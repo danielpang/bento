@@ -1,0 +1,246 @@
+import { after, before, test } from "node:test";
+import assert from "node:assert/strict";
+import pg from "pg";
+import { runMigrations } from "@bento/db";
+
+/**
+ * Row-level security, checked against the database rather than through
+ * the API.
+ *
+ * This exists because the first attempt at RLS passed every structural
+ * check and isolated nothing: policies were enabled and forced, but the
+ * connecting role was a superuser, and Postgres skips RLS entirely for
+ * superusers and any role with BYPASSRLS. Only reading rows under a
+ * foreign context catches that.
+ */
+const adminUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
+const testDbName = "rls_test";
+const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+
+const TENANT_TABLES = [
+  "projects",
+  "repositories",
+  "pipelines",
+  "stages",
+  "features",
+  "feature_events",
+  "feature_pull_requests",
+  "sandboxes",
+  "agent_runs",
+  "run_events",
+  "gate_checks",
+  "agent_profiles",
+  "secrets",
+  "github_installations",
+];
+
+let pool: pg.Pool;
+
+/** Reads as a given organization, the way a request does. */
+async function asOrg<T>(orgId: string, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select set_config('role','bento_user',true), set_config('bento.org_id',$1,true)", [orgId]);
+    return await fn(client);
+  } finally {
+    await client.query("rollback").catch(() => {});
+    client.release();
+  }
+}
+
+before(async () => {
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`);
+  await admin.query(`CREATE DATABASE ${testDbName}`);
+  await admin.end();
+  await runMigrations(testUrl);
+
+  pool = new pg.Pool({ connectionString: testUrl });
+  // Two organizations, each with a project and a feature beneath it.
+  await pool.query(`insert into identity.organization (id,name,slug) values
+    ('org-a','A','org-a'), ('org-b','B','org-b')`);
+  await pool.query(`insert into identity."user" (id,name,email) values ('u1','U','u@x.test')`);
+  for (const [org, suffix] of [["org-a", "a"], ["org-b", "b"]] as const) {
+    await pool.query(
+      `insert into projects (id,owner_id,organization_id,name,default_branch)
+       values ($1,'u1',$2,$3,'main')`,
+      [`0000000${suffix === "a" ? 1 : 2}-0000-0000-0000-000000000000`, org, `project ${suffix}`],
+    );
+  }
+});
+
+after(async () => {
+  await pool?.end();
+});
+
+test("policies are enabled AND forced on every tenant table", async () => {
+  const { rows } = await pool.query(
+    `select c.relname, c.relrowsecurity, c.relforcerowsecurity
+     from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname='public' and c.relname = any($1)`,
+    [TENANT_TABLES],
+  );
+  assert.equal(rows.length, TENANT_TABLES.length, "every tenant table must exist");
+  for (const row of rows) {
+    assert.ok(row.relrowsecurity, `${row.relname} has RLS disabled`);
+    // Without FORCE, the owning role bypasses the policy and the whole
+    // mechanism is decorative.
+    assert.ok(row.relforcerowsecurity, `${row.relname} does not FORCE RLS, so its owner bypasses it`);
+  }
+});
+
+test("the role requests use cannot bypass row-level security", async () => {
+  const { rows } = await pool.query(
+    `select rolcanlogin, rolsuper, rolbypassrls from pg_roles where rolname = 'bento_user'`,
+  );
+  assert.equal(rows.length, 1, "the bento_user role must exist");
+  assert.equal(rows[0].rolcanlogin, false, "bento_user must be NOLOGIN");
+  assert.equal(rows[0].rolsuper, false, "bento_user must not be a superuser");
+  assert.equal(rows[0].rolbypassrls, false, "bento_user must not have BYPASSRLS");
+});
+
+test("tenant context uses only the Bento database names", async () => {
+  const { rows } = await pool.query(
+    `select proname from pg_proc
+     where proname in ('bento_current_org', 'bento_inherit_org')
+     order by proname`,
+  );
+  assert.deepEqual(rows.map((row) => row.proname), ["bento_current_org", "bento_inherit_org"]);
+  const context = await asOrg("org-a", (client) =>
+    client.query("select current_setting('bento.org_id', true) as organization_id"),
+  );
+  assert.equal(context.rows[0].organization_id, "org-a");
+});
+
+test("an organization sees only its own rows", async () => {
+  const a = await asOrg("org-a", (c) => c.query("select name from projects"));
+  const b = await asOrg("org-b", (c) => c.query("select name from projects"));
+  assert.deepEqual(a.rows.map((r) => r.name), ["project a"]);
+  assert.deepEqual(b.rows.map((r) => r.name), ["project b"]);
+});
+
+test("every tenant table returns nothing under a foreign context", async () => {
+  await asOrg("org-nobody", async (client) => {
+    for (const table of TENANT_TABLES) {
+      const { rows } = await client.query(`select count(*)::int as n from ${table}`);
+      assert.equal(rows[0].n, 0, `${table} leaked ${rows[0].n} row(s) to an unrelated organization`);
+    }
+  });
+});
+
+test("a query that forgets its WHERE clause still cannot cross organizations", async () => {
+  // The point of RLS: correctness no longer depends on remembering to
+  // filter. This is the query an IDOR bug would issue.
+  const { rows } = await asOrg("org-a", (c) => c.query("select organization_id from projects"));
+  assert.ok(rows.length > 0, "the caller's own rows must still be reachable");
+  assert.ok(
+    rows.every((r) => r.organization_id === "org-a"),
+    "an unfiltered select must still be confined to the caller's organization",
+  );
+});
+
+test("a row cannot be written into another organization", async () => {
+  await assert.rejects(
+    asOrg("org-a", (c) =>
+      c.query(
+        `insert into projects (owner_id,organization_id,name,default_branch)
+         values ('u1','org-b','smuggled','main')`,
+      ),
+    ),
+    /row-level security/,
+    "the WITH CHECK clause must reject a write aimed at another organization",
+  );
+});
+
+test("child inserts inherit their organization from the parent", async () => {
+  const projectId = "00000001-0000-0000-0000-000000000000";
+  const result = await asOrg("org-a", (client) =>
+    client.query(
+      `insert into repositories (project_id,name,local_path)
+       values ($1,'inherited','/tmp/inherited')
+       returning organization_id`,
+      [projectId],
+    ),
+  );
+  assert.equal(result.rows[0].organization_id, "org-a");
+});
+
+test("a run cannot reference another tenant's stage or agent", async () => {
+  const projectA = "00000001-0000-0000-0000-000000000000";
+  const projectB = "00000002-0000-0000-0000-000000000000";
+  const pipelineA = "10000001-0000-0000-0000-000000000000";
+  const pipelineB = "10000002-0000-0000-0000-000000000000";
+  const stageA = "20000001-0000-0000-0000-000000000000";
+  const stageB = "20000002-0000-0000-0000-000000000000";
+  const profileA = "30000001-0000-0000-0000-000000000000";
+  const profileB = "30000002-0000-0000-0000-000000000000";
+  const featureA = "40000001-0000-0000-0000-000000000000";
+  await pool.query(
+    `insert into pipelines (id,project_id,organization_id,name) values
+       ($1,$2,'org-a','A'), ($3,$4,'org-b','B')`,
+    [pipelineA, projectA, pipelineB, projectB],
+  );
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values
+       ($1,'u1','org-a','A','fake','fake-1'), ($2,'u1','org-b','B','fake','fake-1')`,
+    [profileA, profileB],
+  );
+  await pool.query(
+    `insert into stages (id,pipeline_id,organization_id,position,name,slug) values
+       ($1,$2,'org-a',0,'A','a'), ($3,$4,'org-b',0,'B','b')`,
+    [stageA, pipelineA, stageB, pipelineB],
+  );
+  await pool.query(
+    `insert into features (id,project_id,organization_id,pipeline_id,title,current_stage_id)
+     values ($1,$2,'org-a',$3,'Feature A',$4)`,
+    [featureA, projectA, pipelineA, stageA],
+  );
+
+  await asOrg("org-a", async (client) => {
+    await client.query(
+      `insert into agent_runs (feature_id,stage_id,agent_profile_id,prompt)
+       values ($1,$2,$3,'valid')`,
+      [featureA, stageA, profileA],
+    );
+    await assert.rejects(
+      client.query(
+        `insert into agent_runs (feature_id,stage_id,agent_profile_id,prompt)
+         values ($1,$2,$3,'foreign')`,
+        [featureA, stageB, profileB],
+      ),
+      /organization or pipeline boundary/,
+    );
+  });
+});
+
+test("secret names are unique locally and within each organization", async () => {
+  await pool.query(
+    `insert into secrets (owner_id,organization_id,name,ciphertext)
+     values ('u1',null,'LOCAL_KEY','one'),
+            ('u1','org-a','ORG_KEY','one'),
+            ('u1','org-b','ORG_KEY','two')`,
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into secrets (owner_id,organization_id,name,ciphertext)
+       values ('u1',null,'LOCAL_KEY','duplicate')`,
+    ),
+    /secrets_local_name_idx/,
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into secrets (owner_id,organization_id,name,ciphertext)
+       values ('u1','org-a','ORG_KEY','duplicate')`,
+    ),
+    /secrets_org_name_idx/,
+  );
+});
+
+test("background workers keep the cross-organization access they need", async () => {
+  // Workers do not switch roles, so one process can execute runs and
+  // evaluate gates for every tenant.
+  const { rows } = await pool.query("select count(*)::int as n from projects");
+  assert.equal(rows[0].n, 2, "the worker role must see every organization's rows");
+});

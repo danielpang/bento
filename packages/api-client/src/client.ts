@@ -1,0 +1,619 @@
+import type { AgentEvent, GateCriteria } from "@bento/core";
+import type {
+  AgentProfile,
+  AgentRun,
+  AgentTool,
+  Feature,
+  FeatureChanges,
+  FeaturePullRequest,
+  FeatureEvent,
+  GateState,
+  Pipeline,
+  Project,
+  Repository,
+  Stage,
+} from "./types.js";
+
+export interface TokenStore {
+  get(): string | null | Promise<string | null>;
+  set(token: string | null): void | Promise<void>;
+}
+
+export interface ClientOptions {
+  baseUrl: string;
+  /** Bearer token source for non-browser clients (TUI, Mac app). */
+  tokens?: TokenStore;
+  fetch?: typeof fetch;
+}
+
+export interface GitHubConnection {
+  configured: boolean;
+  connected: boolean;
+  /** True when something can actually push: an App installation, or a saved token. */
+  canPublish: boolean;
+  canManage: boolean;
+  installation: { accountLogin: string; accountType: string } | null;
+}
+
+export interface GitHubRepository {
+  id: number;
+  name: string;
+  fullName: string;
+  owner: string;
+  url: string;
+  cloneUrl: string;
+  defaultBranch: string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    // A refusal arrives as {"error":"..."}, and every client was
+    // showing that envelope to a person. The sentence inside is the
+    // message; the envelope was only ever transport.
+    super(unwrapError(message));
+    this.name = "ApiError";
+  }
+}
+
+/**
+ * The sentence inside a refusal body, whatever shape it arrived in.
+ *
+ * Handlers answer with {"error":"a sentence"}, but a request the
+ * validator rejects answers with the ZodError itself under the same
+ * key. String() on that object renders "[object Object]", which is
+ * what every client used to show for a bad enum value.
+ */
+export function unwrapError(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && "error" in parsed) {
+      const error = (parsed as { error: unknown }).error;
+      if (typeof error === "string") return error;
+      if (error && typeof error === "object" && "issues" in error) {
+        const summary = summariseIssues((error as { issues: unknown }).issues);
+        if (summary) return summary;
+      }
+      return body;
+    }
+  } catch {
+    // Not JSON: an HTML error page or a bare status line. Show as is.
+  }
+  return body;
+}
+
+/**
+ * A validation failure as the fields it happened on. Three at most:
+ * the rest of a long list scrolls the first one, which is usually the
+ * one that was typed wrong.
+ */
+function summariseIssues(issues: unknown): string | null {
+  if (!Array.isArray(issues) || issues.length === 0) return null;
+  const lines = issues.slice(0, 3).map((raw) => {
+    const issue = raw as { path?: unknown[]; message?: string; options?: unknown[]; received?: unknown };
+    const field = Array.isArray(issue.path) ? issue.path.join(".") : "";
+    const detail =
+      Array.isArray(issue.options) && issue.options.length > 0
+        ? `expected one of ${issue.options.join(", ")}`
+        : issue.received === "undefined"
+          ? "required"
+          : (issue.message ?? "is not valid");
+    return field ? `${field}: ${detail}` : detail;
+  });
+  const more = issues.length > lines.length ? `, and ${issues.length - lines.length} more` : "";
+  return `${lines.join("; ")}${more}`;
+}
+
+/**
+ * Shared REST client for the web app and TUI.
+ *
+ * Browsers authenticate with better-auth's session cookie (credentials:
+ * include); the TUI and Mac app send a bearer token from the device
+ * flow. Supplying a TokenStore switches on the bearer path.
+ */
+export class BentoClient {
+  private baseUrl: string;
+  private tokens: TokenStore | undefined;
+  private fetchImpl: typeof fetch;
+
+  constructor(options: ClientOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/$/, "");
+    this.tokens = options.tokens;
+    // Must be bound: an unbound window.fetch throws "Illegal invocation".
+    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const headers = new Headers(init.headers);
+    if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+    const token = await this.tokens?.get();
+    if (token) headers.set("authorization", `Bearer ${token}`);
+
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      ...init,
+      headers,
+      credentials: this.tokens ? "omit" : "include",
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new ApiError(res.status, body || res.statusText);
+    }
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
+  }
+
+  /**
+   * The same request path, for routes whose body is a document rather
+   * than JSON. Kept separate so `request` can go on assuming JSON.
+   */
+  private async requestText(path: string, init: RequestInit = {}): Promise<string> {
+    const headers = new Headers(init.headers);
+    const token = await this.tokens?.get();
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      ...init,
+      headers,
+      credentials: this.tokens ? "omit" : "include",
+    });
+    const body = await res.text();
+    if (!res.ok) throw new ApiError(res.status, body || res.statusText);
+    return body;
+  }
+
+  /** The whole pipeline as a YAML document: stages, agents, commands. */
+  exportPipeline(projectId: string) {
+    return this.requestText(`/api/projects/${projectId}/pipeline/export`);
+  }
+
+  /** Applies one. Stages are matched by slug, so a live board keeps its cards. */
+  importPipeline(projectId: string, yaml: string) {
+    return this.request<{
+      stages: number;
+      agents: number;
+      removedStages: string[];
+      skippedRepositories: string[];
+    }>(`/api/projects/${projectId}/pipeline/import`, {
+      method: "POST",
+      headers: { "content-type": "application/yaml" },
+      body: yaml,
+    });
+  }
+
+  health() {
+    return this.request<{
+      ok: boolean;
+      mode: string;
+      driver: string;
+      /** Which social logins the server is configured for (multi mode). */
+      social?: { github: boolean; google: boolean };
+    }>("/api/health");
+  }
+
+  listProjects() {
+    return this.request<Project[]>("/api/projects");
+  }
+
+  /**
+   * `localPath` is the single repository shorthand; `repositories` is
+   * for a project spanning several, which become one workspace per
+   * card with a worktree each. Give one or the other.
+   */
+  createProject(input: {
+    name: string;
+    localPath?: string;
+    defaultBranch?: string;
+    repositories?: {
+      name?: string;
+      localPath?: string;
+      repoUrl?: string;
+      githubRepoId?: string;
+      defaultBranch?: string;
+    }[];
+  }) {
+    return this.request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  getPipeline(projectId: string) {
+    return this.request<Pipeline>(`/api/projects/${projectId}/pipeline`);
+  }
+
+  listRepositories(projectId: string) {
+    return this.request<Repository[]>(`/api/projects/${projectId}/repositories`);
+  }
+
+  /** A project can span several checkouts, each its own worktree. */
+  addRepository(
+    projectId: string,
+    input: {
+      localPath?: string;
+      name?: string;
+      repoUrl?: string;
+      githubRepoId?: string;
+      defaultBranch?: string;
+      setupCommand?: string | null;
+      testCommand?: string | null;
+    },
+  ) {
+    return this.request<Repository>(`/api/projects/${projectId}/repositories`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** The setup and test commands, changed without re-adding the checkout. */
+  updateRepository(
+    projectId: string,
+    repositoryId: string,
+    input: { setupCommand?: string | null; testCommand?: string | null },
+  ) {
+    return this.request<Repository>(`/api/projects/${projectId}/repositories/${repositoryId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Which coding agents this deployment can start, and how to install the rest. */
+  listAgentTools() {
+    return this.request<AgentTool[]>("/api/profiles/tools");
+  }
+
+  githubStatus() {
+    return this.request<GitHubConnection>("/api/github/status");
+  }
+
+  /** The whole order at once, so positions stay unique and contiguous. */
+  reorderStages(pipelineId: string, stageIds: string[]) {
+    return this.request<{ stageIds: string[] }>("/api/stages/reorder", {
+      method: "POST",
+      body: JSON.stringify({ pipelineId, stageIds }),
+    });
+  }
+
+  /** What Bento puts into a pull request, as opposed to how it signs in. */
+  githubSettings() {
+    return this.request<{ includeStageNotesInPr: boolean; canManage: boolean }>("/api/github/settings");
+  }
+
+  setGitHubSettings(input: { includeStageNotesInPr: boolean }) {
+    return this.request<{ includeStageNotesInPr: boolean }>("/api/github/settings", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  startGitHubInstall() {
+    return this.request<{ url: string }>("/api/github/install", { method: "POST" });
+  }
+
+  listGitHubRepositories() {
+    return this.request<GitHubRepository[]>("/api/github/repositories");
+  }
+
+  disconnectGitHub() {
+    return this.request<{ ok: boolean }>("/api/github/installation", { method: "DELETE" });
+  }
+
+  removeRepository(projectId: string, repositoryId: string) {
+    return this.request<{ ok: boolean }>(`/api/projects/${projectId}/repositories/${repositoryId}`, {
+      method: "DELETE",
+    });
+  }
+
+  listFeatures(projectId: string) {
+    return this.request<Feature[]>(`/api/features?projectId=${encodeURIComponent(projectId)}`);
+  }
+
+  /**
+   * Every card's newest run status, in one request.
+   *
+   * A client that polls needs this for the whole board, not for the
+   * card someone happens to have selected: a board where four of five
+   * cards claim to be idle while their agents work is worse than no
+   * status at all. The line snapshot already carries it, so this reads
+   * that rather than asking per card and growing with the board.
+   */
+  async getRunStatuses(projectId: string): Promise<Record<string, string>> {
+    const token = await this.tokens?.get();
+    const res = await this.fetchImpl(`${this.baseUrl}/api/projects/${projectId}/board/plain`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      credentials: this.tokens ? "omit" : "include",
+    });
+    if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
+    const statuses: Record<string, string> = {};
+    for (const line of (await res.text()).split("\n")) {
+      const [kind, id, , , runStatus] = line.split("|");
+      if (kind !== "feature" || !id || !runStatus || runStatus === "-") continue;
+      statuses[id] = runStatus;
+    }
+    return statuses;
+  }
+
+  createFeature(input: { projectId: string; title: string; description?: string }) {
+    return this.request<Feature>("/api/features", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  getFeature(featureId: string) {
+    return this.request<Feature & { runs: AgentRun[]; pullRequests: FeaturePullRequest[] }>(
+      `/api/features/${featureId}`,
+    );
+  }
+
+  advanceFeature(featureId: string) {
+    return this.request<Feature>(`/api/features/${featureId}/advance`, { method: "POST" });
+  }
+
+  approveFeature(featureId: string) {
+    return this.request<{ feature: Feature; gateChecks: unknown[] }>(`/api/features/${featureId}/approve`, {
+      method: "POST",
+    });
+  }
+
+  /** Rejects a manual gate, sending the card back for rework. */
+  rejectFeature(featureId: string, reason?: string) {
+    const query = reason ? `?reason=${encodeURIComponent(reason)}` : "";
+    return this.request<Feature>(`/api/features/${featureId}/reject${query}`, { method: "POST" });
+  }
+
+  /**
+   * Puts the card in any stage, or the backlog with null. Forward
+   * behaves like advance, backward like send-back; no approval is
+   * recorded either way.
+   */
+  moveFeature(featureId: string, stageId: string | null) {
+    return this.request<Feature>(`/api/features/${featureId}/move`, {
+      method: "POST",
+      body: JSON.stringify({ stageId }),
+    });
+  }
+
+  /** Sends the card back one stage, for work that needs redoing. */
+  moveFeatureBack(featureId: string) {
+    return this.request<Feature>(`/api/features/${featureId}/back`, { method: "POST" });
+  }
+
+  /** Stops a running agent so a person can take over. */
+  cancelRun(runId: string) {
+    return this.request<AgentRun>(`/api/runs/${runId}/cancel`, { method: "POST" });
+  }
+
+  /** Everything that has happened to this feature, oldest first. */
+  getHistory(featureId: string) {
+    return this.request<FeatureEvent[]>(`/api/features/${featureId}/history`);
+  }
+
+  /** Appends a stage to a pipeline; it starts manual with no agent. */
+  createStage(pipelineId: string, name: string) {
+    return this.request<Stage>("/api/stages", { method: "POST", body: JSON.stringify({ pipelineId, name }) });
+  }
+
+  /** Removes an empty stage; refused while cards are in it. */
+  deleteStage(stageId: string) {
+    return this.request<{ ok: boolean }>(`/api/stages/${stageId}`, { method: "DELETE" });
+  }
+
+  getGate(featureId: string) {
+    return this.request<GateState>(`/api/features/${featureId}/gate`);
+  }
+
+  /**
+   * Says something to the card's agent. Resumes the latest session
+   * immediately when the agent is idle; queues for delivery at the end
+   * of the run when it is working. The result says which happened.
+   */
+  messageFeature(featureId: string, text: string) {
+    return this.request<{
+      queued: boolean;
+      /** True when a live session took the message mid-run. */
+      live?: boolean;
+      /** How that session treats it: steered into the work, or read after this turn. */
+      delivery?: "steer" | "queue";
+      run?: AgentRun;
+    }>(`/api/features/${featureId}/message`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  /** Every finished run's events in order, with who spoke them. */
+  getConversation(featureId: string) {
+    return this.request<{
+      blocks: { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[];
+    }>(`/api/features/${featureId}/conversation`);
+  }
+
+  /** Committed work: per-repo diffs and the stage write-ups, from the feature branch. */
+  getChanges(featureId: string) {
+    return this.request<FeatureChanges>(`/api/features/${featureId}/changes`);
+  }
+
+  /** Pushes the card's branch and opens (or updates) its pull requests. */
+  publishFeature(featureId: string) {
+    return this.request<{
+      published: { name: string; repoUrl: string; prNumber: number; url: string }[];
+      failures: { name: string; reason: string }[];
+    }>(`/api/features/${featureId}/publish`, { method: "POST" });
+  }
+
+  recheckGate(featureId: string) {
+    return this.request<Feature>(`/api/features/${featureId}/recheck`, { method: "POST" });
+  }
+
+  linkPullRequest(featureId: string, prNumber: number) {
+    return this.request<Feature>(`/api/features/${featureId}/link-pr`, {
+      method: "POST",
+      body: JSON.stringify({ prNumber }),
+    });
+  }
+
+  listSecrets() {
+    return this.request<{ id: string; name: string; hint: string }[]>("/api/secrets");
+  }
+
+  /** Values are write only: nothing reads a secret back. */
+  createSecret(input: { name: string; value: string }) {
+    return this.request<{ id: string; name: string; hint: string }>("/api/secrets", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteSecret(secretId: string) {
+    return this.request<{ ok: boolean }>(`/api/secrets/${secretId}`, { method: "DELETE" });
+  }
+
+  /**
+   * Settings belonging to the machine the server runs on, and which
+   * agent logins that machine has. Local mode only: a shared server
+   * reports mode "multi" and nothing else.
+   */
+  getMachineSettings() {
+    return this.request<{
+      mode: "local" | "multi";
+      shareAgentAuth: boolean;
+      pinnedByEnv?: boolean;
+      /** What is stored here, which the environment can still override. */
+      gitAuthorName?: string;
+      gitAuthorEmail?: string;
+      /** What a commit would actually say, from whichever source wins. */
+      gitIdentity?: { name: string; email: string } | null;
+      gitIdentityPinnedByEnv?: boolean;
+      logins: { cli: string; signedIn: boolean }[];
+      claude?: { loggedIn: boolean; subscriptionType?: string; email?: string } | null;
+    }>("/api/settings");
+  }
+
+  setShareAgentAuth(shareAgentAuth: boolean) {
+    return this.request<{ shareAgentAuth: boolean }>("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ shareAgentAuth }),
+    });
+  }
+
+  /** Who agent commits are attributed to. Blank clears it. */
+  setGitIdentity(input: { gitAuthorName: string; gitAuthorEmail: string }) {
+    return this.request<{ gitAuthorName: string; gitAuthorEmail: string }>("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /**
+   * Agent spend for a project. `runsWithoutCost` matters: the total
+   * only covers tools that report one, and most do not.
+   */
+  getUsage(projectId: string) {
+    return this.request<{ totalUsd: number; totalRuns: number; runsWithoutCost: number }>(
+      `/api/projects/${projectId}/usage`,
+    );
+  }
+
+  listProfiles() {
+    return this.request<AgentProfile[]>("/api/profiles");
+  }
+
+  createProfile(input: { name: string; cli: string; model: string; skill?: string }) {
+    return this.request<AgentProfile>("/api/profiles", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /**
+   * Changes an agent in place. Every stage pointing at it follows,
+   * which is the difference between editing one and replacing it.
+   */
+  updateProfile(
+    profileId: string,
+    changes: { name?: string; cli?: string; model?: string; extraArgs?: string[]; skill?: string | null },
+  ) {
+    return this.request<AgentProfile>(`/api/profiles/${profileId}`, {
+      method: "PATCH",
+      body: JSON.stringify(changes),
+    });
+  }
+
+  deleteProfile(profileId: string) {
+    return this.request<{ ok: boolean }>(`/api/profiles/${profileId}`, { method: "DELETE" });
+  }
+
+  updateStage(
+    stageId: string,
+    patch: {
+      name?: string;
+      defaultAgentProfileId?: string | null;
+      gateType?: "manual" | "auto";
+      gateCriteria?: GateCriteria;
+      createPr?: boolean;
+    },
+  ) {
+    return this.request<Stage>(`/api/stages/${stageId}`, { method: "PATCH", body: JSON.stringify(patch) });
+  }
+
+  startRun(input: { featureId: string; agentProfileId: string; stageId?: string; prompt?: string }) {
+    return this.request<AgentRun>("/api/runs", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  quickRun(featureId: string, cli: string, model?: string) {
+    const query = new URLSearchParams({ cli, ...(model ? { model } : {}) });
+    return this.request<AgentRun>(`/api/features/${featureId}/quick-run?${query}`, { method: "POST" });
+  }
+
+  resumeRun(runId: string, prompt: string) {
+    return this.request<AgentRun>(`/api/runs/${runId}/resume`, { method: "POST", body: JSON.stringify({ prompt }) });
+  }
+
+  /** Restores the sandbox to the snapshot taken before this run. */
+  rollbackRun(runId: string) {
+    return this.request<{ ok: boolean; restoredTo: string }>(`/api/runs/${runId}/rollback`, { method: "POST" });
+  }
+
+  getRun(runId: string) {
+    return this.request<AgentRun>(`/api/runs/${runId}`);
+  }
+
+  /** Plain text transcript with a cursor, for clients that cannot hold SSE. */
+  async getTranscript(runId: string, since = 0): Promise<{ cursor: number; status: string; lines: string[] }> {
+    const token = await this.tokens?.get();
+    const res = await this.fetchImpl(`${this.baseUrl}/api/runs/${runId}/transcript?since=${since}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      credentials: this.tokens ? "omit" : "include",
+    });
+    if (!res.ok) throw new ApiError(res.status, res.statusText);
+    const text = await res.text();
+    const [header = "cursor|0|unknown", ...lines] = text.split("\n");
+    const [, cursor = "0", status = "unknown"] = header.split("|");
+    return { cursor: Number(cursor), status, lines };
+  }
+
+  /**
+   * Streams a run's events. Replays from `since`, then follows live
+   * until the run ends. Returns a function that stops the stream.
+   */
+  streamRun(
+    runId: string,
+    handlers: { onEvent?: (event: AgentEvent, seq: number) => void; onDone?: (status: string) => void },
+    since = 0,
+  ): () => void {
+    const source = new EventSource(`${this.baseUrl}/api/runs/${runId}/events?since=${since}`, {
+      withCredentials: !this.tokens,
+    });
+    source.addEventListener("run_event", (e) => {
+      const message = e as MessageEvent<string>;
+      handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, Number(message.lastEventId));
+    });
+    source.addEventListener("done", (e) => {
+      const message = e as MessageEvent<string>;
+      handlers.onDone?.((JSON.parse(message.data) as { status: string }).status);
+      source.close();
+    });
+    return () => source.close();
+  }
+
+  /** Streams board changes for a project (card moved, run status changed). */
+  streamBoard(projectId: string, onEvent: (event: unknown) => void): () => void {
+    const source = new EventSource(`${this.baseUrl}/api/board/${projectId}/events`, {
+      withCredentials: !this.tokens,
+    });
+    source.addEventListener("board_event", (e) => onEvent(JSON.parse((e as MessageEvent<string>).data)));
+    return () => source.close();
+  }
+}

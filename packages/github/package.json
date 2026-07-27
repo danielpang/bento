@@ -1,0 +1,30 @@
+{
+  "name": "@bento/github",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Elastic-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@octokit/auth-app": "^7.1.5",
+    "@octokit/graphql": "^8.2.1",
+    "@octokit/rest": "^21.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

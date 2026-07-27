@@ -1,0 +1,454 @@
+import * as Tabs from "@radix-ui/react-tabs";
+import { useCallback, useEffect, useState } from "react";
+import { AGENT_CREDENTIALS } from "@bento/core";
+import { ConfirmDialog } from "./PromptDialog.js";
+import { SecretField } from "./SecretField.js";
+import type { BentoClient } from "@bento/api-client";
+import { useToast } from "./Toasts.js";
+
+/**
+ * The credential cards, shared by every panel that offers them.
+ *
+ * They used to exist twice, in two shapes: a tabbed card under Agents
+ * and a flat dropdown under Team, so which one you got depended on
+ * which mode you ran and neither knew what the other had saved. One
+ * component now, and one home per credential: model provider keys sit
+ * with the agents that spend them, and the GitHub token sits in
+ * settings, because connecting a code host is not something you do
+ * while picking a model.
+ *
+ * Each card owns its own fetch and its own errors. That costs an extra
+ * request and buys drop-in reuse, which is what keeps the two copies
+ * from drifting apart again.
+ */
+
+interface Secret {
+  id: string;
+  name: string;
+  hint?: string | null;
+}
+
+/**
+ * One tab per model provider. The first key is the one whose presence
+ * lights the tab; base URLs ride along on the provider they redirect.
+ */
+const PROVIDER_TABS = [
+  { id: "anthropic", label: "Anthropic", keys: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
+  { id: "openai", label: "OpenAI", keys: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
+  { id: "openrouter", label: "OpenRouter", keys: ["OPENROUTER_API_KEY"] },
+  { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY"] },
+  { id: "cursor", label: "Cursor", keys: ["CURSOR_API_KEY"] },
+] as const;
+
+/**
+ * Saved credentials, with load failure kept distinct from emptiness.
+ * A failed fetch rendered as "nothing saved" invited pasting a key
+ * that was already there, and no route returns one to check against.
+ */
+function useSecrets(client: BentoClient) {
+  const [secrets, setSecrets] = useState<Secret[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  const reload = useCallback(async () => {
+    try {
+      setSecrets(await client.listSecrets());
+      setLoadFailed(false);
+    } catch {
+      setLoadFailed(true);
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  return { secrets, loadFailed, reload };
+}
+
+export function ProviderKeysCard({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const { secrets, loadFailed, reload } = useSecrets(client);
+  const [tab, setTab] = useState<(typeof PROVIDER_TABS)[number]["id"]>("anthropic");
+  /** Draft values per credential name, so switching tabs loses nothing. */
+  const [inputs, setInputs] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState<{ name: string; id: string } | null>(null);
+
+  const active = PROVIDER_TABS.find((entry) => entry.id === tab) ?? PROVIDER_TABS[0];
+
+  async function act(fn: () => Promise<unknown>) {
+    setBusy(true);
+    try {
+      await fn();
+      await reload();
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Model provider keys</h3>
+      <p className="muted">
+        API keys for the providers your agents' models run on, stored encrypted. A green dot means
+        that provider is already set.
+      </p>
+      {loadFailed && (
+        <p className="error">
+          Could not load saved keys, so this cannot show which are set. Retry once the server is
+          reachable.
+        </p>
+      )}
+      {/* Same tablist, same reason: the role promised arrow keys that
+          nothing implemented. Only the live panel is rendered, so one
+          Content carrying the active provider is the whole set. */}
+      {/* Radix hands back a plain string; the values are this list's
+          own ids, so the narrowing is safe here and nowhere else. */}
+      <Tabs.Root
+        value={active.id}
+        onValueChange={(next) => setTab(next as (typeof PROVIDER_TABS)[number]["id"])}
+      >
+        <Tabs.List className="tab-row" aria-label="Model providers">
+          {PROVIDER_TABS.map((entry) => {
+            const isSet = secrets.some((secret) => secret.name === entry.keys[0]);
+            return (
+              <Tabs.Trigger
+                key={entry.id}
+                value={entry.id}
+                className={`tab${entry.id === active.id ? " tab-on" : ""}`}
+              >
+                <span className="tab-dot" data-set={isSet || undefined} aria-hidden="true" />
+                {entry.label}
+              </Tabs.Trigger>
+            );
+          })}
+        </Tabs.List>
+        <Tabs.Content value={active.id} className="section tab-panel">
+          {active.keys.map((keyName) => {
+        const credential = AGENT_CREDENTIALS.find((entry) => entry.name === keyName);
+        const saved = secrets.find((secret) => secret.name === keyName);
+        const isBaseUrl = keyName.endsWith("_BASE_URL");
+        const value = inputs[keyName] ?? "";
+        return (
+          <div key={keyName} className="field">
+            {/* A heading, not a label: it names the group below it (what
+                is saved, the field to replace it, and the note on where the
+                key is used) rather than one control. */}
+            <h4 className="field-heading">{isBaseUrl ? "Base URL (optional)" : "API key"}</h4>
+            {saved ? (
+              <div className="criterion">
+                <span className="criterion-cmd">Saved {saved.hint ?? ""}</span>
+                <button
+                  className="btn btn-ghost"
+                  disabled={busy}
+                  onClick={() => setRemoving({ name: keyName, id: saved.id })}
+                >
+                  Remove
+                </button>
+              </div>
+            ) : (
+              <p className="muted">
+                {isBaseUrl ? "Not set: requests go to the provider directly." : "Not set."}
+              </p>
+            )}
+            <SecretField
+              value={value}
+              onChange={(next) => setInputs((current) => ({ ...current, [keyName]: next }))}
+              onSubmit={() =>
+                void act(async () => {
+                  await client.createSecret({ name: keyName, value: value.trim() });
+                  setInputs((current) => ({ ...current, [keyName]: "" }));
+                })
+              }
+              label={keyName}
+              placeholder={isBaseUrl ? "https://openrouter.ai/api/v1" : "Paste the key"}
+              submitLabel={saved ? "Replace" : "Save"}
+              busy={busy}
+              secret={credential?.secret !== false}
+            />
+            {credential && <p className="muted">{credential.help}</p>}
+          </div>
+            );
+          })}
+        </Tabs.Content>
+      </Tabs.Root>
+
+      {removing && (
+        <ConfirmDialog
+          title={`Remove ${removing.name}?`}
+          description="Saved values are never shown again, so you would need to paste it fresh. Agents on this provider stop running until one is here."
+          confirmLabel="Remove"
+          destructive
+          onClose={() => setRemoving(null)}
+          onConfirm={() => act(() => client.deleteSecret(removing.id))}
+        />
+      )}
+    </section>
+  );
+}
+
+export function GitHubTokenCard({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const { secrets, loadFailed, reload } = useSecrets(client);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState(false);
+
+  const saved = secrets.find((secret) => secret.name === "GITHUB_TOKEN");
+
+  async function act(fn: () => Promise<unknown>) {
+    setBusy(true);
+    try {
+      await fn();
+      await reload();
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">GitHub</h3>
+      <p className="muted">
+        Powers pull requests: stages with "Create a pull request" enabled and the button on each card
+        push the branch and open the pull request through this token. Use a fine grained personal
+        access token with Contents and Pull requests write access on the repositories your pipelines
+        work in. It stays on the server and is never given to an agent.
+      </p>
+      {loadFailed ? (
+        <p className="error">Could not load saved credentials, so this cannot say whether a token is set.</p>
+      ) : saved ? (
+        <div className="criterion">
+          <span className="criterion-cmd">Token saved {saved.hint ?? ""}</span>
+          <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(true)}>
+            Remove
+          </button>
+        </div>
+      ) : (
+        <p className="muted">No token saved yet. Creating a pull request will refuse until one is here.</p>
+      )}
+      <SecretField
+        value={value}
+        onChange={setValue}
+        onSubmit={() =>
+          void act(async () => {
+            await client.createSecret({ name: "GITHUB_TOKEN", value: value.trim() });
+            setValue("");
+          })
+        }
+        label="GitHub token"
+        placeholder="github_pat_..."
+        submitLabel={saved ? "Replace token" : "Save token"}
+        busy={busy}
+      />
+
+      <StageNotesSetting client={client} />
+
+      {removing && saved && (
+        <ConfirmDialog
+          title="Remove the GitHub token?"
+          description="Pull requests can no longer be opened or updated until a new one is saved. Stages set to create a pull request will say so when they run."
+          confirmLabel="Remove token"
+          destructive
+          onClose={() => setRemoving(false)}
+          onConfirm={() => act(() => client.deleteSecret(saved.id))}
+        />
+      )}
+    </section>
+  );
+}
+
+/**
+ * Whether Bento's stage write-ups ride along into pull requests.
+ *
+ * Off by default, and here rather than with the pipeline, because it is
+ * a fact about what reaches GitHub. The write-ups stay on the branch
+ * either way: that is how each stage reads the last one's output, and
+ * how the card's Changes view finds them later. This decides only
+ * whether a reviewer has to scroll past them.
+ */
+function StageNotesSetting({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const [include, setInclude] = useState<boolean | null>(null);
+  const [canManage, setCanManage] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void client
+      .githubSettings()
+      .then((settings) => {
+        setInclude(settings.includeStageNotesInPr);
+        setCanManage(settings.canManage);
+      })
+      // An older server has no such route. Saying nothing beats showing
+      // a switch that cannot be read or written.
+      .catch(() => setInclude(null));
+  }, [client]);
+
+  if (include === null) return null;
+
+  async function choose(next: boolean) {
+    setBusy(true);
+    const previous = include;
+    setInclude(next);
+    try {
+      await client.setGitHubSettings({ includeStageNotesInPr: next });
+    } catch (err) {
+      setInclude(previous);
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="field">
+      <label className="gate-check">
+        <input
+          type="checkbox"
+          checked={include}
+          disabled={busy || !canManage}
+          onChange={(e) => void choose(e.target.checked)}
+        />
+        <span className="gate-check-text">Include Bento's stage write-ups in pull requests</span>
+      </label>
+      <p className="muted">
+        Each stage commits a summary under docs/bento/ so the next one can read it. They are left out
+        of the pull request, so a reviewer sees the code rather than six generated files. Turn this
+        on to send them along too.
+      </p>
+      {!canManage && <p className="muted">Only an owner or admin can change this.</p>}
+    </div>
+  );
+}
+
+/** What the server reports about the machine it runs on. */
+type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
+
+/**
+ * Who agent commits are attributed to.
+ *
+ * Beside the GitHub token because that is what it is about: the name on
+ * the commits that end up in a pull request. The server reads this
+ * machine's global git config, which a container does not have, so
+ * every commit from the compose stack arrived as "Bento Agent" and the
+ * only way to change it was an environment variable set before boot.
+ *
+ * Local mode only, so it fetches its own settings and renders nothing
+ * on a shared server: there the operator's identity is not a tenant's,
+ * and the resolver returns nothing at all.
+ */
+export function GitIdentityCard({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const [machine, setMachine] = useState<MachineSettings | null>(null);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const settings = await client.getMachineSettings();
+      if (settings.mode !== "local") return setMachine(null);
+      setMachine(settings);
+      setName(settings.gitAuthorName ?? "");
+      setEmail(settings.gitAuthorEmail ?? "");
+    } catch {
+      // An older server has no such route; say nothing rather than
+      // showing a field that cannot be read or written.
+      setMachine(null);
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!machine) return null;
+
+  const pinned = machine.gitIdentityPinnedByEnv === true;
+  const dirty = name !== (machine.gitAuthorName ?? "") || email !== (machine.gitAuthorEmail ?? "");
+
+  async function save() {
+    setBusy(true);
+    try {
+      await client.setGitIdentity({ gitAuthorName: name, gitAuthorEmail: email });
+      toast.note("Agent commits will use this identity from the next run.");
+      await load();
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Commit identity</h3>
+      <p className="muted">
+        The name and email on commits your agents make. A server in a container has no git config to
+        read, so without this the work arrives as Bento Agent.
+      </p>
+      {/* What a commit would actually say, which is not always what is
+          stored here: an environment variable outranks it, and this
+          machine's own git config stands in when neither is set. */}
+      <p className="muted">
+        {machine.gitIdentity
+          ? `Commits are currently attributed to ${machine.gitIdentity.name} <${machine.gitIdentity.email}>.`
+          : "No identity resolves yet, so commits will say Bento Agent <agent@bento.dev>."}
+      </p>
+      <label className="field">
+        <span className="label">Name</span>
+        <input
+          className="input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Ada Lovelace"
+          disabled={busy || pinned}
+          autoComplete="name"
+        />
+      </label>
+      <label className="field">
+        <span className="label">Email</span>
+        <input
+          className="input"
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="ada@example.com"
+          disabled={busy || pinned}
+          autoComplete="email"
+          spellCheck={false}
+        />
+      </label>
+      <div className="actions">
+        <button className="btn btn-primary" disabled={busy || pinned || !dirty} onClick={() => void save()}>
+          Save identity
+        </button>
+        {dirty && !pinned && (
+          <button
+            className="btn btn-ghost"
+            disabled={busy}
+            onClick={() => {
+              setName(machine.gitAuthorName ?? "");
+              setEmail(machine.gitAuthorEmail ?? "");
+            }}
+          >
+            Discard
+          </button>
+        )}
+      </div>
+      {pinned ? (
+        <p className="muted">
+          GIT_AUTHOR_NAME or GIT_AUTHOR_EMAIL is set in this server's environment, which wins over
+          anything saved here. Clear it to edit this.
+        </p>
+      ) : (
+        <p className="muted">Leave both blank to fall back to this machine's own git config.</p>
+      )}
+    </section>
+  );
+}

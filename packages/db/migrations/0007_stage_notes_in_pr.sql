@@ -1,0 +1,1 @@
+ALTER TABLE "organization_policies" ADD COLUMN "include_stage_notes_in_pr" boolean DEFAULT false NOT NULL;

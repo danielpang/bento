@@ -1,0 +1,54 @@
+.{
+    .id = "dev.bento.mac",
+    .name = "mac",
+    .display_name = "Bento",
+    .description = "Command centre for coordinating AI coding agents.",
+    .version = "0.1.0",
+    // Bento orange, matching the web console's default accent. The SDK
+    // takes one accent per app, so the web's accent picker has no
+    // native counterpart; this keeps the two apps on the same brand.
+    .theme_accent = "#ff8a3d",
+    .icons = .{"assets/icon.png"},
+    // Provider marks, read once at launch and registered under these
+    // ids, which core.ts maps from a provider id and the system
+    // appearance. Regenerate with scripts/render-provider-logos.mjs;
+    // "-light" is the rendition used in light mode, so it is dark ink.
+    .assets = .{
+        .images = .{
+            .{ .id = 1, .path = "assets/providers/anthropic-light.png" },
+            .{ .id = 2, .path = "assets/providers/anthropic-dark.png" },
+            .{ .id = 3, .path = "assets/providers/openai-light.png" },
+            .{ .id = 4, .path = "assets/providers/openai-dark.png" },
+            .{ .id = 5, .path = "assets/providers/google-light.png" },
+            .{ .id = 6, .path = "assets/providers/google-dark.png" },
+            .{ .id = 7, .path = "assets/providers/openrouter-light.png" },
+            .{ .id = 8, .path = "assets/providers/openrouter-dark.png" },
+        },
+    },
+    .platforms = .{"macos"},
+    .permissions = .{ "view", "network", "command" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Bento Command Centre",
+                .width = 1280,
+                .height = 820,
+                .restore_state = false,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Counter canvas", .accessibility_label = "Counter", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}

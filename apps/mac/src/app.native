@@ -1,0 +1,826 @@
+<!-- Bento command centre: project picker, six stage kanban board, a
+     detail pane with the live agent transcript, and the three
+     configuration panels the web console has (agents, pipeline, team).
+     Binds the model in core.ts; validate with: native check -->
+
+<template name="board-column" args="title cards">
+  <column gap="8" padding="8" min-width="180" background="surface" radius="md">
+    <text foreground="text_muted">{title}</text>
+    <for each="cards" key="index" as="c">
+      <column global-key="{c.index}" background="background" radius="sm" padding="8" gap="6">
+        <text wrap="true">{c.title}</text>
+        <row gap="6" cross="center">
+          <!-- Status hues are reserved words here too: a gated card
+               wears warning, a failed run destructive, and the accent
+               never says a state. -->
+          <if test="{c.isGated}">
+            <text foreground="warning">{c.statusLabel}</text>
+          </if>
+          <else>
+            <text foreground="text_muted">{c.statusLabel}</text>
+          </else>
+          <if test="{c.hasRun}">
+            <if test="{c.runFailed}">
+              <text foreground="destructive">{c.runLabel}</text>
+            </if>
+            <else>
+              <text foreground="text_muted">{c.runLabel}</text>
+            </else>
+          </if>
+        </row>
+        <!-- What the agent last said, so the board reads as work. -->
+        <if test="{c.hasOutput}">
+          <text foreground="text_muted" wrap="true">{c.output}</text>
+        </if>
+        <row gap="6" cross="center">
+          <button size="sm" variant="secondary" on-press="pick_card:{c.index}">Open</button>
+          <spacer grow="1" />
+          <!-- One step either way without opening the card. Back needs
+               a stage to leave; forward stops when the card is done. -->
+          <if test="{c.canBack}">
+            <button size="sm" variant="ghost" on-press="card_back:{c.index}" label="Move back a stage">←</button>
+          </if>
+          <if test="{c.canFwd}">
+            <button size="sm" variant="ghost" on-press="card_fwd:{c.index}" label="Move forward a stage">→</button>
+          </if>
+        </row>
+      </column>
+    </for>
+  </column>
+</template>
+
+<column background="background" grow="1">
+  <row padding="12" gap="10" cross="center" background="surface" window-drag="true">
+    <!-- The wordmark: one filled compartment beside the name, the same
+         mark the web console draws. Accent belongs to it and to the one
+         primary action, nothing else in this bar. -->
+    <column width="10" height="10" background="accent" radius="sm" />
+    <text>bento</text>
+    <if test="{setupDone}">
+      <text foreground="text_muted">{connectionText}</text>
+    </if>
+    <spacer grow="1" />
+    <if test="{hasProject}">
+      <text foreground="text_muted">{projectName}</text>
+      <!-- One primary action per screen: with a card open, the card
+           pane's decision buttons take the primary and this steps back. -->
+      <if test="{hasCard}">
+        <button size="sm" variant="secondary" on-press="open_new_feature">New card</button>
+      </if>
+      <else>
+        <button size="sm" variant="primary" on-press="open_new_feature">New card</button>
+      </else>
+      <button size="sm" on-press="open_pipeline">Pipeline</button>
+    </if>
+    <if test="{connected}">
+      <button size="sm" on-press="open_agents">Agents</button>
+      <if test="{isMulti}">
+        <button size="sm" on-press="open_team">Team</button>
+      </if>
+      <button size="sm" on-press="open_new_project">New project</button>
+      <if test="{hasProject}">
+        <button size="sm" variant="ghost" on-press="back_to_projects">Projects</button>
+      </if>
+      <if test="{isMulti}">
+        <button size="sm" variant="ghost" on-press="sign_out">Sign out</button>
+      </if>
+    </if>
+    <button size="sm" variant="ghost" on-press="open_settings" label="Settings" icon="settings" />
+  </row>
+  <separator />
+
+  <if test="{needsSetup}">
+    <!-- Same three choices the bento command offers. -->
+    <column grow="1" gap="14" padding="24" main="center">
+      <text>How should this app run?</text>
+      <column gap="10" background="surface" radius="md" padding="14">
+        <text>Everything on this machine</text>
+        <text foreground="text_muted" wrap="true">Your own database, board, and agents in containers. Nothing leaves this computer.</text>
+        <button variant="primary" on-press="choose_local">Run locally</button>
+      </column>
+
+      <column gap="10" background="surface" radius="md" padding="14">
+        <text>Use a server</text>
+        <text foreground="text_muted" wrap="true">Your team's board and history live on the server. Choose whether agents run there or here.</text>
+        <text-field text="{serverText}" placeholder="https://bento.example.com" on-input="server_edit" label="Server address" />
+        <row gap="8">
+          <button on-press="choose_client">Agents on the server</button>
+          <button on-press="choose_runner">Agents on this machine</button>
+        </row>
+        <text foreground="text_muted" wrap="true">Running agents here keeps your code and agent keys on this computer. Teammates still see the board, but nothing is pushed for you.</text>
+      </column>
+    </column>
+  </if>
+  <else>
+
+  <if test="{helperFailed}">
+    <column padding="16" gap="8" background="surface" radius="md">
+      <text foreground="destructive">The local helper could not start</text>
+      <text foreground="text_muted" wrap="true">{helperText}</text>
+      <button on-press="back_to_setup">Choose a different setup</button>
+    </column>
+  </if>
+  <else>
+
+  <!-- Device flow: approve this machine in a browser. -->
+  <if test="{needsApproval}">
+    <column grow="1" main="center" cross="center" gap="14" padding="24">
+      <text>Approve this Mac</text>
+      <text foreground="text_muted" wrap="true">Open this page and enter the code to sign in.</text>
+      <text foreground="accent" wrap="true">{verifyUrlText}</text>
+      <text>{verifyCodeText}</text>
+      <text foreground="text_muted">Waiting for approval...</text>
+      <button on-press="back_to_setup">Choose a different setup</button>
+    </column>
+  </if>
+  <else>
+
+  <if test="{helperBusy}">
+    <column grow="1" main="center" gap="8" padding="24">
+      <text foreground="text_muted">{helperText}</text>
+      <button on-press="back_to_setup">Choose a different setup</button>
+    </column>
+  </if>
+  <else>
+
+  <if test="{hasProject}">
+    <column grow="1">
+      <!-- A board with no agent cannot run anything, and the cards give
+           no hint why. Name the missing step where the work would start. -->
+      <if test="{needsSetupHint}">
+        <row padding="10" gap="10" cross="center" background="surface">
+          <text foreground="warning" wrap="true" grow="1">{setupHint}</text>
+          <button size="sm" variant="primary" on-press="open_agents">Add an agent</button>
+          <button size="sm" on-press="open_pipeline">Assign agents</button>
+        </row>
+      </if>
+
+      <row grow="1" gap="10" padding="12">
+        <scroll grow="1">
+          <row gap="10">
+            <!-- The backlog leads: cards are born here, and the flow
+                 reads left to right from creation to done. -->
+            <use template="board-column" title="Backlog" cards="{colBacklog}" />
+            <if test="{hasCol0}"><use template="board-column" title="{colName0}" cards="{col0}" /></if>
+            <if test="{hasCol1}"><use template="board-column" title="{colName1}" cards="{col1}" /></if>
+            <if test="{hasCol2}"><use template="board-column" title="{colName2}" cards="{col2}" /></if>
+            <if test="{hasCol3}"><use template="board-column" title="{colName3}" cards="{col3}" /></if>
+            <if test="{hasCol4}"><use template="board-column" title="{colName4}" cards="{col4}" /></if>
+            <if test="{hasCol5}"><use template="board-column" title="{colName5}" cards="{col5}" /></if>
+            <if test="{hasCol6}"><use template="board-column" title="{colName6}" cards="{col6}" /></if>
+            <if test="{hasCol7}"><use template="board-column" title="{colName7}" cards="{col7}" /></if>
+            <if test="{hasCol8}"><use template="board-column" title="{colName8}" cards="{col8}" /></if>
+            <if test="{hasCol9}"><use template="board-column" title="{colName9}" cards="{col9}" /></if>
+          </row>
+        </scroll>
+
+        <if test="{hasCard}">
+          <column min-width="380" gap="8" padding="10" background="surface" radius="md">
+            <row gap="8" cross="center">
+              <text wrap="true" grow="1">{selTitle}</text>
+              <button size="sm" variant="ghost" on-press="close_card" label="Close the card" icon="x" />
+            </row>
+            <!-- Named values: bare tokens read as debug output. -->
+            <row gap="12" cross="center">
+              <row gap="4" cross="center">
+                <text foreground="text_muted">status</text>
+                <text>{selStatus}</text>
+              </row>
+              <row gap="4" cross="center">
+                <text foreground="text_muted">run</text>
+                <if test="{selRunFailed}">
+                  <text foreground="destructive">{selRunStatus}</text>
+                </if>
+                <else>
+                  <text>{selRunStatus}</text>
+                </else>
+              </row>
+              <if test="{hasCost}">
+                <row gap="4" cross="center">
+                  <text foreground="text_muted">spend</text>
+                  <text foreground="text_muted">${selCost}</text>
+                </row>
+              </if>
+            </row>
+
+            <!-- What the gate is waiting on, which is the answer to the
+                 question a stuck card actually raises. -->
+            <column gap="6">
+              <if test="{hasGateChecks}">
+                <for each="gateChecks" key="index" as="g">
+                  <row key="{g.index}" gap="6" cross="start">
+                    <text foreground="text_muted">{g.type}</text>
+                    <text>{g.status}</text>
+                    <text foreground="text_muted" wrap="true" grow="1">{g.detail}</text>
+                  </row>
+                </for>
+              </if>
+              <else>
+                <text foreground="text_muted" wrap="true">{gateEmptyText}</text>
+              </else>
+            </column>
+
+            <!-- Cancelled is terminal and cannot be reopened. Done is
+                 terminal too, but the server allows it back into its
+                 last stage. Backlog and open stages take their normal
+                 actions only in the final branch. -->
+            <if test="{cardCancelled}">
+              <text foreground="text_muted" wrap="true">This card was cancelled. It has no further actions.</text>
+            </if>
+            <else>
+              <if test="{cardDone}">
+                <column gap="6">
+                  <text foreground="text_muted" wrap="true">This card has been through every stage. Reopen it to change something.</text>
+                  <row gap="8">
+                    <button size="sm" on-press="send_back">Reopen</button>
+                  </row>
+                </column>
+              </if>
+              <else>
+                <row gap="8">
+                  <if test="{inAStage}">
+                    <button size="sm" variant="primary" on-press="approve">Approve</button>
+                    <button size="sm" variant="destructive" on-press="reject">Reject</button>
+                    <button size="sm" on-press="recheck">Re-check gate</button>
+                    <button size="sm" on-press="send_back">Send back</button>
+                  </if>
+                  <else>
+                    <button size="sm" variant="primary" on-press="advance">Start pipeline</button>
+                  </else>
+                </row>
+              </else>
+            </else>
+            <row gap="8">
+              <if test="{canStartAgent}">
+                <button size="sm" variant="secondary" on-press="start_agent">Start {stageAgentName}</button>
+              </if>
+              <if test="{canStopAgent}">
+                <button size="sm" variant="destructive" on-press="stop_agent">Stop</button>
+              </if>
+              <if test="{canContinue}">
+                <button size="sm" on-press="open_takeover">Continue</button>
+              </if>
+            </row>
+            <row gap="8">
+              <!-- Quick runs start an agent, which needs an open stage:
+                   the server refuses them for the backlog and for a
+                   finished card, so they are not offered there. -->
+              <if test="{canQuickRun}">
+                <button size="sm" variant="secondary" on-press="run_claude">Run Claude Code instead</button>
+              </if>
+              <spacer grow="1" />
+              <if test="{showingHistory}">
+                <button size="sm" variant="ghost" on-press="toggle_history">Agent logs</button>
+                <button size="sm" variant="ghost" on-press="toggle_changes">Changes</button>
+              </if>
+              <else>
+                <if test="{showingChanges}">
+                  <button size="sm" variant="ghost" on-press="toggle_history">History</button>
+                  <button size="sm" variant="ghost" on-press="toggle_changes">Agent logs</button>
+                </if>
+                <else>
+                  <button size="sm" variant="ghost" on-press="toggle_history">History</button>
+                  <button size="sm" variant="ghost" on-press="toggle_changes">Changes</button>
+                </else>
+              </else>
+            </row>
+            <separator />
+
+            <!-- One detail pane, three faces: the card's history, what
+                 its agents committed, or the live agent logs. A
+                 terminal-style pane has room for one at a time. -->
+            <if test="{showingHistory}">
+              <scroll grow="1">
+                <column gap="6">
+                  <for each="history" key="index" as="e">
+                    <row key="{e.index}" gap="8" cross="start">
+                      <text foreground="text_muted">{e.at}</text>
+                      <text wrap="true">{e.summary}</text>
+                    </row>
+                  </for>
+                </column>
+              </scroll>
+            </if>
+            <else>
+              <if test="{showingChanges}">
+                <scroll grow="1">
+                  <text wrap="true">{changes}</text>
+                </scroll>
+              </if>
+              <else>
+                <scroll grow="1">
+                  <text wrap="true">{transcript}</text>
+                </scroll>
+              </else>
+            </else>
+          </column>
+        </if>
+      </row>
+    </column>
+  </if>
+  <else>
+    <column grow="1" gap="10" padding="16">
+      <text foreground="text_muted">Choose a project</text>
+      <column gap="6">
+        <for each="projects" key="index" as="p">
+          <row key="{p.index}" background="surface" radius="md" padding="10" gap="8" cross="center">
+            <text grow="1">{p.name}</text>
+            <button size="sm" variant="primary" on-press="pick_project:{p.index}">Open board</button>
+          </row>
+        </for>
+      </column>
+      <if test="{hasNoProjects}">
+        <column gap="10" background="surface" radius="md" padding="14">
+          <text foreground="text_muted" wrap="true">No projects yet. Point Bento at a git repository to start a board.</text>
+          <button variant="primary" on-press="open_new_project">New project</button>
+        </column>
+      </if>
+    </column>
+  </else>
+
+  </else>
+  </else>
+  </else>
+
+  <!-- ---------------------------------------------------------------
+       Panels. One at a time, as a right-hand drawer over the board.
+       -------------------------------------------------------------- -->
+
+  <if test="{showingSettings}">
+    <drawer text="Settings">
+      <column gap="10" padding="14" min-width="380">
+        <text>Appearance</text>
+        <text foreground="text_muted" wrap="true">The theme follows the system: this window is dark when the Mac is dark, light when it is light.</text>
+        <text foreground="text_muted" wrap="true">The accent is Bento orange, fixed when the app is built. The Native SDK gives an app one accent, so the orange, magenta, and teal choice lives in the web console's settings and applies there.</text>
+        <if test="{isDarkMode}">
+          <row gap="6" cross="center">
+            <column width="10" height="10" background="accent" radius="sm" />
+            <text foreground="text_muted">Currently: dark, Bento orange</text>
+          </row>
+        </if>
+        <else>
+          <row gap="6" cross="center">
+            <column width="10" height="10" background="accent" radius="sm" />
+            <text foreground="text_muted">Currently: light, Bento orange</text>
+          </row>
+        </else>
+        <separator />
+        <text>Setup</text>
+        <text foreground="text_muted" wrap="true">How this app runs: local, against a server, or as a runner. Changing it walks the first-launch choices again.</text>
+        <button size="sm" on-press="back_to_setup">Choose a different setup</button>
+        <row gap="8">
+          <spacer grow="1" />
+          <button size="sm" variant="ghost" on-press="close_panel">Close</button>
+        </row>
+      </column>
+    </drawer>
+  </if>
+
+  <if test="{showingAgents}">
+    <drawer text="Agents">
+      <column gap="10" padding="14" min-width="380">
+        <text foreground="text_muted" wrap="true">An agent is a tool paired with a model. Stages point at one of these, which is how "Codex implements, Claude reviews" gets expressed.</text>
+        <column gap="6">
+          <for each="profiles" key="index" as="a">
+            <row key="{a.index}" background="surface" radius="sm" padding="10" gap="8" cross="center">
+              <!-- The mark of the provider this agent bills. Id 0 draws
+                   nothing, which is the fake agent's answer. -->
+              <if test="{isDarkMode}">
+                <image image="{a.logoDark}" width="18" height="18" label="Provider" />
+              </if>
+              <else>
+                <image image="{a.logoLight}" width="18" height="18" label="Provider" />
+              </else>
+              <column grow="1" gap="2">
+                <text>{a.name}</text>
+                <text foreground="text_muted">{a.cli} · {a.model}</text>
+                <!-- Only shown when the pairing needs saying. -->
+                <if test="{a.hasWarning}">
+                  <text foreground="warning" wrap="true">{a.warning}</text>
+                </if>
+              </column>
+              <button size="sm" variant="ghost" on-press="edit_profile:{a.index}">Edit</button>
+              <button size="sm" variant="ghost" on-press="delete_profile:{a.index}" label="Remove this agent" icon="trash" />
+            </row>
+          </for>
+        </column>
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="open_new_agent">Add an agent</button>
+        </row>
+
+        <separator />
+        <text>Credentials</text>
+        <text foreground="text_muted" wrap="true">API keys for the providers your agents run on, plus the GitHub token that opens pull requests. Stored encrypted, and never shown again after you save them.</text>
+        <column gap="6">
+          <for each="secrets" key="index" as="k">
+            <row key="{k.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
+              <text grow="1">{k.name}</text>
+              <text foreground="text_muted">{k.hint}</text>
+              <button size="sm" variant="ghost" on-press="delete_secret:{k.index}" label="Remove this credential" icon="trash" />
+            </row>
+          </for>
+        </column>
+        <if test="{hasSecrets}">
+          <text foreground="text_muted" wrap="true"></text>
+        </if>
+        <else>
+          <text foreground="text_muted" wrap="true">None saved yet. Agents refuse to start until the key their model needs is here.</text>
+        </else>
+        <button size="sm" on-press="open_secret">Add a credential</button>
+
+        <row gap="8">
+          <spacer grow="1" />
+          <button size="sm" variant="ghost" on-press="close_panel">Close</button>
+        </row>
+      </column>
+    </drawer>
+  </if>
+
+  <if test="{showingPipeline}">
+    <drawer text="Pipeline">
+      <column gap="10" padding="14" min-width="420">
+        <text foreground="text_muted" wrap="true">Which agent runs each stage, and what has to be true before a card moves on.</text>
+
+        <text>Repositories</text>
+        <text foreground="text_muted" wrap="true">Each becomes its own worktree inside a feature workspace, so a change spanning two of them is still one card.</text>
+        <column gap="6">
+          <for each="repos" key="index" as="r">
+            <row key="{r.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
+              <column grow="1" gap="2">
+                <text>{r.name}</text>
+                <text foreground="text_muted" wrap="true">{r.localPath}</text>
+              </column>
+              <button size="sm" variant="ghost" on-press="delete_repo:{r.index}" label="Remove this repository" icon="trash" />
+            </row>
+          </for>
+        </column>
+        <button size="sm" on-press="open_new_repo">Add a repository</button>
+        <separator />
+        <column gap="6">
+          <for each="pipelineStages" key="index" as="s">
+            <column key="{s.index}" background="surface" radius="sm" padding="10" gap="6">
+              <row gap="8" cross="center">
+                <text grow="1">{s.name}</text>
+                <button size="sm" variant="ghost" on-press="open_rename_stage:{s.index}">Rename</button>
+              <button size="sm" variant="ghost" on-press="edit_stage:{s.index}">Configure</button>
+              </row>
+              <row gap="6" cross="center">
+                <if test="{isDarkMode}">
+                  <image image="{s.agentLogoDark}" width="14" height="14" label="Provider" />
+                </if>
+                <else>
+                  <image image="{s.agentLogoLight}" width="14" height="14" label="Provider" />
+                </else>
+                <text foreground="text_muted">agent: {s.agentLabel}</text>
+              </row>
+              <text foreground="text_muted" wrap="true">{s.gateSummary}</text>
+              <!-- Read only here: the toggle lives in the web console,
+                   but a stage that opens pull requests must not look
+                   identical to one that does not. -->
+              <if test="{s.createPr}">
+                <text foreground="text_muted">opens a pull request</text>
+              </if>
+              <if test="{s.gateForeign}">
+                <text foreground="warning" wrap="true">Has a requirement only the web console can edit.</text>
+              </if>
+            </column>
+          </for>
+        </column>
+
+        <if test="{editingAStage}">
+          <column background="surface" radius="md" padding="12" gap="8">
+            <text>{editingStageName}</text>
+
+            <text foreground="text_muted">Agent for this stage</text>
+            <stack>
+              <select placeholder="Choose an agent" text="{editingStageAgent}" on-press="toggle_stage_agent_picker" label="Agent for this stage" />
+              <if test="{stageAgentPickerOpen}">
+                <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="toggle_stage_agent_picker">
+                  <for each="profiles" key="index" as="a">
+                    <menu-item on-press="set_stage_agent:{a.index}">{a.name}</menu-item>
+                  </for>
+                  <separator />
+                  <menu-item on-press="clear_stage_agent">No agent</menu-item>
+                </dropdown-menu>
+              </if>
+            </stack>
+
+            <!-- The mode first: it decides which of the two questions
+                 below even applies. -->
+            <text foreground="text_muted">How a card leaves this stage</text>
+            <toggle-group gap="6" label="How a card leaves this stage">
+              <toggle-button size="sm" selected="{gateManual}" on-toggle="set_gate_manual">I approve or reject</toggle-button>
+              <toggle-button size="sm" selected="{gateAutomatic}" on-toggle="set_gate_auto">Automatically</toggle-button>
+            </toggle-group>
+
+            <if test="{gateAutomatic}">
+              <text foreground="text_muted">Requirements, all of which must pass</text>
+              <toggle-group gap="6" label="Requirements">
+                <toggle-button size="sm" selected="{gateChecksPass}" on-toggle="toggle_gate_checks">Checks pass</toggle-button>
+                <toggle-button size="sm" selected="{gatePrComments}" on-toggle="toggle_gate_pr">PR comments resolved</toggle-button>
+              </toggle-group>
+              <text foreground="text_muted" wrap="true">With none chosen, the card moves on when this stage's agent finishes.</text>
+            </if>
+            <else>
+              <text foreground="text_muted" wrap="true">A manual stage waits for you. Requirements are not consulted.</text>
+            </else>
+
+            <if test="{gateAutomatic}">
+              <text foreground="text_muted">Command to run (optional)</text>
+              <text-field text="{gateCmdEdit.text}" placeholder="pnpm test" on-input="gate_cmd_edit" label="Gate command" />
+              <text foreground="text_muted" wrap="true">This runs inside this project's sandbox. Leave it empty for no command.</text>
+            </if>
+
+            <row gap="8">
+              <button size="sm" variant="primary" on-press="submit_gate">Save the gate</button>
+              <button size="sm" variant="ghost" on-press="cancel_stage_edit">Cancel</button>
+            </row>
+          </column>
+        </if>
+
+        <row gap="8">
+          <spacer grow="1" />
+          <button size="sm" variant="ghost" on-press="close_panel">Close</button>
+        </row>
+      </column>
+    </drawer>
+  </if>
+
+  <if test="{showingTeam}">
+    <drawer text="Team">
+      <scroll grow="1">
+        <column gap="10" padding="14" min-width="420">
+          <text foreground="text_muted" wrap="true">Everyone in an organization shares its boards.</text>
+
+          <!-- Each list gets its own container. Row keys are scoped to
+               their siblings, so four lists sharing one parent would
+               give four rows the same id and fail the whole build. -->
+          <text>Organization: {activeOrgName}</text>
+          <column gap="6">
+            <for each="orgs" key="index" as="o">
+              <row key="{o.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
+                <text grow="1">{o.name}</text>
+                <text foreground="text_muted">{o.role}</text>
+                <if test="{o.active}">
+                  <text foreground="accent">active</text>
+                </if>
+                <else>
+                  <button size="sm" variant="ghost" on-press="switch_org:{o.index}">Switch</button>
+                </else>
+              </row>
+            </for>
+          </column>
+          <button size="sm" on-press="open_new_org">New organization</button>
+
+          <if test="{hasActiveOrg}">
+            <separator />
+            <text>Members</text>
+            <column gap="6">
+              <for each="members" key="index" as="m">
+                <row key="{m.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
+                  <column grow="1" gap="2">
+                    <text>{m.name}</text>
+                    <text foreground="text_muted">{m.email}</text>
+                  </column>
+                  <text foreground="text_muted">{m.role}</text>
+                  <button size="sm" variant="ghost" on-press="promote_member:{m.index}">Make admin</button>
+                  <button size="sm" variant="ghost" on-press="demote_member:{m.index}">Make member</button>
+                  <button size="sm" variant="ghost" on-press="remove_member:{m.index}" label="Remove this member" icon="trash" />
+                </row>
+              </for>
+            </column>
+
+            <text>Invitations</text>
+            <column gap="6">
+              <for each="invitations" key="index" as="i">
+                <row key="{i.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
+                  <text grow="1">{i.email}</text>
+                  <text foreground="text_muted">{i.role}</text>
+                  <button size="sm" variant="ghost" on-press="cancel_invite:{i.index}">Cancel</button>
+                </row>
+              </for>
+            </column>
+            <button size="sm" on-press="open_invite">Invite someone</button>
+
+            <separator />
+            <text>Agent credentials</text>
+            <text foreground="text_muted" wrap="true">This organization's API keys and GitHub token live under Agents, so there is one place to look for them.</text>
+          </if>
+
+          <row gap="8">
+            <spacer grow="1" />
+            <button size="sm" variant="ghost" on-press="close_panel">Close</button>
+          </row>
+        </column>
+      </scroll>
+    </drawer>
+  </if>
+
+  <!-- ---------------------------------------------------------------
+       Dialogs.
+       -------------------------------------------------------------- -->
+
+  <if test="{dialogNewProject}">
+    <dialog text="New project">
+      <column gap="10" padding="14" min-width="420">
+        <text foreground="text_muted" wrap="true">Point Bento at a git repository on this machine. If a change usually spans more than one, add the others in Pipeline straight after.</text>
+        <text-field text="{projectNameEdit.text}" placeholder="Checkout" on-input="project_name_edit" label="Project name" autofocus="true" />
+        <text-field text="{projectPathEdit.text}" placeholder="/Users/you/code/checkout" on-input="project_path_edit" label="Repository path" on-submit="submit_project" />
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_project">Create</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogNewFeature}">
+    <dialog text="New card">
+      <column gap="10" padding="14" min-width="420">
+        <text-field text="{featureTitleEdit.text}" placeholder="What should the agents build?" on-input="feature_title_edit" on-submit="submit_feature" label="Card title" autofocus="true" />
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_feature">Add</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogTakeover}">
+    <dialog text="Continue in your own words">
+      <column gap="10" padding="14" min-width="460">
+        <text foreground="text_muted" wrap="true">The agent keeps its session, so it still has everything it read and wrote. Tell it what to do differently.</text>
+        <input-group min-width="420" label="Follow-up instructions">
+          <textarea text="{takeoverEdit.text}" placeholder="Use the existing helper instead of adding one" on-input="takeover_edit" on-submit="submit_takeover" autofocus="true" />
+          <input-group-actions gap="8">
+            <spacer grow="1" />
+            <button size="sm" variant="primary" on-press="submit_takeover" icon="send">Send</button>
+          </input-group-actions>
+        </input-group>
+        <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogNewAgent}">
+    <dialog text="Agent">
+      <column gap="10" padding="14" min-width="460">
+        <!-- One dialog for both: the tool, the model and the name are
+             the same three questions whether adding or changing. -->
+        <if test="{editingAnAgent}">
+          <text foreground="text_muted" wrap="true">Every stage using this agent follows the change.</text>
+        </if>
+        <text foreground="text_muted">Tool</text>
+        <stack>
+          <select placeholder="Choose a tool" text="{selectedToolLabel}" on-press="toggle_tool_picker" label="Tool" />
+          <if test="{toolPickerOpen}">
+            <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="toggle_tool_picker">
+              <for each="tools" key="index" as="t">
+                <menu-item on-press="pick_tool:{t.index}">{t.label}</menu-item>
+              </for>
+            </dropdown-menu>
+          </if>
+        </stack>
+
+        <text foreground="text_muted">Model</text>
+        <stack>
+          <select placeholder="Choose a model" text="{selectedModelLabel}" on-press="toggle_model_picker" label="Model" />
+          <if test="{modelPickerOpen}">
+            <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="toggle_model_picker">
+              <for each="catalog" key="index" as="m">
+                <menu-item on-press="pick_model:{m.index}">{m.providerName} · {m.name}</menu-item>
+              </for>
+            </dropdown-menu>
+          </if>
+        </stack>
+
+        <text-field text="{agentNameEdit.text}" placeholder="Reviewer" on-input="agent_name_edit" label="Name (optional)" on-submit="submit_agent" />
+        <row gap="8">
+          <if test="{editingAnAgent}">
+            <button size="sm" variant="primary" on-press="submit_agent">Save changes</button>
+          </if>
+          <else>
+            <button size="sm" variant="primary" on-press="submit_agent">Add</button>
+          </else>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogNewOrg}">
+    <dialog text="New organization">
+      <column gap="10" padding="14" min-width="420">
+        <text-field text="{orgNameEdit.text}" placeholder="Acme" on-input="org_name_edit" on-submit="submit_org" label="Organization name" autofocus="true" />
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_org">Create</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogInvite}">
+    <dialog text="Invite someone">
+      <column gap="10" padding="14" min-width="420">
+        <text foreground="text_muted" wrap="true">They get an email with a link that adds them to this organization.</text>
+        <text-field text="{inviteEmailEdit.text}" placeholder="teammate@example.com" on-input="invite_email_edit" on-submit="submit_invite" label="Email address" autofocus="true" />
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_invite">Send</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogNewRepo}">
+    <dialog text="Add a repository">
+      <column gap="10" padding="14" min-width="460">
+        <text foreground="text_muted" wrap="true">A path on this machine. It becomes another worktree in every feature workspace.</text>
+        <text-field text="{repoPathEdit.text}" placeholder="/Users/you/code/another" on-input="repo_path_edit" on-submit="submit_repo" label="Repository path" autofocus="true" />
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_repo">Add</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogRenameStage}">
+    <dialog text="Rename stage">
+      <column gap="10" padding="14" min-width="420">
+        <text-field text="{stageNameEdit.text}" placeholder="Implementation" on-input="stage_name_edit" on-submit="submit_stage_name" label="Stage name" autofocus="true" />
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_stage_name">Rename</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogSecret}">
+    <dialog text="Add a credential">
+      <column gap="10" padding="14" min-width="460">
+        <text foreground="text_muted">Credential</text>
+        <stack>
+          <select placeholder="Choose a credential" text="{selectedCredentialLabel}" on-press="toggle_credential_picker" label="Credential" />
+          <if test="{credentialPickerOpen}">
+            <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="toggle_credential_picker">
+              <for each="credentials" key="index" as="c">
+                <menu-item on-press="pick_credential:{c.index}">{c.label}</menu-item>
+              </for>
+            </dropdown-menu>
+          </if>
+        </stack>
+        <text-field text="{secretValueEdit.text}" placeholder="Paste the key" on-input="secret_value_edit" on-submit="submit_secret" label="Value" />
+        <text foreground="text_muted" wrap="true">{selectedCredentialHelp}</text>
+        <!-- Base URLs are not secrets, and claiming they are encrypted
+             the way a key is misdescribes what happens to them. -->
+        <if test="{selectedCredentialSecret}">
+          <text foreground="text_muted" wrap="true">Stored encrypted and never returned by any route. Only a masked hint is shown afterwards.</text>
+        </if>
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_secret">Save</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  <if test="{dialogConfirm}">
+    <dialog text="Are you sure?">
+      <column gap="10" padding="14" min-width="420">
+        <text wrap="true">{confirmText}</text>
+        <row gap="8">
+          <if test="{confirmingProfile}">
+            <button size="sm" variant="destructive" on-press="confirm_delete_profile">Remove</button>
+          </if>
+          <if test="{confirmingRepo}">
+            <button size="sm" variant="destructive" on-press="confirm_delete_repo">Remove</button>
+          </if>
+          <if test="{confirmingSecret}">
+            <button size="sm" variant="destructive" on-press="confirm_delete_secret">Remove</button>
+          </if>
+          <if test="{confirmingMember}">
+            <button size="sm" variant="destructive" on-press="confirm_remove_member">Remove</button>
+          </if>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
+  </else>
+
+  <if test="{hasError}">
+    <status-bar>error: {lastError}</status-bar>
+  </if>
+  <else>
+    <if test="{hasNotice}">
+      <status-bar>{notice}</status-bar>
+    </if>
+    <else>
+      <status-bar>{connectionText}</status-bar>
+    </else>
+  </else>
+</column>

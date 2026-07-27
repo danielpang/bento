@@ -1,0 +1,68 @@
+{
+  "projectId": "9433c41c-d441-4c8f-883b-5240c30a8f26",
+  "shape": "package",
+  "pkg": "@bento/web",
+  "globalName": "BentoWeb",
+  "srcDir": "src/components",
+  "tsconfig": "tsconfig.json",
+  "cssEntry": "src/styles.css",
+  "componentSrcMap": {
+    "App": null
+  },
+  "extraFonts": [
+    "public/fonts/jetbrains-mono.css"
+  ],
+  "buildCmd": "pnpm --filter @bento/web build:types",
+  "overrides": {
+    "AgentsPanel": {
+      "cardMode": "single",
+      "primaryStory": "Configured"
+    },
+    "Modal": {
+      "cardMode": "single",
+      "primaryStory": "WithForm",
+      "viewport": "900x820"
+    },
+    "NewProjectDialog": {
+      "cardMode": "single",
+      "primaryStory": "Empty",
+      "viewport": "900x820"
+    },
+    "RepositoriesPanel": {
+      "cardMode": "single",
+      "primaryStory": "TwoRepositories"
+    },
+    "StageConfig": {
+      "cardMode": "single",
+      "primaryStory": "Pipeline"
+    },
+    "ToastHost": {
+      "cardMode": "single",
+      "primaryStory": "Failure"
+    },
+    "FeatureDrawer": {
+      "cardMode": "single",
+      "primaryStory": "AtAGate"
+    },
+    "SettingsPage": {
+      "cardMode": "single",
+      "primaryStory": "Appearance"
+    },
+    "PromptDialog": {
+      "cardMode": "single",
+      "primaryStory": "default",
+      "viewport": "900x820"
+    },
+    "ConfirmDialog": {
+      "cardMode": "single",
+      "primaryStory": "default",
+      "viewport": "900x820"
+    },
+    "NewFeatureDialog": {
+      "cardMode": "single",
+      "primaryStory": "default",
+      "viewport": "900x820"
+    }
+  },
+  "readmeHeader": ".design-sync/conventions.md"
+}

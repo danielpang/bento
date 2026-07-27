@@ -1,0 +1,147 @@
+name: bento
+
+# The whole stack in containers: database, migrations, then the API and
+# the web console from one image.
+#
+#   docker compose up --build          everything
+#   docker compose up -d postgres      just the database, for `pnpm dev`
+#
+# The database alone is the older workflow and still the one to use when
+# developing, because the server then runs from source with hot reload.
+# The full stack is for trying Bento without a toolchain, and for
+# checking that what ships in an image actually boots.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5439:5432"
+    volumes:
+      - bento-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # A one-shot: applies migrations and exits. The server waits for it to
+  # exit zero, so it never starts against a schema that is behind.
+  # Re-running it is free, and it takes an advisory lock, so two of
+  # these racing is safe.
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    image: bento-server:dev
+    command: ["node", "packages/db/dist/migrate.js"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # The image agents run inside, built here so one `docker compose up
+  # --build` produces every image the stack needs. This container itself
+  # does nothing and exits immediately: the sandboxes are siblings the
+  # server creates from this image through the host's Docker daemon, not
+  # a service compose runs. Without it the stack starts and the first
+  # run fails on a missing image, which is a long way from the mistake.
+  sandbox-image:
+    build:
+      context: infra/sandbox-image
+    image: ${BENTO_SANDBOX_IMAGE:-bento-sandbox:dev}
+    command: ["true"]
+    restart: "no"
+
+  server:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    image: bento-server:dev
+    command: ["node", "apps/server/dist/index.js"]
+    ports:
+      # Published on the host's loopback only, which keeps local mode's
+      # "not on the network" property that binding 0.0.0.0 inside the
+      # container gives up.
+      - "127.0.0.1:4400:4400"
+    environment:
+      # Reaching Postgres by service name, not the published port: that
+      # one is for tools on the host.
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/app
+      - PORT=4400
+      # Loopback inside a container is unreachable from outside it.
+      - BENTO_HOST=0.0.0.0
+      - BENTO_MODE=${BENTO_MODE:-local}
+      - BENTO_WEB_DIR=/app/apps/web/dist
+      - BENTO_SANDBOX_DRIVER=${BENTO_SANDBOX_DRIVER:-docker}
+      - BENTO_SANDBOX_IMAGE=${BENTO_SANDBOX_IMAGE:-bento-sandbox:dev}
+      # Worktrees live here. The path is identical inside and out, which
+      # is what makes the sandbox mounts below resolve.
+      - BENTO_DATA_DIR=${BENTO_STATE_DIR:-/var/tmp/bento}
+      # Multi mode needs these. Named without a value so they are passed
+      # through only when the host has them: spelled `${VAR:-}` they
+      # would arrive as empty strings, and local mode rejects an empty
+      # key rather than deriving one, which is a confusing way to fail.
+      - BENTO_SECRET_KEY
+      - BETTER_AUTH_SECRET
+      - BETTER_AUTH_URL
+      # Social sign-in. Each provider registers only when both halves
+      # are present, so a half-filled pair shows no button rather than
+      # one that can only fail at GitHub's end.
+      - GITHUB_CLIENT_ID
+      - GITHUB_CLIENT_SECRET
+      - GOOGLE_CLIENT_ID
+      - GOOGLE_CLIENT_SECRET
+      # The GitHub App, which is a different credential from the social
+      # login above even when one app provides both.
+      - GITHUB_APP_ID
+      - GITHUB_APP_SLUG
+      - GITHUB_PRIVATE_KEY
+      - GITHUB_WEBHOOK_SECRET
+      # Agent credentials, from .env. This container cannot reach the
+      # host's keychain, so a Claude subscription travels as the token
+      # `claude setup-token` prints. Empty values read as absent.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CURSOR_API_KEY=${CURSOR_API_KEY:-}
+      # Lets stages with "Create a pull request" enabled push and open
+      # pull requests without the GitHub App. Stays on the server; it is
+      # never part of an agent's environment.
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Commits are attributed to you. The container has no global
+      # gitconfig, so the identity arrives through the environment.
+      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-}
+      - GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-}
+    volumes:
+      # Agents run in sibling containers, created through the host's own
+      # Docker daemon rather than a daemon inside this one.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Those siblings are the HOST daemon's, so every path it is asked
+      # to mount has to mean the same thing on the host as it does in
+      # here. Both of these are therefore mounted at their own path
+      # rather than remapped: a worktree living under a different path
+      # inside this container would mount an empty directory into the
+      # sandbox, and the agent would find no code.
+      - ${BENTO_STATE_DIR:-/var/tmp/bento}:${BENTO_STATE_DIR:-/var/tmp/bento}
+      - ${BENTO_REPOS:-${PWD}}:${BENTO_REPOS:-${PWD}}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      # Not a runtime dependency: the server never talks to this
+      # container. Waiting on it is what guarantees the image exists
+      # before the first card can ask for a sandbox.
+      sandbox-image:
+        condition: service_completed_successfully
+
+volumes:
+  bento-pgdata:

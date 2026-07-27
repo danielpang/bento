@@ -1,0 +1,29 @@
+{
+  "name": "@bento/core",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Elastic-2.0",
+  "type": "module",
+  "//sideEffects": "Every module here is data, pure functions, or a zod schema assigned to an export; nothing registers or mutates anything at import time. Saying so lets a bundler drop what an app does not use. The console imports four helpers from here and was shipping 54 kB of zod for them.",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

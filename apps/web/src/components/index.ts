@@ -1,0 +1,37 @@
+/**
+ * The console's components, in one place.
+ *
+ * The app imports each component from its own file, so nothing here is
+ * on its critical path. This barrel exists so the set can be described
+ * as a library: it is what the declaration build emits types from, and
+ * what the design-system export reads to know the component surface.
+ * A component missing from this list is a component nothing outside
+ * this directory can see.
+ */
+export { AcceptInvitation } from "./AcceptInvitation.js";
+export { AccountSettings } from "./AccountSettings.js";
+export { AgentSession } from "./AgentSession.js";
+export { AgentsPanel } from "./AgentsPanel.js";
+export { AppearanceSettings } from "./AppearanceSettings.js";
+export { BillingCard } from "./BillingCard.js";
+export { Board } from "./Board.js";
+export { BrandLockup } from "./BrandLockup.js";
+export { CreateTeam } from "./CreateTeam.js";
+export { GitHubTokenCard, ProviderKeysCard } from "./Credentials.js";
+export { DeviceApproval } from "./DeviceApproval.js";
+export { DiffReview } from "./DiffReview.js";
+export { FeatureDrawer } from "./FeatureDrawer.js";
+export { Modal } from "./Modal.js";
+export { ProjectPicker } from "./ProjectPicker.js";
+export { ConfirmDialog, NewFeatureDialog, NewProjectDialog, PromptDialog } from "./PromptDialog.js";
+export { GitHubIcon, GoogleIcon } from "./ProviderIcons.js";
+export { ProviderMark } from "./ProviderMark.js";
+export { RepositoriesPanel } from "./RepositoriesPanel.js";
+export { ResetPassword } from "./ResetPassword.js";
+export { SecretField } from "./SecretField.js";
+export { SessionPage } from "./SessionPage.js";
+export { SettingsPage } from "./SettingsPage.js";
+export { SignIn } from "./SignIn.js";
+export { StageConfig } from "./StageConfig.js";
+export { TeamSettings } from "./TeamSettings.js";
+export { ToastHost, useToast } from "./Toasts.js";

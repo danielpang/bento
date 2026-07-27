@@ -1,0 +1,25 @@
+/*
+ * Geist and Geist Mono, the leading families in the --sans and --mono
+ * stacks. Variable weight files, so every weight the console uses
+ * (400 through 700) comes out of one request per family.
+ *
+ * `swap` for the same reason JetBrains Mono uses it: the fallback in
+ * each stack is metrically close, so a flash of it beats invisible
+ * labels on a slow connection.
+ *
+ * Vercel's typefaces, SIL Open Font License 1.1 — see Geist-LICENSE.txt.
+ */
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./geist-latin-variable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./geist-mono-latin-variable.woff2") format("woff2");
+}

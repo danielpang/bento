@@ -1,0 +1,33 @@
+{
+  "name": "@bento/tui",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Elastic-2.0",
+  "type": "module",
+  "bin": {
+    "bento": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/cli.tsx",
+    "test": "node --test --import tsx \"src/**/*.test.tsx\" || true"
+  },
+  "dependencies": {
+    "@bento/agents": "workspace:*",
+    "@bento/api-client": "workspace:*",
+    "@bento/core": "workspace:*",
+    "@bento/sandbox": "workspace:*",
+    "@bento/server": "workspace:*",
+    "ink": "^7.1.1",
+    "react": "^19.0.0",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.0.10",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

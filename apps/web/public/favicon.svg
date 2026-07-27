@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Bento">
+  <title>Bento</title>
+  <!--
+    The wordmark's glyph, at tab size: a bento box of four compartments
+    with exactly one of them filled, which is the rule the interface
+    lives by (one primary action per screen).
+
+    No plate behind it. A tab strip is dark in one browser and light in
+    the next, so a plate is a guess about the background; four shapes
+    with a colour that answers prefers-color-scheme is not. The
+    compartments carry the silhouette and the filled one carries the
+    recognition, which is why it stays orange in both.
+
+    Geometry matches .brand-glyph in styles.css: a 2x2 grid, gap and
+    corner radius scaled from 16px to 32 so the gaps survive a 16px
+    render.
+  -->
+  <style>
+    .tile { fill: #3d392f; }
+    .fill { fill: #ff8a3d; }
+    @media (prefers-color-scheme: light) {
+      /* The app's own --line-bright is too pale on a white tab strip,
+         so the quiet compartments take the weight of --text-dim, and
+         the accent deepens the way the light theme's brand does. */
+      .tile { fill: #5c574b; }
+      .fill { fill: #d1550a; }
+    }
+  </style>
+  <rect class="tile" x="3" y="3" width="11.75" height="11.75" rx="2.6" />
+  <rect class="fill" x="17.25" y="3" width="11.75" height="11.75" rx="2.6" />
+  <rect class="tile" x="3" y="17.25" width="11.75" height="11.75" rx="2.6" />
+  <rect class="tile" x="17.25" y="17.25" width="11.75" height="11.75" rx="2.6" />
+</svg>

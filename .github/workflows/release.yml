@@ -1,0 +1,227 @@
+name: Release
+
+# Tags are the release trigger. The tag must be on main, which is
+# enforced below rather than assumed, so a tag pushed from a branch does
+# not quietly publish.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify the tag and run checks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app
+        ports:
+          - 5439:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5439/app
+      BENTO_SANDBOX_DRIVER: local-process
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Refuse tags that are not on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! git branch -r --contains "refs/tags/$TAG" | grep -qE 'origin/main$'; then
+            echo "::error::$TAG is not on main. Releases are cut from main."
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm db:migrate
+      - run: pnpm test
+
+  cli:
+    name: Package the CLI
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      # pnpm deploy resolves the workspace links into a self-contained
+      # directory, so the tarball runs anywhere Node 22 is installed
+      # without pnpm or the monorepo.
+      - name: Build a standalone package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          pnpm deploy --filter @bento/tui --prod dist-cli
+          rm -rf dist-cli/src dist-cli/tsconfig.json
+          cat > dist-cli/bento <<'LAUNCHER'
+          #!/bin/sh
+          exec node "$(dirname "$0")/dist/cli.js" "$@"
+          LAUNCHER
+          chmod +x dist-cli/bento
+          mv dist-cli "bento-$TAG"
+          tar -czf "bento-cli-$TAG.tar.gz" "bento-$TAG"
+
+      - name: Check the packaged CLI starts
+        env:
+          TAG: ${{ github.ref_name }}
+        run: "./bento-$TAG/bento --help"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli
+          path: bento-cli-*.tar.gz
+
+  mac:
+    name: Package the Mac app
+    needs: verify
+    runs-on: macos-latest
+    # The secrets context is not available in step-level `if`, so the
+    # presence of each optional secret is hoisted into env here.
+    env:
+      HAS_SIGNING: ${{ secrets.MACOS_SIGNING_IDENTITY != '' }}
+      HAS_NOTARY: ${{ secrets.MACOS_NOTARY_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          # The Native SDK toolchain requires 22.15 or newer.
+          node-version: "22.15"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # --yes lets the toolchain fetch its pinned Zig on a clean runner.
+      - name: Build the app
+        working-directory: apps/mac
+        run: |
+          ../../node_modules/.bin/native check
+          ../../node_modules/.bin/native build --yes
+
+      # Signing is optional: without secrets the app is ad-hoc signed,
+      # which runs locally but shows Gatekeeper warnings when shared.
+      - name: Package unsigned
+        if: env.HAS_SIGNING != 'true'
+        working-directory: apps/mac
+        run: ../../node_modules/.bin/native package --target macos
+
+      - name: Package signed
+        if: env.HAS_SIGNING == 'true'
+        working-directory: apps/mac
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: |
+          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+          rm -f /tmp/cert.p12
+          ../../node_modules/.bin/native package --target macos \
+            --signing identity --identity "$IDENTITY" --team-id "$TEAM_ID"
+
+      - name: Notarize and staple
+        if: env.HAS_NOTARY == 'true'
+        working-directory: apps/mac
+        env:
+          APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          ditto -c -k --keepParent zig-out/package/mac.app /tmp/notarize.zip
+          xcrun notarytool submit /tmp/notarize.zip \
+            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$NOTARY_PASSWORD" --wait
+          xcrun stapler staple zig-out/package/mac.app
+
+      - name: Zip the app
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ditto -c -k --keepParent apps/mac/zig-out/package/mac.app "bento-mac-$TAG.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: bento-mac-*.zip
+
+  release:
+    name: Publish the release
+    needs: [cli, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "## Install"
+            echo
+            echo '### Terminal'
+            echo
+            echo '```bash'
+            echo "tar -xzf bento-cli-$TAG.tar.gz"
+            echo "sudo mv bento-$TAG /usr/local/lib/bento"
+            echo 'sudo ln -sf /usr/local/lib/bento/bento /usr/local/bin/bento'
+            echo 'bento --help'
+            echo '```'
+            echo
+            echo 'Requires Node 22. Docker is needed only when agents run on your machine.'
+            echo
+            echo '| Command | What it does |'
+            echo '|---|---|'
+            echo '| `bento --server <url>` | Join a server, agents run there |'
+            echo '| `bento --server <url> --agents local` | Join a server, agents run here |'
+            echo '| `bento` | Everything on this machine |'
+            echo
+            echo '### Mac app'
+            echo
+            echo "Unzip \`bento-mac-$TAG.zip\` and move the app to Applications."
+            echo 'The two local modes spawn the `bento` command, so install that first'
+            echo 'and make sure it is on your PATH.'
+          } > notes.md
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --verify-tag \
+            artifacts/*

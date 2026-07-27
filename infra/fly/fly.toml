@@ -1,0 +1,34 @@
+# Hosted Bento. Agents run in Fly Sprites rather than on this machine, so
+# the app itself stays small; it schedules work and holds the board.
+app = "bento"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../infra/docker/Dockerfile"
+
+[env]
+  BENTO_MODE = "multi"
+  BENTO_SANDBOX_DRIVER = "sprite"
+  PORT = "8080"
+  # The console is served from this same app, so the browser sees one
+  # origin: session cookies, OAuth callbacks, the /device page and the
+  # /accept-invitation link all work without CORS.
+  BENTO_WEB_DIR = "/app/apps/web/dist"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # Keep one machine warm: the orchestrator owns queue workers and the
+  # gate sweep, which should not stop when web traffic goes quiet.
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+# Secrets are set out of band, never committed:
+#   fly secrets set BETTER_AUTH_SECRET=... BENTO_SECRET_KEY=... SPRITES_TOKEN=...
+#   fly secrets set GITHUB_APP_ID=... GITHUB_APP_SLUG=... GITHUB_PRIVATE_KEY=... GITHUB_WEBHOOK_SECRET=...
+#   fly secrets set GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=...

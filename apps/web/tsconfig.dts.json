@@ -1,0 +1,18 @@
+{
+  "//": "Declaration-only build. The app itself never emits (tsconfig sets noEmit), but the component surface has to be describable as types for the design-system export: those .d.ts files are the API contract a design agent codes against. Run with `pnpm --filter @bento/web build:types`.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "allowImportingTsExtensions": false,
+    "outDir": "types",
+    "rootDir": "src"
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/main.tsx"
+  ]
+}

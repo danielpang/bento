@@ -1,0 +1,241 @@
+import { zValidator } from "@hono/zod-validator";
+import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
+import { Hono, type Context } from "hono";
+import { z } from "zod";
+import { agentEvent } from "@bento/core";
+import { agentProfiles, agentRuns, features, projects, repositories, runEvents, stages } from "@bento/db";
+import { canAccessProject, visibleProjectFilter } from "../access.js";
+import type { AppContext } from "../context.js";
+import { tenantDb as db } from "../middleware/tenant.js";
+import { buildStagePrompt } from "../orchestrator/prompt.js";
+import { deliverQueuedMessage } from "../orchestrator/run-executor.js";
+import { runOutputPreview } from "../orchestrator/run-executor.js";
+
+const claimInput = z.object({
+  /** Identifies the machine claiming work, for display and debugging. */
+  runnerId: z.string().min(1).max(128),
+});
+
+const eventsInput = z.object({
+  /** Must match the runner that claimed the run. */
+  runnerId: z.string().min(1).max(128),
+  events: z.array(agentEvent).max(500),
+});
+
+const completeInput = z.object({
+  runnerId: z.string().min(1).max(128),
+  ok: z.boolean(),
+  sessionId: z.string().optional(),
+  costUsd: z.number().optional(),
+  numTurns: z.number().int().optional(),
+  exitCode: z.number().int().optional(),
+  error: z.string().optional(),
+});
+
+/**
+ * Endpoints for a machine that executes agent runs locally while the
+ * server holds the board.
+ *
+ * This is the middle option between a thin client and running everything
+ * locally: your organization, projects, and history live on the server,
+ * but agents run in containers on your own machine with your own
+ * checkouts and credentials, which never reach the server.
+ */
+/**
+ * Authorizes a report about a run.
+ *
+ * Reporting endpoints are as powerful as the orchestrator itself: they
+ * write transcripts and decide whether a stage passed, which can advance
+ * a card and start the next agent. So a caller must be able to see the
+ * run's project, the run must be runner-executed, and it must be the
+ * machine that claimed it. Anything else is refused as not found, which
+ * avoids confirming that a run id exists.
+ */
+async function authorizeReport(
+  ctx: AppContext,
+  c: Context,
+  runId: string,
+  runnerId: string,
+) {
+  const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
+  if (!run) return { error: "not found" as const, status: 404 as const };
+
+  const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, run.featureId));
+  if (!feature) return { error: "not found" as const, status: 404 as const };
+  if (!(await canAccessProject(ctx, c, feature.projectId))) {
+    return { error: "not found" as const, status: 404 as const };
+  }
+  if (run.executor !== "runner") {
+    return { error: "this run is executed by the server" as const, status: 409 as const };
+  }
+  if (run.claimedBy !== runnerId) {
+    return { error: "this run was claimed by a different machine" as const, status: 409 as const };
+  }
+  return { run, feature };
+}
+
+export function runnerRoutes(ctx: AppContext) {
+  return new Hono()
+    /**
+     * Claims the oldest queued run the caller may see that is marked for
+     * runner execution. Returns everything needed to execute it, so a
+     * runner needs no other API calls to get started.
+     */
+    .post("/claim", zValidator("json", claimInput), async (c) => {
+      const { runnerId } = c.req.valid("json");
+
+      const visible = await db(c, ctx).select({ id: projects.id }).from(projects).where(await visibleProjectFilter(ctx, c));
+      const projectIds = visible.map((p) => p.id);
+      if (projectIds.length === 0) return c.json({ run: null });
+
+      const candidates = await db(c, ctx)
+        .select({ run: agentRuns, feature: features })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(
+          and(
+            eq(agentRuns.status, "queued"),
+            eq(agentRuns.executor, "runner"),
+            isNull(agentRuns.claimedBy),
+            inArray(features.projectId, projectIds),
+          ),
+        )
+        .orderBy(asc(agentRuns.queuedAt))
+        .limit(1);
+
+      const candidate = candidates[0];
+      if (!candidate) return c.json({ run: null });
+
+      // Conditional update is the lock: a second runner racing for the
+      // same row updates zero rows and simply polls again.
+      const claimed = await db(c, ctx)
+        .update(agentRuns)
+        .set({ status: "starting", claimedBy: runnerId, claimedAt: new Date(), startedAt: new Date() })
+        .where(and(eq(agentRuns.id, candidate.run.id), isNull(agentRuns.claimedBy)))
+        .returning();
+      if (claimed.length === 0) return c.json({ run: null });
+
+      const [profile] = await db(c, ctx)
+        .select()
+        .from(agentProfiles)
+        .where(eq(agentProfiles.id, candidate.run.agentProfileId));
+      const [stage] = await db(c, ctx).select().from(stages).where(eq(stages.id, candidate.run.stageId));
+      const allStages = await db(c, ctx)
+        .select()
+        .from(stages)
+        .where(eq(stages.pipelineId, candidate.feature.pipelineId))
+        .orderBy(asc(stages.position));
+      const repoRows = await db(c, ctx)
+        .select()
+        .from(repositories)
+        .where(eq(repositories.projectId, candidate.feature.projectId))
+        .orderBy(asc(repositories.position));
+
+      if (!profile || !stage) return c.json({ error: "run has dangling references" }, 500);
+
+      ctx.bus.emitBoardEvent({
+        type: "run_updated",
+        projectId: candidate.feature.projectId,
+        featureId: candidate.feature.id,
+        runId: candidate.run.id,
+        status: "starting",
+      });
+
+      return c.json({
+        run: {
+          id: candidate.run.id,
+          featureId: candidate.feature.id,
+          stageId: stage.id,
+          prompt: candidate.run.prompt,
+          resumeSessionId: candidate.run.cliSessionId,
+        },
+        feature: { id: candidate.feature.id, title: candidate.feature.title, branchName: candidate.feature.branchName },
+        agent: { cli: profile.cli, model: profile.model, extraArgs: profile.extraArgs },
+        repositories: repoRows.map((r) => ({
+          name: r.name,
+          localPath: r.localPath,
+          defaultBranch: r.defaultBranch,
+        })),
+        /** Used when the run carries no explicit prompt. */
+        stagePrompt: buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill }),
+      });
+    })
+
+    /** Appends transcript events produced by a runner. */
+    .post("/runs/:id/events", zValidator("json", eventsInput), async (c) => {
+      const runId = c.req.param("id");
+      const authorized = await authorizeReport(ctx, c, runId, c.req.valid("json").runnerId);
+      if ("error" in authorized) return c.json({ error: authorized.error }, authorized.status);
+      const { run } = authorized;
+      // Resolved once per report batch, for the board's output line.
+      const [owner] = await db(c, ctx)
+        .select({ featureId: features.id, projectId: features.projectId })
+        .from(features)
+        .where(eq(features.id, run.featureId));
+
+      // max() in SQL: loading every row grew with transcript length.
+      const [highest] = await db(c, ctx)
+        .select({ seq: max(runEvents.seq) })
+        .from(runEvents)
+        .where(eq(runEvents.runId, runId));
+      let seq = highest?.seq ?? 0;
+
+      if (run.status === "starting") {
+        await db(c, ctx).update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, runId));
+      }
+
+      for (const event of c.req.valid("json").events) {
+        seq += 1;
+        await db(c, ctx).insert(runEvents).values({ runId, seq, type: event.type, payload: event });
+        ctx.bus.emitRunEvent({ runId, seq, event });
+        // Runner-executed agents reach the board the same way.
+        const spoken = runOutputPreview(event as { type: string; role?: string; text?: string });
+        if (spoken && owner) {
+          ctx.bus.emitBoardEvent({
+            type: "run_output",
+            projectId: owner.projectId,
+            featureId: owner.featureId,
+            runId,
+            text: spoken,
+          });
+        }
+      }
+      return c.json({ ok: true, seq });
+    })
+
+    /** Reports a runner-executed run as finished, and re-checks the gate. */
+    .post("/runs/:id/complete", zValidator("json", completeInput), async (c) => {
+      const runId = c.req.param("id");
+      const body = c.req.valid("json");
+      const authorized = await authorizeReport(ctx, c, runId, body.runnerId);
+      if ("error" in authorized) return c.json({ error: authorized.error }, authorized.status);
+      const { feature } = authorized;
+
+      await db(c, ctx)
+        .update(agentRuns)
+        .set({
+          status: body.ok ? "succeeded" : "failed",
+          endedAt: new Date(),
+          exitCode: body.exitCode ?? null,
+          cliSessionId: body.sessionId ?? null,
+          costUsd: body.costUsd !== undefined ? String(body.costUsd) : null,
+          numTurns: body.numTurns ?? null,
+          error: body.error ?? null,
+        })
+        .where(eq(agentRuns.id, runId));
+      await deliverQueuedMessage(ctx, runId);
+
+      {
+        ctx.bus.emitRunDone(runId, body.ok ? "succeeded" : "failed");
+        ctx.bus.emitBoardEvent({
+          type: "run_updated",
+          projectId: feature.projectId,
+          featureId: feature.id,
+          runId,
+          status: body.ok ? "succeeded" : "failed",
+        });
+        await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+      }
+      return c.json({ ok: true });
+    });
+}

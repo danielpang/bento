@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0e0d0b" />
+    <!--
+      The SVG is the real one: it scales to any tab and answers
+      prefers-color-scheme, so the quiet compartments darken on a light
+      tab strip instead of vanishing into it. The .ico is the fallback
+      for browsers that ignore SVG icons, and is listed second because
+      every browser that understands both takes the last it supports.
+    -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!--
+      The console's two voices. Geist carries the sans and Geist Mono
+      the instrumentation; JetBrains Mono stays as the mono fallback
+      for a cached visitor mid-deploy. Self-hosted, because a console
+      that phones a font CDN on every load is not a tool you trust.
+    -->
+    <link rel="stylesheet" href="/fonts/geist.css" />
+    <link rel="stylesheet" href="/fonts/jetbrains-mono.css" />
+    <meta
+      name="description"
+      content="Bento runs coding agents through a staged pipeline: cards move across the board as agents write, review, and gate the work."
+    />
+    <title>Bento Command Centre</title>
+    <script>
+      // Applied before first paint so the stored theme never flashes.
+      // The default follows the system; the topbar toggle pins a choice.
+      (() => {
+        let theme = null;
+        try {
+          theme = localStorage.getItem("bento-theme");
+        } catch {}
+        if (theme !== "light" && theme !== "dark" && theme !== "navy") {
+          theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        }
+        document.documentElement.dataset.theme = theme;
+        let accent = null;
+        try {
+          accent = localStorage.getItem("bento-accent");
+        } catch {}
+        if (accent === "magenta" || accent === "teal") {
+          document.documentElement.dataset.accent = accent;
+        }
+        document
+          .querySelector('meta[name="theme-color"]')
+          .setAttribute(
+            "content",
+            theme === "light" ? "#f2f1ed" : theme === "navy" ? "#0a0e16" : "#0e0d0b",
+          );
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

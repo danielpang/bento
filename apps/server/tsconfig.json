@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // Declarations are emitted so the TUI can embed the server. This
+    // works because auth.ts exports an explicit Auth interface rather
+    // than one inferred from betterAuth() (see TS2742 note there).
+    "declaration": true
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

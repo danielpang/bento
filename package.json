@@ -1,0 +1,30 @@
+{
+  "name": "bento",
+  "private": true,
+  "version": "0.0.1",
+  "license": "Elastic-2.0",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:cli": "./scripts/dev-cli.sh",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f server",
+    "watch": "turbo watch build --output-logs=errors-only",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "models:update": "node scripts/update-models.mjs",
+    "db:generate": "pnpm --filter @bento/db db:generate",
+    "db:migrate": "pnpm --filter @bento/db db:migrate"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "^0.6.1",
+    "turbo": "^2.5.0",
+    "typescript": "^5.7.3"
+  }
+}
