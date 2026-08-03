@@ -10,7 +10,13 @@
     },
     "lint": {},
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      // Turbo runs tasks in strict env mode, so a variable the shell
+      // exports reaches the test process only if it is named here. The
+      // suites fall back to the docker-compose port when DATABASE_URL is
+      // missing, which is why dropping it failed only on CI: every
+      // database test connected to a port nothing was listening on.
+      "env": ["DATABASE_URL"]
     },
     "dev": {
       "cache": false,
