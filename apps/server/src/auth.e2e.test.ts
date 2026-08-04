@@ -1243,3 +1243,92 @@ test("repeated sign in attempts are rate limited", async () => {
   );
 });
 
+
+
+/**
+ * Every sign in lands in the user's organization.
+ *
+ * activeOrganizationId lives on the session, and only the console's
+ * create-team screen ever called setActive: the very first session had
+ * an organization and every later sign in had none. A session with no
+ * organization sees an empty board and is told to "ask an organization
+ * admin" by the GitHub dialog, with the owner asking themselves. The
+ * session-create hook now stamps each new session with the user's
+ * first membership, whatever the sign-in method.
+ */
+test("a fresh sign in lands in the user's organization", async () => {
+  const signUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "returning@bento.test",
+    password: "correct-horse-battery",
+    name: "Returning Owner",
+  });
+  const firstToken = signUp.headers.get("set-auth-token")!;
+
+  const orgRes = await jsonPost(
+    "/api/auth/organization/create",
+    { name: "Returning Inc", slug: "returning-inc" },
+    firstToken,
+  );
+  const org = (await orgRes.json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, firstToken);
+
+  const created = await jsonPost("/api/projects", { name: "The board", localPath: "/tmp" }, firstToken);
+  assert.equal(created.status, 201);
+
+  // A second sign in mints a new session. Nothing calls set-active for
+  // it; the hook has to have done the equivalent already.
+  const signIn = await jsonPost("/api/auth/sign-in/email", {
+    email: "returning@bento.test",
+    password: "correct-horse-battery",
+  });
+  assert.equal(signIn.status, 200);
+  const secondToken = signIn.headers.get("set-auth-token")!;
+
+  const listed = (await (
+    await app.request("/api/projects", { headers: { authorization: `Bearer ${secondToken}` } })
+  ).json()) as { name: string }[];
+  assert.equal(listed.length, 1, "the returning session must see the team's board, not an empty one");
+  assert.equal(listed[0]?.name, "The board");
+
+  const status = (await (
+    await app.request("/api/github/status", { headers: { authorization: `Bearer ${secondToken}` } })
+  ).json()) as { canManage: boolean };
+  assert.equal(status.canManage, true, "the owner must not be told to ask an organization admin");
+});
+
+/**
+ * A project can start without a repository.
+ *
+ * On a hosted install the person naming a project is often not the one
+ * who can connect the GitHub App, and requiring a repository at
+ * creation chained the two: an organization with no installation could
+ * not create a project at all. The name is enough; checkouts arrive
+ * later through the repositories panel.
+ */
+test("a project can be created before any repository is connected", async () => {
+  const signUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "repoless@bento.test",
+    password: "correct-horse-battery",
+    name: "Repoless Owner",
+  });
+  const token = signUp.headers.get("set-auth-token")!;
+  const orgRes = await jsonPost(
+    "/api/auth/organization/create",
+    { name: "Repoless Inc", slug: "repoless-inc" },
+    token,
+  );
+  const org = (await orgRes.json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const created = await jsonPost("/api/projects", { name: "Before GitHub" }, token);
+  assert.equal(created.status, 201);
+  const project = (await created.json()) as { id: string; localPath: string | null };
+  assert.equal(project.localPath, null, "no checkout is mirrored because none exists yet");
+
+  const repos = (await (
+    await app.request(`/api/projects/${project.id}/repositories`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+  ).json()) as unknown[];
+  assert.deepEqual(repos, [], "the project starts with an empty repositories list");
+});

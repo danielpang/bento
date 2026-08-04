@@ -58,18 +58,22 @@ const repositoryInput = z.object({
   message: "provide a local path or GitHub repository",
 });
 
-const createProject = z
-  .object({
-    name: z.string().min(1).max(200).regex(/^[^\r\n]+$/, "name must be one line"),
-    /** Single repository shorthand. */
-    localPath: z.string().min(1).optional(),
-    defaultBranch: z.string().default("main"),
-    /** Several repositories, for features that span more than one. */
-    repositories: z.array(repositoryInput).max(20).optional(),
-  })
-  .refine((v) => v.localPath || (v.repositories && v.repositories.length > 0), {
-    message: "provide localPath or at least one repository",
-  });
+/**
+ * Repositories are optional at creation. On a hosted install the person
+ * naming a project is often not the person who can connect the GitHub
+ * App, and requiring a repository here chained the two: an owner whose
+ * organization had no installation yet was refused a project outright.
+ * A project with no checkout cannot run anything, which the board says
+ * in its own time; repositories arrive later through the panel.
+ */
+const createProject = z.object({
+  name: z.string().min(1).max(200).regex(/^[^\r\n]+$/, "name must be one line"),
+  /** Single repository shorthand. */
+  localPath: z.string().min(1).optional(),
+  defaultBranch: z.string().default("main"),
+  /** Several repositories, for features that span more than one. */
+  repositories: z.array(repositoryInput).max(20).optional(),
+});
 
 /** Derives a workspace directory name from a repository path. */
 function repoNameFromPath(localPath: string): string {
@@ -180,14 +184,16 @@ export function projectRoutes(ctx: AppContext) {
       const requestedInputs =
         body.repositories && body.repositories.length > 0
           ? body.repositories
-          : [
-              {
-                localPath: body.localPath!,
-                defaultBranch: body.defaultBranch,
-                setupCommand: null,
-                testCommand: null,
-              },
-            ];
+          : body.localPath
+            ? [
+                {
+                  localPath: body.localPath,
+                  defaultBranch: body.defaultBranch,
+                  setupCommand: null,
+                  testCommand: null,
+                },
+              ]
+            : [];
       const repoInputs = [];
       for (const requested of requestedInputs) {
         const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
@@ -196,7 +202,8 @@ export function projectRoutes(ctx: AppContext) {
       }
 
       const names = uniqueNames(repoInputs.map((r) => r.name ?? repoNameFromPath(r.localPath)));
-      const first = repoInputs[0]!;
+      /** Absent when the project starts without a checkout. */
+      const first = repoInputs[0];
 
       const [project] = await db(c, ctx)
         .insert(projects)
@@ -206,27 +213,29 @@ export function projectRoutes(ctx: AppContext) {
           name: body.name,
           // Mirror the first repository so single repo callers and the
           // GitHub gate criteria keep working unchanged.
-          localPath: first.localPath,
-          repoUrl: first.repoUrl ?? null,
-          githubRepoId: first.githubRepoId,
-          defaultBranch: first.defaultBranch ?? body.defaultBranch,
+          localPath: first?.localPath ?? null,
+          repoUrl: first?.repoUrl ?? null,
+          githubRepoId: first?.githubRepoId ?? null,
+          defaultBranch: first?.defaultBranch ?? body.defaultBranch,
         })
         .returning();
       if (!project) return c.json({ error: "something went wrong saving the project; try again" }, 500);
 
-      await db(c, ctx).insert(repositories).values(
-        repoInputs.map((repo, i) => ({
-          projectId: project.id,
-          name: names[i]!,
-          localPath: repo.localPath,
-          repoUrl: repo.repoUrl ?? null,
-          githubRepoId: repo.githubRepoId,
-          defaultBranch: repo.defaultBranch,
-          setupCommand: repo.setupCommand ?? null,
-          testCommand: repo.testCommand ?? null,
-          position: i,
-        })),
-      );
+      if (repoInputs.length > 0) {
+        await db(c, ctx).insert(repositories).values(
+          repoInputs.map((repo, i) => ({
+            projectId: project.id,
+            name: names[i]!,
+            localPath: repo.localPath,
+            repoUrl: repo.repoUrl ?? null,
+            githubRepoId: repo.githubRepoId,
+            defaultBranch: repo.defaultBranch,
+            setupCommand: repo.setupCommand ?? null,
+            testCommand: repo.testCommand ?? null,
+            position: i,
+          })),
+        );
+      }
 
       // With the owner, so the pipeline arrives with an agent on every
       // stage: a board that cannot run anything until six agents are

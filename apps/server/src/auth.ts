@@ -1,6 +1,7 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
+import { asc, eq } from "drizzle-orm";
 import {
   account,
   deviceCode,
@@ -106,6 +107,38 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       transaction: true,
     }),
     trustedOrigins: env.BENTO_TRUSTED_ORIGINS,
+    /**
+     * Every new session starts in the user's first organization.
+     *
+     * activeOrganizationId lives on the session and only setActive ever
+     * wrote it, which the console calls in exactly one place: right
+     * after creating a team. Every later sign in, by any method and
+     * from any client, minted a session with no organization at all.
+     * Such a session sees an empty board, and the GitHub dialog told
+     * the owner to "ask an organization admin" because membership is
+     * resolved through the active organization it did not have.
+     *
+     * Oldest membership rather than newest: the team someone built
+     * first is their primary until they switch, and switching is what
+     * setActive remains for.
+     */
+    databaseHooks: {
+      session: {
+        create: {
+          async before(newSession) {
+            const [membership] = await db
+              .select({ organizationId: member.organizationId })
+              .from(member)
+              .where(eq(member.userId, newSession.userId))
+              .orderBy(asc(member.createdAt))
+              .limit(1);
+            return {
+              data: { ...newSession, activeOrganizationId: membership?.organizationId ?? null },
+            };
+          },
+        },
+      },
+    },
     /**
      * Brute force protection, in Postgres rather than in memory: memory
      * gives each instance its own budget, so an attack spread across a
