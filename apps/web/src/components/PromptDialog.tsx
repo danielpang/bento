@@ -202,8 +202,12 @@ export function NewFeatureDialog({
 }
 
 /**
- * A project needs a name and at least one checkout, and asking for them
- * together means the second answer cannot strand the first.
+ * A project needs a name; checkouts are asked for together with it so
+ * the second answer cannot strand the first, but on a hosted install
+ * they are optional. The person naming the project is not always the
+ * person who can connect the GitHub App, and holding the project
+ * hostage to the installation chained the two: create now, connect
+ * under Repositories later.
  *
  * More than one checkout is offered here rather than only afterwards
  * because a project that spans a frontend and a backend spans them from
@@ -233,7 +237,9 @@ export function NewProjectDialog({
   const [selectedRepoIds, setSelectedRepoIds] = useState<string[]>([]);
   const filled = paths.map((p) => p.trim()).filter(Boolean);
   const hosted = Boolean(github?.configured);
-  const ready = githubChecked && name.trim().length > 0 && (hosted ? selectedRepoIds.length > 0 : filled.length > 0);
+  // Hosted: a name is enough, repositories can arrive after the App is
+  // connected. Local: a checkout is the project, so one is required.
+  const ready = githubChecked && name.trim().length > 0 && (hosted || filled.length > 0);
 
   useEffect(() => {
     void client.githubStatus().then(async (status) => {
@@ -282,7 +288,7 @@ export function NewProjectDialog({
       title="New project"
       description={
         hosted
-          ? "Choose repositories granted to the Bento GitHub App."
+          ? "Name the project, and optionally choose repositories granted to the Bento GitHub App."
           : "Point Bento at a git repository on this machine. Add more than one if a change usually spans them."
       }
       onClose={onClose}
@@ -315,20 +321,29 @@ export function NewProjectDialog({
             <span className="label">GitHub repositories</span>
             {!github?.connected ? (
               github?.canManage ? (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => void client.startGitHubInstall().then(({ url }) => window.location.assign(url))}
-                >
-                  Install GitHub App
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => void client.startGitHubInstall().then(({ url }) => window.location.assign(url))}
+                  >
+                    Install GitHub App
+                  </button>
+                  <p className="muted">
+                    Or create the project now and connect GitHub under Repositories later.
+                  </p>
+                </>
               ) : (
-                <p className="muted">Ask an organization admin to connect the GitHub App.</p>
+                <p className="muted">
+                  An organization admin can connect the GitHub App. The project can be created
+                  now either way; repositories are added under Repositories once it is connected.
+                </p>
               )
             ) : githubRepos.length === 0 ? (
               <p className="muted">
                 The GitHub App is installed but no repositories are selected for it, so there is
-                nothing to choose here. Pick them on GitHub, then reopen this dialog.
+                nothing to choose here. Pick them on GitHub, or create the project now and add
+                them later.
               </p>
             ) : (
               githubRepos.map((repo) => {
