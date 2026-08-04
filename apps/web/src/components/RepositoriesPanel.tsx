@@ -2,7 +2,13 @@ import { useEffect, useState } from "react";
 import { useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import { ConfirmDialog } from "./PromptDialog.js";
-import type { BentoClient, GitHubConnection, GitHubRepository, Repository } from "@bento/api-client";
+import type {
+  BentoClient,
+  GitHubConnection,
+  GitHubInstallationOption,
+  GitHubRepository,
+  Repository,
+} from "@bento/api-client";
 
 /**
  * The checkouts a project spans, with its own door in the topbar.
@@ -29,6 +35,8 @@ export function RepositoriesPanel({
   const [github, setGitHub] = useState<GitHubConnection | null>(null);
   const [githubChecked, setGitHubChecked] = useState(false);
   const [available, setAvailable] = useState<GitHubRepository[]>([]);
+  /** Installations of the App this user could adopt for the organization. */
+  const [adoptable, setAdoptable] = useState<GitHubInstallationOption[]>([]);
   const [selectedRepoId, setSelectedRepoId] = useState("");
   const [removing, setRemoving] = useState<Repository | null>(null);
   /**
@@ -51,6 +59,14 @@ export function RepositoriesPanel({
       setGitHub(status);
       setGitHubUnknown(false);
       setAvailable(status.connected ? await client.listGitHubRepositories() : []);
+      // An installation a GitHub owner approved from a request exists
+      // on GitHub with no callback ever reaching us. Offer it for
+      // adoption; an empty list costs one quiet request.
+      if (status.configured && !status.connected && status.canManage) {
+        setAdoptable(await client.listGitHubInstallations().catch(() => []));
+      } else {
+        setAdoptable([]);
+      }
     }).catch(() => {
       // Only a real failure lands here now that every mode answers the
       // status route; before this, "no GitHub App" and "the check did
@@ -185,16 +201,37 @@ export function RepositoriesPanel({
                 <div className="actions">
                   <p className="muted">Connect GitHub and choose which repositories Bento may read and write.</p>
                   {github.canManage && (
-                    <button
-                      className="btn btn-primary"
-                      disabled={busy}
-                      onClick={() => act(async () => {
-                        const { url } = await client.startGitHubInstall();
-                        window.location.assign(url);
-                      })}
-                    >
-                      Install GitHub App
-                    </button>
+                    <>
+                      {/* An approved request first: the App is already
+                          installed on GitHub and only needs adopting,
+                          which one click finishes. */}
+                      {adoptable.map((option) => (
+                        <button
+                          key={option.installationId}
+                          className="btn btn-primary"
+                          disabled={busy}
+                          onClick={() => act(() => client.connectGitHubInstallation(option.installationId))}
+                        >
+                          Connect {option.accountLogin ?? "installation"}
+                        </button>
+                      ))}
+                      <button
+                        className={adoptable.length > 0 ? "btn" : "btn btn-primary"}
+                        disabled={busy}
+                        onClick={() => act(async () => {
+                          const { url } = await client.startGitHubInstall();
+                          window.location.assign(url);
+                        })}
+                      >
+                        Install GitHub App
+                      </button>
+                      <p className="muted">
+                        If your GitHub organization requires approval, the install becomes a
+                        request to its owners. Once an owner approves it on GitHub, the
+                        installation appears here to connect. Agents, pipelines, and cards all
+                        work in the meantime.
+                      </p>
+                    </>
                   )}
                 </div>
               )
