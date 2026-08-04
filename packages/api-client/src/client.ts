@@ -35,6 +35,13 @@ export interface GitHubConnection {
   installation: { accountLogin: string; accountType: string } | null;
 }
 
+/** An installation of the App the signed-in user could connect. */
+export interface GitHubInstallationOption {
+  installationId: string;
+  accountLogin: string | null;
+  accountType: string | null;
+}
+
 export interface GitHubRepository {
   id: number;
   name: string;
@@ -285,6 +292,19 @@ export class BentoClient {
 
   startGitHubInstall() {
     return this.request<{ url: string }>("/api/github/install", { method: "POST" });
+  }
+
+  /** Installations of the App this user could connect: the after-the-fact
+      path for installs a GitHub owner approved from a request. */
+  listGitHubInstallations() {
+    return this.request<GitHubInstallationOption[]>("/api/github/installations");
+  }
+
+  connectGitHubInstallation(installationId: string) {
+    return this.request<{ ok: boolean }>("/api/github/connect", {
+      method: "POST",
+      body: JSON.stringify({ installationId }),
+    });
   }
 
   listGitHubRepositories() {

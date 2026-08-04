@@ -1332,3 +1332,60 @@ test("a project can be created before any repository is connected", async () => 
   ).json()) as unknown[];
   assert.deepEqual(repos, [], "the project starts with an empty repositories list");
 });
+
+
+/**
+ * Adopting an existing installation is the request-flow's second half:
+ * a GitHub owner approved the request on GitHub, so no callback ever
+ * reached us, and connect binds it after the fact. The GitHub side
+ * cannot run in a test; the gates in front of it can, and they are
+ * what keeps one tenant from adopting another's installation.
+ */
+test("adopting a GitHub installation is gated to admins of a configured deployment", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "adopt-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Adopt Owner",
+  });
+  const ownerToken = owner.headers.get("set-auth-token")!;
+  const orgRes = await jsonPost(
+    "/api/auth/organization/create",
+    { name: "Adopt Inc", slug: "adopt-inc" },
+    ownerToken,
+  );
+  const org = (await orgRes.json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, ownerToken);
+
+  // An owner is allowed through the role gate and stops at the missing
+  // App: this deployment has no GitHub App configured.
+  const listed = await app.request("/api/github/installations", {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(listed.status, 503);
+  const connected = await jsonPost("/api/github/connect", { installationId: "12345" }, ownerToken);
+  assert.equal(connected.status, 503);
+
+  // A plain member is refused at the role gate, before configuration
+  // is even consulted.
+  const memberUser = await jsonPost("/api/auth/sign-up/email", {
+    email: "adopt-member@bento.test",
+    password: "correct-horse-battery",
+    name: "Adopt Member",
+  });
+  const memberToken = memberUser.headers.get("set-auth-token")!;
+  const inviteRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "adopt-member@bento.test", role: "member", organizationId: org.id },
+    ownerToken,
+  );
+  const invite = (await inviteRes.json()) as { id: string };
+  await jsonPost("/api/auth/organization/accept-invitation", { invitationId: invite.id }, memberToken);
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, memberToken);
+
+  const memberList = await app.request("/api/github/installations", {
+    headers: { authorization: `Bearer ${memberToken}` },
+  });
+  assert.equal(memberList.status, 403);
+  const memberConnect = await jsonPost("/api/github/connect", { installationId: "12345" }, memberToken);
+  assert.equal(memberConnect.status, 403);
+});

@@ -5,6 +5,7 @@ export {
   unwrapError,
   type ClientOptions,
   type GitHubConnection,
+  type GitHubInstallationOption,
   type GitHubRepository,
   type TokenStore,
 } from "./client.js";

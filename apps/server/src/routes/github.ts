@@ -121,28 +121,61 @@ export function githubRoutes(ctx: AppContext) {
       return c.json({ error: "sign in with GitHub using an account that can manage this installation" }, 403);
     }
 
-    const installation = await ctx.githubApp.installation(installationId);
-    await db(c, ctx)
-      .insert(githubInstallations)
-      .values({
-        organizationId: state.organizationId,
-        installationId: installation.id,
-        accountLogin: installation.accountLogin,
-        accountType: installation.accountType,
-        installedBy: actor(c),
-      })
-      .onConflictDoUpdate({
-        target: githubInstallations.organizationId,
-        set: {
-          installationId: installation.id,
-          accountLogin: installation.accountLogin,
-          accountType: installation.accountType,
-          installedBy: actor(c),
-          updatedAt: new Date(),
-        },
-      });
+    await bindInstallation(ctx, c, state.organizationId, installationId);
     return c.redirect("/?github=connected");
   });
+
+  /**
+   * Installations of this App the signed-in user could connect.
+   *
+   * The direct install path never needs this: its callback carries the
+   * installation id. This exists for the one GitHub creates without us:
+   * a member without GitHub admin rights clicks install, GitHub turns
+   * it into a request, and a GitHub owner approves it later on GitHub,
+   * long after the callback's signed state expired. The approved
+   * installation shows up here, and connect below adopts it.
+   */
+  routes.get("/installations", async (c) => {
+    const membership = await currentMembership(ctx, c);
+    if (!membership) return c.json({ error: "not found" }, 404);
+    if (!canManage(membership.role)) return c.json({ error: "organization admin required" }, 403);
+    if (!ctx.githubApp || !ctx.env.GITHUB_APP_ID) {
+      return c.json({ error: "GitHub App installation is not configured" }, 503);
+    }
+    const appId = Number(ctx.env.GITHUB_APP_ID);
+    const rows = (await accessibleInstallations(ctx, actor(c)))
+      // Only this App's installations: the user's token sees every app
+      // they have anywhere, and offering a stranger's would fail at
+      // listRepositories with a confusing credential error.
+      .filter((row) => row.appId === appId)
+      .map((row) => ({
+        installationId: String(row.id),
+        accountLogin: row.accountLogin,
+        accountType: row.accountType,
+      }));
+    return c.json(rows);
+  });
+
+  routes.post(
+    "/connect",
+    zValidator("json", z.object({ installationId: z.string().regex(/^\d+$/) })),
+    async (c) => {
+      const { installationId } = c.req.valid("json");
+      const membership = await currentMembership(ctx, c);
+      if (!membership) return c.json({ error: "not found" }, 404);
+      if (!canManage(membership.role)) return c.json({ error: "organization admin required" }, 403);
+      if (!ctx.githubApp) return c.json({ error: "GitHub App installation is not configured" }, 503);
+      // The same proof the callback demands: the user's own GitHub
+      // identity must be able to see this installation. Without it any
+      // admin could bind any organization's installation by guessing
+      // ids.
+      if (!(await userCanAccessInstallation(ctx, actor(c), installationId))) {
+        return c.json({ error: "sign in with GitHub using an account that can manage this installation" }, 403);
+      }
+      await bindInstallation(ctx, c, membership.organizationId, installationId);
+      return c.json({ ok: true });
+    },
+  );
 
   routes.get("/repositories", async (c) => {
     const membership = await currentMembership(ctx, c);
@@ -172,6 +205,40 @@ export function githubRoutes(ctx: AppContext) {
 async function currentMembership(ctx: AppContext, c: Parameters<typeof actor>[0]) {
   const organizationId = activeOrg(c);
   return organizationId ? membershipFor(ctx, c, organizationId) : null;
+}
+
+/**
+ * Records an installation as the organization's connection. Shared by
+ * the install callback and the adopt-existing path, so the two cannot
+ * drift in what they store.
+ */
+async function bindInstallation(
+  ctx: AppContext,
+  c: Parameters<typeof actor>[0],
+  organizationId: string,
+  installationId: string,
+): Promise<void> {
+  if (!ctx.githubApp) throw new Error("bindInstallation requires a configured GitHub App");
+  const installation = await ctx.githubApp.installation(installationId);
+  await db(c, ctx)
+    .insert(githubInstallations)
+    .values({
+      organizationId,
+      installationId: installation.id,
+      accountLogin: installation.accountLogin,
+      accountType: installation.accountType,
+      installedBy: actor(c),
+    })
+    .onConflictDoUpdate({
+      target: githubInstallations.organizationId,
+      set: {
+        installationId: installation.id,
+        accountLogin: installation.accountLogin,
+        accountType: installation.accountType,
+        installedBy: actor(c),
+        updatedAt: new Date(),
+      },
+    });
 }
 
 async function membershipFor(ctx: AppContext, c: Parameters<typeof actor>[0], organizationId: string) {
@@ -217,14 +284,33 @@ function verifyState(value: string | undefined, secret: string): InstallState | 
   }
 }
 
-async function userCanAccessInstallation(ctx: AppContext, userId: string, installationId: string): Promise<boolean> {
+/** One installation as GitHub reports it to the signed-in user. */
+type AccessibleInstallation = {
+  id: number;
+  appId: number | null;
+  accountLogin: string | null;
+  accountType: string | null;
+};
+
+/**
+ * The installations the user's own GitHub identity can reach.
+ *
+ * This is what makes connecting after the fact possible: an install
+ * that GitHub turned into a request is approved by a GitHub owner
+ * later, entirely on GitHub, so the signed state the callback expects
+ * is long gone. The user's linked account still sees the resulting
+ * installation here, and seeing it is the proof the callback's check
+ * was already built on.
+ */
+async function accessibleInstallations(ctx: AppContext, userId: string): Promise<AccessibleInstallation[]> {
   const [githubAccount] = await ctx.db
     .select({ accessToken: account.accessToken })
     .from(account)
     .where(and(eq(account.userId, userId), eq(account.providerId, "github")))
     .limit(1);
-  if (!githubAccount?.accessToken) return false;
+  if (!githubAccount?.accessToken) return [];
 
+  const found: AccessibleInstallation[] = [];
   for (let page = 1; page <= 10; page += 1) {
     const response = await fetch(`https://api.github.com/user/installations?per_page=100&page=${page}`, {
       headers: {
@@ -233,11 +319,25 @@ async function userCanAccessInstallation(ctx: AppContext, userId: string, instal
         "x-github-api-version": "2022-11-28",
       },
     });
-    if (!response.ok) return false;
-    const body = await response.json() as { installations?: { id: number }[] };
+    if (!response.ok) return found;
+    const body = (await response.json()) as {
+      installations?: { id: number; app_id?: number; account?: { login?: string; type?: string } }[];
+    };
     const rows = body.installations ?? [];
-    if (rows.some((row) => String(row.id) === installationId)) return true;
-    if (rows.length < 100) return false;
+    for (const row of rows) {
+      found.push({
+        id: row.id,
+        appId: row.app_id ?? null,
+        accountLogin: row.account?.login ?? null,
+        accountType: row.account?.type ?? null,
+      });
+    }
+    if (rows.length < 100) break;
   }
-  return false;
+  return found;
+}
+
+async function userCanAccessInstallation(ctx: AppContext, userId: string, installationId: string): Promise<boolean> {
+  const rows = await accessibleInstallations(ctx, userId);
+  return rows.some((row) => String(row.id) === installationId);
 }
