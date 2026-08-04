@@ -1,0 +1,31 @@
+# The hosted image: the public server image with the private billing
+# module layered on top.
+#
+# The build context for this file is a checkout of bento-cloud, not
+# this repository; CI builds the public image first and passes it in as
+# BASE. Split this way so infra/docker/Dockerfile stays the one
+# definition of what a Bento server contains, and this file only says
+# what the hosted deployment adds. The public image never carries
+# billing code; this one is pushed to the deploy registry and nowhere
+# else.
+ARG BASE=bento-server:dev
+
+FROM node:22-slim AS cloud
+WORKDIR /cloud
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
+
+FROM ${BASE}
+# dist plus its own production node_modules: tsc does not bundle, and
+# the server's pnpm layout cannot resolve the module's dependencies
+# from outside the workspace, so the module brings its own. Its
+# package.json rides along for the "type": "module" declaration;
+# without it node walks up to the workspace root and reparses every
+# file, with a warning per boot.
+COPY --from=cloud /cloud/package.json /app/cloud/package.json
+COPY --from=cloud /cloud/dist /app/cloud/dist
+COPY --from=cloud /cloud/node_modules /app/cloud/node_modules
+ENV BENTO_CLOUD_MODULE=/app/cloud/dist/index.js

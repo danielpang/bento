@@ -1,6 +1,6 @@
 # Hosted Bento. Agents run in Fly Sprites rather than on this machine, so
 # the app itself stays small; it schedules work and holds the board.
-app = "bento"
+app = "bento-production"
 primary_region = "iad"
 
 [build]
