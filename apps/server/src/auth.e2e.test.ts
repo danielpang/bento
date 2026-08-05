@@ -1,7 +1,17 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { and, eq } from "drizzle-orm";
-import { account, agentProfiles, createDb, createPool, member, projects, runMigrations } from "@bento/db";
+import {
+  account,
+  agentProfiles,
+  createDb,
+  createPool,
+  linearConnections,
+  member,
+  projects,
+  runMigrations,
+  user,
+} from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
 import { createHmac } from "node:crypto";
@@ -358,6 +368,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/runs/${run.id}/cancel`],
     ["GET", `/api/runs/${run.id}/transcript`],
     ["GET", `/api/board/${project.id}/events`],
+    ["POST", "/api/linear/mappings", { body: JSON.stringify({ linearTeamId: "team-x", projectId: project.id }) }],
+    ["DELETE", "/api/linear/mappings/00000000-0000-0000-0000-000000000000"],
+    ["PATCH", "/api/linear/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
+    ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
   ];
 
   for (const [method, path, init] of attempts) {
@@ -1388,4 +1402,52 @@ test("adopting a GitHub installation is gated to admins of a configured deployme
   assert.equal(memberList.status, 403);
   const memberConnect = await jsonPost("/api/github/connect", { installationId: "12345" }, memberToken);
   assert.equal(memberConnect.status, 403);
+});
+
+test("the Linear webhook demands a valid signature", async () => {
+  // No connection yet: the endpoint must refuse rather than process.
+  const body = JSON.stringify({
+    type: "Issue",
+    action: "create",
+    data: { id: "issue-1" },
+    webhookTimestamp: Date.now(),
+  });
+  const missing = await app.request("/api/webhooks/linear/local", { method: "POST", body });
+  assert.equal(missing.status, 503);
+
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "linear-hook@bento.test",
+    password: "correct-horse-battery",
+    name: "Hook",
+  });
+  assert.equal(signup.status, 200);
+  const [hookUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "linear-hook@bento.test"));
+  assert.ok(hookUser);
+
+  const secret = "hook-secret";
+  await ctx.db.insert(linearConnections).values({
+    ownerId: hookUser.id,
+    organizationId: null,
+    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test"),
+    encryptedWebhookSecret: ctx.secretBox.encrypt(secret),
+    webhookId: "wh-1",
+  });
+  try {
+    const forged = await app.request("/api/webhooks/linear/local", {
+      method: "POST",
+      body,
+      headers: { "linear-signature": createHmac("sha256", "wrong").update(body).digest("hex") },
+    });
+    assert.equal(forged.status, 401);
+
+    const signed = await app.request("/api/webhooks/linear/local", {
+      method: "POST",
+      body,
+      headers: { "linear-signature": createHmac("sha256", secret).update(body).digest("hex") },
+    });
+    assert.equal(signed.status, 200);
+    assert.deepEqual(await signed.json(), { ok: true, matched: 1 });
+  } finally {
+    await ctx.db.delete(linearConnections);
+  }
 });
