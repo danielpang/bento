@@ -16,6 +16,7 @@ export { AppearanceSettings } from "./AppearanceSettings.js";
 export { BillingCard } from "./BillingCard.js";
 export { Board } from "./Board.js";
 export { BrandLockup } from "./BrandLockup.js";
+export { ContactDialog } from "./ContactDialog.js";
 export { CreateTeam } from "./CreateTeam.js";
 export { GitHubTokenCard, ProviderKeysCard } from "./Credentials.js";
 export { DeviceApproval } from "./DeviceApproval.js";

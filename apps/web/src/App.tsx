@@ -23,6 +23,7 @@ import { ProjectPicker } from "./components/ProjectPicker.js";
  */
 const AcceptInvitation = lazy(() => import("./components/AcceptInvitation.js").then((m) => ({ default: m.AcceptInvitation })));
 const AgentsPanel = lazy(() => import("./components/AgentsPanel.js").then((m) => ({ default: m.AgentsPanel })));
+const ContactDialog = lazy(() => import("./components/ContactDialog.js").then((m) => ({ default: m.ContactDialog })));
 const CreateTeam = lazy(() => import("./components/CreateTeam.js").then((m) => ({ default: m.CreateTeam })));
 const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then((m) => ({ default: m.DeviceApproval })));
 const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m) => ({ default: m.FeatureDrawer })));
@@ -532,6 +533,7 @@ function GearMark() {
 }
 
 function TopBar({ children, showSignOut }: { children?: React.ReactNode; showSignOut: boolean }) {
+  const [contactOpen, setContactOpen] = useState(false);
   return (
     <header className="topbar">
       <span className="brand">
@@ -544,9 +546,15 @@ function TopBar({ children, showSignOut }: { children?: React.ReactNode; showSig
         Bento
       </span>
       {children}
+      <button className="btn btn-ghost" onClick={() => setContactOpen(true)}>
+        Contact
+      </button>
       <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
         <GearMark />
       </a>
+      <Suspense fallback={null}>
+        {contactOpen && <ContactDialog client={client} onClose={() => setContactOpen(false)} />}
+      </Suspense>
       {showSignOut && (
         <button className="btn btn-ghost" onClick={() => signOut()}>
           Sign out

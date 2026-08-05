@@ -270,6 +270,14 @@ export class BentoClient {
     return this.request<GitHubConnection>("/api/github/status");
   }
 
+  /** An issue report or feature request, mailed to the operator. */
+  sendContact(input: { kind: "issue" | "feature"; message: string }) {
+    return this.request<{ ok: boolean }>("/api/contact", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
   /** The whole order at once, so positions stay unique and contiguous. */
   reorderStages(pipelineId: string, stageIds: string[]) {
     return this.request<{ stageIds: string[] }>("/api/stages/reorder", {

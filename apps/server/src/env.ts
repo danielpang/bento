@@ -131,6 +131,13 @@ const envSchema = z.object({
     .optional(),
   BENTO_MAIL_FROM: z.string().default("Bento <no-reply@bento.local>"),
 
+  /**
+   * Where the in-app contact form delivers its mail. Without it the
+   * form reports that contact is not configured rather than sending
+   * feedback nowhere.
+   */
+  BENTO_CONTACT_EMAIL: z.string().optional(),
+
   /** GitHub App credentials. Without these, PR based gates stay pending. */
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_SLUG: z.string().regex(/^[a-z0-9-]+$/).optional(),
