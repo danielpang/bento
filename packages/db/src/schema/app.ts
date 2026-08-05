@@ -479,6 +479,89 @@ export const secrets = pgTable(
   ],
 );
 
+/**
+ * One Linear workspace connection per organization, keyed by a personal
+ * API key encrypted at rest. organizationId is null in local mode, and a
+ * partial unique index keeps local mode to a single connection.
+ */
+export const linearConnections = pgTable(
+  "linear_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    encryptedApiKey: text("encrypted_api_key").notNull(),
+    /** Masked tail, so the UI can show which key is stored. */
+    hint: text("hint").notNull().default(""),
+    /** Linear's id for the webhook we provisioned, when we could. */
+    webhookId: text("webhook_id"),
+    encryptedWebhookSecret: text("encrypted_webhook_secret"),
+    /** Target project for "bento" label imports from unmapped teams. */
+    defaultProjectId: uuid("default_project_id").references(() => projects.id, { onDelete: "set null" }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("linear_connections_org_idx").on(t.organizationId),
+    uniqueIndex("linear_connections_local_idx").on(sql`(organization_id is null)`).where(sql`${t.organizationId} is null`),
+  ],
+);
+
+/** Maps a Linear team to the Bento project its backlog syncs into. */
+export const linearTeamMappings = pgTable(
+  "linear_team_mappings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    linearTeamId: text("linear_team_id").notNull(),
+    linearTeamKey: text("linear_team_key").notNull(),
+    linearTeamName: text("linear_team_name").notNull(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("linear_team_mappings_org_team_idx").on(t.organizationId, t.linearTeamId),
+    uniqueIndex("linear_team_mappings_local_team_idx").on(t.linearTeamId).where(sql`${t.organizationId} is null`),
+  ],
+);
+
+/**
+ * Links an imported Linear issue to its Bento feature. The unique issue
+ * index is the dedupe that keeps webhook, sweep, and manual import from
+ * creating the same feature twice.
+ */
+export const linearIssueLinks = pgTable(
+  "linear_issue_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    featureId: uuid("feature_id")
+      .notNull()
+      .unique()
+      .references(() => features.id, { onDelete: "cascade" }),
+    linearIssueId: text("linear_issue_id").notNull(),
+    linearIssueIdentifier: text("linear_issue_identifier").notNull(),
+    linearIssueUrl: text("linear_issue_url").notNull(),
+    linearTeamId: text("linear_team_id").notNull(),
+    /**
+     * The last Linear state type Bento pushed, so the webhook that echoes
+     * our own update back can be recognized and dropped.
+     */
+    lastOutboundStateType: text("last_outbound_state_type"),
+    lastInboundUpdatedAt: timestamp("last_inbound_updated_at", { withTimezone: true }),
+    /** Set when Linear deletes the issue; the feature stays. */
+    stale: boolean("stale").notNull().default(false),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("linear_issue_links_org_issue_idx").on(t.organizationId, t.linearIssueId),
+    uniqueIndex("linear_issue_links_local_issue_idx").on(t.linearIssueId).where(sql`${t.organizationId} is null`),
+  ],
+);
+
 /** One GitHub App installation selected by each hosted organization. */
 export const githubInstallations = pgTable("github_installations", {
   id: uuid("id").primaryKey().defaultRandom(),

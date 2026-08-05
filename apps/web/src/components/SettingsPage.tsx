@@ -6,6 +6,7 @@ import { AccountSettings } from "./AccountSettings.js";
 import { AppearanceSettings } from "./AppearanceSettings.js";
 import { BillingCard } from "./BillingCard.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
+import { LinearPanel } from "./LinearPanel.js";
 import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
 
@@ -19,7 +20,7 @@ import { TeamSettings } from "./TeamSettings.js";
  * apply: local mode is Appearance alone, a self-hosted team adds Team,
  * and only a deployment with the billing module shows Billing.
  */
-type Tab = "appearance" | "github" | "team" | "billing" | "account";
+type Tab = "appearance" | "github" | "linear" | "team" | "billing" | "account";
 
 export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
@@ -28,7 +29,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   const [hasBilling, setHasBilling] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
     const wanted = new URLSearchParams(window.location.search).get("tab");
-    return wanted === "team" || wanted === "billing" || wanted === "account" || wanted === "github"
+    return wanted === "team" || wanted === "billing" || wanted === "account" || wanted === "github" || wanted === "linear"
       ? wanted
       : "appearance";
   });
@@ -52,6 +53,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   const tabs: { id: Tab; label: string }[] = [
     { id: "appearance", label: "Appearance" },
     { id: "github", label: "GitHub" },
+    { id: "linear", label: "Linear" },
     ...(mode === "multi" ? [{ id: "team" as const, label: "Team" }] : []),
     ...(mode === "multi" && hasBilling ? [{ id: "billing" as const, label: "Billing" }] : []),
     ...(mode === "multi" ? [{ id: "account" as const, label: "Account" }] : []),
@@ -112,6 +114,9 @@ export function SettingsPage({ client }: { client: BentoClient }) {
           <Tabs.Content value="github" className="settings-body">
             <GitHubTokenCard client={client} />
             <GitIdentityCard client={client} />
+          </Tabs.Content>
+          <Tabs.Content value="linear" className="settings-body">
+            <LinearPanel client={client} />
           </Tabs.Content>
           <Tabs.Content value="account" className="settings-body">
             <AccountSettings />

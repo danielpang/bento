@@ -7,6 +7,11 @@ export {
   type GitHubConnection,
   type GitHubInstallationOption,
   type GitHubRepository,
+  type LinearConnection,
+  type LinearTeamMapping,
+  type LinearTeamOption,
+  type LinearIssueOption,
+  type LinearIssuePage,
   type TokenStore,
 } from "./client.js";
 export { DeviceFlow, type DeviceCodeResponse, type DeviceFlowOptions } from "./device-flow.js";

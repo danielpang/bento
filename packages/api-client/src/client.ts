@@ -42,6 +42,46 @@ export interface GitHubInstallationOption {
   accountType: string | null;
 }
 
+export interface LinearTeamMapping {
+  id: string;
+  linearTeamId: string;
+  linearTeamKey: string;
+  linearTeamName: string;
+  projectId: string;
+}
+
+export interface LinearConnection {
+  connected: boolean;
+  /** Masked tail of the stored key, so the UI can show which one. */
+  hint: string | null;
+  /** True when Linear can push changes to us as they happen. */
+  webhook: boolean;
+  defaultProjectId: string | null;
+  canManage: boolean;
+  mappings: LinearTeamMapping[];
+}
+
+export interface LinearTeamOption {
+  id: string;
+  key: string;
+  name: string;
+}
+
+export interface LinearIssueOption {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  stateName: string;
+  imported: boolean;
+}
+
+export interface LinearIssuePage {
+  issues: LinearIssueOption[];
+  endCursor: string | null;
+  hasNextPage: boolean;
+}
+
 export interface GitHubRepository {
   id: number;
   name: string;
@@ -313,6 +353,59 @@ export class BentoClient {
 
   disconnectGitHub() {
     return this.request<{ ok: boolean }>("/api/github/installation", { method: "DELETE" });
+  }
+
+  linearStatus() {
+    return this.request<LinearConnection>("/api/linear/status");
+  }
+
+  connectLinear(apiKey: string) {
+    return this.request<{ connected: boolean; webhook: boolean }>("/api/linear/connect", {
+      method: "POST",
+      body: JSON.stringify({ apiKey }),
+    });
+  }
+
+  disconnectLinear() {
+    return this.request<{ ok: boolean }>("/api/linear/connect", { method: "DELETE" });
+  }
+
+  listLinearTeams() {
+    return this.request<LinearTeamOption[]>("/api/linear/teams");
+  }
+
+  createLinearMapping(input: { linearTeamId: string; projectId: string }) {
+    return this.request<LinearTeamMapping>("/api/linear/mappings", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteLinearMapping(id: string) {
+    return this.request<{ ok: boolean }>(`/api/linear/mappings/${id}`, { method: "DELETE" });
+  }
+
+  setLinearSettings(input: { defaultProjectId: string | null }) {
+    return this.request<{ defaultProjectId: string | null }>("/api/linear/settings", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  listLinearIssues(teamId: string, after?: string) {
+    const cursor = after ? `&after=${encodeURIComponent(after)}` : "";
+    return this.request<LinearIssuePage>(`/api/linear/issues?teamId=${encodeURIComponent(teamId)}${cursor}`);
+  }
+
+  importLinearIssues(input: { issueIds: string[]; projectId: string }) {
+    return this.request<{ imported: number }>("/api/linear/import", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  syncLinearNow() {
+    return this.request<{ ok: boolean }>("/api/linear/sync", { method: "POST" });
   }
 
   removeRepository(projectId: string, repositoryId: string) {

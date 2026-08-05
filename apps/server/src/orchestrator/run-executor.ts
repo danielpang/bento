@@ -23,6 +23,7 @@ import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { startRunIfIdle } from "./start-run.js";
+import { registerLinearJobs } from "./linear-sync.js";
 
 /**
  * Executes one agent run end to end: sandbox, worktree, agent CLI,
@@ -835,4 +836,6 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
     }
   });
+
+  await registerLinearJobs(ctx);
 }
