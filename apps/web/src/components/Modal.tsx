@@ -26,6 +26,13 @@ import { useEffect, useRef, type ReactNode } from "react";
  * supports and `.modal-backdrop` depends on: the backdrop is the
  * flex container that centres the panel, so as siblings the panel
  * would land in the top left corner.
+ *
+ * Opening focuses the panel, not the first field. Radix would focus
+ * the first focusable control, and on iPadOS a focused <select> opens
+ * its picker: editing an agent opened the Tool wheel over the form
+ * before anyone had asked for it. A dialog that wants a field focused
+ * asks for it with `autoFocus`, which React applies before Radix looks,
+ * so Radix leaves that choice alone.
  */
 export function Modal({
   title,
@@ -53,6 +60,7 @@ export function Modal({
    * otherwise it runs after this and lands back on nothing.
    */
   const returnFocus = useRef<Element | null>(null);
+  const panel = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     returnFocus.current = document.activeElement;
     return () => {
@@ -76,6 +84,14 @@ export function Modal({
         <Dialog.Overlay className="modal-backdrop" data-portal-layer="">
           <Dialog.Content
             className="modal"
+            ref={panel}
+            // The panel itself, so the focus trap still has focus
+            // inside it: preventing this without moving focus leaves it
+            // on whatever opened the dialog, out in the page behind.
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              panel.current?.focus({ preventScroll: true });
+            }}
             // Radix warns when a dialog carries no description. Most of
             // these genuinely have nothing to add beyond the title, and
             // this is how Radix documents saying so. Inventing a hidden
