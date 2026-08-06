@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64">
+  <!-- The favicon mark at asset size: four compartments on a dark
+       plate. Same geometry as apps/web/public/favicon.svg and
+       `.brand-glyph` in styles.css. -->
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#12161E" stroke="#39414F" stroke-width="2"/>
+  <rect x="10" y="10" width="26" height="26" rx="5" fill="#F97316"/>
+  <rect x="40" y="10" width="14" height="26" rx="5" fill="#3A4353"/>
+  <rect x="10" y="40" width="14" height="14" rx="5" fill="#3A4353"/>
+  <rect x="28" y="40" width="26" height="14" rx="5" fill="#3E77E8"/>
+</svg>

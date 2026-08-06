@@ -5,6 +5,7 @@ import { useSession } from "../auth-client.js";
 import { AccountSettings } from "./AccountSettings.js";
 import { AppearanceSettings } from "./AppearanceSettings.js";
 import { BillingCard } from "./BillingCard.js";
+import { BrandLockup } from "./BrandLockup.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
 import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
@@ -61,15 +62,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="brand">
-          <span className="brand-glyph" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-            <i />
-          </span>
-          Bento
-        </span>
+        <BrandLockup />
         <span className="topbar-spacer" />
         <a className="btn btn-ghost" href="/">
           Back to the board

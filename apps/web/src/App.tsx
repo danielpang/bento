@@ -4,6 +4,7 @@ import { spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { useCountUp } from "./count-up.js";
 import { Board, type CardPulse } from "./components/Board.js";
+import { BrandLockup } from "./components/BrandLockup.js";
 import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
@@ -534,15 +535,7 @@ function GearMark() {
 function TopBar({ children, showSignOut }: { children?: React.ReactNode; showSignOut: boolean }) {
   return (
     <header className="topbar">
-      <span className="brand">
-        <span className="brand-glyph" aria-hidden="true">
-          <i />
-          <i />
-          <i />
-          <i />
-        </span>
-        Bento
-      </span>
+      <BrandLockup />
       {children}
       <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
         <GearMark />
