@@ -1,33 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Bento">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Bento">
   <title>Bento</title>
   <!--
-    The wordmark's glyph, at tab size: a bento box of four compartments
-    with exactly one of them filled, which is the rule the interface
-    lives by (one primary action per screen).
+    The mark at tab size: a bento box of four compartments on its own
+    plate, sized unevenly so the silhouette survives a 16px render
+    instead of collapsing into an even grid.
 
-    No plate behind it. A tab strip is dark in one browser and light in
-    the next, so a plate is a guess about the background; four shapes
-    with a colour that answers prefers-color-scheme is not. The
-    compartments carry the silhouette and the filled one carries the
-    recognition, which is why it stays orange in both.
-
-    Geometry matches .brand-glyph in styles.css: a 2x2 grid, gap and
-    corner radius scaled from 16px to 32 so the gaps survive a 16px
-    render.
+    The plate is dark in every theme. It carries its own contrast, so
+    the mark reads the same on a light tab strip as on a dark one and
+    needs no prefers-color-scheme branch. Geometry matches
+    `.brand-glyph` in styles.css and assets/brand/logo.svg.
   -->
-  <style>
-    .tile { fill: #3d392f; }
-    .fill { fill: #ff8a3d; }
-    @media (prefers-color-scheme: light) {
-      /* The app's own --line-bright is too pale on a white tab strip,
-         so the quiet compartments take the weight of --text-dim, and
-         the accent deepens the way the light theme's brand does. */
-      .tile { fill: #5c574b; }
-      .fill { fill: #d1550a; }
-    }
-  </style>
-  <rect class="tile" x="3" y="3" width="11.75" height="11.75" rx="2.6" />
-  <rect class="fill" x="17.25" y="3" width="11.75" height="11.75" rx="2.6" />
-  <rect class="tile" x="3" y="17.25" width="11.75" height="11.75" rx="2.6" />
-  <rect class="tile" x="17.25" y="17.25" width="11.75" height="11.75" rx="2.6" />
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#12161E" stroke="#39414F" stroke-width="2"/>
+  <rect x="10" y="10" width="26" height="26" rx="5" fill="#F97316"/>
+  <rect x="40" y="10" width="14" height="26" rx="5" fill="#3A4353"/>
+  <rect x="10" y="40" width="14" height="14" rx="5" fill="#3A4353"/>
+  <rect x="28" y="40" width="26" height="14" rx="5" fill="#3E77E8"/>
 </svg>

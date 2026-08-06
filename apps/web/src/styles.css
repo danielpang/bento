@@ -268,10 +268,11 @@ button {
 }
 
 /*
- * The wordmark. The glyph is a bento box: four compartments, exactly
- * one of them brand violet, which is also the rule the interface lives
- * by (one primary action per screen). Sans against the mono chrome
- * around it, so the name reads as a name, not as another label.
+ * The wordmark. The glyph is a bento box: four compartments of uneven
+ * size on their own plate, drawn as an inline SVG in BrandLockup so it
+ * stays byte-identical to favicon.svg instead of being approximated a
+ * second time in CSS. Sans against the mono chrome around it, so the
+ * name reads as a name, not as another label.
  */
 .brand {
   display: inline-flex;
@@ -286,40 +287,23 @@ button {
 }
 
 .brand-glyph {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   flex: none;
-}
-
-.brand-glyph i {
-  border-radius: 2px;
-  background: var(--line-bright);
-}
-
-.brand-glyph i:nth-child(2) {
-  background: var(--brand);
+  display: block;
 }
 
 /* The entrance screens, where the mark is the page's own heading
-   rather than a corner of the chrome. Same geometry, scaled: the gap
-   and radius grow with the tiles so the compartments stay legible
-   instead of closing into one square. */
+   rather than a corner of the chrome. The mark scales as one piece,
+   so there is nothing to retune here beyond its size. */
 .brand-lg {
   font-size: 20px;
   gap: 10px;
 }
 
 .brand-lg .brand-glyph {
-  width: 24px;
-  height: 24px;
-  gap: 3px;
-}
-
-.brand-lg .brand-glyph i {
-  border-radius: 3px;
+  width: 26px;
+  height: 26px;
 }
 
 /* Accent choice: the swatch shows the hue the current theme would use. */
