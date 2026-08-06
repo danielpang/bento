@@ -471,6 +471,7 @@ function StageEditor({
           placeholder="Security review"
           value={draft.name}
           onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+          autoFocus
         />
       </label>
 

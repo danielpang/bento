@@ -1169,6 +1169,59 @@ test("an agent can be edited, and its stages follow it", { timeout: 60_000 }, as
   assert.equal((await patch({})).status, 400, "an empty patch is a mistake, not a no-op");
 });
 
+/**
+ * The list is read by a person looking for one agent by name, so it is
+ * ordered by name.
+ *
+ * Unordered, Postgres returns heap order, and an update rewrites the
+ * row at the end of the table: editing an agent sent it to the bottom
+ * of every list it appeared in, which reads as a "recently changed"
+ * sort nobody asked for.
+ */
+test("agents are listed alphabetically, and an edit does not move one", async () => {
+  const post = (name: string) =>
+    app.request("/api/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, cli: "claude-code", model: "claude-opus-5" }),
+    });
+
+  // Created out of order, and mixed case: capitals sorting ahead of
+  // lowercase would split the list into two alphabets.
+  const names = ["zz sorting Zebra", "zz sorting alpha", "zz sorting Middle"];
+  const ids: Record<string, string> = {};
+  for (const name of names) {
+    const row = await json<{ id: string; name: string }>(await post(name));
+    ids[name] = row.id;
+  }
+
+  const listed = async () =>
+    (await json<{ id: string; name: string }[]>(await app.request("/api/profiles")))
+      .filter((p) => p.name.startsWith("zz sorting "))
+      .map((p) => p.name);
+
+  assert.deepEqual(await listed(), ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"]);
+
+  await app.request(`/api/profiles/${ids["zz sorting alpha"]}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5" }),
+  });
+  assert.deepEqual(
+    await listed(),
+    ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"],
+    "editing an agent must not move it in the list",
+  );
+
+  // The TUI reads the same agents through a different route.
+  const plain = await (await app.request("/api/profiles/plain")).text();
+  const fromPlain = plain
+    .split("\n")
+    .map((line) => line.split("|").at(-1) ?? "")
+    .filter((name) => name.startsWith("zz sorting "));
+  assert.deepEqual(fromPlain, ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"]);
+});
+
 test("an impossible pairing of coding agent and model is refused", async () => {
   const post = (body: unknown) =>
     app.request("/api/profiles", {
