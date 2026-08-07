@@ -20,10 +20,11 @@ import {
   repositories,
   runEvents,
   runMigrations,
+  sandboxes,
   stages,
 } from "@bento/db";
 import { SseParser } from "@bento/core";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
@@ -1872,6 +1873,115 @@ test("publishing on demand says what it needs before it can push", { timeout: 60
   const noGithub = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
   assert.equal(noGithub.status, 409);
   assert.match(((await noGithub.json()) as { error: string }).error, /Settings, GitHub/);
+});
+
+/**
+ * The Create PR button on a hosted card. A sprite keeps its checkouts
+ * inside the sandbox, where the server cannot mount them, so the route
+ * exports the commits through the driver, the same handoff a finished
+ * run uses, and pushes with the organization's App installation. The
+ * push itself is proven against a real remote in "the server pushes
+ * each repository the agent committed in".
+ */
+test("publishing on demand exports the card's sandbox when the driver keeps no host worktrees", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("sandbox-publish");
+  await run("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/acme/sandbox-publish.git"]);
+  const project = await json<{ id: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Sandbox publish", localPath: checkout }),
+    }),
+  );
+  await unassignStages(project.id);
+  const [repo] = await json<{ name: string }[]>(await app.request(`/api/projects/${project.id}/repositories`));
+
+  // The connection a hosted organization actually has: an App
+  // installation, which githubConnectionFor answers before any token.
+  await ctx.db.insert(organization).values({
+    id: "sandbox-publish-org",
+    name: "Sandbox Publish",
+    slug: "sandbox-publish",
+  });
+  await ctx.db.update(projects).set({ organizationId: "sandbox-publish-org" }).where(eq(projects.id, project.id));
+  await ctx.db.insert(githubInstallations).values({
+    organizationId: "sandbox-publish-org",
+    installationId: "sandbox-publish-installation",
+    accountLogin: "acme",
+    accountType: "Organization",
+    installedBy: ctx.userId,
+  });
+  const feature = await createFeature(project.id, "Publish from the sandbox");
+  const [stored] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(stored?.organizationId, "sandbox-publish-org", "the card inherits the project's organization");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  const exported: string[] = [];
+  let exportError: Error | null = null;
+  const fakeDriver = {
+    provider: "sprite",
+    async provision(): Promise<never> {
+      throw new Error("this test provisions nothing");
+    },
+    exec(): AsyncIterable<never> {
+      throw new Error("this test execs nothing");
+    },
+    async destroy() {},
+    async exportRepository(handle: SandboxHandle, name: string, base: string) {
+      if (exportError) throw exportError;
+      exported.push(`${handle.externalId}:${handle.workdir}:${name}->${base}`);
+      // Nothing committed beyond the base, so nothing to publish.
+      return null;
+    },
+  };
+  const previousDriver = ctx.driver;
+  const previousGitHubApp = ctx.githubApp;
+  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  ctx.githubApp = {
+    forInstallation(installationId: string) {
+      assert.equal(installationId, "sandbox-publish-installation");
+      return {
+        async pushToken() {
+          return "unused: nothing was committed, so nothing is pushed";
+        },
+        async ensurePullRequest() {
+          assert.fail("nothing to publish means no pull request is opened");
+        },
+      };
+    },
+  } as unknown as NonNullable<AppContext["githubApp"]>;
+  try {
+    // A card that never ran has no sandbox to read.
+    const noSandbox = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
+    assert.equal(noSandbox.status, 409);
+    assert.match(((await noSandbox.json()) as { error: string }).error, /no sandbox yet/);
+
+    await ctx.db.insert(sandboxes).values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "sprite",
+      externalId: "sprite-publish-test",
+      status: "hibernated",
+      workdir: "/workspace",
+    });
+    const res = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { published: [], failures: [] });
+    assert.deepEqual(exported, [`sprite-publish-test:/workspace:${repo!.name}->main`]);
+
+    // A sandbox that went away surfaces as a named failure, not a
+    // refusal to try.
+    exportError = new Error("the sandbox is gone");
+    const dead = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
+    assert.equal(dead.status, 200);
+    const body = (await dead.json()) as { published: unknown[]; failures: { name: string; reason: string }[] };
+    assert.deepEqual(body.published, []);
+    assert.equal(body.failures[0]?.name, repo!.name);
+    assert.match(body.failures[0]?.reason ?? "", /the sandbox is gone/);
+  } finally {
+    ctx.driver = previousDriver;
+    ctx.githubApp = previousGitHubApp;
+  }
 });
 
 /**
