@@ -62,6 +62,47 @@ function useCardTravel(board: React.RefObject<HTMLDivElement | null>, deps: unkn
   }, [board, deps]);
 }
 
+/**
+ * Bring a freshly selected card out from under the drawer.
+ *
+ * scrollIntoView cannot do this alone: what keeps the card clear of
+ * the drawer is the board's scroll-padding, and WebKit ignores
+ * scroll-padding for scrollIntoView, so on an iPad the card stayed
+ * where it was, technically inside the scrollport, actually under the
+ * panel. Measure and scroll by hand instead, which every engine gets
+ * right. The drawer's width is not repeated here: the board's
+ * scroll-padding-right already reserves it, so the CSS stays the one
+ * place that number lives.
+ */
+function revealCard(card: HTMLElement) {
+  const behavior: ScrollBehavior = REDUCED_MOTION ? "auto" : "smooth";
+
+  // Sideways: the board is the only horizontal scroller.
+  const board = card.closest<HTMLElement>(".board");
+  if (board) {
+    const reserve = parseFloat(getComputedStyle(board).scrollPaddingRight) || 0;
+    const cardBox = card.getBoundingClientRect();
+    const boardBox = board.getBoundingClientRect();
+    const visibleRight = boardBox.right - reserve;
+    let delta = 0;
+    if (cardBox.right > visibleRight) delta = cardBox.right - visibleRight;
+    else if (cardBox.left < boardBox.left) delta = cardBox.left - boardBox.left;
+    if (delta !== 0) board.scrollBy({ left: delta, behavior });
+  }
+
+  // Up and down: each lane scrolls its own cards; the page itself does
+  // not scroll.
+  const laneCards = card.closest<HTMLElement>(".lane-cards");
+  if (laneCards) {
+    const cardBox = card.getBoundingClientRect();
+    const laneBox = laneCards.getBoundingClientRect();
+    let delta = 0;
+    if (cardBox.bottom > laneBox.bottom) delta = cardBox.bottom - laneBox.bottom;
+    else if (cardBox.top < laneBox.top) delta = cardBox.top - laneBox.top;
+    if (delta !== 0) laneCards.scrollBy({ top: delta, behavior });
+  }
+}
+
 /** The visual state a card reports: its run, or its gate if it is held. */
 export type CardState = "idle" | "running" | "succeeded" | "failed" | "gated" | "done" | "cancelled";
 
@@ -331,7 +372,7 @@ const Card = memo(function Card({
   const self = useRef<HTMLButtonElement>(null);
   // A card in a right lane opens under the drawer; bring it out.
   useEffect(() => {
-    if (selected) self.current?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    if (selected && self.current) revealCard(self.current);
   }, [selected]);
 
   /*
