@@ -492,13 +492,32 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // Keychain-copied tokens die whenever Claude Code rotates its
     // session, which makes this the most common auth failure.
     const authDead = /401|revoked|authentication_error|OAuth token/i.test(outcome.error ?? "");
+    /**
+     * A sandbox that could not install this CLI fails at spawn, and the
+     * sandbox runtime says so in its own words ("executable file
+     * `opencode` not found in $PATH"), which reads as a broken command
+     * rather than a missing install. Named here, with what happens
+     * next: provisioning retries the install on every run, so running
+     * again is usually the whole fix.
+     *
+     * Matched on the runtimes' own phrasing and on 127, the exit status
+     * a shell reserves for it, rather than on "not found" anywhere in
+     * the error: an agent that cannot resume a session says that too.
+     */
+    const toolMissing =
+      exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
     const enriched =
       authDead && profile.cli === "claude-code"
         ? {
             ...outcome,
             error: `${outcome.error} The Claude login is no longer valid: mint a fresh token with claude setup-token and save it under Agents (Claude subscription token), then run again.`,
           }
-        : outcome;
+        : toolMissing
+          ? {
+              ...outcome,
+              error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
+            }
+          : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });

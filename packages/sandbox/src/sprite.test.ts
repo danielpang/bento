@@ -113,6 +113,58 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
   assert.ok(messages.includes("Repository api is ready on branch feature/work."));
 });
 
+/**
+ * A CLI whose installer was unreachable used to be silent: the sandbox
+ * was handed back as ready, and the run that needed it died at spawn
+ * with the runtime's own "executable file `opencode` not found in
+ * $PATH". Provisioning writes into the run's transcript, so the missing
+ * tool is said there instead, while the sandbox stays usable for the
+ * agents that did install.
+ */
+test("Sprite provisioning says which agent CLI could not be installed", async () => {
+  const messages: string[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        // The probe answers first; the toolchain script reports what it
+        // could not put on the PATH.
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-absent\n");
+        else child.stdout.write("bento-toolchain-missing: opencode \n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          return [];
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const handle = await driver.provision({
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+    onProgress: (message) => {
+      messages.push(message);
+    },
+  });
+
+  assert.equal(handle.provider, "sprite");
+  const said = messages.find((message) => message.includes("Could not install"));
+  assert.ok(said, `no message named the missing CLI: ${messages.join(" | ")}`);
+  assert.match(said, /opencode/);
+  // No dashes in user-facing copy.
+  assert.doesNotMatch(said, /[—–]|\s-\s/);
+});
+
 test("Sprite provisioning failures carry the script's stderr on the error", async () => {
   const sprite = {
     spawn() {

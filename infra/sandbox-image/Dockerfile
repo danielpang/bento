@@ -23,10 +23,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Agent CLIs, from the installers that ship standalone binaries, so none
 # of them brings a runtime the project would then trip over.
-RUN curl -fsSL https://claude.ai/install.sh | bash \
- && curl -fsSL https://chatgpt.com/codex/install.sh | sh \
- && curl -fsSL https://opencode.ai/install | bash \
- && curl -fsS https://cursor.com/install | bash
+#
+# Downloaded first and then run, rather than piped into a shell: a
+# pipeline reports the shell's exit status, so a fetch that answers 403
+# hands an empty script to a shell that exits 0, and a build that
+# installed nothing looks like a build that worked. Retried, because
+# opencode's installer asks the GitHub API which release is latest and
+# that API rate limits by address.
+RUN set -eu; \
+    fetch_run() { \
+      for attempt in 1 2 3; do \
+        if curl -fsSL "$2" -o /tmp/installer && "$3" /tmp/installer; then rm -f /tmp/installer; return 0; fi; \
+        sleep 5; \
+      done; \
+      echo "error: $1 install failed"; \
+      return 1; \
+    }; \
+    fetch_run claude https://claude.ai/install.sh bash; \
+    fetch_run codex https://chatgpt.com/codex/install.sh sh; \
+    fetch_run opencode https://opencode.ai/install bash; \
+    fetch_run cursor https://cursor.com/install bash
 
 # pi is published on npm only, so it gets a private Node that runs pi and
 # nothing else. /opt/bento/node/bin stays off PATH: `node` inside a
@@ -49,14 +65,21 @@ RUN arch="$(dpkg --print-architecture)" \
 # Installers drop binaries in their own directories, and an agent is
 # spawned directly rather than through a login shell, so every tool is
 # linked somewhere the default PATH already covers.
+#
+# The check at the end fails the build rather than warning. An image
+# that ships without one of these produces no symptom until a card runs
+# that agent half an hour later, and then only "executable file
+# `opencode` not found in $PATH".
 RUN for tool in claude codex cursor-agent opencode; do \
       for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin; do \
         [ -x "$dir/$tool" ] && ln -sf "$dir/$tool" /usr/local/bin/"$tool" && break; \
       done; \
     done; \
+    status=0; \
     for tool in claude codex cursor-agent opencode pi; do \
-      command -v "$tool" >/dev/null 2>&1 || echo "warning: $tool is not on PATH"; \
-    done
+      command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is not on PATH"; status=1; }; \
+    done; \
+    exit $status
 
 RUN git config --system user.email "agent@bento.dev" \
     && git config --system user.name "Bento Agent" \
