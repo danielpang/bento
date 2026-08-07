@@ -130,8 +130,14 @@ export function AgentSession({
     const stop = client.streamRun(streamedRun.id, {
       onEvent: (event) => {
         onEvent?.(featureId, event);
-        // The persisted line supersedes the fragments that previewed it.
-        if (event.type === "message" || event.type === "result") clearDraft();
+        // The persisted line supersedes the fragments that previewed
+        // it. Assistant lines and results only: a steer the user sends
+        // mid turn says nothing about the message still being typed,
+        // and clearing on it left the draft permanently behind the
+        // stream's offsets, frozen mid sentence.
+        if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
+          clearDraft();
+        }
         if (event.type === "tool") {
           if (event.phase === "start" && event.name !== "tool_result") {
             stepsSinceMessage.current += 1;
@@ -170,7 +176,13 @@ export function AgentSession({
           });
         }
       },
-      onDone: () => onChanged(),
+      onDone: () => {
+        // A cancelled run ends with no result event, so this is the
+        // only thing standing between a stopped run and a half typed
+        // sentence pinned to the transcript.
+        clearDraft();
+        onChanged();
+      },
     });
     return () => {
       stop();
@@ -201,14 +213,33 @@ export function AgentSession({
   // message it becomes. Only the live run produces fragments, so the
   // latest agent is always the one talking.
   const draftLine = draft ? `${latestAgent?.name ?? "agent"}> ${draft}` : "";
+  // Rendered as its own text node so the typing only touches a small
+  // DOM leaf per frame; joining the draft into the transcript string
+  // rebuilt and replaced the whole pane sixty times a second.
+  const body = useMemo(() => lines.join("\n"), [lines]);
 
+  /**
+   * Follow the tail only while the reader is at the tail. The draft
+   * updates once per animation frame while text streams, and an
+   * unconditional scroll on each of those yanked anyone who had
+   * scrolled up straight back to the bottom, every sixteen
+   * milliseconds, for the length of the message. Scrolling back down
+   * re-arms following; the programmatic scroll itself lands within
+   * the threshold, so it keeps the flag true.
+   */
+  const followTail = useRef(true);
+  const onPaneScroll = () => {
+    const el = paneRef.current;
+    if (!el) return;
+    followTail.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
     // After paint: on the first render the pane has not been laid out
     // yet, so setting scrollTop immediately left a long conversation
     // parked at its oldest run.
     const frame = requestAnimationFrame(() => {
       const el = paneRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el && followTail.current) el.scrollTop = el.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
   }, [lines.length, draftLine]);
@@ -290,8 +321,9 @@ export function AgentSession({
             <span className="muted">{workingName} is getting started...</span>
           </div>
         ) : (
-          <pre className="transcript" ref={paneRef}>
-            {[...lines, ...(draftLine ? [draftLine] : [])].join("\n") || "Waiting for output..."}
+          <pre className="transcript" ref={paneRef} onScroll={onPaneScroll}>
+            {body || (draftLine ? "" : "Waiting for output...")}
+            {draftLine ? (body ? "\n" : "") + draftLine : ""}
           </pre>
         )
       ) : (

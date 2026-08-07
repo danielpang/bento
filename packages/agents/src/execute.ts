@@ -99,7 +99,10 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     }
     if (event.type === "init" && initialized) return;
     if (event.type === "init") initialized = true;
-    if (event.type === "message" || event.type === "result") {
+    // Assistant messages and results end the composition; a user line
+    // echoed into the stream mid turn does not, and resetting on it
+    // desynchronized these counters from every draft downstream.
+    if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
       streamed.text = 0;
       streamed.thinking = 0;
     }

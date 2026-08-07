@@ -378,7 +378,16 @@ export class SpriteDriver implements SandboxDriver {
  * promise, and these scripts need defuseKeepalive on that connection.
  * An installer that downloads quietly for 45 seconds would otherwise
  * be cut off the same way agent runs were.
+ *
+ * Bounded, because defuseKeepalive removes the SDK's only half open
+ * socket detector: without a deadline of its own, a connection that
+ * died silently mid install left the promise unsettled and the run
+ * parked in "starting" holding its worker slot until a restart.
+ * Generous, for the same reason repo-setup's bound is: a cold
+ * toolchain install is minutes, not seconds.
  */
+const PROVISION_SCRIPT_TIMEOUT_MS = 20 * 60_000;
+
 function runScript(
   sprite: Sprite,
   script: string,
@@ -389,6 +398,30 @@ function runScript(
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      stopKeepaliveGuard();
+      clearTimeout(deadline);
+      finish();
+    };
+    const deadline = setTimeout(() => {
+      // The kill may be going to a dead socket, so nothing waits for
+      // it to be confirmed; the reject is the bound.
+      void child.kill();
+      settle(() =>
+        reject(
+          Object.assign(
+            new Error(
+              `provisioning script did not finish within ${PROVISION_SCRIPT_TIMEOUT_MS / 60_000} minutes`,
+            ),
+            { stdout, stderr },
+          ),
+        ),
+      );
+    }, PROVISION_SCRIPT_TIMEOUT_MS);
+    deadline.unref?.();
     child.stdout.on("data", (d: Buffer | string) => {
       stdout += d.toString();
     });
@@ -396,22 +429,22 @@ function runScript(
       stderr += d.toString();
     });
     child.on("error", (err: Error) => {
-      stopKeepaliveGuard();
-      reject(err);
+      settle(() => reject(err));
     });
     child.on("exit", (code: number | null) => {
-      stopKeepaliveGuard();
-      const exitCode = code ?? -1;
-      if (exitCode !== 0) {
-        // stdout and stderr ride on the error, the shape run-executor's
-        // describeSandboxError reads to put installer output in the run
-        // record.
-        reject(
-          Object.assign(new Error(`provisioning script failed with exit code ${exitCode}`), { stdout, stderr }),
-        );
-        return;
-      }
-      resolve({ stdout, stderr, exitCode });
+      settle(() => {
+        const exitCode = code ?? -1;
+        if (exitCode !== 0) {
+          // stdout and stderr ride on the error, the shape
+          // run-executor's describeSandboxError reads to put installer
+          // output in the run record.
+          reject(
+            Object.assign(new Error(`provisioning script failed with exit code ${exitCode}`), { stdout, stderr }),
+          );
+          return;
+        }
+        resolve({ stdout, stderr, exitCode });
+      });
     });
   });
 }

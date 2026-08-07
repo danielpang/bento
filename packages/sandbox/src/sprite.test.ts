@@ -397,6 +397,48 @@ test("the installed SDK still forwards stdin writes to the socket", async () => 
 });
 
 /**
+ * defuseKeepalive removes the SDK's only detector of a half open
+ * socket, so runScript must carry its own deadline: without one, a
+ * provisioning script whose connection died silently never settled,
+ * and the run held its worker slot until a server restart.
+ */
+test("Sprite provisioning gives up on a script whose connection went silent", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const child = fakeChild();
+  let killed = false;
+  child.kill = () => {
+    killed = true;
+  };
+  const sprite = {
+    spawn() {
+      return child;
+    },
+    filesystem() {
+      return {};
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const provisioning = driver.provision({
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+  });
+  const outcome = provisioning.then(
+    () => "resolved",
+    (err: Error) => err,
+  );
+  // Past the deadline with no exit, no error, and no data.
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(21 * 60_000);
+  const result = await outcome;
+  assert.ok(result instanceof Error, "provisioning must fail rather than hang");
+  assert.match(result.message, /did not finish within/);
+  assert.ok(killed, "the stuck process was told to stop");
+});
+
+/**
  * The clock lives on private SDK internals (SpriteCommand.wsCmd and
  * WSCommand.resetKeepalive), reached by duck type. This pins those
  * names against the installed package, so an SDK upgrade that renames

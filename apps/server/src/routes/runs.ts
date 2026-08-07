@@ -254,8 +254,24 @@ export function runRoutes(ctx: AppContext) {
         // One queue for both, so a fragment can never overtake the
         // message that finishes it. Deltas are live only: nothing is
         // stored, so there is nothing to replay and no seq to carry.
+        // Contiguous fragments merge into the queue's tail at enqueue
+        // time: per token frames were one awaited socket write each,
+        // and a viewer on a slow link let the backlog grow at token
+        // rate. The merge is safe by construction, because the
+        // client's contiguity check accepts a merged fragment exactly
+        // as it accepts the run of small ones.
         const unsubscribeDeltas = ctx.bus.onRunDelta(runId, (delta) => {
-          queue.push({ delta });
+          const tail = queue[queue.length - 1];
+          if (
+            tail
+            && "delta" in tail
+            && tail.delta.channel === delta.channel
+            && delta.offset === tail.delta.offset + tail.delta.text.length
+          ) {
+            tail.delta = { ...tail.delta, text: tail.delta.text + delta.text };
+          } else {
+            queue.push({ delta });
+          }
           nudge();
         });
         const unsubscribeDone = ctx.bus.onRunDone(runId, (status) => {
@@ -264,14 +280,6 @@ export function runRoutes(ctx: AppContext) {
         });
 
         try {
-          /**
-           * Taken at subscribe time, in the same tick as the
-           * subscriptions above: fragments emitted after this point
-           * sit in the queue and continue exactly where the snapshot
-           * ends, so the client's contiguity check accepts them.
-           */
-          const draft = ctx.bus.runDraft(runId);
-
           const replay = await db(c, ctx)
             .select()
             .from(runEvents)
@@ -282,14 +290,27 @@ export function runRoutes(ctx: AppContext) {
             lastSeq = row.seq;
           }
 
-          // The in-flight message so far, as one offset zero fragment.
-          // Without it, a viewer arriving mid message has no draft
-          // until the next message starts: the fragments it missed are
-          // gone by design, so the whole is sent instead.
-          if (draft?.text) {
+          /**
+           * The in-flight message so far, as one offset zero fragment.
+           * Without it, a viewer arriving mid message has no draft
+           * until the next message starts: the fragments it missed are
+           * gone by design, so the whole is sent instead.
+           *
+           * Read after the replay, in the same synchronous stretch as
+           * the write. A snapshot taken before the replay went stale
+           * during it: when the message finished mid replay, the
+           * replay delivered the persisted copy, and the stale draft
+           * then arrived as a phantom duplicate that nothing cleared,
+           * because the clearing event had already been consumed as
+           * replay. Fragments queued between here and the drain below
+           * continue exactly where this snapshot ends, so the client's
+           * contiguity check accepts them.
+           */
+          const draft = ctx.bus.runDraft(runId);
+          if (draft) {
             await stream.writeSSE({
               event: "run_delta",
-              data: JSON.stringify({ channel: "text", text: draft.text, offset: 0 } satisfies AgentDelta),
+              data: JSON.stringify({ channel: "text", text: draft, offset: 0 } satisfies AgentDelta),
             });
           }
 

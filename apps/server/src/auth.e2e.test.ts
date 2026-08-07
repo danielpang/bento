@@ -357,6 +357,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/runs/${run.id}/rollback`],
     ["POST", `/api/runs/${run.id}/cancel`],
     ["GET", `/api/runs/${run.id}/transcript`],
+    // The SSE stream: for a foreign tenant it must refuse before it
+    // ever streams, and it now carries unpersisted draft text that no
+    // RLS policy can cover, so the matrix is the only thing pinning it.
+    ["GET", `/api/runs/${run.id}/events`],
     ["GET", `/api/board/${project.id}/events`],
   ];
 

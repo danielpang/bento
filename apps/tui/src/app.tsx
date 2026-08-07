@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdin } from "ink";
 import {
   ApiError,
@@ -385,12 +385,23 @@ function Console({
       setCardRuns(detail.runs);
       // The server sends runs newest first.
       const latest = detail.runs[0];
-      if (!latest || cancelled) return;
+      if (cancelled) return;
+      if (!latest) {
+        // A card with no runs must also forget the previous card's:
+        // stale latestRunId kept the live follow subscribed to it and
+        // streamed another card's conversation into this pane.
+        setLatestRunId(null);
+        setLatestRunStatus("");
+        setTranscript([]);
+        return;
+      }
       setRunStatus((prev) => ({ ...prev, [current.id]: latest.status }));
       setLatestRunId(latest.id);
       setLatestRunStatus(latest.status);
-      const { lines } = await client.getTranscript(latest.id);
-      if (!cancelled) setTranscript(lines);
+      const { cursor, lines } = await client.getTranscript(latest.id);
+      if (cancelled) return;
+      setTranscript(lines);
+      transcriptCursor.current = { runId: latest.id, cursor };
     })().catch(() => {});
     return () => {
       cancelled = true;
@@ -406,6 +417,7 @@ function Console({
    * the terminal is not redrawn per token.
    */
   const followedRunId = runActive ? latestRunId : null;
+  const transcriptCursor = useRef<{ runId: string; cursor: number } | null>(null);
   useEffect(() => {
     setDraft("");
     if (!followedRunId) return;
@@ -413,13 +425,39 @@ function Console({
     let draftText = "";
     let draftTimer: ReturnType<typeof setTimeout> | null = null;
     let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+    const dropDraft = () => {
+      // Both halves, or a flush timer scheduled just before the drop
+      // would put the stale text right back on screen.
+      draftText = "";
+      if (draftTimer) {
+        clearTimeout(draftTimer);
+        draftTimer = null;
+      }
+      setDraft("");
+    };
     const refetchTranscript = () => {
       refetchTimer ??= setTimeout(() => {
         refetchTimer = null;
+        /**
+         * From the cursor, not from zero: a chatty run fires this
+         * four times a second, and re-reading the whole transcript
+         * each time made the run cost quadratic in its own length.
+         * The card-switch effect above resets the cursor whenever it
+         * replaces the transcript outright.
+         */
+        const since =
+          transcriptCursor.current?.runId === followedRunId ? transcriptCursor.current.cursor : 0;
         client
-          .getTranscript(followedRunId)
-          .then(({ lines }) => {
-            if (!stopped) setTranscript(lines);
+          .getTranscript(followedRunId, since)
+          .then(({ cursor, lines }) => {
+            if (stopped) return;
+            // Another fetch replaced the transcript meanwhile; these
+            // rows would double-append.
+            const held = transcriptCursor.current;
+            if (since > 0 && (held?.runId !== followedRunId || held.cursor !== since)) return;
+            transcriptCursor.current = { runId: followedRunId, cursor };
+            if (since > 0) setTranscript((prev) => [...prev, ...lines]);
+            else setTranscript(lines);
           })
           .catch(() => {});
       }, 250);
@@ -428,9 +466,11 @@ function Console({
       onEvent: (event) => {
         if (stopped) return;
         // The persisted line supersedes the draft that previewed it.
-        if (event.type === "message" || event.type === "result") {
-          draftText = "";
-          setDraft("");
+        // Assistant lines and results only: the user's own steer says
+        // nothing about the message still being typed, and clearing
+        // on it froze the draft mid sentence.
+        if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
+          dropDraft();
         }
         refetchTranscript();
       },
@@ -448,8 +488,15 @@ function Console({
       },
       onDone: () => {
         if (stopped) return;
-        setDraft("");
+        dropDraft();
         refetchTranscript();
+      },
+      onError: () => {
+        if (stopped) return;
+        // The stream is gone (token rejected, connection dropped).
+        // The 3 second poll still covers the transcript; what must
+        // not survive is a frozen half sentence posing as live.
+        dropDraft();
       },
     });
     return () => {
@@ -758,8 +805,10 @@ function Console({
               ))}
               {draft !== "" && (
                 // The typing edge of the message in progress: its tail,
-                // because that is where the new words appear.
-                <Text>{`${cardAgent?.name ?? "agent"}> ${draft}`.slice(-100)}</Text>
+                // because that is where the new words appear. Flattened
+                // to one line; embedded newlines grew the fixed pane
+                // and bounced the panels below it on every flush.
+                <Text>{`${cardAgent?.name ?? "agent"}> ${draft}`.replaceAll(/\s+/g, " ").slice(-100)}</Text>
               )}
               {transcript.length === 0 && draft === "" && <Text color="gray">No output yet.</Text>}
             </>

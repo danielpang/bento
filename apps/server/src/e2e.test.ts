@@ -22,6 +22,7 @@ import {
   runMigrations,
   stages,
 } from "@bento/db";
+import { SseParser } from "@bento/core";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import pg from "pg";
@@ -455,31 +456,27 @@ test("a live session hears messages mid-run without a second run", { timeout: 12
   assert.equal(turns >= 2, true, "the second message produced a second turn in the same run");
 });
 
-/** Reads SSE frames off a streaming response, one at a time. */
+/**
+ * Reads SSE frames off a streaming response, one at a time, through
+ * the same parser the api-client ships. That is the point: the first
+ * version of this helper hand-rolled its own parsing, so the wire
+ * format looked covered while the parser real clients run stayed
+ * untested.
+ */
 function sseFrames(body: ReadableStream<Uint8Array>) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  const parser = new SseParser();
+  const pending: { event: string; data: string }[] = [];
   return {
     /** The next complete frame, or null when the stream ends. */
     async next(): Promise<{ event: string; data: string } | null> {
-      while (true) {
-        const cut = buffer.indexOf("\n\n");
-        if (cut >= 0) {
-          const raw = buffer.slice(0, cut);
-          buffer = buffer.slice(cut + 2);
-          let event = "message";
-          let data = "";
-          for (const line of raw.split("\n")) {
-            if (line.startsWith("event:")) event = line.slice(6).trim();
-            else if (line.startsWith("data:")) data += line.slice(5).trim();
-          }
-          return { event, data };
-        }
+      while (pending.length === 0) {
         const { value, done } = await reader.read();
         if (done) return null;
-        buffer += decoder.decode(value, { stream: true });
+        pending.push(...parser.push(decoder.decode(value, { stream: true })));
       }
+      return pending.shift()!;
     },
     async cancel() {
       await reader.cancel().catch(() => {});
