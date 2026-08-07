@@ -415,6 +415,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           signal: controller.signal,
           ...(liveChannel ? { stdin: liveChannel } : {}),
         }),
+      // Straight to the bus, no row: the transcript gets the finished
+      // message; open streams get the typing.
+      onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
       onEvent: async (event) => {
         if (!agentReported) {
           agentReported = true;

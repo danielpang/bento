@@ -455,6 +455,103 @@ test("a live session hears messages mid-run without a second run", { timeout: 12
   assert.equal(turns >= 2, true, "the second message produced a second turn in the same run");
 });
 
+/** Reads SSE frames off a streaming response, one at a time. */
+function sseFrames(body: ReadableStream<Uint8Array>) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  return {
+    /** The next complete frame, or null when the stream ends. */
+    async next(): Promise<{ event: string; data: string } | null> {
+      while (true) {
+        const cut = buffer.indexOf("\n\n");
+        if (cut >= 0) {
+          const raw = buffer.slice(0, cut);
+          buffer = buffer.slice(cut + 2);
+          let event = "message";
+          let data = "";
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += line.slice(5).trim();
+          }
+          return { event, data };
+        }
+        const { value, done } = await reader.read();
+        if (done) return null;
+        buffer += decoder.decode(value, { stream: true });
+      }
+    },
+    async cancel() {
+      await reader.cancel().catch(() => {});
+    },
+  };
+}
+
+/**
+ * The typing is visible but not durable: fragments of the message the
+ * agent is composing reach an open viewer as run_delta frames, and the
+ * finished message is the only copy that survives. A replay after the
+ * run must carry events and no fragments, or refreshing the page would
+ * change what the conversation says.
+ */
+test("the message being typed streams live and is never persisted", { timeout: 120_000 }, async () => {
+  const { project } = await setupProject("Delta streaming");
+  const feature = await createFeature(project.id, "Typing card");
+  const profile = await fakeProfile("delta-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  const run = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "LIVE hello" }),
+    }),
+  );
+
+  // Subscribed before the worker picks the run up, so the first turn's
+  // fragments are broadcast while someone is listening.
+  const live = await app.request(`/api/runs/${run.id}/events?since=0`);
+  assert.ok(live.body, "the events endpoint streams");
+  const frames = sseFrames(live.body!);
+  const deltas: { channel: string; text: string }[] = [];
+  let status = "";
+  try {
+    while (true) {
+      const frame = await frames.next();
+      assert.ok(frame, "the stream ends with done, not a bare EOF");
+      if (frame.event === "run_delta") deltas.push(JSON.parse(frame.data) as { channel: string; text: string });
+      if (frame.event === "done") {
+        status = (JSON.parse(frame.data) as { status: string }).status;
+        break;
+      }
+    }
+  } finally {
+    await frames.cancel();
+  }
+  assert.equal(status, "succeeded");
+  assert.ok(
+    deltas.some((d) => d.channel === "text" && d.text === "Heard."),
+    "the fragment reached the open stream",
+  );
+
+  // The same endpoint after the run: replayed events, no fragments.
+  const replay = await app.request(`/api/runs/${run.id}/events?since=0`);
+  const replayFrames = sseFrames(replay.body!);
+  let sawMessage = false;
+  try {
+    while (true) {
+      const frame = await replayFrames.next();
+      assert.ok(frame, "the replay ends with done");
+      assert.notEqual(frame.event, "run_delta", "fragments must not survive the run");
+      if (frame.event === "run_event" && frame.data.includes("Heard.")) sawMessage = true;
+      if (frame.event === "done") break;
+    }
+  } finally {
+    await replayFrames.cancel();
+  }
+  assert.ok(sawMessage, "the finished message is the durable copy");
+});
+
 /**
  * Talking to a working agent queues: a headless run cannot hear
  * mid-flight, so the message waits on the card and becomes a resume

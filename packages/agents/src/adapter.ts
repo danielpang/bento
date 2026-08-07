@@ -1,4 +1,4 @@
-import type { AgentCli, AgentEvent, RunOutcome } from "@bento/core";
+import type { AgentCli, AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
 
 export interface BuildCommandInput {
   prompt: string;
@@ -78,6 +78,17 @@ export interface AgentAdapter {
   buildCommand(input: BuildCommandInput): string[];
   /** Parse one stdout line. Return null for lines that are not events. */
   parseEvent(line: string): AgentEvent | null;
+  /**
+   * Recognize a streaming fragment of the message being composed, for
+   * tools that emit per token updates. Consulted before parseEvent, so
+   * a recognized delta line never reaches the transcript or the stray
+   * output tail; it is forwarded live and then forgotten. The finished
+   * message still arrives through parseEvent. Optional because most
+   * CLIs only report whole messages. The offset is stamped by
+   * runAgent, which sees the whole stream; adapters only name the
+   * fragment.
+   */
+  parseDelta?(line: string): Pick<AgentDelta, "channel" | "text"> | null;
   /** Decide success/failure from the collected events and exit code. */
   extractOutcome(events: AgentEvent[], exitCode: number): RunOutcome;
 }

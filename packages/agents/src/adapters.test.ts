@@ -297,6 +297,64 @@ test("pi exiting without a result is a failure, not a silent success", () => {
   assert.match(outcome.error ?? "", /stopped before reporting a result/);
 });
 
+test("pi recognizes streaming fragments of text and thinking", () => {
+  const text = piAdapter.parseDelta?.(
+    '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hel"}}',
+  );
+  assert.deepEqual(text, { channel: "text", text: "Hel" });
+
+  const thinking = piAdapter.parseDelta?.(
+    '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}',
+  );
+  assert.deepEqual(thinking, { channel: "thinking", text: "hmm" });
+
+  // Tool argument fragments are half a JSON object; tool events cover them.
+  assert.equal(
+    piAdapter.parseDelta?.(
+      '{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"{\\"pa"}}',
+    ),
+    null,
+  );
+  assert.equal(piAdapter.parseDelta?.('{"type":"message_end","message":{}}'), null);
+  assert.equal(piAdapter.parseDelta?.("not json"), null);
+});
+
+/**
+ * Fragments are display only: they reach onDelta and nothing else. In
+ * particular they must not land in the stray output tail, where they
+ * used to bury a failing run's actual reason under token JSON.
+ */
+test("streamed fragments reach onDelta and stay out of the transcript and the failure tail", async () => {
+  const lines = [
+    '{"type":"session","version":3,"id":"sess-1"}',
+    '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Wor"}}',
+    '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"king"}}',
+  ];
+  async function* fails(): AsyncIterable<{ kind: "stdout" | "stderr" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stdout", data: lines.map((l) => `${l}\n`).join("") };
+    yield { kind: "stderr", data: "credential rejected\n" };
+    yield { kind: "exit", exitCode: 1 };
+  }
+  const deltas: { channel: string; text: string; offset: number }[] = [];
+  const { events, outcome } = await runAgent({
+    adapter: piAdapter,
+    argv: ["pi"],
+    exec: fails,
+    onDelta: (delta) => deltas.push(delta),
+  });
+  assert.deepEqual(
+    deltas,
+    [
+      { channel: "text", text: "Wor", offset: 0 },
+      { channel: "text", text: "king", offset: 3 },
+    ],
+    "fragments carry the offset a late joiner needs to detect a torn draft",
+  );
+  assert.deepEqual(events.map((e) => e.type), ["init"], "fragments are not events");
+  assert.match(outcome.error ?? "", /credential rejected/, "the real reason survives");
+  assert.doesNotMatch(outcome.error ?? "", /message_update/, "token JSON stays out of the tail");
+});
+
 /**
  * A key an adapter reads but the catalog cannot store is unreachable in
  * multi mode: the adapter would ask for it and no one could supply it.

@@ -1,4 +1,4 @@
-import type { AgentEvent, RunOutcome } from "@bento/core";
+import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
 import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
 
 /**
@@ -52,6 +52,34 @@ export const piAdapter: AgentAdapter = {
         ? JSON.stringify({ type: "prompt", message: text })
         : JSON.stringify({ type: "steer", message: text });
     },
+  },
+
+  /**
+   * message_update, the event parseEvent deliberately drops, is where
+   * the live typing lives. In JSON mode each one carries an
+   * assistantMessageEvent with the fragment and no cumulative
+   * snapshot ("message_start provides the initial message, deltas
+   * build it, and message_end provides the final authoritative
+   * message", pi's own words), so the fragment is appended, not
+   * replaced.
+   */
+  parseDelta(line: string): Pick<AgentDelta, "channel" | "text"> | null {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) return null;
+    let parsed: PiLine;
+    try {
+      parsed = JSON.parse(trimmed) as PiLine;
+    } catch {
+      return null;
+    }
+    if (parsed.type !== "message_update") return null;
+    const inner = parsed.assistantMessageEvent;
+    if (typeof inner?.delta !== "string" || inner.delta === "") return null;
+    if (inner.type === "text_delta") return { channel: "text", text: inner.delta };
+    if (inner.type === "thinking_delta") return { channel: "thinking", text: inner.delta };
+    // toolcall_delta streams JSON argument fragments; watching half a
+    // JSON object type itself is noise, and tool events cover it.
+    return null;
   },
 
   parseEvent(line: string): AgentEvent | null {
@@ -161,6 +189,8 @@ interface PiLine {
   toolName?: string;
   message?: PiMessage;
   messages?: PiMessage[];
+  /** On message_update: the streaming fragment (pi-ai's event shape). */
+  assistantMessageEvent?: { type?: string; delta?: string };
 }
 
 /** Assistant content is a list of blocks; only the text ones are prose. */

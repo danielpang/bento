@@ -1,4 +1,4 @@
-import type { AgentEvent, GateCriteria } from "@bento/core";
+import type { AgentDelta, AgentEvent, GateCriteria } from "@bento/core";
 import type {
   AgentProfile,
   AgentRun,
@@ -615,10 +615,19 @@ export class BentoClient {
   /**
    * Streams a run's events. Replays from `since`, then follows live
    * until the run ends. Returns a function that stops the stream.
+   *
+   * onDelta carries the typing: token sized fragments of the message
+   * the agent is composing. Live only, never replayed; the finished
+   * message arrives through onEvent and supersedes every fragment
+   * before it.
    */
   streamRun(
     runId: string,
-    handlers: { onEvent?: (event: AgentEvent, seq: number) => void; onDone?: (status: string) => void },
+    handlers: {
+      onEvent?: (event: AgentEvent, seq: number) => void;
+      onDelta?: (delta: AgentDelta) => void;
+      onDone?: (status: string) => void;
+    },
     since = 0,
   ): () => void {
     const source = new EventSource(`${this.baseUrl}/api/runs/${runId}/events?since=${since}`, {
@@ -627,6 +636,9 @@ export class BentoClient {
     source.addEventListener("run_event", (e) => {
       const message = e as MessageEvent<string>;
       handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, Number(message.lastEventId));
+    });
+    source.addEventListener("run_delta", (e) => {
+      handlers.onDelta?.(JSON.parse((e as MessageEvent<string>).data) as AgentDelta);
     });
     source.addEventListener("done", (e) => {
       const message = e as MessageEvent<string>;

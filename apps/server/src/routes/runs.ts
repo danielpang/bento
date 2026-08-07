@@ -3,6 +3,7 @@ import { asc, eq, gt, and } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
+import type { AgentDelta } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
@@ -237,7 +238,7 @@ export function runRoutes(ctx: AppContext) {
          * delayed agent output by up to a second even though the event
          * was already in hand.
          */
-        const queue: { seq: number; event: unknown }[] = [];
+        const queue: ({ seq: number; event: unknown } | { delta: AgentDelta })[] = [];
         let finished: string | null = null;
         let wake: (() => void) | null = null;
         const nudge = () => {
@@ -250,12 +251,27 @@ export function runRoutes(ctx: AppContext) {
           queue.push({ seq: envelope.seq, event: envelope.event });
           nudge();
         });
+        // One queue for both, so a fragment can never overtake the
+        // message that finishes it. Deltas are live only: nothing is
+        // stored, so there is nothing to replay and no seq to carry.
+        const unsubscribeDeltas = ctx.bus.onRunDelta(runId, (delta) => {
+          queue.push({ delta });
+          nudge();
+        });
         const unsubscribeDone = ctx.bus.onRunDone(runId, (status) => {
           finished = status;
           nudge();
         });
 
         try {
+          /**
+           * Taken at subscribe time, in the same tick as the
+           * subscriptions above: fragments emitted after this point
+           * sit in the queue and continue exactly where the snapshot
+           * ends, so the client's contiguity check accepts them.
+           */
+          const draft = ctx.bus.runDraft(runId);
+
           const replay = await db(c, ctx)
             .select()
             .from(runEvents)
@@ -264,6 +280,17 @@ export function runRoutes(ctx: AppContext) {
           for (const row of replay) {
             await stream.writeSSE({ event: "run_event", id: String(row.seq), data: JSON.stringify(row.payload) });
             lastSeq = row.seq;
+          }
+
+          // The in-flight message so far, as one offset zero fragment.
+          // Without it, a viewer arriving mid message has no draft
+          // until the next message starts: the fragments it missed are
+          // gone by design, so the whole is sent instead.
+          if (draft?.text) {
+            await stream.writeSSE({
+              event: "run_delta",
+              data: JSON.stringify({ channel: "text", text: draft.text, offset: 0 } satisfies AgentDelta),
+            });
           }
 
           // A run that already ended before we subscribed has no further
@@ -280,6 +307,10 @@ export function runRoutes(ctx: AppContext) {
           while (true) {
             while (queue.length > 0) {
               const item = queue.shift()!;
+              if ("delta" in item) {
+                await stream.writeSSE({ event: "run_delta", data: JSON.stringify(item.delta) });
+                continue;
+              }
               if (item.seq <= lastSeq) continue;
               await stream.writeSSE({ event: "run_event", id: String(item.seq), data: JSON.stringify(item.event) });
               lastSeq = item.seq;
@@ -308,6 +339,7 @@ export function runRoutes(ctx: AppContext) {
           }
         } finally {
           unsubscribeEvents();
+          unsubscribeDeltas();
           unsubscribeDone();
         }
       });
