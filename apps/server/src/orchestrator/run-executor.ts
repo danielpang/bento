@@ -110,6 +110,30 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * an agent that cannot run a single command.
    */
   const authMounts = Object.keys(authEnv).length > 0 ? [] : await agentAuthMounts(ctx, adapter);
+
+  /**
+   * The transcript starts before the sandbox does. Provisioning a cold
+   * sprite is minutes of real work (machine creation, tool install,
+   * clones), and a card that sits silent for all of it reads as hung,
+   * so the driver reports each step through saySystem as it happens.
+   */
+  let seq = 0;
+  const sayAsUser = async (text: string) => {
+    seq += 1;
+    const said = { type: "message" as const, role: "user" as const, text };
+    await ctx.db.insert(runEvents).values({ runId, seq, type: said.type, payload: said });
+    ctx.bus.emitRunEvent({ runId, seq, event: said });
+  };
+  const saySystem = async (text: string) => {
+    seq += 1;
+    const said = { type: "message" as const, role: "system" as const, text };
+    await ctx.db.insert(runEvents).values({ runId, seq, type: said.type, payload: said });
+    ctx.bus.emitRunEvent({ runId, seq, event: said });
+  };
+  // A resume run's prompt is the user's own line in the conversation,
+  // so it opens the transcript the way it would in a chat.
+  if (run.prompt && run.cliSessionId) await sayAsUser(run.prompt);
+
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
   // Named out here because publishing needs it again once the run ends.
@@ -189,6 +213,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       // Local mode can share the user's own agent logins and git identity.
       mounts: [...repoGitMounts, ...authMounts],
       image: ctx.env.BENTO_SANDBOX_IMAGE,
+      onProgress: saySystem,
     });
 
     const [sandboxRow] = await ctx.db
@@ -312,23 +337,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   await ctx.db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, runId));
   emitBoard("running");
 
-  let seq = 0;
-  const sayAsUser = async (text: string) => {
-    seq += 1;
-    const said = { type: "message" as const, role: "user" as const, text };
-    await ctx.db.insert(runEvents).values({ runId, seq, type: said.type, payload: said });
-    ctx.bus.emitRunEvent({ runId, seq, event: said });
-  };
-  const saySystem = async (text: string) => {
-    seq += 1;
-    const said = { type: "message" as const, role: "system" as const, text };
-    await ctx.db.insert(runEvents).values({ runId, seq, type: said.type, payload: said });
-    ctx.bus.emitRunEvent({ runId, seq, event: said });
-  };
-  // A resume run's prompt is the user's own line in the conversation,
-  // so it opens the transcript the way it would in a chat.
-  if (run.prompt && run.cliSessionId) await sayAsUser(run.prompt);
-
   /**
    * The repositories' own setup commands, before the agent starts.
    *
@@ -388,6 +396,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }
     if (liveChannel.pending === 0) liveChannel.end();
   };
+  // Two lines bracket the agent's launch. The first says the CLI is
+  // being spawned; the second, on its first event, that it came up and
+  // is working. Between "running" and the agent's first message can be
+  // a long model turn, and these are what separate that wait from a
+  // CLI that never started.
+  await saySystem(`Starting ${profile.cli} in the sandbox.`);
+  let agentReported = false;
   try {
     result = await runAgent({
       adapter,
@@ -401,6 +416,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           ...(liveChannel ? { stdin: liveChannel } : {}),
         }),
       onEvent: async (event) => {
+        if (!agentReported) {
+          agentReported = true;
+          await saySystem(`${profile.cli} started and is working on the task.`);
+        }
         seq += 1;
         await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
         ctx.bus.emitRunEvent({ runId, seq, event });

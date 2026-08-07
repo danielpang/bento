@@ -26,6 +26,13 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "p
  */
 export const TOOLCHAIN_VERSION = 1;
 
+/**
+ * The marker file the script leaves behind. Exported so provisioning
+ * can ask "is the install still ahead?" cheaply and say so before the
+ * minutes-long wait rather than after.
+ */
+export const TOOLCHAIN_MARKER = `/opt/bento/toolchain-v${TOOLCHAIN_VERSION}`;
+
 /** Node used only to run pi. Off the agent's PATH on purpose. */
 const NODE_VERSION = "22.14.0";
 
@@ -40,7 +47,7 @@ const NODE_VERSION = "22.14.0";
  * missing tool is reported when a run that needs it cannot start.
  */
 export const AGENT_TOOLCHAIN_SCRIPT = `set -eu
-MARKER=/opt/bento/toolchain-v${TOOLCHAIN_VERSION}
+MARKER=${TOOLCHAIN_MARKER}
 [ -f "$MARKER" ] && exit 0
 mkdir -p /opt/bento /usr/local/bin
 
