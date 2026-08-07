@@ -219,6 +219,13 @@ function Console({
   // lanes would silently move the highlight to a different card.
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string[]>([]);
+  /**
+   * The message the agent is typing right now, streamed as fragments.
+   * The transcript endpoint cannot render it (fragments are never
+   * persisted), so the draft lives here and is dropped the moment the
+   * finished message makes it into the transcript.
+   */
+  const [draft, setDraft] = useState("");
   const [history, setHistory] = useState<FeatureEvent[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
@@ -389,6 +396,69 @@ function Console({
       cancelled = true;
     };
   }, [current?.id, features]);
+
+  /**
+   * Live follow of the run being watched. The 3 second board refresh
+   * above keeps working as the fallback; this subscription is what
+   * makes output appear the moment it happens, and it carries the
+   * fragments of the message being typed, which no transcript fetch
+   * can ever return. Fragment bursts are coalesced on short timers so
+   * the terminal is not redrawn per token.
+   */
+  const followedRunId = runActive ? latestRunId : null;
+  useEffect(() => {
+    setDraft("");
+    if (!followedRunId) return;
+    let stopped = false;
+    let draftText = "";
+    let draftTimer: ReturnType<typeof setTimeout> | null = null;
+    let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+    const refetchTranscript = () => {
+      refetchTimer ??= setTimeout(() => {
+        refetchTimer = null;
+        client
+          .getTranscript(followedRunId)
+          .then(({ lines }) => {
+            if (!stopped) setTranscript(lines);
+          })
+          .catch(() => {});
+      }, 250);
+    };
+    const stop = client.streamRun(followedRunId, {
+      onEvent: (event) => {
+        if (stopped) return;
+        // The persisted line supersedes the draft that previewed it.
+        if (event.type === "message" || event.type === "result") {
+          draftText = "";
+          setDraft("");
+        }
+        refetchTranscript();
+      },
+      onDelta: (delta) => {
+        if (stopped || delta.channel !== "text") return;
+        // Offset zero starts a draft (new message or the server's
+        // catch-up snapshot); anything else must continue this one.
+        if (delta.offset === 0) draftText = delta.text;
+        else if (delta.offset === draftText.length) draftText += delta.text;
+        else return;
+        draftTimer ??= setTimeout(() => {
+          draftTimer = null;
+          if (!stopped) setDraft(draftText);
+        }, 150);
+      },
+      onDone: () => {
+        if (stopped) return;
+        setDraft("");
+        refetchTranscript();
+      },
+    });
+    return () => {
+      stopped = true;
+      stop();
+      if (draftTimer) clearTimeout(draftTimer);
+      if (refetchTimer) clearTimeout(refetchTimer);
+    };
+  }, [client, followedRunId]);
 
   // What the card's agents committed: files touched and the stage
   // write-ups, summarised to fit the pane.
@@ -686,7 +756,12 @@ function Console({
                   {line.slice(0, 100)}
                 </Text>
               ))}
-              {transcript.length === 0 && <Text color="gray">No output yet.</Text>}
+              {draft !== "" && (
+                // The typing edge of the message in progress: its tail,
+                // because that is where the new words appear.
+                <Text>{`${cardAgent?.name ?? "agent"}> ${draft}`.slice(-100)}</Text>
+              )}
+              {transcript.length === 0 && draft === "" && <Text color="gray">No output yet.</Text>}
             </>
           )}
         </Box>

@@ -87,6 +87,11 @@ export interface AgentAdapter {
    * CLIs only report whole messages. The offset is stamped by
    * runAgent, which sees the whole stream; adapters only name the
    * fragment.
+   *
+   * An empty text means "streaming chatter, nothing to forward": block
+   * boundaries, signatures, tool argument fragments. They are consumed
+   * so a failing run's stderr tail holds the actual reason instead of
+   * a page of streaming JSON.
    */
   parseDelta?(line: string): Pick<AgentDelta, "channel" | "text"> | null;
   /** Decide success/failure from the collected events and exit code. */

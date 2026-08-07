@@ -308,12 +308,13 @@ test("pi recognizes streaming fragments of text and thinking", () => {
   );
   assert.deepEqual(thinking, { channel: "thinking", text: "hmm" });
 
-  // Tool argument fragments are half a JSON object; tool events cover them.
-  assert.equal(
+  // Tool argument fragments are half a JSON object; tool events cover
+  // them. Consumed as empty chatter rather than left for the tail.
+  assert.deepEqual(
     piAdapter.parseDelta?.(
       '{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"{\\"pa"}}',
     ),
-    null,
+    { channel: "text", text: "" },
   );
   assert.equal(piAdapter.parseDelta?.('{"type":"message_end","message":{}}'), null);
   assert.equal(piAdapter.parseDelta?.("not json"), null);

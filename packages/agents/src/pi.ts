@@ -74,12 +74,14 @@ export const piAdapter: AgentAdapter = {
     }
     if (parsed.type !== "message_update") return null;
     const inner = parsed.assistantMessageEvent;
-    if (typeof inner?.delta !== "string" || inner.delta === "") return null;
-    if (inner.type === "text_delta") return { channel: "text", text: inner.delta };
-    if (inner.type === "thinking_delta") return { channel: "thinking", text: inner.delta };
-    // toolcall_delta streams JSON argument fragments; watching half a
-    // JSON object type itself is noise, and tool events cover it.
-    return null;
+    if (typeof inner?.delta === "string" && inner.delta !== "") {
+      if (inner.type === "text_delta") return { channel: "text", text: inner.delta };
+      if (inner.type === "thinking_delta") return { channel: "thinking", text: inner.delta };
+    }
+    // The rest of message_update is chatter: toolcall_delta streams
+    // half a JSON object, starts and ends carry no new prose. Consumed
+    // as empty so it stays out of the failure tail.
+    return { channel: "text", text: "" };
   },
 
   parseEvent(line: string): AgentEvent | null {

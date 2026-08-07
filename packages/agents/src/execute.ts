@@ -85,8 +85,11 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
      */
     const fragment = adapter.parseDelta?.(line);
     if (fragment) {
-      onDelta?.({ ...fragment, offset: streamed[fragment.channel] });
-      streamed[fragment.channel] += fragment.text.length;
+      // Empty means recognized chatter: consumed, never forwarded.
+      if (fragment.text) {
+        onDelta?.({ ...fragment, offset: streamed[fragment.channel] });
+        streamed[fragment.channel] += fragment.text.length;
+      }
       return;
     }
     const event = adapter.parseEvent(line);

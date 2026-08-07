@@ -630,9 +630,14 @@ export class BentoClient {
     },
     since = 0,
   ): () => void {
-    const source = new EventSource(`${this.baseUrl}/api/runs/${runId}/events?since=${since}`, {
-      withCredentials: !this.tokens,
-    });
+    const url = `${this.baseUrl}/api/runs/${runId}/events?since=${since}`;
+    // EventSource cannot carry an Authorization header, so a client
+    // that authenticates with a bearer token (the TUI, the Mac app)
+    // reads the same stream over fetch. This is why the TUI could
+    // never follow a run live before.
+    if (this.tokens) return this.streamRunWithFetch(url, handlers);
+
+    const source = new EventSource(url, { withCredentials: true });
     source.addEventListener("run_event", (e) => {
       const message = e as MessageEvent<string>;
       handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, Number(message.lastEventId));
@@ -646,6 +651,66 @@ export class BentoClient {
       source.close();
     });
     return () => source.close();
+  }
+
+  /**
+   * The SSE stream over plain fetch: same frames, but the request can
+   * carry the bearer token. No reconnection on drop, deliberately:
+   * every present caller also polls (the TUI refreshes on a timer), so
+   * a dropped stream degrades to the poll instead of retrying forever
+   * against a server that may be gone.
+   */
+  private streamRunWithFetch(
+    url: string,
+    handlers: {
+      onEvent?: (event: AgentEvent, seq: number) => void;
+      onDelta?: (delta: AgentDelta) => void;
+      onDone?: (status: string) => void;
+    },
+  ): () => void {
+    const controller = new AbortController();
+    void (async () => {
+      const token = await this.tokens?.get();
+      const res = await this.fetchImpl(url, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+        credentials: this.tokens ? "omit" : "include",
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        let cut = buffer.indexOf("\n\n");
+        while (cut >= 0) {
+          const frame = buffer.slice(0, cut);
+          buffer = buffer.slice(cut + 2);
+          cut = buffer.indexOf("\n\n");
+          let event = "message";
+          let data = "";
+          let id = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += line.slice(5).trimStart();
+            else if (line.startsWith("id:")) id = line.slice(3).trim();
+          }
+          if (event === "run_event") handlers.onEvent?.(JSON.parse(data) as AgentEvent, Number(id));
+          else if (event === "run_delta") handlers.onDelta?.(JSON.parse(data) as AgentDelta);
+          else if (event === "done") {
+            handlers.onDone?.((JSON.parse(data) as { status: string }).status);
+            controller.abort();
+            return;
+          }
+        }
+      }
+    })().catch(() => {
+      // Aborted by the caller, or the connection dropped; the poll
+      // that every caller keeps running covers the rest.
+    });
+    return () => controller.abort();
   }
 
   /** Streams board changes for a project (card moved, run status changed). */
