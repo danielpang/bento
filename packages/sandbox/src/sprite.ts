@@ -1,5 +1,10 @@
 import { SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
-import { AGENT_BINARIES, AGENT_TOOLCHAIN_SCRIPT, TOOLCHAIN_MARKER } from "./agent-toolchain.js";
+import {
+  AGENT_BINARIES,
+  AGENT_TOOLCHAIN_SCRIPT,
+  TOOLCHAIN_MARKER,
+  toolchainMissing,
+} from "./agent-toolchain.js";
 import {
   collectExec,
   type ExecChunk,
@@ -92,17 +97,34 @@ export class SpriteDriver implements SandboxDriver {
      * A sprite is a bare machine, not an image: there is nowhere to bake
      * the agent CLIs the way the Docker driver does, so they are
      * installed on first provision. The script exits at once when the
-     * marker is already there, which is every stage after a card's
-     * first.
+     * marker is there and every CLI resolves, which is every stage
+     * after a card's first; a CLI that is missing because its installer
+     * had a bad minute is retried here, and only that one.
      */
+    let toolchain: { stdout: string };
     if (toolsPresent) {
       await say("Agent tools are already installed.");
-      await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
+      toolchain = await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
     } else {
       await say("Installing the agent tools. This takes a few minutes on a new sandbox.");
       const started = Date.now();
-      await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
+      toolchain = await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
       await say(`Agent tools installed in ${Math.round((Date.now() - started) / 1000)}s.`);
+    }
+
+    /**
+     * A CLI whose installer was unreachable is said here, in the run's
+     * own transcript, rather than left for the agent to fail on with a
+     * shell's "not found". The script only reports what is genuinely
+     * absent from the PATH afterwards, and the next provision retries
+     * it, so this is a delay to name rather than a sandbox to throw
+     * away: the other agents still run.
+     */
+    const missing = toolchainMissing(toolchain.stdout);
+    if (missing.length > 0) {
+      await say(
+        `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
+      );
     }
 
     // Repositories live inside the sprite, so clone what is missing and
