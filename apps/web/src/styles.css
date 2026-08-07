@@ -1357,35 +1357,156 @@ button {
   color: var(--text);
 }
 
-.transcript {
+/*
+ * The conversation pane. Rows, not a pre: the agent on the left, the
+ * user on the right, tool work folded into subdued lines between them,
+ * and a hairline divider wherever one run hands over to the next.
+ */
+.chat {
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 10px 12px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--text-dim);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 340px;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  max-height: 380px;
   overflow-y: auto;
   margin: 0;
-  /* Reaching the end of the transcript must not start scrolling the page. */
+  display: flex;
+  flex-direction: column;
+  /* Reaching the end of the conversation must not start scrolling the page. */
   overscroll-behavior: contain;
 }
 
-.transcript-line[data-kind="assistant"] {
-  color: var(--text);
+.chat-section {
+  display: flex;
+  flex-direction: column;
 }
-.transcript-line[data-kind="tool"] {
+
+/* Where a run begins inside the conversation: a centred caption
+   between hairlines, the way a chat app marks a new day. */
+.chat-run {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chat-run::before,
+.chat-run::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+.chat-section:first-child .chat-run {
+  margin-top: 2px;
+}
+
+.chat-row {
+  display: flex;
+  margin: 4px 0;
+}
+.chat-row-user {
+  justify-content: flex-end;
+}
+.chat-row-assistant,
+.chat-row-tools {
+  justify-content: flex-start;
+}
+.chat-row-system {
+  justify-content: center;
+}
+
+.chat-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 92%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The user speaks in a filled bubble on the right, like any chat. */
+.chat-bubble-user {
+  background: var(--panel-raised);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius-lg);
+  padding: 8px 12px;
+}
+/* Accepted but not yet echoed by the run: dashed until it is real. */
+.chat-bubble-user[data-pending] {
+  border-style: dashed;
+  opacity: 0.75;
+}
+
+/* The agent answers in the open, the way Claude Code and Paseo render
+   it: no bubble, its name in small caps beneath. */
+.chat-bubble-assistant {
+  max-width: 100%;
+}
+
+.chat-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-meta {
+  font-size: 10.5px;
   color: var(--text-faint);
 }
-.transcript-line[data-kind="result"] {
-  color: var(--succeeded);
+.chat-row-user .chat-meta {
+  text-align: right;
 }
-.transcript-line[data-kind="failed"] {
+
+/* Between the bubbles: what Bento itself has to say. */
+.chat-note {
+  max-width: 92%;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+/* Tool work collapses to one subdued line per burst. */
+.chat-tools {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  border-left: 2px solid var(--line-bright);
+  padding-left: 8px;
+}
+.chat-tools-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-left: 2px solid var(--line-bright);
+  padding-left: 8px;
+  max-width: 100%;
+}
+.chat-tool-line {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* How a run ended, as a pill in the conversation's own colours. */
+.chat-result {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+}
+.chat-result[data-ok="true"] {
+  color: var(--succeeded);
+  border-color: color-mix(in srgb, var(--succeeded) 40%, transparent);
+}
+.chat-result[data-ok="false"] {
   color: var(--failed);
+  border-color: color-mix(in srgb, var(--failed) 40%, transparent);
 }
 
 .field {
@@ -2268,10 +2389,10 @@ button {
   gap: 12px;
   min-height: 100dvh;
 }
-.session-page .transcript {
+.session-page .chat {
   min-height: 50vh;
   max-height: none;
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 .session-head {
   display: flex;
@@ -2494,7 +2615,7 @@ button.session-expand[aria-pressed="true"] {
     height: 100%;
     min-height: 0;
   }
-  .session-page .agent-session .transcript,
+  .session-page .agent-session .chat,
   .session-page .agent-session .orb-hero {
     flex: 1;
     min-height: 120px;

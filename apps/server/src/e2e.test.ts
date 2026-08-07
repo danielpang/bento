@@ -34,7 +34,7 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { registerJobs } from "./orchestrator/run-executor.js";
+import { registerJobs, recoverInterruptedRuns } from "./orchestrator/run-executor.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter } from "@bento/agents";
@@ -623,6 +623,152 @@ test("a message sent mid-run is queued and delivered when the run ends", { timeo
     "the follow-up block carries the user's message",
   );
 });
+
+/**
+ * The stream's replay cursor. Every frame carries its seq as the SSE
+ * id, and EventSource sends the last one it saw as Last-Event-ID when
+ * it reconnects on its own. Honouring that header is what keeps a
+ * deploy or a network drop from replaying every already-shown message
+ * (the old behavior, which doubled the transcript) or losing the ones
+ * fired while the socket was down.
+ */
+test("the run stream resumes from Last-Event-ID instead of replaying everything", async () => {
+  const { project, stages: projectStages } = await setupProject("Stream resume");
+  const feature = await createFeature(project.id, "Watched run");
+  const profile = await fakeProfile("stream-fake");
+
+  // Written directly: what is on trial is the stream's cursor, not
+  // the agent.
+  const [run] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: projectStages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "already done",
+      status: "succeeded",
+      executor: "server",
+    })
+    .returning();
+  for (let seq = 1; seq <= 5; seq++) {
+    const payload = { type: "message", role: "assistant", text: `line ${seq}` };
+    await ctx.db.insert(runEvents).values({ runId: run!.id, seq, type: "message", payload });
+  }
+
+  const replay = async (query = "", headers: Record<string, string> = {}) => {
+    const res = await app.request(`/api/runs/${run!.id}/events${query}`, { headers });
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /event: done/, "a finished run's stream still closes");
+    return [...body.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+  };
+
+  assert.deepEqual(await replay(), [1, 2, 3, 4, 5], "a fresh stream replays the whole run");
+  assert.deepEqual(await replay("?since=2"), [3, 4, 5], "the query cursor still works");
+  assert.deepEqual(
+    await replay("", { "Last-Event-ID": "3" }),
+    [4, 5],
+    "a reconnect resumes where the socket left off",
+  );
+  assert.deepEqual(await replay("?since=4", { "Last-Event-ID": "2" }), [5], "the cursor only moves forward");
+});
+
+/**
+ * What a deploy does to runs, and what boot does about it. The dead
+ * process held every server-executed run's stream, but the rows kept
+ * saying "running": the card sat busy forever, its gate never
+ * evaluated, its transcript cut off mid-sentence. Recovery closes
+ * those, requeues the ones that never started, and delivers a message
+ * parked during the outage once the card is free.
+ */
+test(
+  "a restart closes interrupted runs, requeues waiting ones, and delivers parked messages",
+  { timeout: 120_000 },
+  async () => {
+    const { project, stages: projectStages } = await setupProject("Restart recovery");
+    const feature = await createFeature(project.id, "Interrupted card");
+    const profile = await fakeProfile("restart-fake");
+    const stage = projectStages[0]!;
+
+    const plant = async (status: "running" | "starting" | "queued", executor: "server" | "runner") => {
+      const [run] = await ctx.db
+        .insert(agentRuns)
+        .values({
+          featureId: feature.id,
+          stageId: stage.id,
+          agentProfileId: profile.id,
+          prompt: "half finished work",
+          status,
+          executor,
+        })
+        .returning();
+      return run!;
+    };
+    const working = await plant("running", "server");
+    const starting = await plant("starting", "server");
+    const waiting = await plant("queued", "server");
+    // On its own card: an active run anywhere on the feature would
+    // (rightly) keep the parked message parked.
+    const runnerCard = await createFeature(project.id, "Runner card");
+    const [onARunner] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: runnerCard.id,
+        stageId: stage.id,
+        agentProfileId: profile.id,
+        prompt: "half finished work",
+        status: "running",
+        executor: "runner",
+      })
+      .returning();
+
+    // A reply that arrived while the deploy was happening.
+    await ctx.db.update(features).set({ queuedPrompt: "is anyone there" }).where(eq(features.id, feature.id));
+
+    const closed: string[] = [];
+    const offWorking = ctx.bus.onRunDone(working.id, (s) => closed.push(`${working.id}:${s}`));
+    const offStarting = ctx.bus.onRunDone(starting.id, (s) => closed.push(`${starting.id}:${s}`));
+    await recoverInterruptedRuns(ctx);
+    offWorking();
+    offStarting();
+
+    const readRun = async (runId: string) =>
+      json<{ status: string; error: string | null; endedAt: string | null }>(await app.request(`/api/runs/${runId}`));
+
+    for (const orphan of [working, starting]) {
+      const after = await readRun(orphan.id);
+      assert.equal(after.status, "failed", "an interrupted run is closed, not left running forever");
+      assert.match(after.error ?? "", /restart/);
+      assert.ok(after.endedAt, "the close is timestamped");
+      const transcript = await (await app.request(`/api/runs/${orphan.id}/transcript`)).text();
+      assert.match(transcript, /restarted while this run was working/, "the transcript says why the run ended");
+    }
+    assert.ok(
+      closed.includes(`${working.id}:failed`) && closed.includes(`${starting.id}:failed`),
+      "a stream that reconnected mid-recovery still hears the close",
+    );
+    assert.equal((await readRun(onARunner.id)).status, "running", "a runner's run outlives the server and is left alone");
+
+    // The waiting run went back on the queue (its job died with the
+    // old process) and this test's own workers pick it up. Its finish
+    // delivers the parked reply into a run of the same conversation.
+    assert.equal(await waitForRun(waiting.id), "succeeded", "a run that never started is queued afresh");
+
+    let resume: { id: string; prompt: string } | undefined;
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && !resume) {
+      const detail = await json<{ runs: { id: string; prompt: string }[] }>(
+        await app.request(`/api/features/${feature.id}`),
+      );
+      resume = detail.runs.find((r) => r.prompt === "is anyone there");
+      if (!resume) await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.ok(resume, "a message parked during the deploy becomes a run once the card is free");
+    assert.equal(await waitForRun(resume.id), "succeeded");
+    const transcript = await (await app.request(`/api/runs/${resume.id}/transcript`)).text();
+    assert.match(transcript, /you> is anyone there/, "the reply opens the new run as the user's own line");
+  },
+);
 
 /**
  * "Run claude-code" on a stage whose assigned agent IS a claude-code

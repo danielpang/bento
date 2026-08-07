@@ -212,13 +212,21 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         setFeatures([]);
         return;
       }
-      const [pipeline, featureRows] = await Promise.all([
+      const [pipeline, featureRows, snapshot] = await Promise.all([
         client.getPipeline(projectId),
         client.listFeatures(projectId),
+        // The run status behind every card's face. Seeding it here
+        // rather than only from live board events: a run that started
+        // before this page opened (or while its stream was down) never
+        // emits into a fresh session, so the card used to read
+        // "not started" while its agent worked.
+        client.getBoardSnapshot(projectId),
       ]);
       setStages(pipeline.stages);
       setPipelineId(pipeline.id);
       setFeatures(featureRows);
+      setRunStatus(snapshot.statuses);
+      setLastOutput(snapshot.outputs);
       setLoadError("");
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -276,26 +284,33 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   useEffect(() => {
     if (!projectId) return;
     let timer: number | null = null;
-    const stop = client.streamBoard(projectId, (event) => {
-      const e = event as { featureId?: string; status?: string; type?: string; text?: string };
-      if (e.type === "run_updated" && e.featureId && e.status) {
-        setRunStatus((prev) => ({ ...prev, [e.featureId!]: e.status }));
-        // The drawer refetches its runs list on this tick, so a run
-        // started elsewhere (another tab, the API, an auto-start) still
-        // surfaces its Stop button and its row without reopening.
-        setRunTicks((prev) => ({ ...prev, [e.featureId!]: (prev[e.featureId!] ?? 0) + 1 }));
-      }
-      // What the agent last said, shown on the card face so a board of
-      // running agents reads as work rather than as spinners.
-      if (e.type === "run_output" && e.featureId && e.text) {
-        setLastOutput((prev) => ({ ...prev, [e.featureId!]: e.text }));
-        return;
-      }
-      timer ??= window.setTimeout(() => {
-        timer = null;
-        void refresh();
-      }, 250);
-    });
+    const stop = client.streamBoard(
+      projectId,
+      (event) => {
+        const e = event as { featureId?: string; status?: string; type?: string; text?: string };
+        if (e.type === "run_updated" && e.featureId && e.status) {
+          setRunStatus((prev) => ({ ...prev, [e.featureId!]: e.status }));
+          // The drawer refetches its runs list on this tick, so a run
+          // started elsewhere (another tab, the API, an auto-start) still
+          // surfaces its Stop button and its row without reopening.
+          setRunTicks((prev) => ({ ...prev, [e.featureId!]: (prev[e.featureId!] ?? 0) + 1 }));
+        }
+        // What the agent last said, shown on the card face so a board of
+        // running agents reads as work rather than as spinners.
+        if (e.type === "run_output" && e.featureId && e.text) {
+          setLastOutput((prev) => ({ ...prev, [e.featureId!]: e.text }));
+          return;
+        }
+        timer ??= window.setTimeout(() => {
+          timer = null;
+          void refresh();
+        }, 250);
+      },
+      // Board events are not persisted, so whatever fired while the
+      // stream was down (a deploy, a dropped connection) is lost.
+      // Coming back up is the signal to resync from the snapshot.
+      () => void refresh(),
+    );
     return () => {
       stop();
       if (timer !== null) clearTimeout(timer);

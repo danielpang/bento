@@ -17,7 +17,7 @@ import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
 import { runRepositorySetup } from "./repo-setup.js";
-import { evaluateFeatureGate } from "./gate-evaluator.js";
+import { evaluateFeatureGate, JUDGE_PROMPT_PREFIX } from "./gate-evaluator.js";
 import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
@@ -86,10 +86,20 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       status,
     });
 
-  await ctx.db
+  /**
+   * Claimed atomically rather than checked then set. Boot recovery
+   * re-queues run.execute for every run still waiting (its original
+   * job may have died with the last process, or may still be sitting
+   * in pg-boss), and a plain read-then-write would let two workers
+   * both think they picked the run up. The compare-and-set makes
+   * exactly one of them run the agent.
+   */
+  const [claimed] = await ctx.db
     .update(agentRuns)
     .set({ status: "starting", startedAt: new Date() })
-    .where(eq(agentRuns.id, runId));
+    .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, "queued")))
+    .returning({ id: agentRuns.id });
+  if (!claimed) return; // a duplicate job claimed it first
   emitBoard("starting");
 
   const adapter = getAdapter(profile.cli);
@@ -130,9 +140,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     await ctx.db.insert(runEvents).values({ runId, seq, type: said.type, payload: said });
     ctx.bus.emitRunEvent({ runId, seq, event: said });
   };
-  // A resume run's prompt is the user's own line in the conversation,
-  // so it opens the transcript the way it would in a chat.
-  if (run.prompt && run.cliSessionId) await sayAsUser(run.prompt);
+  // The prompt the user typed is their own line in the conversation,
+  // so it opens the transcript the way it would in a chat. Generated
+  // prompts stay out: a stage run's prompt is empty here, and the
+  // judge's would read as a message nobody sent.
+  if (run.prompt && !run.prompt.startsWith(JUDGE_PROMPT_PREFIX)) await sayAsUser(run.prompt);
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
@@ -759,10 +771,97 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
   await deliverQueuedMessage(ctx, runId);
 }
 
+/**
+ * Puts the runs the previous process left behind back on the rails.
+ *
+ * A server-executed run's moving parts live in this process's memory:
+ * the exec stream to the sandbox, the abort handle, the stdin channel.
+ * A deploy kills all of them while the row stays "starting" or
+ * "running", and nothing else would ever touch it again: the worker
+ * drops jobs for runs already picked up, the reaper only looks at
+ * runner-executed claims, and startRunIfIdle refuses the card as busy.
+ * The card used to sit "running" forever, its gate unevaluated, its
+ * transcript cut off mid-sentence, its sandbox possibly still billing.
+ *
+ * The sprite the agent ran on survives, but an exec stream cannot be
+ * re-attached, so the honest ending is to close the run as interrupted,
+ * say so in the transcript, and hand back to the usual machinery: a
+ * message parked on the card becomes a resume run in the same session,
+ * and the gate re-evaluates. Runner-executed runs are not here on
+ * purpose: the machine running them outlives this process and reports
+ * when it is done.
+ *
+ * This assumes the single-process deployment the event bus already
+ * assumes; with two servers sharing a database, one's boot would close
+ * runs the other is actively executing.
+ */
+export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
+  const orphans = await ctx.db
+    .update(agentRuns)
+    .set({
+      status: "failed",
+      endedAt: new Date(),
+      error: "interrupted by a server restart",
+    })
+    .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])))
+    .returning({ id: agentRuns.id, featureId: agentRuns.featureId });
+
+  for (const orphan of orphans) {
+    const [seqRow] = await ctx.db
+      .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
+      .from(runEvents)
+      .where(eq(runEvents.runId, orphan.id));
+    const seq = Number(seqRow?.maxSeq ?? 0) + 1;
+    const event = {
+      type: "message" as const,
+      role: "system" as const,
+      text: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+    };
+    await ctx.db.insert(runEvents).values({ runId: orphan.id, seq, type: event.type, payload: event });
+    ctx.bus.emitRunEvent({ runId: orphan.id, seq, event });
+    // Any stream that reconnected before recovery ran is waiting live;
+    // this lets it close the way a normal finish would.
+    ctx.bus.emitRunDone(orphan.id, "failed");
+    const [feature] = await ctx.db.select().from(features).where(eq(features.id, orphan.featureId));
+    if (feature) {
+      ctx.bus.emitBoardEvent({
+        type: "run_updated",
+        projectId: feature.projectId,
+        featureId: feature.id,
+        runId: orphan.id,
+        status: "failed",
+      });
+    }
+    await deliverQueuedMessage(ctx, orphan.id);
+    await ctx.boss.send("gate.evaluate", { featureId: orphan.featureId });
+  }
+  if (orphans.length > 0) {
+    console.warn(`closed ${orphans.length} run(s) interrupted by the restart`);
+  }
+
+  /**
+   * Runs that never started go back on the queue. Their run.execute
+   * job died with the old process when pg-boss had already handed it
+   * out (the claim expires without a retry), so without this the row
+   * would wait on a job that never comes. When the original job is
+   * still sitting in the queue this sends a duplicate, which
+   * executeRun's atomic claim turns into a no-op.
+   */
+  const parked = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.executor, "server"), eq(agentRuns.status, "queued")));
+  for (const row of parked) {
+    await ctx.boss.send("run.execute", { runId: row.id });
+  }
+}
+
 export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("run.execute");
   await ctx.boss.createQueue("gate.evaluate");
   await ctx.boss.createQueue("runner.reap");
+
+  await recoverInterruptedRuns(ctx);
 
   /**
    * One worker per concurrent slot, each taking a single job.
