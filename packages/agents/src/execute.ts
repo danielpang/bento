@@ -52,12 +52,23 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     tail = (tail + " " + text.replaceAll(/\s+/g, " ").trim()).trimStart().slice(-600);
   };
 
+  // One session-start marker per run. claude-code, codex, cursor, and
+  // pi each emit it once and pass straight through; opencode emits a
+  // step_start before every agent loop step (each tool call and the
+  // final answer), so without collapsing, a 2-tool run printed
+  // "[session started]" three times. extractOutcome already takes the
+  // first init via events.find, so dropping the rest is safe for every
+  // adapter.
+  let initialized = false;
+
   const emit = async (line: string) => {
     const event = adapter.parseEvent(line);
     if (!event) {
       if (line.trim()) keep(line);
       return;
     }
+    if (event.type === "init" && initialized) return;
+    if (event.type === "init") initialized = true;
     events.push(event);
     await onEvent?.(event);
   };

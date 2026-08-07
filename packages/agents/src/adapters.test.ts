@@ -131,6 +131,38 @@ test("opencode surfaces an error line as failure", () => {
   assert.equal(outcome.sessionId, "ses_2");
 });
 
+/**
+ * opencode emits step_start before every agent loop step (each tool
+ * call and the final answer), all carrying the same session id. The
+ * adapter maps each to an init event, and init renders as
+ * "[session started]" in the transcript, so without runAgent's
+ * dedupe a 2-tool run opened the transcript with three of them.
+ * claude-code, codex, cursor, and pi each emit their init line once,
+ * so collapsing to the first is safe for every adapter.
+ */
+test("runAgent keeps only the first init across opencode step_starts", async () => {
+  async function* steps(): AsyncIterable<{ kind: "stdout" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stdout", data: `{"type":"step_start","sessionID":"ses_x","part":{}}\n` };
+    yield { kind: "stdout", data: `{"type":"tool_use","sessionID":"ses_x","part":{"tool":"bash","callID":"c1","state":{"status":"running"}}}\n` };
+    yield { kind: "stdout", data: `{"type":"tool_use","sessionID":"ses_x","part":{"tool":"bash","callID":"c1","state":{"status":"completed"}}}\n` };
+    yield { kind: "stdout", data: `{"type":"step_start","sessionID":"ses_x","part":{}}\n` };
+    yield { kind: "stdout", data: `{"type":"text","sessionID":"ses_x","part":{"text":"Done."}}\n` };
+    yield { kind: "stdout", data: `{"type":"step_start","sessionID":"ses_x","part":{}}\n` };
+    yield { kind: "exit", exitCode: 0 };
+  }
+  const seen: AgentEvent[] = [];
+  const { outcome } = await runAgent({
+    adapter: opencodeAdapter,
+    argv: ["opencode"],
+    exec: steps,
+    onEvent: (event) => seen.push(event),
+  });
+  const inits = seen.filter((e) => e.type === "init");
+  assert.equal(inits.length, 1, "only the first step_start should become an init");
+  assert.equal(outcome.sessionId, "ses_x");
+  assert.equal(outcome.ok, true);
+});
+
 test("opencode builds a provider qualified model command", () => {
   const cmd = opencodeAdapter.buildCommand({
     prompt: "do it",
