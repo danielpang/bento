@@ -137,8 +137,8 @@ function AnchorLink({ id, label }: { id: string; label: string }) {
  * The browser does this itself for a document it was handed whole, but
  * this page is rendered after the navigation: at the moment the engine
  * looks for the fragment there is a bare <div id="root"> and nothing
- * to find, so /changelog#sprites landed at the top and looked like a
- * broken link.
+ * to find, so /changelog#board-navigation landed at the top and looked
+ * like a broken link.
  *
  * The listener stays for the same reason in reverse: an in-page anchor
  * click only changes the hash, so once the element exists the browser

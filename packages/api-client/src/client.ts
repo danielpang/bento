@@ -234,6 +234,25 @@ export class BentoClient {
     return this.request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** A new name for the board. Nothing else about the project moves. */
+  renameProject(projectId: string, name: string) {
+    return this.request<Project>(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  /**
+   * Removes the project and everything on its board: repositories, the
+   * pipeline, every card, and every run those cards carry. Refused with
+   * 409 while an agent is still working one of them.
+   */
+  deleteProject(projectId: string) {
+    return this.request<{ ok: boolean; deletedCards: number }>(`/api/projects/${projectId}`, {
+      method: "DELETE",
+    });
+  }
+
   getPipeline(projectId: string) {
     return this.request<Pipeline>(`/api/projects/${projectId}/pipeline`);
   }
