@@ -24,6 +24,13 @@ const envSchema = z.object({
   /** A runner-claimed run with no report for this long is requeued. */
   BENTO_RUNNER_CLAIM_TIMEOUT_MIN: z.coerce.number().int().positive().default(45),
   BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().max(64).default(4),
+  /**
+   * How long one agent run may execute before it is stopped, in
+   * minutes. A backstop against runaway processes, not a pace
+   * expectation: real agent sessions legitimately run for hours, the
+   * way they do on the hosted agent products.
+   */
+  BENTO_RUN_TIMEOUT_MIN: z.coerce.number().int().positive().default(120),
 
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),

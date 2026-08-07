@@ -36,6 +36,8 @@ export interface SpriteDriverOptions {
  */
 export class SpriteDriver implements SandboxDriver {
   provider = "sprite" as const;
+  /** The SDK carries stdin over the exec socket; see feedStdin. */
+  supportsStdin = true;
   private client: SpritesClient;
   private workdir: string;
 
@@ -185,10 +187,18 @@ export class SpriteDriver implements SandboxDriver {
 
     const child = sprite.spawn(command, args, {
       cwd: opts?.cwd ?? handle.workdir,
-      ...(opts?.env ? { env: opts.env } : {}),
+      /**
+       * IS_SANDBOX says the sandbox is the security boundary, which a
+       * sprite is. Claude Code checks it before accepting
+       * --dangerously-skip-permissions as root, and sprites run
+       * commands as root; without it every claude-code run died at
+       * exit 1 with no output. The Docker driver learned this the same
+       * way (see docker.ts).
+       */
+      env: { IS_SANDBOX: "1", ...opts?.env },
     });
     const stopKeepaliveGuard = defuseKeepalive(child);
-    closeStdin(child);
+    feedStdin(child, opts?.stdin);
 
     const queue: ExecChunk[] = [];
     let notify: (() => void) | null = null;
@@ -201,12 +211,22 @@ export class SpriteDriver implements SandboxDriver {
     child.stdout.on("data", (d: Buffer | string) => push({ kind: "stdout", data: d.toString() }));
     child.stderr.on("data", (d: Buffer | string) => push({ kind: "stderr", data: d.toString() }));
     child.on("error", (err: Error) => {
-      push({ kind: "stderr", data: String(err) });
+      push({ kind: "stderr", data: scrubExecUrl(String(err)) });
       push({ kind: "exit", exitCode: -1 });
       done = true;
       notify?.();
     });
     child.on("exit", (code: number | null) => {
+      // A real process exit arrives as an unsigned byte, so a negative
+      // or missing code here always means the socket closed without
+      // one. Said out loud, because "exit code -1" reads as the agent
+      // failing when the agent was never heard from at all.
+      if (code === null || code < 0) {
+        push({
+          kind: "stderr",
+          data: "the connection to the sandbox closed before the command reported an exit",
+        });
+      }
       push({ kind: "exit", exitCode: code ?? -1 });
       done = true;
       notify?.();
@@ -235,7 +255,18 @@ export class SpriteDriver implements SandboxDriver {
     const onAbort = () => kill();
     opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
-    const timeout = opts?.timeoutMs ? setTimeout(kill, opts.timeoutMs) : null;
+    // Named in the stream because a SIGTERM'd CLI exits without saying
+    // why, and "stopped before reporting a result" hides that the
+    // stopping was ours.
+    const timeout = opts?.timeoutMs
+      ? setTimeout(() => {
+          push({
+            kind: "stderr",
+            data: `the run hit its ${Math.round(opts.timeoutMs! / 60_000)} minute limit and was stopped`,
+          });
+          kill();
+        }, opts.timeoutMs)
+      : null;
 
     try {
       while (true) {
@@ -354,7 +385,7 @@ function runScript(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const child = sprite.spawn("sh", ["-c", script]);
   const stopKeepaliveGuard = defuseKeepalive(child);
-  closeStdin(child);
+  feedStdin(child);
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
@@ -386,26 +417,55 @@ function runScript(
 }
 
 /**
- * Sends end-of-input to the spawned process as soon as its connection
- * is up.
+ * Drives the spawned process's stdin: feeds it the caller's lines when
+ * there are any, and always ends it so the process sees end-of-input.
  *
  * The SDK asks the server to open the command's stdin on every exec
  * (stdin=true on the URL) and only sends the end-of-input frame when
- * this side ends the stdin stream. Nothing here writes to stdin, so
- * without this the process sits behind a pipe that never closes. An
- * agent CLI treats a piped stdin as input it must read before
- * starting (opencode's run awaits stdin to EOF), so a run produced
- * not a single event, indefinitely. The SDK's keepalive used to cut
- * exactly those runs off after 45 quiet seconds, which read as a
- * websocket failure; once defuseKeepalive turned that off, the same
- * hang simply ran until the 30 minute limit.
+ * this side ends the stdin stream. An agent CLI treats a piped stdin
+ * as input it must read before starting (opencode's run awaits stdin
+ * to EOF), so a run whose stdin never closed produced not a single
+ * event, indefinitely. The SDK's keepalive used to cut exactly those
+ * runs off after 45 quiet seconds, which read as a websocket failure;
+ * once defuseKeepalive turned that off, the same hang simply ran until
+ * the run limit.
  *
- * On "spawn" rather than immediately, because the SDK drops the EOF
- * frame silently while the socket is still connecting, and "spawn"
- * fires once it is open.
+ * With lines, this is the live session: each one is a user message
+ * flowing to the agent mid-run, and the iterable ending is how the
+ * agent learns the conversation is over. Mirrors the Docker driver.
+ *
+ * On "spawn" rather than immediately, because writes and the EOF frame
+ * are dropped or refused while the socket is still connecting, and
+ * "spawn" fires once it is open.
  */
-function closeStdin(child: SpriteCommand): void {
-  child.on("spawn", () => child.stdin.end());
+function feedStdin(child: SpriteCommand, lines?: AsyncIterable<string>): void {
+  child.on("spawn", () => {
+    if (!lines) {
+      child.stdin.end();
+      return;
+    }
+    void (async () => {
+      try {
+        for await (const line of lines) {
+          child.stdin.write(line.endsWith("\n") ? line : `${line}\n`);
+        }
+      } catch {
+        // The connection died first; the exit chunk tells the story.
+      } finally {
+        child.stdin.end();
+      }
+    })();
+  });
+}
+
+/**
+ * The SDK appends the exec URL to its connection errors, and that URL
+ * carries the process's entire environment as query parameters,
+ * credentials included. These strings end up in run transcripts, so
+ * the URL must never survive into one.
+ */
+function scrubExecUrl(message: string): string {
+  return message.replace(/wss?:\/\/\S+/g, "[sandbox exec url]");
 }
 
 /**
