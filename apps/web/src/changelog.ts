@@ -47,6 +47,10 @@ export const CHANGELOG: ChangelogEntry[] = [
         title: "Contact moved to the bottom bar",
         body: "Contact and this changelog now sit in a strip along the bottom of the console, reachable from any width without opening a menu first.",
       },
+      {
+        title: "The tab icon updates when it changes",
+        body: "Icon links now carry a hash of the file behind them, so replacing an icon changes its address and browsers stop drawing the one they cached. The Mac app also picks up the bento mark, which it had never been given.",
+      },
     ],
   },
   {
