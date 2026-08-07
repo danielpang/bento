@@ -220,10 +220,22 @@ export function runRoutes(ctx: AppContext) {
      * SSE stream of a run's events. Replays persisted events after
      * ?since=<seq>, then stays live until the run reaches a terminal
      * status. Event data is the run_events row shape.
+     *
+     * Reconnects resume rather than restart: every frame carries its
+     * seq as the SSE id, so EventSource sends Last-Event-ID when it
+     * reopens the stream (after a deploy or a network drop), and the
+     * replay below starts from there. Honouring it is what keeps a
+     * reconnect from replaying the whole run (every message twice) or
+     * skipping whatever fired while the socket was down.
      */
     .get("/:id/events", async (c) => {
       const runId = c.req.param("id");
-      const since = Number(c.req.query("since") ?? 0);
+      const sinceParam = Number(c.req.query("since") ?? 0);
+      const lastEventId = Number(c.req.header("Last-Event-ID") ?? 0);
+      const since = Math.max(
+        Number.isFinite(sinceParam) ? sinceParam : 0,
+        Number.isFinite(lastEventId) ? lastEventId : 0,
+      );
       if (!(await getAccessibleRun(ctx, c, runId))) return c.json({ error: "not found" }, 404);
 
       return streamSSE(c, async (stream) => {

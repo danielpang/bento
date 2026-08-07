@@ -716,6 +716,7 @@ async function holdFeature(ctx: AppContext, feature: Feature, stageId: string, r
  * readable off the run itself.
  */
 const JUDGE_PROMPT_PREFIX = "You are the completion judge";
+export { JUDGE_PROMPT_PREFIX };
 
 function buildJudgePrompt(
   stage: Stage,

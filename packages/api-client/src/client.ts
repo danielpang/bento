@@ -346,7 +346,8 @@ export class BentoClient {
   }
 
   /**
-   * Every card's newest run status, in one request.
+   * Every card's newest run status and latest spoken line, in one
+   * request.
    *
    * A client that polls needs this for the whole board, not for the
    * card someone happens to have selected: a board where four of five
@@ -354,7 +355,7 @@ export class BentoClient {
    * status at all. The line snapshot already carries it, so this reads
    * that rather than asking per card and growing with the board.
    */
-  async getRunStatuses(projectId: string): Promise<Record<string, string>> {
+  async getBoardSnapshot(projectId: string): Promise<{ statuses: Record<string, string>; outputs: Record<string, string> }> {
     const token = await this.tokens?.get();
     const res = await this.fetchImpl(`${this.baseUrl}/api/projects/${projectId}/board/plain`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
@@ -362,12 +363,19 @@ export class BentoClient {
     });
     if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
     const statuses: Record<string, string> = {};
+    const outputs: Record<string, string> = {};
     for (const line of (await res.text()).split("\n")) {
-      const [kind, id, , , runStatus] = line.split("|");
-      if (kind !== "feature" || !id || !runStatus || runStatus === "-") continue;
-      statuses[id] = runStatus;
+      const [kind, id, , , runStatus, , , output] = line.split("|");
+      if (kind !== "feature" || !id) continue;
+      if (runStatus && runStatus !== "-") statuses[id] = runStatus;
+      if (output && output !== "-") outputs[id] = output;
     }
-    return statuses;
+    return { statuses, outputs };
+  }
+
+  /** Just the statuses of the board snapshot, for polling clients. */
+  async getRunStatuses(projectId: string): Promise<Record<string, string>> {
+    return (await this.getBoardSnapshot(projectId)).statuses;
   }
 
   createFeature(input: { projectId: string; title: string; description?: string }) {
@@ -732,11 +740,23 @@ export class BentoClient {
     return () => controller.abort();
   }
 
-  /** Streams board changes for a project (card moved, run status changed). */
-  streamBoard(projectId: string, onEvent: (event: unknown) => void): () => void {
+  /**
+   * Streams board changes for a project (card moved, run status changed).
+   *
+   * Board events live only in memory on the server, so anything emitted
+   * while this stream was down (a deploy, a network drop) never arrives.
+   * `onReconnect` fires when the stream opens again after a drop, which
+   * is the caller's cue to refetch a snapshot and fill the gap.
+   */
+  streamBoard(projectId: string, onEvent: (event: unknown) => void, onReconnect?: () => void): () => void {
     const source = new EventSource(`${this.baseUrl}/api/board/${projectId}/events`, {
       withCredentials: !this.tokens,
     });
+    let opened = false;
+    source.onopen = () => {
+      if (opened) onReconnect?.();
+      opened = true;
+    };
     source.addEventListener("board_event", (e) => onEvent(JSON.parse((e as MessageEvent<string>).data)));
     return () => source.close();
   }
