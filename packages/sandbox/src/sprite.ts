@@ -1,5 +1,5 @@
 import { SpritesClient, type Sprite } from "@fly/sprites";
-import { AGENT_BINARIES, AGENT_TOOLCHAIN_SCRIPT } from "./agent-toolchain.js";
+import { AGENT_BINARIES, AGENT_TOOLCHAIN_SCRIPT, TOOLCHAIN_MARKER } from "./agent-toolchain.js";
 import {
   collectExec,
   type ExecChunk,
@@ -55,19 +55,36 @@ export class SpriteDriver implements SandboxDriver {
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
     const name = this.spriteName(spec.featureId);
+    const say = async (message: string) => {
+      await spec.onProgress?.(message);
+    };
 
     let sprite: Sprite;
+    let reused = true;
     try {
       sprite = await this.client.getSprite(name);
     } catch {
+      reused = false;
       sprite = await this.client.createSprite(name, {
         ramMB: this.options.ramMB ?? 4096,
         cpus: this.options.cpus ?? 2,
         ...(this.options.region ? { region: this.options.region } : {}),
       } as Parameters<SpritesClient["createSprite"]>[1]);
     }
+    await say(reused ? `Reusing this card's cloud sandbox (${name}).` : `Created cloud sandbox ${name}.`);
 
-    await runScript(sprite, `mkdir -p ${shellQuote(this.workdir)}`);
+    // One round trip prepares the workspace and answers whether the
+    // agent CLIs are already there, so the wait that follows can be
+    // named before it happens rather than discovered after.
+    const probe = await runScript(
+      sprite,
+      [
+        "set -eu",
+        `mkdir -p ${shellQuote(this.workdir)}`,
+        `if [ -f ${shellQuote(TOOLCHAIN_MARKER)} ]; then echo tools-present; else echo tools-absent; fi`,
+      ].join("\n"),
+    );
+    const toolsPresent = probe.stdout.includes("tools-present");
 
     /**
      * A sprite is a bare machine, not an image: there is nowhere to bake
@@ -76,7 +93,15 @@ export class SpriteDriver implements SandboxDriver {
      * marker is already there, which is every stage after a card's
      * first.
      */
-    await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
+    if (toolsPresent) {
+      await say("Agent tools are already installed.");
+      await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
+    } else {
+      await say("Installing the agent tools. This takes a few minutes on a new sandbox.");
+      const started = Date.now();
+      await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
+      await say(`Agent tools installed in ${Math.round((Date.now() - started) / 1000)}s.`);
+    }
 
     // Repositories live inside the sprite, so clone what is missing and
     // fetch what is already there.
@@ -85,6 +110,7 @@ export class SpriteDriver implements SandboxDriver {
       const dir = `${this.workdir}/${repo.name}`;
       const branch = repo.branch ?? "main";
       const baseBranch = repo.baseBranch ?? "main";
+      await say(`Preparing repository ${repo.name}...`);
       const verifyIdentity = [
         `if [ -d ${shellQuote(dir)}/.git ]; then`,
         `  current_origin=$(git -C ${shellQuote(dir)} remote get-url origin 2>/dev/null || true)`,
@@ -123,6 +149,7 @@ export class SpriteDriver implements SandboxDriver {
         ].join("\n");
         await runScript(sprite, script);
       }
+      await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
 
     // A Sprite persists for the life of a feature. Removing a repository
@@ -160,6 +187,7 @@ export class SpriteDriver implements SandboxDriver {
       cwd: opts?.cwd ?? handle.workdir,
       ...(opts?.env ? { env: opts.env } : {}),
     });
+    const stopKeepaliveGuard = defuseKeepalive(child);
 
     const queue: ExecChunk[] = [];
     let notify: (() => void) | null = null;
@@ -183,14 +211,30 @@ export class SpriteDriver implements SandboxDriver {
       notify?.();
     });
 
-    const onAbort = () => void child.kill();
+    /**
+     * A kill travels over the same WebSocket as the output, so a kill
+     * sent on a dead connection is sent into the void and no exit event
+     * ever comes back. Without a bound, the stream then waits forever
+     * and the run holds its worker slot until the server restarts. The
+     * reaper turns that into a failed run.
+     */
+    let reap: NodeJS.Timeout | null = null;
+    const kill = () => {
+      void child.kill();
+      if (!reap) {
+        reap = setTimeout(() => {
+          if (done) return;
+          push({ kind: "stderr", data: "the sandbox did not confirm the process ended after it was told to stop" });
+          push({ kind: "exit", exitCode: -1 });
+          done = true;
+        }, 15_000);
+        reap.unref?.();
+      }
+    };
+    const onAbort = () => kill();
     opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
-    const timeout = opts?.timeoutMs
-      ? setTimeout(() => {
-          void child.kill();
-        }, opts.timeoutMs)
-      : null;
+    const timeout = opts?.timeoutMs ? setTimeout(kill, opts.timeoutMs) : null;
 
     try {
       while (true) {
@@ -206,7 +250,9 @@ export class SpriteDriver implements SandboxDriver {
         notify = null;
       }
     } finally {
+      stopKeepaliveGuard();
       if (timeout) clearTimeout(timeout);
+      if (reap) clearTimeout(reap);
       opts?.signal?.removeEventListener("abort", onAbort);
     }
   }
@@ -295,9 +341,73 @@ export class SpriteDriver implements SandboxDriver {
  * The scripts here are sh, so they go to sh. `-c` rather than `-lc`:
  * the installers put binaries in /usr/local/bin precisely so nothing
  * has to depend on a login shell's profile.
+ *
+ * spawn rather than execFile: execFile hides its connection inside a
+ * promise, and these scripts need defuseKeepalive on that connection.
+ * An installer that downloads quietly for 45 seconds would otherwise
+ * be cut off the same way agent runs were.
  */
-function runScript(sprite: Sprite, script: string) {
-  return sprite.execFile("sh", ["-c", script]);
+function runScript(
+  sprite: Sprite,
+  script: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const child = sprite.spawn("sh", ["-c", script]);
+  const stopKeepaliveGuard = defuseKeepalive(child);
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer | string) => {
+      stdout += d.toString();
+    });
+    child.stderr.on("data", (d: Buffer | string) => {
+      stderr += d.toString();
+    });
+    child.on("error", (err: Error) => {
+      stopKeepaliveGuard();
+      reject(err);
+    });
+    child.on("exit", (code: number | null) => {
+      stopKeepaliveGuard();
+      const exitCode = code ?? -1;
+      if (exitCode !== 0) {
+        // stdout and stderr ride on the error, the shape run-executor's
+        // describeSandboxError reads to put installer output in the run
+        // record.
+        reject(
+          Object.assign(new Error(`provisioning script failed with exit code ${exitCode}`), { stdout, stderr }),
+        );
+        return;
+      }
+      resolve({ stdout, stderr, exitCode });
+    });
+  });
+}
+
+/**
+ * Stops the SDK's own keepalive from killing a quiet command.
+ *
+ * @fly/sprites never sends a ping: its WSCommand only stamps an
+ * activity clock when output arrives, and after 45 seconds without
+ * any it declares the connection dead ("WebSocket keepalive timeout")
+ * and closes it. A coding agent inside a long tool call or a long
+ * model turn is exactly that quiet, so every run died the first time
+ * its CLI spent 45 seconds working in silence. The process itself was
+ * fine; only the client gave up.
+ *
+ * Resetting the clock from outside turns the fabricated timeout off
+ * while leaving real failure signals alone: a connection that
+ * actually breaks still surfaces through the socket's error and close
+ * events. The clock lives on a private property of a private object,
+ * reached by duck type; the pin test in sprite.test.ts fails against
+ * the installed SDK if either name changes.
+ */
+function defuseKeepalive(child: unknown): () => void {
+  const timer = setInterval(() => {
+    const ws = (child as { wsCmd?: { resetKeepalive?: () => void } }).wsCmd;
+    ws?.resetKeepalive?.();
+  }, 10_000);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /** Minimal POSIX single-quote escaping for interpolated paths and URLs. */

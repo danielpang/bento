@@ -40,6 +40,15 @@ export interface ProvisionSpec {
   mounts?: { hostPath: string; containerPath: string; readOnly?: boolean }[];
   image?: string;
   env?: Record<string, string>;
+  /**
+   * Called with a human readable line as provisioning advances: sandbox
+   * created, tools installed, repository cloned. Provisioning a cold
+   * sandbox takes minutes, and without these lines the run just reads
+   * "starting" with no way to tell progress from a hang. Drivers await
+   * each call so the lines land in order; a driver with nothing slow to
+   * report may ignore it.
+   */
+  onProgress?: (message: string) => void | Promise<void>;
 }
 
 export type ExecChunk =
