@@ -63,44 +63,122 @@ function useCardTravel(board: React.RefObject<HTMLDivElement | null>, deps: unkn
 }
 
 /**
+ * Layout position rather than rendered position. offsetLeft and
+ * offsetTop ignore transforms, and the travel animation starts a moved
+ * card back at its old lane, so getBoundingClientRect would reveal
+ * where the card used to be instead of where it is.
+ */
+function layoutOffset(el: HTMLElement): { x: number; y: number } {
+  let x = 0;
+  let y = 0;
+  let node: HTMLElement | null = el;
+  while (node) {
+    x += node.offsetLeft;
+    y += node.offsetTop;
+    node = node.offsetParent as HTMLElement | null;
+  }
+  return { x, y };
+}
+
+/** How much of the board's right edge the open drawer covers. */
+function drawerReserve(board: HTMLElement): number {
+  if (!board.hasAttribute("data-drawer-open")) return 0;
+  // The CSS declares it; older WebKit has returned the unresolved
+  // calc() for a computed scroll-padding, and right after the
+  // attribute lands the recalc has not happened yet, so the docked
+  // panel itself is the cross-check.
+  const declared = parseFloat(getComputedStyle(board).scrollPaddingRight);
+  if (Number.isFinite(declared) && declared > 0) return declared;
+  const drawer = document.querySelector<HTMLElement>(".drawer");
+  if (drawer) {
+    const box = drawer.getBoundingClientRect();
+    // Docked on the right only: on small screens it is a bottom sheet,
+    // which covers nothing horizontally.
+    return box.top === 0 ? box.width + 24 : 0;
+  }
+  // The panel's code is still arriving: fall back to the rule the CSS
+  // declares for the side-panel layout rather than read a style that
+  // has not settled.
+  return window.innerWidth > 720 ? Math.min(560, window.innerWidth) + 24 : 0;
+}
+
+/** Time constant of the reveal's approach. */
+const REVEAL_EASE_MS = 55;
+/** The drawer's runway padding can lag the attribute that asks for it
+    (and the drawer chunk can lag further), so the reveal retries for a
+    short while rather than trusting the first layout it reads. */
+const REVEAL_GIVE_UP_MS = 800;
+
+/** Latest reveal per card wins, so a retarget never fights itself. */
+const revealRuns = new WeakMap<HTMLElement, number>();
+
+/** Move a scroll position a fraction of the way to its target.
+    Returns true once there is nothing left to do. */
+function approach(scroller: HTMLElement, prop: "scrollLeft" | "scrollTop", target: number, step: number): boolean {
+  const gap = target - scroller[prop];
+  if (Math.abs(gap) < 0.5) return true;
+  const next = step === 1 ? target : scroller[prop] + gap * step;
+  scroller[prop] = Math.abs(target - next) < 0.5 ? target : next;
+  return false;
+}
+
+/**
  * Bring a freshly selected card out from under the drawer.
  *
- * scrollIntoView cannot do this alone: what keeps the card clear of
- * the drawer is the board's scroll-padding, and WebKit ignores
- * scroll-padding for scrollIntoView, so on an iPad the card stayed
- * where it was, technically inside the scrollport, actually under the
- * panel. Measure and scroll by hand instead, which every engine gets
- * right. The drawer's width is not repeated here: the board's
- * scroll-padding-right already reserves it, so the CSS stays the one
- * place that number lives.
+ * No one-shot variant of this survives contact with the engines:
+ * scrollIntoView ignores the board's scroll-padding in WebKit, smooth
+ * scrollBy is not applied to overflow containers on the iPad at all,
+ * and the drawer's runway padding reaches layout a beat after the
+ * attribute that asks for it, so an early scroll clamps to nothing.
+ * Instead the target is recomputed from live layout and the scroll
+ * rewritten every frame until it holds, which each engine gets right.
  */
 function revealCard(card: HTMLElement) {
-  const behavior: ScrollBehavior = REDUCED_MOTION ? "auto" : "smooth";
+  const run = (revealRuns.get(card) ?? 0) + 1;
+  revealRuns.set(card, run);
+  const t0 = performance.now();
 
-  // Sideways: the board is the only horizontal scroller.
   const board = card.closest<HTMLElement>(".board");
-  if (board) {
-    const reserve = parseFloat(getComputedStyle(board).scrollPaddingRight) || 0;
-    const cardBox = card.getBoundingClientRect();
-    const boardBox = board.getBoundingClientRect();
-    const visibleRight = boardBox.right - reserve;
-    let delta = 0;
-    if (cardBox.right > visibleRight) delta = cardBox.right - visibleRight;
-    else if (cardBox.left < boardBox.left) delta = cardBox.left - boardBox.left;
-    if (delta !== 0) board.scrollBy({ left: delta, behavior });
-  }
+  // A gesture means the person has taken over the scroll; stop driving.
+  const yieldToGesture = () => revealRuns.set(card, run + 1);
+  board?.addEventListener("wheel", yieldToGesture, { passive: true, once: true });
+  board?.addEventListener("touchstart", yieldToGesture, { passive: true, once: true });
 
-  // Up and down: each lane scrolls its own cards; the page itself does
-  // not scroll.
-  const laneCards = card.closest<HTMLElement>(".lane-cards");
-  if (laneCards) {
-    const cardBox = card.getBoundingClientRect();
-    const laneBox = laneCards.getBoundingClientRect();
-    let delta = 0;
-    if (cardBox.bottom > laneBox.bottom) delta = cardBox.bottom - laneBox.bottom;
-    else if (cardBox.top < laneBox.top) delta = cardBox.top - laneBox.top;
-    if (delta !== 0) laneCards.scrollBy({ top: delta, behavior });
-  }
+  let prev = t0;
+  const tick = (now: number) => {
+    if (revealRuns.get(card) !== run) return;
+    const step = REDUCED_MOTION ? 1 : 1 - Math.exp(-(now - prev) / REVEAL_EASE_MS);
+    prev = now;
+    let settled = true;
+
+    // Sideways: the board is the only horizontal scroller.
+    if (board) {
+      const reserve = drawerReserve(board);
+      const cardX = layoutOffset(card).x - layoutOffset(board).x;
+      const visible = board.clientWidth - reserve;
+      let target = board.scrollLeft;
+      if (cardX + card.offsetWidth - target > visible) target = cardX + card.offsetWidth - visible;
+      else if (cardX - target < 0) target = cardX;
+      target = Math.max(0, Math.min(target, board.scrollWidth - board.clientWidth));
+      settled = approach(board, "scrollLeft", target, step) && settled;
+    }
+
+    // Up and down: each lane scrolls its own cards; the page itself
+    // does not scroll.
+    const laneCards = card.closest<HTMLElement>(".lane-cards");
+    if (laneCards) {
+      const cardY = layoutOffset(card).y - layoutOffset(laneCards).y;
+      let target = laneCards.scrollTop;
+      if (cardY + card.offsetHeight - target > laneCards.clientHeight)
+        target = cardY + card.offsetHeight - laneCards.clientHeight;
+      else if (cardY - target < 0) target = cardY;
+      target = Math.max(0, Math.min(target, laneCards.scrollHeight - laneCards.clientHeight));
+      settled = approach(laneCards, "scrollTop", target, step) && settled;
+    }
+
+    if (!settled && now - t0 < REVEAL_GIVE_UP_MS) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 /** The visual state a card reports: its run, or its gate if it is held. */
