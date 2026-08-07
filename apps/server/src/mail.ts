@@ -113,6 +113,31 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
+export interface ContactEmailInput {
+  to: string;
+  kind: "issue" | "feature";
+  message: string;
+  senderName: string;
+  senderEmail: string;
+}
+
+/**
+ * A contact form submission, delivered to the operator's inbox. The
+ * sender's address is in the body because the mail comes from the
+ * server's own from address, and a report nobody can reply to is a
+ * report that goes unanswered.
+ */
+export function contactMessage(input: ContactEmailInput): Message {
+  const label = input.kind === "issue" ? "Issue report" : "Feature request";
+  const subject = `[Bento] ${label} from ${input.senderEmail}`;
+  const text = [
+    `${label} from ${input.senderName} (${input.senderEmail}):`,
+    "",
+    input.message,
+  ].join("\n");
+  return { to: input.to, subject, text };
+}
+
 export interface LinkEmailInput {
   email: string;
   url: string;

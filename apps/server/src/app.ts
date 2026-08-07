@@ -21,6 +21,7 @@ import { catalogRoutes } from "./routes/catalog.js";
 import { and, eq } from "drizzle-orm";
 import { member } from "@bento/db";
 import { githubRoutes } from "./routes/github.js";
+import { contactRoutes } from "./routes/contact.js";
 
 export interface AppExtras {
   /**
@@ -134,6 +135,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/secrets", secretRoutes(ctx))
     .route("/github", githubRoutes(ctx))
     .route("/team", teamRoutes(ctx))
+    .route("/contact", contactRoutes(ctx))
     .route("/settings", settingsRoutes(ctx));
 
   app.route("/api", api);
