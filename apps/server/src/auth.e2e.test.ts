@@ -363,9 +363,8 @@ test("every entity route refuses a foreign tenant", async () => {
     // RLS policy can cover, so the matrix is the only thing pinning it.
     ["GET", `/api/runs/${run.id}/events`],
     ["GET", `/api/board/${project.id}/events`],
-    // Last, because a delete that went through would take every row
-    // the rest of this list names with it, and the probes after it
-    // would then be refused for the wrong reason.
+    // Last: a delete that went through would refuse everything after it
+    // for the wrong reason.
     ["DELETE", `/api/projects/${project.id}`],
   ];
 
@@ -377,9 +376,7 @@ test("every entity route refuses a foreign tenant", async () => {
     );
   }
 
-  // The project is still there, under its own name. A rename that went
-  // through would be one tenant relabelling another's board, and a
-  // delete that went through would have taken the board with it.
+  // The project is still there, under its own name.
   const projectAfter = await asOwner(`/api/projects/${project.id}`);
   assert.equal(projectAfter.status, 200, "the intruder must not have deleted the owner's project");
   assert.equal(

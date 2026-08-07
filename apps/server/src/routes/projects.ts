@@ -59,11 +59,7 @@ const repositoryInput = z.object({
   message: "provide a local path or GitHub repository",
 });
 
-/**
- * A project's display name. Shared by creation and rename so a name
- * one door accepts the other cannot refuse. One line, because it is
- * rendered in a picker and along a topbar.
- */
+/** Shared by creation and rename, so one door cannot refuse what the other accepts. */
 const projectName = z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/, "name must be one line");
 
 /**
@@ -173,15 +169,9 @@ async function resolveRepositoryInput(
 }
 
 /**
- * Projects read alphabetically wherever they are listed: the picker,
- * the settings page, the TUI.
- *
- * Unordered, Postgres hands back heap order, and an update rewrites the
- * row at the end of the table, so renaming a project moved it to the
- * bottom of the list, out from under the pointer that had just renamed
- * it. Case-folded, because otherwise every capitalised name sorts ahead
- * of every lowercase one, and the id breaks ties so two projects
- * sharing a name keep a stable order between requests.
+ * Unordered, an update rewrites the row at the end of the table, so
+ * renaming a project moved it to the bottom of every list. Case-folded,
+ * and the id breaks ties.
  */
 const byName = [sql`lower(${projects.name})`, asc(projects.id)];
 
@@ -395,14 +385,9 @@ export function projectRoutes(ctx: AppContext) {
       return c.json(project);
     })
     /**
-     * Renames a project.
-     *
-     * The name is the one part of a project that is only a label:
-     * checkouts, branches and the pipeline are each pointed at by
-     * something and are changed where they are configured. A project
-     * named after the first repository somebody happened to add is the
-     * usual reason for wanting this, and re-creating one to fix a word
-     * would take the board's cards with it.
+     * The name, and nothing else: checkouts, branches and the pipeline
+     * are each pointed at by something and change where they are
+     * configured.
      */
     .patch("/:id", zValidator("json", z.object({ name: projectName })), async (c) => {
       const projectId = c.req.param("id");
@@ -416,26 +401,17 @@ export function projectRoutes(ctx: AppContext) {
       return c.json(updated);
     })
     /**
-     * Deletes a project, and with it the board.
-     *
-     * Everything hanging off the row goes: repositories, the pipeline
-     * and its stages, every card, and every run and transcript on those
-     * cards. That is the whole point of the button, and it is why the
-     * caller is told the card count back rather than a bare ok.
+     * The project and everything hanging off it: repositories, the
+     * pipeline, every card, and every run and transcript on those cards.
      *
      * Refused while an agent is working, because a sandbox outlives the
-     * row it was started from: the run would go on doing work in a
-     * checkout with nothing left to report to, and the finish would
-     * look for a stage that is no longer there.
+     * row it was started from: the run would go on working in a checkout
+     * with nothing left to report to.
      *
-     * The sandbox rows go with the project; the containers behind them
-     * do not, because nothing in the server tears a sandbox down today.
-     * They are already left behind by every finished card, so this does
-     * not introduce the leak, but it does remove the last rows that
-     * name them. A sweep belongs in a job rather than in a request:
-     * destroying a container is a call to Docker or Sprites, and doing
-     * one per card here would hold a pooled connection for the length
-     * of them all.
+     * The sandbox rows go; the containers behind them do not, because
+     * nothing in the server tears one down today. A sweep belongs in a
+     * job, not in a request that would hold a pooled connection for one
+     * Docker call per card.
      */
     .delete("/:id", async (c) => {
       const projectId = c.req.param("id");
@@ -454,9 +430,8 @@ export function projectRoutes(ctx: AppContext) {
         );
       }
 
-      // Counted before the delete, purely to say what was taken. The
-      // cards go with the project, so the number is only recoverable
-      // now.
+      // Counted first: the cards go with the project, so this is the
+      // last moment the number exists.
       const [held] = await db(c, ctx)
         .select({ cards: count(features.id) })
         .from(features)
@@ -466,8 +441,8 @@ export function projectRoutes(ctx: AppContext) {
         .delete(projects)
         .where(eq(projects.id, projectId))
         .returning({ id: projects.id });
-      // Reporting success for a row that was never touched says the
-      // same thing to "deleted it" and to "that is not yours".
+      // Success on a row nothing touched says the same thing to
+      // "deleted it" and to "that is not yours".
       if (deleted.length === 0) return c.json({ error: "not found" }, 404);
       return c.json({ ok: true, deletedCards: Number(held?.cards ?? 0) });
     })

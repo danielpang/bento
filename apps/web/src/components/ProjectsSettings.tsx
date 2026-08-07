@@ -5,28 +5,17 @@ import { PromptDialog } from "./PromptDialog.js";
 import { useToast } from "./Toasts.js";
 
 /**
- * The projects this session can see, and what can be done to one after
- * it exists.
+ * Renaming and removing projects. Creating one stays on the board,
+ * which is where you are when you want another; neither of these is
+ * board work, and removing takes every card with it.
  *
- * Creating a project happens on the board, because that is where you
- * are when you want another one. Renaming and removing are not board
- * work: a name is usually wrong because the project was called after
- * the first repository somebody added, and removing a project takes
- * every card with it, which is not a thing to keep a button for beside
- * the control that starts agents.
- *
- * In multi mode the list is the active organization's projects and
- * nothing else, because the server scopes it per request. Switching
- * organizations under Team therefore changes what is listed here.
+ * The server scopes the list per request, so in multi mode this is the
+ * active organization's projects and nothing else.
  */
 export function ProjectsSettings({ client }: { client: BentoClient }) {
   const toast = useToast();
   const [projects, setProjects] = useState<Project[] | null>(null);
-  /**
-   * Whether the list failed to load, which is not the same as having no
-   * projects yet. "No projects yet" on a failed request is a claim about
-   * the team rather than about the request.
-   */
+  /** Distinct from an empty list: "no projects yet" on a failed request is a lie. */
   const [failed, setFailed] = useState(false);
   const [renaming, setRenaming] = useState<Project | null>(null);
   const [removing, setRemoving] = useState<Project | null>(null);
@@ -65,9 +54,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
           <div key={project.id} className="gate-check">
             <span className="gate-check-text">
               <span className="gate-check-name">{project.name}</span>
-              {/* The checkout, when there is one. A project can exist
-                  before its code does, so this is often absent and the
-                  row simply says less. */}
+              {/* A project can exist before its code does, so this is often absent. */}
               {project.localPath && (
                 <>
                   <br />
@@ -75,9 +62,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
                 </>
               )}
             </span>
-            {/* Both in the one action slot the member rows use, so the
-                two buttons stay together against the right edge rather
-                than drifting apart as a path wraps. */}
+            {/* One slot for both, so they stay together as a path wraps. */}
             <span className="member-action">
               <button className="btn btn-ghost" disabled={busy} onClick={() => setRenaming(project)}>
                 Rename
@@ -125,11 +110,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
   );
 }
 
-/**
- * What the delete takes, in the size it actually is. Null is a count
- * that could not be fetched, which is a reason to say less rather than
- * a reason to guess.
- */
+/** What goes with it. Null is a count that failed, so it says less rather than guessing. */
 function whatGoesWithIt(cards: number | null): string {
   const undone = "This cannot be undone.";
   if (cards === null) {
@@ -140,17 +121,9 @@ function whatGoesWithIt(cards: number | null): string {
 }
 
 /**
- * Removing a project, with the size of it said out loud.
- *
- * A yes or no dialog can promise "and its cards" without either side
- * knowing whether that is two cards or two hundred, so this counts them
- * first and puts the number in the sentence. The count is a request
- * that can fail, and a failed count is not a reason to refuse the
- * delete: the dialog falls back to naming what goes without the figure.
- *
- * The name has to be typed to confirm, because this takes more than
- * any other button in the console does and a Remove sitting beside a
- * Rename is close enough to reach by accident.
+ * "And its cards" can mean two or two hundred, so the cards are counted
+ * first and the number goes in the sentence. The name has to be typed:
+ * a Remove sitting beside a Rename is close enough to reach by accident.
  */
 function RemoveProjectDialog({
   client,
@@ -189,9 +162,7 @@ function RemoveProjectDialog({
       onRemoved();
       onClose();
     } catch (err) {
-      // Kept open on failure. The usual refusal is an agent still
-      // working a card, which is worth reading beside the button that
-      // caused it rather than after the dialog has gone.
+      // Kept open: the usual refusal is an agent still working a card.
       toast.fail(err);
     } finally {
       setBusy(false);

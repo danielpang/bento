@@ -3381,8 +3381,7 @@ button.session-expand[aria-pressed="true"] {
 .bottombar {
   display: flex;
   align-items: center;
-  /* Centred, because the pair is about Bento rather than about your
-     board: hard against the left edge they read as a continuation of
+  /* Centred: against the left edge the pair reads as a continuation of
      the board's own controls, which start there. */
   justify-content: center;
   gap: 4px;

@@ -409,8 +409,7 @@ test("a project can be renamed, and removing it takes its board", async () => {
     404,
     "the cards go with the project rather than outliving it",
   );
-  // Removing the same project twice must not read as though there were
-  // two of it.
+  // Removing it twice must not read as though there were two of it.
   assert.equal((await app.request(`/api/projects/${project.id}`, { method: "DELETE" })).status, 404);
 });
 
