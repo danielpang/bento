@@ -378,6 +378,41 @@ test("changes exclude work inherited from the branch point", async () => {
  * leave when empty. Occupied stages refuse deletion, because silently
  * relocating live cards is how boards lose things.
  */
+test("a project can be renamed, and removing it takes its board", async () => {
+  const { project } = await setupProject("Working title");
+  const feature = await createFeature(project.id, "Card that goes with it");
+
+  const renamed = await json<{ name: string }>(
+    await app.request(`/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "  Payments revamp  " }),
+    }),
+  );
+  assert.equal(renamed.name, "Payments revamp", "the stored name is trimmed");
+
+  const blank = await app.request(`/api/projects/${project.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "   " }),
+  });
+  assert.equal(blank.status, 400, "a name of only spaces is not a name");
+
+  const removed = await json<{ deletedCards: number }>(
+    await app.request(`/api/projects/${project.id}`, { method: "DELETE" }),
+  );
+  assert.equal(removed.deletedCards, 1, "the delete says how much board went with it");
+
+  assert.equal((await app.request(`/api/projects/${project.id}`)).status, 404);
+  assert.equal(
+    (await app.request(`/api/features/${feature.id}`)).status,
+    404,
+    "the cards go with the project rather than outliving it",
+  );
+  // Removing it twice must not read as though there were two of it.
+  assert.equal((await app.request(`/api/projects/${project.id}`, { method: "DELETE" })).status, 404);
+});
+
 test("stages can be added, and removed only when empty", async () => {
   const { project, stages: initial } = await setupProject("Editable pipeline");
   const pipeline = await json<{ id: string }>(await app.request(`/api/projects/${project.id}/pipeline`));

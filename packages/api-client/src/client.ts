@@ -234,6 +234,24 @@ export class BentoClient {
     return this.request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** The name, and nothing else about the project. */
+  renameProject(projectId: string, name: string) {
+    return this.request<Project>(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  /**
+   * The project and everything on its board. Refused with 409 while an
+   * agent is still working a card.
+   */
+  deleteProject(projectId: string) {
+    return this.request<{ ok: boolean; deletedCards: number }>(`/api/projects/${projectId}`, {
+      method: "DELETE",
+    });
+  }
+
   getPipeline(projectId: string) {
     return this.request<Pipeline>(`/api/projects/${projectId}/pipeline`);
   }
