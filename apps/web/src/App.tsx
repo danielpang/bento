@@ -48,6 +48,8 @@ function RouteFallback() {
 
 const client = new BentoClient({ baseUrl: window.location.origin });
 
+const PROJECT_KEY = "bento:projectId";
+
 export function App() {
   return (
     <Suspense fallback={<RouteFallback />}>
@@ -165,7 +167,18 @@ function FirstTeamGate({ userName }: { userName: string }) {
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
-  const [projectId, setProjectId] = useState<string | null>(null);
+  // Remembered across reloads: which board a user was last looking at.
+  // The list effect below still re-checks the stored id against the
+  // rows the current tenant can see, so a stale value from before an
+  // organization switch falls back to the first visible project
+  // rather than landing on one this session cannot open.
+  const [projectId, setProjectId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(PROJECT_KEY) ?? null;
+    } catch {
+      return null;
+    }
+  });
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [features, setFeatures] = useState<Feature[]>([]);
@@ -228,6 +241,19 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       })
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
   }, []);
+
+  // Persist the selection so a refresh lands on the same board. The
+  // list effect above has already rejected ids this tenant cannot see,
+  // so anything reaching here is one the session can open. Private
+  // browsing can refuse storage; the write is best effort.
+  useEffect(() => {
+    try {
+      if (projectId) localStorage.setItem(PROJECT_KEY, projectId);
+      else localStorage.removeItem(PROJECT_KEY);
+    } catch {
+      // ignore: storage unavailable
+    }
+  }, [projectId]);
 
   useEffect(() => {
     void refresh();
