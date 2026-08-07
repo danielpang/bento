@@ -67,7 +67,7 @@ export class SpriteDriver implements SandboxDriver {
       } as Parameters<SpritesClient["createSprite"]>[1]);
     }
 
-    await sprite.exec(`mkdir -p ${shellQuote(this.workdir)}`);
+    await runScript(sprite, `mkdir -p ${shellQuote(this.workdir)}`);
 
     /**
      * A sprite is a bare machine, not an image: there is nowhere to bake
@@ -76,7 +76,7 @@ export class SpriteDriver implements SandboxDriver {
      * marker is already there, which is every stage after a card's
      * first.
      */
-    await sprite.exec(AGENT_TOOLCHAIN_SCRIPT);
+    await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
 
     // Repositories live inside the sprite, so clone what is missing and
     // fetch what is already there.
@@ -106,12 +106,13 @@ export class SpriteDriver implements SandboxDriver {
             "fi",
             `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(`origin/${baseBranch}`)})`,
           ].join("\n");
-          await sprite.exec(script);
+          await runScript(sprite, script);
         } finally {
           await sprite.filesystem("/").rm(bundlePath).catch(() => {});
         }
       } else {
         const script = [
+          "set -eu",
           ...verifyIdentity,
           `if [ -d ${shellQuote(dir)}/.git ]; then`,
           `  cd ${shellQuote(dir)} && git fetch --all --prune`,
@@ -120,7 +121,7 @@ export class SpriteDriver implements SandboxDriver {
           `fi`,
           `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)})`,
         ].join("\n");
-        await sprite.exec(script);
+        await runScript(sprite, script);
       }
     }
 
@@ -279,6 +280,24 @@ export class SpriteDriver implements SandboxDriver {
   async destroy(handle: SandboxHandle): Promise<void> {
     await this.client.deleteSprite(handle.externalId).catch(() => {});
   }
+}
+
+/**
+ * Runs a script through a shell inside the sprite.
+ *
+ * `sprite.exec(string)` reads like a shell and is not one: the SDK
+ * splits the string on whitespace and execs the first word with the
+ * rest as arguments. A provisioning script handed to it arrives as a
+ * command named `set` carrying a hundred arguments, and every quote,
+ * `&&`, `$VAR`, and `if` in it means nothing. Provisioning failed on
+ * its first real attempt with `ExecError: exit code 1` because of it.
+ *
+ * The scripts here are sh, so they go to sh. `-c` rather than `-lc`:
+ * the installers put binaries in /usr/local/bin precisely so nothing
+ * has to depend on a login shell's profile.
+ */
+function runScript(sprite: Sprite, script: string) {
+  return sprite.execFile("sh", ["-c", script]);
 }
 
 /** Minimal POSIX single-quote escaping for interpolated paths and URLs. */
