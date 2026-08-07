@@ -64,6 +64,8 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
   const [busy, setBusy] = useState(false);
   /** What the last publish said, when it did not simply work. */
   const [publishNotes, setPublishNotes] = useState<{ text: string; failed?: boolean }[]>([]);
+  /** True while a publish request is in flight, which on hosted can be a minute. */
+  const [publishing, setPublishing] = useState(false);
   /** The card's open pull requests, one per repository it was published to. */
   const [pullRequests, setPullRequests] = useState<FeaturePullRequest[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -129,7 +131,12 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
   /** The on-demand half of publishing: push the branch and open the PRs now. */
   async function publishNow() {
     setBusy(true);
+    setPublishing(true);
     setPublishNotes([]);
+    // The request wakes the sandbox, pushes, and opens the pull request
+    // in one go, which can take a minute on a hibernated one. A silent
+    // button read as a dead one, and the repeat clicks queued nothing.
+    toast.note("Creating the pull request. It will show up here shortly.");
     try {
       const { published, failures } = await client.publishFeature(feature.id);
       // Successes are not reported in words: they appear as rows in the
@@ -143,12 +150,22 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
             ? []
             : [{ text: "Nothing to publish: the branch has no commits beyond the base branch." }],
       );
-      setPullRequests(published.map((pr) => ({ name: pr.name, number: pr.prNumber, url: pr.url })));
+      // Merge rather than replace: a repository with no new commits is
+      // not in this answer, and its pull request is still open.
+      if (published.length > 0) {
+        setPullRequests((current) => {
+          const fresh = new Map(
+            published.map((pr) => [pr.url, { name: pr.name, number: pr.prNumber, url: pr.url }]),
+          );
+          return [...current.filter((pr) => !fresh.has(pr.url)), ...fresh.values()];
+        });
+      }
       onChanged();
     } catch (err) {
       toast.fail(err);
     } finally {
       setBusy(false);
+      setPublishing(false);
     }
   }
 
@@ -288,20 +305,35 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
                 Hiding it meant somebody looking for the control could
                 not find out it existed, let alone what it wanted. */}
             {feature.branchName && (
-              <button
-                className="btn"
-                disabled={busy || runActive || canPublish === false}
-                title={
-                  canPublish === false
-                    ? "Needs a GitHub connection. Save a GitHub token under Settings, GitHub."
-                    : runActive
-                      ? "An agent is working this card. Publish when it finishes."
-                      : undefined
-                }
-                onClick={() => void publishNow()}
-              >
-                Create PR
-              </button>
+              pullRequests.length > 0 ? (
+                /* Made, so the door becomes the destination. The Pull
+                    requests section lists every repository's; this leads
+                    to the first, mirroring the card's own pr_number. */
+                <a
+                  className="btn"
+                  href={pullRequests[0]!.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`Open pull request #${pullRequests[0]!.number} in ${pullRequests[0]!.name} on GitHub`}
+                >
+                  Open PR #{pullRequests[0]!.number} <ExternalMark />
+                </a>
+              ) : (
+                <button
+                  className="btn"
+                  disabled={busy || runActive || canPublish === false}
+                  title={
+                    canPublish === false
+                      ? "Needs a GitHub connection. Save a GitHub token under Settings, GitHub."
+                      : runActive
+                        ? "An agent is working this card. Publish when it finishes."
+                        : undefined
+                  }
+                  onClick={() => void publishNow()}
+                >
+                  {publishing ? "Creating PR..." : "Create PR"}
+                </button>
+              )
             )}
           </div>
           {/* What publishing said this time: nothing to push, or a
