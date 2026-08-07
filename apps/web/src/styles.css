@@ -2318,10 +2318,15 @@ button.session-expand[aria-pressed="true"] {
 }
 
 /* With a card open, the board keeps a drawer's width of runway so any
-   lane can scroll clear of the panel instead of hiding under it. */
-.board[data-drawer-open] {
-  padding-right: calc(min(560px, 100vw) + 24px);
-  scroll-padding-right: calc(min(560px, 100vw) + 24px);
+   lane can scroll clear of the panel instead of hiding under it. The
+   side-panel layout only: on small screens the drawer is a bottom
+   sheet, and runway wider than the board would push the card off the
+   left edge rather than out from under anything. */
+@media (min-width: 721px) {
+  .board[data-drawer-open] {
+    padding-right: calc(min(560px, 100vw) + 24px);
+    scroll-padding-right: calc(min(560px, 100vw) + 24px);
+  }
 }
 
 /*
