@@ -200,7 +200,10 @@ Those three are passed through only when set, so local mode is never handed an e
 | Path | What |
 |---|---|
 | `apps/web/src/App.tsx` | Screen routing, board state, the SSE subscription |
-| `apps/web/src/components/Board.tsx` | Stage lanes and cards |
+| `apps/web/src/components/Board.tsx` | Backlog, stage lanes, Done, and the search matcher |
+| `apps/web/src/components/NavMenu.tsx` | The topbar's controls, collapsed below 720px |
+| `apps/web/src/components/BottomBar.tsx` | Contact and the changelog |
+| `apps/web/src/changelog.ts` | What the `/changelog` page renders |
 | `apps/web/src/components/FeatureDrawer.tsx` | One card: actions, transcript, gate |
 | `apps/web/src/components/AgentsPanel.tsx` | Pairing a tool with a model |
 | `apps/web/src/components/StageConfig.tsx` | Per stage agent and gate criteria |
@@ -208,6 +211,18 @@ Those three are passed through only when set, so local mode is never handed an e
 | `apps/web/src/styles.css` | All of the styling, no framework |
 
 The console updates itself: it subscribes to `/api/board/:id/events`, a server-sent event stream, and refetches when the board changes. There is no refresh button because there is nothing to refresh.
+
+## Two things about the board that are not in the schema
+
+**The Done lane is drawn, not stored.** A finished card keeps the stage it finished in, because reopening one puts it back there, so "done" is a status and not a seventh stage. The board reads that status and moves the card to a lane of its own at the right. Nothing can be dropped into that lane: there is no server route that marks a card done from an arbitrary stage, and a lane that accepted the drop and then bounced the card would be worse than one that never lifts. Cards leave it by being reopened from the drawer.
+
+**Search filters inside the board, not around it.** The topbar's field holds the query, but `Board` does the filtering, so the unfiltered feature list stays the one the spend chip counts and the SSE handler refetches. `matchesQuery` is exported and covered by `apps/web/src/search.test.ts`; it matches on title and description, and compares each term twice, once as typed and once with punctuation stripped, so `ENG-441`, `eng 441`, and `eng441` all find the same card.
+
+## Adding a release to the changelog
+
+`/changelog` renders `apps/web/src/changelog.ts`, newest first. Entries are written by hand: a commit subject is addressed to whoever maintains the repository, and a release note is addressed to whoever uses the console.
+
+Each entry's `id` is its address (`/changelog#<id>`), and that address is what somebody pastes into an issue. Rename a heading freely; never rename a published id.
 
 ## Working on Bento
 

@@ -3,8 +3,11 @@ import { BentoClient, type AgentProfile, type Feature, type Stage } from "@bento
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { useCountUp } from "./count-up.js";
-import { Board, type CardPulse } from "./components/Board.js";
+import { Board, matchesQuery, type CardPulse } from "./components/Board.js";
+import { BoardSearch } from "./components/BoardSearch.js";
+import { BottomBar } from "./components/BottomBar.js";
 import { BrandLockup } from "./components/BrandLockup.js";
+import { NavMenu, type NavAction } from "./components/NavMenu.js";
 import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
@@ -24,6 +27,7 @@ import { ProjectPicker } from "./components/ProjectPicker.js";
  */
 const AcceptInvitation = lazy(() => import("./components/AcceptInvitation.js").then((m) => ({ default: m.AcceptInvitation })));
 const AgentsPanel = lazy(() => import("./components/AgentsPanel.js").then((m) => ({ default: m.AgentsPanel })));
+const ChangelogPage = lazy(() => import("./components/ChangelogPage.js").then((m) => ({ default: m.ChangelogPage })));
 const ContactDialog = lazy(() => import("./components/ContactDialog.js").then((m) => ({ default: m.ContactDialog })));
 const CreateTeam = lazy(() => import("./components/CreateTeam.js").then((m) => ({ default: m.CreateTeam })));
 const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then((m) => ({ default: m.DeviceApproval })));
@@ -64,6 +68,10 @@ function Route() {
   // Membership and billing are pages, not drawers: they have room,
   // and an address that survives reload.
   if (window.location.pathname === "/settings") return <SettingsPage client={client} />;
+  // Ahead of the session check on purpose: what shipped is not private,
+  // and a release link shared in an issue has to open for whoever
+  // follows it rather than showing them a sign-in form.
+  if (window.location.pathname === "/changelog") return <ChangelogPage client={client} />;
   // Reached from the reset email, with no session and nothing else open.
   if (window.location.pathname === "/reset-password") return <ResetPassword />;
   // A card's conversation in its own tab; the SPA fallback serves it.
@@ -191,6 +199,17 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [panel, setPanel] = useState<"none" | "pipeline" | "repos" | "agents">("none");
   const [dialog, setDialog] = useState<"none" | "feature" | "project">("none");
+  /**
+   * The board's search, held here rather than in the field.
+   *
+   * Deliberately not persisted and not in the address: a filtered board
+   * that survived a reload would be a board with cards missing and no
+   * memory of why, which is the failure this console keeps designing
+   * against.
+   */
+  const [query, setQuery] = useState("");
+  /** Opened from the bottom bar and from the menu; one dialog either way. */
+  const [contactOpen, setContactOpen] = useState(false);
   const [usage, setUsage] = useState<{ totalUsd: number; totalRuns: number; runsWithoutCost: number } | null>(null);
   // Called unconditionally: the chip below it is conditional, a hook
   // cannot be.
@@ -415,39 +434,63 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     </Suspense>
   );
 
-  const toolbar = (
+  const spend = usage && usage.totalRuns > 0 && (
+    <span
+      className="chip"
+      // The tool list comes from the catalog, so it cannot drift
+      // from which adapters actually report a figure.
+      title={
+        usage.runsWithoutCost > 0
+          ? `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns - usage.runsWithoutCost} of ${usage.totalRuns} runs. ${spendCoverageNote()}`
+          : `Across ${usage.totalRuns} runs. ${spendCoverageNote()}`
+      }
+    >
+      spend $<span className="spend-figure">{spendShown.toFixed(2)}</span>
+      {usage.runsWithoutCost > 0 ? "+" : ""}
+    </span>
+  );
+
+  /*
+   * The board's tools, as one list.
+   *
+   * The topbar renders them as a row and the hamburger renders them as
+   * a menu, and this is why the two cannot disagree about what exists.
+   * The order is the row's order, which is the order they were in
+   * before the menu existed.
+   */
+  const actions: NavAction[] = [
+    { id: "agents", label: "Agents", onSelect: () => setPanel("agents") },
+    ...(projects.length > 0
+      ? [
+          { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
+          { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
+        ]
+      : []),
+  ];
+
+  const bottom = (
     <>
-      <span className="topbar-spacer" />
-      {usage && usage.totalRuns > 0 && (
-        <span
-          className="chip"
-          // The tool list comes from the catalog, so it cannot drift
-          // from which adapters actually report a figure.
-          title={
-            usage.runsWithoutCost > 0
-              ? `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns - usage.runsWithoutCost} of ${usage.totalRuns} runs. ${spendCoverageNote()}`
-              : `Across ${usage.totalRuns} runs. ${spendCoverageNote()}`
-          }
-        >
-          spend $<span className="spend-figure">{spendShown.toFixed(2)}</span>
-          {usage.runsWithoutCost > 0 ? "+" : ""}
-        </span>
-      )}
-      <button className="btn btn-ghost" onClick={() => setPanel("agents")}>
-        Agents
-      </button>
+      <BottomBar onContact={() => setContactOpen(true)} />
+      <Suspense fallback={null}>
+        {contactOpen && <ContactDialog client={client} onClose={() => setContactOpen(false)} />}
+      </Suspense>
     </>
   );
 
   if (projects.length === 0) {
     return (
       <div className="app">
-        <TopBar showSignOut={showSignOut}>
-          {toolbar}
-          <button className="btn btn-primary" onClick={() => setDialog("project")}>
-            New project
-          </button>
-        </TopBar>
+        <TopBar
+          showSignOut={showSignOut}
+          actions={actions}
+          meta={spend}
+          onContact={() => setContactOpen(true)}
+          primary={
+            <button className="btn btn-primary" onClick={() => setDialog("project")}>
+              New project
+            </button>
+          }
+        />
         <div className="empty-state">
           <p className="muted">No projects yet. Point Bento at a git repository to start a board.</p>
           <button className="btn btn-primary" onClick={() => setDialog("project")}>
@@ -456,30 +499,39 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         </div>
         {panels}
         {dialogs}
+        {bottom}
       </div>
     );
   }
 
   return (
     <div className="app">
-      <TopBar showSignOut={showSignOut}>
-        <ProjectPicker
-          projects={projects}
-          projectId={projectId}
-          onSelect={setProjectId}
-          onNewProject={() => setDialog("project")}
-        />
-        {toolbar}
-        <button className="btn btn-ghost" onClick={() => setPanel("pipeline")}>
-          Pipeline
-        </button>
-        <button className="btn btn-ghost" onClick={() => setPanel("repos")}>
-          Repositories
-        </button>
-        <button className="btn btn-primary" onClick={() => setDialog("feature")}>
-          New card
-        </button>
-      </TopBar>
+      <TopBar
+        showSignOut={showSignOut}
+        actions={actions}
+        meta={spend}
+        onContact={() => setContactOpen(true)}
+        picker={
+          <ProjectPicker
+            projects={projects}
+            projectId={projectId}
+            onSelect={setProjectId}
+            onNewProject={() => setDialog("project")}
+          />
+        }
+        search={
+          <BoardSearch
+            value={query}
+            onChange={setQuery}
+            matches={features.filter((f) => matchesQuery(f, query)).length}
+          />
+        }
+        primary={
+          <button className="btn btn-primary" onClick={() => setDialog("feature")}>
+            New card
+          </button>
+        }
+      />
 
       {setupNeeded && (
         <div className="setup-prompt">
@@ -500,6 +552,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
 
       <Board
         drawerOpen={selected !== null}
+        query={query}
         stages={stages}
         features={features}
         profiles={profiles}
@@ -547,6 +600,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
 
       {panels}
       {dialogs}
+      {bottom}
     </div>
   );
 }
@@ -574,26 +628,96 @@ function GearMark() {
   );
 }
 
-function TopBar({ children, showSignOut }: { children?: React.ReactNode; showSignOut: boolean }) {
-  const [contactOpen, setContactOpen] = useState(false);
+/**
+ * The console's chrome.
+ *
+ * Two renderings of one set of controls. Above 720px they are a row, as
+ * they always were. Below it the row is a menu behind a hamburger, and
+ * only the three things worth a tap without one stay out: the project
+ * picker, the search field, and the primary action.
+ *
+ * The narrow layout was not a small version of the wide one, it was the
+ * wide one wrapping. A picker, a search field, four ghost buttons, a
+ * gear and Sign out came to three rows of scattered text stacked above
+ * a board with no height left to show a card in.
+ */
+function TopBar({
+  actions = [],
+  primary,
+  picker,
+  search,
+  meta,
+  onContact,
+  showSignOut,
+}: {
+  /** The board's tools. Rendered as a row, and as menu entries. */
+  actions?: NavAction[];
+  /** The one button that stays out of the menu at every width. */
+  primary?: React.ReactNode;
+  picker?: React.ReactNode;
+  search?: React.ReactNode;
+  /** The spend chip: read, not operated, so it never enters the menu. */
+  meta?: React.ReactNode;
+  onContact: () => void;
+  showSignOut: boolean;
+}) {
+  /*
+   * What the row spells out in controls the menu has to spell out in
+   * words. The gear is a gear because the row has no space for a word
+   * and every console puts settings behind one; a menu is a list of
+   * labels, and an unlabelled gear in it would be the only entry you
+   * had to recognise rather than read.
+   *
+   * Contact and the changelog live in the bottom bar, and are repeated
+   * here: on a phone the bottom bar is a thumb's reach away, but the
+   * menu is where somebody goes looking for "everything else", and the
+   * cost of answering that twice is two lines.
+   */
+  const entries: NavAction[] = [
+    ...actions,
+    { id: "contact", label: "Contact", onSelect: onContact },
+    { id: "changelog", label: "Changelog", href: "/changelog" },
+    { id: "settings", label: "Settings", href: "/settings" },
+    ...(showSignOut ? [{ id: "signout", label: "Sign out", onSelect: () => void signOut() }] : []),
+  ];
+
   return (
     <header className="topbar">
       <BrandLockup />
-      {children}
-      <button className="btn btn-ghost" onClick={() => setContactOpen(true)}>
-        Contact
-      </button>
-      <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
-        <GearMark />
-      </a>
-      <Suspense fallback={null}>
-        {contactOpen && <ContactDialog client={client} onClose={() => setContactOpen(false)} />}
-      </Suspense>
-      {showSignOut && (
-        <button className="btn btn-ghost" onClick={() => signOut()}>
-          Sign out
-        </button>
+      {/* One block, so it can drop to a row of its own on a phone
+          without the picker and the field being separated by whatever
+          happened to wrap between them. */}
+      {(picker || search) && (
+        <div className="topbar-lead">
+          {picker}
+          {search}
+        </div>
       )}
+      <span className="topbar-spacer" />
+      {meta}
+      <nav className="topbar-nav" aria-label="Board">
+        {actions.map((action) =>
+          action.href === undefined ? (
+            <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
+              {action.label}
+            </button>
+          ) : (
+            <a key={action.id} className="btn btn-ghost" href={action.href}>
+              {action.label}
+            </a>
+          ),
+        )}
+        <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
+          <GearMark />
+        </a>
+        {showSignOut && (
+          <button className="btn btn-ghost" onClick={() => signOut()}>
+            Sign out
+          </button>
+        )}
+      </nav>
+      {primary}
+      <NavMenu actions={entries} />
     </header>
   );
 }
