@@ -9,8 +9,15 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
   const scripts: string[] = [];
   const removed: string[] = [];
   const sprite = {
-    async exec(script: string) {
-      scripts.push(script);
+    // Recording argv rather than a bare script is the point of this
+    // stub. Provisioning runs shell scripts, and the SDK's exec() is
+    // not a shell: it splits on whitespace and execs the first word.
+    // A stub that accepted a script string agreed with the old code
+    // while every provision failed on `set: not found`.
+    async execFile(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      assert.equal(args[0], "-c");
+      scripts.push(args[1] ?? "");
       return { stdout: "", stderr: "", exitCode: 0 };
     },
     filesystem() {

@@ -212,7 +212,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       await ctx.db.update(agentRuns).set({ sandboxId: existingSandbox.id }).where(eq(agentRuns.id, runId));
     }
   } catch (err) {
-    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${String(err)}` }, null);
+    console.error(`sandbox provisioning failed for run ${runId}:`, err);
+    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
     return;
@@ -835,4 +836,25 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
     }
   });
+}
+
+/**
+ * A sandbox command that fails carries its output on the error rather
+ * than in its message, so `String(err)` reduces a page of installer
+ * stderr to "ExecError: Command failed with exit code 1". The run
+ * record is the only place a provisioning failure is reported to the
+ * person who triggered it, so it gets the output too.
+ *
+ * Duck typed rather than an instanceof: the shape belongs to whichever
+ * driver raised it, and the server does not import their SDKs.
+ */
+function describeSandboxError(err: unknown): string {
+  const base = String(err);
+  if (typeof err !== "object" || err === null) return base;
+  const { stderr, stdout } = err as { stderr?: unknown; stdout?: unknown };
+  const output = [stderr, stdout].find((value) => typeof value === "string" && value.trim() !== "");
+  if (typeof output !== "string") return base;
+  // The tail, because an installer's useful line is its last one and a
+  // run record is not the place for a megabyte of progress bars.
+  return `${base}\n${output.trim().split("\n").slice(-20).join("\n")}`;
 }
