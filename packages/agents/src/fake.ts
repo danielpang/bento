@@ -1,4 +1,4 @@
-import type { AgentEvent, RunOutcome } from "@bento/core";
+import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
 import { lastResultEvent, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
 
 /**
@@ -30,11 +30,20 @@ export const fakeAdapter: AgentAdapter = {
     const model = input.model.replace(/[^a-zA-Z0-9._-]/g, "");
     const script = [
       `echo '{"type":"system","subtype":"init","session_id":"fake-session-1","model":"${model}"}'`,
+      // The message streams before it lands, like a real tool: two
+      // fragments, then the whole message. Tests use these to prove
+      // deltas reach the wire and never the transcript. SLOW spaces
+      // them out, so the typing is watchable and the fragments spend
+      // real time as the only copy on screen.
+      `echo '{"type":"delta","channel":"text","text":"Working"}'`,
+      ...(shouldLinger ? ["sleep 3"] : []),
+      `echo '{"type":"delta","channel":"text","text":" on it."}'`,
+      ...(shouldLinger ? ["sleep 3"] : []),
       `echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Working on it."}]}}'`,
       ...(verdict
         ? [`echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"${verdict}"}]}}'`]
         : []),
-      ...(shouldLinger ? ["sleep 30"] : []),
+      ...(shouldLinger ? ["sleep 24"] : []),
       "echo fake-artifact > .bento-fake-output",
       "git add -A >/dev/null 2>&1 || true",
       'git -c user.email=fake@bento.dev -c user.name=fake commit -qm "fake agent commit" >/dev/null 2>&1 || true',
@@ -60,6 +69,7 @@ export const fakeAdapter: AgentAdapter = {
       const script = [
         `echo '{"type":"system","subtype":"init","session_id":"fake-live-1","model":"${model}"}'`,
         "while IFS= read -r line; do",
+        `  echo '{"type":"delta","channel":"text","text":"Heard."}'`,
         `  echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Heard."}]}}'`,
         "  sleep 2",
         `  echo '{"type":"result","subtype":"success","is_error":false,"session_id":"fake-live-1","total_cost_usd":0,"num_turns":1}'`,
@@ -76,6 +86,18 @@ export const fakeAdapter: AgentAdapter = {
 
   parseEvent(line: string): AgentEvent | null {
     return claudeStyleParse(line);
+  },
+
+  parseDelta(line: string): Pick<AgentDelta, "channel" | "text"> | null {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{"type":"delta"')) return null;
+    try {
+      const parsed = JSON.parse(trimmed) as { type?: string; channel?: string; text?: string };
+      if (parsed.type !== "delta" || typeof parsed.text !== "string") return null;
+      return { channel: parsed.channel === "thinking" ? "thinking" : "text", text: parsed.text };
+    } catch {
+      return null;
+    }
   },
 
   extractOutcome(events: AgentEvent[], exitCode: number): RunOutcome {

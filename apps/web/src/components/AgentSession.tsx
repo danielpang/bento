@@ -14,7 +14,7 @@ function orbStateFor(tool: string | null): OrbState {
   if (!tool) return "shaping";
   if (/read|grep|glob|search|fetch|ls|find/i.test(tool)) return "searching";
   if (/edit|write|patch|notebook/i.test(tool)) return "composing";
-  if (/task|todo|plan|agent/i.test(tool)) return "solving";
+  if (/task|todo|plan|agent|think/i.test(tool)) return "solving";
   return "working";
 }
 
@@ -78,6 +78,24 @@ export function AgentSession({
   const [activity, setActivity] = useState<{ tool: string | null; steps: number }>({ tool: null, steps: 0 });
   const stepsSinceMessage = useRef(0);
   const paneRef = useRef<HTMLPreElement>(null);
+  /**
+   * The message being typed, built from streamed fragments. Fragments
+   * arrive per token, so they accumulate in a ref and reach state once
+   * a frame; per token setState would render hundreds of times a
+   * second. Cleared whenever a finished message or result lands: the
+   * transcript's copy is authoritative and showing both says it twice.
+   */
+  const [draft, setDraft] = useState("");
+  const draftRef = useRef("");
+  const draftFrame = useRef<number | null>(null);
+  const clearDraft = () => {
+    draftRef.current = "";
+    if (draftFrame.current !== null) {
+      cancelAnimationFrame(draftFrame.current);
+      draftFrame.current = null;
+    }
+    setDraft("");
+  };
 
   // The server sends runs newest first.
   const latestRun = runs[0];
@@ -105,12 +123,21 @@ export function AgentSession({
   const streamedRun = viewedRunId ? viewedRun : runActive ? latestRun : null;
   useEffect(() => {
     setEvents([]);
+    clearDraft();
     if (!streamedRun) return;
     stepsSinceMessage.current = 0;
     setActivity({ tool: null, steps: 0 });
     const stop = client.streamRun(streamedRun.id, {
       onEvent: (event) => {
         onEvent?.(featureId, event);
+        // The persisted line supersedes the fragments that previewed
+        // it. Assistant lines and results only: a steer the user sends
+        // mid turn says nothing about the message still being typed,
+        // and clearing on it left the draft permanently behind the
+        // stream's offsets, frozen mid sentence.
+        if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
+          clearDraft();
+        }
         if (event.type === "tool") {
           if (event.phase === "start" && event.name !== "tool_result") {
             stepsSinceMessage.current += 1;
@@ -124,9 +151,46 @@ export function AgentSession({
         // an ever-growing log on every event.
         setEvents((prev) => [...prev.slice(-1499), event]);
       },
-      onDone: () => onChanged(),
+      onDelta: (delta) => {
+        // Thinking has no text worth previewing; it only proves life.
+        if (delta.channel === "thinking") {
+          setActivity((prev) => (prev.tool === "thinking" ? prev : { tool: "thinking", steps: prev.steps }));
+          return;
+        }
+        setActivity((prev) => (prev.tool === "thinking" ? { tool: null, steps: prev.steps } : prev));
+        /**
+         * Offset zero starts a draft (a new message, or the server's
+         * catch-up snapshot of one already in flight); anything else
+         * must continue exactly where this draft ends. A fragment from
+         * the middle of a sentence renders as text that starts
+         * nowhere, so it is dropped; the finished message arrives
+         * whole regardless.
+         */
+        if (delta.offset === 0) draftRef.current = delta.text;
+        else if (delta.offset === draftRef.current.length) draftRef.current += delta.text;
+        else return;
+        if (draftFrame.current === null) {
+          draftFrame.current = requestAnimationFrame(() => {
+            draftFrame.current = null;
+            setDraft(draftRef.current);
+          });
+        }
+      },
+      onDone: () => {
+        // A cancelled run ends with no result event, so this is the
+        // only thing standing between a stopped run and a half typed
+        // sentence pinned to the transcript.
+        clearDraft();
+        onChanged();
+      },
     });
-    return stop;
+    return () => {
+      stop();
+      if (draftFrame.current !== null) {
+        cancelAnimationFrame(draftFrame.current);
+        draftFrame.current = null;
+      }
+    };
   }, [client, streamedRun?.id]);
 
   const lines = useMemo(() => {
@@ -145,16 +209,40 @@ export function AgentSession({
     return out.slice(-1500);
   }, [events, blocks, viewedRunId, runActive, latestRun?.id, viewedAgent?.name, latestAgent?.name, showDetail]);
 
+  // The typing line, spoken in the agent's voice like the finished
+  // message it becomes. Only the live run produces fragments, so the
+  // latest agent is always the one talking.
+  const draftLine = draft ? `${latestAgent?.name ?? "agent"}> ${draft}` : "";
+  // Rendered as its own text node so the typing only touches a small
+  // DOM leaf per frame; joining the draft into the transcript string
+  // rebuilt and replaced the whole pane sixty times a second.
+  const body = useMemo(() => lines.join("\n"), [lines]);
+
+  /**
+   * Follow the tail only while the reader is at the tail. The draft
+   * updates once per animation frame while text streams, and an
+   * unconditional scroll on each of those yanked anyone who had
+   * scrolled up straight back to the bottom, every sixteen
+   * milliseconds, for the length of the message. Scrolling back down
+   * re-arms following; the programmatic scroll itself lands within
+   * the threshold, so it keeps the flag true.
+   */
+  const followTail = useRef(true);
+  const onPaneScroll = () => {
+    const el = paneRef.current;
+    if (!el) return;
+    followTail.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
     // After paint: on the first render the pane has not been laid out
     // yet, so setting scrollTop immediately left a long conversation
     // parked at its oldest run.
     const frame = requestAnimationFrame(() => {
       const el = paneRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el && followTail.current) el.scrollTop = el.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [lines.length]);
+  }, [lines.length, draftLine]);
 
   async function send() {
     const question = say.trim();
@@ -227,14 +315,15 @@ export function AgentSession({
         </span>
       </span>
       {latestRun ? (
-        lines.length <= 1 && runActive && !viewedRunId ? (
+        lines.length <= 1 && !draftLine && runActive && !viewedRunId ? (
           <div className="transcript orb-hero" aria-label="The agent is starting">
             <ThinkingOrb state="shaping" size={64} paused={REDUCED_MOTION} />
             <span className="muted">{workingName} is getting started...</span>
           </div>
         ) : (
-          <pre className="transcript" ref={paneRef}>
-            {lines.length > 0 ? lines.join("\n") : "Waiting for output..."}
+          <pre className="transcript" ref={paneRef} onScroll={onPaneScroll}>
+            {body || (draftLine ? "" : "Waiting for output...")}
+            {draftLine ? (body ? "\n" : "") + draftLine : ""}
           </pre>
         )
       ) : (

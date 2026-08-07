@@ -1,4 +1,4 @@
-import type { AgentEvent } from "@bento/core";
+import type { AgentDelta, AgentEvent } from "@bento/core";
 import type { AgentAdapter } from "./adapter.js";
 
 export interface ExecChunk {
@@ -14,6 +14,13 @@ export interface RunAgentInput {
   exec: () => AsyncIterable<ExecChunk>;
   /** Called for each parsed event, for persistence or streaming. */
   onEvent?: (event: AgentEvent) => void | Promise<void>;
+  /**
+   * Called for each streaming fragment of the message being composed.
+   * Fragments are display-only: they are never collected, persisted,
+   * or considered by extractOutcome, so this is synchronous on
+   * purpose. A consumer that needs durability wants onEvent.
+   */
+  onDelta?: (delta: AgentDelta) => void;
 }
 
 export interface RunAgentResult {
@@ -36,7 +43,7 @@ export interface RunAgentResult {
  * complete, with any trailing partial line parsed at the end.
  */
 export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
-  const { adapter, exec, onEvent } = input;
+  const { adapter, exec, onEvent, onDelta } = input;
   const events: AgentEvent[] = [];
   let buffer = "";
   let exitCode = -1;
@@ -61,7 +68,30 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   // adapter.
   let initialized = false;
 
+  /**
+   * Where each channel's current message stands, so every forwarded
+   * fragment carries its offset. Adapters see one line at a time; only
+   * this loop sees enough of the stream to count. Reset when a message
+   * arrives, because that is when composition starts over.
+   */
+  const streamed = { text: 0, thinking: 0 };
+
   const emit = async (line: string) => {
+    /**
+     * Deltas first, and unconditionally: a per token line is neither a
+     * transcript event nor stray output, and before this check pi's
+     * message_update lines fell through parseEvent into the stderr
+     * tail, so a failing run's "reason" was a page of token JSON.
+     */
+    const fragment = adapter.parseDelta?.(line);
+    if (fragment) {
+      // Empty means recognized chatter: consumed, never forwarded.
+      if (fragment.text) {
+        onDelta?.({ ...fragment, offset: streamed[fragment.channel] });
+        streamed[fragment.channel] += fragment.text.length;
+      }
+      return;
+    }
     const event = adapter.parseEvent(line);
     if (!event) {
       if (line.trim()) keep(line);
@@ -69,6 +99,13 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     }
     if (event.type === "init" && initialized) return;
     if (event.type === "init") initialized = true;
+    // Assistant messages and results end the composition; a user line
+    // echoed into the stream mid turn does not, and resetting on it
+    // desynchronized these counters from every draft downstream.
+    if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
+      streamed.text = 0;
+      streamed.thinking = 0;
+    }
     events.push(event);
     await onEvent?.(event);
   };

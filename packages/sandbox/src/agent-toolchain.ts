@@ -20,11 +20,17 @@
 export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "pi"] as const;
 
 /**
- * Bumped whenever the script changes what it installs. It names the
- * marker file, so a sprite that survives a Bento deploy installs the
- * new set instead of reporting the old one as done.
+ * Bumped whenever the script changes what it installs, or when the
+ * commands Bento builds start requiring newer CLIs than a warm
+ * machine may hold. It names the marker file, so a sprite that
+ * survives a Bento deploy installs the new set instead of reporting
+ * the old one as done.
+ *
+ * v2: claude is invoked with --include-partial-messages, which a
+ * binary installed under v1 may predate; the reinstall brings every
+ * warm sprite to a CLI that has it.
  */
-export const TOOLCHAIN_VERSION = 1;
+export const TOOLCHAIN_VERSION = 2;
 
 /**
  * The marker file the script leaves behind. Exported so provisioning

@@ -1,4 +1,4 @@
-import type { AgentEvent, RunOutcome } from "@bento/core";
+import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
 import { lastResultEvent, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
 
 interface ClaudeContentBlock {
@@ -19,6 +19,15 @@ interface ClaudeLine {
   total_cost_usd?: number;
   num_turns?: number;
   message?: { role?: string; content?: ClaudeContentBlock[] };
+  /**
+   * On stream_event lines: the raw Anthropic streaming event. Note the
+   * asymmetry, from the API itself: text_delta carries `text`,
+   * thinking_delta carries `thinking`.
+   */
+  event?: {
+    type?: string;
+    delta?: { type?: string; text?: string; thinking?: string };
+  };
 }
 
 /**
@@ -56,6 +65,32 @@ export const claudeCodeAdapter: AgentAdapter = {
     encodeMessage(text: string): string {
       return JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
     },
+  },
+
+  /**
+   * stream_event lines are the raw Anthropic streaming events, present
+   * because sharedFlags passes --include-partial-messages. Only the
+   * text and thinking fragments carry anything a viewer wants; the
+   * rest (message_start, content_block boundaries, signature_delta)
+   * is consumed as empty fragments so it stays out of the failure
+   * tail. Shapes verified against claude 2.1.221's actual output.
+   */
+  parseDelta(line: string): Pick<AgentDelta, "channel" | "text"> | null {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) return null;
+    let parsed: ClaudeLine;
+    try {
+      parsed = JSON.parse(trimmed) as ClaudeLine;
+    } catch {
+      return null;
+    }
+    if (parsed.type !== "stream_event") return null;
+    const delta = parsed.event?.delta;
+    if (parsed.event?.type === "content_block_delta" && delta) {
+      if (delta.type === "text_delta" && delta.text) return { channel: "text", text: delta.text };
+      if (delta.type === "thinking_delta" && delta.thinking) return { channel: "thinking", text: delta.thinking };
+    }
+    return { channel: "text", text: "" };
   },
 
   parseEvent(line: string): AgentEvent | null {
@@ -133,6 +168,10 @@ function sharedFlags(input: BuildCommandInput): string[] {
     "--output-format",
     "stream-json",
     "--verbose",
+    // Streams the message being composed so viewers can watch the
+    // typing. Sandboxes install the current CLI, so the flag is safe
+    // to assume; it has shipped since well before 2.x.
+    "--include-partial-messages",
     "--dangerously-skip-permissions",
     "--model",
     input.model,

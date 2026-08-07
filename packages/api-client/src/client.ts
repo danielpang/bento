@@ -1,4 +1,4 @@
-import type { AgentEvent, GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type GateCriteria } from "@bento/core";
 import type {
   AgentProfile,
   AgentRun,
@@ -24,6 +24,18 @@ export interface ClientOptions {
   /** Bearer token source for non-browser clients (TUI, Mac app). */
   tokens?: TokenStore;
   fetch?: typeof fetch;
+}
+
+export interface RunStreamHandlers {
+  onEvent?: (event: AgentEvent, seq: number) => void;
+  onDelta?: (delta: AgentDelta) => void;
+  onDone?: (status: string) => void;
+  /**
+   * The stream failed: a rejected token, a dropped connection, or a
+   * handler that threw. Fired on the fetch transport only; the
+   * EventSource transport reconnects on its own instead.
+   */
+  onError?: (error: Error) => void;
 }
 
 export interface GitHubConnection {
@@ -615,18 +627,44 @@ export class BentoClient {
   /**
    * Streams a run's events. Replays from `since`, then follows live
    * until the run ends. Returns a function that stops the stream.
+   *
+   * onDelta carries the typing: token sized fragments of the message
+   * the agent is composing. Live only, never replayed; the finished
+   * message arrives through onEvent and supersedes every fragment
+   * before it.
    */
   streamRun(
     runId: string,
-    handlers: { onEvent?: (event: AgentEvent, seq: number) => void; onDone?: (status: string) => void },
+    handlers: RunStreamHandlers,
     since = 0,
   ): () => void {
-    const source = new EventSource(`${this.baseUrl}/api/runs/${runId}/events?since=${since}`, {
-      withCredentials: !this.tokens,
-    });
+    const url = `${this.baseUrl}/api/runs/${runId}/events?since=${since}`;
+    // EventSource cannot carry an Authorization header, so a client
+    // that authenticates with a bearer token (the TUI, the Mac app)
+    // reads the same stream over fetch. This is why the TUI could
+    // never follow a run live before.
+    if (this.tokens) return this.streamRunWithFetch(url, handlers, since);
+
+    /**
+     * EventSource reconnects on its own after a drop, and the server
+     * replays from ?since= on every connection, so without this
+     * filter a wifi blip showed the whole conversation twice. The
+     * seq rides on the SSE id field precisely so replays are
+     * recognizable.
+     */
+    let lastSeq = since;
+    const source = new EventSource(url, { withCredentials: true });
     source.addEventListener("run_event", (e) => {
       const message = e as MessageEvent<string>;
-      handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, Number(message.lastEventId));
+      const seq = Number(message.lastEventId);
+      if (Number.isFinite(seq) && seq > 0) {
+        if (seq <= lastSeq) return;
+        lastSeq = seq;
+      }
+      handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, seq);
+    });
+    source.addEventListener("run_delta", (e) => {
+      handlers.onDelta?.(JSON.parse((e as MessageEvent<string>).data) as AgentDelta);
     });
     source.addEventListener("done", (e) => {
       const message = e as MessageEvent<string>;
@@ -634,6 +672,64 @@ export class BentoClient {
       source.close();
     });
     return () => source.close();
+  }
+
+  /**
+   * The SSE stream over plain fetch: same frames, but the request can
+   * carry the bearer token. No reconnection on drop, deliberately:
+   * every present caller also polls (the TUI refreshes on a timer), so
+   * a dropped stream degrades to the poll instead of retrying forever
+   * against a server that may be gone. What it must not do is degrade
+   * silently: a rejected token and a dropped socket both reach
+   * onError, so the caller can clear its draft and say so.
+   */
+  private streamRunWithFetch(url: string, handlers: RunStreamHandlers, since: number): () => void {
+    const controller = new AbortController();
+    void (async () => {
+      const token = await this.tokens!.get();
+      const res = await this.fetchImpl(url, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+        credentials: "omit",
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const parser = new SseParser();
+      let lastSeq = since;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+          // A consumer handler that throws must not kill the stream:
+          // the frames after it are still wanted.
+          try {
+            if (frame.event === "run_event") {
+              const seq = Number(frame.id);
+              if (Number.isFinite(seq) && seq > 0) {
+                if (seq <= lastSeq) continue;
+                lastSeq = seq;
+              }
+              handlers.onEvent?.(JSON.parse(frame.data) as AgentEvent, seq);
+            } else if (frame.event === "run_delta") {
+              handlers.onDelta?.(JSON.parse(frame.data) as AgentDelta);
+            } else if (frame.event === "done") {
+              handlers.onDone?.((JSON.parse(frame.data) as { status: string }).status);
+              controller.abort();
+              return;
+            }
+          } catch (err) {
+            handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+          }
+        }
+      }
+    })().catch((err: unknown) => {
+      // Aborted by the caller is the normal ending; anything else is
+      // a stream the caller believes is live and is not.
+      if (controller.signal.aborted) return;
+      handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+    });
+    return () => controller.abort();
   }
 
   /** Streams board changes for a project (card moved, run status changed). */
