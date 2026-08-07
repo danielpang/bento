@@ -411,7 +411,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         ctx.driver.exec(handle, argv, {
           cwd: workdir,
           env: execEnv,
-          timeoutMs: 30 * 60 * 1000,
+          timeoutMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60 * 1000,
           signal: controller.signal,
           ...(liveChannel ? { stdin: liveChannel } : {}),
         }),
@@ -452,7 +452,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // The two common failures get sentences; anything else keeps the
     // raw error, which is at least honest about being unexpected.
     const reason = /exec timeout/.test(String(err))
-      ? "The agent hit the 30 minute run limit and was stopped. Send it a message to continue where it left off."
+      ? `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`
       : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
         ? "Docker is not reachable from the server. Check that Docker is running, then run again."
         : `exec failed: ${String(err)}`;

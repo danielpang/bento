@@ -3,9 +3,17 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { SpriteCommand, type Sprite } from "@fly/sprites";
+import { LineChannel, collectExec } from "./driver.js";
 import { SpriteDriver } from "./sprite.js";
 
+/** Lets pending microtasks and immediates run, twice over for chains. */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 type FakeChild = EventEmitter & {
+  stdin: PassThrough;
   stdout: PassThrough;
   stderr: PassThrough;
   kill(): void;
@@ -14,6 +22,7 @@ type FakeChild = EventEmitter & {
 
 function fakeChild(): FakeChild {
   const child = new EventEmitter() as FakeChild;
+  child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = () => {};
@@ -175,6 +184,216 @@ test("Sprite exec keeps resetting the SDK inactivity clock while the agent is qu
   const after = resets;
   t.mock.timers.tick(60_000);
   assert.equal(resets, after);
+});
+
+/**
+ * The SDK opens stdin for every exec and holds it open until this side
+ * ends the stream, and an agent CLI reads a piped stdin to EOF before
+ * it starts. A run whose stdin never closed produced no output at all,
+ * forever. See feedStdin.
+ */
+test("Sprite exec ends the process's stdin once the command is up", async () => {
+  const child = fakeChild();
+  const sprite = {
+    spawn() {
+      return child;
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const iterator = driver
+    .exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["opencode"])
+    [Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Not before the connection is open: an EOF sent while the socket is
+  // still connecting is dropped, and the agent waits forever anyway.
+  assert.equal(child.stdin.writableEnded, false);
+  child.emit("spawn");
+  assert.equal(child.stdin.writableEnded, true);
+
+  child.emit("exit", 0);
+  const chunk = await first;
+  assert.deepEqual(chunk.value, { kind: "exit", exitCode: 0 });
+  await iterator.return?.(undefined);
+});
+
+/**
+ * Sprites run commands as root, and Claude Code refuses
+ * --dangerously-skip-permissions as root unless IS_SANDBOX says the
+ * sandbox is the security boundary. The Docker driver learned this
+ * when every claude-code run died at exit 1 with no output; this pins
+ * the same guarantee here.
+ */
+test("Sprite exec marks the sandbox as the security boundary for agent CLIs", async () => {
+  let seenEnv: Record<string, string> | undefined;
+  const child = fakeChild();
+  const sprite = {
+    spawn(_file: string, _args: string[], options?: { env?: Record<string, string> }) {
+      seenEnv = options?.env;
+      queueMicrotask(() => child.emit("exit", 0));
+      return child;
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"], {
+      env: { ANTHROPIC_API_KEY: "key" },
+    }),
+  );
+  assert.equal(seenEnv?.IS_SANDBOX, "1");
+  assert.equal(seenEnv?.ANTHROPIC_API_KEY, "key");
+});
+
+/**
+ * The live session: lines written while the agent runs flow to its
+ * stdin as user messages, and the channel ending is how the agent
+ * learns the conversation is over. Same contract as the Docker driver,
+ * which is what makes mid-run messages reach a sprite agent instead of
+ * parking until the run ends.
+ */
+test("Sprite exec feeds live stdin lines and closes stdin when the conversation ends", async () => {
+  const child = fakeChild();
+  const sprite = {
+    spawn() {
+      return child;
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+  assert.equal(driver.supportsStdin, true);
+
+  const channel = new LineChannel();
+  channel.write('{"type":"user"}');
+  const iterator = driver
+    .exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"], { stdin: channel })
+    [Symbol.asyncIterator]();
+  const first = iterator.next();
+  await settle();
+
+  const written: string[] = [];
+  child.stdin.on("data", (d: Buffer | string) => written.push(d.toString()));
+  child.emit("spawn");
+  await settle();
+  assert.deepEqual(written, ['{"type":"user"}\n']);
+  // The conversation is still open, so stdin must be too.
+  assert.equal(child.stdin.writableEnded, false);
+
+  channel.write("follow-up");
+  await settle();
+  assert.deepEqual(written, ['{"type":"user"}\n', "follow-up\n"]);
+
+  channel.end();
+  await settle();
+  assert.equal(child.stdin.writableEnded, true);
+
+  child.emit("exit", 0);
+  const chunk = await first;
+  assert.deepEqual(chunk.value, { kind: "exit", exitCode: 0 });
+  await iterator.return?.(undefined);
+});
+
+/**
+ * The SDK appends the exec URL to its connection errors, and that URL
+ * carries the whole environment as query parameters, credentials
+ * included. Error text ends up in run transcripts, so the URL must
+ * not survive into the stream.
+ */
+test("Sprite exec keeps the credential-bearing exec URL out of error output", async () => {
+  const child = fakeChild();
+  const sprite = {
+    spawn() {
+      queueMicrotask(() => {
+        child.emit(
+          "error",
+          new Error(
+            "WebSocket error: connect ETIMEDOUT (url: wss://api.sprites.dev/v1/sprites/x/exec?env=ANTHROPIC_API_KEY%3Dsk-secret&cmd=claude)",
+          ),
+        );
+      });
+      return child;
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const result = await collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+  );
+  assert.equal(result.exitCode, -1);
+  assert.match(result.stderr, /ETIMEDOUT/);
+  assert.match(result.stderr, /\[sandbox exec url\]/);
+  assert.doesNotMatch(result.stderr, /sk-secret|wss:/);
+});
+
+/**
+ * A real process exit arrives as an unsigned byte, so a negative code
+ * always means the socket closed without one. Without the explanation
+ * the run reads as the agent failing with "exit code -1" when the
+ * agent was never heard from at all.
+ */
+test("Sprite exec explains a connection that closed without an exit", async () => {
+  const child = fakeChild();
+  const sprite = {
+    spawn() {
+      queueMicrotask(() => child.emit("exit", -1));
+      return child;
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const result = await collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+  );
+  assert.equal(result.exitCode, -1);
+  assert.match(result.stderr, /connection to the sandbox closed before the command reported an exit/);
+});
+
+/**
+ * The other half of feedStdin's contract lives in the SDK: ending the
+ * stdin stream must translate into the end-of-input frame the server
+ * waits for. This pins that wiring against the installed package, so
+ * an SDK change that drops it fails here instead of silently reviving
+ * the hang.
+ */
+test("the installed SDK still sends stdin end-of-input when the stream ends", async () => {
+  const sprite = {
+    name: "pin",
+    client: { token: "token", baseURL: "https://example.invalid" },
+  } as unknown as Sprite;
+  const command = new SpriteCommand(sprite, "true");
+  const ws = (command as unknown as { wsCmd?: { sendStdinEOF?: unknown } }).wsCmd;
+  assert.equal(typeof ws?.sendStdinEOF, "function");
+  let sent = 0;
+  (ws as { sendStdinEOF: () => void }).sendStdinEOF = () => {
+    sent += 1;
+  };
+  command.stdin.end();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent, 1);
+});
+
+/** Same pin for the live half: written lines must reach writeStdin. */
+test("the installed SDK still forwards stdin writes to the socket", async () => {
+  const sprite = {
+    name: "pin",
+    client: { token: "token", baseURL: "https://example.invalid" },
+  } as unknown as Sprite;
+  const command = new SpriteCommand(sprite, "true");
+  const ws = (command as unknown as { wsCmd?: { writeStdin?: unknown } }).wsCmd;
+  assert.equal(typeof ws?.writeStdin, "function");
+  const written: string[] = [];
+  (ws as { writeStdin: (data: Buffer) => void }).writeStdin = (data) => {
+    written.push(data.toString());
+  };
+  command.stdin.write("a user message\n");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(written, ["a user message\n"]);
 });
 
 /**
