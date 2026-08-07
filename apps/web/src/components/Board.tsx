@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentProfile, Feature, Stage } from "@bento/api-client";
 import { ProviderMark } from "./ProviderMark.js";
 
@@ -205,6 +205,54 @@ interface BoardProps {
   onNewCard: () => void;
   /** The drawer covers the right edge; the board makes room for it. */
   drawerOpen: boolean;
+  /**
+   * What the topbar's search field holds. Empty shows every card.
+   *
+   * The board filters rather than the caller, so the unfiltered list
+   * stays the one every other part of the console counts, spends
+   * against, and refetches on.
+   */
+  query?: string;
+}
+
+/** A card whose work is over: finished or abandoned, either way not moving. */
+function isFinished(feature: Feature): boolean {
+  return feature.status === "done" || feature.status === "cancelled";
+}
+
+/**
+ * Whether a card answers a search.
+ *
+ * Both fields, because a ticket id is written wherever the person
+ * pasting it happened to be: "ENG-441" as a title prefix on one card
+ * and buried in the description of the next.
+ *
+ * Every whitespace-separated term has to land somewhere, so "auth
+ * ENG-441" narrows rather than widens. Each term is tried twice: once
+ * against the text as written, and once against the text with its
+ * punctuation removed, which is what makes "eng441" and "eng 441" find
+ * a card titled "ENG-441" instead of quietly returning nothing. A
+ * search that misses the id someone read off a Linear tab is worse
+ * than no search, because it reads as "that card does not exist".
+ */
+export function matchesQuery(feature: Pick<Feature, "title" | "description">, query: string): boolean {
+  /*
+   * A term carrying no letters or digits is dropped rather than
+   * searched. It is punctuation left over from typing an id, and both
+   * ways of honouring it are wrong: matched literally, a stray "-"
+   * filters the board down to the cards whose titles happen to be
+   * hyphenated; squashed to nothing, it matches everything, because
+   * "" is a substring of every string. Neither is what somebody
+   * halfway through typing ENG-441 meant.
+   */
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((term) => /[a-z0-9]/.test(term));
+  if (terms.length === 0) return true;
+  const text = `${feature.title} ${feature.description ?? ""}`.toLowerCase();
+  const squashed = text.replace(/[^a-z0-9]+/g, "");
+  return terms.every((term) => text.includes(term) || squashed.includes(term.replace(/[^a-z0-9]+/g, "")));
 }
 
 /**
@@ -235,7 +283,11 @@ function useExpectedArrivals(
       const index = stages.findIndex((s) => s.id === feature.currentStageId);
       const stage = stages[index];
       const next = stages[index + 1];
-      if (stage?.gateType === "auto" && next) arriving.push(next.id);
+      if (stage?.gateType !== "auto") continue;
+      // Past the last stage there is nowhere further to go, so what is
+      // pending is the card finishing: the Done lane is the one about
+      // to receive it.
+      arriving.push(next ? next.id : DONE_LANE);
     }
     if (arriving.length === 0) return;
     setExpecting((current) => new Set([...current, ...arriving]));
@@ -249,6 +301,13 @@ function useExpectedArrivals(
   return expecting;
 }
 
+/**
+ * The Done lane's key. Not a stage id: "done" is one step past the last
+ * stage rather than a stage of its own, which is why the server records
+ * it as a status and leaves the card's stage where it finished.
+ */
+const DONE_LANE = "done";
+
 export function Board({
   stages,
   features,
@@ -261,8 +320,23 @@ export function Board({
   onMove,
   onNewCard,
   drawerOpen,
+  query = "",
 }: BoardProps) {
-  const backlog = features.filter((f) => !f.currentStageId);
+  const searching = query.trim().length > 0;
+  const shown = useMemo(
+    () => (searching ? features.filter((f) => matchesQuery(f, query)) : features),
+    [features, query, searching],
+  );
+  /**
+   * Finished cards leave their stage lane for the Done lane.
+   *
+   * They keep the stage they finished in, because reopening one puts it
+   * back there, but a shipped card sitting in Review alongside work
+   * still being reviewed made the lane counts lie about the load: a
+   * five-card Review lane where four were finished read as a queue.
+   */
+  const finished = shown.filter(isFinished);
+  const backlog = shown.filter((f) => !f.currentStageId && !isFinished(f));
   /**
    * The lane a drag is hovering, so it can say it accepts the drop.
    * Board state rather than lane state: the highlight has to move OFF
@@ -298,6 +372,23 @@ export function Board({
     },
   });
 
+  const card = (feature: Feature) => (
+    <Card
+      key={feature.id}
+      feature={feature}
+      state={cardState(feature, runStatusByFeature[feature.id])}
+      runActive={RUN_ACTIVE.has(runStatusByFeature[feature.id] ?? "")}
+      lastOutput={lastOutputByFeature[feature.id]}
+      pulse={pulses[feature.id]}
+      selected={feature.id === selectedId}
+      onSelect={onSelect}
+    />
+  );
+
+  /* An empty lane means two different things, and saying the wrong one
+     sends someone looking for a card that is simply filtered out. */
+  const nothingFound = <p className="lane-empty">No matches</p>;
+
   return (
     <div className="board" ref={boardRef} data-drawer-open={drawerOpen || undefined}>
       <Lane
@@ -305,28 +396,21 @@ export function Board({
         ordinal="00"
         count={backlog.length}
         empty={
-          <button className="lane-cta" onClick={onNewCard}>
-            Add your first card
-          </button>
+          searching ? (
+            nothingFound
+          ) : (
+            <button className="lane-cta" onClick={onNewCard}>
+              Add your first card
+            </button>
+          )
         }
         {...laneDropProps("backlog", null)}
       >
-        {backlog.map((feature) => (
-          <Card
-            key={feature.id}
-            feature={feature}
-            state={cardState(feature, runStatusByFeature[feature.id])}
-            runActive={RUN_ACTIVE.has(runStatusByFeature[feature.id] ?? "")}
-            lastOutput={lastOutputByFeature[feature.id]}
-            pulse={pulses[feature.id]}
-            selected={feature.id === selectedId}
-            onSelect={onSelect}
-          />
-        ))}
+        {backlog.map(card)}
       </Lane>
 
       {stages.map((stage, i) => {
-        const inStage = features.filter((f) => f.currentStageId === stage.id);
+        const inStage = shown.filter((f) => f.currentStageId === stage.id && !isFinished(f));
         const agent = profiles.find((p) => p.id === stage.defaultAgentProfileId);
         return (
           <Lane
@@ -336,23 +420,34 @@ export function Board({
             count={inStage.length}
             agent={agent}
             expecting={expecting.has(stage.id)}
+            {...(searching ? { empty: nothingFound } : {})}
             {...laneDropProps(stage.id, stage.id)}
           >
-            {inStage.map((feature) => (
-              <Card
-                key={feature.id}
-                feature={feature}
-                state={cardState(feature, runStatusByFeature[feature.id])}
-                runActive={RUN_ACTIVE.has(runStatusByFeature[feature.id] ?? "")}
-                lastOutput={lastOutputByFeature[feature.id]}
-                pulse={pulses[feature.id]}
-                selected={feature.id === selectedId}
-                onSelect={onSelect}
-              />
-            ))}
+            {inStage.map(card)}
           </Lane>
         );
       })}
+
+      {/*
+        Where the work ends up.
+
+        No drop handlers, so nothing can be dragged in: the server has
+        no "mark done" move, and a card reaches this lane by clearing
+        the last stage's gate. A lane that accepted a drop and then
+        bounced the card back would be a worse answer than one that
+        never lifts. Cards leave it by being reopened from the drawer,
+        which is why they are not draggable out either.
+      */}
+      <Lane
+        name="Done"
+        ordinal={String(stages.length + 1).padStart(2, "0")}
+        count={finished.length}
+        note="finished work"
+        expecting={expecting.has(DONE_LANE)}
+        empty={searching ? nothingFound : <p className="lane-empty">Nothing finished yet</p>}
+      >
+        {finished.map(card)}
+      </Lane>
     </div>
   );
 }
@@ -362,6 +457,7 @@ function Lane({
   ordinal,
   count,
   agent,
+  note,
   empty,
   over,
   expecting,
@@ -375,14 +471,17 @@ function Lane({
   ordinal: string;
   count: number;
   agent?: AgentProfile | undefined;
+  /** Said in the agent's place, for a lane no agent works. */
+  note?: string;
   /** Shown in place of the default empty slot when the lane has no cards. */
   empty?: React.ReactNode;
-  over: boolean;
+  /** Absent on a lane that takes no drops, which is what makes it terminal. */
+  over?: boolean;
   /** A run upstream just succeeded and this lane is next in line. */
   expecting?: boolean;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDragLeave?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
   children: React.ReactNode;
 }) {
   return (
@@ -411,7 +510,10 @@ function Lane({
             <span className="lane-agent-name">{agent.name}</span>
           </span>
         ) : (
-          <span className="lane-agent lane-agent-empty">no agent assigned</span>
+          // "no agent assigned" is a gap worth naming on a stage, which
+          // is a lane an agent is meant to work. On the Done lane it
+          // would be an instruction to fix something that is not broken.
+          <span className="lane-agent lane-agent-empty">{note ?? "no agent assigned"}</span>
         )}
       </header>
       <div className="lane-cards">

@@ -343,6 +343,145 @@ button {
   flex: 1;
 }
 
+/* The project picker and the search field, as one block. They answer
+   the same question (which cards am I looking at), and on a phone they
+   move to a row of their own together rather than being separated by
+   wherever the row happened to wrap. */
+.topbar-lead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/*
+ * The board's tools, and the chrome that follows them. Replaced by the
+ * hamburger below 720px; see the narrow-screen block.
+ *
+ * A real flex container rather than `display: contents`, which would
+ * have laid the buttons out identically and been the tidier rule.
+ * Browsers have shipped `display: contents` removing an element from
+ * the accessibility tree, and this one is a landmark carrying a name.
+ * The gap repeats the topbar's so the row is unchanged either way.
+ */
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Hidden from sight, kept for a screen reader. Position rather than
+   display: none, which would take the element out of the accessibility
+   tree along with the live region announcement it exists to carry. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * The board's search.
+ *
+ * Built as a field rather than as an .input with an icon beside it: the
+ * magnifier and the clear button sit inside the border, so the whole
+ * thing reads as one control and clicking anywhere in it starts typing.
+ */
+.search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  width: 220px;
+  padding: 0 8px;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-faint);
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.search:focus-within,
+.search[data-on] {
+  border-color: var(--brand);
+  color: var(--text-dim);
+}
+
+.search-mark {
+  flex: none;
+}
+
+/*
+ * The input itself carries no border of its own: the wrapper is the
+ * field. `appearance: none` because a type="search" is a platform
+ * widget in WebKit, and it arrives with a cancel button of its own
+ * drawn in the system's colours next to ours.
+ */
+.search-input {
+  appearance: none;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+.search-input:focus {
+  outline: none;
+}
+
+.search-input::-webkit-search-cancel-button,
+.search-input::-webkit-search-decoration {
+  appearance: none;
+}
+
+.search-input::placeholder {
+  color: var(--text-faint);
+}
+
+.search-clear {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+}
+
+@media (hover: hover) {
+  .search-clear:hover {
+    background: var(--panel-raised);
+    color: var(--text);
+  }
+}
+
+/* The hamburger. Absent until the row it replaces is gone, so the two
+   are never on screen at once saying the same thing twice. */
+.nav-menu-trigger {
+  display: none;
+  padding: 6px 8px;
+}
+
+/* Wider than the project menu's floor: these are labels, not names
+   that need room to be long. */
+.nav-menu {
+  min-width: 190px;
+}
 
 .select,
 .input {
@@ -1894,6 +2033,31 @@ button {
   }
 }
 
+/*
+ * Where the topbar's row stops fitting, which is not where the board's
+ * layout changes.
+ *
+ * Measured rather than guessed: with the picker, the search field, the
+ * three board tools, the gear and the primary action, the row runs out
+ * of slack at about 940px and starts wrapping the primary button's
+ * label onto a second line while squeezing the search field down to a
+ * stub. 980px leaves a margin over that, and keeps the full row at the
+ * 1024px a tablet in landscape reports.
+ *
+ * The board keeps its own breakpoint at 720px, further down: lane
+ * widths and the drawer becoming a sheet are a different question from
+ * whether eight controls fit on one line.
+ */
+@media (max-width: 980px) {
+  .topbar-nav {
+    display: none;
+  }
+
+  .nav-menu-trigger {
+    display: inline-flex;
+  }
+}
+
 @media (max-width: 720px) {
   :root {
     /* A lane nearly fills the screen, so the board pages lane by lane. */
@@ -1914,6 +2078,26 @@ button {
   .topbar .select {
     flex: 1 1 140px;
     min-width: 0;
+  }
+
+  /*
+   * The row becomes two.
+   *
+   * Everything keeps its natural order except the picker and the search
+   * field, which are ordered last and told to take the full width, so
+   * they wrap together onto a line of their own. The line above is then
+   * the brand, the spend, the primary action and the menu, which is
+   * what a phone has room for.
+   */
+  .topbar-lead {
+    order: 1;
+    flex: 1 1 100%;
+  }
+
+  .search {
+    /* No fixed width down here: it takes whatever the picker leaves. */
+    flex: 1 1 auto;
+    width: auto;
   }
 
   .board {
@@ -2971,6 +3155,11 @@ button.session-expand[aria-pressed="true"] {
   font: inherit;
   font-size: 13px;
   text-align: left;
+  /* Some entries are anchors (the nav menu's Changelog and Settings
+     carry addresses on purpose). Without this they were the only two
+     underlined lines in a menu of plain ones, which read as a different
+     kind of thing rather than as the same list. */
+  text-decoration: none;
   cursor: pointer;
 }
 .picker-item:hover {
@@ -3174,5 +3363,254 @@ button.session-expand[aria-pressed="true"] {
 @media (prefers-reduced-motion: reduce) {
   .toast {
     animation: none;
+  }
+}
+
+/*
+ * The bottom bar.
+ *
+ * Everything about Bento rather than about your board: the contact
+ * form and the changelog. A hairline above and the page's own
+ * background, so it reads as the far edge of the chrome rather than as
+ * a third panel competing with the board slab.
+ *
+ * A flex item of .app, not a fixed overlay: the board is a flex child
+ * that takes the height that is left, so a fixed strip would sit on
+ * top of the last row of cards in every lane.
+ */
+.bottombar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
+  /* Clears the home indicator on a phone, and is nothing anywhere else. */
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+
+/*
+ * A tab, in the sense the settings page's tabs are: a place, named by a
+ * word, with a rule under the one you are on. Same shape as .tab,
+ * mirrored, because the rule belongs on the edge the bar is attached
+ * to rather than under the label.
+ */
+.bottombar-tab {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 9px 10px;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+@media (hover: hover) {
+  .bottombar-tab:hover {
+    color: var(--text-dim);
+  }
+}
+
+.bottombar-tab::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: -1px;
+  height: 2px;
+  border-radius: 1px;
+  background: transparent;
+}
+
+.bottombar-tab[data-on] {
+  color: var(--text);
+}
+
+.bottombar-tab[data-on]::after {
+  background: var(--brand);
+}
+
+.bottombar-tab:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+  border-radius: 3px;
+}
+
+/*
+ * The changelog.
+ *
+ * A document, so it reads like one: a single measured column, dates in
+ * their own rail down the left, and releases separated by a rule rather
+ * than boxed into cards. The board is the app; this is a page about it.
+ */
+.changelog {
+  flex: 1;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+}
+
+.changelog-intro {
+  margin-bottom: 40px;
+}
+
+.changelog-title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.changelog-lede {
+  margin: 8px 0 0;
+  max-width: 52ch;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+/*
+ * One release. The date rail is a column of its own on a wide screen,
+ * and the heading is what the anchor lands on, so it keeps the topbar's
+ * height clear of itself: a deep link that put the heading under the
+ * chrome would look like it had scrolled to the wrong place.
+ */
+.release {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 28px;
+  padding: 32px 0;
+  border-top: 1px solid var(--line);
+  scroll-margin-top: 20px;
+}
+
+.release-rail {
+  /* Sticky, so a long release keeps saying when it shipped while it is
+     being read. Bounded by its own grid row, so it releases at the next
+     one rather than travelling down the whole page. */
+  position: sticky;
+  top: 20px;
+  align-self: start;
+}
+
+.release-date {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.release-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  scroll-margin-top: 20px;
+}
+
+/*
+ * The link on a heading. Quiet until the heading is hovered or it is
+ * focused: it is an affordance for the person who wants it, not a
+ * character in every title. Focus is the important half, since keyboard
+ * users never trigger the hover that reveals it.
+ */
+.release-anchor {
+  flex: none;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+
+.release-title:hover .release-anchor,
+.release-anchor:focus-visible {
+  opacity: 1;
+}
+
+.release-anchor:hover {
+  color: var(--brand);
+}
+
+/* Coarse pointers have no hover to reveal it with, and a link nobody
+   can reach is worse than one that is always faintly there. */
+@media (hover: none) {
+  .release-anchor {
+    opacity: 1;
+  }
+}
+
+.release-summary {
+  margin: 10px 0 0;
+  max-width: 62ch;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.release-items {
+  list-style: none;
+  margin: 22px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.release-item-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.release-item-body {
+  margin: 4px 0 0;
+  max-width: 62ch;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+/* On a phone the rail would spend a third of the width holding eight
+   characters, so the date becomes a line above the heading. */
+@media (max-width: 720px) {
+  .changelog {
+    padding: 24px 16px 60px;
+  }
+
+  .changelog-title {
+    font-size: 25px;
+  }
+
+  .release {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 26px 0;
+  }
+
+  .release-rail {
+    position: static;
+  }
+
+  .release-title {
+    font-size: 18px;
   }
 }
