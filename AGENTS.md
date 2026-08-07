@@ -102,6 +102,18 @@ the feature did not work:
 - `window.fetch` stored unbound threw on every browser request.
 - Local mode would not boot, because a derived key came out below the
   minimum length and no test exercised startup.
+- A sandbox that failed to install one agent CLI kept a marker saying it
+  had, so every later provision skipped the install and every run of
+  that agent died at spawn. Every test agreed, because they all ran
+  against stubs, and a stub is never unreachable.
+
+The sandbox toolchain now has a test that provisions a real Fly Sprite
+and installs the real CLIs: `packages/sandbox/src/sprite.e2e.test.ts`,
+run by `.github/workflows/sandbox-e2e.yml` nightly and on any change to
+`agent-toolchain.ts`. It is deliberately outside `pnpm test`, because it
+costs a machine and several minutes. Bumping `TOOLCHAIN_VERSION` makes
+every warm sprite reinstall at once, which is when an installer is most
+likely to be throttled, so wait for that workflow before merging a bump.
 
 For anything user-facing, run it: drive the web app in a browser, run
 the TUI against a live server, read the rows back out of Postgres.

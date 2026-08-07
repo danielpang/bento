@@ -197,6 +197,105 @@ test("opencode falls back to its installer when the release download is gone", (
   }
 });
 
+/**
+ * A version bump is the riskiest moment this script has, and the one
+ * most likely to bring the bug back.
+ *
+ * Bumping renames the marker, so every warm sandbox in the fleet
+ * reinstalls the whole set on its next provision, all at once, from one
+ * egress address. That is exactly the condition that gets an installer
+ * throttled, so a bump makes a failed install more likely rather than
+ * less. What must not follow is the old behaviour: the CLI that lost
+ * its install during the stampede staying gone.
+ */
+test("a bump reinstalls the set, and still retries a CLI the bump could not install", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-bump-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    // A machine that never got opencode, which is the state the fleet
+    // is in when a bump lands after a bad hour. Both of its routes are
+    // down, since either one alone would install it.
+    sandbox.breaks("opencode", "opencode-release");
+    const first = sandbox.run();
+    assert.equal(first.status, 0, first.stderr);
+    assert.deepEqual(toolchainMissing(first.stdout), ["opencode"]);
+
+    // The bump, with opencode still unreachable while every warm
+    // machine reinstalls at once.
+    const bumped = sandbox.runAfterVersionBump();
+    assert.equal(bumped.status, 0, bumped.stderr);
+    // A bump means the whole set, not only what is missing: the point
+    // of bumping is that the CLIs already there may be too old.
+    for (const installer of ["claude", "codex", "opencode", "cursor"]) {
+      assert.ok(
+        sandbox.fetched().some((url) => url.includes(installer)),
+        `a bump did not reinstall ${installer}: ${sandbox.fetched().join(" ")}`,
+      );
+    }
+    assert.deepEqual(toolchainMissing(bumped.stdout), ["opencode"]);
+    // The four that did install are still usable. A bump that fails
+    // halfway must not take the working CLIs down with it.
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi"]);
+
+    // The provision after the bump. This is the assertion that would
+    // have caught the original bug: the new marker is on disk, and it
+    // must not be enough to end the script while a CLI is absent.
+    sandbox.breaks();
+    const after = sandbox.runAfterVersionBump();
+    assert.equal(after.status, 0, after.stderr);
+    assert.deepEqual(toolchainMissing(after.stdout), []);
+    assert.equal(after.status, 0);
+    assert.equal(sandbox.fetched().length, 1);
+    assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The other half of a bump, written down because it is a deliberate
+ * limit rather than an oversight: a machine that already has a CLI
+ * keeps the copy it has when the reinstall cannot reach it at all.
+ *
+ * Nothing breaks, and the sandbox stays usable, but the upgrade the
+ * bump existed to deliver did not happen and the script cannot tell.
+ * Catching that would mean knowing each CLI's version and how to ask
+ * for it, which is a bigger thing than this script. What it does
+ * guarantee is the part that matters for a run: a CLI is either there
+ * or reported.
+ */
+test("a bump that cannot reach a CLI keeps the copy the machine already had", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-stale-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    sandbox.breaks("opencode", "opencode-release");
+    const bumped = sandbox.runAfterVersionBump();
+    assert.equal(bumped.status, 0, bumped.stderr);
+    assert.deepEqual(toolchainMissing(bumped.stdout), [], "the previously installed copy is still there");
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Adding a sixth CLI means adding something that installs it. Without
+ * this, a binary added to the list alone would leave every provision
+ * installing nothing, reporting it missing, and trying again forever.
+ */
+test("every binary the script promises has something that installs it", () => {
+  for (const binary of AGENT_BINARIES) {
+    assert.ok(
+      new RegExp(`install_from ${binary}\\b`).test(AGENT_TOOLCHAIN_SCRIPT) ||
+        new RegExp(`wanted ${binary}\\b`).test(AGENT_TOOLCHAIN_SCRIPT),
+      `${binary} is in AGENT_BINARIES but nothing in the script installs it`,
+    );
+  }
+});
+
 /** Both routes down is still reported, not silently swallowed. */
 test("opencode is reported missing when the release and the installer are both unreachable", () => {
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-bothdown-"));
@@ -229,28 +328,7 @@ class ToolchainSandbox {
 
   constructor(private root: string) {
     this.stubs = path.join(root, "stubs");
-    this.script = AGENT_TOOLCHAIN_SCRIPT.replaceAll(
-      /(?<![\w/])\/(opt|usr\/local|root|tmp|etc)\//g,
-      `${root}/$1/`,
-    );
-
-    /**
-     * The relocation is only as good as its coverage: a path it misses
-     * is a test that writes to the machine it runs on. Anything still
-     * absolute has to be either inside the root or read-only.
-     */
-    // /proc/cpuinfo is read, never written: the opencode fallback reads
-    // it to tell an avx2 machine from one that needs the baseline build.
-    const allowed = new Set(["/dev/null", "/bin/sh", "/root", "/proc/cpuinfo"]);
-    for (const line of this.script.split("\n")) {
-      // A comment touches nothing, and the script explains itself in
-      // terms of the paths and URLs it works with.
-      if (line.trim().startsWith("#")) continue;
-      for (const found of line.match(/(?<![\w.$/])\/[a-z][\w./-]*/g) ?? []) {
-        if (found.startsWith(`${root}/`) || allowed.has(found)) continue;
-        assert.fail(`the toolchain script writes outside the test's root: ${found}`);
-      }
-    }
+    this.script = this.relocate(AGENT_TOOLCHAIN_SCRIPT);
 
     mkdirSync(this.stubs, { recursive: true });
     // The real /tmp exists; the relocated one has to be made.
@@ -319,15 +397,25 @@ EOF
     );
   }
 
-  run(): { status: number | null; stdout: string; stderr: string } {
+  run(script = this.script): { status: number | null; stdout: string; stderr: string } {
     rmSync(path.join(this.root, "fetched"), { force: true });
     const home = path.join(this.root, "home");
     mkdirSync(home, { recursive: true });
-    const result = spawnSync("sh", ["-c", this.script], {
+    const result = spawnSync("sh", ["-c", script], {
       env: { PATH: `${this.stubs}:${this.root}/usr/local/bin:/usr/bin:/bin`, HOME: home },
       encoding: "utf8",
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }
+
+  /**
+   * The same sandbox after a TOOLCHAIN_VERSION bump. A bump renames the
+   * marker, which is the whole of what a warm machine notices, so
+   * rendering the script against a marker it has never seen is a
+   * faithful stand-in for the deploy that follows one.
+   */
+  runAfterVersionBump(): { status: number | null; stdout: string; stderr: string } {
+    return this.run(this.relocate(AGENT_TOOLCHAIN_SCRIPT.replaceAll(TOOLCHAIN_MARKER, `${TOOLCHAIN_MARKER}-next`)));
   }
 
   /** The binaries a run could actually spawn afterwards. */
@@ -341,6 +429,29 @@ EOF
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Rewrites every absolute path the script writes to so it sits under
+   * the test's root. The relocation is only as good as its coverage: a
+   * path it misses is a test that writes to the machine it runs on, so
+   * anything still absolute afterwards has to be read-only.
+   */
+  private relocate(script: string): string {
+    const moved = script.replaceAll(/(?<![\w/])\/(opt|usr\/local|root|tmp|etc)\//g, `${this.root}/$1/`);
+    // /proc/cpuinfo is read, never written: the opencode download reads
+    // it to tell an avx2 machine from one that needs the baseline build.
+    const allowed = new Set(["/dev/null", "/bin/sh", "/root", "/proc/cpuinfo"]);
+    for (const line of moved.split("\n")) {
+      // A comment touches nothing, and the script explains itself in
+      // terms of the paths and URLs it works with.
+      if (line.trim().startsWith("#")) continue;
+      for (const found of line.match(/(?<![\w.$/])\/[a-z][\w./-]*/g) ?? []) {
+        if (found.startsWith(`${this.root}/`) || allowed.has(found)) continue;
+        assert.fail(`the toolchain script writes outside the test's root: ${found}`);
+      }
+    }
+    return moved;
   }
 
   private stub(name: string, body: string): void {
