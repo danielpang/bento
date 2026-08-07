@@ -75,3 +75,15 @@ jobs:
         if: ${{ env.SPRITES_TOKEN != '' }}
         working-directory: packages/sandbox
         run: node --test --import tsx src/sprite.e2e.test.ts
+
+      # The test deletes its own machine and asserts that it went, so
+      # this is for the paths where the test never got the chance: a
+      # cancelled job, the timeout above, a runner that died. A sprite
+      # lives until something deletes it, so "usually tidy" is not good
+      # enough. The name comes from the run rather than from the test,
+      # which is why the test derives it the same way, and why a test in
+      # ordinary CI pins the two together.
+      - name: Delete the sprite even if the run was killed
+        if: ${{ always() && env.SPRITES_TOKEN != '' }}
+        working-directory: packages/sandbox
+        run: node --import tsx scripts/delete-sprite.ts "bento-e2e-${{ github.run_id }}-${{ github.run_attempt }}"

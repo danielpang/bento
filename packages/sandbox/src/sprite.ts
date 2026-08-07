@@ -1,4 +1,4 @@
-import { SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
+import { APIError, SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
 import {
   AGENT_BINARIES,
   AGENT_TOOLCHAIN_SCRIPT,
@@ -25,6 +25,31 @@ import {
  */
 export function spriteName(featureId: string): string {
   return `bento-${featureId}`;
+}
+
+/**
+ * Whether the machine is still there.
+ *
+ * Deliberately not "any failure means gone". A lookup that fails for
+ * some reason other than "no such sprite" has not answered the
+ * question, and reporting "gone" would turn an unreachable API, or a
+ * token that has expired, into a clean bill of health. `destroy`
+ * swallows whatever `deleteSprite` says, so this is the only way to
+ * know a machine really went, and a wrong answer is a machine that goes
+ * on being billed with nobody looking for it.
+ */
+export async function spriteExists(client: SpritesClient, name: string): Promise<boolean> {
+  try {
+    await client.getSprite(name);
+    return true;
+  } catch (err) {
+    if (err instanceof APIError && err.statusCode === 404) return false;
+    // Not every path through the SDK builds an APIError, and a 404 is
+    // still a 404 when it arrives as an ordinary Error.
+    if (err instanceof APIError && err.statusCode !== undefined) throw err;
+    if (/\b404\b|not found/i.test(String(err))) return false;
+    throw err;
+  }
 }
 
 export interface SpriteDriverOptions {
