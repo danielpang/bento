@@ -1,4 +1,4 @@
-import { SpritesClient, type Sprite } from "@fly/sprites";
+import { SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
 import { AGENT_BINARIES, AGENT_TOOLCHAIN_SCRIPT, TOOLCHAIN_MARKER } from "./agent-toolchain.js";
 import {
   collectExec,
@@ -188,6 +188,7 @@ export class SpriteDriver implements SandboxDriver {
       ...(opts?.env ? { env: opts.env } : {}),
     });
     const stopKeepaliveGuard = defuseKeepalive(child);
+    closeStdin(child);
 
     const queue: ExecChunk[] = [];
     let notify: (() => void) | null = null;
@@ -353,6 +354,7 @@ function runScript(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const child = sprite.spawn("sh", ["-c", script]);
   const stopKeepaliveGuard = defuseKeepalive(child);
+  closeStdin(child);
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
@@ -381,6 +383,29 @@ function runScript(
       resolve({ stdout, stderr, exitCode });
     });
   });
+}
+
+/**
+ * Sends end-of-input to the spawned process as soon as its connection
+ * is up.
+ *
+ * The SDK asks the server to open the command's stdin on every exec
+ * (stdin=true on the URL) and only sends the end-of-input frame when
+ * this side ends the stdin stream. Nothing here writes to stdin, so
+ * without this the process sits behind a pipe that never closes. An
+ * agent CLI treats a piped stdin as input it must read before
+ * starting (opencode's run awaits stdin to EOF), so a run produced
+ * not a single event, indefinitely. The SDK's keepalive used to cut
+ * exactly those runs off after 45 quiet seconds, which read as a
+ * websocket failure; once defuseKeepalive turned that off, the same
+ * hang simply ran until the 30 minute limit.
+ *
+ * On "spawn" rather than immediately, because the SDK drops the EOF
+ * frame silently while the socket is still connecting, and "spawn"
+ * fires once it is open.
+ */
+function closeStdin(child: SpriteCommand): void {
+  child.on("spawn", () => child.stdin.end());
 }
 
 /**

@@ -6,6 +6,7 @@ import { SpriteCommand, type Sprite } from "@fly/sprites";
 import { SpriteDriver } from "./sprite.js";
 
 type FakeChild = EventEmitter & {
+  stdin: PassThrough;
   stdout: PassThrough;
   stderr: PassThrough;
   kill(): void;
@@ -14,6 +15,7 @@ type FakeChild = EventEmitter & {
 
 function fakeChild(): FakeChild {
   const child = new EventEmitter() as FakeChild;
+  child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = () => {};
@@ -175,6 +177,64 @@ test("Sprite exec keeps resetting the SDK inactivity clock while the agent is qu
   const after = resets;
   t.mock.timers.tick(60_000);
   assert.equal(resets, after);
+});
+
+/**
+ * The SDK opens stdin for every exec and holds it open until this side
+ * ends the stream, and an agent CLI reads a piped stdin to EOF before
+ * it starts. A run whose stdin never closed produced no output at all,
+ * forever. See closeStdin.
+ */
+test("Sprite exec ends the process's stdin once the command is up", async () => {
+  const child = fakeChild();
+  const sprite = {
+    spawn() {
+      return child;
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const iterator = driver
+    .exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["opencode"])
+    [Symbol.asyncIterator]();
+  const first = iterator.next();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Not before the connection is open: an EOF sent while the socket is
+  // still connecting is dropped, and the agent waits forever anyway.
+  assert.equal(child.stdin.writableEnded, false);
+  child.emit("spawn");
+  assert.equal(child.stdin.writableEnded, true);
+
+  child.emit("exit", 0);
+  const chunk = await first;
+  assert.deepEqual(chunk.value, { kind: "exit", exitCode: 0 });
+  await iterator.return?.(undefined);
+});
+
+/**
+ * The other half of closeStdin's contract lives in the SDK: ending the
+ * stdin stream must translate into the end-of-input frame the server
+ * waits for. This pins that wiring against the installed package, so
+ * an SDK change that drops it fails here instead of silently reviving
+ * the hang.
+ */
+test("the installed SDK still sends stdin end-of-input when the stream ends", async () => {
+  const sprite = {
+    name: "pin",
+    client: { token: "token", baseURL: "https://example.invalid" },
+  } as unknown as Sprite;
+  const command = new SpriteCommand(sprite, "true");
+  const ws = (command as unknown as { wsCmd?: { sendStdinEOF?: unknown } }).wsCmd;
+  assert.equal(typeof ws?.sendStdinEOF, "function");
+  let sent = 0;
+  (ws as { sendStdinEOF: () => void }).sendStdinEOF = () => {
+    sent += 1;
+  };
+  command.stdin.end();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent, 1);
 });
 
 /**
