@@ -35,13 +35,23 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "p
  * again. Machines carrying a v2 marker may be missing a CLI because of
  * it, and the bump makes them install the set once more.
  *
- * Deliberately still 3. A bump makes every warm sprite reinstall the
- * whole set at once, from one egress address, which is what exhausts
- * an hourly API budget in the first place: bumping to fix a rate limit
- * feeds it. Nothing here needs one either. Since v3 the retry decision
- * comes from the binaries rather than the marker, so a sandbox missing
- * opencode already runs that installer on its next provision and picks
- * up whatever this script now does.
+ * Bumping this is not free, and it is worth knowing why before you do.
+ * Every warm sprite in the fleet reinstalls the whole set on its next
+ * provision, so the next run of every card pays minutes it did not
+ * expect, and four vendors' installers are all called at once from one
+ * egress address. That is the condition that gets one of them
+ * throttled, which means a bump is the change most likely to hit the
+ * failure this version exists to fix: bumping to fix a rate limit feeds
+ * it. Nothing wedges when it does, and agent-toolchain.test.ts holds
+ * that guarantee, but a real sprite is the only thing that can say the
+ * installers themselves still work, so
+ * .github/workflows/sandbox-e2e.yml runs one whenever this file
+ * changes. Wait for it before merging a bump.
+ *
+ * Which is also why fixing opencode did not need one. Since v3 the
+ * retry decision comes from the binaries rather than the marker, so a
+ * sandbox missing a CLI already reinstalls it on its next provision and
+ * picks up whatever this script now does.
  */
 export const TOOLCHAIN_VERSION = 3;
 

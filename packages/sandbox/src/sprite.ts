@@ -15,6 +15,18 @@ import {
   type SandboxHandle,
 } from "./driver.js";
 
+/**
+ * The machine a feature's work happens on. Exported because a test that
+ * provisions a real sprite has to be able to delete it by name even
+ * when provisioning threw halfway, and guessing the convention in two
+ * places is how a leaked machine goes on being billed.
+ *
+ * Sprite names are DNS-ish; a uuid with dashes is fine.
+ */
+export function spriteName(featureId: string): string {
+  return `bento-${featureId}`;
+}
+
 export interface SpriteDriverOptions {
   token: string;
   /** Sprite size. Agents are IO heavy rather than CPU heavy. */
@@ -56,8 +68,7 @@ export class SpriteDriver implements SandboxDriver {
   }
 
   private spriteName(featureId: string): string {
-    // Sprite names are DNS-ish; a uuid with dashes is fine.
-    return `bento-${featureId}`;
+    return spriteName(featureId);
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
