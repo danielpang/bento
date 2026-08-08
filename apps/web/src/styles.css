@@ -1254,6 +1254,8 @@ button {
 
 .drawer-body {
   flex: 1;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 14px 16px;
   display: flex;
@@ -1277,6 +1279,8 @@ button {
   border-radius: var(--radius);
   background: var(--panel-raised);
   padding: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .drawer-body-sectioned > .section:first-of-type {
@@ -1514,10 +1518,15 @@ button {
   line-height: 1.55;
   color: var(--text);
   max-height: 380px;
+  /* Vertical scroll only. Long tool paths and URLs wrap inside the
+     bubbles instead of widening the drawer (or the page behind it). */
+  overflow-x: hidden;
   overflow-y: auto;
   margin: 0;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
   /* Reaching the end of the conversation must not start scrolling the page. */
   overscroll-behavior: contain;
 }
@@ -1525,6 +1534,8 @@ button {
 .chat-section {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Where a run begins inside the conversation: a centred caption
@@ -1536,7 +1547,14 @@ button {
   margin: 12px 0 4px;
   color: var(--text-faint);
   font-size: 11px;
+  min-width: 0;
+  max-width: 100%;
+}
+.chat-run > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 .chat-run::before,
 .chat-run::after {
@@ -1551,6 +1569,8 @@ button {
 .chat-row {
   display: flex;
   margin: 4px 0;
+  min-width: 0;
+  max-width: 100%;
 }
 .chat-row-user {
   justify-content: flex-end;
@@ -1568,9 +1588,11 @@ button {
   flex-direction: column;
   gap: 4px;
   max-width: min(88%, 720px);
+  min-width: 0;
   padding: 8px 12px;
   border-radius: var(--radius-lg);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -1605,7 +1627,9 @@ button {
 
 .chat-text {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  min-width: 0;
 }
 
 .chat-meta {
@@ -1620,9 +1644,11 @@ button {
 /* Between the bubbles: what Bento itself has to say. */
 .chat-note {
   max-width: 92%;
+  min-width: 0;
   text-align: center;
   font-size: 11.5px;
   color: var(--text-faint);
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -1634,10 +1660,12 @@ button {
 .chat-tools,
 .chat-tools-detail {
   max-width: min(88%, 720px);
+  min-width: 0;
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: transparent;
+  overflow-wrap: anywhere;
 }
 .chat-tools {
   font-family: var(--mono);
@@ -1654,7 +1682,9 @@ button {
   font-size: 11px;
   color: var(--text-faint);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  min-width: 0;
 }
 
 /* How a run ended, as a pill in the conversation's own colours. */
@@ -2592,7 +2622,14 @@ button {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
   width: 100%;
+  min-width: 0;
+}
+.agent-session {
+  min-width: 0;
+  max-width: 100%;
 }
 .session-expand {
   color: var(--text-dim);
