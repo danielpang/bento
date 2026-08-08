@@ -35,7 +35,12 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { markCancelled, registerJobs, recoverInterruptedRuns } from "./orchestrator/run-executor.js";
+import {
+  deliverQueuedMessage,
+  markCancelled,
+  registerJobs,
+  recoverInterruptedRuns,
+} from "./orchestrator/run-executor.js";
 import { JUDGE_PROMPT_PREFIX } from "./orchestrator/gate-evaluator.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
@@ -1267,6 +1272,67 @@ test("a message the agent never confirmed is redelivered to the next run", { tim
   const [after] = await ctx.db.select().from(featureMessages).where(eq(featureMessages.id, message!.id));
   assert.equal(after?.status, "delivered", "the redelivering run's result confirms it");
   assert.equal(after?.runId, resume.id, "and the message records which run answered");
+});
+
+/**
+ * A message that became a run's prompt is finished, whatever becomes
+ * of the run.
+ *
+ * Treating it as still in flight was an endless loop: a run that ends
+ * without a result (no credentials, a sandbox that will not provision,
+ * the run limit) requeued its own prompt, the terminal path handed it
+ * straight to another run, and that one failed identically. A card
+ * with a persistent failure spawned runs until somebody noticed. The
+ * run row carries the prompt, so a failure is something to read and
+ * resume, not a message to deliver again.
+ */
+test("a run's own prompt is never handed to another run", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Prompt redelivery");
+  const feature = await createFeature(project.id, "Looping card");
+  const profile = await fakeProfile("loop-fake");
+  const stage = projectStages[0]!;
+
+  // Executor "runner" so the delivered run stays queued for this test
+  // to end deliberately, rather than being executed out from under it.
+  const [previous] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "earlier work",
+      status: "succeeded",
+      executor: "runner",
+      cliSessionId: "loop-sess",
+    })
+    .returning();
+  const [message] = await ctx.db
+    .insert(featureMessages)
+    .values({ featureId: feature.id, text: "retry the header" })
+    .returning();
+
+  await deliverQueuedMessage(ctx, previous!.id);
+
+  const carrying = async () =>
+    ctx.db.select().from(agentRuns).where(eq(agentRuns.prompt, "retry the header"));
+  const first = await carrying();
+  assert.equal(first.length, 1, "the message became exactly one run");
+  const [afterDelivery] = await ctx.db
+    .select()
+    .from(featureMessages)
+    .where(eq(featureMessages.id, message!.id));
+  assert.equal(afterDelivery?.status, "delivered", "handing a message to a run as its prompt delivers it");
+  assert.equal(afterDelivery?.runId, first[0]!.id);
+
+  // The run ends without ever reaching a result, which is what every
+  // pre-agent failure looks like.
+  await markCancelled(ctx, first[0]!.id);
+
+  assert.equal(
+    (await carrying()).length,
+    1,
+    "the ended run's prompt is not delivered again, so no second run is spawned",
+  );
 });
 
 /**

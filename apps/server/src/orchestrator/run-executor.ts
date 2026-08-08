@@ -28,6 +28,7 @@ import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
+  markMessagesDelivered,
   markMessagesSent,
   requeueDanglingClaims,
   requeueMessages,
@@ -885,7 +886,10 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     await requeueMessages(ctx.db, ids);
     return;
   }
-  await markMessagesSent(ctx.db, ids, next.id);
+  // Delivered, not merely sent: they are this run's prompt now, carried
+  // durably by the run row, so its failure is something to read and
+  // resume rather than a message to hand out again.
+  await markMessagesDelivered(ctx.db, ids, next.id);
   ctx.bus.emitBoardEvent({
     type: "run_updated",
     projectId: feature.projectId,
