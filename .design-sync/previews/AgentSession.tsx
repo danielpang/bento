@@ -71,7 +71,7 @@ export function ToolDetail() {
         profiles={profiles}
         finished={false}
         onChanged={() => {}}
-        defaultShowDetail
+        showDetail
       />
     </div>
   );

@@ -5,7 +5,20 @@ import { Surface } from "./_fixtures.js";
 export function Active() {
   return (
     <Surface>
-      <StopButton disabled={false} onClick={() => {}} />
+      <form className="composer" onSubmit={(e) => e.preventDefault()}>
+        <input
+          className="input composer-input"
+          defaultValue=""
+          placeholder="Message the agent"
+          aria-label="Message the agent"
+          readOnly
+        />
+        <StopButton disabled={false} onClick={() => {}} />
+        <button className="btn btn-primary" type="submit" disabled>
+          Send
+        </button>
+      </form>
+      <p className="muted composer-hint">Delivered while the agent is working.</p>
     </Surface>
   );
 }
@@ -14,7 +27,21 @@ export function Active() {
 export function Disabled() {
   return (
     <Surface>
-      <StopButton disabled onClick={() => {}} />
+      <form className="composer" onSubmit={(e) => e.preventDefault()}>
+        <input
+          className="input composer-input"
+          defaultValue=""
+          placeholder="Message the agent"
+          aria-label="Message the agent"
+          readOnly
+          disabled
+        />
+        <StopButton disabled onClick={() => {}} />
+        <button className="btn btn-primary" type="submit" disabled>
+          Send
+        </button>
+      </form>
+      <p className="muted composer-hint">Delivered while the agent is working.</p>
     </Surface>
   );
 }

@@ -62,6 +62,7 @@ export function AgentSession({
   quote,
   onQuoteClear,
   defaultShowDetail,
+  showDetail: controlledShowDetail,
 }: {
   client: BentoClient;
   featureId: string;
@@ -78,6 +79,11 @@ export function AgentSession({
   onQuoteClear?: () => void;
   /** Falls back to this when localStorage has no saved detail preference yet. */
   defaultShowDetail?: boolean;
+  /**
+   * Fully controlled detail mode for durable previews. When set, it
+   * wins over both the saved preference and defaultShowDetail.
+   */
+  showDetail?: boolean;
 }) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   /**
@@ -91,10 +97,11 @@ export function AgentSession({
   // Remembered across cards and sessions: detail is a reading
   // preference, not a per-card state. Only an absent preference falls
   // back to defaultShowDetail; a saved "0" still means hidden.
-  const [showDetail, setShowDetail] = useState(() => {
+  const [showDetailState, setShowDetailState] = useState(() => {
     const saved = localStorage.getItem("bento:logDetail");
     return saved === null ? (defaultShowDetail ?? false) : saved === "1";
   });
+  const showDetail = controlledShowDetail ?? showDetailState;
   const [say, setSay] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -394,8 +401,11 @@ export function AgentSession({
             className="session-expand"
             aria-pressed={showDetail}
             onClick={() => {
-              const next = !showDetail;
-              setShowDetail(next);
+              // Controlled previews pin the mode; only the uncontrolled
+              // path remembers a preference across cards and sessions.
+              if (controlledShowDetail !== undefined) return;
+              const next = !showDetailState;
+              setShowDetailState(next);
               localStorage.setItem("bento:logDetail", next ? "1" : "0");
             }}
           >
