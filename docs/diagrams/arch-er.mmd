@@ -1,0 +1,47 @@
+erDiagram
+    organization ||--o{ projects : owns
+    projects ||--o{ repositories : spans
+    projects ||--o{ pipelines : owns
+    pipelines ||--o{ stages : orders
+    projects ||--o{ features : holds
+    stages |o--o{ features : "currently in"
+    agent_profiles |o--o{ stages : "assigned to"
+    features ||--o{ agent_runs : "worked by"
+    agent_profiles ||--o{ agent_runs : "performed by"
+    projects ||--o{ sandboxes : for
+    sandboxes |o--o{ agent_runs : inside
+    agent_runs ||--o{ run_events : streams
+    features ||--o{ feature_messages : hears
+    features ||--o{ gate_checks : "must satisfy"
+    features ||--o{ feature_events : records
+    features ||--o{ feature_pull_requests : opens
+
+    features {
+        uuid id PK
+        text status "backlog active gated done cancelled"
+        uuid current_stage_id FK
+        text branch_name
+    }
+    agent_runs {
+        uuid id PK
+        text status "queued starting running succeeded failed cancelled"
+        text executor "server or runner"
+        text cli_session_id
+        uuid sandbox_id FK
+    }
+    run_events {
+        bigserial id PK
+        integer seq "unique per run"
+        jsonb payload
+    }
+    feature_messages {
+        uuid id PK
+        text status "queued sent delivered"
+        uuid run_id FK
+    }
+    stages {
+        uuid id PK
+        integer position
+        text gate_type "manual or auto"
+        jsonb gate_criteria
+    }

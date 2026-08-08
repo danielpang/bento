@@ -1,0 +1,7 @@
+flowchart TB
+    req["A request carrying a session"]
+    l1["1. Route checks<br/>access helpers re-read membership<br/>a foreign id answers 404, never 403"]
+    l2["2. Row-level security<br/>the request runs as bento_user<br/>policies compare bento.org_id"]
+    l3["3. Insert triggers<br/>organization_id is derived<br/>from the parent row"]
+    rows[("Only this organization's rows")]
+    req --> l1 --> l2 --> l3 --> rows

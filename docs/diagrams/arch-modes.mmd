@@ -1,0 +1,4 @@
+flowchart LR
+    a1["bento<br/>TUI, embedded server, managed Postgres"] --> a2["Agents in Docker<br/>on this machine"]
+    b1["bento --server url<br/>TUI as a thin client"] --> b2["The server runs the agents,<br/>in Fly Sprites when hosted"]
+    c1["bento --server url --run-agents local<br/>TUI with a local runner"] --> c2["Shared board on the server,<br/>agents and code stay here"]

@@ -1,0 +1,16 @@
+stateDiagram-v2
+    [*] --> queued
+    queued --> starting: a worker claims it
+    starting --> running: first event
+    starting --> failed: no credential
+    running --> succeeded: result
+    running --> failed: error or limit
+    running --> cancelled: stopped
+    succeeded --> [*]
+    failed --> [*]
+    cancelled --> [*]
+    note right of running
+        A dropped socket, or a server
+        restart, reattaches here.
+        The run never leaves this state.
+    end note

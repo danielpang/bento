@@ -1,0 +1,28 @@
+sequenceDiagram
+    actor U as User
+    participant A as Hono API
+    participant O as Orchestrator
+    participant Q as pg-boss
+    participant S as Sandbox
+    participant G as GitHub
+
+    U->>A: create a card, move it into a stage
+    A->>O: advanceFeature
+    O->>Q: send run.execute
+    Q->>O: a worker picks the run up
+    O->>O: resolveAgentEnv from the organization's secrets
+    O->>S: provision the card's sandbox
+    O->>S: run each repository's setup command, once per sandbox
+    O->>S: start the stage's agent
+    S-->>A: transcript events, through the bus to SSE
+    S->>S: the agent commits and writes docs/bento/stage.md
+    O->>G: push the branch and open a pull request, when the stage says so
+    O->>Q: send gate.evaluate
+    Q->>O: evaluateFeatureGate
+    alt every criterion passes
+        O->>A: advance the card to the next stage
+    else a criterion failed
+        O->>A: hold the card, recording which one
+    else the stage is manual
+        O->>A: hold until a person approves
+    end
