@@ -232,13 +232,6 @@ export const features = pgTable("features", {
   boardPosition: numeric("board_position").notNull().default("0"),
   branchName: text("branch_name"),
   /**
-   * A message sent to the agent while a run was still going. A headless
-   * CLI run cannot hear mid-flight, so the message waits here and is
-   * delivered as a session resume the moment the run reaches a terminal
-   * state. Several messages sent during one run stack with newlines.
-   */
-  queuedPrompt: text("queued_prompt"),
-  /**
    * The first repository's pull request, mirrored from
    * feature_pull_requests the same way the project mirrors its first
    * repository. A card spanning three repositories has three pull
@@ -430,6 +423,46 @@ export const runEvents = pgTable(
     payload: jsonb("payload").notNull(),
   },
   (t) => [uniqueIndex("run_events_run_seq_idx").on(t.runId, t.seq)],
+);
+
+/**
+ * A message sent to a card's agent, with its own lifecycle. This
+ * replaced a single queued_prompt column on features, which was a slot
+ * rather than a queue: no identity per message, no delivery state, and
+ * no owner to retry, so racing messages overwrote each other and a
+ * claimed one could vanish after its sender had been told "queued".
+ *
+ * queued: parked, waiting for an agent to hear it. sent: handed to a
+ * run, as a live stdin line or as a resume run's prompt. delivered: a
+ * later result event confirmed the run answered while it was on the
+ * conversation. A run that ends with sent messages puts them back to
+ * queued, so a message the agent never read reaches the next run
+ * instead of vanishing while the transcript shows it.
+ */
+export const featureMessages = pgTable(
+  "feature_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    featureId: uuid("feature_id")
+      .notNull()
+      .references(() => features.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    status: text("status", { enum: ["queued", "sent", "delivered"] })
+      .notNull()
+      .default("queued"),
+    /** The run that consumed this message; null while it waits. */
+    runId: uuid("run_id").references(() => agentRuns.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  },
+  (t) => [index("feature_messages_claim_idx").on(t.featureId, t.status, t.createdAt)],
 );
 
 export const gateChecks = pgTable("gate_checks", {
