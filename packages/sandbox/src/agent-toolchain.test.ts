@@ -98,19 +98,22 @@ test("an installer that fails once is retried on the next provision, and the res
   try {
     const sandbox = new ToolchainSandbox(root);
 
-    // First provision, with opencode's installer answering 403.
-    sandbox.breaks("opencode");
+    // First provision, with both of opencode's routes down: the
+    // installer and the release it falls back to. Both, because one
+    // alone no longer leaves the CLI missing, which is the point of the
+    // fallback.
+    sandbox.breaks("opencode", "opencode-release");
     const first = sandbox.run();
     assert.equal(first.status, 0, first.stderr);
     assert.deepEqual(toolchainMissing(first.stdout), ["opencode"]);
     assert.match(first.stderr, /opencode install failed/);
     assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi"]);
-    // Not once and given up on: a rate limit passes within seconds.
-    assert.equal(sandbox.fetched().filter((url) => url.includes("opencode")).length, 3);
+    // Not once and given up on: a blip passes within seconds.
+    assert.equal(sandbox.fetched().filter((url) => url === "https://opencode.ai/install").length, 3);
 
-    // Second provision, with the installer reachable again. Only the
-    // CLI that is missing is fetched; the four that are there are not
-    // reinstalled, which is what keeps a warm sandbox warm.
+    // Second provision, with both reachable again. Only the CLI that is
+    // missing is fetched; the four that are there are not reinstalled,
+    // which is what keeps a warm sandbox warm.
     sandbox.breaks();
     const second = sandbox.run();
     assert.equal(second.status, 0, second.stderr);
@@ -122,6 +125,57 @@ test("an installer that fails once is retried on the next provision, and the res
     const third = sandbox.run();
     assert.equal(third.status, 0, third.stderr);
     assert.deepEqual(sandbox.fetched(), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The failure that actually happened, twice.
+ *
+ * opencode's installer asks api.github.com which release is latest and
+ * exits without installing when that call fails. It fails for an hour
+ * at a time, because that is the window an address gets sixty
+ * unauthenticated requests in, and a pool of sprites shares one
+ * address. No retry this script could reasonably wait out covers an
+ * hour, so the answer is not to need the API: the release is served
+ * from /releases/latest/download without it.
+ */
+test("opencode installs from its release when the installer cannot reach the GitHub API", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-fallback-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    sandbox.breaks("opencode");
+    const result = sandbox.run();
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), [], "opencode should have come from the release");
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+    assert.ok(
+      sandbox.fetched().some((url) => url.includes("releases/latest/download/opencode-linux-")),
+      `the release was never fetched: ${sandbox.fetched().join(" ")}`,
+    );
+    // The vendor's installer is still tried first, so anything else it
+    // does keeps happening on the days it works.
+    assert.ok(sandbox.fetched().some((url) => url === "https://opencode.ai/install"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Both routes down is still reported, not silently swallowed. */
+test("opencode is reported missing when the installer and the release are both unreachable", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-bothdown-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    sandbox.breaks("opencode", "opencode-release");
+    const result = sandbox.run();
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), ["opencode"]);
+    assert.match(result.stderr, /opencode release download failed/);
+    // And the other four are unharmed.
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -151,10 +205,17 @@ class ToolchainSandbox {
      * is a test that writes to the machine it runs on. Anything still
      * absolute has to be either inside the root or read-only.
      */
-    const allowed = new Set(["/dev/null", "/bin/sh", "/root"]);
-    for (const found of this.script.match(/(?<![\w.$/])\/[a-z][\w./-]*/g) ?? []) {
-      if (found.startsWith(`${root}/`) || allowed.has(found)) continue;
-      assert.fail(`the toolchain script writes outside the test's root: ${found}`);
+    // /proc/cpuinfo is read, never written: the opencode fallback reads
+    // it to tell an avx2 machine from one that needs the baseline build.
+    const allowed = new Set(["/dev/null", "/bin/sh", "/root", "/proc/cpuinfo"]);
+    for (const line of this.script.split("\n")) {
+      // A comment touches nothing, and the script explains itself in
+      // terms of the paths and URLs it works with.
+      if (line.trim().startsWith("#")) continue;
+      for (const found of line.match(/(?<![\w.$/])\/[a-z][\w./-]*/g) ?? []) {
+        if (found.startsWith(`${root}/`) || allowed.has(found)) continue;
+        assert.fail(`the toolchain script writes outside the test's root: ${found}`);
+      }
     }
 
     mkdirSync(this.stubs, { recursive: true });
@@ -163,6 +224,13 @@ class ToolchainSandbox {
     this.stub("git", "exit 0");
     this.stub("apt-get", "exit 0");
     this.stub("sleep", "exit 0");
+
+    // A real release tarball for the fallback to unpack, so the test
+    // exercises the tar and the move rather than trusting them.
+    const fixtures = path.join(root, "fixtures");
+    mkdirSync(fixtures, { recursive: true });
+    writeFileSync(path.join(fixtures, "opencode"), "#!/bin/sh\n");
+    spawnSync("tar", ["-czf", path.join(fixtures, "opencode.tar.gz"), "-C", fixtures, "opencode"]);
     this.breaks();
 
     // pi's private Node, already unpacked, so the npm stub is all the
@@ -189,6 +257,15 @@ class ToolchainSandbox {
 done
 echo "$url" >> ${this.root}/fetched
 case "$url" in
+  # The release tarball the opencode fallback fetches, which is a real
+  # gzipped tar carrying a file called opencode, not an installer.
+  *releases/latest/download/*)
+    for broken in ${broken.join(" ")}; do
+      if [ "$broken" = opencode-release ]; then exit 22; fi
+    done
+    cp ${this.root}/fixtures/opencode.tar.gz "$out"
+    exit 0
+    ;;
   *opencode*) tool=opencode ;;
   *claude*) tool=claude ;;
   *codex*) tool=codex ;;

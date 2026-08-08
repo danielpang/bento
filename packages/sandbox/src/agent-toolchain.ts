@@ -34,6 +34,14 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "p
  * a sandbox that lost one installer to a bad minute never installed it
  * again. Machines carrying a v2 marker may be missing a CLI because of
  * it, and the bump makes them install the set once more.
+ *
+ * Deliberately still 3. A bump makes every warm sprite reinstall the
+ * whole set at once, from one egress address, which is what exhausts
+ * an hourly API budget in the first place: bumping to fix a rate limit
+ * feeds it. Nothing here needs one either. Since v3 the retry decision
+ * comes from the binaries rather than the marker, so a sandbox missing
+ * opencode already runs that installer on its next provision and picks
+ * up whatever this script now does.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -135,11 +143,11 @@ fi
 # or times out hands an empty script to a shell that exits 0, and the
 # failure reads as a success all the way to the missing binary.
 #
-# Retried, because every one of these is a network install and
-# opencode's asks the GitHub API which release is latest. That API
-# answers 403 to a shared egress address that has asked too often, and
-# on one attempt a minute of rate limiting cost the sandbox its
-# opencode.
+# Retried, because these are network installs and a lost packet is not
+# a reason to leave a sandbox without a CLI. Three quick attempts is
+# all this is: it covers a blip, and nothing longer. The failure that
+# actually happens, opencode's GitHub API rate limit, lasts an hour and
+# is handled by not depending on that API at all. See below.
 install_from() {
   name=$1
   url=$2
@@ -159,9 +167,67 @@ install_from() {
   return 1
 }
 
+# opencode's installer asks api.github.com which release is latest, and
+# exits without installing when that call fails. It fails whenever the
+# sixty unauthenticated requests an address gets per hour are used up,
+# which a pool of sprites sharing one egress address does easily, and
+# an hour is far longer than any retry above will wait out.
+#
+# The release itself never needed that call. The installer builds the
+# download URL before it asks, from /releases/latest/download, which is
+# served without the API and without a version number. So when the
+# installer gives up, the release it was about to fetch is fetched
+# directly.
+#
+# The target names mirror the installer's own detection, which is the
+# part worth keeping: a machine without avx2 needs the baseline build
+# and musl needs the musl one, and the wrong choice installs a binary
+# that will not start. The repository is named here rather than
+# discovered, so an upstream move breaks this fallback: the nightly
+# sandbox e2e is what notices, and the installer above is still tried
+# first.
+install_opencode_release() {
+  case "$(uname -m)" in
+    x86_64|amd64) target=linux-x64 ;;
+    aarch64|arm64) target=linux-arm64 ;;
+    *) return 1 ;;
+  esac
+  if [ "$target" = linux-x64 ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+    target="$target-baseline"
+  fi
+  is_musl=no
+  if [ -f /etc/alpine-release ]; then is_musl=yes; fi
+  if command -v ldd >/dev/null 2>&1; then
+    if ldd --version 2>&1 | grep -qi musl; then is_musl=yes; fi
+  fi
+  if [ "$is_musl" = yes ]; then target="$target-musl"; fi
+
+  unpack=/tmp/bento-opencode
+  rm -rf "$unpack"
+  mkdir -p "$unpack"
+  if ! curl -fsSL "https://github.com/anomalyco/opencode/releases/latest/download/opencode-$target.tar.gz" \\
+       -o "$unpack/opencode.tar.gz"; then
+    rm -rf "$unpack"
+    return 1
+  fi
+  if ! tar -xzf "$unpack/opencode.tar.gz" -C "$unpack" || [ ! -f "$unpack/opencode" ]; then
+    rm -rf "$unpack"
+    return 1
+  fi
+  mkdir -p "$HOME/.opencode/bin"
+  mv "$unpack/opencode" "$HOME/.opencode/bin/opencode"
+  chmod +x "$HOME/.opencode/bin/opencode"
+  rm -rf "$unpack"
+}
+
 if wanted claude; then install_from claude https://claude.ai/install.sh bash || true; fi
 if wanted codex; then install_from codex https://chatgpt.com/codex/install.sh sh || true; fi
-if wanted opencode; then install_from opencode https://opencode.ai/install bash || true; fi
+if wanted opencode; then
+  install_from opencode https://opencode.ai/install bash || true
+  if ! publish opencode; then
+    install_opencode_release || echo "bento: opencode release download failed" >&2
+  fi
+fi
 if wanted cursor-agent; then install_from cursor https://cursor.com/install bash || true; fi
 
 # pi is npm only, so it gets its own Node. /opt/bento/node/bin is never
