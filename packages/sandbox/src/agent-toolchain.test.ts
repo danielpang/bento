@@ -108,7 +108,10 @@ test("an installer that fails once is retried on the next provision, and the res
     assert.deepEqual(toolchainMissing(first.stdout), ["opencode"]);
     assert.match(first.stderr, /opencode install failed/);
     assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi"]);
-    // Not once and given up on: a blip passes within seconds.
+    // Not once and given up on: a blip passes within seconds. Both
+    // routes get their three, the release first and the installer only
+    // once that has failed.
+    assert.equal(sandbox.fetched().filter((url) => url.includes("releases/latest/download")).length, 3);
     assert.equal(sandbox.fetched().filter((url) => url === "https://opencode.ai/install").length, 3);
 
     // Second provision, with both reachable again. Only the CLI that is
@@ -118,7 +121,10 @@ test("an installer that fails once is retried on the next provision, and the res
     const second = sandbox.run();
     assert.equal(second.status, 0, second.stderr);
     assert.deepEqual(toolchainMissing(second.stdout), []);
-    assert.deepEqual(sandbox.fetched(), ["https://opencode.ai/install"]);
+    // Exactly one fetch, and it is the release: the CLI that was
+    // missing, by the route that does not need the API.
+    assert.equal(sandbox.fetched().length, 1);
+    assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
     assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
 
     // Third provision, with everything in place: no network at all.
@@ -131,40 +137,68 @@ test("an installer that fails once is retried on the next provision, and the res
 });
 
 /**
- * The failure that actually happened, twice.
+ * The failure that actually happened, twice, and the reason opencode no
+ * longer goes through its installer at all.
  *
- * opencode's installer asks api.github.com which release is latest and
- * exits without installing when that call fails. It fails for an hour
- * at a time, because that is the window an address gets sixty
+ * That installer asks api.github.com which release is latest and exits
+ * without installing when the call fails. It fails for an hour at a
+ * time, because that is the window an address gets sixty
  * unauthenticated requests in, and a pool of sprites shares one
- * address. No retry this script could reasonably wait out covers an
- * hour, so the answer is not to need the API: the release is served
- * from /releases/latest/download without it.
+ * address. No retry worth writing waits out an hour, so the answer is
+ * not to need the API: /releases/latest/download serves the newest
+ * build without it, and without a version number.
  */
-test("opencode installs from its release when the installer cannot reach the GitHub API", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-fallback-"));
+test("opencode comes from its release, never asking which version that is", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-release-"));
   try {
     const sandbox = new ToolchainSandbox(root);
+    // The installer is down, as it is for an hour at a time. Nothing
+    // should notice.
     sandbox.breaks("opencode");
     const result = sandbox.run();
 
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(toolchainMissing(result.stdout), [], "opencode should have come from the release");
+    assert.deepEqual(toolchainMissing(result.stdout), []);
     assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
     assert.ok(
       sandbox.fetched().some((url) => url.includes("releases/latest/download/opencode-linux-")),
       `the release was never fetched: ${sandbox.fetched().join(" ")}`,
     );
-    // The vendor's installer is still tried first, so anything else it
-    // does keeps happening on the days it works.
-    assert.ok(sandbox.fetched().some((url) => url === "https://opencode.ai/install"));
+    // Not merely tolerated: not consulted. The installer is the one
+    // thing here that can be rate limited, so the ordinary path must
+    // not touch it.
+    assert.ok(
+      !sandbox.fetched().includes("https://opencode.ai/install"),
+      "the rate limited installer was fetched on the ordinary path",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The installer earns its place only for the day upstream moves the
+ * release: a renamed asset or another change of GitHub organization
+ * 404s the download, and the vendor's own script can still be right.
+ */
+test("opencode falls back to its installer when the release download is gone", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-moved-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    sandbox.breaks("opencode-release");
+    const result = sandbox.run();
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+    assert.ok(sandbox.fetched().includes("https://opencode.ai/install"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
 /** Both routes down is still reported, not silently swallowed. */
-test("opencode is reported missing when the installer and the release are both unreachable", () => {
+test("opencode is reported missing when the release and the installer are both unreachable", () => {
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-bothdown-"));
   try {
     const sandbox = new ToolchainSandbox(root);

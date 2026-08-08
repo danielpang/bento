@@ -29,13 +29,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # hands an empty script to a shell that exits 0, and a build that
 # installed nothing looks like a build that worked.
 #
-# opencode gets a second route. Its installer asks api.github.com which
-# release is latest and exits without installing when that call fails,
+# opencode comes from its release rather than through its installer.
+# That installer asks api.github.com which release is latest, only to
+# print a version, and exits without installing when the call fails,
 # which it does for an hour at a time once an address has spent the
-# sixty unauthenticated requests it gets. The release itself is served
-# from /releases/latest/download without any of that, so a build that
-# lands inside such an hour uses it rather than failing. Kept in step
-# with packages/sandbox/src/agent-toolchain.ts, which does the same.
+# sixty unauthenticated requests it gets. /releases/latest/download
+# serves the newest build without the API and without a version number.
+# The installer is kept only for the day upstream moves the release.
+# Same order and same reasons as packages/sandbox/src/agent-toolchain.ts.
 RUN set -eu; \
     fetch_run() { \
       for attempt in 1 2 3; do \
@@ -48,17 +49,17 @@ RUN set -eu; \
     fetch_run claude https://claude.ai/install.sh bash; \
     fetch_run codex https://chatgpt.com/codex/install.sh sh; \
     fetch_run cursor https://cursor.com/install bash; \
-    fetch_run opencode https://opencode.ai/install bash || true; \
-    if [ ! -x "$HOME/.opencode/bin/opencode" ]; then \
-      case "$(dpkg --print-architecture)" in amd64) target=linux-x64 ;; arm64) target=linux-arm64 ;; *) target=linux-x64 ;; esac; \
-      grep -qwi avx2 /proc/cpuinfo 2>/dev/null || { [ "$target" = linux-x64 ] && target=linux-x64-baseline; }; \
-      mkdir -p /tmp/oc "$HOME/.opencode/bin"; \
-      curl -fsSL "https://github.com/anomalyco/opencode/releases/latest/download/opencode-$target.tar.gz" -o /tmp/oc/oc.tar.gz; \
-      tar -xzf /tmp/oc/oc.tar.gz -C /tmp/oc; \
+    case "$(dpkg --print-architecture)" in arm64) target=linux-arm64 ;; *) target=linux-x64 ;; esac; \
+    if [ "$target" = linux-x64 ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then target=linux-x64-baseline; fi; \
+    mkdir -p /tmp/oc "$HOME/.opencode/bin"; \
+    if curl -fsSL "https://github.com/anomalyco/opencode/releases/latest/download/opencode-$target.tar.gz" \
+         -o /tmp/oc/oc.tar.gz && tar -xzf /tmp/oc/oc.tar.gz -C /tmp/oc && [ -f /tmp/oc/opencode ]; then \
       mv /tmp/oc/opencode "$HOME/.opencode/bin/opencode"; \
-      chmod +x "$HOME/.opencode/bin/opencode"; \
-      rm -rf /tmp/oc; \
-    fi
+      chmod 755 "$HOME/.opencode/bin/opencode"; \
+    else \
+      fetch_run opencode https://opencode.ai/install bash; \
+    fi; \
+    rm -rf /tmp/oc
 
 # pi is published on npm only, so it gets a private Node that runs pi and
 # nothing else. /opt/bento/node/bin stays off PATH: `node` inside a
