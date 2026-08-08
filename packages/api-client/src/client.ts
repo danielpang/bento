@@ -707,10 +707,15 @@ export class BentoClient {
    * itself: the server replays persisted events past ?since=, so a
    * deploy or a network blip costs at most the in-flight typing. It
    * used to not reconnect at all, and the TUI spent the rest of the
-   * run on its polling fallback with nothing saying so. Bounded:
-   * several consecutive failures stop the retrying and reach onError,
-   * rather than hammering a server that may be gone; a rejected token
-   * lands there the same way.
+   * run on its polling fallback with nothing saying so.
+   *
+   * It keeps trying for as long as the caller wants the stream, with
+   * the delay capped, because the outage it most has to survive is a
+   * deploy: the agent works on inside its sandbox and the restarted
+   * server reattaches to it, so a client that gave up after a handful
+   * of seconds would go blind exactly when there was still something
+   * to watch. Only a refusal that retrying cannot fix, an expired or
+   * rejected token, stops the loop and reaches onError.
    */
   private streamRunWithFetch(url: string, handlers: RunStreamHandlers, since: number): () => void {
     const controller = new AbortController();
@@ -730,12 +735,21 @@ export class BentoClient {
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           const parser = new SseParser();
+          /**
+           * Whether this connection carried anything. The backoff grows
+           * on connections that deliver nothing as well as on ones that
+           * fail outright, because a server that accepts and closes at
+           * once would otherwise be reconnected to every second for as
+           * long as it kept doing it.
+           */
+          let carried = false;
           while (true) {
             const { value, done } = await reader.read();
             // The server only ends the stream on purpose after a done
             // frame; a bare end is a disconnect, so reconnect and let
             // ?since= deduplicate.
             if (done) break;
+            carried = true;
             failures = 0;
             for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
               // A consumer handler that throws must not kill the
@@ -760,13 +774,17 @@ export class BentoClient {
               }
             }
           }
+          if (!carried) failures += 1;
         } catch (err) {
           if (controller.signal.aborted) return;
-          failures += 1;
-          if (failures >= 5) {
-            handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+          // A credential the server refuses is the one failure another
+          // attempt cannot mend, so it ends the stream and is said out
+          // loud. Everything else is an outage to wait out.
+          if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+            handlers.onError?.(err);
             return;
           }
+          failures += 1;
         }
         if (controller.signal.aborted) return;
         await new Promise((resolve) => setTimeout(resolve, Math.min(1_000 * 2 ** failures, 8_000)));
