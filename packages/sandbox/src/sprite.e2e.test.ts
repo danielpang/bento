@@ -242,6 +242,55 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   /**
+   * Which of the five need api.github.com, and which only look like
+   * they might.
+   *
+   * opencode's installer asked that API which release was latest and
+   * then refused to install without the answer, which cost every
+   * sandbox its opencode for an hour at a time whenever a shared egress
+   * address spent its sixty unauthenticated requests. opencode no
+   * longer goes near it. Whether claude, codex or cursor do is not
+   * something their installers will say, and they are not published
+   * anywhere they can be read: they are fetched from claude.ai,
+   * chatgpt.com and cursor.com and could change any week.
+   *
+   * So the question is asked of the machine rather than of the source.
+   * With that one host unreachable, and the CLIs and the marker gone,
+   * a provision must still put all five back. A failure here does not
+   * mean this repository broke something. It means the CLI it names is
+   * one busy hour away from being uninstallable, and wants the same
+   * treatment opencode got: fetch the release, do not ask which one.
+   */
+  await t.test("every CLI installs with the GitHub API unreachable", { skip: needsSprite() }, async () => {
+    const blackhole = "printf '127.0.0.1 api.github.com\\n' >> /etc/hosts";
+    const restore = "sed -i '/api.github.com/d' /etc/hosts";
+    try {
+      assert.equal((await shell(blackhole)).exitCode, 0);
+      // Confirm the block really took, so a test that passes cannot be
+      // a test that never blocked anything.
+      const reachable = await shell("curl -fsS -m 10 https://api.github.com/ >/dev/null 2>&1");
+      assert.notEqual(reachable.exitCode, 0, "api.github.com was still reachable, so this proved nothing");
+
+      // Everything gone: the binaries, the directories the installers
+      // put them in, and the marker, so the whole set installs again.
+      // pi's private Node stays, since it comes from npm rather than
+      // from GitHub and re-downloading it tests nothing here.
+      const dirs = ["/usr/local/bin", "/root/.local/bin", "/root/.opencode/bin", "/root/.cursor/bin"];
+      const removals = AGENT_BINARIES.flatMap((binary) => dirs.map((dir) => `${dir}/${binary}`));
+      await shell(`rm -f ${removals.join(" ")} /opt/bento/pi/bin/pi ${TOOLCHAIN_MARKER}`);
+      assert.deepEqual(await present(), [], "the CLIs were not actually removed");
+
+      said.length = 0;
+      await provision();
+      const failed = said.filter((message) => message.includes("Could not install"));
+      assert.deepEqual(failed, [], `these CLIs cannot be installed without the GitHub API: ${failed.join(" ")}`);
+      assert.deepEqual(await present(), expected);
+    } finally {
+      await shell(restore);
+    }
+  });
+
+  /**
    * The half of the lifecycle that costs money if it is wrong, so it is
    * asserted rather than left to a hook. A sprite is billed until it is
    * deleted, and nothing outside these tests deletes one: the server
