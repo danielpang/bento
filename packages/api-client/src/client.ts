@@ -702,59 +702,94 @@ export class BentoClient {
 
   /**
    * The SSE stream over plain fetch: same frames, but the request can
-   * carry the bearer token. No reconnection on drop, deliberately:
-   * every present caller also polls (the TUI refreshes on a timer), so
-   * a dropped stream degrades to the poll instead of retrying forever
-   * against a server that may be gone. What it must not do is degrade
-   * silently: a rejected token and a dropped socket both reach
-   * onError, so the caller can clear its draft and say so.
+   * carry the bearer token. Reconnects after a drop from the last seen
+   * seq, which is the same recovery a browser gets from EventSource
+   * itself: the server replays persisted events past ?since=, so a
+   * deploy or a network blip costs at most the in-flight typing. It
+   * used to not reconnect at all, and the TUI spent the rest of the
+   * run on its polling fallback with nothing saying so.
+   *
+   * It keeps trying for as long as the caller wants the stream, with
+   * the delay capped, because the outage it most has to survive is a
+   * deploy: the agent works on inside its sandbox and the restarted
+   * server reattaches to it, so a client that gave up after a handful
+   * of seconds would go blind exactly when there was still something
+   * to watch. Only a refusal that retrying cannot fix, an expired or
+   * rejected token, stops the loop and reaches onError.
    */
   private streamRunWithFetch(url: string, handlers: RunStreamHandlers, since: number): () => void {
     const controller = new AbortController();
+    const base = url.replace(/\?since=\d+$/, "");
+    let lastSeq = since;
     void (async () => {
-      const token = await this.tokens!.get();
-      const res = await this.fetchImpl(url, {
-        headers: token ? { authorization: `Bearer ${token}` } : {},
-        credentials: "omit",
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      const parser = new SseParser();
-      let lastSeq = since;
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) return;
-        for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
-          // A consumer handler that throws must not kill the stream:
-          // the frames after it are still wanted.
-          try {
-            if (frame.event === "run_event") {
-              const seq = Number(frame.id);
-              if (Number.isFinite(seq) && seq > 0) {
-                if (seq <= lastSeq) continue;
-                lastSeq = seq;
+      let failures = 0;
+      while (!controller.signal.aborted) {
+        try {
+          const token = await this.tokens!.get();
+          const res = await this.fetchImpl(`${base}?since=${lastSeq}`, {
+            headers: token ? { authorization: `Bearer ${token}` } : {},
+            credentials: "omit",
+            signal: controller.signal,
+          });
+          if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          const parser = new SseParser();
+          /**
+           * Whether this connection carried anything. The backoff grows
+           * on connections that deliver nothing as well as on ones that
+           * fail outright, because a server that accepts and closes at
+           * once would otherwise be reconnected to every second for as
+           * long as it kept doing it.
+           */
+          let carried = false;
+          while (true) {
+            const { value, done } = await reader.read();
+            // The server only ends the stream on purpose after a done
+            // frame; a bare end is a disconnect, so reconnect and let
+            // ?since= deduplicate.
+            if (done) break;
+            carried = true;
+            failures = 0;
+            for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+              // A consumer handler that throws must not kill the
+              // stream: the frames after it are still wanted.
+              try {
+                if (frame.event === "run_event") {
+                  const seq = Number(frame.id);
+                  if (Number.isFinite(seq) && seq > 0) {
+                    if (seq <= lastSeq) continue;
+                    lastSeq = seq;
+                  }
+                  handlers.onEvent?.(JSON.parse(frame.data) as AgentEvent, seq);
+                } else if (frame.event === "run_delta") {
+                  handlers.onDelta?.(JSON.parse(frame.data) as AgentDelta);
+                } else if (frame.event === "done") {
+                  handlers.onDone?.((JSON.parse(frame.data) as { status: string }).status);
+                  controller.abort();
+                  return;
+                }
+              } catch (err) {
+                handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
               }
-              handlers.onEvent?.(JSON.parse(frame.data) as AgentEvent, seq);
-            } else if (frame.event === "run_delta") {
-              handlers.onDelta?.(JSON.parse(frame.data) as AgentDelta);
-            } else if (frame.event === "done") {
-              handlers.onDone?.((JSON.parse(frame.data) as { status: string }).status);
-              controller.abort();
-              return;
             }
-          } catch (err) {
-            handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
           }
+          if (!carried) failures += 1;
+        } catch (err) {
+          if (controller.signal.aborted) return;
+          // A credential the server refuses is the one failure another
+          // attempt cannot mend, so it ends the stream and is said out
+          // loud. Everything else is an outage to wait out.
+          if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+            handlers.onError?.(err);
+            return;
+          }
+          failures += 1;
         }
+        if (controller.signal.aborted) return;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1_000 * 2 ** failures, 8_000)));
       }
-    })().catch((err: unknown) => {
-      // Aborted by the caller is the normal ending; anything else is
-      // a stream the caller believes is live and is not.
-      if (controller.signal.aborted) return;
-      handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
-    });
+    })();
     return () => controller.abort();
   }
 
