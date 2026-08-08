@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
-import { getAdapter, runAgent } from "@bento/agents";
+import type { RunOutcome } from "@bento/core";
+import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
   agentProfiles,
   agentRuns,
@@ -256,48 +257,17 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
-  const allStages = await ctx.db
-    .select()
-    .from(stages)
-    .where(eq(stages.pipelineId, feature.pipelineId))
-    .orderBy(asc(stages.position));
-  // Paths inside the sandbox depend on the driver: a container mounts
-  // the workspace at /workspace, the local driver uses the host path.
-  const mounted = prepared.map((repo) => {
-    const row = repoRows.find((r) => r.name === repo.name);
-    return {
-      name: repo.name,
-      mountPath: repositoryPathIn(handle.workdir, repo.name),
-      testCommand: row?.testCommand ?? null,
-    };
+  const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
+    run,
+    feature,
+    stage,
+    profile,
+    adapter,
+    repoRows,
+    prepared,
+    handle,
+    sendInitialPrompt: true,
   });
-  // With one repository the agent starts inside it, which is what a
-  // single repo project expects. With several, it starts at the
-  // workspace root so every checkout is visible; the prompt lists them.
-  const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
-
-  const prompt = run.prompt || buildStagePrompt(feature, stage, allStages, mounted, { name: profile.name, skill: profile.skill });
-
-  const commandInput = {
-    prompt,
-    model: profile.model,
-    cwd: workdir,
-    ...(run.cliSessionId ? { resumeSessionId: run.cliSessionId } : {}),
-    ...(profile.extraArgs.length ? { extraArgs: profile.extraArgs } : {}),
-  };
-  /**
-   * Live mode: the tool holds a conversation over stdin, so a message
-   * sent while it works reaches the process instead of waiting for the
-   * run to end. Needs both halves: an adapter that speaks it and a
-   * driver that can attach stdin (sprites cannot).
-   */
-  const live =
-    adapter.live && ctx.driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
-      ? adapter.live
-      : null;
-  const liveChannel = live ? new LineChannel() : null;
-  if (live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
-  const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
 
   // Credentials come from the owning organization, never from the
   // server's own environment: see resolveAgentEnv.
@@ -464,14 +434,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       emitBoard("cancelled");
       return;
     }
-    // The two common failures get sentences; anything else keeps the
-    // raw error, which is at least honest about being unexpected.
-    const reason = /exec timeout/.test(String(err))
-      ? `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`
-      : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
-        ? "Docker is not reachable from the server. Check that Docker is running, then run again."
-        : `exec failed: ${String(err)}`;
-    await finishRun(ctx, runId, { ok: false, error: reason }, null);
+    await finishRun(ctx, runId, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
     return;
@@ -486,6 +449,52 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
+  await settleAgentResult(ctx, {
+    runId,
+    feature,
+    stage,
+    profile,
+    repoRows,
+    prepared,
+    handle,
+    branch,
+    publisher,
+    argv,
+    result,
+    seq,
+    emitBoard,
+  });
+}
+
+/** The rows a run settlement needs, shared by first runs and resumes. */
+interface RunSettlement {
+  runId: string;
+  feature: typeof features.$inferSelect;
+  stage: typeof stages.$inferSelect;
+  profile: typeof agentProfiles.$inferSelect;
+  repoRows: (typeof repositories.$inferSelect)[];
+  prepared: PreparedRepository[];
+  handle: SandboxHandle;
+  branch: string;
+  publisher: Awaited<ReturnType<typeof githubConnectionFor>>;
+  argv: string[];
+  result: { outcome: RunOutcome; exitCode: number };
+  /** Continues the run's transcript counter for the publish notes. */
+  seq: number;
+  emitBoard: (status: string) => void;
+}
+
+/**
+ * Everything that happens after the agent process ends: naming the
+ * failure, publishing branches, and writing the terminal state. Shared
+ * by executeRun and by resumeInterruptedRun, so a run that finished
+ * under a different server process than it started under still ends
+ * exactly the way a normal run does.
+ */
+async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
+  const { runId, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
+    settlement;
+  let seq = settlement.seq;
   const { outcome, exitCode } = result;
   if (!outcome.ok) {
     // A revoked login has exactly one fix, so the failure names it.
@@ -589,6 +598,91 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   // A finished run is the main trigger for re-checking the stage gate.
   await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+}
+
+/**
+ * The two common exec failures get sentences; anything else keeps the
+ * raw error, which is at least honest about being unexpected.
+ */
+function execFailureReason(ctx: AppContext, err: unknown): string {
+  return /exec timeout/.test(String(err))
+    ? `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`
+    : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
+      ? "Docker is not reachable from the server. Check that Docker is running, then run again."
+      : `exec failed: ${String(err)}`;
+}
+
+/**
+ * Builds the agent's command line and, for live adapters, the stdin
+ * channel that carries the conversation. Shared by first runs and
+ * resumes so a resume reconstructs exactly the argv the session was
+ * started with; the opening prompt is only written into the channel on
+ * a first run, because a resumed process consumed it in its first life
+ * and re-sending it would replay the whole task as a new user turn.
+ */
+async function buildRunCommand(
+  ctx: AppContext,
+  input: {
+    run: typeof agentRuns.$inferSelect;
+    feature: typeof features.$inferSelect;
+    stage: typeof stages.$inferSelect;
+    profile: typeof agentProfiles.$inferSelect;
+    adapter: AgentAdapter;
+    repoRows: (typeof repositories.$inferSelect)[];
+    prepared: PreparedRepository[];
+    handle: SandboxHandle;
+    sendInitialPrompt: boolean;
+  },
+): Promise<{
+  argv: string[];
+  live: LiveSession | null;
+  liveChannel: LineChannel | null;
+  workdir: string;
+}> {
+  const { run, feature, stage, profile, adapter, repoRows, prepared, handle } = input;
+  const allStages = await ctx.db
+    .select()
+    .from(stages)
+    .where(eq(stages.pipelineId, feature.pipelineId))
+    .orderBy(asc(stages.position));
+  // Paths inside the sandbox depend on the driver: a container mounts
+  // the workspace at /workspace, the local driver uses the host path.
+  const mounted = prepared.map((repo) => {
+    const row = repoRows.find((r) => r.name === repo.name);
+    return {
+      name: repo.name,
+      mountPath: repositoryPathIn(handle.workdir, repo.name),
+      testCommand: row?.testCommand ?? null,
+    };
+  });
+  // With one repository the agent starts inside it, which is what a
+  // single repo project expects. With several, it starts at the
+  // workspace root so every checkout is visible; the prompt lists them.
+  const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
+
+  const prompt = run.prompt || buildStagePrompt(feature, stage, allStages, mounted, { name: profile.name, skill: profile.skill });
+
+  const commandInput = {
+    prompt,
+    model: profile.model,
+    cwd: workdir,
+    ...(run.cliSessionId ? { resumeSessionId: run.cliSessionId } : {}),
+    ...(profile.extraArgs.length ? { extraArgs: profile.extraArgs } : {}),
+  };
+  /**
+   * Live mode: the tool holds a conversation over stdin, so a message
+   * sent while it works reaches the process instead of waiting for the
+   * run to end. Needs both halves: an adapter that speaks it and a
+   * driver that can attach stdin (sprites cannot).
+   */
+  const live =
+    adapter.live && ctx.driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
+      ? adapter.live
+      : null;
+  const liveChannel = live ? new LineChannel() : null;
+  if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
+  const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
+  return { argv, live, liveChannel, workdir };
 }
 
 /** Whether this organization has asked for sandboxes with no egress. */
@@ -816,43 +910,12 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
  */
 export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
   const orphans = await ctx.db
-    .update(agentRuns)
-    .set({
-      status: "failed",
-      endedAt: new Date(),
-      error: "interrupted by a server restart",
-    })
-    .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])))
-    .returning({ id: agentRuns.id, featureId: agentRuns.featureId });
+    .select()
+    .from(agentRuns)
+    .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])));
 
   for (const orphan of orphans) {
-    const [seqRow] = await ctx.db
-      .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
-      .from(runEvents)
-      .where(eq(runEvents.runId, orphan.id));
-    const seq = Number(seqRow?.maxSeq ?? 0) + 1;
-    const event = {
-      type: "message" as const,
-      role: "system" as const,
-      text: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
-    };
-    await ctx.db.insert(runEvents).values({ runId: orphan.id, seq, type: event.type, payload: event });
-    ctx.bus.emitRunEvent({ runId: orphan.id, seq, event });
-    // Any stream that reconnected before recovery ran is waiting live;
-    // this lets it close the way a normal finish would.
-    ctx.bus.emitRunDone(orphan.id, "failed");
-    const [feature] = await ctx.db.select().from(features).where(eq(features.id, orphan.featureId));
-    if (feature) {
-      ctx.bus.emitBoardEvent({
-        type: "run_updated",
-        projectId: feature.projectId,
-        featureId: feature.id,
-        runId: orphan.id,
-        status: "failed",
-      });
-    }
-    await deliverQueuedMessage(ctx, orphan.id);
-    await ctx.boss.send("gate.evaluate", { featureId: orphan.featureId });
+    await failRunAsInterrupted(ctx, orphan);
   }
   if (orphans.length > 0) {
     console.warn(`closed ${orphans.length} run(s) interrupted by the restart`);
@@ -866,6 +929,62 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
    * still sitting in the queue this sends a duplicate, which
    * executeRun's atomic claim turns into a no-op.
    */
+  await requeueWaitingRuns(ctx);
+}
+
+/**
+ * Closes one orphaned run as interrupted: transcript line, terminal
+ * status, stream close, parked message delivery, gate re-check.
+ * Compare-and-set on the status, because the paths that reach here can
+ * race a run that finished or was cancelled while recovery deliberated,
+ * and the loser must change nothing.
+ */
+async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureId: string }): Promise<void> {
+  const [closed] = await ctx.db
+    .update(agentRuns)
+    .set({
+      status: "failed",
+      endedAt: new Date(),
+      error: "interrupted by a server restart",
+    })
+    .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
+    .returning({ id: agentRuns.id });
+  if (!closed) return;
+
+  const [seqRow] = await ctx.db
+    .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
+    .from(runEvents)
+    .where(eq(runEvents.runId, run.id));
+  const seq = Number(seqRow?.maxSeq ?? 0) + 1;
+  const event = {
+    type: "message" as const,
+    role: "system" as const,
+    text: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+  };
+  await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: event.type, payload: event });
+  ctx.bus.emitRunEvent({ runId: run.id, seq, event });
+  // Any stream that reconnected before recovery ran is waiting live;
+  // this lets it close the way a normal finish would.
+  ctx.bus.emitRunDone(run.id, "failed");
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+  if (feature) {
+    ctx.bus.emitBoardEvent({
+      type: "run_updated",
+      projectId: feature.projectId,
+      featureId: feature.id,
+      runId: run.id,
+      status: "failed",
+    });
+  }
+  await deliverQueuedMessage(ctx, run.id);
+  await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
+}
+
+/**
+ * Runs that never started go back on the queue; see the caller's
+ * comment for why their jobs are gone.
+ */
+async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
   const parked = await ctx.db
     .select({ id: agentRuns.id })
     .from(agentRuns)
