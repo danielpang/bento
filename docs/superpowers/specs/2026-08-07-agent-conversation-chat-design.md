@@ -92,11 +92,21 @@ On narrow screens, both roles may use a larger percentage of the available width
 - Keep system and result text available to assistive technology.
 - Do not add decorative animation. Existing streaming and thinking states already communicate activity.
 
+## Icon controls
+
+The composer Stop control becomes an icon-only button using its existing square stop mark. It retains `title="Stop the agent"` and `aria-label="Stop the agent"` so removing visible text does not remove its accessible name.
+
+The wide topbar Sign out control also becomes icon-only. Its exit mark follows the same inline mark treatment as the existing settings and menu icons, and the button retains `title="Sign out"` and `aria-label="Sign out"`.
+
+Text remains appropriate where Sign out is a menu item or a primary account action. The narrow navigation menu and account settings action therefore keep their labels.
+
 ## Implementation seams
 
 Primary changes:
 
 - Update `ChatRow` and `ToolRow` markup in `apps/web/src/components/AgentSession.tsx`.
+- Add shared, testable icon controls in `apps/web/src/components/IconButtons.tsx`.
+- Use the icon controls from `apps/web/src/components/AgentSession.tsx` and the wide topbar in `apps/web/src/App.tsx`.
 - Update the `.chat-*` rules in `apps/web/src/styles.css`.
 - Update the design preview fixture if needed to exercise user, assistant, tool, system, pending, and streaming layouts.
 
@@ -119,6 +129,7 @@ Visual checks:
 - Confirm pending user and streaming assistant states.
 - Confirm long text, multiline text, and narrow-screen wrapping.
 - Confirm light and dark theme contrast if both themes are available in the running app.
+- Confirm Stop and the wide topbar Sign out button are icon-only, keyboard focusable, and expose their accessible names.
 
 ## Acceptance criteria
 
@@ -130,4 +141,6 @@ Visual checks:
 - Run boundaries, system notes, and result states remain distinct from participant messages.
 - The feature drawer and full-page session use the same shared rendering behavior.
 - Streaming, pending, scrolling, and message delivery behavior do not regress.
+- Stop is icon-only and retains the accessible name "Stop the agent".
+- The wide topbar Sign out control is icon-only and retains the accessible name "Sign out".
 - No backend or persisted data changes are introduced.
