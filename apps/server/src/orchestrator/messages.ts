@@ -53,10 +53,36 @@ export async function claimQueuedMessages(db: Db, featureId: string): Promise<Cl
     .map((row) => ({ id: row.id, text: row.text }));
 }
 
-/** Binds claimed messages to the run that carries them. */
+/**
+ * Binds claimed messages to the run carrying them, still awaiting a
+ * result to confirm them. Only for messages written into a live
+ * session's stdin: those are the ones a process can die without ever
+ * reading. A message that becomes a run's prompt is delivered outright
+ * (see markMessagesDelivered).
+ */
 export async function markMessagesSent(db: Db, ids: string[], runId: string): Promise<void> {
   if (ids.length === 0) return;
   await db.update(featureMessages).set({ runId }).where(inArray(featureMessages.id, ids));
+}
+
+/**
+ * Hands messages to the run they became the prompt of, finished.
+ *
+ * A prompt is not a message in flight: agent_runs.prompt carries the
+ * text durably, and the run exists whatever happens to it next. Leaving
+ * these as "sent" made every run that ended before emitting a result
+ * requeue its own prompt, which the terminal path immediately turned
+ * into another identical run, and that one failed the same way: cards
+ * with a persistent failure (no credentials, a sandbox that will not
+ * provision) span an endless chain of runs. A run that fails is a
+ * failure to read and resume, not a message to deliver again.
+ */
+export async function markMessagesDelivered(db: Db, ids: string[], runId: string): Promise<void> {
+  if (ids.length === 0) return;
+  await db
+    .update(featureMessages)
+    .set({ status: "delivered", runId, deliveredAt: new Date() })
+    .where(inArray(featureMessages.id, ids));
 }
 
 /** Puts claimed messages back for the next taker, order preserved. */

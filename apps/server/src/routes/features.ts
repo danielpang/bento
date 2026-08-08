@@ -38,7 +38,7 @@ import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
 import {
   claimQueuedMessages,
   enqueueMessage,
-  markMessagesSent,
+  markMessagesDelivered,
   requeueMessages,
 } from "../orchestrator/messages.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
@@ -351,7 +351,9 @@ export function featureRoutes(ctx: AppContext) {
         await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
         return c.json({ queued: true as const });
       }
-      await markMessagesSent(db(c, ctx), claimed.map((m) => m.id), run.id);
+      // The run's prompt now carries them, so they are delivered rather
+      // than in flight: a run that fails is resumed, not redelivered.
+      await markMessagesDelivered(db(c, ctx), claimed.map((m) => m.id), run.id);
       if (resumeFrom.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json({ queued: false as const, run }, 201);
     })
