@@ -1562,29 +1562,28 @@ button {
 .chat-bubble {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  max-width: 92%;
+  gap: 4px;
+  max-width: min(88%, 720px);
+  padding: 8px 12px;
+  border-radius: var(--radius-lg);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* The user speaks in a filled bubble on the right, like any chat. */
-.chat-bubble-user {
+.chat-bubble-assistant {
   background: var(--panel-raised);
-  border: 1px solid var(--line-bright);
-  border-radius: var(--radius-lg);
-  padding: 8px 12px;
-}
-/* Accepted but not yet echoed by the run: dashed until it is real. */
-.chat-bubble-user[data-pending] {
-  border-style: dashed;
-  opacity: 0.75;
+  border: 1px solid var(--line);
 }
 
-/* The agent answers in the open, the way Claude Code and Paseo render
-   it: no bubble, its name in small caps beneath. */
-.chat-bubble-assistant {
-  max-width: 100%;
+.chat-bubble-user {
+  background: color-mix(in srgb, var(--brand) 14%, var(--panel-raised));
+  border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line));
+}
+
+/* Accepted but not yet echoed by the run: dashed until it is real. */
+.chat-bubble[data-pending] {
+  border-style: dashed;
+  opacity: 0.75;
 }
 
 .chat-text {
@@ -1594,10 +1593,8 @@ button {
 
 .chat-meta {
   font-size: 10.5px;
+  font-weight: 600;
   color: var(--text-faint);
-}
-.chat-row-user .chat-meta {
-  text-align: right;
 }
 
 /* Between the bubbles: what Bento itself has to say. */
@@ -1608,21 +1605,26 @@ button {
   color: var(--text-faint);
 }
 
-/* Tool work collapses to one subdued line per burst. */
+/* Tool work collapses to one subdued card per burst. */
 .chat-tools {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
-  border-left: 2px solid var(--line-bright);
-  padding-left: 8px;
+  max-width: min(88%, 720px);
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-raised);
 }
 .chat-tools-detail {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  border-left: 2px solid var(--line-bright);
-  padding-left: 8px;
-  max-width: 100%;
+  max-width: min(88%, 720px);
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-raised);
 }
 .chat-tool-line {
   font-family: var(--mono);
@@ -1646,6 +1648,14 @@ button {
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
+}
+
+@media (max-width: 720px) {
+  .chat-bubble,
+  .chat-tools,
+  .chat-tools-detail {
+    max-width: 94%;
+  }
 }
 
 .field {
@@ -2599,6 +2609,11 @@ button {
   min-height: 50vh;
   max-height: none;
   font-size: 13.5px;
+}
+.session-page .chat-bubble,
+.session-page .chat-tools,
+.session-page .chat-tools-detail {
+  max-width: min(92%, 720px);
 }
 .session-head {
   display: flex;

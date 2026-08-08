@@ -437,23 +437,17 @@ export function AgentSession({
               fragments, so the latest agent is always the one talking.
             */}
             {!viewedRunId && draft && (
-              <div className="chat-row chat-row-assistant">
-                <div className="chat-bubble chat-bubble-assistant" data-draft="true">
-                  <span className="chat-text">{draft}</span>
-                  <span className="chat-meta">{workingName}</span>
-                </div>
-              </div>
+              <MessageBubble role="assistant" speaker={workingName} text={draft} state="draft" />
             )}
             {!viewedRunId &&
               visiblePending.map((p) => (
-                <div className="chat-row chat-row-user" key={`pending-${p.id}`}>
-                  <div className="chat-bubble chat-bubble-user" data-pending="true">
-                    <span className="chat-text">{p.text}</span>
-                    <span className="chat-meta">
-                      you{p.queued ? " · queued until the agent finishes" : ""}
-                    </span>
-                  </div>
-                </div>
+                <MessageBubble
+                  key={`pending-${p.id}`}
+                  role="user"
+                  speaker={`you${p.queued ? " · queued until the agent finishes" : ""}`}
+                  text={p.text}
+                  state="pending"
+                />
               ))}
           </div>
         )
@@ -565,18 +559,36 @@ export function AgentSession({
   );
 }
 
+export function MessageBubble({
+  role,
+  speaker,
+  text,
+  state,
+}: {
+  role: "assistant" | "user";
+  speaker: string;
+  text: string;
+  state?: "pending" | "draft";
+}) {
+  return (
+    <div className={`chat-row chat-row-${role}`}>
+      <div
+        className={`chat-bubble chat-bubble-${role}`}
+        data-pending={state === "pending" || undefined}
+        data-draft={state === "draft" || undefined}
+      >
+        <span className="chat-meta">{speaker}</span>
+        <span className="chat-text">{text}</span>
+      </div>
+    </div>
+  );
+}
+
 /** One row of the conversation, whatever it carries. */
 function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) {
   if (item.kind === "message") {
     if (item.role === "user") {
-      return (
-        <div className="chat-row chat-row-user">
-          <div className="chat-bubble chat-bubble-user">
-            <span className="chat-text">{item.text}</span>
-            <span className="chat-meta">you</span>
-          </div>
-        </div>
-      );
+      return <MessageBubble role="user" speaker="you" text={item.text} />;
     }
     if (item.role === "system") {
       return (
@@ -585,14 +597,7 @@ function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) 
         </div>
       );
     }
-    return (
-      <div className="chat-row chat-row-assistant">
-        <div className="chat-bubble chat-bubble-assistant">
-          <span className="chat-text">{item.text}</span>
-          <span className="chat-meta">{item.speaker}</span>
-        </div>
-      </div>
-    );
+    return <MessageBubble role="assistant" speaker={item.speaker} text={item.text} />;
   }
   if (item.kind === "tools") {
     return <ToolRow calls={item.calls} showDetail={showDetail} />;
