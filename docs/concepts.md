@@ -4,7 +4,7 @@ Each feature is a card that moves through your stages. When a card enters a stag
 
 ## Cards, sandboxes and worktrees
 
-One card, one branch, one sandbox. The sandbox is created when the card's first agent runs and outlives that run, so the second stage starts warm: the dependencies its setup command installed are still there, and so are the caches the first agent built.
+One card, one branch, one sandbox. The sandbox is created when the card's first agent runs and outlives that run, so the second stage starts warm: the dependencies its setup command installed are still there, and so are the caches the first agent built. On hosted sandboxes it outlives the server too: a deploy in the middle of a run does not end it, because the sandbox keeps the agent working through the disconnect and the restarted server reattaches to it.
 
 **A project can span several repositories.** Each gets its own worktree inside one feature workspace, so a change touching a frontend and a backend is a single card:
 
