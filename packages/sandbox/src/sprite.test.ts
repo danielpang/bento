@@ -480,18 +480,34 @@ test("Sprite exec reattaches to the running command when the connection drops", 
 /**
  * A stop is the one disconnect that must not reattach: the user asked
  * for the process to end, and following it back would resurrect the
- * run they cancelled.
+ * run they cancelled. The stop itself is also delivered over HTTP,
+ * because the WebSocket kill dies with the socket it rides on.
  */
-test("Sprite exec does not reattach when the run was told to stop", async () => {
+test("Sprite exec does not reattach when the run was told to stop, and stops it over HTTP", async () => {
   const child = fakeChild();
-  let sessionsAsked = 0;
+  let spawned = 0;
+  const kills: { id: string; signal?: string; timeout?: string }[] = [];
   const sprite = {
     spawn() {
+      spawned += 1;
       return child;
     },
     async listSessions() {
-      sessionsAsked += 1;
-      return [];
+      return [
+        {
+          id: "sess-3",
+          command: "claude",
+          workdir: "/workspace",
+          created: new Date(0),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+    async killSession(id: string, signal?: string, timeout?: string) {
+      kills.push({ id, ...(signal ? { signal } : {}), ...(timeout ? { timeout } : {}) });
+      return { async processAll() {} };
     },
   };
   const driver = new SpriteDriver({ token: "token" });
@@ -511,9 +527,43 @@ test("Sprite exec does not reattach when the run was told to stop", async () => 
   child.emit("exit", -1);
 
   const result = await collected;
+  await settle();
   assert.equal(result.exitCode, -1);
   assert.match(result.stderr, /closed before the command reported an exit/);
-  assert.equal(sessionsAsked, 0);
+  assert.equal(spawned, 1, "a cancelled run must not be reattached");
+  assert.deepEqual(kills, [{ id: "sess-3", signal: "SIGTERM", timeout: "10s" }]);
+});
+
+/**
+ * The SDK's connect has no bound: a connection that blackholes emits
+ * neither open nor error, and before this the run sat silent until its
+ * own limit, holding a worker slot the whole time.
+ */
+test("Sprite exec gives up on a connection the sandbox never accepts", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const child = fakeChild(); // never emits anything at all
+  const sprite = {
+    spawn() {
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+  );
+  await settle();
+  t.mock.timers.tick(2 * 60_000);
+  await settle();
+  await settle();
+
+  const result = await collected;
+  assert.equal(result.exitCode, -1);
+  assert.match(result.stderr, /did not accept the connection in time/);
 });
 
 /**
@@ -712,8 +762,120 @@ test("the installed SDK still supports surviving a disconnect and reattaching", 
   assert.equal(attachWs?.isAttach, true);
   assert.equal(typeof attachWs?.close, "function");
 
-  // Sessions are found again through listSessions on the Sprite class.
+  // Sessions are found again through listSessions on the Sprite class,
+  // and a stop reaches the process over HTTP through killSession.
   assert.equal(typeof SpriteClass.prototype.listSessions, "function");
+  assert.equal(typeof SpriteClass.prototype.killSession, "function");
+});
+
+/**
+ * The checkpoint stream reports failure as an error message, not a
+ * rejection. Drained blind, a failed checkpoint looked exactly like a
+ * finished one, and the newest listed checkpoint was then the previous
+ * snapshot: a later rollback would restore the wrong filesystem.
+ */
+test("Sprite snapshot surfaces a checkpoint the sandbox failed to take", async () => {
+  const sprite = {
+    async createCheckpoint() {
+      return {
+        async processAll(handler: (message: { type: string; error?: string; data?: string }) => void) {
+          handler({ type: "info", data: "creating checkpoint" });
+          handler({ type: "error", error: "disk full" });
+        },
+        close() {},
+      };
+    },
+    async listCheckpoints() {
+      return [{ id: "v1", createTime: new Date(0) }];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    driver.snapshot({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, "before stage"),
+    /disk full/,
+  );
+});
+
+/**
+ * The checkpoint fetch carries no timeout at any layer, so a stalled
+ * stream used to park the run in "starting" holding its worker slot
+ * until a server restart.
+ */
+test("Sprite snapshot gives up on a checkpoint stream that stalls", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  let closed = false;
+  const sprite = {
+    async createCheckpoint() {
+      return {
+        processAll() {
+          return new Promise(() => {});
+        },
+        close() {
+          closed = true;
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const outcome = driver
+    .snapshot({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, "before stage")
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  await settle();
+  t.mock.timers.tick(6 * 60_000);
+  const result = await outcome;
+  assert.ok(result instanceof Error, "the stalled checkpoint must fail rather than hang");
+  assert.match(result.message, /did not finish within/);
+  assert.ok(closed, "the stalled stream was closed");
+});
+
+/**
+ * Filesystem calls have no SDK timeout either; a stalled one hung
+ * provisioning with the run parked in "starting". The bound turns that
+ * into a failure the run record can explain.
+ */
+test("Sprite provisioning fails rather than hangs when a filesystem call stalls", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const sprite = {
+    spawn() {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        readdir() {
+          return new Promise(() => {});
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const outcome = driver
+    .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  await settle();
+  await settle();
+  t.mock.timers.tick(6 * 60_000);
+  const result = await outcome;
+  assert.ok(result instanceof Error, "the stalled provision must fail rather than hang");
+  assert.match(result.message, /listing the workspace did not finish/);
 });
 
 test("Sprite repository export returns committed objects without credentials", async () => {

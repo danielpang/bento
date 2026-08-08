@@ -143,7 +143,12 @@ export class SpriteDriver implements SandboxDriver {
       ];
       if (repo.seedBundle) {
         const bundlePath = `/tmp/bento-seed-${repo.name}.bundle`;
-        await sprite.filesystem("/").writeFile(bundlePath, repo.seedBundle);
+        // Filesystem calls carry no SDK timeout at all; see bounded.
+        await bounded(
+          sprite.filesystem("/").writeFile(bundlePath, repo.seedBundle),
+          FILESYSTEM_TIMEOUT_MS,
+          `writing the ${repo.name} seed bundle`,
+        );
         try {
           const script = [
             "set -eu",
@@ -158,7 +163,9 @@ export class SpriteDriver implements SandboxDriver {
           ].join("\n");
           await runScript(sprite, script);
         } finally {
-          await sprite.filesystem("/").rm(bundlePath).catch(() => {});
+          await bounded(sprite.filesystem("/").rm(bundlePath), FILESYSTEM_TIMEOUT_MS, "removing the seed bundle").catch(
+            () => {},
+          );
         }
       } else {
         const script = [
@@ -181,12 +188,22 @@ export class SpriteDriver implements SandboxDriver {
     // later agent can still read and modify it.
     const keep = new Set((spec.repositories ?? []).map((repo) => repo.name));
     const filesystem = sprite.filesystem("/");
-    const entries = await filesystem.readdir(this.workdir, { withFileTypes: true });
+    const entries = await bounded(
+      filesystem.readdir(this.workdir, { withFileTypes: true }),
+      FILESYSTEM_TIMEOUT_MS,
+      "listing the workspace",
+    );
     for (const entry of entries) {
       if (!entry.isDirectory() || keep.has(entry.name)) continue;
       const candidate = `${this.workdir}/${entry.name}`;
-      if (!(await filesystem.exists(`${candidate}/.git`))) continue;
-      await filesystem.rm(candidate, { recursive: true, force: true });
+      if (!(await bounded(filesystem.exists(`${candidate}/.git`), FILESYSTEM_TIMEOUT_MS, "checking a checkout"))) {
+        continue;
+      }
+      await bounded(
+        filesystem.rm(candidate, { recursive: true, force: true }),
+        FILESYSTEM_TIMEOUT_MS,
+        `removing the old ${entry.name} checkout`,
+      );
     }
 
     return { externalId: name, provider: "sprite", workdir: this.workdir };
@@ -368,10 +385,31 @@ export class SpriteDriver implements SandboxDriver {
     const wire = (child: SpriteCommand, alreadyOpen: boolean) => {
       let retired = false;
       let open = alreadyOpen;
+      let connectDeadline: NodeJS.Timeout | null = null;
       const retire = () => {
         retired = true;
+        if (connectDeadline) clearTimeout(connectDeadline);
         if (active === child) active = null;
       };
+      /**
+       * The SDK's connect has no bound of its own: a connection that
+       * blackholes emits neither open nor error, and the run would sit
+       * silent until its own limit. Generous, because a hibernated
+       * sprite wakes on demand and the wake rides this same connect.
+       * Ending through lost() rather than a plain failure, because the
+       * server may have started the command even though the answer
+       * never arrived; the session listing settles which.
+       */
+      if (!alreadyOpen) {
+        connectDeadline = setTimeout(() => {
+          if (retired || open || done) return;
+          retire();
+          closeQuietly(child);
+          push({ kind: "stderr", data: "the sandbox did not accept the connection in time" });
+          lost(null);
+        }, EXEC_CONNECT_TIMEOUT_MS);
+        connectDeadline.unref?.();
+      }
       const activate = () => {
         active = child;
         if (stdinDone) child.stdin.end();
@@ -416,17 +454,41 @@ export class SpriteDriver implements SandboxDriver {
     };
 
     /**
+     * The WebSocket kill only works while the socket does, so a stop is
+     * also delivered over HTTP, which reaches the process no matter
+     * what state the socket is in. Best effort: when even this cannot
+     * land, the disconnect grace period is what finally reaps the
+     * process. TERM first with a short escalation to KILL, so a CLI
+     * that ignores the polite signal still dies.
+     */
+    const killOverHttp = async () => {
+      try {
+        const fresh = await this.client.getSprite(handle.externalId);
+        const sessions = await fresh.listSessions();
+        const mine = sessions
+          .filter((s) => !s.tty && (s.command === command || s.command.startsWith(`${command} `)))
+          .sort((a, b) => b.created.getTime() - a.created.getTime())[0];
+        if (!mine) return;
+        const stream = await fresh.killSession(mine.id, "SIGTERM", "10s");
+        await stream.processAll(() => {});
+      } catch {
+        // The socket kill and the disconnect grace still bound the process.
+      }
+    };
+
+    /**
      * A kill travels over the same WebSocket as the output, so a kill
      * sent on a dead connection is sent into the void and no exit event
      * ever comes back. Without a bound, the stream then waits forever
      * and the run holds its worker slot until the server restarts. The
-     * reaper turns that into a failed run; the disconnect grace period
-     * bounds how long the orphaned process itself can keep running.
+     * reaper turns that into a failed run; the HTTP kill above and the
+     * disconnect grace period bound the orphaned process itself.
      */
     let reap: NodeJS.Timeout | null = null;
     const kill = () => {
       killed = true;
       void latest?.kill();
+      void killOverHttp();
       if (!reap) {
         reap = setTimeout(() => {
           conclude(-1, "the sandbox did not confirm the process ended after it was told to stop");
@@ -497,11 +559,31 @@ export class SpriteDriver implements SandboxDriver {
    * createCheckpoint returns a progress stream rather than the
    * checkpoint, so the stream is drained first and the newest checkpoint
    * read back afterwards.
+   *
+   * The stream reports failure as an error message rather than a
+   * rejection, and draining it blind made a failed checkpoint look
+   * exactly like a finished one: listCheckpoints would then hand back
+   * the previous snapshot, and a later rollback would quietly restore
+   * the wrong filesystem. The drain is also bounded, because the
+   * checkpoint fetch carries no timeout at any layer and a stalled
+   * stream parked the run in "starting" holding its worker slot.
    */
   async snapshot(handle: SandboxHandle, label: string): Promise<string> {
     const sprite = await this.client.getSprite(handle.externalId);
-    const stream = await sprite.createCheckpoint(label);
-    await stream.processAll(() => {});
+    const stream = await bounded(sprite.createCheckpoint(label), CHECKPOINT_TIMEOUT_MS, "the checkpoint");
+    const failures: string[] = [];
+    try {
+      await bounded(
+        stream.processAll((message) => {
+          if (message.type === "error") failures.push(message.error ?? message.data ?? "unnamed error");
+        }),
+        CHECKPOINT_TIMEOUT_MS,
+        "the checkpoint",
+      );
+    } finally {
+      stream.close();
+    }
+    if (failures.length > 0) throw new Error(`checkpoint failed: ${failures.join("; ")}`);
 
     const checkpoints = await sprite.listCheckpoints();
     let newest: { id: string; createTime: Date } | undefined;
@@ -512,11 +594,28 @@ export class SpriteDriver implements SandboxDriver {
     return newest.id;
   }
 
-  /** Restores the sandbox filesystem to a checkpoint. */
+  /**
+   * Restores the sandbox filesystem to a checkpoint. Watched and
+   * bounded the same way snapshot is: a restore that failed or stalled
+   * while reporting nothing left the caller believing the rollback
+   * happened.
+   */
   async restore(handle: SandboxHandle, snapshotId: string): Promise<void> {
     const sprite = await this.client.getSprite(handle.externalId);
-    const stream = await sprite.restoreCheckpoint(snapshotId);
-    await stream.processAll(() => {});
+    const stream = await bounded(sprite.restoreCheckpoint(snapshotId), RESTORE_TIMEOUT_MS, "the restore");
+    const failures: string[] = [];
+    try {
+      await bounded(
+        stream.processAll((message) => {
+          if (message.type === "error") failures.push(message.error ?? message.data ?? "unnamed error");
+        }),
+        RESTORE_TIMEOUT_MS,
+        "the restore",
+      );
+    } finally {
+      stream.close();
+    }
+    if (failures.length > 0) throw new Error(`restore failed: ${failures.join("; ")}`);
   }
 
   async exportRepository(
@@ -611,6 +710,49 @@ const REATTACH_DELAYS_MS = [1_000, 5_000, 15_000, 30_000, 60_000];
 
 /** How long one attach attempt may sit connecting before the next tries. */
 const ATTACH_TIMEOUT_MS = 30_000;
+
+/**
+ * How long the first connection of an exec may sit connecting. Longer
+ * than an attach attempt, because a hibernated sprite wakes on demand
+ * and the wake rides this connect.
+ */
+const EXEC_CONNECT_TIMEOUT_MS = 2 * 60_000;
+
+/**
+ * Bounds for SDK calls that carry no timeout of their own. The
+ * checkpoint and restore fetches say so outright ("No timeout"), and
+ * the filesystem calls simply never set one, so any of them could hang
+ * a provision or snapshot forever with the run parked in "starting".
+ */
+const FILESYSTEM_TIMEOUT_MS = 5 * 60_000;
+const CHECKPOINT_TIMEOUT_MS = 5 * 60_000;
+const RESTORE_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Races unbounded SDK work against a deadline. The underlying request
+ * cannot be aborted from here (the SDK exposes no signal), so a bound
+ * that fires abandons it: that costs a socket, where the hang it
+ * replaces cost a worker slot until a server restart.
+ */
+function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const deadline = setTimeout(
+      () => reject(new Error(`${what} did not finish within ${Math.round(ms / 60_000)} minutes`)),
+      ms,
+    );
+    deadline.unref?.();
+    work.then(
+      (value) => {
+        clearTimeout(deadline);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(deadline);
+        reject(err);
+      },
+    );
+  });
+}
 
 /** Resolves on the connection opening, rejects on its error or the deadline. */
 function openedWithin(child: SpriteCommand, ms: number): Promise<void> {
