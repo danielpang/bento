@@ -10,6 +10,7 @@ import {
   createDb,
   createPool,
   agentProfiles,
+  featureMessages,
   featurePullRequests,
   features,
   githubInstallations,
@@ -34,7 +35,7 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { registerJobs, recoverInterruptedRuns } from "./orchestrator/run-executor.js";
+import { markCancelled, registerJobs, recoverInterruptedRuns } from "./orchestrator/run-executor.js";
 import { JUDGE_PROMPT_PREFIX } from "./orchestrator/gate-evaluator.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
@@ -759,7 +760,7 @@ test(
       .returning();
 
     // A reply that arrived while the deploy was happening.
-    await ctx.db.update(features).set({ queuedPrompt: "is anyone there" }).where(eq(features.id, feature.id));
+    await ctx.db.insert(featureMessages).values({ featureId: feature.id, text: "is anyone there" });
 
     const closed: string[] = [];
     const offWorking = ctx.bus.onRunDone(working.id, (s) => closed.push(`${working.id}:${s}`));
@@ -1149,9 +1150,9 @@ test("two messages racing into the parking slot both survive", { timeout: 60_000
   assert.equal((await json<{ queued: boolean }>(first!)).queued, true);
   assert.equal((await json<{ queued: boolean }>(second!)).queued, true);
 
-  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
-  const parked = (row?.queuedPrompt ?? "").split("\n").sort();
-  assert.deepEqual(parked, ["actually stop", "wait"], "both racing messages are in the slot");
+  const rows = await ctx.db.select().from(featureMessages).where(eq(featureMessages.featureId, feature.id));
+  const parked = rows.map((m) => m.text).sort();
+  assert.deepEqual(parked, ["actually stop", "wait"], "both racing messages are their own rows");
 
   await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" });
   await waitForRun(running!.id);
@@ -1216,6 +1217,94 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   assert.equal(resumed?.agentProfileId, worker.id, "the worker answers, not the judge");
   assert.equal(resumed?.cliSessionId, "work-sess", "inside the work conversation, not the judging one");
   await waitForRun(reply.run!.id);
+});
+
+/**
+ * A message handed to a run that never confirmed a turn is not
+ * delivered, whatever the transcript shows: the run's ending puts it
+ * back and the next run carries it. This is the loss the old
+ * queued_prompt slot could not see, a message acknowledged, written to
+ * a live channel, and then gone with the process that never read it.
+ */
+test("a message the agent never confirmed is redelivered to the next run", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Unread redelivery");
+  const feature = await createFeature(project.id, "Unread card");
+  const profile = await fakeProfile("unread-fake");
+  const stage = projectStages[0]!;
+
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "half finished work",
+      status: "running",
+      executor: "server",
+    })
+    .returning();
+  // Sent to that run, never confirmed by a result event.
+  const [message] = await ctx.db
+    .insert(featureMessages)
+    .values({ featureId: feature.id, text: "fix the header", status: "sent", runId: running!.id, sentAt: new Date() })
+    .returning();
+
+  // The run ends without ever reaching a result: a cancel, here.
+  await markCancelled(ctx, running!.id);
+
+  let resume: { id: string; prompt: string } | undefined;
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline && !resume) {
+    const detail = await json<{ runs: { id: string; prompt: string }[] }>(
+      await app.request(`/api/features/${feature.id}`),
+    );
+    resume = detail.runs.find((r) => r.prompt === "fix the header");
+    if (!resume) await new Promise((r) => setTimeout(r, 250));
+  }
+  assert.ok(resume, "the unread message becomes the next run's prompt");
+  assert.equal(await waitForRun(resume.id), "succeeded");
+
+  const [after] = await ctx.db.select().from(featureMessages).where(eq(featureMessages.id, message!.id));
+  assert.equal(after?.status, "delivered", "the redelivering run's result confirms it");
+  assert.equal(after?.runId, resume.id, "and the message records which run answered");
+});
+
+/**
+ * A parked message always has an owner. The old slot's only delivery
+ * chance was a run's terminal path; a message that missed it (a race,
+ * a crash) sat invisible forever. Boot now sweeps for stranded
+ * messages and delivers them from the card's newest run.
+ */
+test("boot recovery delivers a message stranded with no active run", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Stranded delivery");
+  const feature = await createFeature(project.id, "Stranded card");
+  const profile = await fakeProfile("stranded-fake");
+  const stage = projectStages[0]!;
+
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "finished long ago",
+    status: "succeeded",
+    executor: "server",
+    cliSessionId: "stranded-sess",
+  });
+  await ctx.db.insert(featureMessages).values({ featureId: feature.id, text: "are you still there" });
+
+  await recoverInterruptedRuns(ctx);
+
+  let resume: { id: string; prompt: string; cliSessionId?: string | null } | undefined;
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline && !resume) {
+    const detail = await json<{ runs: { id: string; prompt: string; cliSessionId?: string | null }[] }>(
+      await app.request(`/api/features/${feature.id}`),
+    );
+    resume = detail.runs.find((r) => r.prompt === "are you still there");
+    if (!resume) await new Promise((r) => setTimeout(r, 250));
+  }
+  assert.ok(resume, "the sweep found the stranded message an owner");
+  assert.equal(await waitForRun(resume.id), "succeeded");
 });
 
 /**

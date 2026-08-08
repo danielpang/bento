@@ -4,6 +4,7 @@ import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bent
 import {
   agentProfiles,
   agentRuns,
+  featureMessages,
   features,
   organizationPolicies,
   projects,
@@ -23,7 +24,15 @@ import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
-import { startRunIfIdle } from "./start-run.js";
+import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import {
+  claimQueuedMessages,
+  confirmDelivered,
+  markMessagesSent,
+  requeueDanglingClaims,
+  requeueMessages,
+  requeueUndelivered,
+} from "./messages.js";
 
 /**
  * Executes one agent run end to end: sandbox, worktree, agent CLI,
@@ -362,19 +371,21 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   /**
    * A live conversation settles rather than exits: after each finished
-   * turn, a message that arrived through the fallback queue is fed in;
+   * turn, messages that parked meanwhile are fed in, oldest first;
    * with nothing waiting, stdin closes and the process ends the run.
    */
   const onTurnFinished = async () => {
     if (!live || !liveChannel) return;
-    const parked = await claimQueuedPrompt(ctx, feature.id);
-    if (parked) {
-      const accepted = liveChannel.write(live.encodeMessage(parked, "followUp"));
+    const claimed = await claimQueuedMessages(ctx.db, feature.id);
+    if (claimed.length > 0) {
+      const joined = claimed.map((m) => m.text).join("\n");
+      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
       if (accepted) {
-        await sayAsUser(parked);
+        await markMessagesSent(ctx.db, claimed.map((m) => m.id), runId);
+        await sayAsUser(joined);
         return;
       }
-      await parkQueuedPrompt(ctx, feature.id, parked);
+      await requeueMessages(ctx.db, claimed.map((m) => m.id));
     }
     if (liveChannel.pending === 0) liveChannel.end();
   };
@@ -421,7 +432,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         seq += 1;
         await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
         ctx.bus.emitRunEvent({ runId, seq, event });
-        if (event.type === "result") await onTurnFinished();
+        if (event.type === "result") {
+          // A completed turn confirms every message this run was
+          // carrying; only then are new arrivals fed in.
+          await confirmDelivered(ctx.db, runId);
+          await onTurnFinished();
+        }
         // The board shows what the agent last said, so a wall of
         // running cards reads as work rather than as spinners. Only
         // spoken lines: tool starts and stops are ticker noise.
@@ -813,54 +829,31 @@ async function finishRun(
   // Wakes every open stream for this run so none of them has to poll.
   ctx.bus.emitRunDone(runId, outcome.ok ? "succeeded" : "failed");
 
+  // Messages the run took but never confirmed go back first, so the
+  // delivery below hands them to the next run instead of losing them.
+  await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 }
 
 /**
- * Delivers a message that arrived while the run was still going. A
- * headless CLI cannot hear mid-flight, so the message waited on the
- * feature; now that the run is over it becomes a resume run in the same
- * session. Cancel counts as an ending too: someone who stops the agent
- * and types a redirect means the redirect. The claim is guarded so two
- * terminal paths racing deliver once.
+ * Delivers messages that arrived while the run was still going. A
+ * headless CLI cannot hear mid-flight, so they waited as rows on the
+ * card; now that the run is over they become one resume run in the
+ * same session, oldest first. Cancel counts as an ending too: someone
+ * who stops the agent and types a redirect means the redirect. Claims
+ * lock rows, so two terminal paths racing deliver each message once.
  */
-/**
- * Claims the card's parked message atomically, so two racing terminal
- * paths (or a live turn and a finishing run) deliver it exactly once.
- */
-async function claimQueuedPrompt(ctx: AppContext, featureId: string): Promise<string | null> {
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
-  if (!feature?.queuedPrompt) return null;
-  const text = feature.queuedPrompt;
-  const [claimed] = await ctx.db
-    .update(features)
-    .set({ queuedPrompt: null })
-    .where(and(eq(features.id, featureId), eq(features.queuedPrompt, text)))
-    .returning({ id: features.id });
-  return claimed ? text : null;
-}
-
-/**
- * Puts a claimed message back when it could not be delivered after all.
- * In front of anything that parked while the claim was out, because the
- * claimed text is the older message; the previous isNull guard matched
- * nothing in exactly that case, and the message it existed to save was
- * discarded after its sender had been told "queued".
- */
-async function parkQueuedPrompt(ctx: AppContext, featureId: string, text: string): Promise<void> {
-  await ctx.db
-    .update(features)
-    .set({ queuedPrompt: sql`${text} || coalesce(E'\n' || ${features.queuedPrompt}, '')` })
-    .where(eq(features.id, featureId));
-}
-
 export async function deliverQueuedMessage(ctx: AppContext, runId: string): Promise<void> {
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
   if (!run) return;
-  const text = await claimQueuedPrompt(ctx, run.featureId);
-  if (!text) return;
+  const claimed = await claimQueuedMessages(ctx.db, run.featureId);
+  if (claimed.length === 0) return;
+  const ids = claimed.map((m) => m.id);
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-  if (!feature) return;
+  if (!feature) {
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
 
   /**
    * A judge's end can be what frees the card, but the judge is not the
@@ -883,15 +876,16 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     featureId: feature.id,
     stageId: source.stageId,
     agentProfileId: source.agentProfileId,
-    prompt: text,
+    prompt: claimed.map((m) => m.text).join("\n"),
     cliSessionId: source.cliSessionId,
     executor: source.executor,
   });
   if (next === "busy") {
-    // Another run started in the gap; put the message back for its end.
-    await parkQueuedPrompt(ctx, feature.id, text);
+    // Another run started in the gap; the messages wait for its end.
+    await requeueMessages(ctx.db, ids);
     return;
   }
+  await markMessagesSent(ctx.db, ids, next.id);
   ctx.bus.emitBoardEvent({
     type: "run_updated",
     projectId: feature.projectId,
@@ -900,6 +894,43 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     status: "queued",
   });
   if (source.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+}
+
+/**
+ * Boot sweep for messages with no owner. Two ways a message strands: a
+ * claim whose process died between claiming and assigning a run, and
+ * sent rows whose run reached a terminal state on a path that could not
+ * put them back (a crash, an interrupted close from an older version).
+ * Both go back to queued; then any card holding queued messages with
+ * nothing running gets a delivery kicked off from its newest run. This
+ * is what guarantees a parked message always has a next chance, instead
+ * of waiting on a terminal-path delivery that already happened.
+ */
+async function sweepStrandedMessages(ctx: AppContext): Promise<void> {
+  await requeueDanglingClaims(ctx.db);
+  await ctx.db.execute(sql`
+    update feature_messages set status = 'queued', run_id = null, sent_at = null
+    where status = 'sent' and run_id in (
+      select id from agent_runs where status in ('succeeded', 'failed', 'cancelled')
+    )
+  `);
+  const stranded = await ctx.db
+    .selectDistinct({ featureId: featureMessages.featureId })
+    .from(featureMessages)
+    .where(eq(featureMessages.status, "queued"));
+  for (const row of stranded) {
+    const [lastRun] = await ctx.db
+      .select()
+      .from(agentRuns)
+      .where(eq(agentRuns.featureId, row.featureId))
+      .orderBy(desc(agentRuns.queuedAt))
+      .limit(1);
+    // No run yet: the messages wait for the card's first start.
+    if (!lastRun) continue;
+    // An active run's own end delivers; resumed runs count as active.
+    if ((ACTIVE_RUN_STATUSES as readonly string[]).includes(lastRun.status)) continue;
+    await deliverQueuedMessage(ctx, lastRun.id);
+  }
 }
 
 /**
@@ -924,6 +955,7 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
     .set({ status: "cancelled", endedAt: new Date(), error: null })
     .where(eq(agentRuns.id, runId));
   ctx.bus.emitRunDone(runId, "cancelled");
+  await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 }
 
@@ -999,6 +1031,8 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
     console.warn(`reattaching to ${resuming} run(s) still working in their sandboxes`);
   }
 
+  await sweepStrandedMessages(ctx);
+
   /**
    * Runs that never started go back on the queue. Their run.execute
    * job died with the old process when pg-boss had already handed it
@@ -1054,6 +1088,7 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
       status: "failed",
     });
   }
+  await requeueUndelivered(ctx.db, run.id);
   await deliverQueuedMessage(ctx, run.id);
   await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
 }
@@ -1202,14 +1237,16 @@ async function resumeInterruptedRun(
   }
   const onTurnFinished = async () => {
     if (!live || !liveChannel) return;
-    const parked = await claimQueuedPrompt(ctx, feature.id);
-    if (parked) {
-      const accepted = liveChannel.write(live.encodeMessage(parked, "followUp"));
+    const claimed = await claimQueuedMessages(ctx.db, feature.id);
+    if (claimed.length > 0) {
+      const joined = claimed.map((m) => m.text).join("\n");
+      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
       if (accepted) {
-        await sayAsUser(parked);
+        await markMessagesSent(ctx.db, claimed.map((m) => m.id), run.id);
+        await sayAsUser(joined);
         return;
       }
-      await parkQueuedPrompt(ctx, feature.id, parked);
+      await requeueMessages(ctx.db, claimed.map((m) => m.id));
     }
     if (liveChannel.pending === 0) liveChannel.end();
   };
@@ -1228,7 +1265,10 @@ async function resumeInterruptedRun(
         seq += 1;
         await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: event.type, payload: event });
         ctx.bus.emitRunEvent({ runId: run.id, seq, event });
-        if (event.type === "result") await onTurnFinished();
+        if (event.type === "result") {
+          await confirmDelivered(ctx.db, run.id);
+          await onTurnFinished();
+        }
         const spoken = runOutputPreview(event);
         if (spoken) {
           ctx.bus.emitBoardEvent({
