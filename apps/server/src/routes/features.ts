@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, notLike, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
@@ -26,6 +26,7 @@ import { canAccessProject, getAccessibleFeature } from "../access.js";
 import {
   advanceFeature,
   evaluateFeatureGate,
+  JUDGE_PROMPT_PREFIX,
   moveFeatureBack,
   moveFeatureTo,
   recordManualApproval,
@@ -215,10 +216,16 @@ export function featureRoutes(ctx: AppContext) {
       // The last 30 finished runs bound the payload; a card with sixty
       // historical runs does not need them all to read as a conversation.
       const finishedRuns = runRows.filter((r) => terminal.includes(r.status)).slice(-30);
-      const profileRows = await db(c, ctx)
-        .select({ id: agentProfiles.id, name: agentProfiles.name })
-        .from(agentProfiles)
-        .where(eq(agentProfiles.ownerId, actor(c)));
+      // Looked up by the runs' own profiles rather than by who is
+      // asking: in a shared organization a colleague's agent used to
+      // render as "agent" because only the caller's profiles resolved.
+      const profileIds = [...new Set(finishedRuns.map((r) => r.agentProfileId))];
+      const profileRows = profileIds.length
+        ? await db(c, ctx)
+            .select({ id: agentProfiles.id, name: agentProfiles.name })
+            .from(agentProfiles)
+            .where(inArray(agentProfiles.id, profileIds))
+        : [];
       const names = new Map(profileRows.map((p) => [p.id, p.name]));
 
       const blocks = [];
@@ -264,10 +271,16 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
 
+      /**
+       * One SQL statement, not a read-modify-write: two messages sent
+       * in the same instant both read the same queuedPrompt, and the
+       * second SET silently erased the first while both callers were
+       * told "queued". The database does the append, so both survive.
+       */
       const queueIt = async () => {
         await db(c, ctx)
           .update(features)
-          .set({ queuedPrompt: feature.queuedPrompt ? `${feature.queuedPrompt}\n${text}` : text })
+          .set({ queuedPrompt: sql`coalesce(${features.queuedPrompt} || E'\n', '') || ${text}` })
           .where(eq(features.id, feature.id));
         return c.json({ queued: true as const });
       };
@@ -283,18 +296,33 @@ export function featureRoutes(ctx: AppContext) {
         }
         return queueIt();
       }
+      /**
+       * The conversation a follow-up continues is the card's own work,
+       * never a judge's. Judge runs are ordinary rows on the feature,
+       * so "the newest run" was sometimes the reviewer, and the user's
+       * message came back answered by the judge inside the judging
+       * session. The newest run whose prompt is not a judge prompt is
+       * the one whose agent, stage, and session the message belongs to.
+       */
+      const [conversation] = await db(c, ctx)
+        .select()
+        .from(agentRuns)
+        .where(and(eq(agentRuns.featureId, feature.id), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1);
+      const resumeFrom = conversation ?? latest;
       const run = await startRunIfIdle(db(c, ctx), {
         featureId: feature.id,
-        stageId: latest.stageId,
-        agentProfileId: latest.agentProfileId,
+        stageId: resumeFrom.stageId,
+        agentProfileId: resumeFrom.agentProfileId,
         prompt: text,
-        cliSessionId: latest.cliSessionId,
-        executor: latest.executor,
+        cliSessionId: resumeFrom.cliSessionId,
+        executor: resumeFrom.executor,
       });
       // A run started in the gap between the read and the insert; the
       // message waits for it like any other mid-run message.
       if (run === "busy") return queueIt();
-      if (latest.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      if (resumeFrom.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json({ queued: false as const, run }, 201);
     })
     /**
