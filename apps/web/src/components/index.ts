@@ -25,6 +25,7 @@ export { GitHubTokenCard, ProviderKeysCard } from "./Credentials.js";
 export { DeviceApproval } from "./DeviceApproval.js";
 export { DiffReview } from "./DiffReview.js";
 export { FeatureDrawer } from "./FeatureDrawer.js";
+export { SignOutButton, StopButton } from "./IconButtons.js";
 export { Modal } from "./Modal.js";
 export { NavMenu, type NavAction } from "./NavMenu.js";
 export { ProjectPicker } from "./ProjectPicker.js";

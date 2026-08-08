@@ -57,6 +57,17 @@ export const runs = [
   { id: "r0", featureId: "f1", stageId: "s1", agentProfileId: "p1", sandboxId: "sb1", status: "succeeded", executor: "server", costUsd: 0.11, numTurns: 4, error: null, queuedAt: at(170), startedAt: at(169), endedAt: at(160), cliSessionId: "sess-0" },
 ];
 
+/**
+ * A card whose newest run is still going: `runs[0]` is what
+ * `AgentSession` reads as "the latest run", so the Working preview
+ * shows Stop beside the composer while the transcript above it still
+ * reads from the finished blocks fixture.
+ */
+export const workingRuns = [
+  { id: "r2", featureId: "f1", stageId: "s2", agentProfileId: "p2", sandboxId: "sb1", status: "running", executor: "server", costUsd: null, numTurns: 2, error: null, queuedAt: at(2), startedAt: at(1), endedAt: null, cliSessionId: "sess-2" },
+  ...runs,
+];
+
 export const repositories = [
   { id: "rp1", projectId: "prj1", name: "api", localPath: "/Users/you/code/api", repoUrl: "https://github.com/acme/api", githubRepoId: null, defaultBranch: "main", position: 0, setupCommand: "npm ci", testCommand: "npm test" },
   { id: "rp2", projectId: "prj1", name: "web", localPath: "/Users/you/code/web", repoUrl: "https://github.com/acme/web", githubRepoId: null, defaultBranch: "main", position: 1, setupCommand: null, testCommand: "npm run test:ci" },
@@ -145,8 +156,13 @@ const answers: Record<string, unknown> = {
         status: "succeeded",
         costUsd: 0.42,
         events: [
+          { type: "message", role: "user", text: "Add a per-token rate limit in front of the router. Return 429 with a retry window when a token is over quota." },
           { type: "message", role: "assistant", text: "Read the middleware and the route table first. The limit belongs in front of the router, not per handler." },
-          { type: "tool", name: "edit", phase: "end", detail: "src/middleware/rate-limit.ts" },
+          { type: "tool", name: "read", phase: "start", detail: { path: "src/app.ts" } },
+          { type: "tool", name: "read", phase: "end" },
+          { type: "tool", name: "edit", phase: "start", detail: { file_path: "src/middleware/rate-limit.ts" } },
+          { type: "tool", name: "edit", phase: "end" },
+          { type: "message", role: "system", text: "Gate checks passed on pull request #142." },
           { type: "message", role: "assistant", text: "Added a token bucket per API token, refilled on read, and wired it ahead of the router. 429 carries the retry window." },
           { type: "result", ok: true, costUsd: 0.42, numTurns: 9 },
         ],

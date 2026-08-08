@@ -3,6 +3,7 @@ import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient } from "@bento/api-client";
 import type { AgentEvent } from "@bento/core";
 import type { LineQuote } from "./DiffReview.js";
+import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
 
 /** Animation is decoration; a stilled frame carries the same meaning. */
@@ -60,6 +61,8 @@ export function AgentSession({
   expandHref,
   quote,
   onQuoteClear,
+  defaultShowDetail,
+  showDetail: controlledShowDetail,
 }: {
   client: BentoClient;
   featureId: string;
@@ -74,6 +77,13 @@ export function AgentSession({
   /** A diff line the user picked to ask about; sent with the message. */
   quote?: LineQuote | null;
   onQuoteClear?: () => void;
+  /** Falls back to this when localStorage has no saved detail preference yet. */
+  defaultShowDetail?: boolean;
+  /**
+   * Fully controlled detail mode for durable previews. When set, it
+   * wins over both the saved preference and defaultShowDetail.
+   */
+  showDetail?: boolean;
 }) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   /**
@@ -85,8 +95,13 @@ export function AgentSession({
     { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[]
   >([]);
   // Remembered across cards and sessions: detail is a reading
-  // preference, not a per-card state.
-  const [showDetail, setShowDetail] = useState(() => localStorage.getItem("bento:logDetail") === "1");
+  // preference, not a per-card state. Only an absent preference falls
+  // back to defaultShowDetail; a saved "0" still means hidden.
+  const [showDetailState, setShowDetailState] = useState(() => {
+    const saved = localStorage.getItem("bento:logDetail");
+    return saved === null ? (defaultShowDetail ?? false) : saved === "1";
+  });
+  const showDetail = controlledShowDetail ?? showDetailState;
   const [say, setSay] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -386,8 +401,11 @@ export function AgentSession({
             className="session-expand"
             aria-pressed={showDetail}
             onClick={() => {
-              const next = !showDetail;
-              setShowDetail(next);
+              // Controlled previews pin the mode; only the uncontrolled
+              // path remembers a preference across cards and sessions.
+              if (controlledShowDetail !== undefined) return;
+              const next = !showDetailState;
+              setShowDetailState(next);
               localStorage.setItem("bento:logDetail", next ? "1" : "0");
             }}
           >
@@ -436,23 +454,17 @@ export function AgentSession({
               fragments, so the latest agent is always the one talking.
             */}
             {!viewedRunId && draft && (
-              <div className="chat-row chat-row-assistant">
-                <div className="chat-bubble chat-bubble-assistant" data-draft="true">
-                  <span className="chat-text">{draft}</span>
-                  <span className="chat-meta">{workingName}</span>
-                </div>
-              </div>
+              <MessageBubble role="assistant" speaker={workingName} text={draft} state="draft" />
             )}
             {!viewedRunId &&
               visiblePending.map((p) => (
-                <div className="chat-row chat-row-user" key={`pending-${p.id}`}>
-                  <div className="chat-bubble chat-bubble-user" data-pending="true">
-                    <span className="chat-text">{p.text}</span>
-                    <span className="chat-meta">
-                      you{p.queued ? " · queued until the agent finishes" : ""}
-                    </span>
-                  </div>
-                </div>
+                <MessageBubble
+                  key={`pending-${p.id}`}
+                  role="user"
+                  speaker={`you${p.queued ? " · queued until the agent finishes" : ""}`}
+                  text={p.text}
+                  state="pending"
+                />
               ))}
           </div>
         )
@@ -505,12 +517,8 @@ export function AgentSession({
             aria-label="Message the agent"
           />
           {runActive && (
-            <button
-              type="button"
-              className="btn composer-stop"
+            <StopButton
               disabled={busy}
-              title="Stop the agent"
-              aria-label="Stop the agent"
               onClick={() => {
                 setBusy(true);
                 void client
@@ -519,10 +527,7 @@ export function AgentSession({
                   .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
                   .finally(() => setBusy(false));
               }}
-            >
-              <span className="stop-square" aria-hidden="true" />
-              Stop
-            </button>
+            />
           )}
           <button className="btn btn-primary" type="submit" disabled={busy || !say.trim()}>
             Send
@@ -571,18 +576,36 @@ export function AgentSession({
   );
 }
 
+export function MessageBubble({
+  role,
+  speaker,
+  text,
+  state,
+}: {
+  role: "assistant" | "user";
+  speaker: string;
+  text: string;
+  state?: "pending" | "draft";
+}) {
+  return (
+    <div className={`chat-row chat-row-${role}`}>
+      <div
+        className={`chat-bubble chat-bubble-${role}`}
+        data-pending={state === "pending" || undefined}
+        data-draft={state === "draft" || undefined}
+      >
+        <span className="chat-meta">{speaker}</span>
+        <span className="chat-text">{text}</span>
+      </div>
+    </div>
+  );
+}
+
 /** One row of the conversation, whatever it carries. */
 function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) {
   if (item.kind === "message") {
     if (item.role === "user") {
-      return (
-        <div className="chat-row chat-row-user">
-          <div className="chat-bubble chat-bubble-user">
-            <span className="chat-text">{item.text}</span>
-            <span className="chat-meta">you</span>
-          </div>
-        </div>
-      );
+      return <MessageBubble role="user" speaker="you" text={item.text} />;
     }
     if (item.role === "system") {
       return (
@@ -591,14 +614,7 @@ function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) 
         </div>
       );
     }
-    return (
-      <div className="chat-row chat-row-assistant">
-        <div className="chat-bubble chat-bubble-assistant">
-          <span className="chat-text">{item.text}</span>
-          <span className="chat-meta">{item.speaker}</span>
-        </div>
-      </div>
-    );
+    return <MessageBubble role="assistant" speaker={item.speaker} text={item.text} />;
   }
   if (item.kind === "tools") {
     return <ToolRow calls={item.calls} showDetail={showDetail} />;
