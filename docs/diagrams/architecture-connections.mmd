@@ -1,0 +1,17 @@
+flowchart TB
+    clients["Clients<br/>web console, TUI, Mac app"]
+    api["Hono API<br/>REST, SSE, in-process event bus"]
+    orch["Orchestrator<br/>run executor, boot recovery"]
+    pg[("Postgres<br/>run_events, unique on run and seq")]
+    sprite["SpriteDriver<br/>exec and attach"]
+    other["Docker and local process<br/>exec only"]
+    agent["Agent CLI in the sandbox<br/>outlives the server process"]
+
+    clients -->|"POST a message, SSE back, each event carries its seq"| api
+    api --> orch
+    api -->|"replay past since or Last-Event-ID"| pg
+    orch -->|"transcript rows"| pg
+    orch --> sprite
+    orch --> other
+    sprite -->|"WebSocket: stdin, stdout, signals"| agent
+    other -->|"exec"| agent
