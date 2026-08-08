@@ -35,6 +35,7 @@ import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { registerJobs, recoverInterruptedRuns } from "./orchestrator/run-executor.js";
+import { JUDGE_PROMPT_PREFIX } from "./orchestrator/gate-evaluator.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter } from "@bento/agents";
@@ -1060,6 +1061,161 @@ test("a resumed live conversation hears new messages and never repeats the promp
   } finally {
     ctx.driver = previousDriver;
   }
+});
+
+/**
+ * The session id is the conversation's only key, and it used to reach
+ * the run row only at the very end: a run that died without a result
+ * event took the whole conversation with it. It is known the moment
+ * the CLI announces itself, so that is when it is written.
+ */
+test("a run records its session id at init, not only at the end", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Early session id");
+  const feature = await createFeature(project.id, "Session id card");
+  const profile = await fakeProfile("early-session-fake");
+  const stage = projectStages[0]!;
+
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      // SLOW keeps the run alive long enough to observe it mid-flight.
+      prompt: "SLOW work",
+      status: "queued",
+      executor: "server",
+    })
+    .returning();
+  await ctx.boss.send("run.execute", { runId: running!.id });
+
+  const deadline = Date.now() + 30_000;
+  let seen: { status: string; cliSessionId: string | null } | null = null;
+  while (Date.now() < deadline) {
+    seen = await json<{ status: string; cliSessionId: string | null }>(
+      await app.request(`/api/runs/${running!.id}`),
+    );
+    if (seen.cliSessionId) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.equal(seen?.cliSessionId, "fake-session-1", "the init event's session id reaches the run row");
+  assert.ok(
+    seen && !TERMINAL_STATUSES.includes(seen.status),
+    "and it is there while the run is still working, when a crash could still lose it",
+  );
+  // No need to sit out the slow run once the point is proven.
+  await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" });
+  await waitForRun(running!.id);
+});
+
+/**
+ * Two messages sent in the same instant used to both read the same
+ * queuedPrompt and the second write erased the first, with both
+ * senders told "queued". The append now happens in SQL, so the race
+ * has no window.
+ */
+test("two messages racing into the parking slot both survive", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Message race");
+  const feature = await createFeature(project.id, "Race card");
+  const profile = await fakeProfile("race-fake");
+  const stage = projectStages[0]!;
+
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "SLOW work",
+      status: "queued",
+      executor: "server",
+    })
+    .returning();
+  await ctx.boss.send("run.execute", { runId: running!.id });
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const run = await json<{ status: string }>(await app.request(`/api/runs/${running!.id}`));
+    if (run.status === "running") break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  const send = (text: string) =>
+    app.request(`/api/features/${feature.id}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  const [first, second] = await Promise.all([send("wait"), send("actually stop")]);
+  assert.equal((await json<{ queued: boolean }>(first!)).queued, true);
+  assert.equal((await json<{ queued: boolean }>(second!)).queued, true);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  const parked = (row?.queuedPrompt ?? "").split("\n").sort();
+  assert.deepEqual(parked, ["actually stop", "wait"], "both racing messages are in the slot");
+
+  await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" });
+  await waitForRun(running!.id);
+});
+
+/**
+ * A follow-up continues the card's work, never the judging of it. The
+ * newest run on a gated card is often the completion judge, and
+ * inheriting its profile and session had the reviewer answering the
+ * user inside the judging session.
+ */
+test("a follow-up resumes the work agent's session, not the judge's", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Judge hijack");
+  const feature = await createFeature(project.id, "Judged card");
+  const worker = await fakeProfile("judged-worker");
+  const judge = await fakeProfile("judged-judge");
+  const stage = projectStages[0]!;
+
+  const plant = async (values: {
+    profileId: string;
+    prompt: string;
+    cliSessionId: string;
+    queuedAt: Date;
+  }) => {
+    const [run] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: stage.id,
+        agentProfileId: values.profileId,
+        prompt: values.prompt,
+        status: "succeeded",
+        executor: "server",
+        cliSessionId: values.cliSessionId,
+        queuedAt: values.queuedAt,
+      })
+      .returning();
+    return run!;
+  };
+  await plant({
+    profileId: worker.id,
+    prompt: "build the thing",
+    cliSessionId: "work-sess",
+    queuedAt: new Date(Date.now() - 60_000),
+  });
+  await plant({
+    profileId: judge.id,
+    prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build". Decide whether it is complete.`,
+    cliSessionId: "judge-sess",
+    queuedAt: new Date(),
+  });
+
+  const reply = await json<{ queued: boolean; run?: { id: string } }>(
+    await app.request(`/api/features/${feature.id}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "also handle the empty case" }),
+    }),
+  );
+  assert.ok(reply.run, "an idle card answers a message with a new run");
+  const [resumed] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, reply.run!.id));
+  assert.equal(resumed?.agentProfileId, worker.id, "the worker answers, not the judge");
+  assert.equal(resumed?.cliSessionId, "work-sess", "inside the work conversation, not the judging one");
+  await waitForRun(reply.run!.id);
 });
 
 /**
