@@ -896,17 +896,21 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
  * The card used to sit "running" forever, its gate unevaluated, its
  * transcript cut off mid-sentence, its sandbox possibly still billing.
  *
- * The sprite the agent ran on survives, but an exec stream cannot be
- * re-attached, so the honest ending is to close the run as interrupted,
- * say so in the transcript, and hand back to the usual machinery: a
- * message parked on the card becomes a resume run in the same session,
- * and the gate re-evaluates. Runner-executed runs are not here on
+ * The sandbox outlives this process, and on drivers that can attach,
+ * so does the agent: the sprite keeps a disconnected command running
+ * through its grace period (see EXEC_DISCONNECT_GRACE), and boot
+ * reattaches to it and lets the run finish as if nothing happened. A
+ * deploy longer than the grace finds no session, and the run is closed
+ * as interrupted, which stays the honest ending for that case, for
+ * runs still in "starting" (their agent may never have spawned), and
+ * for drivers with no attach. Runner-executed runs are not here on
  * purpose: the machine running them outlives this process and reports
  * when it is done.
  *
  * This assumes the single-process deployment the event bus already
- * assumes; with two servers sharing a database, one's boot would close
- * runs the other is actively executing.
+ * assumes; with two servers sharing a database, both boots would try
+ * to attach to the same session, and one's close would race the
+ * other's run.
  */
 export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
   const orphans = await ctx.db
@@ -914,11 +918,42 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
     .from(agentRuns)
     .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])));
 
+  let closed = 0;
+  let resuming = 0;
   for (const orphan of orphans) {
-    await failRunAsInterrupted(ctx, orphan);
+    // The sandbox is found through the run's own link, never by
+    // external id: sandboxes has no unique index on external_id, so a
+    // name lookup could hand back another row for the same sprite.
+    const sandbox =
+      orphan.status === "running" && orphan.sandboxId && ctx.driver.attach
+        ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, orphan.sandboxId)).limit(1))[0]
+        : undefined;
+    if (!sandbox || sandbox.provider !== ctx.driver.provider) {
+      await failRunAsInterrupted(ctx, orphan);
+      closed += 1;
+      continue;
+    }
+    resuming += 1;
+    /**
+     * Fire and forget: a resume lasts as long as the agent does, and
+     * boot must not wait behind it. Every failure inside falls back to
+     * the interrupted close, whose compare-and-set means a resume that
+     * already finished cannot be clobbered.
+     */
+    void resumeInterruptedRun(ctx, orphan, sandbox).catch(async (err) => {
+      console.error(`could not resume run ${orphan.id} after the restart:`, err);
+      try {
+        await failRunAsInterrupted(ctx, orphan);
+      } catch (inner) {
+        console.error(`could not close run ${orphan.id} as interrupted either:`, inner);
+      }
+    });
   }
-  if (orphans.length > 0) {
-    console.warn(`closed ${orphans.length} run(s) interrupted by the restart`);
+  if (closed > 0) {
+    console.warn(`closed ${closed} run(s) interrupted by the restart`);
+  }
+  if (resuming > 0) {
+    console.warn(`reattaching to ${resuming} run(s) still working in their sandboxes`);
   }
 
   /**
@@ -978,6 +1013,230 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   }
   await deliverQueuedMessage(ctx, run.id);
   await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
+}
+
+/**
+ * Follows a run into its sandbox after a restart: the agent process
+ * kept working while this server was away, so the run's stream, abort
+ * handle, and live stdin are rebuilt around the surviving session and
+ * the run finishes the way it would have.
+ *
+ * Everything provisioning-shaped is skipped on purpose. The process
+ * already carries its environment and working directory, so resolving
+ * credentials here would add nothing except a fresh way to fail: a
+ * secret rotated during the deploy must not kill a run that never
+ * needed to read it again. No snapshot either; the pre-run checkpoint
+ * was taken in the run's first life.
+ */
+async function resumeInterruptedRun(
+  ctx: AppContext,
+  run: typeof agentRuns.$inferSelect,
+  sandbox: typeof sandboxes.$inferSelect,
+): Promise<void> {
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+  const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
+  const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, run.agentProfileId));
+  if (!feature || !stage || !profile) throw new Error(`run ${run.id} has dangling references`);
+  const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
+  if (!project) throw new Error(`project ${feature.projectId} not found`);
+
+  const selectedRepos = await ctx.db
+    .select()
+    .from(repositories)
+    .where(eq(repositories.projectId, project.id))
+    .orderBy(asc(repositories.position));
+  const repoRows =
+    ctx.env.BENTO_MODE === "multi" ? selectedRepos : await linkGitHubRemotes(ctx.db, selectedRepos);
+
+  const emitBoard = (status: string) =>
+    ctx.bus.emitBoardEvent({
+      type: "run_updated",
+      projectId: feature.projectId,
+      featureId: feature.id,
+      runId: run.id,
+      status,
+    });
+  const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
+  const publisher = await githubConnectionFor(ctx, feature.organizationId);
+  const adapter = getAdapter(profile.cli);
+
+  const handle: SandboxHandle = {
+    externalId: sandbox.externalId,
+    provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+    workdir: sandbox.workdir,
+  };
+  // Resume only exists for drivers with attach, whose publish path
+  // exports bundles through the handle, so worktreePath is never read.
+  const prepared: PreparedRepository[] = repoRows.map((r) => ({
+    name: r.name,
+    localPath: r.localPath,
+    worktreePath: "",
+  }));
+
+  const { argv, live, liveChannel } = await buildRunCommand(ctx, {
+    run,
+    feature,
+    stage,
+    profile,
+    adapter,
+    repoRows,
+    prepared,
+    handle,
+    // The process consumed its prompt in its first life; re-sending it
+    // would replay the whole task as a new user turn.
+    sendInitialPrompt: false,
+  });
+
+  // What is left of the run's budget, not a fresh one: the agent has
+  // been running since startedAt, deploy or no deploy. The floor gives
+  // a run near its limit a minute to reach a result event.
+  const timeoutMs = Math.max(
+    60_000,
+    ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - (run.startedAt ? Date.now() - run.startedAt.getTime() : 0),
+  );
+
+  // Attach before touching shared state or the transcript, so a failed
+  // attach leaves no misleading "reattached" line and no stale abort
+  // handle behind.
+  const controller = new AbortController();
+  const stream = await ctx.driver.attach!(handle, argv, {
+    timeoutMs,
+    signal: controller.signal,
+    ...(liveChannel ? { stdin: liveChannel } : {}),
+  });
+  if (!stream) {
+    liveChannel?.end();
+    await failRunAsInterrupted(ctx, run);
+    return;
+  }
+
+  // The cancel route may have fired between boot and here, aborting a
+  // controller that was not registered yet and marking the row. The
+  // abort tells the driver to stop the process it just reconnected;
+  // draining the stream lets that kill conclude.
+  const [current] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  if (!current || current.status !== "running") {
+    controller.abort();
+    liveChannel?.end();
+    for await (const chunk of stream) {
+      if (chunk.kind === "exit") break;
+    }
+    return;
+  }
+
+  ctx.running.set(run.id, controller);
+
+  // The transcript already holds this run's first life; the counter
+  // continues it, because (runId, seq) is unique and starting over
+  // would throw on the first insert.
+  const [seqRow] = await ctx.db
+    .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
+    .from(runEvents)
+    .where(eq(runEvents.runId, run.id));
+  let seq = Number(seqRow?.maxSeq ?? 0);
+  const sayAsUser = async (text: string) => {
+    seq += 1;
+    const said = { type: "message" as const, role: "user" as const, text };
+    await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: said.type, payload: said });
+    ctx.bus.emitRunEvent({ runId: run.id, seq, event: said });
+  };
+  const saySystem = async (text: string) => {
+    seq += 1;
+    const said = { type: "message" as const, role: "system" as const, text };
+    await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: said.type, payload: said });
+    ctx.bus.emitRunEvent({ runId: run.id, seq, event: said });
+  };
+
+  if (live && liveChannel) {
+    ctx.liveInputs.set(run.id, {
+      delivery: live.delivery,
+      deliver: async (text: string) => {
+        const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
+        if (accepted) await sayAsUser(text);
+        return accepted;
+      },
+    });
+  }
+  const onTurnFinished = async () => {
+    if (!live || !liveChannel) return;
+    const parked = await claimQueuedPrompt(ctx, feature.id);
+    if (parked) {
+      const accepted = liveChannel.write(live.encodeMessage(parked, "followUp"));
+      if (accepted) {
+        await sayAsUser(parked);
+        return;
+      }
+      await parkQueuedPrompt(ctx, feature.id, parked);
+    }
+    if (liveChannel.pending === 0) liveChannel.end();
+  };
+
+  emitBoard("running");
+  await saySystem("Bento restarted and reattached to the agent still working in the sandbox.");
+
+  let result;
+  try {
+    result = await runAgent({
+      adapter,
+      argv,
+      exec: () => stream,
+      onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
+      onEvent: async (event) => {
+        seq += 1;
+        await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: event.type, payload: event });
+        ctx.bus.emitRunEvent({ runId: run.id, seq, event });
+        if (event.type === "result") await onTurnFinished();
+        const spoken = runOutputPreview(event);
+        if (spoken) {
+          ctx.bus.emitBoardEvent({
+            type: "run_output",
+            projectId: feature.projectId,
+            featureId: feature.id,
+            runId: run.id,
+            text: spoken,
+          });
+        }
+      },
+    });
+  } catch (err) {
+    ctx.running.delete(run.id);
+    ctx.liveInputs.delete(run.id);
+    liveChannel?.end();
+    if (controller.signal.aborted) {
+      await markCancelled(ctx, run.id);
+      emitBoard("cancelled");
+      return;
+    }
+    await finishRun(ctx, run.id, { ok: false, error: execFailureReason(ctx, err) }, null);
+    emitBoard("failed");
+    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    return;
+  }
+  ctx.running.delete(run.id);
+  ctx.liveInputs.delete(run.id);
+  liveChannel?.end();
+
+  if (controller.signal.aborted) {
+    await markCancelled(ctx, run.id);
+    emitBoard("cancelled");
+    return;
+  }
+
+  await settleAgentResult(ctx, {
+    runId: run.id,
+    feature,
+    stage,
+    profile,
+    repoRows,
+    prepared,
+    handle,
+    branch,
+    publisher,
+    argv,
+    result,
+    seq,
+    emitBoard,
+  });
 }
 
 /**
