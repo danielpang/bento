@@ -202,25 +202,21 @@ export class SpriteDriver implements SandboxDriver {
     return Object.fromEntries(binaries.map((binary) => [binary, installed.has(binary)]));
   }
 
+  /**
+   * One WebSocket used to carry an entire agent run, and any blip on it
+   * used to end the run: the SDK surfaces a dropped socket as an exit
+   * with no code, which read as the agent dying ("stopped before
+   * reporting a result, exit code -1") half an hour into a task the
+   * process inside the sprite was still working on. The socket is not
+   * the process. Every exec now asks the server to keep the command
+   * running for a grace period after a disconnect, and a socket that
+   * closes without a real exit is answered by reattaching to the still
+   * running session rather than by failing the run.
+   */
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
     const sprite = await this.client.getSprite(handle.externalId);
     const [command, ...args] = argv;
     if (!command) throw new Error("empty argv");
-
-    const child = sprite.spawn(command, args, {
-      cwd: opts?.cwd ?? handle.workdir,
-      /**
-       * IS_SANDBOX says the sandbox is the security boundary, which a
-       * sprite is. Claude Code checks it before accepting
-       * --dangerously-skip-permissions as root, and sprites run
-       * commands as root; without it every claude-code run died at
-       * exit 1 with no output. The Docker driver learned this the same
-       * way (see docker.ts).
-       */
-      env: { IS_SANDBOX: "1", ...opts?.env },
-    });
-    const stopKeepaliveGuard = defuseKeepalive(child);
-    feedStdin(child, opts?.stdin);
 
     const queue: ExecChunk[] = [];
     let notify: (() => void) | null = null;
@@ -230,46 +226,210 @@ export class SpriteDriver implements SandboxDriver {
       notify?.();
     };
 
-    child.stdout.on("data", (d: Buffer | string) => push({ kind: "stdout", data: d.toString() }));
-    child.stderr.on("data", (d: Buffer | string) => push({ kind: "stderr", data: d.toString() }));
-    child.on("error", (err: Error) => {
-      push({ kind: "stderr", data: scrubExecUrl(String(err)) });
-      push({ kind: "exit", exitCode: -1 });
-      done = true;
-      notify?.();
-    });
-    child.on("exit", (code: number | null) => {
-      // A real process exit arrives as an unsigned byte, so a negative
-      // or missing code here always means the socket closed without
-      // one. Said out loud, because "exit code -1" reads as the agent
-      // failing when the agent was never heard from at all.
-      if (code === null || code < 0) {
-        push({
-          kind: "stderr",
-          data: "the connection to the sandbox closed before the command reported an exit",
-        });
+    /**
+     * Which connection carries the run right now. `latest` is the last
+     * connection made, open or not, and is where kills go; `active` is
+     * only set while its socket is open, so stdin lines are never
+     * written into a closed connection.
+     */
+    let latest: SpriteCommand | null = null;
+    let active: SpriteCommand | null = null;
+    let stopKeepaliveGuard: () => void = () => {};
+    let killed = false;
+
+    /**
+     * The live conversation outlives any single connection: the pump
+     * below writes each line to whichever connection is open, waiting
+     * out the gap a reattach leaves. `stdinDone` records that the
+     * conversation is over, so every later connection passes the
+     * end-of-input frame on to the process. The SDK holds the process's
+     * stdin open until this side ends it, and an agent CLI reads a
+     * piped stdin to EOF before starting, so a run whose stdin never
+     * closed produced not a single event, indefinitely. Writes wait for
+     * "spawn" because lines and the EOF frame are dropped or refused
+     * while a socket is still connecting.
+     */
+    let stdinDone = !opts?.stdin;
+    const stdinWaiters: (() => void)[] = [];
+    const wakeStdin = () => {
+      for (const wake of stdinWaiters.splice(0)) wake();
+    };
+    const waitForOpen = (): Promise<SpriteCommand | null> => {
+      if (active) return Promise.resolve(active);
+      if (done) return Promise.resolve(null);
+      return new Promise((resolve) => {
+        stdinWaiters.push(() => resolve(active));
+      });
+    };
+    const pump = async (lines: AsyncIterable<string>) => {
+      try {
+        for await (const line of lines) {
+          const target = active ?? (await waitForOpen());
+          if (!target) return; // the run ended before the line could go
+          target.stdin.write(line.endsWith("\n") ? line : `${line}\n`);
+        }
+      } catch {
+        // The conversation source failed; the exit chunk tells the story.
+      } finally {
+        stdinDone = true;
+        active?.stdin.end();
       }
-      push({ kind: "exit", exitCode: code ?? -1 });
+    };
+    if (opts?.stdin) void pump(opts.stdin);
+
+    /** Exactly one exit chunk ends the stream, whichever path is first. */
+    const conclude = (exitCode: number, reason?: string) => {
+      if (done) return;
+      if (reason) push({ kind: "stderr", data: reason });
+      push({ kind: "exit", exitCode });
       done = true;
-      notify?.();
-    });
+      wakeStdin();
+    };
+
+    /**
+     * The socket went away without a process exit. When the stopping
+     * was ours the process is meant to die with the socket, so the run
+     * ends here; otherwise the process is presumed alive inside the
+     * grace window and the run follows it through a reattach.
+     */
+    const lost = (code: number | null) => {
+      if (done) return;
+      if (killed) {
+        conclude(code ?? -1, "the connection to the sandbox closed before the command reported an exit");
+        return;
+      }
+      push({ kind: "stderr", data: "the connection to the sandbox dropped, reattaching to the running command" });
+      void reattach();
+    };
+
+    /**
+     * Finds the surviving session and picks the stream back up.
+     *
+     * Sessions are matched by their command's first word rather than by
+     * substring: the full command line carries the whole prompt, which
+     * contains almost any text one could match on. One feature has one
+     * sprite and one running agent (startRunIfIdle enforces it), so the
+     * newest match is the run's own session.
+     *
+     * A listSessions answer without the session is conclusive, the
+     * process ended while the socket was down, and its exit code and
+     * final output are gone with it; retrying would not bring it back.
+     * Only transport failures retry, because the same outage that took
+     * the socket usually takes the next few API calls too.
+     */
+    const reattach = async () => {
+      for (let attempt = 0; ; attempt++) {
+        if (done || killed) return;
+        try {
+          const fresh = await this.client.getSprite(handle.externalId);
+          const sessions = await fresh.listSessions();
+          if (done || killed) return;
+          const mine = sessions
+            .filter((s) => !s.tty && (s.command === command || s.command.startsWith(`${command} `)))
+            .sort((a, b) => b.created.getTime() - a.created.getTime())[0];
+          if (!mine) {
+            conclude(
+              -1,
+              "the connection to the sandbox closed before the command reported an exit, and the process was gone when the driver tried to reattach",
+            );
+            return;
+          }
+          const attach = fresh.spawn(command, [], { sessionId: mine.id });
+          const guard = defuseKeepalive(attach);
+          try {
+            await openedWithin(attach, ATTACH_TIMEOUT_MS);
+          } catch (err) {
+            guard();
+            throw err;
+          }
+          if (done || killed) {
+            guard();
+            closeQuietly(attach);
+            return;
+          }
+          latest = attach;
+          stopKeepaliveGuard = guard;
+          wire(attach, true);
+          push({ kind: "stderr", data: "reattached to the running command" });
+          return;
+        } catch {
+          // The sandbox is still unreachable; the next attempt decides.
+        }
+        const delay = REATTACH_DELAYS_MS[attempt];
+        if (delay === undefined) break;
+        await sleep(delay);
+      }
+      conclude(
+        -1,
+        "the connection to the sandbox closed before the command reported an exit, and the sandbox stayed unreachable while the driver tried to reattach",
+      );
+    };
+
+    const wire = (child: SpriteCommand, alreadyOpen: boolean) => {
+      let retired = false;
+      let open = alreadyOpen;
+      const retire = () => {
+        retired = true;
+        if (active === child) active = null;
+      };
+      const activate = () => {
+        active = child;
+        if (stdinDone) child.stdin.end();
+        wakeStdin();
+      };
+      if (alreadyOpen) activate();
+      child.on("spawn", () => {
+        if (retired) return;
+        open = true;
+        activate();
+      });
+      child.stdout.on("data", (d: Buffer | string) => {
+        if (!retired) push({ kind: "stdout", data: d.toString() });
+      });
+      child.stderr.on("data", (d: Buffer | string) => {
+        if (!retired) push({ kind: "stderr", data: d.toString() });
+      });
+      child.on("error", (err: Error) => {
+        if (retired) return;
+        push({ kind: "stderr", data: scrubExecUrl(String(err)) });
+        // A connection that never opened has no exit event coming, so
+        // the error is its ending; an open one ends through exit.
+        if (!open) {
+          retire();
+          lost(null);
+        }
+      });
+      child.on("exit", (code: number | null) => {
+        if (retired) return;
+        retire();
+        stopKeepaliveGuard();
+        // A real process exit arrives as an unsigned byte, so a negative
+        // or missing code here always means the socket closed without
+        // one. Said out loud, because "exit code -1" reads as the agent
+        // failing when the agent was never heard from at all.
+        if (code === null || code < 0) {
+          lost(code);
+          return;
+        }
+        conclude(code);
+      });
+    };
 
     /**
      * A kill travels over the same WebSocket as the output, so a kill
      * sent on a dead connection is sent into the void and no exit event
      * ever comes back. Without a bound, the stream then waits forever
      * and the run holds its worker slot until the server restarts. The
-     * reaper turns that into a failed run.
+     * reaper turns that into a failed run; the disconnect grace period
+     * bounds how long the orphaned process itself can keep running.
      */
     let reap: NodeJS.Timeout | null = null;
     const kill = () => {
-      void child.kill();
+      killed = true;
+      void latest?.kill();
       if (!reap) {
         reap = setTimeout(() => {
-          if (done) return;
-          push({ kind: "stderr", data: "the sandbox did not confirm the process ended after it was told to stop" });
-          push({ kind: "exit", exitCode: -1 });
-          done = true;
+          conclude(-1, "the sandbox did not confirm the process ended after it was told to stop");
         }, 15_000);
         reap.unref?.();
       }
@@ -290,6 +450,23 @@ export class SpriteDriver implements SandboxDriver {
         }, opts.timeoutMs)
       : null;
 
+    const child = sprite.spawn(command, args, {
+      cwd: opts?.cwd ?? handle.workdir,
+      /**
+       * IS_SANDBOX says the sandbox is the security boundary, which a
+       * sprite is. Claude Code checks it before accepting
+       * --dangerously-skip-permissions as root, and sprites run
+       * commands as root; without it every claude-code run died at
+       * exit 1 with no output. The Docker driver learned this the same
+       * way (see docker.ts).
+       */
+      env: { IS_SANDBOX: "1", ...opts?.env },
+      maxRunAfterDisconnect: EXEC_DISCONNECT_GRACE,
+    });
+    latest = child;
+    stopKeepaliveGuard = defuseKeepalive(child);
+    wire(child, false);
+
     try {
       while (true) {
         while (queue.length > 0) {
@@ -304,6 +481,8 @@ export class SpriteDriver implements SandboxDriver {
         notify = null;
       }
     } finally {
+      done = true;
+      wakeStdin();
       stopKeepaliveGuard();
       if (timeout) clearTimeout(timeout);
       if (reap) clearTimeout(reap);
@@ -410,6 +589,63 @@ export class SpriteDriver implements SandboxDriver {
  */
 const PROVISION_SCRIPT_TIMEOUT_MS = 20 * 60_000;
 
+/**
+ * How long the sprite keeps an exec'd process running after its socket
+ * disconnects, passed on every exec so a reattach has something to
+ * reattach to. Well past the reattach deadline below, and short enough
+ * that a process nobody could reclaim does not run to the run limit:
+ * this same window is what finally stops a process whose kill was sent
+ * into a dead socket.
+ */
+const EXEC_DISCONNECT_GRACE = "10m";
+
+/**
+ * Waits between reattach attempts. Only transport failures walk this
+ * ladder; a sandbox that answers but no longer lists the session is
+ * conclusive on the first try. Roughly two minutes in total, chosen to
+ * ride out the restarts and routing blips that take a socket down
+ * without taking the sprite down, while staying well inside the
+ * disconnect grace period.
+ */
+const REATTACH_DELAYS_MS = [1_000, 5_000, 15_000, 30_000, 60_000];
+
+/** How long one attach attempt may sit connecting before the next tries. */
+const ATTACH_TIMEOUT_MS = 30_000;
+
+/** Resolves on the connection opening, rejects on its error or the deadline. */
+function openedWithin(child: SpriteCommand, ms: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error("attach timed out")), ms);
+    deadline.unref?.();
+    child.once("spawn", () => {
+      clearTimeout(deadline);
+      resolve();
+    });
+    child.once("error", (err: Error) => {
+      clearTimeout(deadline);
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Closes a connection the run no longer wants without signaling the
+ * process behind it: kill() would deliver SIGTERM to the very process a
+ * reattach was trying to keep. Reached by duck type like the keepalive
+ * clock; the pin test covers the name.
+ */
+function closeQuietly(child: unknown): void {
+  const ws = (child as { wsCmd?: { close?: () => void } }).wsCmd;
+  ws?.close?.();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
 function runScript(
   sprite: Sprite,
   script: string,
@@ -472,8 +708,8 @@ function runScript(
 }
 
 /**
- * Drives the spawned process's stdin: feeds it the caller's lines when
- * there are any, and always ends it so the process sees end-of-input.
+ * Ends the spawned process's stdin once the connection is open, so the
+ * process sees end-of-input.
  *
  * The SDK asks the server to open the command's stdin on every exec
  * (stdin=true on the URL) and only sends the end-of-input frame when
@@ -485,31 +721,15 @@ function runScript(
  * once defuseKeepalive turned that off, the same hang simply ran until
  * the run limit.
  *
- * With lines, this is the live session: each one is a user message
- * flowing to the agent mid-run, and the iterable ending is how the
- * agent learns the conversation is over. Mirrors the Docker driver.
- *
- * On "spawn" rather than immediately, because writes and the EOF frame
- * are dropped or refused while the socket is still connecting, and
- * "spawn" fires once it is open.
+ * On "spawn" rather than immediately, because the EOF frame is dropped
+ * or refused while the socket is still connecting, and "spawn" fires
+ * once it is open. Live agent sessions do not come through here: exec's
+ * own stdin pump feeds them, because their lines must survive a
+ * reattach and this binds to a single connection.
  */
-function feedStdin(child: SpriteCommand, lines?: AsyncIterable<string>): void {
+function feedStdin(child: SpriteCommand): void {
   child.on("spawn", () => {
-    if (!lines) {
-      child.stdin.end();
-      return;
-    }
-    void (async () => {
-      try {
-        for await (const line of lines) {
-          child.stdin.write(line.endsWith("\n") ? line : `${line}\n`);
-        }
-      } catch {
-        // The connection died first; the exit chunk tells the story.
-      } finally {
-        child.stdin.end();
-      }
-    })();
+    child.stdin.end();
   });
 }
 

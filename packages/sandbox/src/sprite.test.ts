@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { SpriteCommand, type Sprite } from "@fly/sprites";
+import { Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { LineChannel, collectExec } from "./driver.js";
 import { SpriteDriver } from "./sprite.js";
 
@@ -369,6 +369,10 @@ test("Sprite exec keeps the credential-bearing exec URL out of error output", as
       });
       return child;
     },
+    // Nothing to reattach to: the command never started.
+    async listSessions() {
+      return [];
+    },
   };
   const driver = new SpriteDriver({ token: "token" });
   stubClient(driver, sprite);
@@ -384,9 +388,9 @@ test("Sprite exec keeps the credential-bearing exec URL out of error output", as
 
 /**
  * A real process exit arrives as an unsigned byte, so a negative code
- * always means the socket closed without one. Without the explanation
- * the run reads as the agent failing with "exit code -1" when the
- * agent was never heard from at all.
+ * always means the socket closed without one. When the sandbox answers
+ * and the session is not there, the process is genuinely gone, and the
+ * run must fail with the explanation rather than hang or retry.
  */
 test("Sprite exec explains a connection that closed without an exit", async () => {
   const child = fakeChild();
@@ -394,6 +398,9 @@ test("Sprite exec explains a connection that closed without an exit", async () =
     spawn() {
       queueMicrotask(() => child.emit("exit", -1));
       return child;
+    },
+    async listSessions() {
+      return [];
     },
   };
   const driver = new SpriteDriver({ token: "token" });
@@ -404,6 +411,177 @@ test("Sprite exec explains a connection that closed without an exit", async () =
   );
   assert.equal(result.exitCode, -1);
   assert.match(result.stderr, /connection to the sandbox closed before the command reported an exit/);
+});
+
+/**
+ * The failure this section exists for: a WebSocket blip half an hour
+ * into an agent run used to end it with "stopped before reporting a
+ * result (exit code -1)" while the agent inside the sprite worked on,
+ * mid task. The socket is not the process. A close without an exit now
+ * finds the surviving session and picks the stream back up, and the
+ * run's consumer never sees a failure.
+ */
+test("Sprite exec reattaches to the running command when the connection drops", async () => {
+  const child1 = fakeChild();
+  const child2 = fakeChild();
+  const spawns: { file: string; args: string[]; options?: Record<string, unknown> }[] = [];
+  const sprite = {
+    spawn(file: string, args: string[], options?: Record<string, unknown>) {
+      spawns.push({ file, args, ...(options ? { options } : {}) });
+      return spawns.length === 1 ? child1 : child2;
+    },
+    async listSessions() {
+      return [
+        {
+          id: "sess-1",
+          // The full command line, prompt included, as the server
+          // reports it.
+          command: "claude -p do the task",
+          workdir: "/workspace",
+          created: new Date(0),
+          bytesPerSecond: 0,
+          isActive: false,
+          tty: false,
+        },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", "do the task"]),
+  );
+  await settle();
+  child1.emit("spawn");
+  child1.stdout.write('{"type":"assistant"}\n');
+  await settle();
+  child1.emit("exit", -1); // the socket dropped, no exit frame arrived
+
+  for (let i = 0; i < 50 && spawns.length < 2; i++) await settle();
+  assert.equal(spawns.length, 2, "the driver should have attached to the surviving session");
+  child2.emit("spawn");
+  await settle();
+  child2.stdout.write('{"type":"result"}\n');
+  child2.emit("exit", 0);
+
+  const result = await collected;
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /assistant/);
+  assert.match(result.stdout, /result/);
+  assert.match(result.stderr, /reattached to the running command/);
+  assert.doesNotMatch(result.stderr, /closed before the command reported an exit/);
+  // The first spawn asks the server to keep the process alive across a
+  // disconnect; the second names the session instead of a command.
+  assert.equal(spawns[0]?.options?.maxRunAfterDisconnect, "10m");
+  assert.equal(spawns[1]?.options?.sessionId, "sess-1");
+});
+
+/**
+ * A stop is the one disconnect that must not reattach: the user asked
+ * for the process to end, and following it back would resurrect the
+ * run they cancelled.
+ */
+test("Sprite exec does not reattach when the run was told to stop", async () => {
+  const child = fakeChild();
+  let sessionsAsked = 0;
+  const sprite = {
+    spawn() {
+      return child;
+    },
+    async listSessions() {
+      sessionsAsked += 1;
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const controller = new AbortController();
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"], {
+      signal: controller.signal,
+    }),
+  );
+  await settle();
+  child.emit("spawn");
+  await settle();
+  controller.abort();
+  // The kill went over a socket that then closed without an exit frame.
+  child.emit("exit", -1);
+
+  const result = await collected;
+  assert.equal(result.exitCode, -1);
+  assert.match(result.stderr, /closed before the command reported an exit/);
+  assert.equal(sessionsAsked, 0);
+});
+
+/**
+ * The conversation belongs to the run, not to a connection: a line sent
+ * after a reattach must reach the process through the new socket, and
+ * the conversation ending must still close its stdin.
+ */
+test("Sprite exec keeps the live conversation flowing across a reattach", async () => {
+  const child1 = fakeChild();
+  const child2 = fakeChild();
+  const spawns: string[] = [];
+  const sprite = {
+    spawn(file: string) {
+      spawns.push(file);
+      return spawns.length === 1 ? child1 : child2;
+    },
+    async listSessions() {
+      return [
+        {
+          id: "sess-2",
+          command: "claude",
+          workdir: "/workspace",
+          created: new Date(0),
+          bytesPerSecond: 0,
+          isActive: false,
+          tty: false,
+        },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const channel = new LineChannel();
+  channel.write("first");
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"], {
+      stdin: channel,
+    }),
+  );
+  await settle();
+  const written1: string[] = [];
+  child1.stdin.on("data", (d: Buffer | string) => written1.push(d.toString()));
+  child1.emit("spawn");
+  await settle();
+  assert.deepEqual(written1, ["first\n"]);
+
+  child1.emit("exit", -1); // the socket dropped mid conversation
+  for (let i = 0; i < 50 && spawns.length < 2; i++) await settle();
+  assert.equal(spawns.length, 2);
+  const written2: string[] = [];
+  child2.stdin.on("data", (d: Buffer | string) => written2.push(d.toString()));
+  child2.emit("spawn");
+  await settle();
+
+  channel.write("second");
+  await settle();
+  assert.deepEqual(written2, ["second\n"]);
+  // The conversation is still open, so the reattached stdin is too.
+  assert.equal(child2.stdin.writableEnded, false);
+
+  channel.end();
+  await settle();
+  assert.equal(child2.stdin.writableEnded, true);
+
+  child2.emit("exit", 0);
+  const result = await collected;
+  assert.equal(result.exitCode, 0);
 });
 
 /**
@@ -508,6 +686,34 @@ test("the installed SDK still exposes the inactivity clock the driver resets", (
   const ws = (command as unknown as { wsCmd?: { resetKeepalive?: unknown } }).wsCmd;
   assert.equal(typeof ws?.resetKeepalive, "function");
   (ws as { resetKeepalive: () => void }).resetKeepalive();
+});
+
+/**
+ * Reattaching rests on three SDK behaviors: max_run_after_disconnect
+ * riding the exec URL (the server-side grace that keeps the process
+ * alive), sessionId routing to /exec/{id} in attach mode, and a close
+ * on the private WSCommand that does not signal the process. This pins
+ * all three against the installed package, so an SDK change fails here
+ * instead of silently turning every dropped socket back into a dead
+ * run.
+ */
+test("the installed SDK still supports surviving a disconnect and reattaching", () => {
+  const sprite = {
+    name: "pin",
+    client: { token: "token", baseURL: "https://example.invalid" },
+  } as unknown as Sprite;
+  const kept = new SpriteCommand(sprite, "claude", [], { maxRunAfterDisconnect: "10m" });
+  const keptWs = (kept as unknown as { wsCmd?: { url?: string } }).wsCmd;
+  assert.match(keptWs?.url ?? "", /max_run_after_disconnect=10m/);
+
+  const attach = new SpriteCommand(sprite, "claude", [], { sessionId: "sess-9" });
+  const attachWs = (attach as unknown as { wsCmd?: { url?: string; isAttach?: boolean; close?: unknown } }).wsCmd;
+  assert.match(attachWs?.url ?? "", /\/exec\/sess-9\?/);
+  assert.equal(attachWs?.isAttach, true);
+  assert.equal(typeof attachWs?.close, "function");
+
+  // Sessions are found again through listSessions on the Sprite class.
+  assert.equal(typeof SpriteClass.prototype.listSessions, "function");
 });
 
 test("Sprite repository export returns committed objects without credentials", async () => {
