@@ -109,6 +109,7 @@ erDiagram
     agent_profiles |o--o{ stages : "runs"
 
     features ||--o{ agent_runs : "worked by"
+    features ||--o{ feature_messages : "hears"
     stages ||--o{ agent_runs : "during"
     agent_profiles ||--o{ agent_runs : "performed by"
     sandboxes |o--o{ agent_runs : "inside"
@@ -165,7 +166,13 @@ erDiagram
         text status "backlog, active, gated, done, cancelled"
         text branch_name
         integer pr_number "mirrors the first pull request"
-        text queued_prompt "waiting for the run to end"
+    }
+    feature_messages {
+        uuid id PK
+        uuid feature_id FK
+        uuid run_id FK "the run carrying it, once sent"
+        text text
+        text status "queued, sent, delivered"
     }
     agent_profiles {
         uuid id PK

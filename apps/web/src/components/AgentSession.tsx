@@ -175,7 +175,23 @@ export function AgentSession({
   useEffect(() => {
     void client
       .getConversation(featureId)
-      .then((conv) => setBlocks(conv.blocks))
+      .then((conv) => {
+        setBlocks(conv.blocks);
+        /**
+         * Messages parked on the server outlive this tab: after a
+         * reload the optimistic entries are gone, and without this a
+         * waiting message looked like it never existed. Server rows
+         * merge behind whatever is already showing; the transcript
+         * reconciliation above retires them once a run echoes them.
+         */
+        setPending((prev) => {
+          const showing = new Set(prev.map((p) => p.text));
+          const parked = (conv.pending ?? [])
+            .filter((m) => !showing.has(m.text))
+            .map((m) => ({ id: ++pendingId.current, text: m.text, queued: true }));
+          return parked.length > 0 ? [...parked, ...prev] : prev;
+        });
+      })
       .catch(() => setBlocks([]));
   }, [client, featureId, finishedCount]);
 
