@@ -7,6 +7,7 @@ import { Board, matchesQuery, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
 import { BottomBar } from "./components/BottomBar.js";
 import { BrandLockup } from "./components/BrandLockup.js";
+import { SignOutButton } from "./components/IconButtons.js";
 import { NavMenu, type NavAction } from "./components/NavMenu.js";
 import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
@@ -710,11 +711,7 @@ function TopBar({
         <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
           <GearMark />
         </a>
-        {showSignOut && (
-          <button className="btn btn-ghost" onClick={() => signOut()}>
-            Sign out
-          </button>
-        )}
+        {showSignOut && <SignOutButton onClick={() => signOut()} />}
       </nav>
       {primary}
       <NavMenu actions={entries} />

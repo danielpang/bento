@@ -3,6 +3,7 @@ import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient } from "@bento/api-client";
 import type { AgentEvent } from "@bento/core";
 import type { LineQuote } from "./DiffReview.js";
+import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
 
 /** Animation is decoration; a stilled frame carries the same meaning. */
@@ -505,12 +506,8 @@ export function AgentSession({
             aria-label="Message the agent"
           />
           {runActive && (
-            <button
-              type="button"
-              className="btn composer-stop"
+            <StopButton
               disabled={busy}
-              title="Stop the agent"
-              aria-label="Stop the agent"
               onClick={() => {
                 setBusy(true);
                 void client
@@ -519,10 +516,7 @@ export function AgentSession({
                   .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
                   .finally(() => setBusy(false));
               }}
-            >
-              <span className="stop-square" aria-hidden="true" />
-              Stop
-            </button>
+            />
           )}
           <button className="btn btn-primary" type="submit" disabled={busy || !say.trim()}>
             Send
