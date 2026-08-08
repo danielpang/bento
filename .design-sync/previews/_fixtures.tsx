@@ -57,6 +57,17 @@ export const runs = [
   { id: "r0", featureId: "f1", stageId: "s1", agentProfileId: "p1", sandboxId: "sb1", status: "succeeded", executor: "server", costUsd: 0.11, numTurns: 4, error: null, queuedAt: at(170), startedAt: at(169), endedAt: at(160), cliSessionId: "sess-0" },
 ];
 
+/**
+ * A card whose newest run is still going: `runs[0]` is what
+ * `AgentSession` reads as "the latest run", so the Working preview
+ * shows Stop beside the composer while the transcript above it still
+ * reads from the finished blocks fixture.
+ */
+export const workingRuns = [
+  { id: "r2", featureId: "f1", stageId: "s2", agentProfileId: "p2", sandboxId: "sb1", status: "running", executor: "server", costUsd: null, numTurns: 2, error: null, queuedAt: at(2), startedAt: at(1), endedAt: null, cliSessionId: "sess-2" },
+  ...runs,
+];
+
 export const repositories = [
   { id: "rp1", projectId: "prj1", name: "api", localPath: "/Users/you/code/api", repoUrl: "https://github.com/acme/api", githubRepoId: null, defaultBranch: "main", position: 0, setupCommand: "npm ci", testCommand: "npm test" },
   { id: "rp2", projectId: "prj1", name: "web", localPath: "/Users/you/code/web", repoUrl: "https://github.com/acme/web", githubRepoId: null, defaultBranch: "main", position: 1, setupCommand: null, testCommand: "npm run test:ci" },

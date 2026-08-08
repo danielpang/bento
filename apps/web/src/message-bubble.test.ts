@@ -34,3 +34,11 @@ test("MessageBubble exposes pending and draft presentation states", () => {
   assert.match(pending, /data-pending="true"/);
   assert.match(draft, /data-draft="true"/);
 });
+
+test("MessageBubble omits data-pending and data-draft for a plain turn", () => {
+  const html = renderToStaticMarkup(
+    createElement(MessageBubble, { role: "assistant", speaker: "Staff Engineer", text: "Done" }),
+  );
+  assert.doesNotMatch(html, /data-pending/);
+  assert.doesNotMatch(html, /data-draft/);
+});

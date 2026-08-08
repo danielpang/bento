@@ -61,6 +61,7 @@ export function AgentSession({
   expandHref,
   quote,
   onQuoteClear,
+  defaultShowDetail,
 }: {
   client: BentoClient;
   featureId: string;
@@ -75,6 +76,8 @@ export function AgentSession({
   /** A diff line the user picked to ask about; sent with the message. */
   quote?: LineQuote | null;
   onQuoteClear?: () => void;
+  /** Falls back to this when localStorage has no saved detail preference yet. */
+  defaultShowDetail?: boolean;
 }) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   /**
@@ -86,8 +89,12 @@ export function AgentSession({
     { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[]
   >([]);
   // Remembered across cards and sessions: detail is a reading
-  // preference, not a per-card state.
-  const [showDetail, setShowDetail] = useState(() => localStorage.getItem("bento:logDetail") === "1");
+  // preference, not a per-card state. Only an absent preference falls
+  // back to defaultShowDetail; a saved "0" still means hidden.
+  const [showDetail, setShowDetail] = useState(() => {
+    const saved = localStorage.getItem("bento:logDetail");
+    return saved === null ? (defaultShowDetail ?? false) : saved === "1";
+  });
   const [say, setSay] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

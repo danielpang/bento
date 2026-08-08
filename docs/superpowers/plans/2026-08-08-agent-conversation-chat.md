@@ -35,7 +35,7 @@
 - Produces: `SignOutButton({ onClick })`
 - Both render native buttons with visible icons and accessible labels.
 
-- [ ] **Step 1: Write the failing icon markup tests**
+- [x] **Step 1: Write the failing icon markup tests**
 
 ```ts
 import assert from "node:assert/strict";
@@ -61,7 +61,7 @@ test("SignOutButton is icon-only and keeps an accessible name", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify the expected failure**
+- [x] **Step 2: Run the test and verify the expected failure**
 
 Run:
 
@@ -71,7 +71,7 @@ pnpm --filter @bento/web test
 
 Expected: FAIL because `components/IconButtons.js` does not exist.
 
-- [ ] **Step 3: Add the icon controls**
+- [x] **Step 3: Add the icon controls**
 
 ```tsx
 export function StopButton({
@@ -139,11 +139,11 @@ Style the shared hit area:
 }
 ```
 
-- [ ] **Step 4: Use the controls in the application**
+- [x] **Step 4: Use the controls in the application**
 
 Import `StopButton` into `AgentSession.tsx` and replace the existing Stop button while preserving its cancellation callback. Import `SignOutButton` into `App.tsx` and replace only the visible wide topbar Sign out button. Keep the `entries` menu item and `AccountSettings` text button unchanged.
 
-- [ ] **Step 5: Run the test and verify it passes**
+- [x] **Step 5: Run the test and verify it passes**
 
 Run:
 
@@ -153,7 +153,7 @@ pnpm --filter @bento/web test
 
 Expected: 9 tests pass with zero failures.
 
-- [ ] **Step 6: Commit the icon controls**
+- [x] **Step 6: Commit the icon controls**
 
 ```bash
 git add apps/web/src/icon-buttons.test.ts apps/web/src/components/IconButtons.tsx apps/web/src/components/AgentSession.tsx apps/web/src/App.tsx apps/web/src/styles.css
@@ -173,7 +173,7 @@ git commit -m "Use icon controls for stop and sign out"
 - Produces: `MessageBubble({ role, speaker, text, state? })`
 - Consumes: existing `ChatItem` message roles and local pending or draft state.
 
-- [ ] **Step 1: Write the failing message bubble tests**
+- [x] **Step 1: Write the failing message bubble tests**
 
 ```ts
 import assert from "node:assert/strict";
@@ -214,7 +214,7 @@ test("MessageBubble exposes pending and draft presentation states", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify the expected failure**
+- [x] **Step 2: Run the test and verify the expected failure**
 
 Run:
 
@@ -224,7 +224,7 @@ pnpm --filter @bento/web test
 
 Expected: FAIL because `MessageBubble` is not exported.
 
-- [ ] **Step 3: Add and reuse the message renderer**
+- [x] **Step 3: Add and reuse the message renderer**
 
 ```tsx
 export function MessageBubble({
@@ -255,7 +255,7 @@ export function MessageBubble({
 
 Use `MessageBubble` for persisted user and assistant messages, the streaming assistant draft, and optimistic pending user messages. Leave system notes and results in their existing centered renderers.
 
-- [ ] **Step 4: Apply the approved conversation styling**
+- [x] **Step 4: Apply the approved conversation styling**
 
 Update the `.chat-*` block so:
 
@@ -266,7 +266,7 @@ Update the `.chat-*` block so:
 - `.chat-tools` and `.chat-tools-detail` use contained, subdued cards rather than a left rule.
 - Full-page bubbles stop at a readable width and narrow-screen bubbles may use up to 94 percent.
 
-- [ ] **Step 5: Run the tests and type check**
+- [x] **Step 5: Run the tests and type check**
 
 Run:
 
@@ -277,7 +277,7 @@ pnpm --filter @bento/web typecheck
 
 Expected: 12 tests pass and TypeScript exits with code 0.
 
-- [ ] **Step 6: Commit the conversation renderer**
+- [x] **Step 6: Commit the conversation renderer**
 
 ```bash
 git add apps/web/src/message-bubble.test.ts apps/web/src/components/AgentSession.tsx apps/web/src/styles.css
@@ -298,7 +298,7 @@ git commit -m "Render agent sessions as chat conversations"
 - The design fixture feeds representative user, assistant, tool start and end, system, and result events to the existing `AgentSession` preview.
 - The PR description embeds the PNG artifact without committing it to the repository.
 
-- [ ] **Step 1: Expand the preview fixture**
+- [x] **Step 1: Expand the preview fixture**
 
 Add one user message before the assistant reply and paired tool start and end events with object details. Keep the result event so the preview shows participant, activity, and run-state hierarchy in one card.
 
@@ -325,7 +325,7 @@ Open the preview and confirm:
 - Stop and wide topbar Sign out are icon-only with visible focus states.
 - Dark and light themes retain readable contrast.
 
-- [ ] **Step 4: Commit preview and documentation updates**
+- [x] **Step 4: Commit preview and documentation updates**
 
 ```bash
 git add .design-sync/previews/_fixtures.tsx docs/superpowers/specs/2026-08-07-agent-conversation-chat-design.md docs/superpowers/plans/2026-08-08-agent-conversation-chat.md

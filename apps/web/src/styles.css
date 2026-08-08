@@ -662,7 +662,8 @@ button {
  * clickable region is what grows: the pseudo-element takes the hit
  * area past the 44x44 floor without moving a pixel of what is drawn.
  */
-.settings-gear {
+.settings-gear,
+.icon-button {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -670,9 +671,12 @@ button {
   line-height: 1;
 }
 
-.settings-gear::after {
+.settings-gear::after,
+.icon-button::after {
   content: "";
   position: absolute;
+}
+.settings-gear::after {
   inset: -7px -1px;
 }
 
@@ -1576,14 +1580,28 @@ button {
 }
 
 .chat-bubble-user {
-  background: color-mix(in srgb, var(--brand) 14%, var(--panel-raised));
+  /*
+   * A light tint, not a fill: at 14% the meta label (10.5px, already
+   * the smallest text in the pane) measured below the 4.5:1 floor in
+   * warm dark, navy, and worst on teal-on-navy (3.59:1). 8% keeps the
+   * user side visibly warmer than the assistant bubble while the
+   * tinted border still does most of the work of telling the roles
+   * apart, and clears 4.5:1 in every theme and accent measured.
+   */
+  background: color-mix(in srgb, var(--brand) 8%, var(--panel-raised));
   border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line));
 }
 
-/* Accepted but not yet echoed by the run: dashed until it is real. */
+/*
+ * Accepted but not yet echoed by the run: dashed until it is real.
+ * Opacity used to stand in for "not real yet" too, but dimming the
+ * whole bubble toward the pane's own background dragged the label
+ * below 4.5:1 in every theme (as low as 3.24:1 on navy teal) even
+ * though the un-dimmed bubble read fine. The dashed border already
+ * says pending without touching contrast.
+ */
 .chat-bubble[data-pending] {
   border-style: dashed;
-  opacity: 0.75;
 }
 
 .chat-text {
@@ -1594,7 +1612,10 @@ button {
 .chat-meta {
   font-size: 10.5px;
   font-weight: 600;
-  color: var(--text-faint);
+  /* text-faint reads fine on the plain assistant surface, but under
+     the user bubble's brand tint it fell below 4.5:1 for several
+     theme and accent pairs. text-dim clears the floor everywhere. */
+  color: var(--text-dim);
 }
 
 /* Between the bubbles: what Bento itself has to say. */
@@ -1605,26 +1626,29 @@ button {
   color: var(--text-faint);
 }
 
-/* Tool work collapses to one subdued card per burst. */
-.chat-tools {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-faint);
+/*
+ * Tool work collapses to one card per burst, quieter than either
+ * bubble: an outlined, transparent card rather than the assistant's
+ * own panel-raised surface, so a page of tool steps does not read as
+ * more messages than were actually said.
+ */
+.chat-tools,
+.chat-tools-detail {
   max-width: min(88%, 720px);
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  background: var(--panel-raised);
+  background: transparent;
+}
+.chat-tools {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
 }
 .chat-tools-detail {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  max-width: min(88%, 720px);
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--panel-raised);
 }
 .chat-tool-line {
   font-family: var(--mono);
@@ -1648,14 +1672,6 @@ button {
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
-}
-
-@media (max-width: 720px) {
-  .chat-bubble,
-  .chat-tools,
-  .chat-tools-detail {
-    max-width: 94%;
-  }
 }
 
 .field {
@@ -2534,9 +2550,6 @@ button {
   min-width: 0;
 }
 .composer-stop {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   color: var(--failed);
   border-color: var(--failed);
   flex-shrink: 0;
@@ -2547,20 +2560,25 @@ button {
   border-radius: 2px;
   background: var(--failed);
 }
+/* Sizing on top of the shared `.settings-gear, .icon-button` base above. */
 .icon-button {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   width: 34px;
   min-width: 34px;
   padding: 0;
-  line-height: 1;
 }
 .icon-button::after {
-  content: "";
-  position: absolute;
   inset: -7px -5px;
+}
+/*
+ * The composer already stretches Stop to the input's full height
+ * (`.composer` sets `align-items: stretch`), so the shared -7px
+ * vertical bleed on `.icon-button::after` reached past the button's
+ * real edges and into the hint line below the composer. Only the
+ * horizontal bleed is still useful here; the button's own height
+ * already clears a comfortable hit target.
+ */
+.composer .icon-button::after {
+  inset: 0 -5px;
 }
 .signout-mark {
   fill: none;
@@ -2614,6 +2632,23 @@ button {
 .session-page .chat-tools,
 .session-page .chat-tools-detail {
   max-width: min(92%, 720px);
+}
+/*
+ * A narrow viewport widens bubbles everywhere they appear. This has
+ * to repeat the session-page selectors at equal specificity and come
+ * after the rule above, or the unqualified 94% here loses the tie to
+ * the two-class session-page rule regardless of source order within
+ * its own media query.
+ */
+@media (max-width: 720px) {
+  .chat-bubble,
+  .chat-tools,
+  .chat-tools-detail,
+  .session-page .chat-bubble,
+  .session-page .chat-tools,
+  .session-page .chat-tools-detail {
+    max-width: 94%;
+  }
 }
 .session-head {
   display: flex;
