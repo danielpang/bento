@@ -77,6 +77,8 @@ flowchart LR
 
 In runner mode the machine claims runs the server holds for it, so the board, run history, and transcripts are shared while checkouts and agent credentials never leave the machine. Runs queued for an offline runner wait for it.
 
+A server restart does not end hosted runs either: the sandbox keeps a disconnected agent running through a grace period, and the restarting server reattaches to the live session and carries the run to its normal finish. Only when the sandbox no longer holds the process (a deploy longer than the grace, or an agent that ended meanwhile) is the run closed as interrupted.
+
 ## Life of a feature card
 
 ```mermaid
