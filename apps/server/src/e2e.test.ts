@@ -906,22 +906,98 @@ test("an agent's skill shapes its prompt, and the log speaks its name", async ()
 });
 
 /**
+ * Runs a body with these process.env values in place, null meaning
+ * absent, and restores what was there afterwards. The credential tests
+ * below turn on what is *not* set as much as on what is, so inheriting
+ * a developer's own `ANTHROPIC_API_KEY` would quietly invert a result.
+ */
+async function withEnv(values: Record<string, string | null>, body: () => Promise<void>) {
+  const before = new Map(Object.keys(values).map((name) => [name, process.env[name]]));
+  try {
+    for (const [name, value] of Object.entries(values)) {
+      if (value === null) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await body();
+  } finally {
+    for (const [name, value] of before) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+/**
  * A subscription login token satisfies claude-code without an API key.
  * This is the path a containerized server relies on: it cannot reach
  * the machine's keychain, so the token from `claude setup-token`
  * arrives through the environment instead.
  */
 test("a claude login token counts as a credential", async () => {
-  const before = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
-  try {
+  await withEnv({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test", ANTHROPIC_API_KEY: null, ANTHROPIC_BASE_URL: null }, async () => {
     const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
     assert.deepEqual(missing, [], "a login token means nothing is missing");
     assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-test", "and the token reaches the sandbox env");
-  } finally {
-    if (before === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    else process.env.CLAUDE_CODE_OAUTH_TOKEN = before;
-  }
+  });
+});
+
+/**
+ * The two Anthropic credentials are alternatives, and Claude Code picks
+ * the key when it is handed both, so a stale key beside a good token
+ * failed the run with "Invalid API key" while every check here passed.
+ * Only one of them may reach the sandbox.
+ */
+test("a login token displaces the API key rather than joining it", async () => {
+  await withEnv(
+    { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test", ANTHROPIC_API_KEY: "sk-ant-api-stale", ANTHROPIC_BASE_URL: null },
+    async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
+      assert.deepEqual(missing, []);
+      assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-test", "the token is what the agent gets");
+      assert.equal(env.ANTHROPIC_API_KEY, undefined, "and the key it supersedes is withheld");
+    },
+  );
+});
+
+/**
+ * The exception, and the reason this is not a plain preference: a login
+ * token is only valid at Anthropic's own API. Once a base URL points
+ * the tool at OpenRouter or a gateway, the key is the only credential
+ * that can work, so the token gives way instead.
+ */
+test("a redirected endpoint reverses which Anthropic credential wins", async () => {
+  await withEnv(
+    {
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test",
+      ANTHROPIC_API_KEY: "sk-or-routed",
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api/v1",
+    },
+    async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
+      assert.deepEqual(missing, []);
+      assert.equal(env.ANTHROPIC_API_KEY, "sk-or-routed", "the key is what reaches a redirected tool");
+      assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined, "and the token, useless there, is withheld");
+    },
+  );
+});
+
+/**
+ * With the endpoint redirected and only a token stored, the run stops
+ * here naming the key. Starting it would spend a sandbox to arrive at
+ * an authentication error that says nothing about what to add.
+ */
+test("a redirected endpoint with only a token is missing the key", async () => {
+  await withEnv(
+    {
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test",
+      ANTHROPIC_API_KEY: null,
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api/v1",
+    },
+    async () => {
+      const { missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
+      assert.deepEqual(missing, ["ANTHROPIC_API_KEY"], "and the message names what to add");
+    },
+  );
 });
 
 /**
