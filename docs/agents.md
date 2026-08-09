@@ -32,13 +32,15 @@ claude setup-token
 
 It opens a browser once, you approve, and it prints a long lived token. Save that token in any of these places:
 
-- **Web console**: Agents panel, "Use a subscription instead of a key", paste and Save. Takes effect on the next run, no restart.
+- **Web console**: Agents panel, "Claude subscription", paste into "Claude subscription token" and Save. Takes effect on the next run, no restart.
 - **`bento setup`**: the credentials step offers "Claude subscription token".
 - **`.env`** as `CLAUDE_CODE_OAUTH_TOKEN=...` for the docker compose stack. A token saved in the console overrides this.
 
-The token counts as a full credential: with it present, no `ANTHROPIC_API_KEY` is needed and runs bill the subscription.
+The token counts as a full credential: with it present, no `ANTHROPIC_API_KEY` is needed and runs bill the subscription. The two are alternatives, so only the token is given to the agent and a key stored beside it is left behind. That matters because Claude Code prefers the key when it is handed both, which turned a stale key into an "Invalid API key" failure on a card that looked correctly set up. Setting `ANTHROPIC_BASE_URL` reverses this: a token is only valid at Anthropic's own endpoint, so a redirected tool gets the key and the token is the one left behind.
 
-Two things to know:
+Three things to know:
+
+- **This is local mode only.** Hosted deployments do not offer the field. Credentials are stored one value per organization, so a token saved there would put one member's personal subscription behind every other member's runs, on that account's rate limits.
 
 - **Do not rely on the machine's Claude login for servers.** The login in the macOS Keychain rotates its access token on a timescale of minutes, so copies of it die almost immediately, and a server in a container cannot reach the Keychain at all. `setup-token` exists precisely for this; it is the only Claude credential that survives unattended operation.
 - **If a run fails with "OAuth access token has been revoked"**, the saved token was invalidated. Run `claude setup-token` again and save the new one; the failure message in the run log says exactly this.

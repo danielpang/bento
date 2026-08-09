@@ -29,7 +29,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "CLAUDE_CODE_OAUTH_TOKEN",
     label: "Claude subscription token",
-    help: "Lets Claude Code run on a Claude subscription instead of an API key. Mint one in a terminal with: claude setup-token. Saved here it survives server restarts and replaces any token from the environment.",
+    help: "Lets Claude Code run on a Claude subscription instead of an API key. Mint one in a terminal with: claude setup-token. Saved here it survives server restarts and replaces any token from the environment. The console offers this in local mode only: credentials are stored one value per organization, so on a hosted deployment it would put one member's personal subscription behind every other member's runs.",
     secret: true,
   },
   {
