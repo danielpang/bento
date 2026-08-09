@@ -531,6 +531,9 @@ button {
   font-family: var(--sans);
   font-size: 13px;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 /*
@@ -1210,11 +1213,14 @@ button {
   right: 0;
   bottom: 0;
   width: min(560px, 100vw);
+  max-width: 100vw;
   background: var(--panel);
   border-left: 1px solid var(--line-bright);
   box-shadow: -24px 0 48px var(--shadow-2);
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow-x: hidden;
   animation: slide-in 180ms ease-out;
   z-index: 20;
 }
@@ -1236,6 +1242,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .drawer-title-row {
@@ -1303,6 +1310,20 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/*
+ * `.input` is width 100% for stacked fields. Inside a button row that
+ * makes the field ask for the whole row plus the button, and the
+ * pipeline command editor then scrolls the modal sideways.
+ */
+.actions .input,
+.actions .select {
+  flex: 1 1 12rem;
+  min-width: 0;
+  width: auto;
 }
 
 .gate-check {
@@ -1313,6 +1334,8 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg);
+  min-width: 0;
+  max-width: 100%;
 }
 
 /*
@@ -1493,8 +1516,10 @@ button {
 
 .gate-check-text {
   flex: 1;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-dim);
+  overflow-wrap: anywhere;
 }
 
 .gate-check-name {
@@ -1502,6 +1527,7 @@ button {
   font-weight: 600;
   font-size: 11px;
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -1707,6 +1733,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Sits between the toolbar and the board: unmissable without being a
@@ -1788,6 +1816,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .criterion {
@@ -1800,11 +1830,15 @@ button {
   background: var(--bg);
   font-family: var(--mono);
   font-size: 11px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .criterion-cmd {
   flex: 1;
+  min-width: 0;
   color: var(--text-dim);
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -1996,10 +2030,14 @@ button {
   font-family: var(--sans);
   font-size: 11.5px;
   line-height: 1.6;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .warn code {
   display: inline-block;
+  max-width: 100%;
   margin-top: 4px;
   padding: 3px 6px;
   border: 1px solid var(--line);
@@ -2008,6 +2046,9 @@ button {
   color: var(--text-dim);
   font-size: 11px;
   user-select: all;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
 }
 
 .divider {
@@ -2272,6 +2313,8 @@ button {
 
 .modal {
   width: min(460px, 100%);
+  max-width: 100%;
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line-bright);
   border-radius: var(--radius-lg);
@@ -2280,6 +2323,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* Agent and stage forms hold long model ids and shell commands.
+     Keep those wrapping inside the dialog instead of widening it. */
+  overflow-x: hidden;
   animation: modal-rise 140ms ease-out;
 }
 
@@ -2558,6 +2604,10 @@ button {
   resize: vertical;
   font-family: var(--sans);
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 /* The agent form is the tallest modal; it scrolls inside itself
@@ -2935,6 +2985,8 @@ button.session-expand[aria-pressed="true"] {
   padding: 10px 12px;
   margin-bottom: 10px;
   box-shadow: 0 1px 2px var(--shadow-1);
+  min-width: 0;
+  max-width: 100%;
 }
 .stage-card-head {
   display: flex;
@@ -3014,6 +3066,8 @@ button.session-expand[aria-pressed="true"] {
   background: var(--panel);
   padding: 16px 16px 18px;
   margin-bottom: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 .settings-title {
   margin: 0;
