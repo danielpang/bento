@@ -1,4 +1,4 @@
-import { SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
+import { APIError, SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
 import {
   AGENT_BINARIES,
   AGENT_TOOLCHAIN_SCRIPT,
@@ -14,6 +14,43 @@ import {
   type SandboxDriver,
   type SandboxHandle,
 } from "./driver.js";
+
+/**
+ * The machine a feature's work happens on. Exported because a test that
+ * provisions a real sprite has to be able to delete it by name even
+ * when provisioning threw halfway, and guessing the convention in two
+ * places is how a leaked machine goes on being billed.
+ *
+ * Sprite names are DNS-ish; a uuid with dashes is fine.
+ */
+export function spriteName(featureId: string): string {
+  return `bento-${featureId}`;
+}
+
+/**
+ * Whether the machine is still there.
+ *
+ * Deliberately not "any failure means gone". A lookup that fails for
+ * some reason other than "no such sprite" has not answered the
+ * question, and reporting "gone" would turn an unreachable API, or a
+ * token that has expired, into a clean bill of health. `destroy`
+ * swallows whatever `deleteSprite` says, so this is the only way to
+ * know a machine really went, and a wrong answer is a machine that goes
+ * on being billed with nobody looking for it.
+ */
+export async function spriteExists(client: SpritesClient, name: string): Promise<boolean> {
+  try {
+    await client.getSprite(name);
+    return true;
+  } catch (err) {
+    if (err instanceof APIError && err.statusCode === 404) return false;
+    // Not every path through the SDK builds an APIError, and a 404 is
+    // still a 404 when it arrives as an ordinary Error.
+    if (err instanceof APIError && err.statusCode !== undefined) throw err;
+    if (/\b404\b|not found/i.test(String(err))) return false;
+    throw err;
+  }
+}
 
 export interface SpriteDriverOptions {
   token: string;
@@ -56,8 +93,7 @@ export class SpriteDriver implements SandboxDriver {
   }
 
   private spriteName(featureId: string): string {
-    // Sprite names are DNS-ish; a uuid with dashes is fine.
-    return `bento-${featureId}`;
+    return spriteName(featureId);
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
@@ -188,8 +224,25 @@ export class SpriteDriver implements SandboxDriver {
     // later agent can still read and modify it.
     const keep = new Set((spec.repositories ?? []).map((repo) => repo.name));
     const filesystem = sprite.filesystem("/");
+    /**
+     * An empty workspace is not an error, though the SDK makes it look
+     * like one: the API answers a directory with nothing in it by
+     * setting entries to null, and readdir maps that without looking,
+     * so it throws `Cannot read properties of null` rather than
+     * returning nothing.
+     *
+     * A project with no repositories has exactly that workspace, so
+     * every run of one failed here, in provisioning, with a TypeError
+     * from inside a vendor's SDK and no hint that the cause was a
+     * project without a repository. Narrow on purpose: an API that is
+     * unreachable or refusing raises an APIError, which still travels,
+     * and the bound around it still applies to the call itself.
+     */
     const entries = await bounded(
-      filesystem.readdir(this.workdir, { withFileTypes: true }),
+      filesystem.readdir(this.workdir, { withFileTypes: true }).catch((err: unknown) => {
+        if (err instanceof TypeError) return [];
+        throw err;
+      }),
       FILESYSTEM_TIMEOUT_MS,
       "listing the workspace",
     );

@@ -1,10 +1,52 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { LineChannel, collectExec } from "./driver.js";
-import { SpriteDriver } from "./sprite.js";
+import { SpriteDriver, spriteName } from "./sprite.js";
+
+/**
+ * A sprite lives until something deletes it, and the e2e test's own
+ * cleanup cannot run when its job is cancelled or times out. The
+ * workflow deletes the machine afterwards for those cases, which means
+ * it has to name it, which means two places now derive one name.
+ *
+ * Pinned here rather than discovered by a bill: this test runs in
+ * ordinary CI, and the e2e it guards runs nightly.
+ */
+test("the sandbox e2e workflow deletes the sprite that test creates", async () => {
+  const workflow = await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../.github/workflows/sandbox-e2e.yml"),
+    "utf8",
+  );
+  const e2e = await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "sprite.e2e.test.ts"),
+    "utf8",
+  );
+
+  // The name the workflow's cleanup step deletes, built the one way
+  // the driver builds names.
+  const cleaned = spriteName("e2e-${{ github.run_id }}-${{ github.run_attempt }}");
+  assert.ok(
+    workflow.includes(cleaned),
+    `the workflow does not delete ${cleaned}, so a cancelled run would leak its sprite`,
+  );
+  // And the same two halves on the test's side.
+  for (const variable of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) {
+    assert.match(e2e, new RegExp(variable), `the e2e test no longer names its sprite after ${variable}`);
+  }
+
+  // The cleanup step has to point at a script that is really there.
+  // It runs on a schedule, so a path that stopped resolving would go
+  // unnoticed until a sprite was left running.
+  const invoked = workflow.match(/scripts\/[\w.-]+\.ts/)?.[0];
+  assert.ok(invoked, "the workflow no longer runs a cleanup script");
+  await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", invoked), "utf8");
+});
 
 /** Lets pending microtasks and immediates run, twice over for chains. */
 async function settle(): Promise<void> {
@@ -111,6 +153,90 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
   assert.ok(messages.some((m) => m.includes("cloud sandbox")));
   assert.ok(messages.some((m) => m.includes("Installing the agent tools")));
   assert.ok(messages.includes("Repository api is ready on branch feature/work."));
+});
+
+/**
+ * A project with no repositories provisions a sprite whose workspace is
+ * empty, and the SDK cannot describe one: the API answers an empty
+ * directory by setting entries to null and readdir maps it unchecked,
+ * so it throws `Cannot read properties of null (reading 'map')` instead
+ * of returning nothing.
+ *
+ * Every run of such a project died in provisioning because of it, with
+ * a TypeError from inside a vendor's SDK and nothing pointing at the
+ * missing repository. Found by the first real run of sprite.e2e.test.ts,
+ * which provisions without repositories and had never been run against
+ * a live machine before.
+ */
+test("Sprite provisioning survives an empty workspace", async () => {
+  const messages: string[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          throw new TypeError("Cannot read properties of null (reading 'map')");
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const handle = await driver.provision({
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+    repositories: [],
+    onProgress: (message) => {
+      messages.push(message);
+    },
+  });
+  assert.equal(handle.workdir, "/workspace");
+});
+
+/**
+ * The narrowness matters: swallowing every readdir failure would turn
+ * an unreachable API, or a token that has expired, into a sandbox
+ * handed back as ready. Only the SDK's own null dereference is
+ * forgiven.
+ */
+test("Sprite provisioning still fails when the filesystem API does", async () => {
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          throw new Error("503 Service Unavailable");
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    /503/,
+  );
 });
 
 /**
