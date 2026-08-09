@@ -156,6 +156,90 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
 });
 
 /**
+ * A project with no repositories provisions a sprite whose workspace is
+ * empty, and the SDK cannot describe one: the API answers an empty
+ * directory by setting entries to null and readdir maps it unchecked,
+ * so it throws `Cannot read properties of null (reading 'map')` instead
+ * of returning nothing.
+ *
+ * Every run of such a project died in provisioning because of it, with
+ * a TypeError from inside a vendor's SDK and nothing pointing at the
+ * missing repository. Found by the first real run of sprite.e2e.test.ts,
+ * which provisions without repositories and had never been run against
+ * a live machine before.
+ */
+test("Sprite provisioning survives an empty workspace", async () => {
+  const messages: string[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          throw new TypeError("Cannot read properties of null (reading 'map')");
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const handle = await driver.provision({
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+    repositories: [],
+    onProgress: (message) => {
+      messages.push(message);
+    },
+  });
+  assert.equal(handle.workdir, "/workspace");
+});
+
+/**
+ * The narrowness matters: swallowing every readdir failure would turn
+ * an unreachable API, or a token that has expired, into a sandbox
+ * handed back as ready. Only the SDK's own null dereference is
+ * forgiven.
+ */
+test("Sprite provisioning still fails when the filesystem API does", async () => {
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          throw new Error("503 Service Unavailable");
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    /503/,
+  );
+});
+
+/**
  * A CLI whose installer was unreachable used to be silent: the sandbox
  * was handed back as ready, and the run that needed it died at spawn
  * with the runtime's own "executable file `opencode` not found in

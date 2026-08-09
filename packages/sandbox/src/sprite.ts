@@ -224,8 +224,25 @@ export class SpriteDriver implements SandboxDriver {
     // later agent can still read and modify it.
     const keep = new Set((spec.repositories ?? []).map((repo) => repo.name));
     const filesystem = sprite.filesystem("/");
+    /**
+     * An empty workspace is not an error, though the SDK makes it look
+     * like one: the API answers a directory with nothing in it by
+     * setting entries to null, and readdir maps that without looking,
+     * so it throws `Cannot read properties of null` rather than
+     * returning nothing.
+     *
+     * A project with no repositories has exactly that workspace, so
+     * every run of one failed here, in provisioning, with a TypeError
+     * from inside a vendor's SDK and no hint that the cause was a
+     * project without a repository. Narrow on purpose: an API that is
+     * unreachable or refusing raises an APIError, which still travels,
+     * and the bound around it still applies to the call itself.
+     */
     const entries = await bounded(
-      filesystem.readdir(this.workdir, { withFileTypes: true }),
+      filesystem.readdir(this.workdir, { withFileTypes: true }).catch((err: unknown) => {
+        if (err instanceof TypeError) return [];
+        throw err;
+      }),
       FILESYSTEM_TIMEOUT_MS,
       "listing the workspace",
     );
