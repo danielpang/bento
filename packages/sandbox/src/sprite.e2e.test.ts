@@ -118,6 +118,34 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   const expected = [...AGENT_BINARIES].sort();
 
   /**
+   * Removes a CLI from wherever it actually is, rather than from
+   * wherever it was expected to be.
+   *
+   * The first version listed the directories the installers use and
+   * deleted from those. It missed three of the five: the sprite's HOME
+   * is not /root, so the binaries publish() links from sit somewhere
+   * the list never named, and that directory is on the PATH in its own
+   * right, so deleting the symlink in /usr/local/bin left the CLI
+   * working and the test asserting against a machine it had not
+   * changed. Asking the PATH where something is cannot miss it.
+   *
+   * Bounded rather than looping until gone: a path that cannot be
+   * removed should end the loop, not spin in it.
+   */
+  const uninstall = (binaries: readonly string[]) =>
+    shell(
+      binaries
+        .map(
+          (binary) =>
+            `for attempt in 1 2 3 4 5; do\n` +
+            `  p=$(command -v ${binary} 2>/dev/null) || break\n` +
+            `  rm -f "$p" || break\n` +
+            `done`,
+        )
+        .join("\n"),
+    );
+
+  /**
    * Everything below the first check needs a machine to talk to, so a
    * sprite that never came up would otherwise report the same failure
    * five times over and bury the one that happened. This runs
@@ -160,13 +188,30 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
 
   /**
    * The rule the sandbox design rests on: the Node that exists to run
-   * pi is not the Node a repository gets. Checked here rather than only
-   * by reading the script, because a future installer that helpfully
-   * adds itself to /usr/local/bin would break it silently.
+   * pi is not the Node a repository gets.
+   *
+   * The first real run showed that only half of that promise is ours
+   * to keep. A sprite ships its own node and npm at /.sprite/bin, on
+   * the default PATH, so `node` in a workspace already means Fly's
+   * rather than nothing at all, whatever this repository does. That is
+   * a platform fact, not something a test here can assert away, and a
+   * nightly that failed on it would be permanently red for a reason
+   * nobody could act on.
+   *
+   * So what is asserted is the half this repository owns: the Node
+   * installed here to run pi never becomes the one a project picks up.
+   * What `node` does resolve to is printed rather than checked, so a
+   * platform that changes its mind is visible in the log without
+   * turning the run red.
    */
   await t.test("the private Node stays off the agent's PATH", { skip: needsSprite() }, async () => {
     const { out } = await shell("command -v node || echo absent; command -v npm || echo absent");
-    assert.deepEqual(out.split("\n"), ["absent", "absent"], `a project's Node was decided for it: ${out}`);
+    console.log(`  node and npm resolve to: ${out.split("\n").join(", ")}`);
+    assert.doesNotMatch(
+      out,
+      /\/opt\/bento\/node/,
+      `the Node installed for pi became the one a project would use: ${out}`,
+    );
     // pi still runs, which is the point of the shim.
     assert.equal((await shell("pi --version")).exitCode, 0);
   });
@@ -198,12 +243,12 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * found in $PATH".
    */
   await t.test("a CLI that goes missing is reinstalled by the next provision", { skip: needsSprite() }, async () => {
-    // Every directory publish() links from, so the CLI is genuinely
-    // gone rather than merely unlinked from one of them.
-    const removed = await shell(
-      "rm -f /usr/local/bin/opencode /root/.opencode/bin/opencode /root/.local/bin/opencode" +
-        " /opt/bento/bin/opencode; command -v opencode",
-    );
+    // Genuinely gone, rather than merely unlinked from one of the
+    // places it can live. This one happened to pass against a list of
+    // directories, because opencode's is on the list; three of its
+    // neighbours are not, which is what the next subtest found.
+    await uninstall(["opencode"]);
+    const removed = await shell("command -v opencode");
     assert.notEqual(removed.exitCode, 0, "opencode should be gone before the provision that restores it");
     assert.deepEqual(
       (await present()).filter((binary) => binary === "opencode"),
@@ -271,13 +316,12 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
       const reachable = await shell("curl -fsS -m 10 https://api.github.com/ >/dev/null 2>&1");
       assert.notEqual(reachable.exitCode, 0, "api.github.com was still reachable, so this proved nothing");
 
-      // Everything gone: the binaries, the directories the installers
-      // put them in, and the marker, so the whole set installs again.
-      // pi's private Node stays, since it comes from npm rather than
-      // from GitHub and re-downloading it tests nothing here.
-      const dirs = ["/usr/local/bin", "/root/.local/bin", "/root/.opencode/bin", "/root/.cursor/bin"];
-      const removals = AGENT_BINARIES.flatMap((binary) => dirs.map((dir) => `${dir}/${binary}`));
-      await shell(`rm -f ${removals.join(" ")} /opt/bento/pi/bin/pi ${TOOLCHAIN_MARKER}`);
+      // Everything gone: every CLI wherever it lives, and the marker,
+      // so the whole set installs again. pi's private Node stays, since
+      // it comes from npm rather than from GitHub and re-downloading it
+      // tests nothing here.
+      await uninstall(AGENT_BINARIES);
+      await shell(`rm -f ${TOOLCHAIN_MARKER}`);
       assert.deepEqual(await present(), [], "the CLIs were not actually removed");
 
       said.length = 0;
