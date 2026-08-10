@@ -281,10 +281,71 @@ export class SpriteDriver implements SandboxDriver {
    * the process. Every exec now asks the server to keep the command
    * running for a grace period after a disconnect, and a socket that
    * closes without a real exit is answered by reattaching to the still
-   * running session rather than by failing the run.
+   * running session rather than by failing the run. The same machinery,
+   * entered through attach below, lets a freshly booted server pick up
+   * a command a previous process left running.
    */
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
     const sprite = await this.client.getSprite(handle.externalId);
+    const session = this.openSession(handle, argv, opts);
+    session.adoptInitial(sprite);
+    yield* session.stream();
+  }
+
+  /**
+   * Picks up a command a previous server process started and left
+   * running in the sandbox. Only argv's first word is used, to find the
+   * session; the live process already carries its environment and
+   * working directory, so cwd and env in opts are ignored. Resolves
+   * null when the sandbox answers but no such command is running, which
+   * is conclusive: the process ended while nobody was attached, and its
+   * exit code went with it. A rejection means the question could not be
+   * answered (the sandbox or its API was unreachable), which is not
+   * conclusive. timeoutMs, signal, and stdin behave exactly as on exec.
+   */
+  async attach(
+    handle: SandboxHandle,
+    argv: string[],
+    opts?: ExecOptions,
+  ): Promise<AsyncIterable<ExecChunk> | null> {
+    const [command] = argv;
+    if (!command) throw new Error("empty argv");
+    const sprite = await this.client.getSprite(handle.externalId);
+    const mine = newestSessionFor(await sprite.listSessions(), command);
+    if (!mine) return null;
+
+    const child = sprite.spawn(command, [], { sessionId: mine.id });
+    const guard = defuseKeepalive(child);
+    try {
+      await openedWithin(child, ATTACH_TIMEOUT_MS);
+    } catch (err) {
+      guard();
+      // The session exists; a connection that would not open is a
+      // transport failure, not "no session", so the caller may retry.
+      closeQuietly(child);
+      throw err;
+    }
+    /**
+     * No await between the connection opening and adoptAttached:
+     * openSession arms its machinery synchronously, so an exit frame
+     * arriving right after the open still lands on wired listeners
+     * even though the caller has not started iterating yet. This is
+     * why the session is built eagerly here while exec builds it
+     * lazily inside its generator.
+     */
+    const session = this.openSession(handle, argv, opts);
+    session.adoptAttached(child, guard);
+    return session.stream();
+  }
+
+  /**
+   * The shared machinery of one live command stream: connections come
+   * and go (drops, reattaches), the machinery stays. exec enters it
+   * with a fresh spawn; attach enters it with a connection to a session
+   * that already exists. Everything arms at call time, not at first
+   * iteration.
+   */
+  private openSession(handle: SandboxHandle, argv: string[], opts?: ExecOptions): OpenSession {
     const [command, ...args] = argv;
     if (!command) throw new Error("empty argv");
 
@@ -375,12 +436,6 @@ export class SpriteDriver implements SandboxDriver {
     /**
      * Finds the surviving session and picks the stream back up.
      *
-     * Sessions are matched by their command's first word rather than by
-     * substring: the full command line carries the whole prompt, which
-     * contains almost any text one could match on. One feature has one
-     * sprite and one running agent (startRunIfIdle enforces it), so the
-     * newest match is the run's own session.
-     *
      * A listSessions answer without the session is conclusive, the
      * process ended while the socket was down, and its exit code and
      * final output are gone with it; retrying would not bring it back.
@@ -394,9 +449,7 @@ export class SpriteDriver implements SandboxDriver {
           const fresh = await this.client.getSprite(handle.externalId);
           const sessions = await fresh.listSessions();
           if (done || killed) return;
-          const mine = sessions
-            .filter((s) => !s.tty && (s.command === command || s.command.startsWith(`${command} `)))
-            .sort((a, b) => b.created.getTime() - a.created.getTime())[0];
+          const mine = newestSessionFor(sessions, command);
           if (!mine) {
             conclude(
               -1,
@@ -517,10 +570,7 @@ export class SpriteDriver implements SandboxDriver {
     const killOverHttp = async () => {
       try {
         const fresh = await this.client.getSprite(handle.externalId);
-        const sessions = await fresh.listSessions();
-        const mine = sessions
-          .filter((s) => !s.tty && (s.command === command || s.command.startsWith(`${command} `)))
-          .sort((a, b) => b.created.getTime() - a.created.getTime())[0];
+        const mine = newestSessionFor(await fresh.listSessions(), command);
         if (!mine) return;
         const stream = await fresh.killSession(mine.id, "SIGTERM", "10s");
         await stream.processAll(() => {});
@@ -565,44 +615,56 @@ export class SpriteDriver implements SandboxDriver {
         }, opts.timeoutMs)
       : null;
 
-    const child = sprite.spawn(command, args, {
-      cwd: opts?.cwd ?? handle.workdir,
-      /**
-       * IS_SANDBOX says the sandbox is the security boundary, which a
-       * sprite is. Claude Code checks it before accepting
-       * --dangerously-skip-permissions as root, and sprites run
-       * commands as root; without it every claude-code run died at
-       * exit 1 with no output. The Docker driver learned this the same
-       * way (see docker.ts).
-       */
-      env: { IS_SANDBOX: "1", ...opts?.env },
-      maxRunAfterDisconnect: EXEC_DISCONNECT_GRACE,
-    });
-    latest = child;
-    stopKeepaliveGuard = defuseKeepalive(child);
-    wire(child, false);
+    const adoptInitial = (sprite: Sprite) => {
+      const child = sprite.spawn(command, args, {
+        cwd: opts?.cwd ?? handle.workdir,
+        /**
+         * IS_SANDBOX says the sandbox is the security boundary, which a
+         * sprite is. Claude Code checks it before accepting
+         * --dangerously-skip-permissions as root, and sprites run
+         * commands as root; without it every claude-code run died at
+         * exit 1 with no output. The Docker driver learned this the same
+         * way (see docker.ts).
+         */
+        env: { IS_SANDBOX: "1", ...opts?.env },
+        maxRunAfterDisconnect: EXEC_DISCONNECT_GRACE,
+      });
+      latest = child;
+      stopKeepaliveGuard = defuseKeepalive(child);
+      wire(child, false);
+    };
 
-    try {
-      while (true) {
-        while (queue.length > 0) {
-          const chunk = queue.shift()!;
-          yield chunk;
-          if (chunk.kind === "exit") return;
+    const adoptAttached = (child: SpriteCommand, guard: () => void) => {
+      latest = child;
+      stopKeepaliveGuard = guard;
+      wire(child, true);
+    };
+
+    async function* stream(): AsyncGenerator<ExecChunk, void> {
+      try {
+        while (true) {
+          while (queue.length > 0) {
+            const chunk = queue.shift()!;
+            yield chunk;
+            if (chunk.kind === "exit") return;
+          }
+          if (done) return;
+          await new Promise<void>((resolve) => {
+            notify = resolve;
+          });
+          notify = null;
         }
-        if (done) return;
-        await new Promise<void>((resolve) => {
-          notify = resolve;
-        });
-        notify = null;
+      } finally {
+        done = true;
+        wakeStdin();
+        stopKeepaliveGuard();
+        if (timeout) clearTimeout(timeout);
+        if (reap) clearTimeout(reap);
+        opts?.signal?.removeEventListener("abort", onAbort);
       }
-    } finally {
-      done = true;
-      wakeStdin();
-      stopKeepaliveGuard();
-      if (timeout) clearTimeout(timeout);
-      if (reap) clearTimeout(reap);
-      opts?.signal?.removeEventListener("abort", onAbort);
     }
+
+    return { adoptInitial, adoptAttached, stream };
   }
 
   /**
@@ -805,6 +867,32 @@ function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
       },
     );
   });
+}
+
+/**
+ * One live command stream, separated from any particular connection.
+ * exec adopts a fresh spawn; attach adopts a connection to a session
+ * that already exists; stream() is what the caller iterates either way.
+ */
+interface OpenSession {
+  adoptInitial(sprite: Sprite): void;
+  adoptAttached(child: SpriteCommand, guard: () => void): void;
+  stream(): AsyncGenerator<ExecChunk, void>;
+}
+
+type SpriteSession = Awaited<ReturnType<Sprite["listSessions"]>>[number];
+
+/**
+ * Finds the session carrying a command. Matched by the command's first
+ * word rather than by substring: the full command line carries the
+ * whole prompt, which contains almost any text one could match on. One
+ * feature has one sprite and one running agent (startRunIfIdle enforces
+ * it), so the newest match is the run's own session.
+ */
+function newestSessionFor(sessions: SpriteSession[], command: string): SpriteSession | undefined {
+  return sessions
+    .filter((s) => !s.tty && (s.command === command || s.command.startsWith(`${command} `)))
+    .sort((a, b) => b.created.getTime() - a.created.getTime())[0];
 }
 
 /** Resolves on the connection opening, rejects on its error or the deadline. */
