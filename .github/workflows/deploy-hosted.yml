@@ -143,9 +143,10 @@ jobs:
   deploy-production:
     # The workflow file is public along with the rest of the
     # repository; the guard keeps forks from attempting a deploy they
-    # have no secrets for.
+    # have no secrets for. needs build as well as migrate-production so
+    # the image artifact dependency is explicit, not only transitive.
     if: github.repository == 'danielpang/bento'
-    needs: migrate-production
+    needs: [migrate-production, build]
     runs-on: ubuntu-latest
     environment: production
     steps:
