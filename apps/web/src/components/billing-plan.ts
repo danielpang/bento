@@ -15,8 +15,8 @@ export interface PlanPricing {
   /** Whether that number is a floor rather than the price. */
   fromPrice: boolean;
   minimumSeats: number;
+  /** The team's pool for the period, whatever its headcount. */
   includedAgentHours: number;
-  includedPer: "seat" | "organization";
   overageUsdPerAgentHour: number | null;
   summary: string;
   highlights: string[];
@@ -192,18 +192,4 @@ export function seatChangeNote(state: PlanState, direction: 1 | -1): string | nu
   }
   const verb = direction === 1 ? "goes from" : "drops from";
   return `The bill ${verb} ${money(before * perSeat)} to ${money(after * perSeat)} a month, prorated from today.`;
-}
-
-/** The sandbox allowance in words, with what an hour past it costs. */
-export function allowance(pricing: PlanPricing, billableSeats: number): string {
-  const each = `${pricing.includedAgentHours} agent hours`;
-  const scope =
-    pricing.includedPer === "seat"
-      ? `${each} per seat each month, ${pricing.includedAgentHours * billableSeats} for this team`
-      : `${each} a month for the team`;
-  const past =
-    pricing.overageUsdPerAgentHour === null
-      ? "Runs pause once they are used."
-      : `Past that, ${money(pricing.overageUsdPerAgentHour)} an agent hour.`;
-  return `${scope}. ${past}`;
 }

@@ -90,8 +90,9 @@ export function BillingCard() {
       */}
       <p className="muted">
         {state.agentHours.used} agent hours used of {state.agentHours.included} included, resetting
-        on {resetsOn(state)}. An agent hour is an hour of a sandbox actually running, so a card
-        waiting for review costs nothing.
+        on {resetsOn(state)}. The allowance belongs to the team rather than to each seat, so it does
+        not move when somebody joins or leaves. An agent hour is an hour of a sandbox actually
+        running, so a card waiting for review costs nothing.
       </p>
 
       {/*
