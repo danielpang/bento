@@ -34,12 +34,11 @@ export async function queueSandboxReap(ctx: AppContext, featureId: string): Prom
  * once the driver has been asked again and said the machine is gone.
  */
 export async function reapSandbox(ctx: AppContext, featureId: string): Promise<void> {
-  const [row] = await ctx.db
+  const rows = await ctx.db
     .select()
     .from(sandboxes)
-    .where(and(eq(sandboxes.featureId, featureId), ne(sandboxes.status, "destroyed")))
-    .limit(1);
-  if (!row) return;
+    .where(and(eq(sandboxes.featureId, featureId), ne(sandboxes.status, "destroyed")));
+  if (rows.length === 0) return;
 
   /**
    * A card is not supposed to finish with an agent still working it,
@@ -56,22 +55,34 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
     .limit(1);
   if (working) throw new Error(`a run is still working feature ${featureId}; not reaping its sandbox yet`);
 
-  const handle = {
-    externalId: row.externalId,
-    provider: row.provider,
-    workdir: row.workdir,
-  };
-  await ctx.driver.destroy(handle);
+  /**
+   * Every row, not the first one.
+   *
+   * A card holds one machine at a time, but not necessarily the same
+   * one for its whole life: the Docker driver rebuilds a container
+   * when the mounts it was built for stop being the truth, and the new
+   * one has a new id. Reaping a single row left the earlier machines
+   * with nothing pointing at them.
+   */
+  for (const row of rows) {
+    const handle = {
+      externalId: row.externalId,
+      provider: row.provider,
+      workdir: row.workdir,
+    };
+    await ctx.driver.destroy(handle);
 
-  // Drivers that can answer are asked. One that cannot is taken at its
-  // word, which is right for the local ones: a container on somebody's
-  // laptop bills nobody, so there is no leak to be careful about.
-  if (ctx.driver.exists && (await ctx.driver.exists(handle))) {
-    throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
+    // Drivers that can answer are asked. One that cannot is taken at
+    // its word, which is right for the local ones: a container on
+    // somebody's laptop bills nobody, so there is no leak to be
+    // careful about.
+    if (ctx.driver.exists && (await ctx.driver.exists(handle))) {
+      throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
+    }
+
+    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));
+    console.log(`reaped sandbox ${row.externalId} for finished feature ${featureId}`);
   }
-
-  await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));
-  console.log(`reaped sandbox ${row.externalId} for finished feature ${featureId}`);
 }
 
 /**
@@ -89,7 +100,10 @@ export async function reapFinishedSandboxes(ctx: AppContext): Promise<void> {
     .innerJoin(features, eq(features.id, sandboxes.featureId))
     .where(and(ne(sandboxes.status, "destroyed"), inArray(features.status, ["done", "cancelled"])));
 
-  for (const { featureId } of stale) {
+  // Distinct: reapSandbox takes every row a card holds, so a card with
+  // more than one would otherwise be visited once per row and do
+  // nothing on all but the first.
+  for (const featureId of new Set(stale.map((row) => row.featureId))) {
     if (!featureId) continue;
     try {
       await reapSandbox(ctx, featureId);

@@ -116,10 +116,13 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
      * better-auth's own handler, plus one announcement.
      *
      * A deployment that bills per seat has to hear about a headcount
-     * that moved, and better-auth owns every route that moves it. The
-     * organization is resolved before the handler runs, because
-     * cancelling or rejecting an invitation deletes the row that says
-     * which organization it belonged to.
+     * that moved, and better-auth owns every route that moves it.
+     *
+     * The organization is resolved before the handler runs because two
+     * of these routes carry only an invitation id. better-auth marks an
+     * invitation rejected or cancelled rather than deleting it, so the
+     * row would still be readable afterwards, but reading it first
+     * keeps this from depending on that.
      */
     async function handleAuth(c: { req: { url: string; raw: Request } }): Promise<Response> {
       const announce = ctx.entitlements?.onMembershipChanged;
@@ -145,12 +148,39 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
       return response;
     }
 
-    /** Which organization a membership route is about, before it runs. */
+    /**
+     * Which organization a membership route is about, before it runs.
+     *
+     * The body's organization id is checked against a membership this
+     * caller actually holds, the same way the invite-member route above
+     * does it and for the same reason: the discipline in this file is
+     * that an id from a request body is a claim, not a fact. Nothing
+     * here is exploitable today, since better-auth authorizes the
+     * action itself and the announcement only fires when it succeeded.
+     * But resolving the wrong organization would sync the wrong team's
+     * seats, and that is a rule worth keeping rather than an assumption
+     * about somebody else's library worth relying on.
+     */
     async function organizationForAction(
       c: { req: { url: string; raw: Request } },
       body: { organizationId?: string; invitationId?: string } | null,
     ): Promise<string | null> {
-      if (body?.organizationId) return body.organizationId;
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (!session) return null;
+
+      const claimed = body?.organizationId ?? null;
+      if (claimed) {
+        const [membership] = await ctx.db
+          .select({ id: member.id })
+          .from(member)
+          .where(and(eq(member.organizationId, claimed), eq(member.userId, session.user.id)))
+          .limit(1);
+        // A leave request is the one case where the membership may
+        // already be gone by the time this runs; the session's own
+        // active organization then answers for it below.
+        if (membership) return claimed;
+      }
+
       if (body?.invitationId) {
         const [row] = await ctx.db
           .select({ organizationId: invitation.organizationId })
@@ -159,8 +189,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
           .limit(1);
         if (row) return row.organizationId;
       }
-      const session = await auth.api.getSession({ headers: c.req.raw.headers });
-      return session?.session.activeOrganizationId ?? null;
+      return session.session.activeOrganizationId ?? null;
     }
   }
 

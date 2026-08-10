@@ -60,7 +60,15 @@ export interface PlanState {
     /** What the overage has come to so far this period. */
     spentUsd: number;
   };
-  /** Who spent the hours. Null user means a run nobody started. */
+  /**
+   * Who spent the hours. Null user means a run nobody started: a stage
+   * handed on by the evaluator, or a judge agent.
+   *
+   * The name is the one recorded when the run finished, not one looked
+   * up now, so a month's usage still names the people who spent it
+   * after they have left and agrees with the invoice that charged for
+   * them.
+   */
   usageByMember: { userId: string | null; name: string | null; agentHours: number }[];
   seats: { held: number; billable: number; monthlyTotalUsd: number | null; billed: boolean };
   catalog: PlanOffer[];
@@ -109,9 +117,11 @@ export function useBillingPlan(reloadKey?: unknown): { plan: PlanState | null; a
 /**
  * Whether this team has spent the compute its plan stops at.
  *
- * Only ever true on a plan with a hard cap, which is Free. A paid
- * plan passing its allowance is a line on an invoice, not a wall, and
- * showing it as one would be a warning about nothing.
+ * True whenever there is a wall to hit, which is not only Free. Every
+ * plan stops by default; a paid team that has chosen to pay its
+ * overage instead has no cap, and for them this stays false because
+ * passing an allowance they are billed for is a line on an invoice
+ * rather than a warning about anything.
  */
 export function outOfCompute(state: PlanState): boolean {
   return state.agentHours.cap !== null && state.agentHours.used >= state.agentHours.cap;

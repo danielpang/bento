@@ -25,13 +25,6 @@ export interface LiveInput {
  */
 export interface EntitlementRefusal {
   reason: string;
-  /**
-   * A machine readable kind, so the console can shape its own answer.
-   * The same refusal reads differently to somebody who can fix it and
-   * somebody who has to ask: a member offered an upgrade button that
-   * refuses them is worse off than one told who to ask.
-   */
-  code?: "PLAN_LIMIT";
 }
 
 /**

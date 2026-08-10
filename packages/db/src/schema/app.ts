@@ -371,7 +371,22 @@ export const sandboxes = pgTable("sandboxes", {
   size: text("size"),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   ...timestamps,
-});
+},
+  /**
+   * One machine, one row.
+   *
+   * Both drivers derive a stable name from the feature (`bento-<id>`
+   * for a sprite, `bento-sbx-<id>` for a container) and reuse it, so a
+   * card has exactly one machine however many stages it runs. The
+   * insert in run-executor already reads as though it knows that: it
+   * says `onConflictDoNothing()` and falls back to selecting the row
+   * that must already exist. Without this index there was nothing for
+   * that conflict to fire on, so every run inserted another row naming
+   * the same machine, and the reaper marked one of them destroyed
+   * while the rest went on claiming a machine that was gone.
+   */
+  (t) => [uniqueIndex("sandboxes_external_id_idx").on(t.externalId)],
+);
 
 export const agentRuns = pgTable("agent_runs", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -408,10 +423,17 @@ export const agentRuns = pgTable("agent_runs", {
    * existed nothing could answer it. Null for the runs nobody started:
    * a stage handed on by the gate evaluator, and a judge agent.
    *
-   * No cascade on delete. A departed member's runs stay attributed,
-   * because the hours were spent and the invoice already reflects
-   * them; losing that would make last month's usage page disagree with
-   * last month's bill.
+   * Nulled rather than cascaded when the user goes: the run and its
+   * hours survive a deleted account, which a cascade would take with
+   * it and leave the month's totals short.
+   *
+   * The name is not preserved here, and deliberately not. A deployment
+   * that needs last month's usage page to keep agreeing with last
+   * month's bill snapshots the name onto its own usage ledger when the
+   * run finishes, because that is a billing record and this is a
+   * foreign key. Making this column restrict deletion instead would
+   * mean an account could not be deleted at all once it had run
+   * anything.
    */
   startedBy: text("started_by").references(() => user.id, { onDelete: "set null" }),
   status: text("status", {
