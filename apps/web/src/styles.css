@@ -3779,3 +3779,89 @@ button.session-expand[aria-pressed="true"] {
     font-size: 18px;
   }
 }
+
+/*
+ * The plan comparison, shown before anybody is sent to Stripe.
+ *
+ * Four columns on a wide modal and one on a narrow one. The price and
+ * the team's own total sit at the top of each option, because per seat
+ * pricing makes the headline number the least useful one on the card.
+ */
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.plan-option {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  min-width: 0;
+}
+
+/* The plan they already have, marked without a badge that would
+   compete with the button on every other column. */
+.plan-option-current {
+  border-color: var(--brand);
+}
+
+.plan-option-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plan-option-price {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.plan-option-total {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.plan-option-list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* The button sits at the bottom of every column whatever the bullets
+   above it do, so the row of choices reads as a row. */
+.plan-option > :last-child {
+  margin-top: auto;
+}
+
+/* The two answers to "what happens when the hours run out", each on
+   its own line: they are a paragraph apiece, not a row of chips. */
+.overage-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.overage-choice input {
+  margin-top: 2px;
+  flex: none;
+}
+
+.overage-choice:has(input:disabled) {
+  cursor: default;
+  opacity: 0.7;
+}

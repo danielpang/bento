@@ -64,6 +64,20 @@
       "when": 1785624890740,
       "tag": "0008_delete_agent_with_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786333943756,
+      "tag": "0009_sandbox_size",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786335953579,
+      "tag": "0010_run_attribution",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,2 @@
+ALTER TABLE "agent_runs" ADD COLUMN "started_by" text;--> statement-breakpoint
+ALTER TABLE "agent_runs" ADD CONSTRAINT "agent_runs_started_by_user_id_fk" FOREIGN KEY ("started_by") REFERENCES "identity"."user"("id") ON DELETE set null ON UPDATE no action;

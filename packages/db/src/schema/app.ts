@@ -357,6 +357,18 @@ export const sandboxes = pgTable("sandboxes", {
    */
   setupFingerprint: text("setup_fingerprint"),
   imageRef: text("image_ref"),
+  /**
+   * The shape of machine this is, named from the driver's own
+   * configuration at provision time.
+   *
+   * Recorded rather than looked up, because it is a fact about what was
+   * paid for and the deployment's configuration can change underneath
+   * it. A deployment that moves its default from two cores to four must
+   * not retroactively reprice last month's hours. Null on sandboxes
+   * created before this column, and on the local drivers, where nobody
+   * is billed for a container on their own machine.
+   */
+  size: text("size"),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   ...timestamps,
 });
@@ -388,6 +400,20 @@ export const agentRuns = pgTable("agent_runs", {
     .notNull()
     .references(() => agentProfiles.id, { onDelete: "cascade" }),
   sandboxId: uuid("sandbox_id").references(() => sandboxes.id),
+  /**
+   * Who asked for this run.
+   *
+   * Compute is pooled across a team, so "one person used it all" is a
+   * thing teams need to be able to say to each other, and until this
+   * existed nothing could answer it. Null for the runs nobody started:
+   * a stage handed on by the gate evaluator, and a judge agent.
+   *
+   * No cascade on delete. A departed member's runs stay attributed,
+   * because the hours were spent and the invoice already reflects
+   * them; losing that would make last month's usage page disagree with
+   * last month's bill.
+   */
+  startedBy: text("started_by").references(() => user.id, { onDelete: "set null" }),
   status: text("status", {
     enum: ["queued", "starting", "running", "succeeded", "failed", "cancelled"],
   })

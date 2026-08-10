@@ -128,6 +128,20 @@ export interface RepositoryBundle {
  */
 export interface SandboxDriver {
   provider: SandboxHandle["provider"];
+  /**
+   * What this driver's sandboxes cost, as a name rather than a number.
+   *
+   * A deployment that meters compute has to know which shape of machine
+   * an hour was spent on, and only the driver knows how it was
+   * configured. A name rather than cpus and megabytes because the
+   * meter's unit is a class of machine, not its dimensions: the price
+   * list has four sizes and the arithmetic belongs with the price list,
+   * not scattered across drivers.
+   *
+   * Absent means "unmetered", which is the honest answer for the local
+   * drivers: nobody is billed for a container on their own laptop.
+   */
+  readonly sandboxSize?: string;
   /** Whether exec honors ExecOptions.stdin. Live agent sessions need it. */
   supportsStdin?: boolean;
   provision(spec: ProvisionSpec): Promise<SandboxHandle>;
@@ -149,6 +163,16 @@ export interface SandboxDriver {
    */
   checkTools?(binaries: readonly string[], image?: string): Promise<Record<string, boolean> | null>;
   destroy(handle: SandboxHandle): Promise<void>;
+  /**
+   * Whether the machine is still there.
+   *
+   * `destroy` is best effort on every driver, so on its own it cannot
+   * tell "gone" from "the API was unreachable for a moment". Anything
+   * that reaps sandboxes has to be able to check, because the failure
+   * it is preventing is a machine that goes on being billed with
+   * nobody looking for it. Absent on drivers where nothing accrues.
+   */
+  exists?(handle: SandboxHandle): Promise<boolean>;
   /**
    * Point-in-time snapshot of the sandbox, taken before an agent runs so
    * its changes can be undone wholesale. Only drivers that can restore

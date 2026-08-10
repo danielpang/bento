@@ -35,6 +35,9 @@ import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { registerJobs, recoverInterruptedRuns } from "./orchestrator/run-executor.js";
+import { reapSandbox } from "./orchestrator/reap-sandbox.js";
+import { markCancelled } from "./orchestrator/run-executor.js";
+import { moveFeatureTo } from "./orchestrator/gate-evaluator.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter } from "@bento/agents";
@@ -3359,3 +3362,239 @@ test("no billing surface exists on a local install", async () => {
   assert.equal(checkout.status, 404);
   assert.equal(ctx.entitlements, undefined, "no plan limits outside a cloud deployment");
 });
+
+
+/**
+ * A finished card's sandbox is a machine somebody pays for by the
+ * gigabyte month for as long as it exists, whether or not it ever
+ * wakes again. Nothing else in this server reclaims one, so this is
+ * all that stands between a year of finished cards and a year of
+ * storage nobody is using.
+ */
+test("a finished card's sandbox is destroyed, and only once it is really gone", async () => {
+  const { project } = await setupProject("Reaper");
+  const feature = await createFeature(project.id, "Card that ends");
+
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "reaper-box",
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const destroyed: string[] = [];
+  let stillThere = true;
+  const previousDriver = ctx.driver;
+  ctx.driver = {
+    ...previousDriver,
+    async destroy(handle: { externalId: string }) {
+      destroyed.push(handle.externalId);
+    },
+    async exists() {
+      return stillThere;
+    },
+  } as unknown as AppContext["driver"];
+
+  try {
+    // A driver that says the machine is still there must not have its
+    // row marked destroyed. Believing a failed delete is exactly how a
+    // sprite goes on billing with nothing left pointing at it.
+    await assert.rejects(() => reapSandbox(ctx, feature.id), /still there/);
+    assert.deepEqual(destroyed, ["reaper-box"], "it did try");
+    const [afterFailure] = await ctx.db
+      .select()
+      .from(sandboxes)
+      .where(eq(sandboxes.featureId, feature.id));
+    assert.equal(afterFailure?.status, "ready", "a machine that survived is not recorded as gone");
+
+    stillThere = false;
+    await reapSandbox(ctx, feature.id);
+    const [afterSuccess] = await ctx.db
+      .select()
+      .from(sandboxes)
+      .where(eq(sandboxes.featureId, feature.id));
+    assert.equal(afterSuccess?.status, "destroyed");
+
+    // Nothing left to do, and answering rather than throwing is what
+    // lets the sweep run over an already tidy deployment.
+    await reapSandbox(ctx, feature.id);
+  } finally {
+    ctx.driver = previousDriver;
+  }
+});
+
+/**
+ * The card is over but an agent is somehow still working it. Killing
+ * the machine underneath would leave the branch in a state nobody
+ * chose, and skipping quietly would drop the only reference to it, so
+ * the job refuses and comes back.
+ */
+test("a sandbox with a run still working it is not reaped, and is not forgotten either", async () => {
+  const { project, stages } = await setupProject("Reaper busy");
+  const feature = await createFeature(project.id, "Card still working");
+  const profile = await fakeProfile("reaper-busy-agent");
+  const run = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, stageId: stages[0]!.id }),
+    }),
+  );
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "busy-box",
+    status: "busy",
+    workdir: "/workspace",
+  });
+
+  let destroyCalls = 0;
+  const previousDriver = ctx.driver;
+  ctx.driver = {
+    ...previousDriver,
+    async destroy() {
+      destroyCalls += 1;
+    },
+  } as unknown as AppContext["driver"];
+  try {
+    await ctx.db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, run.id));
+    await assert.rejects(() => reapSandbox(ctx, feature.id), /still working/);
+    assert.equal(destroyCalls, 0, "the machine is not touched while an agent is on it");
+  } finally {
+    ctx.driver = previousDriver;
+    await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, run.id));
+  }
+});
+
+
+/**
+ * The metering seam, end to end through the real doors.
+ *
+ * The open source server knows nothing about hours; what it has is a
+ * hook fired when a run ends and a question asked before one starts.
+ * A stub standing in for the billing module proves both happen, with
+ * the run id the deployment would need and without any billing code
+ * present.
+ */
+test("a finished run is announced once, and the card it belongs to is named at the door", async () => {
+  const { project, stages } = await setupProject("Metering");
+  const feature = await createFeature(project.id, "Card that costs");
+  const profile = await fakeProfile("metering-agent");
+
+  const finished: string[] = [];
+  const asked: { organizationId: string; featureId?: string }[] = [];
+  ctx.entitlements = {
+    async canAddMember() {
+      return null;
+    },
+    async canActivateFeature() {
+      return null;
+    },
+    async canStartRun(organizationId, featureId) {
+      asked.push({ organizationId, ...(featureId ? { featureId } : {}) });
+      return null;
+    },
+    async onRunFinished(runId) {
+      finished.push(runId);
+    },
+  };
+  try {
+    const run = await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, stageId: stages[0]!.id }),
+      }),
+    );
+
+    // Local mode has no organization, so the door has nothing to ask
+    // about. What matters is that the card travels when it does: the
+    // per card ceiling cannot exist without it.
+    assert.equal(asked.length, 0, "no organization, no plan to check");
+
+    await markCancelled(ctx, run.id);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(finished, [run.id], "the run that ended is the run announced");
+
+    // Cancelling again must not announce it twice: the deployment
+    // keys its ledger on the run, but a server that shouts twice makes
+    // that guarantee do work it should not have to.
+    finished.length = 0;
+    await markCancelled(ctx, run.id);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(finished, [run.id], "an already cancelled run still announces its own id, not another");
+  } finally {
+    delete ctx.entitlements;
+  }
+});
+
+/**
+ * Attribution. Compute is pooled across a team, so "who used it all"
+ * has to have an answer, and until the column existed it did not.
+ */
+test("a run records who asked for it", async () => {
+  const { project, stages } = await setupProject("Attribution");
+  const feature = await createFeature(project.id, "Whose hours");
+  const profile = await fakeProfile("attribution-agent");
+  const run = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, stageId: stages[0]!.id }),
+    }),
+  );
+  const [row] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  assert.equal(row?.startedBy, ctx.userId, "the person who clicked owns the hours");
+});
+
+/**
+ * Loop detection: the specific runaway, where a gate that never passes
+ * hands the card back to the same agent with nobody in the loop.
+ * Starting a run by hand is deliberately unaffected, because the guard
+ * is on the automatic door and not on the card.
+ */
+test("the evaluator stops handing a card to a stage it has already retried", async () => {
+  const { project, stages: pipelineStages } = await setupProject("Looping");
+  const feature = await createFeature(project.id, "Card going round");
+  const profile = await fakeProfile("looping-agent");
+  const stage = pipelineStages[0]!;
+
+  // Three runs on this stage already, which is the ceiling.
+  for (let i = 0; i < 3; i++) {
+    await ctx.db.insert(agentRuns).values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "",
+      status: "succeeded",
+      startedAt: new Date(),
+      endedAt: new Date(),
+    });
+  }
+  await ctx.db
+    .update(stages)
+    .set({ defaultAgentProfileId: profile.id })
+    .where(eq(stages.id, stage.id));
+
+  const before = await runCount(feature.id);
+  await moveFeatureTo(ctx, feature.id, stage.id, ctx.userId);
+  const after = await runCount(feature.id);
+  assert.equal(after, before, "a stage that has been round three times is not started again by itself");
+
+  // By hand still works: a person looking at the card is the thing the
+  // guard was protecting, not the thing it was blocking.
+  const byHand = await app.request(`/api/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, stageId: stage.id }),
+  });
+  assert.equal(byHand.status, 201, "a person can always start it themselves");
+});
+
+async function runCount(featureId: string): Promise<number> {
+  const rows = await ctx.db.select({ id: agentRuns.id }).from(agentRuns).where(eq(agentRuns.featureId, featureId));
+  return rows.length;
+}

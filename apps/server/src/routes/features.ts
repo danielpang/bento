@@ -290,10 +290,15 @@ export function featureRoutes(ctx: AppContext) {
         prompt: text,
         cliSessionId: latest.cliSessionId,
         executor: latest.executor,
-      });
+        startedBy: actor(c),
+      }, ctx.entitlements);
       // A run started in the gap between the read and the insert; the
       // message waits for it like any other mid-run message.
       if (run === "busy") return queueIt();
+      // Out of compute, so the message is held rather than thrown away.
+      // It is the next thing this card hears when the plan allows work
+      // again, which is what the sender meant by sending it.
+      if ("outOfCompute" in run) return queueIt();
       if (latest.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json({ queued: false as const, run }, 201);
     })
@@ -725,8 +730,10 @@ export function featureRoutes(ctx: AppContext) {
         agentProfileId: profile.id,
         prompt: "",
         executor,
-      });
+        startedBy: actor(c),
+      }, ctx.entitlements);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json(run, 201);
     })

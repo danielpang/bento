@@ -1,7 +1,15 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { spendCoverageNote } from "@bento/core";
 import { Modal } from "./Modal.js";
 import { useToast } from "./Toasts.js";
+import {
+  monthlyTotal,
+  money,
+  resetsOn,
+  seatPrice,
+  useBillingPlan,
+  type PlanOffer,
+} from "./billing-plan.js";
 
 /**
  * The team's plan, on hosted deployments.
@@ -12,52 +20,17 @@ import { useToast } from "./Toasts.js";
  * boundary: the console carries the surface, the closed module carries
  * every decision about money.
  */
-interface PlanState {
-  plan: string;
-  planName: string;
-  status: string | null;
-  limits: { members: number | null; liveFeatures: number | null };
-  usage: { members: number; liveFeatures: number; monthlySpendUsd: number };
-  activity?: {
-    activity: string;
-    fromPlan: string | null;
-    toPlan: string | null;
-    amountTotal: number | null;
-    currency: string | null;
-    occurredAt: string;
-  }[];
-  canManageBilling: boolean;
-  upgradable: boolean;
-  manageable: boolean;
-  salesConfigured: boolean;
-}
-
 export function BillingCard() {
   const toast = useToast();
-  const [state, setState] = useState<PlanState | null>(null);
-  const [absent, setAbsent] = useState(false);
   const [busy, setBusy] = useState(false);
+  const { plan: state, absent } = useBillingPlan(busy);
   const [notice, setNotice] = useState("");
   const [salesOpen, setSalesOpen] = useState(false);
-
-  useEffect(() => {
-    void fetch("/api/billing/plan", { credentials: "include" })
-      .then(async (res) => {
-        // 404 means this deployment has no billing at all, which is the
-        // open source case and the only reason to render nothing. Any
-        // other failure is transient, and latching on it hid the whole
-        // card until a full page reload.
-        if (res.status === 404) return setAbsent(true);
-        if (!res.ok) return;
-        setAbsent(false);
-        setState((await res.json()) as PlanState);
-      })
-      .catch(() => {
-        // A dropped request says nothing about whether billing exists.
-      });
-  }, [busy]);
+  const [plansOpen, setPlansOpen] = useState(false);
 
   if (absent || !state) return null;
+
+  const current = state.catalog.find((offer) => offer.plan === state.plan);
 
   async function post(path: string, body?: unknown): Promise<{ url?: string; error?: string }> {
     const res = await fetch(path, {
@@ -89,53 +62,152 @@ export function BillingCard() {
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Plan</h3>
+      {/*
+        The price first, and the team's own total beside it. Per seat
+        pricing means the number that matters depends on the headcount,
+        and Stripe cannot show that until after the redirect, so the
+        console has to be where the customer meets it.
+      */}
       <p className="muted">
-        This team is on the <strong>{state.planName}</strong> plan:{" "}
-        {meter(state.usage.members, state.limits.members, "members")},{" "}
-        {meter(state.usage.liveFeatures, state.limits.liveFeatures, "live features")}. A feature is
-        live while its card is on the board being worked; finishing or cancelling it frees the slot.
+        This team is on the <strong>{state.planName}</strong> plan
+        {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
+          <>
+            , {seatPrice(current.pricing).toLowerCase()}
+          </>
+        )}
+        . {current && <strong>{monthlyTotal(current, state.seats.held)}</strong>}
+        {state.seats.held !== state.usage.members && "."}
       </p>
-      {/* Reported, never enforced. Only some tools print a figure, so a
-          ceiling built on this would bite the teams whose tools are
-          honest about cost and miss everyone else entirely. */}
+      <p className="muted">
+        {meter(state.usage.members, state.limits.members, "members")},{" "}
+        {state.usage.liveFeatures} live features. There is no cap on how many cards are live: a card
+        waiting for review costs nothing to hold, so nothing charges for it.
+      </p>
+      {/*
+        The count and the allowance only. What happens when the two
+        meet is the choice below, and saying "then $0.90 an hour" here
+        would contradict the team that has just chosen to stop.
+      */}
+      <p className="muted">
+        {state.agentHours.used} agent hours used of {state.agentHours.included} included, resetting
+        on {resetsOn(state)}. An agent hour is an hour of a sandbox actually running, so a card
+        waiting for review costs nothing.
+      </p>
+
+      {/*
+        What happens at the end of the allowance, as a choice rather
+        than as our policy. A team on a deadline would rather find $40
+        on the invoice than a board that stopped overnight, and a team
+        on a budget would much rather the reverse. Neither is wrong
+        about their own situation, so neither should be assumed.
+      */}
+      {state.overage.changeable && (
+        <div className="field">
+          <span className="label">When the included hours run out</span>
+          {OVERAGE_CHOICES.map((choice) => (
+            <label key={choice.policy} className="overage-choice">
+              <input
+                type="radio"
+                name="overage-policy"
+                checked={state.overage.policy === choice.policy}
+                disabled={busy || !state.canManageBilling}
+                onChange={() =>
+                  act(async () => {
+                    await post("/api/billing/overage-policy", { policy: choice.policy });
+                    setNotice(choice.confirmation(state.overage.usdPerAgentHour));
+                  })
+                }
+              />
+              <span>
+                <strong>{choice.label}</strong>
+                <span className="muted"> {choice.help(state.overage.usdPerAgentHour)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+      {/*
+        A ceiling, which binds even for a team that chose to pay. They
+        agreed to pay for what they use; they did not agree to pay for
+        whatever a loop can spend overnight.
+      */}
+      {state.overage.changeable && state.overage.policy === "allow" && (
+        <label className="field">
+          <span className="label">Stop anyway past</span>
+          <div className="actions">
+            <input
+              className="input"
+              type="number"
+              min={0}
+              step={10}
+              placeholder="no ceiling"
+              defaultValue={state.overage.ceilingUsd ?? ""}
+              disabled={busy || !state.canManageBilling}
+              aria-label="Overage ceiling in dollars"
+              onBlur={(e) => {
+                const raw = e.target.value.trim();
+                const next = raw === "" ? null : Number(raw);
+                if (next !== null && !Number.isFinite(next)) return;
+                if (next === state.overage.ceilingUsd) return;
+                void act(async () => {
+                  await post("/api/billing/overage-ceiling", { ceilingUsd: next });
+                  setNotice(
+                    next === null
+                      ? "Removed the ceiling. Overage is billed with nothing stopping it."
+                      : `Agents stop once overage passes ${money(next)} in a period.`,
+                  );
+                });
+              }}
+            />
+            <span className="muted">
+              {money(state.overage.spentUsd)} of overage so far this period.
+            </span>
+          </div>
+        </label>
+      )}
+
+      {/*
+        Who spent it. Hours are pooled across the team, so this is what
+        lets them settle "one person used it all" between themselves
+        rather than asking us for a rationing system.
+      */}
+      {state.usageByMember.length > 1 && (
+        <div className="field">
+          <span className="label">Agent hours by person</span>
+          {state.usageByMember.map((entry) => (
+            <div key={entry.userId ?? "automatic"} className="history-row">
+              <span className="history-what">{entry.name ?? "Started automatically"}</span>
+              <span className="muted">{entry.agentHours} hours</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Reported, never enforced, and never ours: agents run on this
+          team's own provider keys, so this figure is what they spent
+          with their provider and not part of the Bento bill. Only some
+          tools print a figure, so a ceiling built on it would bite the
+          teams whose tools are honest about cost and miss everyone
+          else entirely. */}
       <p className="muted" title={spendCoverageNote()}>
-        ${state.usage.monthlySpendUsd.toFixed(2)} of measured agent spend this month.{" "}
-        {spendCoverageNote()}
+        ${state.usage.monthlySpendUsd.toFixed(2)} of measured agent spend this month, charged to
+        this team's own provider keys rather than to Bento. {spendCoverageNote()}
       </p>
       {notice && <p className="muted">{notice}</p>}
       {!state.canManageBilling && (
         <p className="muted">Only an owner or admin can change the plan for this team.</p>
       )}
       <div className="actions">
-        {state.canManageBilling && state.upgradable && state.plan !== "business" && state.plan !== "enterprise" && (
-          <>
-            {state.plan !== "pro" && (
-              <button
-                className="btn btn-primary"
-                disabled={busy}
-                onClick={() =>
-                  act(async () => {
-                    const { url } = await post("/api/billing/checkout", { plan: "pro" });
-                    if (url) window.location.assign(url);
-                  })
-                }
-              >
-                Upgrade to Pro (50 live features)
-              </button>
-            )}
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() =>
-                act(async () => {
-                  const { url } = await post("/api/billing/checkout", { plan: "business" });
-                  if (url) window.location.assign(url);
-                })
-              }
-            >
-              Upgrade to Business (500 live features)
-            </button>
-          </>
+        {/*
+          One button to the comparison rather than one per plan. The
+          old pair named a limit and no price, so the first time anyone
+          saw what they were agreeing to was on Stripe's own page,
+          after the redirect.
+        */}
+        {state.canManageBilling && state.upgradable && state.plan !== "enterprise" && (
+          <button className="btn btn-primary" disabled={busy} onClick={() => setPlansOpen(true)}>
+            {state.plan === "free" ? "See plans and prices" : "Change plan"}
+          </button>
         )}
         {state.canManageBilling && state.manageable && (
           <button
@@ -178,6 +250,33 @@ export function BillingCard() {
         </div>
       )}
 
+      {plansOpen && (
+        <ChoosePlan
+          offers={state.catalog}
+          currentPlan={state.plan}
+          heldSeats={state.seats.held}
+          busy={busy}
+          onClose={() => setPlansOpen(false)}
+          onContactSales={() => {
+            setPlansOpen(false);
+            setSalesOpen(true);
+          }}
+          onChoose={(plan) =>
+            act(async () => {
+              const result = await post("/api/billing/checkout", { plan });
+              // An existing subscription switches in place and answers
+              // with no address, so there is nothing to redirect to and
+              // the card simply reloads on the new plan.
+              if (result.url) window.location.assign(result.url);
+              else {
+                setPlansOpen(false);
+                setNotice("Plan changed. The next invoice is prorated from today.");
+              }
+            })
+          }
+        />
+      )}
+
       {salesOpen && (
         <ContactSales
           onClose={() => setSalesOpen(false)}
@@ -190,6 +289,127 @@ export function BillingCard() {
     </section>
   );
 }
+
+/**
+ * The ladder, priced for this team, before anybody is redirected.
+ *
+ * Every plan shows what this team in particular would pay, because per
+ * seat pricing makes the headline price the least useful number on the
+ * card: what a buyer needs is their own total.
+ */
+function ChoosePlan({
+  offers,
+  currentPlan,
+  heldSeats,
+  busy,
+  onClose,
+  onChoose,
+  onContactSales,
+}: {
+  offers: PlanOffer[];
+  currentPlan: string;
+  heldSeats: number;
+  busy: boolean;
+  onClose: () => void;
+  onChoose: (plan: string) => void;
+  onContactSales: () => void;
+}) {
+  return (
+    <Modal
+      title="Plans"
+      description={`Priced for this team as it stands, ${heldSeats} ${heldSeats === 1 ? "person" : "people"} counting open invitations.`}
+      onClose={onClose}
+      actions={
+        <button className="btn btn-ghost" disabled={busy} onClick={onClose}>
+          Close
+        </button>
+      }
+    >
+      <div className="plan-grid">
+        {offers.map((offer) => {
+          const isCurrent = offer.plan === currentPlan;
+          const total = monthlyTotal(offer, heldSeats);
+          return (
+            <div key={offer.plan} className={`plan-option${isCurrent ? " plan-option-current" : ""}`}>
+              <div className="plan-option-head">
+                <strong>{offer.name}</strong>
+                <span className="plan-option-price">{seatPrice(offer.pricing)}</span>
+              </div>
+              {total && <p className="plan-option-total">{total}</p>}
+              <p className="muted">{offer.pricing.summary}</p>
+              <ul className="plan-option-list">
+                {offer.pricing.highlights.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+                <li>
+                  {offer.pricing.overageUsdPerAgentHour === null
+                    ? "Runs pause once the included hours are used"
+                    : `Then ${money(offer.pricing.overageUsdPerAgentHour)} an agent hour`}
+                </li>
+              </ul>
+              {isCurrent ? (
+                <span className="muted">This team's plan</span>
+              ) : offer.pricing.perSeatUsd === null || offer.plan === "enterprise" ? (
+                <button className="btn" disabled={busy} onClick={onContactSales}>
+                  Contact sales
+                </button>
+              ) : offer.plan === "free" ? (
+                // Downgrading to Free is a cancellation, and cancelling
+                // belongs in the portal where the last invoice and the
+                // end date are visible. A button here would hide both.
+                <span className="muted">Cancel under Manage billing</span>
+              ) : (
+                <button className="btn btn-primary" disabled={busy} onClick={() => onChoose(offer.plan)}>
+                  Choose {offer.name}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {/*
+        An agent hour is the one unit here nobody arrives knowing, and
+        the whole allowance means nothing without it.
+      */}
+      <p className="muted">
+        An agent hour is an hour of a sandbox actually running. A card waiting for review costs
+        nothing, and hours are pooled across the team rather than held per person.
+      </p>
+    </Modal>
+  );
+}
+
+/**
+ * The two answers, worded so that picking one does not need the other
+ * explained. Each says what happens to the work and what happens to
+ * the money, because those are the two things being traded.
+ */
+const OVERAGE_CHOICES: {
+  policy: "stop" | "allow";
+  label: string;
+  help: (rate: number | null) => string;
+  confirmation: (rate: number | null) => string;
+}[] = [
+  {
+    policy: "stop",
+    label: "Stop starting agents",
+    help: () =>
+      "Cards stay where they are until next month, or until somebody changes this. Nothing already running is interrupted, and no work is lost.",
+    confirmation: () => "Agents will stop when the included hours are used.",
+  },
+  {
+    policy: "allow",
+    label: "Keep going and bill the difference",
+    help: (rate) =>
+      rate === null
+        ? "Work continues past the included hours."
+        : `Work continues at ${money(rate)} an agent hour, added to the next invoice.`,
+    confirmation: (rate) =>
+      rate === null
+        ? "Agents will keep running past the included hours."
+        : `Agents will keep running, at ${money(rate)} an agent hour.`,
+  },
+];
 
 const PLAN_WORDS: Record<string, string> = {
   free: "Free",

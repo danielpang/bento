@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import { gateCriteria, type GateCriterion } from "@bento/core";
 import { agentProfiles, agentRuns, featureEvents, featurePullRequests, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
 import { evaluateGate, type GateContext, type GateResult } from "@bento/gates";
@@ -6,6 +6,7 @@ import { parseRepoUrl } from "@bento/github";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { queueSandboxReap } from "./reap-sandbox.js";
 
 type Feature = typeof features.$inferSelect;
 type Stage = typeof stages.$inferSelect;
@@ -302,6 +303,9 @@ export async function advanceFeature(
       trigger,
       actorUserId: actorUserId ?? null,
     });
+    // The card is over, so the machine it was worked on goes. It costs
+    // money for as long as it exists, not for as long as it is used.
+    await queueSandboxReap(ctx, feature.id);
   }
 
   ctx.bus.emitBoardEvent({
@@ -326,7 +330,7 @@ export async function advanceFeature(
   // Hand off to the next stage's agent when one is configured. If a run
   // is somehow still working this card, nothing new starts: that run's
   // finish queues an evaluation, which is what will look at this stage.
-  if (nextStage?.defaultAgentProfileId) {
+  if (nextStage?.defaultAgentProfileId && !(await stageIsLooping(ctx, feature.id, nextStage.id))) {
     const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
     const executor = project?.executor ?? "server";
     const run = await startRunIfIdle(ctx.db, {
@@ -335,9 +339,14 @@ export async function advanceFeature(
       agentProfileId: nextStage.defaultAgentProfileId,
       prompt: "",
       executor,
-    });
-    // Runner-executed runs wait to be claimed by a machine.
-    if (run !== "busy" && executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+    }, ctx.entitlements);
+    // Runner-executed runs wait to be claimed by a machine. A card that
+    // ran the team out of compute stops here, on its new stage, with no
+    // agent working it: the same shape as a stage nobody assigned an
+    // agent to, and the console says why from the plan it reads.
+    if (run !== "busy" && !("outOfCompute" in run) && executor === "server") {
+      await ctx.boss.send("run.execute", { runId: run.id });
+    }
   }
 
   return { status: updated?.status ?? "unknown", currentStageId: updated?.currentStageId ?? null };
@@ -435,6 +444,9 @@ export async function moveFeatureTo(
   if (forward && target) {
     if (!target.defaultAgentProfileId) {
       await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    } else if (await stageIsLooping(ctx, feature.id, target.id)) {
+      // Somebody moved the card here by hand, so the card moves. What
+      // stops is the automatic start, which is the part going round.
     } else {
       const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
       const executor = project?.executor ?? "server";
@@ -446,8 +458,10 @@ export async function moveFeatureTo(
         agentProfileId: target.defaultAgentProfileId,
         prompt: "",
         executor,
-      });
-      if (run !== "busy" && executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      }, ctx.entitlements);
+      if (run !== "busy" && !("outOfCompute" in run) && executor === "server") {
+        await ctx.boss.send("run.execute", { runId: run.id });
+      }
     }
   }
 
@@ -837,10 +851,14 @@ async function judgeStageWork(
     agentProfileId: judgeProfile.id,
     prompt: buildJudgePrompt(stage, judgeProfile),
     executor: executor === "runner" ? "runner" : "server",
-  });
+  }, ctx.entitlements);
   if (run === "busy") {
     return { status: "pending", detail: "Waiting for the current run to finish before judging" };
   }
+  // Pending rather than failed: the work is fine and the judge has not
+  // looked at it. Failing here would reject a card for something the
+  // card had nothing to do with.
+  if ("outOfCompute" in run) return { status: "pending", detail: run.outOfCompute };
   if (executor !== "runner") await ctx.boss.send("run.execute", { runId: run.id });
   return { status: "pending", detail: `${judgeProfile.name} is reviewing the work` };
 }
@@ -859,3 +877,44 @@ function slugify(title: string): string {
       .slice(0, 40) || "feature"
   );
 }
+
+/**
+ * Whether this card has been round this stage too many times already.
+ *
+ * The specific runaway: a gate that never passes sends the card back,
+ * the evaluator hands it to the same agent, the agent fails the same
+ * way, and nobody is in the loop while the meter runs. A person
+ * starting a run by hand is unaffected, which is the point: the guard
+ * is on the automatic door, not on the card.
+ *
+ * Counted within the current period rather than for all time, so a
+ * long lived card that legitimately revisits a stage over months is
+ * not held against its own history.
+ */
+async function stageIsLooping(ctx: AppContext, featureId: string, stageId: string): Promise<boolean> {
+  const since = new Date(Date.now() - LOOP_WINDOW_MS);
+  const [row] = await ctx.db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.featureId, featureId),
+        eq(agentRuns.stageId, stageId),
+        gte(agentRuns.queuedAt, since),
+      ),
+    );
+  const started = row?.count ?? 0;
+  if (started < MAX_AUTO_STARTS_PER_STAGE) return false;
+  console.warn(
+    `feature ${featureId} has been handed to stage ${stageId} ${started} times in the last day; not starting it again automatically`,
+  );
+  return true;
+}
+
+/**
+ * Three automatic starts on one stage. Enough for a stage that
+ * legitimately retries, few enough that a loop is caught in hours
+ * rather than in an invoice.
+ */
+const MAX_AUTO_STARTS_PER_STAGE = 3;
+const LOOP_WINDOW_MS = 24 * 60 * 60 * 1000;
