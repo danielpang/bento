@@ -262,9 +262,9 @@ export function BillingCard() {
             setPlansOpen(false);
             setSalesOpen(true);
           }}
-          onChoose={(plan) =>
+          onChoose={(plan, overagePolicy) =>
             act(async () => {
-              const result = await post("/api/billing/checkout", { plan });
+              const result = await post("/api/billing/checkout", { plan, overagePolicy });
               // An existing subscription switches in place and answers
               // with no address, so there is nothing to redirect to and
               // the card simply reloads on the new plan.
@@ -312,9 +312,17 @@ function ChoosePlan({
   heldSeats: number;
   busy: boolean;
   onClose: () => void;
-  onChoose: (plan: string) => void;
+  onChoose: (plan: string, overagePolicy: "stop" | "allow") => void;
   onContactSales: () => void;
 }) {
+  /**
+   * Two steps on purpose. The plan is the decision they came for; what
+   * happens past the allowance is a second one, and stacking it into
+   * the same click is how it would get answered by not reading it.
+   */
+  const [picked, setPicked] = useState<PlanOffer | null>(null);
+  const [policy, setPolicy] = useState<"stop" | "allow" | null>(null);
+
   return (
     <Modal
       title="Plans"
@@ -360,7 +368,7 @@ function ChoosePlan({
                 // end date are visible. A button here would hide both.
                 <span className="muted">Cancel under Manage billing</span>
               ) : (
-                <button className="btn btn-primary" disabled={busy} onClick={() => onChoose(offer.plan)}>
+                <button className="btn btn-primary" disabled={busy} onClick={() => setPicked(offer)}>
                   Choose {offer.name}
                 </button>
               )}
@@ -369,12 +377,52 @@ function ChoosePlan({
         })}
       </div>
       {/*
-        An agent hour is the one unit here nobody arrives knowing, and
-        the whole allowance means nothing without it.
+        The question is asked here rather than defaulted, because a
+        default is wrong for somebody either way: stopping surprises a
+        team on a deadline, paying surprises a team on a budget. This is
+        the moment they are already deciding about money.
       */}
+      {picked && (
+        <div className="field">
+          <span className="label">
+            One more thing, for {picked.name}: what happens when the{" "}
+            {picked.pricing.includedAgentHours} hours run out?
+          </span>
+          {OVERAGE_CHOICES.map((choice) => (
+            <label key={choice.policy} className="overage-choice">
+              <input
+                type="radio"
+                name="checkout-overage"
+                checked={policy === choice.policy}
+                disabled={busy}
+                onChange={() => setPolicy(choice.policy)}
+              />
+              <span>
+                <strong>{choice.label}</strong>
+                <span className="muted"> {choice.help(picked.pricing.overageUsdPerAgentHour)}</span>
+              </span>
+            </label>
+          ))}
+          <div className="actions">
+            <button
+              className="btn btn-primary"
+              disabled={busy || policy === null}
+              onClick={() => policy && onChoose(picked.plan, policy)}
+            >
+              {policy === null ? "Pick one to continue" : `Continue to payment`}
+            </button>
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setPicked(null)}>
+              Back to plans
+            </button>
+          </div>
+          <span className="muted">You can change this later under Billing.</span>
+        </div>
+      )}
+
       <p className="muted">
         An agent hour is an hour of a sandbox actually running. A card waiting for review costs
-        nothing, and hours are pooled across the team rather than held per person.
+        nothing. The allowance is one pool for the whole team, so it does not move when somebody
+        joins or leaves.
       </p>
     </Modal>
   );
