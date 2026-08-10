@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, notLike, sql } from "drizzle-orm";
 import type { RunOutcome } from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
@@ -385,6 +385,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // CLI that never started.
   await saySystem(`Starting ${profile.cli} in the sandbox.`);
   let agentReported = false;
+  let sessionRecorded = false;
   try {
     result = await runAgent({
       adapter,
@@ -404,6 +405,18 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         if (!agentReported) {
           agentReported = true;
           await saySystem(`${profile.cli} started and is working on the task.`);
+        }
+        /**
+         * The session id is known the moment the CLI announces itself,
+         * but it used to reach the run row only at the very end, from
+         * the result event. A run that died without one (crash, kill,
+         * restart) left the column null, and the conversation it
+         * carried became unreachable even though the id sat in the
+         * transcript the whole time. Written once, as soon as heard.
+         */
+        if (!sessionRecorded && event.type === "init" && event.sessionId) {
+          sessionRecorded = true;
+          await ctx.db.update(agentRuns).set({ cliSessionId: event.sessionId }).where(eq(agentRuns.id, runId));
         }
         seq += 1;
         await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
@@ -736,7 +749,14 @@ async function finishRun(
       status: outcome.ok ? "succeeded" : "failed",
       endedAt: new Date(),
       exitCode,
-      cliSessionId: outcome.sessionId ?? null,
+      /**
+       * Only when the agent actually said. Overwriting with null on a
+       * run that died without a result erased a still valid session id
+       * and then the failure text advised "send a message to continue",
+       * which silently started a cold conversation. Cancel always kept
+       * the column; failure now does too.
+       */
+      ...(outcome.sessionId !== undefined ? { cliSessionId: outcome.sessionId } : {}),
       costUsd: outcome.costUsd !== undefined ? String(outcome.costUsd) : null,
       numTurns: outcome.numTurns ?? null,
       error: outcome.error ?? null,
@@ -820,12 +840,18 @@ async function claimQueuedPrompt(ctx: AppContext, featureId: string): Promise<st
   return claimed ? text : null;
 }
 
-/** Puts a claimed message back when it could not be delivered after all. */
+/**
+ * Puts a claimed message back when it could not be delivered after all.
+ * In front of anything that parked while the claim was out, because the
+ * claimed text is the older message; the previous isNull guard matched
+ * nothing in exactly that case, and the message it existed to save was
+ * discarded after its sender had been told "queued".
+ */
 async function parkQueuedPrompt(ctx: AppContext, featureId: string, text: string): Promise<void> {
   await ctx.db
     .update(features)
-    .set({ queuedPrompt: text })
-    .where(and(eq(features.id, featureId), isNull(features.queuedPrompt)));
+    .set({ queuedPrompt: sql`${text} || coalesce(E'\n' || ${features.queuedPrompt}, '')` })
+    .where(eq(features.id, featureId));
 }
 
 export async function deliverQueuedMessage(ctx: AppContext, runId: string): Promise<void> {
@@ -836,13 +862,30 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   if (!feature) return;
 
+  /**
+   * A judge's end can be what frees the card, but the judge is not the
+   * conversation: inheriting its profile and session had the reviewer
+   * answering the user's follow-up inside the judging session. The
+   * newest run that is not a judge run is whose agent and session the
+   * message continues.
+   */
+  const [conversation] = run.prompt.startsWith(JUDGE_PROMPT_PREFIX)
+    ? await ctx.db
+        .select()
+        .from(agentRuns)
+        .where(and(eq(agentRuns.featureId, run.featureId), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1)
+    : [run];
+  const source = conversation ?? run;
+
   const next = await startRunIfIdle(ctx.db, {
     featureId: feature.id,
-    stageId: run.stageId,
-    agentProfileId: run.agentProfileId,
+    stageId: source.stageId,
+    agentProfileId: source.agentProfileId,
     prompt: text,
-    cliSessionId: run.cliSessionId,
-    executor: run.executor,
+    cliSessionId: source.cliSessionId,
+    executor: source.executor,
   });
   if (next === "busy") {
     // Another run started in the gap; put the message back for its end.
@@ -856,7 +899,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     runId: next.id,
     status: "queued",
   });
-  if (run.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+  if (source.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
 }
 
 /**
@@ -1274,6 +1317,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
         try {
           await executeRun(ctx, job.data.runId);
         } catch (err) {
+          // The in-flight draft dies with the run, or it leaks for the
+          // life of the process: this catch is the path finishRun never
+          // reaches, so nothing downstream clears it.
+          ctx.bus.dropRunDraft(job.data.runId);
           console.error(`run.execute ${job.data.runId} failed:`, err);
           throw err;
         }
