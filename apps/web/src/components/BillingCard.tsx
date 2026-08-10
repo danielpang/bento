@@ -415,7 +415,16 @@ function ChoosePlan({
               Back to plans
             </button>
           </div>
-          <span className="muted">You can change this later under Billing.</span>
+          {/*
+            Said before they pick, not discovered when it bites. A
+            ceiling nobody was told about is worse than no ceiling: the
+            board stops and nothing on the screen explains why.
+          */}
+          <span className="muted">
+            {policy === "allow" && picked.monthlyTotalUsd !== null
+              ? `Agents stop if overage passes ${money(picked.monthlyTotalUsd)}, so your bill cannot more than double. Change or remove that under Billing whenever you like.`
+              : "You can change this later under Billing."}
+          </span>
         </div>
       )}
 
