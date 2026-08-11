@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
+    "preview:email": "tsx src/email-preview.ts",
     "test": "node --test --import tsx \"src/**/*.test.ts\""
   },
   "dependencies": {
