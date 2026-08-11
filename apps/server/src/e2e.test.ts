@@ -5,12 +5,13 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   createDb,
   createPool,
   agentProfiles,
   featureMessages,
+  featureEvents,
   featurePullRequests,
   features,
   githubInstallations,
@@ -45,6 +46,7 @@ import {
 import { reapSandbox } from "./orchestrator/reap-sandbox.js";
 import { appendRunEvent } from "./orchestrator/transcript.js";
 import { JUDGE_PROMPT_PREFIX, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
+import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
@@ -3318,6 +3320,218 @@ test("deleting an agent takes its runs with it", { timeout: 90_000 }, async () =
   // The card is still there, and still knows it moved.
   const history = await json<unknown[]>(await app.request(`/api/features/${feature.id}/history`));
   assert.ok(history.length > 0, "the card keeps its own history");
+});
+
+/**
+ * A card was the one thing in Bento that could not be removed short of
+ * deleting the organization, so the first card anybody makes, which the
+ * README tells them to make, was permanent.
+ */
+test("a card created by mistake can be deleted, and a repeat answers 404", async () => {
+  const { project } = await setupProject("Deletable card");
+  const feature = await createFeature(project.id, "Typo in the tilte");
+
+  const deleted = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), { ok: true });
+
+  const listed = await json<{ id: string }[]>(await app.request(`/api/features?projectId=${project.id}`));
+  assert.ok(!listed.some((f) => f.id === feature.id), "it is off the board, not filtered out of one view");
+  assert.equal((await app.request(`/api/features/${feature.id}`)).status, 404);
+
+  // 404 rather than success on a repeat, for the reason the profiles
+  // delete already writes down: answering the same thing to "deleted it
+  // already" and to "that is not yours" is what keeps the route from
+  // confirming which ids exist.
+  const again = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+  assert.equal(again.status, 404);
+});
+
+/**
+ * The delete this feature exists for: a card that has actually run.
+ *
+ * Its sandbox is a machine somebody is billed for, so the row cannot go
+ * without the machine going first, and the branch is the only copy of
+ * the work, so the machine cannot take that with it.
+ */
+test("deleting a worked card takes its runs, transcript and sandbox, and leaves the branch", { timeout: 90_000 }, async () => {
+  const { project, stages: pipelineStages } = await setupProject("Deletable worked card");
+  const feature = await createFeature(project.id, "Ran before it went");
+  const profile = await fakeProfile("worked-then-deleted");
+  // Advanced before the stage has an agent, so nothing auto-starts and
+  // this test owns the one run it is about to make.
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  await patchStage(pipelineStages[0]!.id, { defaultAgentProfileId: profile.id });
+  const started = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+    }),
+  );
+  assert.equal(await waitForRun(started.id, 90_000), "succeeded");
+
+  const { branchName } = await json<{ branchName: string }>(await app.request(`/api/features/${feature.id}`));
+  const [sandboxRow] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, feature.id));
+  assert.ok(sandboxRow, "the run left a sandbox row, which is the thing the delete has to clean up");
+
+  // This route is the first caller of driver.destroy in the product, so
+  // the test watches the call rather than trusting the status code.
+  const destroyed: SandboxHandle[] = [];
+  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
+  ctx.driver.destroy = async (handle: SandboxHandle) => {
+    destroyed.push(handle);
+    await realDestroy(handle);
+  };
+  try {
+    const res = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+    assert.equal(res.status, 200);
+  } finally {
+    ctx.driver.destroy = realDestroy;
+  }
+
+  assert.deepEqual(
+    destroyed.map((h) => h.externalId),
+    [sandboxRow!.externalId],
+    "the machine is destroyed, not merely forgotten about",
+  );
+  assert.equal((await ctx.db.select().from(features).where(eq(features.id, feature.id))).length, 0);
+  assert.equal((await ctx.db.select().from(agentRuns).where(eq(agentRuns.featureId, feature.id))).length, 0);
+  assert.equal(
+    (await ctx.db.select().from(runEvents).where(eq(runEvents.runId, started.id))).length,
+    0,
+    "the transcript went with the run",
+  );
+  assert.equal((await ctx.db.select().from(featureEvents).where(eq(featureEvents.featureId, feature.id))).length, 0);
+  assert.equal((await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, sandboxRow!.id))).length, 0);
+  // The check the investigation proposed for a machine gone adrift: a
+  // sandbox row whose card is gone is one nothing in the product can
+  // name again, and it would still be billing.
+  const orphans = await ctx.db
+    .select()
+    .from(sandboxes)
+    .where(and(eq(sandboxes.projectId, project.id), isNull(sandboxes.featureId)));
+  assert.equal(orphans.length, 0, "no sandbox row is left pointing at nothing");
+
+  // The promise the whole feature rests on: the work is the user's.
+  const branches = await run("git", ["-C", repoDir, "branch", "--list", branchName]);
+  assert.ok(branches.stdout.trim(), `the branch ${branchName} survives the card`);
+});
+
+/**
+ * Refused rather than "cancel the agent and then delete": a delete that
+ * also silently kills a running agent is a lot of consequence behind
+ * one button.
+ */
+test("a card an agent is working cannot be deleted", async () => {
+  const { project, stages: pipelineStages } = await setupProject("Busy card");
+  const feature = await createFeature(project.id, "Being worked right now");
+  const profile = await fakeProfile("still-going");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  // A run row rather than a live agent: the refusal is about the row's
+  // status, and a real fake agent would finish while the test read it.
+  const [working] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: pipelineStages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "",
+      status: "running",
+    })
+    .returning();
+
+  const refused = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+  assert.equal(refused.status, 409);
+  // Its own sentence, not CARD_BUSY: "wait for it to finish" is advice
+  // about starting a second run, and waiting does not delete a card.
+  assert.equal(((await refused.json()) as { error: string }).error, CARD_BUSY_DELETE);
+  assert.equal((await app.request(`/api/features/${feature.id}`)).status, 200, "the card is where it was");
+  assert.equal((await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, working!.id))).length, 1);
+
+  // Queued counts as working too, which is what keeps a run.execute job
+  // from ever naming a run a delete has removed.
+  await ctx.db.update(agentRuns).set({ status: "queued" }).where(eq(agentRuns.id, working!.id));
+  assert.equal((await app.request(`/api/features/${feature.id}`, { method: "DELETE" })).status, 409);
+
+  // Finished, and the card goes.
+  await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, working!.id));
+  assert.equal((await app.request(`/api/features/${feature.id}`, { method: "DELETE" })).status, 200);
+});
+
+/**
+ * The ordering that makes this feature safe, from the failing side. A
+ * destroyed machine with its card still on the board is a retry; a
+ * deleted card with its machine still running is a billed sandbox no
+ * query in the product can find.
+ */
+test("a sandbox that will not die keeps its card", async () => {
+  const { project } = await setupProject("Stubborn sandbox");
+  const feature = await createFeature(project.id, "Has a machine that argues");
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "sandbox-that-will-not-die",
+    status: "hibernated",
+    workdir: "/workspace",
+  });
+
+  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
+  ctx.driver.destroy = async () => {
+    throw new Error("the machine did not answer");
+  };
+  let body: { error: string };
+  try {
+    const res = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+    assert.equal(res.status, 502);
+    body = (await res.json()) as { error: string };
+  } finally {
+    ctx.driver.destroy = realDestroy;
+  }
+  assert.match(body.error, /the machine did not answer/, "the reason reaches the person, not just the log");
+  assert.match(body.error, /The card was not deleted/);
+
+  assert.equal((await app.request(`/api/features/${feature.id}`)).status, 200, "nothing observable changed");
+  const rows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, feature.id));
+  assert.equal(rows.length, 1, "and the row still points at the machine, so a retry can find it");
+});
+
+/**
+ * The other side of the race the delete opens. A start that blocks on
+ * the delete's row lock wakes up to a card that is gone, and the runs
+ * insert would die on its foreign key as an unhandled 500.
+ */
+test("starting a run on a card that was deleted answers gone, not a foreign key error", async () => {
+  const { project, stages: pipelineStages } = await setupProject("Gone card");
+  const feature = await createFeature(project.id, "Deleted mid start");
+  const profile = await fakeProfile("too-late");
+  assert.equal((await app.request(`/api/features/${feature.id}`, { method: "DELETE" })).status, 200);
+
+  const outcome = await startRunIfIdle(ctx.db, {
+    featureId: feature.id,
+    stageId: pipelineStages[0]!.id,
+    agentProfileId: profile.id,
+    prompt: "",
+    executor: "server",
+  });
+  assert.equal(outcome, "gone");
+
+  // And every door that starts a run says so rather than throwing.
+  const created = await app.request("/api/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+  });
+  assert.equal(created.status, 404);
+  const quick = await app.request(`/api/features/${feature.id}/quick-run?cli=fake`, { method: "POST" });
+  assert.equal(quick.status, 404);
+  const message = await app.request(`/api/features/${feature.id}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "anybody there" }),
+  });
+  assert.equal(message.status, 404);
 });
 
 /**

@@ -421,8 +421,10 @@ export async function advanceFeature(
     // Runner-executed runs wait to be claimed by a machine. A card that
     // ran the team out of compute stops here, on its new stage, with no
     // agent working it: the same shape as a stage nobody assigned an
-    // agent to, and the console says why from the plan it reads.
-    if (run !== "busy" && !("outOfCompute" in run) && executor === "server") {
+    // agent to, and the console says why from the plan it reads. A card
+    // deleted mid advance starts nothing, quietly: there is nobody
+    // left to tell.
+    if (run !== "busy" && run !== "gone" && !("outOfCompute" in run) && executor === "server") {
       await ctx.boss.send("run.execute", { runId: run.id });
     }
   }
@@ -537,7 +539,7 @@ export async function moveFeatureTo(
         prompt: "",
         executor,
       }, ctx.entitlements, ctx.analytics);
-      if (run !== "busy" && !("outOfCompute" in run) && executor === "server") {
+      if (run !== "busy" && run !== "gone" && !("outOfCompute" in run) && executor === "server") {
         await ctx.boss.send("run.execute", { runId: run.id });
       }
     }
@@ -1047,6 +1049,9 @@ async function judgeStageWork(
   if (run === "busy") {
     return { status: "pending", detail: "Waiting for the current run to finish before judging" };
   }
+  // The card was deleted while this criterion was being evaluated.
+  // Nothing will read the answer; there is no card left to hold it.
+  if (run === "gone") return { status: "pending", detail: "This card is gone" };
   // Pending rather than failed: the work is fine and the judge has not
   // looked at it. Failing here would reject a card for something the
   // card had nothing to do with.

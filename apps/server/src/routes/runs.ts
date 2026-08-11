@@ -58,6 +58,8 @@ export function runRoutes(ctx: AppContext) {
         startedBy: actor(c),
       }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      // The card was deleted while this request was in flight.
+      if (run === "gone") return c.json({ error: "feature not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
 
       // Runner-executed runs stay queued until a machine claims them.
@@ -99,6 +101,7 @@ export function runRoutes(ctx: AppContext) {
         startedBy: actor(c),
       }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (previous.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json(run, 201);

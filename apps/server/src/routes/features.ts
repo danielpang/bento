@@ -37,7 +37,7 @@ import {
   reopenFeature,
   activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
-import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, startRunIfIdle } from "../orchestrator/start-run.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
   claimQueuedMessages,
@@ -133,6 +133,15 @@ function repoNameFromUrl(repoUrl: string): string {
   return repoUrl.replace(/\.git$/, "").split("/").slice(-2).join("/") || repoUrl;
 }
 
+/**
+ * Carries a failed sandbox destroy out of the delete's transaction.
+ *
+ * Thrown rather than returned because the transaction has to roll back
+ * with it: a card whose row is gone while its machine keeps running is
+ * a billed sandbox no query in this product can find again.
+ */
+class SandboxDestroyFailed extends Error {}
+
 export function featureRoutes(ctx: AppContext) {
   return new Hono()
     .get("/", async (c) => {
@@ -219,6 +228,131 @@ export function featureRoutes(ctx: AppContext) {
           url: pr.url,
         })),
       });
+    })
+    /**
+     * Removes the card and everything Bento holds about it: its runs
+     * and their transcripts, its history, its gate checks, and the
+     * sandbox it was worked in. Recorded spend goes with the runs, so
+     * the project's total drops; the confirmation names the figure
+     * before anybody clicks it.
+     *
+     * What survives is the user's: the branch in every source
+     * repository, and any pull request opened from it. Bento stops
+     * tracking those, it does not close them.
+     */
+    .delete("/:id", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+
+      const outcome = await db(c, ctx)
+        .transaction(async (tx) => {
+          /**
+           * The same row lock startRunIfIdle takes, which is the whole
+           * concurrency story: a delete and a run start on one card
+           * serialize here, and whoever loses sees what the winner
+           * did. No row means another tab deleted it while this
+           * request was resolving access.
+           */
+          const [locked] = await tx
+            .select({ id: features.id })
+            .from(features)
+            .where(eq(features.id, feature.id))
+            .for("update");
+          if (!locked) return "gone" as const;
+
+          const [active] = await tx
+            .select({ id: agentRuns.id })
+            .from(agentRuns)
+            .where(and(eq(agentRuns.featureId, feature.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+            .limit(1);
+          // Queued counts as working, which also means no run.execute
+          // job can name a run this delete is about to remove.
+          if (active) return "busy" as const;
+
+          /**
+           * The machines go before the rows, and a failure here fails
+           * the request. A destroyed machine with its card still on
+           * the board is a retry; the other order leaves a metered
+           * sandbox nothing in the product can still name.
+           *
+           * Read whole, destroyed ones included: their rows have to go
+           * too, or the delete leaves exactly the pointerless row that
+           * is supposed to mean "a machine is adrift".
+           */
+          const owned = await tx.select().from(sandboxes).where(eq(sandboxes.featureId, feature.id));
+          for (const sandbox of owned.filter((s) => s.status !== "destroyed")) {
+            const handle: SandboxHandle = {
+              externalId: sandbox.externalId,
+              provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+              workdir: sandbox.workdir,
+            };
+            try {
+              await ctx.driver.destroy(handle);
+            } catch (err) {
+              throw new SandboxDestroyFailed(err instanceof Error ? err.message : String(err));
+            }
+          }
+
+          // Local mode works the card in a worktree beside each
+          // repository. Removing one leaves the branch it had checked
+          // out exactly where it is, which is the promise this feature
+          // makes; anything uncommitted in it goes, same as the
+          // sandbox being thrown away.
+          const repos = await tx.select().from(repositories).where(eq(repositories.projectId, feature.projectId));
+          for (const repo of repos) await ctx.worktrees.remove(repo.localPath, feature.id, repo.name);
+
+          // Runs (and their transcripts), gate checks, history and
+          // pull request links all cascade from this row.
+          await tx.delete(features).where(eq(features.id, feature.id));
+          /**
+           * The sandbox rows go last, and by id.
+           *
+           * Last because agent_runs.sandbox_id is "no action": deleting
+           * a sandbox while a run still points at it is a foreign key
+           * violation, and every card with a sandbox has such a run.
+           * By id because the delete above has already set their
+           * feature_id to null, so "where feature_id = ..." would now
+           * match nothing and leave them behind.
+           *
+           * Explicitly rather than by cascade, because that "set null"
+           * is deliberate: a row deleted outside Bento should leave a
+           * pointerless row as evidence of a machine still running.
+           * Here the machines are confirmed gone first, so the count
+           * this feature is measured by stays at zero.
+           */
+          if (owned.length > 0) {
+            await tx.delete(sandboxes).where(
+              inArray(
+                sandboxes.id,
+                owned.map((s) => s.id),
+              ),
+            );
+          }
+          return "deleted" as const;
+        })
+        .catch((err: unknown) => {
+          if (err instanceof SandboxDestroyFailed) return err;
+          throw err;
+        });
+
+      if (outcome instanceof SandboxDestroyFailed) {
+        return c.json(
+          { error: `the sandbox could not be destroyed (${outcome.message}). The card was not deleted; try again` },
+          502,
+        );
+      }
+      // Answering 404 rather than success to a repeat, for the reason
+      // the profiles delete already writes down: success would say the
+      // same thing to "deleted it already" and to "that is not yours".
+      if (outcome === "gone") return c.json({ error: "not found" }, 404);
+      if (outcome === "busy") return c.json({ error: CARD_BUSY_DELETE }, 409);
+
+      ctx.bus.emitBoardEvent({
+        type: "feature_deleted",
+        projectId: feature.projectId,
+        featureId: feature.id,
+      });
+      return c.json({ ok: true });
     })
     /**
      * The card's whole conversation: every finished run's events, in
@@ -370,6 +504,8 @@ export function featureRoutes(ctx: AppContext) {
         await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
         return c.json({ queued: true as const });
       }
+      // Deleted in the gap: there is no card left to park a message on.
+      if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) {
         // Out of compute: held rather than thrown away. Queued is the
         // honest answer, and the stranded sweep delivers it once the
@@ -867,6 +1003,7 @@ export function featureRoutes(ctx: AppContext) {
         startedBy: actor(c),
       }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json(run, 201);

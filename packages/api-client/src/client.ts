@@ -586,6 +586,16 @@ export class BentoClient {
     );
   }
 
+  /**
+   * Removes the card, its runs and their transcripts, and the sandbox
+   * it was worked in. The branch and any pull request are left alone.
+   * Refused with 409 while an agent works the card, and answered 404
+   * for a card that is already gone.
+   */
+  deleteFeature(featureId: string) {
+    return this.request<{ ok: boolean }>(`/api/features/${featureId}`, { method: "DELETE" });
+  }
+
   advanceFeature(featureId: string) {
     return this.request<Feature>(`/api/features/${featureId}/advance`, { method: "POST" });
   }

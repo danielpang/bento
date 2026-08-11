@@ -663,6 +663,7 @@ test("every entity route refuses a foreign tenant", async () => {
     // RLS policy can cover, so the matrix is the only thing pinning it.
     ["GET", `/api/runs/${run.id}/events`],
     ["GET", `/api/board/${project.id}/events`],
+    ["GET", `/api/board/${project.id}/events`],
     ["POST", "/api/linear/mappings", { body: JSON.stringify({ linearTeamId: "team-x", projectId: project.id }) }],
     ["DELETE", "/api/linear/mappings/00000000-0000-0000-0000-000000000000"],
     ["PATCH", "/api/linear/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
@@ -674,8 +675,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", "/api/linear/projects?teamId=team-x"],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
     ["PATCH", "/api/slack/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
+    ["DELETE", `/api/features/${feature.id}`],
     // Last: a delete that went through would refuse everything after it
-    // for the wrong reason.
+    // for the wrong reason. The project last, because it would take the
+    // card with it and make the check below 404 for the wrong reason.
     ["DELETE", `/api/projects/${project.id}`],
   ];
 
@@ -686,6 +689,13 @@ test("every entity route refuses a foreign tenant", async () => {
       `${method} ${path} answered ${res.status} to a foreign tenant; it must refuse`,
     );
   }
+
+  // The card is still on the owner's board. A refusal that answered
+  // 404 and deleted the row anyway would pass the loop above and lose
+  // somebody else's work, which is the one failure the status code
+  // cannot show.
+  const stillThere = await asOwner(`/api/features/${feature.id}`);
+  assert.equal(stillThere.status, 200, "the intruder's DELETE must not have removed the owner's card");
 
   // The project is still there, under its own name.
   const projectAfter = await asOwner(`/api/projects/${project.id}`);

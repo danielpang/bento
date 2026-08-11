@@ -2576,6 +2576,23 @@ button {
   align-items: stretch;
 }
 
+/* The rule the design asks for: the action grid is a set of things you
+   do to move work along, and what follows it ends the card. */
+.danger-row {
+  display: flex;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* Quiet at rest, danger where it is reached for. A permanently red
+   button beside "Approve and advance" would read as its peer. */
+.btn-danger-quiet:hover:not(:disabled),
+.btn-danger-quiet:focus-visible {
+  color: var(--failed);
+  border-color: var(--failed);
+}
+
 .action-grid .btn {
   width: 100%;
   min-height: 38px;

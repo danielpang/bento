@@ -1,10 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BentoClient, type AgentProfile, type Feature, type Stage } from "@bento/api-client";
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { teamDisplayName } from "./team-name.js";
 import { useCountUp } from "./count-up.js";
-import { Board, matchesQuery, type CardPulse } from "./components/Board.js";
+import { Board, matchesQuery, neighbourCardId, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
 import { BottomBar } from "./components/BottomBar.js";
 import { BrandLockup } from "./components/BrandLockup.js";
@@ -15,6 +15,7 @@ import { OutOfCompute } from "./components/OutOfCompute.js";
 import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
+import { useToast } from "./components/Toasts.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -350,6 +351,35 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const spendShown = useCountUp(usage?.totalUsd ?? 0);
   /** A board-level load or action failure, shown under the topbar. */
   const [loadError, setLoadError] = useState("");
+  const toast = useToast();
+  /**
+   * Where focus goes once a deleted card has left the board, and which
+   * card leaving is the signal to place it. Held until the refetch
+   * lands: focusing sooner would put the cursor on the row that is
+   * about to be removed.
+   */
+  const [focusAfterDelete, setFocusAfterDelete] = useState<{ deletedId: string; cardId: string | null } | null>(null);
+  /**
+   * The selection, readable from the board stream's handler without
+   * putting it in that effect's dependencies: re-subscribing the
+   * stream every time somebody opens a card would drop the events it
+   * exists to carry.
+   */
+  const selectedIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  /**
+   * The card this tab is deleting right now.
+   *
+   * Its own event comes back on the board stream like everybody else's,
+   * and in practice it arrives before the DELETE response does: the
+   * server emits on the bus inside the handler, so the stream beats the
+   * round trip. Without this the tab that pressed the button would tell
+   * itself its card was deleted by somebody else, which is the one
+   * message this feature was careful not to send.
+   */
+  const deletingRef = useRef<string | null>(null);
 
   /**
    * Agents are not scoped to a project, so they load independently:
@@ -465,6 +495,20 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           // surfaces its Stop button and its row without reopening.
           setRunTicks((prev) => ({ ...prev, [e.featureId!]: (prev[e.featureId!] ?? 0) + 1 }));
         }
+        /*
+         * A removal, not an update: the card has to be dropped rather
+         * than refetched and redrawn. Only a viewer with that very
+         * card open is told, and only when somebody else did it: the
+         * tab that pressed Delete has its own message. Anybody else
+         * gets the card leaving its lane, which is the whole story of
+         * a colleague tidying.
+         */
+        if (e.type === "feature_deleted" && e.featureId && deletingRef.current !== e.featureId) {
+          if (selectedIdRef.current === e.featureId) {
+            setSelectedId(null);
+            toast.note("The card you had open was deleted.");
+          }
+        }
         // What the agent last said, shown on the card face so a board of
         // running agents reads as work rather than as spinners.
         if (e.type === "run_output" && e.featureId && e.text) {
@@ -485,7 +529,23 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       stop();
       if (timer !== null) clearTimeout(timer);
     };
-  }, [projectId, refresh]);
+  }, [projectId, refresh, toast]);
+
+  /**
+   * A deleted card takes its drawer and its Delete button with it, so
+   * focus has nowhere to be restored to. It goes to the card that took
+   * its place in the lane, and to the lane's own control when the
+   * board is empty.
+   */
+  useEffect(() => {
+    if (!focusAfterDelete) return;
+    if (features.some((f) => f.id === focusAfterDelete.deletedId)) return;
+    const target = focusAfterDelete.cardId
+      ? document.querySelector<HTMLElement>(`[data-feature="${focusAfterDelete.cardId}"]`)
+      : document.querySelector<HTMLElement>(".lane-cta");
+    target?.focus();
+    setFocusAfterDelete(null);
+  }, [features, focusAfterDelete]);
 
   const recordEvent = useCallback((featureId: string, event: AgentEvent) => {
     const kind = event.type === "result" && !event.ok ? "result-failed" : event.type;
@@ -496,6 +556,31 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   }, []);
 
   const selected = useMemo(() => features.find((f) => f.id === selectedId) ?? null, [features, selectedId]);
+
+  /**
+   * Claimed before the request, so this tab knows its own event, and
+   * released when the delete was refused: the card is still there for
+   * somebody else to remove, and this tab should hear about it.
+   */
+  const handleDeleting = useCallback((featureId: string | null) => {
+    deletingRef.current = featureId;
+  }, []);
+
+  /**
+   * The card is gone. The neighbour is worked out from the board as it
+   * still stands, because the row is only dropped by the refetch that
+   * follows; the drawer closes on its own once the list no longer
+   * holds the card.
+   */
+  const handleDeleted = useCallback(
+    (featureId: string) => {
+      const visible = query.trim() ? features.filter((f) => matchesQuery(f, query)) : features;
+      setFocusAfterDelete({ deletedId: featureId, cardId: neighbourCardId(visible, stages, featureId) });
+      setSelectedId(null);
+      void refresh();
+    },
+    [features, query, stages, refresh],
+  );
 
   /**
    * A board with no agent cannot run anything, and the cards give no
@@ -776,6 +861,8 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             runsVersion={runTicks[selected.id] ?? 0}
             onClose={() => setSelectedId(null)}
             onChanged={refresh}
+            onDeleting={handleDeleting}
+            onDeleted={handleDeleted}
             onEvent={recordEvent}
           />
         )}

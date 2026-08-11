@@ -5,7 +5,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
+import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { LineChannel, collectExec } from "./driver.js";
 import { SpriteDriver, spriteName } from "./sprite.js";
 
@@ -1436,4 +1436,40 @@ test("Sprite repository export returns committed objects without credentials", a
   assert.equal(exported?.baseSha, "base-sha");
   assert.equal(exported?.headSha, "head-sha");
   assert.deepEqual(exported?.data, bundle);
+});
+
+/**
+ * A sprite is a billed machine, so destroy used to be the most
+ * dangerous kind of quiet: it swallowed every error, and a refused
+ * delete read as a machine gone while it kept running.
+ */
+test("destroying a sprite tolerates one that is already gone and reports everything else", async () => {
+  const attempted: string[] = [];
+  let failure: unknown = null;
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  (driver as unknown as { client: { deleteSprite(name: string): Promise<void> } }).client = {
+    async deleteSprite(name: string) {
+      attempted.push(name);
+      if (failure) throw failure;
+    },
+  };
+  const handle = { externalId: "bento-feature", provider: "sprite" as const, workdir: "/workspace" };
+
+  await driver.destroy(handle);
+  assert.deepEqual(attempted, ["bento-feature"]);
+
+  // Already gone is the one outcome that means the same thing as a
+  // successful delete.
+  failure = new APIError("sprite not found", { statusCode: 404 });
+  await driver.destroy(handle);
+  failure = new Error("Failed to delete sprite (status 404): no such sprite");
+  await driver.destroy(handle);
+
+  // Everything else has to reach the caller: the delete route answers
+  // 502 and keeps the card, rather than losing the only pointer to a
+  // machine that is still billing.
+  failure = new APIError("upstream is unwell", { statusCode: 500 });
+  await assert.rejects(driver.destroy(handle), /upstream is unwell/);
+  failure = new Error("fetch failed");
+  await assert.rejects(driver.destroy(handle), /fetch failed/);
 });
