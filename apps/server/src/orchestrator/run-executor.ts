@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { getAdapter, runAgent } from "@bento/agents";
 import {
   agentProfiles,
@@ -229,6 +229,19 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       onProgress: saySystem,
     });
 
+    /**
+     * An upsert, not insert-or-ignore. The machine was just provisioned,
+     * so whatever the row said before, it is real and awake now.
+     *
+     * Ignoring the conflict was how two bugs lived in one line. A card
+     * reopened after its sandbox was reaped provisions a new machine
+     * under the same name, and the ignored insert left the row saying
+     * "destroyed": the reaper filters that status out, so the new
+     * machine was never destroyed again and billed forever. And the
+     * size recorded at provision never reached an existing row, so a
+     * deployment on large sprites metered every hour at the standard
+     * rate.
+     */
     const [sandboxRow] = await ctx.db
       .insert(sandboxes)
       .values({
@@ -244,15 +257,23 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         // spent. Absent on the local drivers, which bill nobody.
         ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
       })
-      .onConflictDoNothing()
+      .onConflictDoUpdate({
+        target: sandboxes.externalId,
+        set: {
+          featureId: feature.id,
+          status: "busy",
+          workdir: handle.workdir,
+          ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
+          lastUsedAt: new Date(),
+        },
+      })
       .returning();
 
-    // Link the run to its sandbox so rollback can find it later.
-    const [existingSandbox] = sandboxRow
-      ? [sandboxRow]
-      : await ctx.db.select().from(sandboxes).where(eq(sandboxes.externalId, handle.externalId)).limit(1);
-    if (existingSandbox) {
-      await ctx.db.update(agentRuns).set({ sandboxId: existingSandbox.id }).where(eq(agentRuns.id, runId));
+    // Link the run to its sandbox so rollback can find it later. The
+    // upsert always returns the row, so there is no fallback select to
+    // race with anything.
+    if (sandboxRow) {
+      await ctx.db.update(agentRuns).set({ sandboxId: sandboxRow.id }).where(eq(agentRuns.id, runId));
     }
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
@@ -1028,7 +1049,53 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     for (const row of gated) {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
     }
+    await redeliverStrandedPrompts(ctx);
   });
+}
+
+/**
+ * Picks up parked prompts that nothing else will.
+ *
+ * The delivery invariant used to be that a prompt is only ever parked
+ * while a run is active, so that run's finish redelivers it. The
+ * compute gate broke that: a message sent while the team was out of
+ * hours parks with no run at all, and when the allowance came back
+ * days later nothing fired, so the user was told "queued" and the
+ * agent never acted on it.
+ *
+ * Riding the existing five minute sweep rather than a timer aimed at
+ * period boundaries, because it also heals every other way a prompt
+ * could strand, not just the one we know about. deliverQueuedMessage
+ * re-parks when the team is still out of compute, so a sweep during
+ * the outage is a no-op rather than a retry storm.
+ */
+async function redeliverStrandedPrompts(ctx: AppContext): Promise<void> {
+  const stranded = await ctx.db
+    .select({ id: features.id })
+    .from(features)
+    .where(and(isNotNull(features.queuedPrompt), inArray(features.status, ["active", "gated"])));
+  for (const feature of stranded) {
+    const [active] = await ctx.db
+      .select({ id: agentRuns.id })
+      .from(agentRuns)
+      .where(and(eq(agentRuns.featureId, feature.id), inArray(agentRuns.status, ["queued", "starting", "running"])))
+      .limit(1);
+    // A run is working the card, and its finish is the delivery path
+    // that already exists. This sweep is only for prompts nothing owns.
+    if (active) continue;
+    const [latest] = await ctx.db
+      .select()
+      .from(agentRuns)
+      .where(eq(agentRuns.featureId, feature.id))
+      .orderBy(desc(agentRuns.queuedAt))
+      .limit(1);
+    // No run has ever touched the card, so there is no agent or stage
+    // to resume with; the prompt waits for the first manual start.
+    if (!latest) continue;
+    await deliverQueuedMessage(ctx, latest.id).catch((err: unknown) => {
+      console.warn(`could not redeliver the parked prompt on feature ${feature.id}:`, err);
+    });
+  }
 }
 
 /**

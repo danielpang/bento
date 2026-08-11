@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, notLike, sql } from "drizzle-orm";
 import { gateCriteria, type GateCriterion } from "@bento/core";
 import { agentProfiles, agentRuns, featureEvents, featurePullRequests, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
 import { evaluateGate, type GateContext, type GateResult } from "@bento/gates";
@@ -893,6 +893,16 @@ function slugify(title: string): string {
  */
 async function stageIsLooping(ctx: AppContext, featureId: string, stageId: string): Promise<boolean> {
   const since = new Date(Date.now() - LOOP_WINDOW_MS);
+  /**
+   * Only the runs the evaluator itself started. The count used to take
+   * every run on the stage, so three chat messages in an afternoon,
+   * each of which resumes as its own run, silently disabled automatic
+   * hand-off into that stage, the exact opposite of the promise below
+   * that a person is unaffected. Evaluator starts carry no started_by,
+   * and the judge, which also carries none, is excluded by its prompt
+   * prefix: judging is the gate examining work, not the loop this
+   * guard exists to catch.
+   */
   const [row] = await ctx.db
     .select({ count: sql<number>`count(*)::int` })
     .from(agentRuns)
@@ -901,6 +911,8 @@ async function stageIsLooping(ctx: AppContext, featureId: string, stageId: strin
         eq(agentRuns.featureId, featureId),
         eq(agentRuns.stageId, stageId),
         gte(agentRuns.queuedAt, since),
+        isNull(agentRuns.startedBy),
+        notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`),
       ),
     );
   const started = row?.count ?? 0;

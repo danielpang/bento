@@ -47,6 +47,12 @@ export interface PlanState {
    */
   agentHours: { used: number; included: number; cap: number | null; periodStart: string; periodEnd: string };
   /**
+   * Whether new runs are being refused right now, and by which wall.
+   * Server computed from the same refusals the gate applies, so this
+   * cannot disagree with what actually happens when a run asks.
+   */
+  stopped: "ceiling" | "pool" | null;
+  /**
    * What this team has chosen to happen at the end of its allowance.
    * `changeable` is false on Free, which has no subscription for an
    * overage to land on and so has nothing to allow.
@@ -115,16 +121,15 @@ export function useBillingPlan(reloadKey?: unknown): { plan: PlanState | null; a
 }
 
 /**
- * Whether this team has spent the compute its plan stops at.
+ * Whether this team's runs are being refused right now.
  *
- * True whenever there is a wall to hit, which is not only Free. Every
- * plan stops by default; a paid team that has chosen to pay its
- * overage instead has no cap, and for them this stays false because
- * passing an allowance they are billed for is a line on an invoice
- * rather than a warning about anything.
+ * Reads the server's own answer rather than re-deriving it from the
+ * cap. Re-deriving is how the ceiling stop went silent: the cap is
+ * null on the allow policy, so a team stopped by its own overage
+ * ceiling had every surface stay quiet while every run was refused.
  */
 export function outOfCompute(state: PlanState): boolean {
-  return state.agentHours.cap !== null && state.agentHours.used >= state.agentHours.cap;
+  return state.stopped !== null;
 }
 
 /**

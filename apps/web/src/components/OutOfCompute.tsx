@@ -27,25 +27,33 @@ export function OutOfCompute({ onOpenBilling }: { onOpenBilling: () => void }) {
 
   if (!plan || !outOfCompute(plan)) return null;
 
-  const { used, cap } = plan.agentHours;
+  const { used, included } = plan.agentHours;
   // Only an owner or admin can change any of this, so only they are
   // offered the way out. Handing a member a button that refuses them
   // is worse than telling them plainly who to ask.
   const canUpgrade = plan.canManageBilling;
   /**
-   * Two different situations wearing the same face. A free team
-   * cannot pay for more hours; a paid team has asked us not to let
-   * them. The remedy is different, so the sentence has to be.
+   * Three situations wearing the same face, each with its own remedy.
+   * A free team cannot pay for more hours. A paid team on stop asked
+   * us not to let them. And a paid team on allow can hit the ceiling
+   * it set on its own overage, where the remedy is raising it, not
+   * upgrading, and saying "upgrade" would answer a question they did
+   * not ask.
    */
-  const byChoice = plan.overage.changeable;
+  const byCeiling = plan.stopped === "ceiling";
+  const byChoice = plan.overage.changeable && !byCeiling;
   const rate = plan.overage.usdPerAgentHour;
-  const spent = `This team has used its ${cap} agent hours for the period (${used} so far).`;
-  const remedy = byChoice
-    ? `Billing is set to stop rather than pay for more. Allowing overage${rate === null ? "" : ` at ${money(rate)} an agent hour`} starts the agents again.`
-    : `Agents start again on ${resetsOn(plan)}, or on a paid plan today.`;
+  const spent = byCeiling
+    ? `This team's overage has reached the ${plan.overage.ceilingUsd === null ? "ceiling" : money(plan.overage.ceilingUsd) + " ceiling"} it set (${money(plan.overage.spentUsd)} so far).`
+    : `This team has used its ${included} agent hours for the period (${used} so far).`;
+  const remedy = byCeiling
+    ? "Raising or removing the ceiling under Billing starts the agents again."
+    : byChoice
+      ? `Billing is set to stop rather than pay for more. Allowing overage${rate === null ? "" : ` at ${money(rate)} an agent hour`} starts the agents again.`
+      : `Agents start again on ${resetsOn(plan)}, or on a paid plan today.`;
   const nextStep = canUpgrade
     ? remedy
-    : `${remedy.replace(/^Billing is set/, "This team's billing is set")} An owner or admin can change it.`;
+    : `${remedy.replace(/^Billing is set/, "This team's billing is set").replace(/^Raising/, "An owner or admin raising")} An owner or admin can change it.`;
 
   function dismiss() {
     sessionStorage.setItem(SEEN, "1");
@@ -58,14 +66,16 @@ export function OutOfCompute({ onOpenBilling }: { onOpenBilling: () => void }) {
         <span>
           {spent}{" "}
           {canUpgrade
-            ? byChoice
-              ? "Allow overage or upgrade to keep going."
-              : "Upgrade to keep going."
-            : `Ask an owner or admin to ${byChoice ? "allow overage or upgrade" : "upgrade"}.`}
+            ? byCeiling
+              ? "Raise the ceiling to keep going."
+              : byChoice
+                ? "Allow overage or upgrade to keep going."
+                : "Upgrade to keep going."
+            : `Ask an owner or admin to ${byCeiling ? "raise the ceiling" : byChoice ? "allow overage or upgrade" : "upgrade"}.`}
         </span>
         {canUpgrade && (
           <button className="btn btn-primary" onClick={onOpenBilling}>
-            {byChoice ? "Billing settings" : "See plans"}
+            {byCeiling || byChoice ? "Billing settings" : "See plans"}
           </button>
         )}
       </div>
@@ -88,7 +98,7 @@ export function OutOfCompute({ onOpenBilling }: { onOpenBilling: () => void }) {
                     onOpenBilling();
                   }}
                 >
-                  {byChoice ? "Billing settings" : "See plans"}
+                  {byCeiling || byChoice ? "Billing settings" : "See plans"}
                 </button>
               )}
             </>

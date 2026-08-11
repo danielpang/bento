@@ -3584,6 +3584,30 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
   const after = await runCount(feature.id);
   assert.equal(after, before, "a stage that has been round three times is not started again by itself");
 
+  /**
+   * Human runs must not trip the guard. Three chat messages in an
+   * afternoon each insert a run carrying started_by, and counting them
+   * used to silently disable auto hand-off into the stage, the exact
+   * opposite of the promise that a person is unaffected.
+   */
+  const human = await createFeature(project.id, "Card someone talks to");
+  for (let i = 0; i < 3; i++) {
+    await ctx.db.insert(agentRuns).values({
+      featureId: human.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "a chat message",
+      status: "succeeded",
+      startedBy: ctx.userId,
+      startedAt: new Date(),
+      endedAt: new Date(),
+    });
+  }
+  const humanBefore = await runCount(human.id);
+  await moveFeatureTo(ctx, human.id, stage.id, ctx.userId);
+  const humanAfter = await runCount(human.id);
+  assert.equal(humanAfter, humanBefore + 1, "three human runs do not count as a loop");
+
   // By hand still works: a person looking at the card is the thing the
   // guard was protecting, not the thing it was blocking.
   const byHand = await app.request(`/api/runs`, {
