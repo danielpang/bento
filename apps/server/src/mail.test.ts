@@ -120,6 +120,14 @@ test("the mark and the wordmark are centred in the header band", () => {
   assert.match(body, /<table role="presentation" align="center"[^>]*margin:0 auto;"><tr>\s*<td style="padding-right:12px;">/);
 });
 
+test("the heading is centred and the body copy is not", () => {
+  const body = invitation().html ?? "";
+  assert.match(body, /<h1 [^>]*text-align:center;">Alice invited you to Acme Robotics<\/h1>/);
+  // Paragraphs stay left: centred prose is harder to read once it
+  // wraps, and these wrap.
+  assert.doesNotMatch(body, /<p style="margin:0 0 14px;[^"]*text-align:center/);
+});
+
 test("the action button is centred, by attribute as well as by margin", () => {
   const body = invitation().html ?? "";
   // Outlook ignores margin:auto on a table, so the align attribute is

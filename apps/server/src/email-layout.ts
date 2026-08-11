@@ -189,7 +189,7 @@ function mark(): string {
 function body(input: EmailLayoutInput): string {
   const parts = [
     '<tr><td style="padding:32px;">',
-    `<h1 style="margin:0 0 16px;font-family:${SANS};font-size:20px;line-height:1.3;font-weight:600;color:${TEXT};">${escapeHtml(input.heading)}</h1>`,
+    `<h1 style="margin:0 0 16px;font-family:${SANS};font-size:20px;line-height:1.3;font-weight:600;color:${TEXT};text-align:center;">${escapeHtml(input.heading)}</h1>`,
   ];
 
   for (const paragraph of input.paragraphs) {
