@@ -114,6 +114,12 @@ test("the footer carries one link back, centred", () => {
   assert.doesNotMatch(body, /Account settings|What changed/);
 });
 
+test("the mark and the wordmark are centred in the header band", () => {
+  const body = invitation().html ?? "";
+  assert.match(body, /<td align="center" style="background:#0e0d0b[^"]*text-align:center;">/);
+  assert.match(body, /<table role="presentation" align="center"[^>]*margin:0 auto;"><tr>\s*<td style="padding-right:12px;">/);
+});
+
 test("the action button is centred, by attribute as well as by margin", () => {
   const body = invitation().html ?? "";
   // Outlook ignores margin:auto on a table, so the align attribute is

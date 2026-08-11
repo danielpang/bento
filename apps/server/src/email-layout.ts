@@ -148,10 +148,15 @@ function preheader(text: string): string {
   );
 }
 
+/**
+ * Centred the way the button and the footer are: the align attribute
+ * for the clients that ignore margin:auto on a table, the margin for
+ * the ones that ignore the attribute.
+ */
 function header(): string {
   return [
-    `<tr><td style="background:${HEADER};padding:20px 32px;">`,
-    '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>',
+    `<tr><td align="center" style="background:${HEADER};padding:20px 32px;text-align:center;">`,
+    '<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;"><tr>',
     `<td style="padding-right:12px;">${mark()}</td>`,
     `<td style="font-family:${SANS};font-size:19px;font-weight:700;letter-spacing:-0.01em;color:${HEADER_TEXT};">bento</td>`,
     "</tr></table>",
