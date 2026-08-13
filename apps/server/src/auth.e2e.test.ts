@@ -1,7 +1,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { and, eq } from "drizzle-orm";
-import { account, agentProfiles, createDb, createPool, member, projects, runMigrations } from "@bento/db";
+import { account, agentProfiles, createDb, createPool, member, projects, runArtifacts, runMigrations } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
 import { createHmac } from "node:crypto";
@@ -10,6 +10,7 @@ import path from "node:path";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
+import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { createAuth } from "./auth.js";
 import type { AppContext } from "./context.js";
@@ -63,6 +64,7 @@ before(async () => {
     driver: new LocalProcessDriver(),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
+    artifacts: new DiskArtifactStore(dataDir),
     running: new Map(),
     liveInputs: new Map(),
     userId: "",
@@ -298,6 +300,23 @@ test("every entity route refuses a foreign tenant", async () => {
   // Named here, because every run-shaped row below reads as "undefined"
   // otherwise and the matrix reports a 500 instead of the real cause.
   assert.ok(run.id, "the owner's run must exist for the run routes to be probed");
+  // Inserted directly because only the executor creates artifact rows;
+  // the matrix still needs one to probe the artifact routes with.
+  const [artifact] = await ctx.db
+    .insert(runArtifacts)
+    .values({
+      runId: run.id,
+      featureId: feature.id,
+      stageSlug: "matrix",
+      stageName: "Matrix",
+      path: "docs/bento/matrix.md",
+      kind: "markdown",
+      mime: "text/markdown",
+      size: 5,
+      content: "mine.",
+    })
+    .returning({ id: runArtifacts.id });
+  assert.ok(artifact?.id, "the owner's artifact must exist for the artifact routes to be probed");
 
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
@@ -337,6 +356,9 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/features/${feature.id}/gate/plain`],
     ["GET", `/api/features/${feature.id}/changes`],
     ["GET", `/api/features/${feature.id}/changes/plain`],
+    ["GET", `/api/features/${feature.id}/artifacts`],
+    ["GET", `/api/artifacts/${artifact!.id}`],
+    ["GET", `/api/artifacts/${artifact!.id}/content`],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected" }) }],
     ["GET", `/api/features/${feature.id}/conversation`],
     ["POST", "/api/stages", { body: JSON.stringify({ pipelineId: pipeline.id, name: "Injected" }) }],

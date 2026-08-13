@@ -432,6 +432,58 @@ export const runEvents = pgTable(
   (t) => [uniqueIndex("run_events_run_seq_idx").on(t.runId, t.seq)],
 );
 
+/**
+ * Files an agent produced for people to look at, captured from the
+ * sandbox when its run ends: the stage write-up, design mockups,
+ * diagrams, screenshots, HTML previews.
+ *
+ * Rows are per run rather than per feature, so the design stage's
+ * output is still readable after the implementation stage rewrote the
+ * branch. Text stays inline in `content`; binary files live in the
+ * artifact store and `storageKey` names them there. Exactly one of the
+ * two is set, and the check constraint holds inserts to it.
+ */
+export const runArtifacts = pgTable(
+  "run_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "cascade" }),
+    featureId: uuid("feature_id")
+      .notNull()
+      .references(() => features.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /**
+     * The stage as it was when the run happened, held by value rather
+     * than by reference: an artifact is a record, and renaming or
+     * deleting the stage later must not orphan or block it.
+     */
+    stageSlug: text("stage_slug").notNull(),
+    stageName: text("stage_name").notNull(),
+    /** Where the agent wrote it, relative to the workspace. Display only. */
+    path: text("path").notNull(),
+    kind: text("kind", { enum: ["markdown", "mermaid", "image", "html", "file"] }).notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    /** Inline body for text artifacts. */
+    content: text("content"),
+    /** Artifact store key for binary artifacts. */
+    storageKey: text("storage_key"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("run_artifacts_feature_idx").on(t.featureId, t.createdAt),
+    index("run_artifacts_run_idx").on(t.runId),
+    check("run_artifacts_content_or_key", sql`(${t.content} is null) <> (${t.storageKey} is null)`),
+  ],
+);
+
 export const gateChecks = pgTable("gate_checks", {
   id: uuid("id").primaryKey().defaultRandom(),
   featureId: uuid("feature_id")

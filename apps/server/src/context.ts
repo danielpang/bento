@@ -4,6 +4,7 @@ import { GitHubApp } from "@bento/github";
 import { DockerDriver, LocalProcessDriver, SpriteDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import type PgBoss from "pg-boss";
 import type pg from "pg";
+import type { ArtifactStore } from "./artifact-store.js";
 import type { Auth } from "./auth.js";
 import type { SecretBox } from "./secrets.js";
 import { EventBus } from "./events.js";
@@ -67,6 +68,13 @@ export interface AppContext {
   entitlements?: Entitlements;
   /** Encrypts organization secrets at rest. */
   secretBox: SecretBox;
+  /**
+   * Bytes of binary run artifacts. Null on a multi mode deploy with no
+   * bucket configured, where capture keeps text artifacts and says in
+   * the transcript that it skipped the files. Access control is never
+   * here: it lives on the run_artifacts rows.
+   */
+  artifacts: ArtifactStore | null;
   /**
    * Live agent executions on this server, by run id, so a cancel
    * request can interrupt one. Runner-executed runs are not here: they

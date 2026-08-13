@@ -58,6 +58,31 @@ Requests switch to `bento_user`, which has neither. If you find yourself
 adding a query that "mysteriously sees everything", check which role it
 is running as before concluding the policies are wrong.
 
+## Artifacts are agent output, and must never run as the console
+
+Run artifacts (stage write-ups, mockups, HTML previews) are captured
+into `run_artifacts` rows; binary bytes go to the artifact store
+(`ctx.artifacts`), text stays inline. Two rules hold everywhere:
+
+1. **Authority lives in Postgres, never in the bucket.** Every read
+   goes through `getAccessibleArtifact` and the 404 convention. Store
+   keys are bookkeeping; nothing may be served because a key matched.
+2. **Agent bytes never execute on the console's origin.** Agents ingest
+   untrusted input, so an artifact can carry a prompt injection's
+   payload. Markdown renders through react-markdown with raw HTML off;
+   HTML previews render only in `<iframe sandbox="allow-scripts">` via
+   srcdoc (no `allow-same-origin`, ever); the content route sends
+   `Content-Security-Policy: sandbox` plus nosniff and serves HTML and
+   SVG as downloads. Loosening any of these hands an injected agent
+   the user's session.
+
+A new tenant table inherits none of the isolation machinery: the
+migration must state ENABLE and FORCE ROW LEVEL SECURITY, the policy,
+and the `bento_inherit_org` trigger itself, and the table belongs in
+`rls.test.ts`'s TENANT_TABLES. `organization_policies` shipped without
+any of that and is protected only by hand-scoped queries; do not add
+another one like it.
+
 ## Streams must not hold a database connection
 
 SSE endpoints stream for the length of an agent run. They query the

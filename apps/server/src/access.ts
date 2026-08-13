@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
-import { agentRuns, features, member, pipelines, projects, stages } from "@bento/db";
+import { agentRuns, features, member, pipelines, projects, runArtifacts, stages } from "@bento/db";
 import type { Context } from "hono";
 import type { AppContext } from "./context.js";
 import { actor, activeOrg } from "./middleware/actor.js";
@@ -87,6 +87,13 @@ export async function getAccessibleRun(ctx: AppContext, c: Context, runId: strin
   if (!run) return null;
   const feature = await getAccessibleFeature(ctx, c, run.featureId);
   return feature ? { run, feature } : null;
+}
+
+export async function getAccessibleArtifact(ctx: AppContext, c: Context, artifactId: string) {
+  const [artifact] = await db(c, ctx).select().from(runArtifacts).where(eq(runArtifacts.id, artifactId));
+  if (!artifact) return null;
+  const feature = await getAccessibleFeature(ctx, c, artifact.featureId);
+  return feature ? artifact : null;
 }
 
 export async function getAccessibleStage(ctx: AppContext, c: Context, stageId: string) {

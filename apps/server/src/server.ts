@@ -3,6 +3,7 @@ import { createDb, createPool, runMigrations } from "@bento/db";
 import { WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import { createApp } from "./app.js";
+import { createArtifactStore } from "./artifact-store.js";
 import { createAuth, type AuthHooks } from "./auth.js";
 import { createMailer } from "./mail.js";
 import { SecretBox } from "./secrets.js";
@@ -79,6 +80,13 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     env.BENTO_SECRET_KEY ?? createHash("sha256").update(`bento-local:${env.BENTO_DATA_DIR}`).digest("hex"),
   );
 
+  const artifacts = createArtifactStore(env);
+  if (env.BENTO_MODE === "multi" && !artifacts) {
+    console.warn(
+      "No artifact bucket is configured, so agents' binary artifacts (screenshots, HTML previews) are not kept. Run `fly storage create`, or set BENTO_ARTIFACTS_BUCKET, _ENDPOINT, _ACCESS_KEY_ID, and _SECRET_ACCESS_KEY.",
+    );
+  }
+
   const ctx: AppContext = {
     env,
     db,
@@ -88,6 +96,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     driver: createDriver(env),
     worktrees: new WorktreeManager(env.BENTO_DATA_DIR),
     secretBox,
+    artifacts,
     running: new Map(),
     liveInputs: new Map(),
     userId,

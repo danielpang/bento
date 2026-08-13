@@ -11,6 +11,7 @@ import type {
   Pipeline,
   Project,
   Repository,
+  RunArtifact,
   Stage,
 } from "./types.js";
 
@@ -492,6 +493,25 @@ export class BentoClient {
   /** Committed work: per-repo diffs and the stage write-ups, from the feature branch. */
   getChanges(featureId: string) {
     return this.request<FeatureChanges>(`/api/features/${featureId}/changes`);
+  }
+
+  /** The card's artifacts, newest first: write-ups, mockups, screenshots. */
+  listArtifacts(featureId: string) {
+    return this.request<RunArtifact[]>(`/api/features/${featureId}/artifacts`);
+  }
+
+  /** One artifact's body as text, for the kinds the console renders itself. */
+  getArtifactText(artifactId: string) {
+    return this.requestText(`/api/artifacts/${artifactId}/content`);
+  }
+
+  /**
+   * Where an artifact's bytes are served. For <img> tags and download
+   * links in the browser, which ride the session cookie; bearer-token
+   * clients fetch through getArtifactText instead.
+   */
+  artifactContentUrl(artifactId: string): string {
+    return `${this.baseUrl}/api/artifacts/${artifactId}/content`;
   }
 
   /** Pushes the card's branch and opens (or updates) its pull requests. */

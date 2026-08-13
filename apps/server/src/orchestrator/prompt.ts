@@ -15,6 +15,8 @@ export function buildStagePrompt(
   allStages: Stage[],
   repositories: { name: string; mountPath: string; testCommand?: string | null }[] = [],
   agent?: { name: string; skill: string | null },
+  /** Workspace directory whose files are captured onto the card as artifacts. */
+  artifactsDir?: string,
 ): string {
   const artifact = stageArtifactPath(stage.slug);
   const priorStages = allStages.filter((s) => s.position < stage.position);
@@ -86,6 +88,18 @@ export function buildStagePrompt(
     // in a workspace of several checkouts is to commit in one of them.
     lines.push(
       "Each repository is a separate checkout with its own history: a change touching two of them needs a commit in each.",
+    );
+  }
+  /**
+   * Where visual output goes. Outside the repositories on purpose: a
+   * mockup is for the person reviewing the card, not for the pull
+   * request, and files here are captured onto the card when the run
+   * ends. Self-contained HTML because the card shows one file in a
+   * sandboxed frame, with no way to fetch a stylesheet next to it.
+   */
+  if (artifactsDir) {
+    lines.push(
+      `If your work here produced something visual for people to review (a design mockup, an HTML preview, a screenshot, a diagram), save it under ${artifactsDir}. Files there are shown on the feature card. Keep each file self-contained: one HTML file with its styles, scripts, and images inlined; PNG, JPEG, or WebP images; Mermaid diagrams as .mmd files; or Markdown. Do not commit these files.`,
     );
   }
   /**

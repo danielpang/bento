@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { AgentSession } from "./AgentSession.js";
 import { criterionName, useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
@@ -12,8 +12,16 @@ import type {
   FeatureEvent,
   FeaturePullRequest,
   GateState,
+  RunArtifact,
   Stage,
 } from "@bento/api-client";
+
+// The viewer carries the markdown renderer, and mermaid behind that:
+// none of it belongs in the bundle of a drawer most cards open only to
+// press Approve.
+const ArtifactViewer = lazy(() =>
+  import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
+);
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
 
 interface DrawerProps {
@@ -61,6 +69,9 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
   const [gate, setGate] = useState<GateState | null>(null);
   const [history, setHistory] = useState<FeatureEvent[]>([]);
   const [changes, setChanges] = useState<FeatureChanges | null>(null);
+  const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
+  /** The artifact open in the viewer, when one is. */
+  const [openArtifact, setOpenArtifact] = useState<RunArtifact | null>(null);
   const [busy, setBusy] = useState(false);
   /** What the last publish said, when it did not simply work. */
   const [publishNotes, setPublishNotes] = useState<{ text: string; failed?: boolean }[]>([]);
@@ -86,12 +97,13 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
     let cancelled = false;
     void (async () => {
       try {
-        const [detail, gateState, events, committed, github] = await Promise.all([
+        const [detail, gateState, events, committed, github, produced] = await Promise.all([
           client.getFeature(feature.id),
           client.getGate(feature.id),
           client.getHistory(feature.id),
           client.getChanges(feature.id).catch(() => null),
           client.githubStatus().catch(() => null),
+          client.listArtifacts(feature.id).catch(() => []),
         ]);
         if (cancelled) return;
         setRuns(detail.runs);
@@ -99,6 +111,7 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
         setGate(gateState);
         setHistory(events);
         setChanges(committed);
+        setArtifacts(produced);
         setCanPublish(github ? github.canPublish : null);
         setLoadFailed(false);
       } catch {
@@ -168,6 +181,14 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
       setPublishing(false);
     }
   }
+
+  // The server sends artifacts newest first; a path captured by several
+  // runs shows once, as its latest capture. Older ones stay reachable
+  // through nothing yet, which is deliberate: the list is for review,
+  // not archaeology.
+  const visibleArtifacts = artifacts.filter(
+    (artifact, index) => artifacts.findIndex((other) => other.path === artifact.path) === index,
+  );
 
   const stageAgent = profiles.find((p) => p.id === stage?.defaultAgentProfileId);
   /**
@@ -471,6 +492,33 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
         )}
 
         {/*
+          What each stage produced for people: write-ups rendered as
+          documents, mockups, screenshots, diagrams. One row per file,
+          newest capture of each; opening one renders it in the viewer.
+        */}
+        {visibleArtifacts.length > 0 && (
+          <section className="section">
+            <span className="label">Artifacts</span>
+            <div className="artifact-list">
+              {visibleArtifacts.map((artifact) => (
+                <button key={artifact.id} className="artifact-row" onClick={() => setOpenArtifact(artifact)}>
+                  <span className="chip">{artifactKindWords(artifact.kind)}</span>
+                  <span className="artifact-name" title={artifact.path}>
+                    {artifactBaseName(artifact.path)}
+                  </span>
+                  <span className="artifact-when">{artifact.stageName}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+        {openArtifact && (
+          <Suspense fallback={null}>
+            <ArtifactViewer client={client} artifact={openArtifact} onClose={() => setOpenArtifact(null)} />
+          </Suspense>
+        )}
+
+        {/*
           What the agents have actually produced: the stage write-ups
           and the code change itself, read from the feature branch. A
           transcript says what happened; this is what you review.
@@ -663,5 +711,22 @@ function statusWords(status: string): string {
 function formatWhen(at: string): string {
   const date = new Date(at);
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+/** The file's own name; the row's title attribute keeps the full path. */
+function artifactBaseName(path: string): string {
+  return path.split("/").pop() ?? path;
+}
+
+const ARTIFACT_KIND_WORDS: Record<string, string> = {
+  markdown: "Doc",
+  mermaid: "Diagram",
+  image: "Image",
+  html: "Page",
+  file: "File",
+};
+
+function artifactKindWords(kind: string): string {
+  return ARTIFACT_KIND_WORDS[kind] ?? "File";
 }
 

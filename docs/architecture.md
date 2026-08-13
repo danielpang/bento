@@ -4,7 +4,7 @@ How the pieces of Bento fit together. The diagrams are Mermaid, which GitHub ren
 
 ## The system at a glance
 
-Every client talks to the same Hono API. The server owns the orchestrator and the queue, Postgres is the only stateful dependency, and agents run inside sandboxes that the server (or a runner machine) manages through a common driver interface.
+Every client talks to the same Hono API. The server owns the orchestrator and the queue, Postgres holds all state but one kind (binary run artifacts live in an S3-compatible bucket, Tigris on the hosted deployment, with their authority still in Postgres), and agents run inside sandboxes that the server (or a runner machine) manages through a common driver interface.
 
 ```mermaid
 flowchart TB
@@ -26,6 +26,8 @@ flowchart TB
         db[("Tables with RLS<br/>row-level security")]
         secrets[("Org secrets<br/>AES-256-GCM")]
     end
+
+    store[("Artifact store<br/>Tigris bucket, or local disk")]
 
     subgraph sandboxes [Sandboxes, one per feature]
         docker["Docker container<br/>git worktrees"]
@@ -54,6 +56,8 @@ flowchart TB
     orch <--> github
     orch --> bus
     bus --> api
+    orch --> store
+    api --> store
 ```
 
 The TUI can also embed the entire server block in its own process, which is what `bento` with no arguments does: it brings up Postgres in a managed container, runs migrations, and serves the API on a loopback port.

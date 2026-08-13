@@ -40,12 +40,15 @@ export function Modal({
   onClose,
   children,
   actions,
+  wide,
 }: {
   title: string;
   description?: string;
   onClose: () => void;
   children?: ReactNode;
   actions: ReactNode;
+  /** For content, not forms: the artifact viewer's page-shaped panel. */
+  wide?: boolean;
 }) {
   /**
    * Put the cursor back where it came from.
@@ -83,7 +86,7 @@ export function Modal({
             without also dismissing the drawer that opened it. */}
         <Dialog.Overlay className="modal-backdrop" data-portal-layer="">
           <Dialog.Content
-            className="modal"
+            className={wide ? "modal modal-wide" : "modal"}
             ref={panel}
             // The panel itself, so the focus trap still has focus
             // inside it: preventing this without moving focus leaves it
