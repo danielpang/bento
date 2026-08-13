@@ -33,10 +33,23 @@ export function artifactRoutes(ctx: AppContext) {
     .get("/:id", async (c) => {
       const artifact = await getAccessibleArtifact(ctx, c, c.req.param("id"));
       if (!artifact) return c.json({ error: "not found" }, 404);
-      // The store key is bookkeeping between the server and its bucket.
-      const { storageKey: _storageKey, ...row } = artifact;
-      return c.json(row);
+      // Stated column by column rather than by subtraction, so a column
+      // added to run_artifacts later has to be put here on purpose. The
+      // store key stays out (bookkeeping between the server and its
+      // bucket); inline content rides along because for text artifacts
+      // it is the useful half of the answer.
+      const { id, runId, featureId, stageSlug, stageName, path, kind, mime, size, content, createdAt } = artifact;
+      return c.json({ id, runId, featureId, stageSlug, stageName, path, kind, mime, size, content, createdAt });
     })
+    /**
+     * Deliberately inside the tenant transaction, store fetch and all,
+     * unlike the /events routes. Their exclusion exists for connections
+     * held the length of an agent run; this hold is bounded by one
+     * capped object read (25 MB, usually far less), the same class of
+     * in-request work /changes does when it shells out to git. Keeping
+     * the route wrapped keeps row-level security on it, and the layers
+     * are not interchangeable: do not move it out to shave the hold.
+     */
     .get("/:id/content", async (c) => {
       const artifact = await getAccessibleArtifact(ctx, c, c.req.param("id"));
       if (!artifact) return c.json({ error: "not found" }, 404);

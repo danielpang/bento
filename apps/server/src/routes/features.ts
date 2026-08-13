@@ -343,7 +343,7 @@ export function featureRoutes(ctx: AppContext) {
      * The card's artifacts, newest first: stage write-ups, mockups,
      * screenshots, captured per run so earlier stages' output survives
      * later rewrites. Metadata only; the console fetches one artifact's
-     * body from /api/artifacts/:id when somebody opens it.
+     * body from /api/artifacts/:id/content when somebody opens it.
      */
     .get("/:id/artifacts", async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));

@@ -94,7 +94,7 @@ export function buildStagePrompt(
    * Where visual output goes. Outside the repositories on purpose: a
    * mockup is for the person reviewing the card, not for the pull
    * request, and files here are captured onto the card when the run
-   * ends. Self-contained HTML because the card shows one file in a
+   * succeeds. Self-contained HTML because the card shows one file in a
    * sandboxed frame, with no way to fetch a stylesheet next to it.
    */
   if (artifactsDir) {

@@ -7,7 +7,10 @@ import type { AppContext } from "../context.js";
 
 /**
  * Pulls what an agent produced for people out of the sandbox when its
- * run ends, and keeps it as run_artifacts rows.
+ * run succeeds, and keeps it as run_artifacts rows. Failed runs skip
+ * capture on purpose: their sandboxes are often unusable (a missing
+ * CLI, dead credentials), and half-finished files presented as the
+ * stage's output would mislead the person reviewing the card.
  *
  * Two sources. The stage write-up at docs/bento/<slug>.md is committed
  * to git, but reading it back through git only works for branches that
@@ -204,6 +207,10 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
       latest.size === data.byteLength &&
       latest.content === data.toString("utf8")
     ) {
+      // Already on the card, so the file still leaves the artifacts
+      // directory below; leaving it meant re-reading it on every
+      // later run of this sandbox, forever.
+      if (candidate.fromArtifactDir) captured.push({ abs: candidate.abs });
       continue;
     }
 

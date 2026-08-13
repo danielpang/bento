@@ -189,6 +189,9 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
   const visibleArtifacts = artifacts.filter(
     (artifact, index) => artifacts.findIndex((other) => other.path === artifact.path) === index,
   );
+  // What the Artifacts section already covers, so the Changes section
+  // below does not show the same write-up a second time as raw text.
+  const capturedPaths = new Set(artifacts.map((artifact) => artifact.path));
 
   const stageAgent = profiles.find((p) => p.id === stage?.defaultAgentProfileId);
   /**
@@ -545,12 +548,23 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
                     in {repo.files.length} file{repo.files.length === 1 ? "" : "s"}
                   </span>
                 </p>
-                {repo.artifacts.map((artifact) => (
-                  <details key={artifact.path} className="changes-block">
-                    <summary>{artifact.path.replace(/^docs\/bento\//, "")} (write-up)</summary>
-                    <pre className="artifact">{artifact.content}</pre>
-                  </details>
-                ))}
+                {/* Only write-ups the Artifacts section does not already
+                    render: without the filter, a captured write-up
+                    appeared twice in one drawer, once as a document and
+                    once as raw text. Cards worked before capture existed
+                    have no artifact rows, so their write-ups still show
+                    here from git. */}
+                {repo.artifacts
+                  .filter(
+                    (artifact) =>
+                      !capturedPaths.has(artifact.path) && !capturedPaths.has(`${repo.name}/${artifact.path}`),
+                  )
+                  .map((artifact) => (
+                    <details key={artifact.path} className="changes-block">
+                      <summary>{artifact.path.replace(/^docs\/bento\//, "")} (write-up)</summary>
+                      <pre className="artifact">{artifact.content}</pre>
+                    </details>
+                  ))}
                 <details className="changes-block">
                   <summary>
                     Code changes
