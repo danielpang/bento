@@ -1,4 +1,4 @@
-import type { AgentEvent, GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type GateCriteria } from "@bento/core";
 import type {
   AgentProfile,
   AgentRun,
@@ -24,6 +24,18 @@ export interface ClientOptions {
   /** Bearer token source for non-browser clients (TUI, Mac app). */
   tokens?: TokenStore;
   fetch?: typeof fetch;
+}
+
+export interface RunStreamHandlers {
+  onEvent?: (event: AgentEvent, seq: number) => void;
+  onDelta?: (delta: AgentDelta) => void;
+  onDone?: (status: string) => void;
+  /**
+   * The stream failed: a rejected token, a dropped connection, or a
+   * handler that threw. Fired on the fetch transport only; the
+   * EventSource transport reconnects on its own instead.
+   */
+  onError?: (error: Error) => void;
 }
 
 export interface GitHubConnection {
@@ -262,6 +274,24 @@ export class BentoClient {
     return this.request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
   }
 
+  /** The name, and nothing else about the project. */
+  renameProject(projectId: string, name: string) {
+    return this.request<Project>(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  /**
+   * The project and everything on its board. Refused with 409 while an
+   * agent is still working a card.
+   */
+  deleteProject(projectId: string) {
+    return this.request<{ ok: boolean; deletedCards: number }>(`/api/projects/${projectId}`, {
+      method: "DELETE",
+    });
+  }
+
   getPipeline(projectId: string) {
     return this.request<Pipeline>(`/api/projects/${projectId}/pipeline`);
   }
@@ -308,6 +338,14 @@ export class BentoClient {
 
   githubStatus() {
     return this.request<GitHubConnection>("/api/github/status");
+  }
+
+  /** An issue report or feature request, mailed to the operator. */
+  sendContact(input: { kind: "issue" | "feature"; message: string }) {
+    return this.request<{ ok: boolean }>("/api/contact", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   /** The whole order at once, so positions stay unique and contiguous. */
@@ -419,7 +457,8 @@ export class BentoClient {
   }
 
   /**
-   * Every card's newest run status, in one request.
+   * Every card's newest run status and latest spoken line, in one
+   * request.
    *
    * A client that polls needs this for the whole board, not for the
    * card someone happens to have selected: a board where four of five
@@ -427,7 +466,7 @@ export class BentoClient {
    * status at all. The line snapshot already carries it, so this reads
    * that rather than asking per card and growing with the board.
    */
-  async getRunStatuses(projectId: string): Promise<Record<string, string>> {
+  async getBoardSnapshot(projectId: string): Promise<{ statuses: Record<string, string>; outputs: Record<string, string> }> {
     const token = await this.tokens?.get();
     const res = await this.fetchImpl(`${this.baseUrl}/api/projects/${projectId}/board/plain`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
@@ -435,12 +474,19 @@ export class BentoClient {
     });
     if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
     const statuses: Record<string, string> = {};
+    const outputs: Record<string, string> = {};
     for (const line of (await res.text()).split("\n")) {
-      const [kind, id, , , runStatus] = line.split("|");
-      if (kind !== "feature" || !id || !runStatus || runStatus === "-") continue;
-      statuses[id] = runStatus;
+      const [kind, id, , , runStatus, , , output] = line.split("|");
+      if (kind !== "feature" || !id) continue;
+      if (runStatus && runStatus !== "-") statuses[id] = runStatus;
+      if (output && output !== "-") outputs[id] = output;
     }
-    return statuses;
+    return { statuses, outputs };
+  }
+
+  /** Just the statuses of the board snapshot, for polling clients. */
+  async getRunStatuses(projectId: string): Promise<Record<string, string>> {
+    return (await this.getBoardSnapshot(projectId)).statuses;
   }
 
   createFeature(input: { projectId: string; title: string; description?: string }) {
@@ -700,18 +746,44 @@ export class BentoClient {
   /**
    * Streams a run's events. Replays from `since`, then follows live
    * until the run ends. Returns a function that stops the stream.
+   *
+   * onDelta carries the typing: token sized fragments of the message
+   * the agent is composing. Live only, never replayed; the finished
+   * message arrives through onEvent and supersedes every fragment
+   * before it.
    */
   streamRun(
     runId: string,
-    handlers: { onEvent?: (event: AgentEvent, seq: number) => void; onDone?: (status: string) => void },
+    handlers: RunStreamHandlers,
     since = 0,
   ): () => void {
-    const source = new EventSource(`${this.baseUrl}/api/runs/${runId}/events?since=${since}`, {
-      withCredentials: !this.tokens,
-    });
+    const url = `${this.baseUrl}/api/runs/${runId}/events?since=${since}`;
+    // EventSource cannot carry an Authorization header, so a client
+    // that authenticates with a bearer token (the TUI, the Mac app)
+    // reads the same stream over fetch. This is why the TUI could
+    // never follow a run live before.
+    if (this.tokens) return this.streamRunWithFetch(url, handlers, since);
+
+    /**
+     * EventSource reconnects on its own after a drop, and the server
+     * replays from ?since= on every connection, so without this
+     * filter a wifi blip showed the whole conversation twice. The
+     * seq rides on the SSE id field precisely so replays are
+     * recognizable.
+     */
+    let lastSeq = since;
+    const source = new EventSource(url, { withCredentials: true });
     source.addEventListener("run_event", (e) => {
       const message = e as MessageEvent<string>;
-      handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, Number(message.lastEventId));
+      const seq = Number(message.lastEventId);
+      if (Number.isFinite(seq) && seq > 0) {
+        if (seq <= lastSeq) return;
+        lastSeq = seq;
+      }
+      handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, seq);
+    });
+    source.addEventListener("run_delta", (e) => {
+      handlers.onDelta?.(JSON.parse((e as MessageEvent<string>).data) as AgentDelta);
     });
     source.addEventListener("done", (e) => {
       const message = e as MessageEvent<string>;
@@ -721,11 +793,116 @@ export class BentoClient {
     return () => source.close();
   }
 
-  /** Streams board changes for a project (card moved, run status changed). */
-  streamBoard(projectId: string, onEvent: (event: unknown) => void): () => void {
+  /**
+   * The SSE stream over plain fetch: same frames, but the request can
+   * carry the bearer token. Reconnects after a drop from the last seen
+   * seq, which is the same recovery a browser gets from EventSource
+   * itself: the server replays persisted events past ?since=, so a
+   * deploy or a network blip costs at most the in-flight typing. It
+   * used to not reconnect at all, and the TUI spent the rest of the
+   * run on its polling fallback with nothing saying so.
+   *
+   * It keeps trying for as long as the caller wants the stream, with
+   * the delay capped, because the outage it most has to survive is a
+   * deploy: the agent works on inside its sandbox and the restarted
+   * server reattaches to it, so a client that gave up after a handful
+   * of seconds would go blind exactly when there was still something
+   * to watch. Only a refusal that retrying cannot fix, an expired or
+   * rejected token, stops the loop and reaches onError.
+   */
+  private streamRunWithFetch(url: string, handlers: RunStreamHandlers, since: number): () => void {
+    const controller = new AbortController();
+    const base = url.replace(/\?since=\d+$/, "");
+    let lastSeq = since;
+    void (async () => {
+      let failures = 0;
+      while (!controller.signal.aborted) {
+        try {
+          const token = await this.tokens!.get();
+          const res = await this.fetchImpl(`${base}?since=${lastSeq}`, {
+            headers: token ? { authorization: `Bearer ${token}` } : {},
+            credentials: "omit",
+            signal: controller.signal,
+          });
+          if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          const parser = new SseParser();
+          /**
+           * Whether this connection carried anything. The backoff grows
+           * on connections that deliver nothing as well as on ones that
+           * fail outright, because a server that accepts and closes at
+           * once would otherwise be reconnected to every second for as
+           * long as it kept doing it.
+           */
+          let carried = false;
+          while (true) {
+            const { value, done } = await reader.read();
+            // The server only ends the stream on purpose after a done
+            // frame; a bare end is a disconnect, so reconnect and let
+            // ?since= deduplicate.
+            if (done) break;
+            carried = true;
+            failures = 0;
+            for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+              // A consumer handler that throws must not kill the
+              // stream: the frames after it are still wanted.
+              try {
+                if (frame.event === "run_event") {
+                  const seq = Number(frame.id);
+                  if (Number.isFinite(seq) && seq > 0) {
+                    if (seq <= lastSeq) continue;
+                    lastSeq = seq;
+                  }
+                  handlers.onEvent?.(JSON.parse(frame.data) as AgentEvent, seq);
+                } else if (frame.event === "run_delta") {
+                  handlers.onDelta?.(JSON.parse(frame.data) as AgentDelta);
+                } else if (frame.event === "done") {
+                  handlers.onDone?.((JSON.parse(frame.data) as { status: string }).status);
+                  controller.abort();
+                  return;
+                }
+              } catch (err) {
+                handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+              }
+            }
+          }
+          if (!carried) failures += 1;
+        } catch (err) {
+          if (controller.signal.aborted) return;
+          // A credential the server refuses is the one failure another
+          // attempt cannot mend, so it ends the stream and is said out
+          // loud. Everything else is an outage to wait out.
+          if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+            handlers.onError?.(err);
+            return;
+          }
+          failures += 1;
+        }
+        if (controller.signal.aborted) return;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1_000 * 2 ** failures, 8_000)));
+      }
+    })();
+    return () => controller.abort();
+  }
+
+  /**
+   * Streams board changes for a project (card moved, run status changed).
+   *
+   * Board events live only in memory on the server, so anything emitted
+   * while this stream was down (a deploy, a network drop) never arrives.
+   * `onReconnect` fires when the stream opens again after a drop, which
+   * is the caller's cue to refetch a snapshot and fill the gap.
+   */
+  streamBoard(projectId: string, onEvent: (event: unknown) => void, onReconnect?: () => void): () => void {
     const source = new EventSource(`${this.baseUrl}/api/board/${projectId}/events`, {
       withCredentials: !this.tokens,
     });
+    let opened = false;
+    source.onopen = () => {
+      if (opened) onReconnect?.();
+      opened = true;
+    };
     source.addEventListener("board_event", (e) => onEvent(JSON.parse((e as MessageEvent<string>).data)));
     return () => source.close();
   }

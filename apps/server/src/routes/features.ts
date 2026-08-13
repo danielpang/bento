@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, notLike, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
@@ -15,8 +15,10 @@ import {
   pipelines,
   projects,
   repositories,
+  sandboxes,
   stages,
 } from "@bento/db";
+import type { SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
@@ -24,6 +26,7 @@ import { canAccessProject, getAccessibleFeature } from "../access.js";
 import {
   advanceFeature,
   evaluateFeatureGate,
+  JUDGE_PROMPT_PREFIX,
   moveFeatureBack,
   moveFeatureTo,
   recordManualApproval,
@@ -31,7 +34,7 @@ import {
   reopenFeature,
 } from "../orchestrator/gate-evaluator.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
-import { publishFeatureBranches } from "../orchestrator/publish.js";
+import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { githubConnectionFor } from "../github.js";
 import { shouldIncludeStageNotes } from "../settings.js";
@@ -213,10 +216,16 @@ export function featureRoutes(ctx: AppContext) {
       // The last 30 finished runs bound the payload; a card with sixty
       // historical runs does not need them all to read as a conversation.
       const finishedRuns = runRows.filter((r) => terminal.includes(r.status)).slice(-30);
-      const profileRows = await db(c, ctx)
-        .select({ id: agentProfiles.id, name: agentProfiles.name })
-        .from(agentProfiles)
-        .where(eq(agentProfiles.ownerId, actor(c)));
+      // Looked up by the runs' own profiles rather than by who is
+      // asking: in a shared organization a colleague's agent used to
+      // render as "agent" because only the caller's profiles resolved.
+      const profileIds = [...new Set(finishedRuns.map((r) => r.agentProfileId))];
+      const profileRows = profileIds.length
+        ? await db(c, ctx)
+            .select({ id: agentProfiles.id, name: agentProfiles.name })
+            .from(agentProfiles)
+            .where(inArray(agentProfiles.id, profileIds))
+        : [];
       const names = new Map(profileRows.map((p) => [p.id, p.name]));
 
       const blocks = [];
@@ -262,10 +271,16 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
 
+      /**
+       * One SQL statement, not a read-modify-write: two messages sent
+       * in the same instant both read the same queuedPrompt, and the
+       * second SET silently erased the first while both callers were
+       * told "queued". The database does the append, so both survive.
+       */
       const queueIt = async () => {
         await db(c, ctx)
           .update(features)
-          .set({ queuedPrompt: feature.queuedPrompt ? `${feature.queuedPrompt}\n${text}` : text })
+          .set({ queuedPrompt: sql`coalesce(${features.queuedPrompt} || E'\n', '') || ${text}` })
           .where(eq(features.id, feature.id));
         return c.json({ queued: true as const });
       };
@@ -281,18 +296,33 @@ export function featureRoutes(ctx: AppContext) {
         }
         return queueIt();
       }
+      /**
+       * The conversation a follow-up continues is the card's own work,
+       * never a judge's. Judge runs are ordinary rows on the feature,
+       * so "the newest run" was sometimes the reviewer, and the user's
+       * message came back answered by the judge inside the judging
+       * session. The newest run whose prompt is not a judge prompt is
+       * the one whose agent, stage, and session the message belongs to.
+       */
+      const [conversation] = await db(c, ctx)
+        .select()
+        .from(agentRuns)
+        .where(and(eq(agentRuns.featureId, feature.id), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1);
+      const resumeFrom = conversation ?? latest;
       const run = await startRunIfIdle(db(c, ctx), {
         featureId: feature.id,
-        stageId: latest.stageId,
-        agentProfileId: latest.agentProfileId,
+        stageId: resumeFrom.stageId,
+        agentProfileId: resumeFrom.agentProfileId,
         prompt: text,
-        cliSessionId: latest.cliSessionId,
-        executor: latest.executor,
+        cliSessionId: resumeFrom.cliSessionId,
+        executor: resumeFrom.executor,
       });
       // A run started in the gap between the read and the insert; the
       // message waits for it like any other mid-run message.
       if (run === "busy") return queueIt();
-      if (latest.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      if (resumeFrom.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json({ queued: false as const, run }, 201);
     })
     /**
@@ -532,6 +562,13 @@ export function featureRoutes(ctx: AppContext) {
      * in, whatever the stage settings say, publish what is committed
      * right now. The server pushes, never the agent, for the same
      * reason as always: a push credential must not enter a sandbox.
+     *
+     * Where the commits are read from depends on the driver. A local
+     * card's work is in the host's worktrees; a hosted card's work is
+     * inside its sandbox, which the server cannot mount, so the driver
+     * exports it as bundles, the same handoff a finished run uses.
+     * Either way the organization's GitHub App installation answers the
+     * push when there is one, before any saved token is consulted.
      */
     .post("/:id/publish", async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
@@ -549,9 +586,6 @@ export function featureRoutes(ctx: AppContext) {
           409,
         );
       }
-      if (ctx.driver.provider === "sprite") {
-        return c.json({ error: "hosted sandboxes publish when a run finishes; run the stage's agent instead" }, 409);
-      }
       const selected = await db(c, ctx)
         .select()
         .from(repositories)
@@ -565,20 +599,49 @@ export function featureRoutes(ctx: AppContext) {
       // rather than refusing for a link its checkout has always had.
       const repoRows =
         ctx.env.BENTO_MODE === "multi" ? selected : await linkGitHubRemotes(db(c, ctx), selected);
-      // Ensured rather than assumed: worktrees are cleaned up over
-      // time, and a fresh one at the branch still answers correctly
-      // (no commits beyond the base means nothing to publish).
-      const prepared = await ctx.worktrees.ensureAll(
-        repoRows.map((r) => ({ name: r.name, localPath: r.localPath })),
-        feature.id,
-        feature.branchName,
-      );
       const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
-      const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
-        featureId: feature.id,
-        featureTitle: feature.title,
-        branch: feature.branchName,
-        repositories: repoRows.map((row) => {
+
+      const exportRepository = ctx.driver.exportRepository?.bind(ctx.driver);
+      let publishable: PublishableRepository[];
+      if (exportRepository) {
+        // The card's sandbox holds the checkouts. It outlives the run
+        // that made it, so the latest row that was not destroyed is the
+        // one to read; a card with none has never run anywhere.
+        const [sandbox] = await db(c, ctx)
+          .select()
+          .from(sandboxes)
+          .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
+          .orderBy(desc(sandboxes.createdAt))
+          .limit(1);
+        if (!sandbox) {
+          return c.json({ error: "this card has no sandbox yet; run an agent on it first, then publish" }, 409);
+        }
+        const handle: SandboxHandle = {
+          externalId: sandbox.externalId,
+          provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+          workdir: sandbox.workdir,
+        };
+        publishable = repoRows.map((row) => {
+          const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
+          return {
+            id: row.id,
+            name: row.name,
+            repoUrl: row.repoUrl,
+            githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
+            defaultBranch: row.defaultBranch,
+            exportBundle: () => exportRepository(handle, row.name, row.defaultBranch),
+          };
+        });
+      } else {
+        // Ensured rather than assumed: worktrees are cleaned up over
+        // time, and a fresh one at the branch still answers correctly
+        // (no commits beyond the base means nothing to publish).
+        const prepared = await ctx.worktrees.ensureAll(
+          repoRows.map((r) => ({ name: r.name, localPath: r.localPath })),
+          feature.id,
+          feature.branchName,
+        );
+        publishable = repoRows.map((row) => {
           const preparedRepo = prepared.find((p) => p.name === row.name);
           const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
           return {
@@ -589,7 +652,13 @@ export function featureRoutes(ctx: AppContext) {
             defaultBranch: row.defaultBranch,
             ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
           };
-        }),
+        });
+      }
+      const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
+        featureId: feature.id,
+        featureTitle: feature.title,
+        branch: feature.branchName,
+        repositories: publishable,
       }, { includeStageNotes });
       if (published.length > 0) {
         ctx.bus.emitBoardEvent({

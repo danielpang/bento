@@ -131,6 +131,38 @@ test("opencode surfaces an error line as failure", () => {
   assert.equal(outcome.sessionId, "ses_2");
 });
 
+/**
+ * opencode emits step_start before every agent loop step (each tool
+ * call and the final answer), all carrying the same session id. The
+ * adapter maps each to an init event, and init renders as
+ * "[session started]" in the transcript, so without runAgent's
+ * dedupe a 2-tool run opened the transcript with three of them.
+ * claude-code, codex, cursor, and pi each emit their init line once,
+ * so collapsing to the first is safe for every adapter.
+ */
+test("runAgent keeps only the first init across opencode step_starts", async () => {
+  async function* steps(): AsyncIterable<{ kind: "stdout" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stdout", data: `{"type":"step_start","sessionID":"ses_x","part":{}}\n` };
+    yield { kind: "stdout", data: `{"type":"tool_use","sessionID":"ses_x","part":{"tool":"bash","callID":"c1","state":{"status":"running"}}}\n` };
+    yield { kind: "stdout", data: `{"type":"tool_use","sessionID":"ses_x","part":{"tool":"bash","callID":"c1","state":{"status":"completed"}}}\n` };
+    yield { kind: "stdout", data: `{"type":"step_start","sessionID":"ses_x","part":{}}\n` };
+    yield { kind: "stdout", data: `{"type":"text","sessionID":"ses_x","part":{"text":"Done."}}\n` };
+    yield { kind: "stdout", data: `{"type":"step_start","sessionID":"ses_x","part":{}}\n` };
+    yield { kind: "exit", exitCode: 0 };
+  }
+  const seen: AgentEvent[] = [];
+  const { outcome } = await runAgent({
+    adapter: opencodeAdapter,
+    argv: ["opencode"],
+    exec: steps,
+    onEvent: (event) => seen.push(event),
+  });
+  const inits = seen.filter((e) => e.type === "init");
+  assert.equal(inits.length, 1, "only the first step_start should become an init");
+  assert.equal(outcome.sessionId, "ses_x");
+  assert.equal(outcome.ok, true);
+});
+
 test("opencode builds a provider qualified model command", () => {
   const cmd = opencodeAdapter.buildCommand({
     prompt: "do it",
@@ -263,6 +295,65 @@ test("pi exiting without a result is a failure, not a silent success", () => {
   const outcome = piAdapter.extractOutcome([], 1);
   assert.equal(outcome.ok, false);
   assert.match(outcome.error ?? "", /stopped before reporting a result/);
+});
+
+test("pi recognizes streaming fragments of text and thinking", () => {
+  const text = piAdapter.parseDelta?.(
+    '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hel"}}',
+  );
+  assert.deepEqual(text, { channel: "text", text: "Hel" });
+
+  const thinking = piAdapter.parseDelta?.(
+    '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}',
+  );
+  assert.deepEqual(thinking, { channel: "thinking", text: "hmm" });
+
+  // Tool argument fragments are half a JSON object; tool events cover
+  // them. Consumed as empty chatter rather than left for the tail.
+  assert.deepEqual(
+    piAdapter.parseDelta?.(
+      '{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"{\\"pa"}}',
+    ),
+    { channel: "text", text: "" },
+  );
+  assert.equal(piAdapter.parseDelta?.('{"type":"message_end","message":{}}'), null);
+  assert.equal(piAdapter.parseDelta?.("not json"), null);
+});
+
+/**
+ * Fragments are display only: they reach onDelta and nothing else. In
+ * particular they must not land in the stray output tail, where they
+ * used to bury a failing run's actual reason under token JSON.
+ */
+test("streamed fragments reach onDelta and stay out of the transcript and the failure tail", async () => {
+  const lines = [
+    '{"type":"session","version":3,"id":"sess-1"}',
+    '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Wor"}}',
+    '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"king"}}',
+  ];
+  async function* fails(): AsyncIterable<{ kind: "stdout" | "stderr" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stdout", data: lines.map((l) => `${l}\n`).join("") };
+    yield { kind: "stderr", data: "credential rejected\n" };
+    yield { kind: "exit", exitCode: 1 };
+  }
+  const deltas: { channel: string; text: string; offset: number }[] = [];
+  const { events, outcome } = await runAgent({
+    adapter: piAdapter,
+    argv: ["pi"],
+    exec: fails,
+    onDelta: (delta) => deltas.push(delta),
+  });
+  assert.deepEqual(
+    deltas,
+    [
+      { channel: "text", text: "Wor", offset: 0 },
+      { channel: "text", text: "king", offset: 3 },
+    ],
+    "fragments carry the offset a late joiner needs to detect a torn draft",
+  );
+  assert.deepEqual(events.map((e) => e.type), ["init"], "fragments are not events");
+  assert.match(outcome.error ?? "", /credential rejected/, "the real reason survives");
+  assert.doesNotMatch(outcome.error ?? "", /message_update/, "token JSON stays out of the tail");
 });
 
 /**

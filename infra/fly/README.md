@@ -54,7 +54,6 @@ Members add keys under Team in the console. Supported today:
 | Credential | Used by |
 |---|---|
 | `ANTHROPIC_API_KEY` | Claude Code, and opencode on Claude models |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code on a subscription, in place of the key. Mint one with `claude setup-token` |
 | `OPENAI_API_KEY` | Codex CLI, and opencode on OpenAI models |
 | `OPENROUTER_API_KEY` | opencode directly |
 | `GEMINI_API_KEY` | opencode on Gemini models |
@@ -62,7 +61,16 @@ Members add keys under Team in the console. Supported today:
 
 To bill Claude Code or Codex through OpenRouter, save the OpenRouter key
 and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to
-`https://openrouter.ai/api/v1`.
+`https://openrouter.ai/api/v1`. A base URL takes the endpoint away from
+the provider, so a Claude subscription token cannot be used with one and
+is dropped in favour of the key when both are stored.
+
+Claude subscriptions are not offered here. A `claude setup-token`
+credential does work, and the console has a field for it in local mode,
+but secrets are stored one value per organization: a hosted tenant
+saving one would put a single member's personal subscription behind
+every other member's runs, sharing that one account's rate limits.
+Hosted organizations use `ANTHROPIC_API_KEY`.
 
 Keys are encrypted at rest with `BENTO_SECRET_KEY` (AES-256-GCM) and are
 never returned by any route: the console shows a masked tail only.

@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import type { Env } from "./env.js";
+import { anchor, html, renderEmail, renderText } from "./email-layout.js";
 
 export interface Message {
   to: string;
@@ -77,6 +78,8 @@ export interface InvitationEmailInput {
   role: string;
   acceptUrl: string;
   expiresInDays: number;
+  /** Base URL of the console, for the footer link. */
+  appUrl: string;
 }
 
 /**
@@ -85,38 +88,90 @@ export interface InvitationEmailInput {
  */
 export function invitationMessage(input: InvitationEmailInput): Message {
   const subject = `${input.inviterName} invited you to ${input.organizationName} on Bento`;
-  const text = [
-    `${input.inviterName} invited you to join ${input.organizationName} on Bento as a ${input.role}.`,
-    "",
-    "Accept the invitation:",
-    input.acceptUrl,
-    "",
-    `The link expires in ${input.expiresInDays} days.`,
-    "If you were not expecting this, you can ignore it.",
-  ].join("\n");
+  const note = `The link expires in ${input.expiresInDays} days. If you were not expecting this, you can ignore it.`;
+  const footerNote = "You are receiving this because someone invited you to a team on Bento.";
 
-  const html = [
-    `<p><strong>${escapeHtml(input.inviterName)}</strong> invited you to join`,
-    `<strong>${escapeHtml(input.organizationName)}</strong> on Bento as a ${escapeHtml(input.role)}.</p>`,
-    `<p><a href="${escapeHtml(input.acceptUrl)}">Accept the invitation</a></p>`,
-    `<p>The link expires in ${input.expiresInDays} days. If you were not expecting this, you can ignore it.</p>`,
-  ].join(" ");
+  const text = renderText({
+    lines: [
+      `${input.inviterName} invited you to join ${input.organizationName} on Bento as a ${input.role}.`,
+      "",
+      "Accept the invitation:",
+      input.acceptUrl,
+      "",
+      `The link expires in ${input.expiresInDays} days.`,
+      "If you were not expecting this, you can ignore it.",
+    ],
+    footerNote,
+    appUrl: input.appUrl,
+  });
 
-  return { to: input.email, subject, text, html };
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: `Join ${input.organizationName} as a ${input.role}.`,
+    heading: `${input.inviterName} invited you to ${input.organizationName}`,
+    paragraphs: [
+      html`You have been invited to join <strong>${input.organizationName}</strong> on Bento as a ${input.role}.`,
+      "Bento runs coding agents on a board your team shares, one agent to a card, with every run and every review in the open.",
+    ],
+    action: { label: "Accept the invitation", url: input.acceptUrl },
+    note,
+    footerNote,
+  });
+
+  return { to: input.email, subject, text, html: body };
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+export interface ContactEmailInput {
+  to: string;
+  kind: "issue" | "feature";
+  message: string;
+  senderName: string;
+  senderEmail: string;
+  /** Base URL of the console, for the footer link. */
+  appUrl: string;
+}
+
+/**
+ * A contact form submission, delivered to the operator's inbox. The
+ * sender's address is in the body because the mail comes from the
+ * server's own from address, and a report nobody can reply to is a
+ * report that goes unanswered.
+ */
+export function contactMessage(input: ContactEmailInput): Message {
+  const label = input.kind === "issue" ? "Issue report" : "Feature request";
+  const subject = `[Bento] ${label} from ${input.senderEmail}`;
+  const footerNote = "You are receiving this because this address is set as the contact for this Bento server.";
+
+  const text = renderText({
+    lines: [
+      `${label} from ${input.senderName} (${input.senderEmail}):`,
+      "",
+      input.message,
+    ],
+    footerNote,
+    appUrl: input.appUrl,
+  });
+
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: `${input.senderName} sent a ${input.kind === "issue" ? "report" : "request"}.`,
+    heading: `${label} from ${input.senderName}`,
+    paragraphs: [
+      html`Sent by ${input.senderName}, ` + anchor(`mailto:${input.senderEmail}`, input.senderEmail) + ". Reply to that address to reach them.",
+    ],
+    quote: input.message,
+    footerNote,
+  });
+
+  return { to: input.to, subject, text, html: body };
 }
 
 export interface LinkEmailInput {
   email: string;
   url: string;
   expiresInHours: number;
+  /** Base URL of the console, for the footer link. */
+  appUrl: string;
 }
 
 /**
@@ -128,20 +183,33 @@ export interface LinkEmailInput {
  */
 export function verificationMessage(input: LinkEmailInput): Message {
   const subject = "Confirm your email for Bento";
-  const text = [
-    "Confirm this address to finish setting up your Bento account.",
-    "",
-    input.url,
-    "",
-    `The link expires in ${input.expiresInHours} hours.`,
-    "If you did not create a Bento account, you can ignore this.",
-  ].join("\n");
-  const html = [
-    "<p>Confirm this address to finish setting up your Bento account.</p>",
-    `<p><a href="${escapeHtml(input.url)}">Confirm my email</a></p>`,
-    `<p>The link expires in ${input.expiresInHours} hours. If you did not create a Bento account, you can ignore this.</p>`,
-  ].join(" ");
-  return { to: input.email, subject, text, html };
+  const note = `The link expires in ${input.expiresInHours} hours. If you did not create a Bento account, you can ignore this.`;
+  const footerNote = "You are receiving this because this address was used to create a Bento account.";
+
+  const text = renderText({
+    lines: [
+      "Confirm this address to finish setting up your Bento account.",
+      "",
+      input.url,
+      "",
+      `The link expires in ${input.expiresInHours} hours.`,
+      "If you did not create a Bento account, you can ignore this.",
+    ],
+    footerNote,
+    appUrl: input.appUrl,
+  });
+
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: "One click and your Bento account is ready.",
+    heading: "Confirm your email",
+    paragraphs: ["Confirm this address to finish setting up your Bento account."],
+    action: { label: "Confirm my email", url: input.url },
+    note,
+    footerNote,
+  });
+
+  return { to: input.email, subject, text, html: body };
 }
 
 /**
@@ -151,21 +219,34 @@ export function verificationMessage(input: LinkEmailInput): Message {
  */
 export function passwordResetMessage(input: LinkEmailInput): Message {
   const subject = "Reset your Bento password";
-  const text = [
-    "Someone asked to reset the password for this Bento account.",
-    "",
-    "Choose a new password:",
-    input.url,
-    "",
-    `The link expires in ${input.expiresInHours} hours.`,
-    "If this was not you, ignore this email. Your password stays as it is.",
-  ].join("\n");
-  const html = [
-    "<p>Someone asked to reset the password for this Bento account.</p>",
-    `<p><a href="${escapeHtml(input.url)}">Choose a new password</a></p>`,
-    `<p>The link expires in ${input.expiresInHours} hours. If this was not you, ignore this email and your password stays as it is.</p>`,
-  ].join(" ");
-  return { to: input.email, subject, text, html };
+  const note = `The link expires in ${input.expiresInHours} hours. If this was not you, ignore this email and your password stays as it is.`;
+  const footerNote = "You are receiving this because a password reset was requested for this address.";
+
+  const text = renderText({
+    lines: [
+      "Someone asked to reset the password for this Bento account.",
+      "",
+      "Choose a new password:",
+      input.url,
+      "",
+      `The link expires in ${input.expiresInHours} hours.`,
+      "If this was not you, ignore this email. Your password stays as it is.",
+    ],
+    footerNote,
+    appUrl: input.appUrl,
+  });
+
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: "Choose a new password for your Bento account.",
+    heading: "Reset your password",
+    paragraphs: ["Someone asked to reset the password for this Bento account."],
+    action: { label: "Choose a new password", url: input.url },
+    note,
+    footerNote,
+  });
+
+  return { to: input.email, subject, text, html: body };
 }
 
 /**
@@ -175,22 +256,37 @@ export function passwordResetMessage(input: LinkEmailInput): Message {
  */
 export function deleteAccountMessage(input: LinkEmailInput): Message {
   const subject = "Confirm deleting your Bento account";
-  const text = [
-    "You asked to delete your Bento account.",
-    "",
-    "This removes your sign in and your membership of every team. Boards owned by a team you share stay with that team.",
-    "",
-    "Confirm the deletion:",
-    input.url,
-    "",
-    `The link expires in ${input.expiresInHours} hours.`,
-    "If this was not you, ignore this email and nothing happens.",
-  ].join("\n");
-  const html = [
-    "<p>You asked to delete your Bento account.</p>",
-    "<p>This removes your sign in and your membership of every team. Boards owned by a team you share stay with that team.</p>",
-    `<p><a href="${escapeHtml(input.url)}">Confirm the deletion</a></p>`,
-    `<p>The link expires in ${input.expiresInHours} hours. If this was not you, ignore this email and nothing happens.</p>`,
-  ].join(" ");
-  return { to: input.email, subject, text, html };
+  const note = `The link expires in ${input.expiresInHours} hours. If this was not you, ignore this email and nothing happens.`;
+  const footerNote = "You are receiving this because account deletion was requested for this address.";
+
+  const text = renderText({
+    lines: [
+      "You asked to delete your Bento account.",
+      "",
+      "This removes your sign in and your membership of every team. Boards owned by a team you share stay with that team.",
+      "",
+      "Confirm the deletion:",
+      input.url,
+      "",
+      `The link expires in ${input.expiresInHours} hours.`,
+      "If this was not you, ignore this email and nothing happens.",
+    ],
+    footerNote,
+    appUrl: input.appUrl,
+  });
+
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: "This cannot be undone once you confirm.",
+    heading: "Confirm deleting your account",
+    paragraphs: [
+      "You asked to delete your Bento account.",
+      "This removes your sign in and your membership of every team. Boards owned by a team you share stay with that team.",
+    ],
+    action: { label: "Confirm the deletion", url: input.url },
+    note,
+    footerNote,
+  });
+
+  return { to: input.email, subject, text, html: body };
 }

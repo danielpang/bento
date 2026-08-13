@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="500" viewBox="0 0 1500 500">
+  <!-- X header, 1500x500. The app's own palette: warm near-black,
+       brand orange, blue reserved for running. The right side scales
+       the favicon mark up; one compartment filled, one agent at work. -->
+  <rect width="1500" height="500" fill="#0e0d0b"/>
+
+  <!-- faint warm grid -->
+  <g stroke="#1d1b17" stroke-width="1">
+    <line x1="0" y1="125" x2="1500" y2="125"/>
+    <line x1="0" y1="250" x2="1500" y2="250"/>
+    <line x1="0" y1="375" x2="1500" y2="375"/>
+    <line x1="250" y1="0" x2="250" y2="500"/>
+    <line x1="500" y1="0" x2="500" y2="500"/>
+    <line x1="750" y1="0" x2="750" y2="500"/>
+    <line x1="1000" y1="0" x2="1000" y2="500"/>
+    <line x1="1250" y1="0" x2="1250" y2="500"/>
+  </g>
+
+  <!-- small glyph + wordmark -->
+  <g transform="translate(122,128) scale(0.85)">
+    <rect x="1" y="1" width="62" height="62" rx="14" fill="#12161E" stroke="#39414F" stroke-width="2"/>
+    <rect x="10" y="10" width="26" height="26" rx="5" fill="#F97316"/>
+    <rect x="40" y="10" width="14" height="26" rx="5" fill="#3A4353"/>
+    <rect x="10" y="40" width="14" height="14" rx="5" fill="#3A4353"/>
+    <rect x="28" y="40" width="26" height="14" rx="5" fill="#3E77E8"/>
+  </g>
+  <text x="200" y="180" font-family="'SF Pro Display','Inter','Helvetica Neue',Arial,sans-serif" font-size="72" font-weight="700" letter-spacing="-0.7" fill="#ededed">bento</text>
+  <text x="122" y="264" font-family="'SF Pro Display','Inter','Helvetica Neue',Arial,sans-serif" font-size="34" font-weight="400" fill="#a8a49b">Every agent in its place.</text>
+
+  <!-- pipeline: cards move through gated stages; blue means running -->
+  <g font-family="'SF Mono',Menlo,monospace" font-size="16" letter-spacing="1.5">
+    <rect x="122" y="322" width="140" height="50" rx="10" fill="#161411" stroke="#2a2722" stroke-width="1.5"/>
+    <text x="192" y="353" text-anchor="middle" fill="#8b867c">PLAN</text>
+
+    <line x1="262" y1="347" x2="304" y2="347" stroke="#2a2722" stroke-width="2"/>
+
+    <rect x="304" y="322" width="140" height="50" rx="10" fill="#1d1b17" stroke="#4da3ff" stroke-width="2"/>
+    <text x="374" y="353" text-anchor="middle" fill="#4da3ff">BUILD</text>
+    <circle cx="426" cy="335" r="4" fill="#4da3ff"/>
+
+    <line x1="444" y1="347" x2="486" y2="347" stroke="#2a2722" stroke-width="2"/>
+
+    <rect x="486" y="322" width="140" height="50" rx="10" fill="#161411" stroke="#2a2722" stroke-width="1.5"/>
+    <text x="556" y="353" text-anchor="middle" fill="#8b867c">REVIEW</text>
+
+    <line x1="626" y1="347" x2="668" y2="347" stroke="#2a2722" stroke-width="2"/>
+
+    <rect x="668" y="322" width="140" height="50" rx="10" fill="#161411" stroke="#2a2722" stroke-width="1.5"/>
+    <text x="738" y="353" text-anchor="middle" fill="#8b867c">SHIP</text>
+  </g>
+
+  <!-- the favicon mark, large -->
+  <g transform="translate(1030,84) scale(4.63)">
+    <rect x="1" y="1" width="62" height="62" rx="14" fill="#12161E" stroke="#39414F" stroke-width="2"/>
+    <rect x="10" y="10" width="26" height="26" rx="5" fill="#F97316"/>
+    <rect x="40" y="10" width="14" height="26" rx="5" fill="#3A4353"/>
+    <rect x="10" y="40" width="14" height="14" rx="5" fill="#3A4353"/>
+    <rect x="28" y="40" width="26" height="14" rx="5" fill="#3E77E8"/>
+  </g>
+
+  <!-- compartment labels: one agent per compartment, one at work -->
+  <g font-family="'SF Mono',Menlo,monospace" font-size="14" letter-spacing="1.2" text-anchor="middle">
+    <text x="1137" y="196" font-weight="600" fill="#0e0d0b">AGENT</text>
+    <text x="1248" y="196" fill="#8b95a6">AGENT</text>
+    <text x="1109" y="307" fill="#8b95a6">AGENT</text>
+    <text x="1220" y="307" font-weight="600" fill="#0e0d0b">RUNNING</text>
+  </g>
+</svg>

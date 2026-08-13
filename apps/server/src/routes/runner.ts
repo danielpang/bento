@@ -173,21 +173,46 @@ export function runnerRoutes(ctx: AppContext) {
         .from(features)
         .where(eq(features.id, run.featureId));
 
-      // max() in SQL: loading every row grew with transcript length.
-      const [highest] = await db(c, ctx)
-        .select({ seq: max(runEvents.seq) })
-        .from(runEvents)
-        .where(eq(runEvents.runId, runId));
-      let seq = highest?.seq ?? 0;
-
       if (run.status === "starting") {
         await db(c, ctx).update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, runId));
       }
 
-      for (const event of c.req.valid("json").events) {
-        seq += 1;
-        await db(c, ctx).insert(runEvents).values({ runId, seq, type: event.type, payload: event });
-        ctx.bus.emitRunEvent({ runId, seq, event });
+      /**
+       * One transaction around the counter read and the inserts. Two
+       * batches reporting concurrently both computed the same max(seq)
+       * and collided on the (runId, seq) unique index halfway through,
+       * leaving one batch partially written and the runner retrying
+       * into duplicates.
+       */
+      const events = c.req.valid("json").events;
+      const seq = await db(c, ctx).transaction(async (tx) => {
+        // max() in SQL: loading every row grew with transcript length.
+        const [highest] = await tx
+          .select({ seq: max(runEvents.seq) })
+          .from(runEvents)
+          .where(eq(runEvents.runId, runId));
+        let next = highest?.seq ?? 0;
+        for (const event of events) {
+          next += 1;
+          await tx.insert(runEvents).values({ runId, seq: next, type: event.type, payload: event });
+          /**
+           * The session id reaches the run row the moment the CLI
+           * announces it, same as server-executed runs: a runner whose
+           * machine dies mid-run must not take the conversation's only
+           * key with it.
+           */
+          const announced = (event as { type?: string; sessionId?: string }).sessionId;
+          if (event.type === "init" && typeof announced === "string" && announced) {
+            await tx.update(agentRuns).set({ cliSessionId: announced }).where(eq(agentRuns.id, runId));
+          }
+        }
+        return next;
+      });
+
+      let emitted = seq - events.length;
+      for (const event of events) {
+        emitted += 1;
+        ctx.bus.emitRunEvent({ runId, seq: emitted, event });
         // Runner-executed agents reach the board the same way.
         const spoken = runOutputPreview(event as { type: string; role?: string; text?: string });
         if (spoken && owner) {
@@ -217,7 +242,10 @@ export function runnerRoutes(ctx: AppContext) {
           status: body.ok ? "succeeded" : "failed",
           endedAt: new Date(),
           exitCode: body.exitCode ?? null,
-          cliSessionId: body.sessionId ?? null,
+          // Only when the runner actually said: a report without a
+          // session id must not erase one already recorded, or the
+          // conversation ends with the failure it should survive.
+          ...(body.sessionId !== undefined ? { cliSessionId: body.sessionId } : {}),
           costUsd: body.costUsd !== undefined ? String(body.costUsd) : null,
           numTurns: body.numTurns ?? null,
           error: body.error ?? null,

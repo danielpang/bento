@@ -24,6 +24,13 @@ const envSchema = z.object({
   /** A runner-claimed run with no report for this long is requeued. */
   BENTO_RUNNER_CLAIM_TIMEOUT_MIN: z.coerce.number().int().positive().default(45),
   BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().max(64).default(4),
+  /**
+   * How long one agent run may execute before it is stopped, in
+   * minutes. A backstop against runaway processes, not a pace
+   * expectation: real agent sessions legitimately run for hours, the
+   * way they do on the hosted agent products.
+   */
+  BENTO_RUN_TIMEOUT_MIN: z.coerce.number().int().positive().default(120),
 
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),
@@ -130,6 +137,13 @@ const envSchema = z.object({
     .transform((v) => v === "true")
     .optional(),
   BENTO_MAIL_FROM: z.string().default("Bento <no-reply@bento.local>"),
+
+  /**
+   * Where the in-app contact form delivers its mail. Without it the
+   * form reports that contact is not configured rather than sending
+   * feedback nowhere.
+   */
+  BENTO_CONTACT_EMAIL: z.string().optional(),
 
   /** GitHub App credentials. Without these, PR based gates stay pending. */
   GITHUB_APP_ID: z.string().optional(),

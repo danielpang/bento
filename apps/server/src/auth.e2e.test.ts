@@ -311,6 +311,7 @@ test("every entity route refuses a foreign tenant", async () => {
 
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
+    ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ name: "Stolen" }) }],
     ["GET", `/api/projects/${project.id}/pipeline`],
     ["GET", `/api/projects/${project.id}/pipeline/export`],
     [
@@ -367,11 +368,18 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/runs/${run.id}/rollback`],
     ["POST", `/api/runs/${run.id}/cancel`],
     ["GET", `/api/runs/${run.id}/transcript`],
+    // The SSE stream: for a foreign tenant it must refuse before it
+    // ever streams, and it now carries unpersisted draft text that no
+    // RLS policy can cover, so the matrix is the only thing pinning it.
+    ["GET", `/api/runs/${run.id}/events`],
     ["GET", `/api/board/${project.id}/events`],
     ["POST", "/api/linear/mappings", { body: JSON.stringify({ linearTeamId: "team-x", projectId: project.id }) }],
     ["DELETE", "/api/linear/mappings/00000000-0000-0000-0000-000000000000"],
     ["PATCH", "/api/linear/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
+    // Last: a delete that went through would refuse everything after it
+    // for the wrong reason.
+    ["DELETE", `/api/projects/${project.id}`],
   ];
 
   for (const [method, path, init] of attempts) {
@@ -381,6 +389,15 @@ test("every entity route refuses a foreign tenant", async () => {
       `${method} ${path} answered ${res.status} to a foreign tenant; it must refuse`,
     );
   }
+
+  // The project is still there, under its own name.
+  const projectAfter = await asOwner(`/api/projects/${project.id}`);
+  assert.equal(projectAfter.status, 200, "the intruder must not have deleted the owner's project");
+  assert.equal(
+    ((await projectAfter.json()) as { name: string }).name,
+    "Matrix",
+    "the intruder must not have renamed the owner's project",
+  );
 
   // The agent is still the owner's, under its own name. A rename that
   // went through would be one tenant editing another's agent, and a

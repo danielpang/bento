@@ -69,6 +69,9 @@ export function PromptDialog({
       <form id="prompt-dialog" onSubmit={submit}>
         <label className="field">
           <span className="label">{label}</span>
+          {/* Asked for here rather than left to the dialog: a one field
+              dialog exists to be typed into, and Modal no longer focuses
+              whatever comes first on its own. */}
           {multiline ? (
             <textarea
               className="input"
@@ -76,6 +79,7 @@ export function PromptDialog({
               value={value}
               placeholder={placeholder}
               onChange={(e) => setValue(e.target.value)}
+              autoFocus
               // A textarea keeps Enter for newlines, so submit is the
               // modifier chord the rest of the web uses.
               onKeyDown={(e) => {
@@ -89,6 +93,7 @@ export function PromptDialog({
               placeholder={placeholder}
               onChange={(e) => setValue(e.target.value)}
               spellCheck={false}
+              autoFocus
             />
           )}
         </label>
@@ -312,6 +317,7 @@ export function NewProjectDialog({
             placeholder="Payments revamp"
             onChange={(e) => setName(e.target.value)}
             spellCheck={false}
+            autoFocus
           />
         </label>
         {!githubChecked ? (

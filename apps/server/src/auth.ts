@@ -86,6 +86,9 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
    */
   const requireVerification = env.BENTO_REQUIRE_EMAIL_VERIFICATION ?? Boolean(env.SMTP_HOST);
 
+  /** Where the emails point back to, for their footer links. */
+  const appUrl = env.BETTER_AUTH_URL.replace(/\/$/, "");
+
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
@@ -179,7 +182,7 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       // with it off, not signing them in would be a step for nothing.
       autoSignIn: !requireVerification,
       async sendResetPassword({ user, url }) {
-        await sendOrLog(mailer, passwordResetMessage({ email: user.email, url, expiresInHours: LINK_HOURS }), url);
+        await sendOrLog(mailer, passwordResetMessage({ email: user.email, url, expiresInHours: LINK_HOURS, appUrl }), url);
       },
       resetPasswordTokenExpiresIn: LINK_HOURS * 60 * 60,
     },
@@ -190,7 +193,7 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       autoSignInAfterVerification: true,
       expiresIn: LINK_HOURS * 60 * 60,
       async sendVerificationEmail({ user, url }) {
-        await sendOrLog(mailer, verificationMessage({ email: user.email, url, expiresInHours: LINK_HOURS }), url);
+        await sendOrLog(mailer, verificationMessage({ email: user.email, url, expiresInHours: LINK_HOURS, appUrl }), url);
       },
     },
     user: {
@@ -200,7 +203,7 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
         // is irreversible, and a session someone left open on a shared
         // machine must not be enough to erase an account.
         async sendDeleteAccountVerification({ user, url }) {
-          await sendOrLog(mailer, deleteAccountMessage({ email: user.email, url, expiresInHours: LINK_HOURS }), url);
+          await sendOrLog(mailer, deleteAccountMessage({ email: user.email, url, expiresInHours: LINK_HOURS, appUrl }), url);
         },
         deleteTokenExpiresIn: LINK_HOURS * 60 * 60,
       },
@@ -229,8 +232,7 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
         membershipLimit: 100,
         invitationExpiresIn: INVITATION_DAYS * 24 * 60 * 60,
         async sendInvitationEmail(data) {
-          const base = env.BETTER_AUTH_URL.replace(/\/$/, "");
-          const acceptUrl = `${base}/accept-invitation?id=${encodeURIComponent(data.id)}`;
+          const acceptUrl = `${appUrl}/accept-invitation?id=${encodeURIComponent(data.id)}`;
           try {
             await mailer.send(
               invitationMessage({
@@ -240,6 +242,7 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
                 role: data.role,
                 acceptUrl,
                 expiresInDays: INVITATION_DAYS,
+                appUrl,
               }),
             );
           } catch (err) {

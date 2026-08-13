@@ -5,15 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0e0d0b" />
     <!--
-      The SVG is the real one: it scales to any tab and answers
-      prefers-color-scheme, so the quiet compartments darken on a light
-      tab strip instead of vanishing into it. The .ico is the fallback
-      for browsers that ignore SVG icons, and is listed second because
-      every browser that understands both takes the last it supports.
+      The SVG is the real one: it scales to any tab, and its plate
+      carries its own contrast, so it needs no light-mode branch. The
+      .ico is the fallback for browsers that ignore SVG icons, and is
+      listed second because every browser that understands both takes
+      the last it supports. The manifest carries the Android icons.
     -->
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
     <!--
       The console's two voices. Geist carries the sans and Geist Mono
       the instrumentation; JetBrains Mono stays as the mono fallback

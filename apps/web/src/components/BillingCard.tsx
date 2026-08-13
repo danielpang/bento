@@ -295,6 +295,7 @@ function ContactSales({ onClose, onSent }: { onClose: () => void; onSent: () => 
           placeholder="you@company.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          autoFocus
         />
       </label>
       <label className="field">

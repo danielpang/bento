@@ -28,7 +28,8 @@ export async function resolveAgentEnv(
   // Provider agnostic tools require nothing in general and something
   // specific per model: an openrouter/ model needs the OpenRouter key.
   const required = (model && adapter.requiredEnvFor?.(model)) || adapter.requiredEnv;
-  const wanted = [...required, ...(adapter.optionalEnv ?? []), ...(adapter.authAlternatives ?? [])];
+  const alternatives = adapter.authAlternatives ?? [];
+  const wanted = [...required, ...(adapter.optionalEnv ?? []), ...alternatives];
   if (wanted.length === 0) return { env, missing: [] };
 
   if (ctx.env.BENTO_MODE !== "multi") {
@@ -56,10 +57,28 @@ export async function resolveAgentEnv(
     }
   }
 
-  // A login token stands in for the API key wholesale: with one
-  // present, nothing is missing and the run may start.
-  if ((adapter.authAlternatives ?? []).some((name) => env[name])) {
+  /**
+   * A login token stands in for the API key wholesale, so exactly one
+   * of the two may reach the CLI. Forwarding both leaves the choice to
+   * the tool, and Claude Code takes the key: an organization that saved
+   * a subscription token while a stale key sat beside it got "Invalid
+   * API key" out of a run this function had already called fully
+   * credentialled, with nothing anywhere naming the key as the cause.
+   *
+   * Which one gives way depends on the endpoint. A login token is only
+   * valid at the provider's own API, so once a base URL points the tool
+   * somewhere else (OpenRouter, a gateway) the key is the only
+   * credential that can work and the token is the one to drop. `missing`
+   * is then computed as usual, so a redirected tool with only a token
+   * fails naming the key it needs rather than starting and failing as
+   * an authentication error. Base URLs are recognized by suffix, the
+   * same convention the console groups them by.
+   */
+  const redirected = wanted.some((name) => name.endsWith("_BASE_URL") && env[name]);
+  if (!redirected && alternatives.some((name) => env[name])) {
+    for (const name of required) delete env[name];
     return { env, missing: [] };
   }
+  for (const name of alternatives) delete env[name];
   return { env, missing: required.filter((name) => !env[name]) };
 }

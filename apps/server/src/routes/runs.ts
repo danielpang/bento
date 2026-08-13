@@ -3,6 +3,7 @@ import { asc, eq, gt, and } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
+import type { AgentDelta } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
@@ -219,10 +220,22 @@ export function runRoutes(ctx: AppContext) {
      * SSE stream of a run's events. Replays persisted events after
      * ?since=<seq>, then stays live until the run reaches a terminal
      * status. Event data is the run_events row shape.
+     *
+     * Reconnects resume rather than restart: every frame carries its
+     * seq as the SSE id, so EventSource sends Last-Event-ID when it
+     * reopens the stream (after a deploy or a network drop), and the
+     * replay below starts from there. Honouring it is what keeps a
+     * reconnect from replaying the whole run (every message twice) or
+     * skipping whatever fired while the socket was down.
      */
     .get("/:id/events", async (c) => {
       const runId = c.req.param("id");
-      const since = Number(c.req.query("since") ?? 0);
+      const sinceParam = Number(c.req.query("since") ?? 0);
+      const lastEventId = Number(c.req.header("Last-Event-ID") ?? 0);
+      const since = Math.max(
+        Number.isFinite(sinceParam) ? sinceParam : 0,
+        Number.isFinite(lastEventId) ? lastEventId : 0,
+      );
       if (!(await getAccessibleRun(ctx, c, runId))) return c.json({ error: "not found" }, 404);
 
       return streamSSE(c, async (stream) => {
@@ -237,7 +250,7 @@ export function runRoutes(ctx: AppContext) {
          * delayed agent output by up to a second even though the event
          * was already in hand.
          */
-        const queue: { seq: number; event: unknown }[] = [];
+        const queue: ({ seq: number; event: unknown } | { delta: AgentDelta })[] = [];
         let finished: string | null = null;
         let wake: (() => void) | null = null;
         const nudge = () => {
@@ -248,6 +261,29 @@ export function runRoutes(ctx: AppContext) {
         // Subscribe before replaying so nothing falls between the two.
         const unsubscribeEvents = ctx.bus.onRunEvent(runId, (envelope) => {
           queue.push({ seq: envelope.seq, event: envelope.event });
+          nudge();
+        });
+        // One queue for both, so a fragment can never overtake the
+        // message that finishes it. Deltas are live only: nothing is
+        // stored, so there is nothing to replay and no seq to carry.
+        // Contiguous fragments merge into the queue's tail at enqueue
+        // time: per token frames were one awaited socket write each,
+        // and a viewer on a slow link let the backlog grow at token
+        // rate. The merge is safe by construction, because the
+        // client's contiguity check accepts a merged fragment exactly
+        // as it accepts the run of small ones.
+        const unsubscribeDeltas = ctx.bus.onRunDelta(runId, (delta) => {
+          const tail = queue[queue.length - 1];
+          if (
+            tail
+            && "delta" in tail
+            && tail.delta.channel === delta.channel
+            && delta.offset === tail.delta.offset + tail.delta.text.length
+          ) {
+            tail.delta = { ...tail.delta, text: tail.delta.text + delta.text };
+          } else {
+            queue.push({ delta });
+          }
           nudge();
         });
         const unsubscribeDone = ctx.bus.onRunDone(runId, (status) => {
@@ -266,6 +302,30 @@ export function runRoutes(ctx: AppContext) {
             lastSeq = row.seq;
           }
 
+          /**
+           * The in-flight message so far, as one offset zero fragment.
+           * Without it, a viewer arriving mid message has no draft
+           * until the next message starts: the fragments it missed are
+           * gone by design, so the whole is sent instead.
+           *
+           * Read after the replay, in the same synchronous stretch as
+           * the write. A snapshot taken before the replay went stale
+           * during it: when the message finished mid replay, the
+           * replay delivered the persisted copy, and the stale draft
+           * then arrived as a phantom duplicate that nothing cleared,
+           * because the clearing event had already been consumed as
+           * replay. Fragments queued between here and the drain below
+           * continue exactly where this snapshot ends, so the client's
+           * contiguity check accepts them.
+           */
+          const draft = ctx.bus.runDraft(runId);
+          if (draft) {
+            await stream.writeSSE({
+              event: "run_delta",
+              data: JSON.stringify({ channel: "text", text: draft, offset: 0 } satisfies AgentDelta),
+            });
+          }
+
           // A run that already ended before we subscribed has no further
           // events coming, so check its status once rather than waiting.
           const [current] = await db(c, ctx)
@@ -280,6 +340,10 @@ export function runRoutes(ctx: AppContext) {
           while (true) {
             while (queue.length > 0) {
               const item = queue.shift()!;
+              if ("delta" in item) {
+                await stream.writeSSE({ event: "run_delta", data: JSON.stringify(item.delta) });
+                continue;
+              }
               if (item.seq <= lastSeq) continue;
               await stream.writeSSE({ event: "run_event", id: String(item.seq), data: JSON.stringify(item.event) });
               lastSeq = item.seq;
@@ -308,6 +372,7 @@ export function runRoutes(ctx: AppContext) {
           }
         } finally {
           unsubscribeEvents();
+          unsubscribeDeltas();
           unsubscribeDone();
         }
       });

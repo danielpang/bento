@@ -20,9 +20,11 @@ import {
   repositories,
   runEvents,
   runMigrations,
+  sandboxes,
   stages,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { SseParser } from "@bento/core";
+import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
@@ -32,7 +34,8 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { registerJobs } from "./orchestrator/run-executor.js";
+import { registerJobs, recoverInterruptedRuns } from "./orchestrator/run-executor.js";
+import { JUDGE_PROMPT_PREFIX } from "./orchestrator/gate-evaluator.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter } from "@bento/agents";
@@ -376,6 +379,41 @@ test("changes exclude work inherited from the branch point", async () => {
  * leave when empty. Occupied stages refuse deletion, because silently
  * relocating live cards is how boards lose things.
  */
+test("a project can be renamed, and removing it takes its board", async () => {
+  const { project } = await setupProject("Working title");
+  const feature = await createFeature(project.id, "Card that goes with it");
+
+  const renamed = await json<{ name: string }>(
+    await app.request(`/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "  Payments revamp  " }),
+    }),
+  );
+  assert.equal(renamed.name, "Payments revamp", "the stored name is trimmed");
+
+  const blank = await app.request(`/api/projects/${project.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "   " }),
+  });
+  assert.equal(blank.status, 400, "a name of only spaces is not a name");
+
+  const removed = await json<{ deletedCards: number }>(
+    await app.request(`/api/projects/${project.id}`, { method: "DELETE" }),
+  );
+  assert.equal(removed.deletedCards, 1, "the delete says how much board went with it");
+
+  assert.equal((await app.request(`/api/projects/${project.id}`)).status, 404);
+  assert.equal(
+    (await app.request(`/api/features/${feature.id}`)).status,
+    404,
+    "the cards go with the project rather than outliving it",
+  );
+  // Removing it twice must not read as though there were two of it.
+  assert.equal((await app.request(`/api/projects/${project.id}`, { method: "DELETE" })).status, 404);
+});
+
 test("stages can be added, and removed only when empty", async () => {
   const { project, stages: initial } = await setupProject("Editable pipeline");
   const pipeline = await json<{ id: string }>(await app.request(`/api/projects/${project.id}/pipeline`));
@@ -456,6 +494,99 @@ test("a live session hears messages mid-run without a second run", { timeout: 12
 });
 
 /**
+ * Reads SSE frames off a streaming response, one at a time, through
+ * the same parser the api-client ships. That is the point: the first
+ * version of this helper hand-rolled its own parsing, so the wire
+ * format looked covered while the parser real clients run stayed
+ * untested.
+ */
+function sseFrames(body: ReadableStream<Uint8Array>) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new SseParser();
+  const pending: { event: string; data: string }[] = [];
+  return {
+    /** The next complete frame, or null when the stream ends. */
+    async next(): Promise<{ event: string; data: string } | null> {
+      while (pending.length === 0) {
+        const { value, done } = await reader.read();
+        if (done) return null;
+        pending.push(...parser.push(decoder.decode(value, { stream: true })));
+      }
+      return pending.shift()!;
+    },
+    async cancel() {
+      await reader.cancel().catch(() => {});
+    },
+  };
+}
+
+/**
+ * The typing is visible but not durable: fragments of the message the
+ * agent is composing reach an open viewer as run_delta frames, and the
+ * finished message is the only copy that survives. A replay after the
+ * run must carry events and no fragments, or refreshing the page would
+ * change what the conversation says.
+ */
+test("the message being typed streams live and is never persisted", { timeout: 120_000 }, async () => {
+  const { project } = await setupProject("Delta streaming");
+  const feature = await createFeature(project.id, "Typing card");
+  const profile = await fakeProfile("delta-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  const run = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "LIVE hello" }),
+    }),
+  );
+
+  // Subscribed before the worker picks the run up, so the first turn's
+  // fragments are broadcast while someone is listening.
+  const live = await app.request(`/api/runs/${run.id}/events?since=0`);
+  assert.ok(live.body, "the events endpoint streams");
+  const frames = sseFrames(live.body!);
+  const deltas: { channel: string; text: string }[] = [];
+  let status = "";
+  try {
+    while (true) {
+      const frame = await frames.next();
+      assert.ok(frame, "the stream ends with done, not a bare EOF");
+      if (frame.event === "run_delta") deltas.push(JSON.parse(frame.data) as { channel: string; text: string });
+      if (frame.event === "done") {
+        status = (JSON.parse(frame.data) as { status: string }).status;
+        break;
+      }
+    }
+  } finally {
+    await frames.cancel();
+  }
+  assert.equal(status, "succeeded");
+  assert.ok(
+    deltas.some((d) => d.channel === "text" && d.text === "Heard."),
+    "the fragment reached the open stream",
+  );
+
+  // The same endpoint after the run: replayed events, no fragments.
+  const replay = await app.request(`/api/runs/${run.id}/events?since=0`);
+  const replayFrames = sseFrames(replay.body!);
+  let sawMessage = false;
+  try {
+    while (true) {
+      const frame = await replayFrames.next();
+      assert.ok(frame, "the replay ends with done");
+      assert.notEqual(frame.event, "run_delta", "fragments must not survive the run");
+      if (frame.event === "run_event" && frame.data.includes("Heard.")) sawMessage = true;
+      if (frame.event === "done") break;
+    }
+  } finally {
+    await replayFrames.cancel();
+  }
+  assert.ok(sawMessage, "the finished message is the durable copy");
+});
+
+/**
  * Talking to a working agent queues: a headless run cannot hear
  * mid-flight, so the message waits on the card and becomes a resume
  * run, in the same session, the moment the run ends. Two messages
@@ -527,6 +658,564 @@ test("a message sent mid-run is queued and delivered when the run ends", { timeo
     followEvents.some((e) => e.type === "message" && e.role === "user" && (e.text ?? "").includes("first thought")),
     "the follow-up block carries the user's message",
   );
+});
+
+/**
+ * The stream's replay cursor. Every frame carries its seq as the SSE
+ * id, and EventSource sends the last one it saw as Last-Event-ID when
+ * it reconnects on its own. Honouring that header is what keeps a
+ * deploy or a network drop from replaying every already-shown message
+ * (the old behavior, which doubled the transcript) or losing the ones
+ * fired while the socket was down.
+ */
+test("the run stream resumes from Last-Event-ID instead of replaying everything", async () => {
+  const { project, stages: projectStages } = await setupProject("Stream resume");
+  const feature = await createFeature(project.id, "Watched run");
+  const profile = await fakeProfile("stream-fake");
+
+  // Written directly: what is on trial is the stream's cursor, not
+  // the agent.
+  const [run] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: projectStages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "already done",
+      status: "succeeded",
+      executor: "server",
+    })
+    .returning();
+  for (let seq = 1; seq <= 5; seq++) {
+    const payload = { type: "message", role: "assistant", text: `line ${seq}` };
+    await ctx.db.insert(runEvents).values({ runId: run!.id, seq, type: "message", payload });
+  }
+
+  const replay = async (query = "", headers: Record<string, string> = {}) => {
+    const res = await app.request(`/api/runs/${run!.id}/events${query}`, { headers });
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /event: done/, "a finished run's stream still closes");
+    return [...body.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+  };
+
+  assert.deepEqual(await replay(), [1, 2, 3, 4, 5], "a fresh stream replays the whole run");
+  assert.deepEqual(await replay("?since=2"), [3, 4, 5], "the query cursor still works");
+  assert.deepEqual(
+    await replay("", { "Last-Event-ID": "3" }),
+    [4, 5],
+    "a reconnect resumes where the socket left off",
+  );
+  assert.deepEqual(await replay("?since=4", { "Last-Event-ID": "2" }), [5], "the cursor only moves forward");
+});
+
+/**
+ * What a deploy does to runs, and what boot does about it. The dead
+ * process held every server-executed run's stream, but the rows kept
+ * saying "running": the card sat busy forever, its gate never
+ * evaluated, its transcript cut off mid-sentence. Recovery closes
+ * those, requeues the ones that never started, and delivers a message
+ * parked during the outage once the card is free.
+ */
+test(
+  "a restart closes interrupted runs, requeues waiting ones, and delivers parked messages",
+  { timeout: 120_000 },
+  async () => {
+    const { project, stages: projectStages } = await setupProject("Restart recovery");
+    const feature = await createFeature(project.id, "Interrupted card");
+    const profile = await fakeProfile("restart-fake");
+    const stage = projectStages[0]!;
+
+    const plant = async (status: "running" | "starting" | "queued", executor: "server" | "runner") => {
+      const [run] = await ctx.db
+        .insert(agentRuns)
+        .values({
+          featureId: feature.id,
+          stageId: stage.id,
+          agentProfileId: profile.id,
+          prompt: "half finished work",
+          status,
+          executor,
+        })
+        .returning();
+      return run!;
+    };
+    const working = await plant("running", "server");
+    const starting = await plant("starting", "server");
+    const waiting = await plant("queued", "server");
+    // On its own card: an active run anywhere on the feature would
+    // (rightly) keep the parked message parked.
+    const runnerCard = await createFeature(project.id, "Runner card");
+    const [onARunner] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: runnerCard.id,
+        stageId: stage.id,
+        agentProfileId: profile.id,
+        prompt: "half finished work",
+        status: "running",
+        executor: "runner",
+      })
+      .returning();
+
+    // A reply that arrived while the deploy was happening.
+    await ctx.db.update(features).set({ queuedPrompt: "is anyone there" }).where(eq(features.id, feature.id));
+
+    const closed: string[] = [];
+    const offWorking = ctx.bus.onRunDone(working.id, (s) => closed.push(`${working.id}:${s}`));
+    const offStarting = ctx.bus.onRunDone(starting.id, (s) => closed.push(`${starting.id}:${s}`));
+    await recoverInterruptedRuns(ctx);
+    offWorking();
+    offStarting();
+
+    const readRun = async (runId: string) =>
+      json<{ status: string; error: string | null; endedAt: string | null }>(await app.request(`/api/runs/${runId}`));
+
+    for (const orphan of [working, starting]) {
+      const after = await readRun(orphan.id);
+      assert.equal(after.status, "failed", "an interrupted run is closed, not left running forever");
+      assert.match(after.error ?? "", /restart/);
+      assert.ok(after.endedAt, "the close is timestamped");
+      const transcript = await (await app.request(`/api/runs/${orphan.id}/transcript`)).text();
+      assert.match(transcript, /restarted while this run was working/, "the transcript says why the run ended");
+    }
+    assert.ok(
+      closed.includes(`${working.id}:failed`) && closed.includes(`${starting.id}:failed`),
+      "a stream that reconnected mid-recovery still hears the close",
+    );
+    assert.equal((await readRun(onARunner.id)).status, "running", "a runner's run outlives the server and is left alone");
+
+    // The waiting run went back on the queue (its job died with the
+    // old process) and this test's own workers pick it up. Its finish
+    // delivers the parked reply into a run of the same conversation.
+    assert.equal(await waitForRun(waiting.id), "succeeded", "a run that never started is queued afresh");
+
+    let resume: { id: string; prompt: string } | undefined;
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && !resume) {
+      const detail = await json<{ runs: { id: string; prompt: string }[] }>(
+        await app.request(`/api/features/${feature.id}`),
+      );
+      resume = detail.runs.find((r) => r.prompt === "is anyone there");
+      if (!resume) await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.ok(resume, "a message parked during the deploy becomes a run once the card is free");
+    assert.equal(await waitForRun(resume.id), "succeeded");
+    const transcript = await (await app.request(`/api/runs/${resume.id}/transcript`)).text();
+    assert.match(transcript, /you> is anyone there/, "the reply opens the new run as the user's own line");
+  },
+);
+
+/**
+ * The other half of restart recovery: a run whose sandbox still holds
+ * the working agent is followed, not failed. Boot attaches to the
+ * surviving session, the transcript continues past where it stopped,
+ * and the run ends the way it would have without the deploy.
+ */
+test("a restart reattaches to a run still working in its sandbox", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Reattach recovery");
+  const feature = await createFeature(project.id, "Reattached card");
+  const profile = await fakeProfile("reattach-fake");
+  const stage = projectStages[0]!;
+
+  const [sandbox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "sprite",
+      externalId: `bento-${feature.id}`,
+      status: "busy",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "half finished work",
+      status: "running",
+      executor: "server",
+      sandboxId: sandbox!.id,
+      startedAt: new Date(Date.now() - 60_000),
+    })
+    .returning();
+  // The first life already wrote events; the resumed half must continue
+  // the counter, because (runId, seq) is unique and a restart at zero
+  // would throw on its first insert.
+  for (const seq of [1, 2]) {
+    await ctx.db.insert(runEvents).values({
+      runId: running!.id,
+      seq,
+      type: "message",
+      payload: { type: "message", role: "assistant", text: `first life line ${seq}` },
+    });
+  }
+
+  const attached: { externalId: string; argv0: string }[] = [];
+  const fakeDriver = {
+    provider: "sprite" as const,
+    async provision(): Promise<never> {
+      throw new Error("recovery must not provision");
+    },
+    exec(): AsyncIterable<never> {
+      throw new Error("recovery must not exec");
+    },
+    async attach(handle: SandboxHandle, argv: string[]) {
+      attached.push({ externalId: handle.externalId, argv0: argv[0] ?? "" });
+      return (async function* () {
+        yield {
+          kind: "stdout" as const,
+          data: `${JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "resumed-1", total_cost_usd: 0.01, num_turns: 2 })}\n`,
+        };
+        yield { kind: "exit" as const, exitCode: 0 };
+      })();
+    },
+    async destroy() {},
+  };
+  const previousDriver = ctx.driver;
+  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  try {
+    await recoverInterruptedRuns(ctx);
+    assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
+
+    const transcript = await (await app.request(`/api/runs/${running!.id}/transcript`)).text();
+    assert.match(transcript, /reattached to the agent still working/, "the transcript says the run was followed");
+    assert.doesNotMatch(transcript, /so the run ended here/, "no interrupted close on a run that survived");
+    assert.equal(attached.length, 1, "recovery attached exactly once");
+    assert.equal(attached[0]?.externalId, `bento-${feature.id}`, "the attach went to the run's own sandbox");
+  } finally {
+    ctx.driver = previousDriver;
+  }
+});
+
+/**
+ * Reattaching has honest limits: a sandbox that answers without the
+ * session means the agent ended while nobody watched, and a run still
+ * in "starting" may never have spawned its agent at all. Both keep the
+ * interrupted close.
+ */
+test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Reattach limits");
+  const profile = await fakeProfile("reattach-limits-fake");
+  const stage = projectStages[0]!;
+
+  const plant = async (title: string, status: "running" | "starting") => {
+    const feature = await createFeature(project.id, title);
+    const [sandbox] = await ctx.db
+      .insert(sandboxes)
+      .values({
+        projectId: project.id,
+        featureId: feature.id,
+        provider: "sprite",
+        externalId: `bento-${feature.id}`,
+        status: "busy",
+        workdir: "/workspace",
+      })
+      .returning();
+    const [run] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: stage.id,
+        agentProfileId: profile.id,
+        prompt: "half finished work",
+        status,
+        executor: "server",
+        sandboxId: sandbox!.id,
+        startedAt: new Date(),
+      })
+      .returning();
+    return run!;
+  };
+  const gone = await plant("Agent gone card", "running");
+  const starting = await plant("Never started card", "starting");
+
+  let asked = 0;
+  const fakeDriver = {
+    provider: "sprite" as const,
+    async provision(): Promise<never> {
+      throw new Error("recovery must not provision");
+    },
+    exec(): AsyncIterable<never> {
+      throw new Error("recovery must not exec");
+    },
+    async attach() {
+      asked += 1;
+      return null; // the sandbox answers; the process is gone
+    },
+    async destroy() {},
+  };
+  const previousDriver = ctx.driver;
+  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  try {
+    await recoverInterruptedRuns(ctx);
+    for (const run of [gone, starting]) {
+      assert.equal(await waitForRun(run.id), "failed");
+      const detail = await json<{ error: string | null }>(await app.request(`/api/runs/${run.id}`));
+      assert.match(detail.error ?? "", /restart/);
+      const transcript = await (await app.request(`/api/runs/${run.id}/transcript`)).text();
+      assert.match(transcript, /restarted while this run was working/, "the close still explains itself");
+    }
+    assert.equal(asked, 1, "a run that had not reached running is never attached");
+  } finally {
+    ctx.driver = previousDriver;
+  }
+});
+
+/**
+ * A resumed live conversation is still the same conversation: the
+ * opening prompt is not replayed (the agent heard it in its first
+ * life), and a message sent after the restart reaches the reconnected
+ * process's stdin instead of parking.
+ */
+test("a resumed live conversation hears new messages and never repeats the prompt", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Reattach live");
+  const feature = await createFeature(project.id, "Live resumed card");
+  const profile = await fakeProfile("reattach-live-fake");
+  const stage = projectStages[0]!;
+
+  const [sandbox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "sprite",
+      externalId: `bento-${feature.id}`,
+      status: "busy",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      // LIVE selects the fake adapter's stdin conversation mode.
+      prompt: "LIVE half finished work",
+      status: "running",
+      executor: "server",
+      sandboxId: sandbox!.id,
+      startedAt: new Date(Date.now() - 60_000),
+    })
+    .returning();
+
+  const heard: string[] = [];
+  const fakeDriver = {
+    provider: "sprite" as const,
+    supportsStdin: true,
+    async provision(): Promise<never> {
+      throw new Error("recovery must not provision");
+    },
+    exec(): AsyncIterable<never> {
+      throw new Error("recovery must not exec");
+    },
+    async attach(_handle: SandboxHandle, _argv: string[], opts?: { stdin?: AsyncIterable<string> }) {
+      const stdin = opts?.stdin;
+      return (async function* () {
+        // The reconnected agent waits for the conversation, exactly
+        // like a live process whose stdin pipe survived the deploy.
+        if (stdin) {
+          for await (const line of stdin) {
+            heard.push(line.trim());
+            break;
+          }
+        }
+        yield {
+          kind: "stdout" as const,
+          data: `${JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "fake-live-1", total_cost_usd: 0, num_turns: 1 })}\n`,
+        };
+        yield { kind: "exit" as const, exitCode: 0 };
+      })();
+    },
+    async destroy() {},
+  };
+  const previousDriver = ctx.driver;
+  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  try {
+    await recoverInterruptedRuns(ctx);
+    // The live session registers as part of the resume; a message sent
+    // before that would (correctly) park instead of going live.
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && !ctx.liveInputs.has(running!.id)) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(ctx.liveInputs.has(running!.id), "the resumed run accepts live messages again");
+
+    const reply = await json<{ queued: boolean; live?: boolean }>(
+      await app.request(`/api/features/${feature.id}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "a follow-up mid resume" }),
+      }),
+    );
+    assert.equal(reply.live, true, "the message went to the reconnected agent, not the parking slot");
+
+    assert.equal(await waitForRun(running!.id), "succeeded");
+    assert.deepEqual(heard, ["a follow-up mid resume"], "stdin carried the follow-up and nothing else");
+    const transcript = await (await app.request(`/api/runs/${running!.id}/transcript`)).text();
+    assert.match(transcript, /you> a follow-up mid resume/, "the follow-up is the user's own transcript line");
+  } finally {
+    ctx.driver = previousDriver;
+  }
+});
+
+/**
+ * The session id is the conversation's only key, and it used to reach
+ * the run row only at the very end: a run that died without a result
+ * event took the whole conversation with it. It is known the moment
+ * the CLI announces itself, so that is when it is written.
+ */
+test("a run records its session id at init, not only at the end", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Early session id");
+  const feature = await createFeature(project.id, "Session id card");
+  const profile = await fakeProfile("early-session-fake");
+  const stage = projectStages[0]!;
+
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      // SLOW keeps the run alive long enough to observe it mid-flight.
+      prompt: "SLOW work",
+      status: "queued",
+      executor: "server",
+    })
+    .returning();
+  await ctx.boss.send("run.execute", { runId: running!.id });
+
+  const deadline = Date.now() + 30_000;
+  let seen: { status: string; cliSessionId: string | null } | null = null;
+  while (Date.now() < deadline) {
+    seen = await json<{ status: string; cliSessionId: string | null }>(
+      await app.request(`/api/runs/${running!.id}`),
+    );
+    if (seen.cliSessionId) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.equal(seen?.cliSessionId, "fake-session-1", "the init event's session id reaches the run row");
+  assert.ok(
+    seen && !TERMINAL_STATUSES.includes(seen.status),
+    "and it is there while the run is still working, when a crash could still lose it",
+  );
+  // No need to sit out the slow run once the point is proven.
+  await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" });
+  await waitForRun(running!.id);
+});
+
+/**
+ * Two messages sent in the same instant used to both read the same
+ * queuedPrompt and the second write erased the first, with both
+ * senders told "queued". The append now happens in SQL, so the race
+ * has no window.
+ */
+test("two messages racing into the parking slot both survive", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Message race");
+  const feature = await createFeature(project.id, "Race card");
+  const profile = await fakeProfile("race-fake");
+  const stage = projectStages[0]!;
+
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "SLOW work",
+      status: "queued",
+      executor: "server",
+    })
+    .returning();
+  await ctx.boss.send("run.execute", { runId: running!.id });
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const run = await json<{ status: string }>(await app.request(`/api/runs/${running!.id}`));
+    if (run.status === "running") break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  const send = (text: string) =>
+    app.request(`/api/features/${feature.id}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  const [first, second] = await Promise.all([send("wait"), send("actually stop")]);
+  assert.equal((await json<{ queued: boolean }>(first!)).queued, true);
+  assert.equal((await json<{ queued: boolean }>(second!)).queued, true);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  const parked = (row?.queuedPrompt ?? "").split("\n").sort();
+  assert.deepEqual(parked, ["actually stop", "wait"], "both racing messages are in the slot");
+
+  await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" });
+  await waitForRun(running!.id);
+});
+
+/**
+ * A follow-up continues the card's work, never the judging of it. The
+ * newest run on a gated card is often the completion judge, and
+ * inheriting its profile and session had the reviewer answering the
+ * user inside the judging session.
+ */
+test("a follow-up resumes the work agent's session, not the judge's", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Judge hijack");
+  const feature = await createFeature(project.id, "Judged card");
+  const worker = await fakeProfile("judged-worker");
+  const judge = await fakeProfile("judged-judge");
+  const stage = projectStages[0]!;
+
+  const plant = async (values: {
+    profileId: string;
+    prompt: string;
+    cliSessionId: string;
+    queuedAt: Date;
+  }) => {
+    const [run] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: stage.id,
+        agentProfileId: values.profileId,
+        prompt: values.prompt,
+        status: "succeeded",
+        executor: "server",
+        cliSessionId: values.cliSessionId,
+        queuedAt: values.queuedAt,
+      })
+      .returning();
+    return run!;
+  };
+  await plant({
+    profileId: worker.id,
+    prompt: "build the thing",
+    cliSessionId: "work-sess",
+    queuedAt: new Date(Date.now() - 60_000),
+  });
+  await plant({
+    profileId: judge.id,
+    prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build". Decide whether it is complete.`,
+    cliSessionId: "judge-sess",
+    queuedAt: new Date(),
+  });
+
+  const reply = await json<{ queued: boolean; run?: { id: string } }>(
+    await app.request(`/api/features/${feature.id}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "also handle the empty case" }),
+    }),
+  );
+  assert.ok(reply.run, "an idle card answers a message with a new run");
+  const [resumed] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, reply.run!.id));
+  assert.equal(resumed?.agentProfileId, worker.id, "the worker answers, not the judge");
+  assert.equal(resumed?.cliSessionId, "work-sess", "inside the work conversation, not the judging one");
+  await waitForRun(reply.run!.id);
 });
 
 /**
@@ -630,22 +1319,98 @@ test("an agent's skill shapes its prompt, and the log speaks its name", async ()
 });
 
 /**
+ * Runs a body with these process.env values in place, null meaning
+ * absent, and restores what was there afterwards. The credential tests
+ * below turn on what is *not* set as much as on what is, so inheriting
+ * a developer's own `ANTHROPIC_API_KEY` would quietly invert a result.
+ */
+async function withEnv(values: Record<string, string | null>, body: () => Promise<void>) {
+  const before = new Map(Object.keys(values).map((name) => [name, process.env[name]]));
+  try {
+    for (const [name, value] of Object.entries(values)) {
+      if (value === null) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await body();
+  } finally {
+    for (const [name, value] of before) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+/**
  * A subscription login token satisfies claude-code without an API key.
  * This is the path a containerized server relies on: it cannot reach
  * the machine's keychain, so the token from `claude setup-token`
  * arrives through the environment instead.
  */
 test("a claude login token counts as a credential", async () => {
-  const before = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
-  try {
+  await withEnv({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test", ANTHROPIC_API_KEY: null, ANTHROPIC_BASE_URL: null }, async () => {
     const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
     assert.deepEqual(missing, [], "a login token means nothing is missing");
     assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-test", "and the token reaches the sandbox env");
-  } finally {
-    if (before === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    else process.env.CLAUDE_CODE_OAUTH_TOKEN = before;
-  }
+  });
+});
+
+/**
+ * The two Anthropic credentials are alternatives, and Claude Code picks
+ * the key when it is handed both, so a stale key beside a good token
+ * failed the run with "Invalid API key" while every check here passed.
+ * Only one of them may reach the sandbox.
+ */
+test("a login token displaces the API key rather than joining it", async () => {
+  await withEnv(
+    { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test", ANTHROPIC_API_KEY: "sk-ant-api-stale", ANTHROPIC_BASE_URL: null },
+    async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
+      assert.deepEqual(missing, []);
+      assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-test", "the token is what the agent gets");
+      assert.equal(env.ANTHROPIC_API_KEY, undefined, "and the key it supersedes is withheld");
+    },
+  );
+});
+
+/**
+ * The exception, and the reason this is not a plain preference: a login
+ * token is only valid at Anthropic's own API. Once a base URL points
+ * the tool at OpenRouter or a gateway, the key is the only credential
+ * that can work, so the token gives way instead.
+ */
+test("a redirected endpoint reverses which Anthropic credential wins", async () => {
+  await withEnv(
+    {
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test",
+      ANTHROPIC_API_KEY: "sk-or-routed",
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api/v1",
+    },
+    async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
+      assert.deepEqual(missing, []);
+      assert.equal(env.ANTHROPIC_API_KEY, "sk-or-routed", "the key is what reaches a redirected tool");
+      assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined, "and the token, useless there, is withheld");
+    },
+  );
+});
+
+/**
+ * With the endpoint redirected and only a token stored, the run stops
+ * here naming the key. Starting it would spend a sandbox to arrive at
+ * an authentication error that says nothing about what to add.
+ */
+test("a redirected endpoint with only a token is missing the key", async () => {
+  await withEnv(
+    {
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-test",
+      ANTHROPIC_API_KEY: null,
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api/v1",
+    },
+    async () => {
+      const { missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter);
+      assert.deepEqual(missing, ["ANTHROPIC_API_KEY"], "and the message names what to add");
+    },
+  );
 });
 
 /**
@@ -1167,6 +1932,59 @@ test("an agent can be edited, and its stages follow it", { timeout: 60_000 }, as
 
   assert.equal((await patch({ name: "x" }, "00000000-0000-0000-0000-000000000000")).status, 404);
   assert.equal((await patch({})).status, 400, "an empty patch is a mistake, not a no-op");
+});
+
+/**
+ * The list is read by a person looking for one agent by name, so it is
+ * ordered by name.
+ *
+ * Unordered, Postgres returns heap order, and an update rewrites the
+ * row at the end of the table: editing an agent sent it to the bottom
+ * of every list it appeared in, which reads as a "recently changed"
+ * sort nobody asked for.
+ */
+test("agents are listed alphabetically, and an edit does not move one", async () => {
+  const post = (name: string) =>
+    app.request("/api/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, cli: "claude-code", model: "claude-opus-5" }),
+    });
+
+  // Created out of order, and mixed case: capitals sorting ahead of
+  // lowercase would split the list into two alphabets.
+  const names = ["zz sorting Zebra", "zz sorting alpha", "zz sorting Middle"];
+  const ids: Record<string, string> = {};
+  for (const name of names) {
+    const row = await json<{ id: string; name: string }>(await post(name));
+    ids[name] = row.id;
+  }
+
+  const listed = async () =>
+    (await json<{ id: string; name: string }[]>(await app.request("/api/profiles")))
+      .filter((p) => p.name.startsWith("zz sorting "))
+      .map((p) => p.name);
+
+  assert.deepEqual(await listed(), ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"]);
+
+  await app.request(`/api/profiles/${ids["zz sorting alpha"]}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5" }),
+  });
+  assert.deepEqual(
+    await listed(),
+    ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"],
+    "editing an agent must not move it in the list",
+  );
+
+  // The TUI reads the same agents through a different route.
+  const plain = await (await app.request("/api/profiles/plain")).text();
+  const fromPlain = plain
+    .split("\n")
+    .map((line) => line.split("|").at(-1) ?? "")
+    .filter((name) => name.startsWith("zz sorting "));
+  assert.deepEqual(fromPlain, ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"]);
 });
 
 test("an impossible pairing of coding agent and model is refused", async () => {
@@ -1725,6 +2543,115 @@ test("publishing on demand says what it needs before it can push", { timeout: 60
   const noGithub = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
   assert.equal(noGithub.status, 409);
   assert.match(((await noGithub.json()) as { error: string }).error, /Settings, GitHub/);
+});
+
+/**
+ * The Create PR button on a hosted card. A sprite keeps its checkouts
+ * inside the sandbox, where the server cannot mount them, so the route
+ * exports the commits through the driver, the same handoff a finished
+ * run uses, and pushes with the organization's App installation. The
+ * push itself is proven against a real remote in "the server pushes
+ * each repository the agent committed in".
+ */
+test("publishing on demand exports the card's sandbox when the driver keeps no host worktrees", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("sandbox-publish");
+  await run("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/acme/sandbox-publish.git"]);
+  const project = await json<{ id: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Sandbox publish", localPath: checkout }),
+    }),
+  );
+  await unassignStages(project.id);
+  const [repo] = await json<{ name: string }[]>(await app.request(`/api/projects/${project.id}/repositories`));
+
+  // The connection a hosted organization actually has: an App
+  // installation, which githubConnectionFor answers before any token.
+  await ctx.db.insert(organization).values({
+    id: "sandbox-publish-org",
+    name: "Sandbox Publish",
+    slug: "sandbox-publish",
+  });
+  await ctx.db.update(projects).set({ organizationId: "sandbox-publish-org" }).where(eq(projects.id, project.id));
+  await ctx.db.insert(githubInstallations).values({
+    organizationId: "sandbox-publish-org",
+    installationId: "sandbox-publish-installation",
+    accountLogin: "acme",
+    accountType: "Organization",
+    installedBy: ctx.userId,
+  });
+  const feature = await createFeature(project.id, "Publish from the sandbox");
+  const [stored] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(stored?.organizationId, "sandbox-publish-org", "the card inherits the project's organization");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  const exported: string[] = [];
+  let exportError: Error | null = null;
+  const fakeDriver = {
+    provider: "sprite",
+    async provision(): Promise<never> {
+      throw new Error("this test provisions nothing");
+    },
+    exec(): AsyncIterable<never> {
+      throw new Error("this test execs nothing");
+    },
+    async destroy() {},
+    async exportRepository(handle: SandboxHandle, name: string, base: string) {
+      if (exportError) throw exportError;
+      exported.push(`${handle.externalId}:${handle.workdir}:${name}->${base}`);
+      // Nothing committed beyond the base, so nothing to publish.
+      return null;
+    },
+  };
+  const previousDriver = ctx.driver;
+  const previousGitHubApp = ctx.githubApp;
+  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  ctx.githubApp = {
+    forInstallation(installationId: string) {
+      assert.equal(installationId, "sandbox-publish-installation");
+      return {
+        async pushToken() {
+          return "unused: nothing was committed, so nothing is pushed";
+        },
+        async ensurePullRequest() {
+          assert.fail("nothing to publish means no pull request is opened");
+        },
+      };
+    },
+  } as unknown as NonNullable<AppContext["githubApp"]>;
+  try {
+    // A card that never ran has no sandbox to read.
+    const noSandbox = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
+    assert.equal(noSandbox.status, 409);
+    assert.match(((await noSandbox.json()) as { error: string }).error, /no sandbox yet/);
+
+    await ctx.db.insert(sandboxes).values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "sprite",
+      externalId: "sprite-publish-test",
+      status: "hibernated",
+      workdir: "/workspace",
+    });
+    const res = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { published: [], failures: [] });
+    assert.deepEqual(exported, [`sprite-publish-test:/workspace:${repo!.name}->main`]);
+
+    // A sandbox that went away surfaces as a named failure, not a
+    // refusal to try.
+    exportError = new Error("the sandbox is gone");
+    const dead = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
+    assert.equal(dead.status, 200);
+    const body = (await dead.json()) as { published: unknown[]; failures: { name: string; reason: string }[] };
+    assert.deepEqual(body.published, []);
+    assert.equal(body.failures[0]?.name, repo!.name);
+    assert.match(body.failures[0]?.reason ?? "", /the sandbox is gone/);
+  } finally {
+    ctx.driver = previousDriver;
+    ctx.githubApp = previousGitHubApp;
+  }
 });
 
 /**

@@ -3,6 +3,7 @@ import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient } from "@bento/api-client";
 import type { AgentEvent } from "@bento/core";
 import type { LineQuote } from "./DiffReview.js";
+import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
 
 /** Animation is decoration; a stilled frame carries the same meaning. */
@@ -14,16 +15,40 @@ function orbStateFor(tool: string | null): OrbState {
   if (!tool) return "shaping";
   if (/read|grep|glob|search|fetch|ls|find/i.test(tool)) return "searching";
   if (/edit|write|patch|notebook/i.test(tool)) return "composing";
-  if (/task|todo|plan|agent/i.test(tool)) return "solving";
+  if (/task|todo|plan|agent|think/i.test(tool)) return "solving";
   return "working";
 }
 
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
 
 /**
- * One conversation with a card's agents: the log, the run selector, and
- * the composer with its stop control. Shared by the card drawer and the
- * full-page session view, so the two cannot drift.
+ * The conversation is rendered from these, never from raw events: a
+ * run's event list is folded into rows first, so tool bursts collapse
+ * and the pane reads as an exchange between people.
+ */
+type ChatItem =
+  | { key: string; kind: "message"; role: "assistant" | "user" | "system"; text: string; speaker: string }
+  | { key: string; kind: "tools"; calls: ToolCall[] }
+  | { key: string; kind: "result"; ok: boolean; costUsd?: number | undefined; error?: string | undefined };
+
+interface ToolCall {
+  name: string;
+  phase: "start" | "end";
+  /** A short reading of the call's input, when the adapter carried one. */
+  summary: string | null;
+}
+
+/** A message the server accepted but has not echoed back yet. */
+interface PendingMessage {
+  id: number;
+  text: string;
+  queued: boolean;
+}
+
+/**
+ * One conversation with a card's agents: the chat, the run selector,
+ * and the composer with its stop control. Shared by the card drawer
+ * and the full-page session view, so the two cannot drift.
  */
 export function AgentSession({
   client,
@@ -36,6 +61,8 @@ export function AgentSession({
   expandHref,
   quote,
   onQuoteClear,
+  defaultShowDetail,
+  showDetail: controlledShowDetail,
 }: {
   client: BentoClient;
   featureId: string;
@@ -50,6 +77,13 @@ export function AgentSession({
   /** A diff line the user picked to ask about; sent with the message. */
   quote?: LineQuote | null;
   onQuoteClear?: () => void;
+  /** Falls back to this when localStorage has no saved detail preference yet. */
+  defaultShowDetail?: boolean;
+  /**
+   * Fully controlled detail mode for durable previews. When set, it
+   * wins over both the saved preference and defaultShowDetail.
+   */
+  showDetail?: boolean;
 }) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   /**
@@ -61,23 +95,62 @@ export function AgentSession({
     { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[]
   >([]);
   // Remembered across cards and sessions: detail is a reading
-  // preference, not a per-card state.
-  const [showDetail, setShowDetail] = useState(() => localStorage.getItem("bento:logDetail") === "1");
+  // preference, not a per-card state. Only an absent preference falls
+  // back to defaultShowDetail; a saved "0" still means hidden.
+  const [showDetailState, setShowDetailState] = useState(() => {
+    const saved = localStorage.getItem("bento:logDetail");
+    return saved === null ? (defaultShowDetail ?? false) : saved === "1";
+  });
+  const showDetail = controlledShowDetail ?? showDetailState;
   const [say, setSay] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  // The log pane can be pointed at any run; null follows the newest,
-  // which is also where it snaps back when a new run starts.
+  // The pane can be pointed at any run; null follows the newest, which
+  // is also where it snaps back when a new run starts.
   const [viewedRunId, setViewedRunId] = useState<string | null>(null);
+  /**
+   * Sent messages the transcript has not echoed yet. Shown immediately
+   * so the composer never appears to swallow one, and reconciled
+   * against the persisted record the moment it streams in or lands in
+   * a finished block, so nothing shows twice.
+   */
+  const [pending, setPending] = useState<PendingMessage[]>([]);
+  const pendingId = useRef(0);
   /**
    * What the agent is doing between spoken lines. Tool events used to
    * land in the log as "[tool Bash start] [tool tool_result end]" over
    * and over: room spent, nothing said. They feed this indicator now,
-   * and collapse to one "[n tool steps]" line when the agent speaks.
+   * and collapse into one row in the conversation.
    */
   const [activity, setActivity] = useState<{ tool: string | null; steps: number }>({ tool: null, steps: 0 });
   const stepsSinceMessage = useRef(0);
-  const paneRef = useRef<HTMLPreElement>(null);
+  /**
+   * Highest event seq applied for the viewed stream. The server
+   * resumes a reconnect from Last-Event-ID, and this guard is the
+   * other half: an event that somehow arrives twice renders once.
+   */
+  const lastSeq = useRef(0);
+  /**
+   * The message being typed, built from streamed fragments. Fragments
+   * arrive per token, so they accumulate in a ref and reach state once
+   * a frame; per token setState would render hundreds of times a
+   * second. Cleared whenever a finished message or result lands: the
+   * transcript's copy is authoritative and showing both says it twice.
+   */
+  const [draft, setDraft] = useState("");
+  const draftRef = useRef("");
+  const draftFrame = useRef<number | null>(null);
+  const clearDraft = () => {
+    draftRef.current = "";
+    if (draftFrame.current !== null) {
+      cancelAnimationFrame(draftFrame.current);
+      draftFrame.current = null;
+    }
+    setDraft("");
+  };
+  const paneRef = useRef<HTMLDivElement>(null);
+  /** Whether the pane is pinned to the newest row; reading history unpins it. */
+  const stickToBottom = useRef(true);
 
   // The server sends runs newest first.
   const latestRun = runs[0];
@@ -92,6 +165,11 @@ export function AgentSession({
     setViewedRunId(null);
   }, [featureId, latestRun?.id]);
 
+  // A different card has a different conversation waiting for it.
+  useEffect(() => {
+    setPending([]);
+  }, [featureId]);
+
   // Finished runs come from one fetch; the live run streams below.
   const finishedCount = runs.filter((r) => TERMINAL_RUN.has(r.status)).length;
   useEffect(() => {
@@ -105,12 +183,26 @@ export function AgentSession({
   const streamedRun = viewedRunId ? viewedRun : runActive ? latestRun : null;
   useEffect(() => {
     setEvents([]);
+    clearDraft();
+    lastSeq.current = 0;
     if (!streamedRun) return;
     stepsSinceMessage.current = 0;
     setActivity({ tool: null, steps: 0 });
     const stop = client.streamRun(streamedRun.id, {
-      onEvent: (event) => {
+      onEvent: (event, seq) => {
+        // Replays and reconnects both re-deliver; seq is the
+        // exactly-once cursor the pane renders by.
+        if (seq > 0 && seq <= lastSeq.current) return;
+        if (seq > lastSeq.current) lastSeq.current = seq;
         onEvent?.(featureId, event);
+        // The persisted line supersedes the fragments that previewed
+        // it. Assistant lines and results only: a steer the user sends
+        // mid turn says nothing about the message still being typed,
+        // and clearing on it left the draft permanently behind the
+        // stream's offsets, frozen mid sentence.
+        if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
+          clearDraft();
+        }
         if (event.type === "tool") {
           if (event.phase === "start" && event.name !== "tool_result") {
             stepsSinceMessage.current += 1;
@@ -121,40 +213,140 @@ export function AgentSession({
           setActivity({ tool: null, steps: 0 });
         }
         // The pane shows the tail; a long run would otherwise re-render
-        // an ever-growing log on every event.
-        setEvents((prev) => [...prev.slice(-1499), event]);
+        // an ever-growing conversation on every event. Whatever the cap
+        // drops returns when the finished run's block is refetched.
+        setEvents((prev) => [...prev.slice(-1999), event]);
       },
-      onDone: () => onChanged(),
+      onDelta: (delta) => {
+        // Thinking has no text worth previewing; it only proves life.
+        if (delta.channel === "thinking") {
+          setActivity((prev) => (prev.tool === "thinking" ? prev : { tool: "thinking", steps: prev.steps }));
+          return;
+        }
+        setActivity((prev) => (prev.tool === "thinking" ? { tool: null, steps: prev.steps } : prev));
+        /**
+         * Offset zero starts a draft (a new message, or the server's
+         * catch-up snapshot of one already in flight); anything else
+         * must continue exactly where this draft ends. A fragment from
+         * the middle of a sentence renders as text that starts
+         * nowhere, so it is dropped; the finished message arrives
+         * whole regardless.
+         */
+        if (delta.offset === 0) draftRef.current = delta.text;
+        else if (delta.offset === draftRef.current.length) draftRef.current += delta.text;
+        else return;
+        if (draftFrame.current === null) {
+          draftFrame.current = requestAnimationFrame(() => {
+            draftFrame.current = null;
+            setDraft(draftRef.current);
+          });
+        }
+      },
+      onDone: () => {
+        // A cancelled run ends with no result event, so this is the
+        // only thing standing between a stopped run and a half typed
+        // sentence pinned to the transcript.
+        clearDraft();
+        onChanged();
+      },
     });
-    return stop;
+    return () => {
+      stop();
+      if (draftFrame.current !== null) {
+        cancelAnimationFrame(draftFrame.current);
+        draftFrame.current = null;
+      }
+    };
   }, [client, streamedRun?.id]);
 
-  const lines = useMemo(() => {
-    if (viewedRunId) return renderLines(events, viewedAgent?.name ?? "agent", showDetail);
-    const out: string[] = [];
+  /**
+   * The conversation as sections, one per run, newest last. Default
+   * view: every finished run's block in order, then the latest run's
+   * live events (or a just-finished run's, until its block arrives:
+   * clearing them there blanked the exchange that had only moments
+   * left to read). A run picked from the list shows alone.
+   */
+  const sections = useMemo(() => {
+    const out: { key: string; runId: string; agentName: string; when: string; status: string; items: ChatItem[] }[] = [];
+    if (viewedRunId) {
+      if (viewedRun) {
+        out.push({
+          key: viewedRun.id,
+          runId: viewedRun.id,
+          agentName: viewedAgent?.name ?? "agent",
+          when: runTime(viewedRun.queuedAt),
+          status: runWords(viewedRun.status),
+          items: toChatItems(events, viewedAgent?.name ?? "agent", `v-${viewedRun.id}`),
+        });
+      }
+      return out;
+    }
+    const inBlocks = new Set(blocks.map((b) => b.runId));
     for (const block of blocks) {
-      out.push(separator(block.agentName, block.queuedAt, block.status));
-      out.push(...renderLines(block.events, block.agentName, showDetail));
+      out.push({
+        key: block.runId,
+        runId: block.runId,
+        agentName: block.agentName,
+        when: runTime(block.queuedAt),
+        status: runWords(block.status),
+        items: toChatItems(block.events, block.agentName, block.runId),
+      });
     }
-    if (runActive && latestRun) {
-      out.push(separator(latestAgent?.name ?? "agent", latestRun.queuedAt, "working"));
-      out.push(...renderLines(events, latestAgent?.name ?? "agent", showDetail));
-    } else if (blocks.length === 0) {
-      out.push(...renderLines(events, latestAgent?.name ?? "agent", showDetail));
+    if (latestRun && !inBlocks.has(latestRun.id)) {
+      out.push({
+        key: latestRun.id,
+        runId: latestRun.id,
+        agentName: latestAgent?.name ?? "agent",
+        when: runTime(latestRun.queuedAt),
+        status: runActive ? "working" : runWords(latestRun.status),
+        items: toChatItems(events, latestAgent?.name ?? "agent", latestRun.id),
+      });
     }
-    return out.slice(-1500);
-  }, [events, blocks, viewedRunId, runActive, latestRun?.id, viewedAgent?.name, latestAgent?.name, showDetail]);
+    return out;
+  }, [events, blocks, viewedRunId, viewedRun, latestRun, runActive, viewedAgent?.name, latestAgent?.name]);
+
+  /**
+   * Pendings that have not been echoed by the transcript, counting
+   * occurrences so sending the same words twice still reconciles one
+   * at a time.
+   */
+  const visiblePending = useMemo(() => {
+    const echoed = new Map<string, number>();
+    const count = (text: string) => echoed.set(text, (echoed.get(text) ?? 0) + 1);
+    if (!viewedRunId) {
+      for (const block of blocks) {
+        for (const event of block.events) {
+          if (event.type === "message" && event.role === "user") count(event.text);
+        }
+      }
+      for (const event of events) {
+        if (event.type === "message" && event.role === "user") count(event.text);
+      }
+    }
+    return pending.filter((p) => {
+      const left = echoed.get(p.text) ?? 0;
+      if (left > 0) {
+        echoed.set(p.text, left - 1);
+        return false;
+      }
+      return true;
+    });
+  }, [pending, blocks, events, viewedRunId]);
+
+  const hasMessages = sections.some((s) => s.items.length > 0) || visiblePending.length > 0;
 
   useEffect(() => {
     // After paint: on the first render the pane has not been laid out
     // yet, so setting scrollTop immediately left a long conversation
-    // parked at its oldest run.
+    // parked at its oldest run. And only when pinned: reading history
+    // must not be yanked back to the newest line on every event, and
+    // the draft updates once per animation frame while text streams.
     const frame = requestAnimationFrame(() => {
       const el = paneRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [lines.length]);
+  }, [sections, visiblePending.length, draft]);
 
   async function send() {
     const question = say.trim();
@@ -170,17 +362,14 @@ export function AgentSession({
       const sent = await client.messageFeature(featureId, prompt);
       onQuoteClear?.();
       setSay("");
-      // Live deliveries come back through the event stream, so adding
-      // an optimistic line too would say it twice.
+      // Watch the answer, not the historical run that happened to be open.
+      setViewedRunId(null);
+      stickToBottom.current = true;
+      // Live deliveries echo back through the event stream on their
+      // own; anything else would be invisible until then, so it is
+      // shown now and reconciled when the persisted line arrives.
       if (!("live" in sent && sent.live)) {
-        setEvents((prev) => [
-          ...prev,
-          {
-            type: "message",
-            role: "user",
-            text: sent.queued ? `${prompt}  [queued until the agent finishes]` : prompt,
-          } as AgentEvent,
-        ]);
+        setPending((prev) => [...prev, { id: ++pendingId.current, text: prompt, queued: sent.queued }]);
       }
       onChanged();
     } catch (err) {
@@ -203,7 +392,7 @@ export function AgentSession({
     <section className="section agent-session">
       <span className="label session-label">
         <span>
-          Agent logs
+          Conversation
           {viewedRun && viewedRun.id !== latestRun?.id ? ` (run from ${runTime(viewedRun.queuedAt)})` : ""}
         </span>
         <span className="session-tools">
@@ -212,8 +401,11 @@ export function AgentSession({
             className="session-expand"
             aria-pressed={showDetail}
             onClick={() => {
-              const next = !showDetail;
-              setShowDetail(next);
+              // Controlled previews pin the mode; only the uncontrolled
+              // path remembers a preference across cards and sessions.
+              if (controlledShowDetail !== undefined) return;
+              const next = !showDetailState;
+              setShowDetailState(next);
               localStorage.setItem("bento:logDetail", next ? "1" : "0");
             }}
           >
@@ -227,15 +419,54 @@ export function AgentSession({
         </span>
       </span>
       {latestRun ? (
-        lines.length <= 1 && runActive && !viewedRunId ? (
-          <div className="transcript orb-hero" aria-label="The agent is starting">
+        !hasMessages && !draft && runActive && !viewedRunId ? (
+          <div className="chat orb-hero" aria-label="The agent is starting">
             <ThinkingOrb state="shaping" size={64} paused={REDUCED_MOTION} />
             <span className="muted">{workingName} is getting started...</span>
           </div>
         ) : (
-          <pre className="transcript" ref={paneRef}>
-            {lines.length > 0 ? lines.join("\n") : "Waiting for output..."}
-          </pre>
+          <div
+            className="chat"
+            ref={paneRef}
+            onScroll={() => {
+              const el = paneRef.current;
+              if (!el) return;
+              stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            }}
+          >
+            {sections.length === 0 && !hasMessages && !draft && <p className="muted">Waiting for output...</p>}
+            {sections.map((section) => (
+              <div className="chat-section" key={section.key}>
+                <div className="chat-run">
+                  <span>
+                    {section.agentName} · {section.when} · {section.status}
+                  </span>
+                </div>
+                {section.items.map((item) => (
+                  <ChatRow key={item.key} item={item} showDetail={showDetail} />
+                ))}
+              </div>
+            ))}
+            {/*
+              The message being typed, in the agent's own bubble: the
+              fragments preview what the finished message will say, and
+              its arrival replaces them. Only the live run produces
+              fragments, so the latest agent is always the one talking.
+            */}
+            {!viewedRunId && draft && (
+              <MessageBubble role="assistant" speaker={workingName} text={draft} state="draft" />
+            )}
+            {!viewedRunId &&
+              visiblePending.map((p) => (
+                <MessageBubble
+                  key={`pending-${p.id}`}
+                  role="user"
+                  speaker={`you${p.queued ? " · queued until the agent finishes" : ""}`}
+                  text={p.text}
+                  state="pending"
+                />
+              ))}
+          </div>
         )
       ) : (
         <p className="muted">
@@ -243,7 +474,7 @@ export function AgentSession({
           appears here.
         </p>
       )}
-      {runActive && !viewedRunId && lines.length > 1 && (
+      {runActive && !viewedRunId && hasMessages && (
         <div className="working-row" role="status">
           <ThinkingOrb state={orbStateFor(activity.tool)} size={20} paused={REDUCED_MOTION} aria-label="Agent working" />
           <span className="muted">
@@ -286,12 +517,8 @@ export function AgentSession({
             aria-label="Message the agent"
           />
           {runActive && (
-            <button
-              type="button"
-              className="btn composer-stop"
+            <StopButton
               disabled={busy}
-              title="Stop the agent"
-              aria-label="Stop the agent"
               onClick={() => {
                 setBusy(true);
                 void client
@@ -300,10 +527,7 @@ export function AgentSession({
                   .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
                   .finally(() => setBusy(false));
               }}
-            >
-              <span className="stop-square" aria-hidden="true" />
-              Stop
-            </button>
+            />
           )}
           <button className="btn btn-primary" type="submit" disabled={busy || !say.trim()}>
             Send
@@ -333,7 +557,7 @@ export function AgentSession({
           key={run.id}
           className="criterion run-row"
           data-viewing={run.id === viewedRun?.id || undefined}
-          title="Show this run's log"
+          title="Show this run's conversation"
           onClick={() => setViewedRunId(run.id === latestRun?.id ? null : run.id)}
         >
           <span
@@ -352,15 +576,164 @@ export function AgentSession({
   );
 }
 
-/** One line marking where a run begins inside the conversation. */
-function separator(agentName: string, queuedAt: string, status: string): string {
-  return `── ${agentName} · ${runTime(queuedAt)} · ${runWords(status)} ──`;
+export function MessageBubble({
+  role,
+  speaker,
+  text,
+  state,
+}: {
+  role: "assistant" | "user";
+  speaker: string;
+  text: string;
+  state?: "pending" | "draft";
+}) {
+  return (
+    <div className={`chat-row chat-row-${role}`}>
+      <div
+        className={`chat-bubble chat-bubble-${role}`}
+        data-pending={state === "pending" || undefined}
+        data-draft={state === "draft" || undefined}
+      >
+        <span className="chat-meta">{speaker}</span>
+        <span className="chat-text">{text}</span>
+      </div>
+    </div>
+  );
+}
+
+/** One row of the conversation, whatever it carries. */
+function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) {
+  if (item.kind === "message") {
+    if (item.role === "user") {
+      return <MessageBubble role="user" speaker="you" text={item.text} />;
+    }
+    if (item.role === "system") {
+      return (
+        <div className="chat-row chat-row-system">
+          <span className="chat-note">{item.text}</span>
+        </div>
+      );
+    }
+    return <MessageBubble role="assistant" speaker={item.speaker} text={item.text} />;
+  }
+  if (item.kind === "tools") {
+    return <ToolRow calls={item.calls} showDetail={showDetail} />;
+  }
+  return (
+    <div className="chat-row chat-row-system">
+      <span className="chat-result" data-ok={item.ok}>
+        {item.ok
+          ? `finished${item.costUsd !== undefined ? ` · $${item.costUsd.toFixed(2)}` : ""}`
+          : `failed: ${item.error ?? "no reason reported"}`}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * A run's tool activity as one subdued row. Collapsed it counts steps
+ * and names the tools; the detail toggle lists each call with a short
+ * reading of its input, for debugging a stuck agent.
+ */
+function ToolRow({ calls, showDetail }: { calls: ToolCall[]; showDetail: boolean }) {
+  if (showDetail) {
+    return (
+      <div className="chat-row chat-row-tools">
+        <div className="chat-tools-detail">
+          {calls.map((call, i) => (
+            <span key={i} className="chat-tool-line">
+              {call.name}
+              {call.summary ? `: ${call.summary}` : ""} {call.phase}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  const starts = calls.filter((c) => c.phase === "start");
+  const names = [...new Set(starts.map((c) => c.name))];
+  const label =
+    starts.length === 0
+      ? "tool activity"
+      : `${starts.length} tool step${starts.length === 1 ? "" : "s"}${names.length > 0 ? ` · ${names.join(", ")}` : ""}`;
+  return (
+    <div className="chat-row chat-row-tools">
+      <span className="chat-tools">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * Folds a run's events into conversation rows. Consecutive tool events
+ * gather into one row so a burst of file reads is a line, not a
+ * screen; everything else keeps its order. Pure, so history and the
+ * live stream render identically.
+ */
+function toChatItems(events: AgentEvent[], agentName: string, keyPrefix: string): ChatItem[] {
+  const items: ChatItem[] = [];
+  let calls: ToolCall[] = [];
+  let n = 0;
+  const flush = () => {
+    if (calls.length === 0) return;
+    items.push({ key: `${keyPrefix}-tools-${n}`, kind: "tools", calls });
+    n += 1;
+    calls = [];
+  };
+  for (const event of events) {
+    if (event.type === "tool") {
+      calls.push({ name: event.name, phase: event.phase, summary: toolSummary(event) });
+      continue;
+    }
+    flush();
+    if (event.type === "init") continue; // the run divider already says a session began
+    if (event.type === "message") {
+      items.push({
+        key: `${keyPrefix}-${n}`,
+        kind: "message",
+        role: event.role,
+        text: event.text,
+        speaker: event.role === "assistant" ? agentName : event.role === "user" ? "you" : "bento",
+      });
+      n += 1;
+      continue;
+    }
+    items.push({
+      key: `${keyPrefix}-${n}`,
+      kind: "result",
+      ok: event.ok,
+      costUsd: event.costUsd,
+      error: event.error,
+    });
+    n += 1;
+  }
+  flush();
+  return items;
+}
+
+/**
+ * A short reading of a tool call's input, when the adapter carried it:
+ * the command for a shell, the path for a file edit, the pattern for a
+ * search. Null when there is nothing honest to say.
+ */
+function toolSummary(event: Extract<AgentEvent, { type: "tool" }>): string | null {
+  if (event.phase !== "start" || !event.detail || typeof event.detail !== "object") return null;
+  const input = event.detail as Record<string, unknown>;
+  const pick = (...keys: string[]): string | null => {
+    for (const key of keys) {
+      const value = input[key];
+      if (typeof value === "string" && value.trim()) return value.replaceAll(/\s+/g, " ").trim();
+    }
+    return null;
+  };
+  const text = pick("command", "file_path", "path", "pattern", "url", "query", "description", "prompt");
+  if (!text) return null;
+  return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }
 
 /**
  * A run's status as a phrase. The raw enum reads as debug output in a
- * log meant for people, and "queued" beside an agent's name told
- * nobody whether anything was happening.
+ * conversation meant for people, and "queued" beside an agent's name
+ * told nobody whether anything was happening.
  */
 export function runWords(status: string): string {
   switch (status) {
@@ -384,48 +757,4 @@ export function runWords(status: string): string {
 /** "Jul 29, 11:42 PM": enough to tell runs apart without a full ISO stamp. */
 export function runTime(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-/**
- * The log in either voice: collapsed (tool bursts fold into one
- * "[n tool steps]" marker) or detailed (every tool start and result,
- * for debugging a stuck agent). Pure, so the toggle replays history.
- */
-function renderLines(events: AgentEvent[], agentName: string, showDetail: boolean): string[] {
-  const lines: string[] = [];
-  let steps = 0;
-  for (const event of events) {
-    if (event.type === "tool") {
-      if (showDetail) {
-        lines.push(`[tool ${event.name} ${event.phase}]`);
-      } else if (event.phase === "start" && event.name !== "tool_result") {
-        steps += 1;
-      }
-      continue;
-    }
-    if (steps > 0) {
-      lines.push(`[${steps} tool step${steps === 1 ? "" : "s"}]`);
-      steps = 0;
-    }
-    lines.push(renderEvent(event, agentName));
-  }
-  if (steps > 0) lines.push(`[${steps} tool step${steps === 1 ? "" : "s"} so far]`);
-  return lines.slice(-500);
-}
-
-function renderEvent(event: AgentEvent, agentName: string): string {
-  switch (event.type) {
-    case "init":
-      return "[session started]";
-    case "message":
-      // The profile's name, not the wire role: "Product Designer>"
-      // reads as a colleague, "assistant>" reads as a protocol.
-      return `${event.role === "assistant" ? agentName : event.role === "user" ? "you" : event.role}> ${event.text}`;
-    case "tool":
-      return `[tool ${event.name} ${event.phase}]`;
-    case "result":
-      return event.ok
-        ? `[done${event.costUsd !== undefined ? ` cost $${event.costUsd}` : ""}]`
-        : `[failed: ${event.error ?? "no reason reported"}]`;
-  }
 }

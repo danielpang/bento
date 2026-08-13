@@ -268,10 +268,11 @@ button {
 }
 
 /*
- * The wordmark. The glyph is a bento box: four compartments, exactly
- * one of them brand violet, which is also the rule the interface lives
- * by (one primary action per screen). Sans against the mono chrome
- * around it, so the name reads as a name, not as another label.
+ * The wordmark. The glyph is a bento box: four compartments of uneven
+ * size on their own plate, drawn as an inline SVG in BrandLockup so it
+ * stays byte-identical to favicon.svg instead of being approximated a
+ * second time in CSS. Sans against the mono chrome around it, so the
+ * name reads as a name, not as another label.
  */
 .brand {
   display: inline-flex;
@@ -286,40 +287,23 @@ button {
 }
 
 .brand-glyph {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   flex: none;
-}
-
-.brand-glyph i {
-  border-radius: 2px;
-  background: var(--line-bright);
-}
-
-.brand-glyph i:nth-child(2) {
-  background: var(--brand);
+  display: block;
 }
 
 /* The entrance screens, where the mark is the page's own heading
-   rather than a corner of the chrome. Same geometry, scaled: the gap
-   and radius grow with the tiles so the compartments stay legible
-   instead of closing into one square. */
+   rather than a corner of the chrome. The mark scales as one piece,
+   so there is nothing to retune here beyond its size. */
 .brand-lg {
   font-size: 20px;
   gap: 10px;
 }
 
 .brand-lg .brand-glyph {
-  width: 24px;
-  height: 24px;
-  gap: 3px;
-}
-
-.brand-lg .brand-glyph i {
-  border-radius: 3px;
+  width: 26px;
+  height: 26px;
 }
 
 /* Accent choice: the swatch shows the hue the current theme would use. */
@@ -359,6 +343,145 @@ button {
   flex: 1;
 }
 
+/* The project picker and the search field, as one block. They answer
+   the same question (which cards am I looking at), and on a phone they
+   move to a row of their own together rather than being separated by
+   wherever the row happened to wrap. */
+.topbar-lead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/*
+ * The board's tools, and the chrome that follows them. Replaced by the
+ * hamburger below 720px; see the narrow-screen block.
+ *
+ * A real flex container rather than `display: contents`, which would
+ * have laid the buttons out identically and been the tidier rule.
+ * Browsers have shipped `display: contents` removing an element from
+ * the accessibility tree, and this one is a landmark carrying a name.
+ * The gap repeats the topbar's so the row is unchanged either way.
+ */
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Hidden from sight, kept for a screen reader. Position rather than
+   display: none, which would take the element out of the accessibility
+   tree along with the live region announcement it exists to carry. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * The board's search.
+ *
+ * Built as a field rather than as an .input with an icon beside it: the
+ * magnifier and the clear button sit inside the border, so the whole
+ * thing reads as one control and clicking anywhere in it starts typing.
+ */
+.search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  width: 220px;
+  padding: 0 8px;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-faint);
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.search:focus-within,
+.search[data-on] {
+  border-color: var(--brand);
+  color: var(--text-dim);
+}
+
+.search-mark {
+  flex: none;
+}
+
+/*
+ * The input itself carries no border of its own: the wrapper is the
+ * field. `appearance: none` because a type="search" is a platform
+ * widget in WebKit, and it arrives with a cancel button of its own
+ * drawn in the system's colours next to ours.
+ */
+.search-input {
+  appearance: none;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+.search-input:focus {
+  outline: none;
+}
+
+.search-input::-webkit-search-cancel-button,
+.search-input::-webkit-search-decoration {
+  appearance: none;
+}
+
+.search-input::placeholder {
+  color: var(--text-faint);
+}
+
+.search-clear {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+}
+
+@media (hover: hover) {
+  .search-clear:hover {
+    background: var(--panel-raised);
+    color: var(--text);
+  }
+}
+
+/* The hamburger. Absent until the row it replaces is gone, so the two
+   are never on screen at once saying the same thing twice. */
+.nav-menu-trigger {
+  display: none;
+  padding: 6px 8px;
+}
+
+/* Wider than the project menu's floor: these are labels, not names
+   that need room to be long. */
+.nav-menu {
+  min-width: 190px;
+}
 
 .select,
 .input {
@@ -408,6 +531,9 @@ button {
   font-family: var(--sans);
   font-size: 13px;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 /*
@@ -539,7 +665,8 @@ button {
  * clickable region is what grows: the pseudo-element takes the hit
  * area past the 44x44 floor without moving a pixel of what is drawn.
  */
-.settings-gear {
+.settings-gear,
+.icon-button {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -547,9 +674,12 @@ button {
   line-height: 1;
 }
 
-.settings-gear::after {
+.settings-gear::after,
+.icon-button::after {
   content: "";
   position: absolute;
+}
+.settings-gear::after {
   inset: -7px -1px;
 }
 
@@ -1083,11 +1213,14 @@ button {
   right: 0;
   bottom: 0;
   width: min(560px, 100vw);
+  max-width: 100vw;
   background: var(--panel);
   border-left: 1px solid var(--line-bright);
   box-shadow: -24px 0 48px var(--shadow-2);
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow-x: hidden;
   animation: slide-in 180ms ease-out;
   z-index: 20;
 }
@@ -1109,6 +1242,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .drawer-title-row {
@@ -1127,6 +1261,8 @@ button {
 
 .drawer-body {
   flex: 1;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 14px 16px;
   display: flex;
@@ -1150,6 +1286,8 @@ button {
   border-radius: var(--radius);
   background: var(--panel-raised);
   padding: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .drawer-body-sectioned > .section:first-of-type {
@@ -1172,6 +1310,20 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/*
+ * `.input` is width 100% for stacked fields. Inside a button row that
+ * makes the field ask for the whole row plus the button, and the
+ * pipeline command editor then scrolls the modal sideways.
+ */
+.actions .input,
+.actions .select {
+  flex: 1 1 12rem;
+  min-width: 0;
+  width: auto;
 }
 
 .gate-check {
@@ -1182,6 +1334,8 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg);
+  min-width: 0;
+  max-width: 100%;
 }
 
 /*
@@ -1362,8 +1516,10 @@ button {
 
 .gate-check-text {
   flex: 1;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-dim);
+  overflow-wrap: anywhere;
 }
 
 .gate-check-name {
@@ -1371,43 +1527,214 @@ button {
   font-weight: 600;
   font-size: 11px;
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 
-.transcript {
+/*
+ * The conversation pane. Rows, not a pre: the agent on the left, the
+ * user on the right, tool work folded into subdued lines between them,
+ * and a hairline divider wherever one run hands over to the next.
+ */
+.chat {
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 10px 12px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--text-dim);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 340px;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  max-height: 380px;
+  /* Vertical scroll only. Long tool paths and URLs wrap inside the
+     bubbles instead of widening the drawer (or the page behind it). */
+  overflow-x: hidden;
   overflow-y: auto;
   margin: 0;
-  /* Reaching the end of the transcript must not start scrolling the page. */
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  /* Reaching the end of the conversation must not start scrolling the page. */
   overscroll-behavior: contain;
 }
 
-.transcript-line[data-kind="assistant"] {
-  color: var(--text);
+.chat-section {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
 }
-.transcript-line[data-kind="tool"] {
+
+/* Where a run begins inside the conversation: a centred caption
+   between hairlines, the way a chat app marks a new day. */
+.chat-run {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+  min-width: 0;
+  max-width: 100%;
+}
+.chat-run > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.chat-run::before,
+.chat-run::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+.chat-section:first-child .chat-run {
+  margin-top: 2px;
+}
+
+.chat-row {
+  display: flex;
+  margin: 4px 0;
+  min-width: 0;
+  max-width: 100%;
+}
+.chat-row-user {
+  justify-content: flex-end;
+}
+.chat-row-assistant,
+.chat-row-tools {
+  justify-content: flex-start;
+}
+.chat-row-system {
+  justify-content: center;
+}
+
+.chat-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(88%, 720px);
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-lg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.chat-bubble-assistant {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+}
+
+.chat-bubble-user {
+  /*
+   * A light tint, not a fill: at 14% the meta label (10.5px, already
+   * the smallest text in the pane) measured below the 4.5:1 floor in
+   * warm dark, navy, and worst on teal-on-navy (3.59:1). 8% keeps the
+   * user side visibly warmer than the assistant bubble while the
+   * tinted border still does most of the work of telling the roles
+   * apart, and clears 4.5:1 in every theme and accent measured.
+   */
+  background: color-mix(in srgb, var(--brand) 8%, var(--panel-raised));
+  border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line));
+}
+
+/*
+ * Accepted but not yet echoed by the run. A dashed border alone was
+ * too quiet on the tinted user fill (about 1.7:1 against itself).
+ * Dropping the fill keeps the label above 4.5:1 and makes the pending
+ * turn obviously unfinished next to delivered bubbles.
+ */
+.chat-bubble[data-pending] {
+  border-style: dashed;
+  background: transparent;
+}
+
+.chat-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.chat-meta {
+  font-size: 10.5px;
+  font-weight: 600;
+  /* text-faint reads fine on the plain assistant surface, but under
+     the user bubble's brand tint it fell below 4.5:1 for several
+     theme and accent pairs. text-dim clears the floor everywhere. */
+  color: var(--text-dim);
+}
+
+/* Between the bubbles: what Bento itself has to say. */
+.chat-note {
+  max-width: 92%;
+  min-width: 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Tool work collapses to one card per burst, quieter than either
+ * bubble: an outlined, transparent card rather than the assistant's
+ * own panel-raised surface, so a page of tool steps does not read as
+ * more messages than were actually said.
+ */
+.chat-tools,
+.chat-tools-detail {
+  max-width: min(88%, 720px);
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+.chat-tools {
+  font-family: var(--mono);
+  font-size: 11px;
   color: var(--text-faint);
 }
-.transcript-line[data-kind="result"] {
-  color: var(--succeeded);
+.chat-tools-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
-.transcript-line[data-kind="failed"] {
+.chat-tool-line {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
+
+/* How a run ended, as a pill in the conversation's own colours. */
+.chat-result {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+}
+.chat-result[data-ok="true"] {
+  color: var(--succeeded);
+  border-color: color-mix(in srgb, var(--succeeded) 40%, transparent);
+}
+.chat-result[data-ok="false"] {
   color: var(--failed);
+  border-color: color-mix(in srgb, var(--failed) 40%, transparent);
 }
 
 .field {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Sits between the toolbar and the board: unmissable without being a
@@ -1489,6 +1816,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .criterion {
@@ -1501,11 +1830,15 @@ button {
   background: var(--bg);
   font-family: var(--mono);
   font-size: 11px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .criterion-cmd {
   flex: 1;
+  min-width: 0;
   color: var(--text-dim);
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -1697,10 +2030,14 @@ button {
   font-family: var(--sans);
   font-size: 11.5px;
   line-height: 1.6;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .warn code {
   display: inline-block;
+  max-width: 100%;
   margin-top: 4px;
   padding: 3px 6px;
   border: 1px solid var(--line);
@@ -1709,6 +2046,9 @@ button {
   color: var(--text-dim);
   font-size: 11px;
   user-select: all;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
 }
 
 .divider {
@@ -1789,6 +2129,31 @@ button {
   }
 }
 
+/*
+ * Where the topbar's row stops fitting, which is not where the board's
+ * layout changes.
+ *
+ * Measured rather than guessed: with the picker, the search field, the
+ * three board tools, the gear and the primary action, the row runs out
+ * of slack at about 940px and starts wrapping the primary button's
+ * label onto a second line while squeezing the search field down to a
+ * stub. 980px leaves a margin over that, and keeps the full row at the
+ * 1024px a tablet in landscape reports.
+ *
+ * The board keeps its own breakpoint at 720px, further down: lane
+ * widths and the drawer becoming a sheet are a different question from
+ * whether eight controls fit on one line.
+ */
+@media (max-width: 980px) {
+  .topbar-nav {
+    display: none;
+  }
+
+  .nav-menu-trigger {
+    display: inline-flex;
+  }
+}
+
 @media (max-width: 720px) {
   :root {
     /* A lane nearly fills the screen, so the board pages lane by lane. */
@@ -1809,6 +2174,26 @@ button {
   .topbar .select {
     flex: 1 1 140px;
     min-width: 0;
+  }
+
+  /*
+   * The row becomes two.
+   *
+   * Everything keeps its natural order except the picker and the search
+   * field, which are ordered last and told to take the full width, so
+   * they wrap together onto a line of their own. The line above is then
+   * the brand, the spend, the primary action and the menu, which is
+   * what a phone has room for.
+   */
+  .topbar-lead {
+    order: 1;
+    flex: 1 1 100%;
+  }
+
+  .search {
+    /* No fixed width down here: it takes whatever the picker leaves. */
+    flex: 1 1 auto;
+    width: auto;
   }
 
   .board {
@@ -1928,6 +2313,8 @@ button {
 
 .modal {
   width: min(460px, 100%);
+  max-width: 100%;
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line-bright);
   border-radius: var(--radius-lg);
@@ -1936,6 +2323,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* Agent and stage forms hold long model ids and shell commands.
+     Keep those wrapping inside the dialog instead of widening it. */
+  overflow-x: hidden;
   animation: modal-rise 140ms ease-out;
 }
 
@@ -2214,6 +2604,10 @@ button {
   resize: vertical;
   font-family: var(--sans);
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 /* The agent form is the tallest modal; it scrolls inside itself
@@ -2235,9 +2629,6 @@ button {
   min-width: 0;
 }
 .composer-stop {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   color: var(--failed);
   border-color: var(--failed);
   flex-shrink: 0;
@@ -2248,13 +2639,47 @@ button {
   border-radius: 2px;
   background: var(--failed);
 }
+/*
+ * Topbar icon controls keep `.btn` padding so Sign out matches the
+ * gear beside it. Compact sizing belongs only to the composer, where
+ * Stop is stretched to the input height and should not grow wider.
+ */
+.icon-button::after {
+  inset: -7px -5px;
+}
+.composer .icon-button {
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+}
+/*
+ * The composer stretches Stop to the input height. Keep the free
+ * upward hit growth, and stop the downward growth before the hint.
+ */
+.composer .icon-button::after {
+  inset: -7px -5px -4px;
+}
+.signout-mark {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
 /* The session label row holds the open-in-tab door on the right. */
 .session-label {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
   width: 100%;
+  min-width: 0;
+}
+.agent-session {
+  min-width: 0;
+  max-width: 100%;
 }
 .session-expand {
   color: var(--text-dim);
@@ -2284,10 +2709,32 @@ button {
   gap: 12px;
   min-height: 100dvh;
 }
-.session-page .transcript {
+.session-page .chat {
   min-height: 50vh;
   max-height: none;
-  font-size: 12.5px;
+  font-size: 13.5px;
+}
+.session-page .chat-bubble,
+.session-page .chat-tools,
+.session-page .chat-tools-detail {
+  max-width: min(92%, 720px);
+}
+/*
+ * A narrow viewport widens bubbles everywhere they appear. This has
+ * to repeat the session-page selectors at equal specificity and come
+ * after the rule above, or the unqualified 94% here loses the tie to
+ * the two-class session-page rule regardless of source order within
+ * its own media query.
+ */
+@media (max-width: 720px) {
+  .chat-bubble,
+  .chat-tools,
+  .chat-tools-detail,
+  .session-page .chat-bubble,
+  .session-page .chat-tools,
+  .session-page .chat-tools-detail {
+    max-width: 94%;
+  }
 }
 .session-head {
   display: flex;
@@ -2334,10 +2781,15 @@ button.session-expand[aria-pressed="true"] {
 }
 
 /* With a card open, the board keeps a drawer's width of runway so any
-   lane can scroll clear of the panel instead of hiding under it. */
-.board[data-drawer-open] {
-  padding-right: calc(min(560px, 100vw) + 24px);
-  scroll-padding-right: calc(min(560px, 100vw) + 24px);
+   lane can scroll clear of the panel instead of hiding under it. The
+   side-panel layout only: on small screens the drawer is a bottom
+   sheet, and runway wider than the board would push the card off the
+   left edge rather than out from under anything. */
+@media (min-width: 721px) {
+  .board[data-drawer-open] {
+    padding-right: calc(min(560px, 100vw) + 24px);
+    scroll-padding-right: calc(min(560px, 100vw) + 24px);
+  }
 }
 
 /*
@@ -2510,7 +2962,7 @@ button.session-expand[aria-pressed="true"] {
     height: 100%;
     min-height: 0;
   }
-  .session-page .agent-session .transcript,
+  .session-page .agent-session .chat,
   .session-page .agent-session .orb-hero {
     flex: 1;
     min-height: 120px;
@@ -2533,6 +2985,8 @@ button.session-expand[aria-pressed="true"] {
   padding: 10px 12px;
   margin-bottom: 10px;
   box-shadow: 0 1px 2px var(--shadow-1);
+  min-width: 0;
+  max-width: 100%;
 }
 .stage-card-head {
   display: flex;
@@ -2612,6 +3066,8 @@ button.session-expand[aria-pressed="true"] {
   background: var(--panel);
   padding: 16px 16px 18px;
   margin-bottom: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 .settings-title {
   margin: 0;
@@ -2861,6 +3317,11 @@ button.session-expand[aria-pressed="true"] {
   font: inherit;
   font-size: 13px;
   text-align: left;
+  /* Some entries are anchors (the nav menu's Changelog and Settings
+     carry addresses on purpose). Without this they were the only two
+     underlined lines in a menu of plain ones, which read as a different
+     kind of thing rather than as the same list. */
+  text-decoration: none;
   cursor: pointer;
 }
 .picker-item:hover {
@@ -3064,5 +3525,257 @@ button.session-expand[aria-pressed="true"] {
 @media (prefers-reduced-motion: reduce) {
   .toast {
     animation: none;
+  }
+}
+
+/*
+ * The bottom bar.
+ *
+ * Everything about Bento rather than about your board: the contact
+ * form and the changelog. A hairline above and the page's own
+ * background, so it reads as the far edge of the chrome rather than as
+ * a third panel competing with the board slab.
+ *
+ * A flex item of .app, not a fixed overlay: the board is a flex child
+ * that takes the height that is left, so a fixed strip would sit on
+ * top of the last row of cards in every lane.
+ */
+.bottombar {
+  display: flex;
+  align-items: center;
+  /* Centred: against the left edge the pair reads as a continuation of
+     the board's own controls, which start there. */
+  justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
+  /* Clears the home indicator on a phone, and is nothing anywhere else. */
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+
+/*
+ * A tab, in the sense the settings page's tabs are: a place, named by a
+ * word, with a rule under the one you are on. Same shape as .tab,
+ * mirrored, because the rule belongs on the edge the bar is attached
+ * to rather than under the label.
+ */
+.bottombar-tab {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 9px 10px;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+@media (hover: hover) {
+  .bottombar-tab:hover {
+    color: var(--text-dim);
+  }
+}
+
+.bottombar-tab::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: -1px;
+  height: 2px;
+  border-radius: 1px;
+  background: transparent;
+}
+
+.bottombar-tab[data-on] {
+  color: var(--text);
+}
+
+.bottombar-tab[data-on]::after {
+  background: var(--brand);
+}
+
+.bottombar-tab:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+  border-radius: 3px;
+}
+
+/*
+ * The changelog.
+ *
+ * A document, so it reads like one: a single measured column, dates in
+ * their own rail down the left, and releases separated by a rule rather
+ * than boxed into cards. The board is the app; this is a page about it.
+ */
+.changelog {
+  flex: 1;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+}
+
+.changelog-intro {
+  margin-bottom: 40px;
+}
+
+.changelog-title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.changelog-lede {
+  margin: 8px 0 0;
+  max-width: 52ch;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+/*
+ * One release. The date rail is a column of its own on a wide screen,
+ * and the heading is what the anchor lands on, so it keeps the topbar's
+ * height clear of itself: a deep link that put the heading under the
+ * chrome would look like it had scrolled to the wrong place.
+ */
+.release {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 28px;
+  padding: 32px 0;
+  border-top: 1px solid var(--line);
+  scroll-margin-top: 20px;
+}
+
+.release-rail {
+  /* Sticky, so a long release keeps saying when it shipped while it is
+     being read. Bounded by its own grid row, so it releases at the next
+     one rather than travelling down the whole page. */
+  position: sticky;
+  top: 20px;
+  align-self: start;
+}
+
+.release-date {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.release-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  scroll-margin-top: 20px;
+}
+
+/*
+ * The link on a heading. Quiet until the heading is hovered or it is
+ * focused: it is an affordance for the person who wants it, not a
+ * character in every title. Focus is the important half, since keyboard
+ * users never trigger the hover that reveals it.
+ */
+.release-anchor {
+  flex: none;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+
+.release-title:hover .release-anchor,
+.release-anchor:focus-visible {
+  opacity: 1;
+}
+
+.release-anchor:hover {
+  color: var(--brand);
+}
+
+/* Coarse pointers have no hover to reveal it with, and a link nobody
+   can reach is worse than one that is always faintly there. */
+@media (hover: none) {
+  .release-anchor {
+    opacity: 1;
+  }
+}
+
+.release-summary {
+  margin: 10px 0 0;
+  max-width: 62ch;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.release-items {
+  list-style: none;
+  margin: 22px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.release-item-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.release-item-body {
+  margin: 4px 0 0;
+  max-width: 62ch;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+/* On a phone the rail would spend a third of the width holding eight
+   characters, so the date becomes a line above the heading. */
+@media (max-width: 720px) {
+  .changelog {
+    padding: 24px 16px 60px;
+  }
+
+  .changelog-title {
+    font-size: 25px;
+  }
+
+  .release {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 26px 0;
+  }
+
+  .release-rail {
+    position: static;
+  }
+
+  .release-title {
+    font-size: 18px;
   }
 }

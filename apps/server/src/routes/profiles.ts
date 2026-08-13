@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, count, eq } from "drizzle-orm";
+import { and, asc, count, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { MODEL_GUIDANCE, agentCli, checkAgentPairing, providerForProfile } from "@bento/core";
@@ -56,10 +56,28 @@ const updateProfile = z
   })
   .refine((v) => Object.keys(v).length > 0, { message: "nothing to change" });
 
+/**
+ * Agents read alphabetically wherever they are listed: the panel, the
+ * stage pickers, the TUI.
+ *
+ * Unordered, Postgres hands back heap order, and an update rewrites the
+ * row at the end of the table, so editing an agent moved it to the
+ * bottom of the list. That looked like a "recently changed" sort nobody
+ * chose, and it moved an agent out from under the pointer that had just
+ * edited it. Case-folded, because otherwise every capitalised name
+ * sorts ahead of every lowercase one, and the id breaks ties so two
+ * agents sharing a name keep a stable order between requests.
+ */
+const byName = [sql`lower(${agentProfiles.name})`, asc(agentProfiles.id)];
+
 export function profileRoutes(ctx: AppContext) {
   return new Hono()
     .get("/", async (c) => {
-      const rows = await db(c, ctx).select().from(agentProfiles).where(eq(agentProfiles.ownerId, actor(c)));
+      const rows = await db(c, ctx)
+        .select()
+        .from(agentProfiles)
+        .where(eq(agentProfiles.ownerId, actor(c)))
+        .orderBy(...byName);
       return c.json(rows);
     })
     /**
@@ -105,7 +123,11 @@ export function profileRoutes(ctx: AppContext) {
      * can be, and a routed pairing is worth flagging either way.
      */
     .get("/plain", async (c) => {
-      const rows = await db(c, ctx).select().from(agentProfiles).where(eq(agentProfiles.ownerId, actor(c)));
+      const rows = await db(c, ctx)
+        .select()
+        .from(agentProfiles)
+        .where(eq(agentProfiles.ownerId, actor(c)))
+        .orderBy(...byName);
       return c.text(
         rows
           .map((p) => {

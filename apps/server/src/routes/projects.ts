@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, count, desc, eq, inArray, isNull, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { gateCriteria } from "@bento/core";
@@ -26,6 +26,7 @@ import {
 } from "../access.js";
 import { githubForOrganization } from "../github.js";
 import { githubRemoteOf } from "../orchestrator/repo-remote.js";
+import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 
 /**
  * The two shells a repository can carry. Shared by the add and edit
@@ -58,6 +59,9 @@ const repositoryInput = z.object({
   message: "provide a local path or GitHub repository",
 });
 
+/** Shared by creation and rename, so one door cannot refuse what the other accepts. */
+const projectName = z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/, "name must be one line");
+
 /**
  * Repositories are optional at creation. On a hosted install the person
  * naming a project is often not the person who can connect the GitHub
@@ -67,7 +71,7 @@ const repositoryInput = z.object({
  * in its own time; repositories arrive later through the panel.
  */
 const createProject = z.object({
-  name: z.string().min(1).max(200).regex(/^[^\r\n]+$/, "name must be one line"),
+  name: projectName,
   /** Single repository shorthand. */
   localPath: z.string().min(1).optional(),
   defaultBranch: z.string().default("main"),
@@ -164,15 +168,30 @@ async function resolveRepositoryInput(
   };
 }
 
+/**
+ * Unordered, an update rewrites the row at the end of the table, so
+ * renaming a project moved it to the bottom of every list. Case-folded,
+ * and the id breaks ties.
+ */
+const byName = [sql`lower(${projects.name})`, asc(projects.id)];
+
 export function projectRoutes(ctx: AppContext) {
   return new Hono()
     .get("/", async (c) => {
-      const rows = await db(c, ctx).select().from(projects).where(await visibleProjectFilter(ctx, c));
+      const rows = await db(c, ctx)
+        .select()
+        .from(projects)
+        .where(await visibleProjectFilter(ctx, c))
+        .orderBy(...byName);
       return c.json(rows);
     })
     /** Line format: project|<id>|<name> */
     .get("/plain", async (c) => {
-      const rows = await db(c, ctx).select().from(projects).where(await visibleProjectFilter(ctx, c));
+      const rows = await db(c, ctx)
+        .select()
+        .from(projects)
+        .where(await visibleProjectFilter(ctx, c))
+        .orderBy(...byName);
       return c.text(rows.map((p) => `project|${p.id}|${p.name}`).join("\n"));
     })
     .post("/", zValidator("json", createProject), async (c) => {
@@ -364,6 +383,68 @@ export function projectRoutes(ctx: AppContext) {
       if (!(await canAccessProject(ctx, c, c.req.param("id")))) return c.json({ error: "not found" }, 404);
       const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, c.req.param("id")));
       return c.json(project);
+    })
+    /**
+     * The name, and nothing else: checkouts, branches and the pipeline
+     * are each pointed at by something and change where they are
+     * configured.
+     */
+    .patch("/:id", zValidator("json", z.object({ name: projectName })), async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+      const [updated] = await db(c, ctx)
+        .update(projects)
+        .set({ name: c.req.valid("json").name, updatedAt: new Date() })
+        .where(eq(projects.id, projectId))
+        .returning();
+      if (!updated) return c.json({ error: "not found" }, 404);
+      return c.json(updated);
+    })
+    /**
+     * The project and everything hanging off it: repositories, the
+     * pipeline, every card, and every run and transcript on those cards.
+     *
+     * Refused while an agent is working, because a sandbox outlives the
+     * row it was started from: the run would go on working in a checkout
+     * with nothing left to report to.
+     *
+     * The sandbox rows go; the containers behind them do not, because
+     * nothing in the server tears one down today. A sweep belongs in a
+     * job, not in a request that would hold a pooled connection for one
+     * Docker call per card.
+     */
+    .delete("/:id", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+
+      const [working] = await db(c, ctx)
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(and(eq(features.projectId, projectId), inArray(agentRuns.status, [...ACTIVE_RUN_STATUSES])))
+        .limit(1);
+      if (working) {
+        return c.json(
+          { error: "an agent is still working a card here; wait for it to finish or cancel it first" },
+          409,
+        );
+      }
+
+      // Counted first: the cards go with the project, so this is the
+      // last moment the number exists.
+      const [held] = await db(c, ctx)
+        .select({ cards: count(features.id) })
+        .from(features)
+        .where(eq(features.projectId, projectId));
+
+      const deleted = await db(c, ctx)
+        .delete(projects)
+        .where(eq(projects.id, projectId))
+        .returning({ id: projects.id });
+      // Success on a row nothing touched says the same thing to
+      // "deleted it" and to "that is not yours".
+      if (deleted.length === 0) return c.json({ error: "not found" }, 404);
+      return c.json({ ok: true, deletedCards: Number(held?.cards ?? 0) });
     })
     /**
      * Line-based board snapshot for the Native SDK Mac app (no JSON

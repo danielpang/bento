@@ -12,7 +12,10 @@
   "include": [
     "src"
   ],
+  "//exclude": "Tests are not part of the component surface, and they import node: builtins this build has no types for.",
   "exclude": [
-    "src/main.tsx"
+    "src/main.tsx",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx"
   ]
 }

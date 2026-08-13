@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdin } from "ink";
 import {
   ApiError,
@@ -219,6 +219,13 @@ function Console({
   // lanes would silently move the highlight to a different card.
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string[]>([]);
+  /**
+   * The message the agent is typing right now, streamed as fragments.
+   * The transcript endpoint cannot render it (fragments are never
+   * persisted), so the draft lives here and is dropped the moment the
+   * finished message makes it into the transcript.
+   */
+  const [draft, setDraft] = useState("");
   const [history, setHistory] = useState<FeatureEvent[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
@@ -378,17 +385,127 @@ function Console({
       setCardRuns(detail.runs);
       // The server sends runs newest first.
       const latest = detail.runs[0];
-      if (!latest || cancelled) return;
+      if (cancelled) return;
+      if (!latest) {
+        // A card with no runs must also forget the previous card's:
+        // stale latestRunId kept the live follow subscribed to it and
+        // streamed another card's conversation into this pane.
+        setLatestRunId(null);
+        setLatestRunStatus("");
+        setTranscript([]);
+        return;
+      }
       setRunStatus((prev) => ({ ...prev, [current.id]: latest.status }));
       setLatestRunId(latest.id);
       setLatestRunStatus(latest.status);
-      const { lines } = await client.getTranscript(latest.id);
-      if (!cancelled) setTranscript(lines);
+      const { cursor, lines } = await client.getTranscript(latest.id);
+      if (cancelled) return;
+      setTranscript(lines);
+      transcriptCursor.current = { runId: latest.id, cursor };
     })().catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [current?.id, features]);
+
+  /**
+   * Live follow of the run being watched. The 3 second board refresh
+   * above keeps working as the fallback; this subscription is what
+   * makes output appear the moment it happens, and it carries the
+   * fragments of the message being typed, which no transcript fetch
+   * can ever return. Fragment bursts are coalesced on short timers so
+   * the terminal is not redrawn per token.
+   */
+  const followedRunId = runActive ? latestRunId : null;
+  const transcriptCursor = useRef<{ runId: string; cursor: number } | null>(null);
+  useEffect(() => {
+    setDraft("");
+    if (!followedRunId) return;
+    let stopped = false;
+    let draftText = "";
+    let draftTimer: ReturnType<typeof setTimeout> | null = null;
+    let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+    const dropDraft = () => {
+      // Both halves, or a flush timer scheduled just before the drop
+      // would put the stale text right back on screen.
+      draftText = "";
+      if (draftTimer) {
+        clearTimeout(draftTimer);
+        draftTimer = null;
+      }
+      setDraft("");
+    };
+    const refetchTranscript = () => {
+      refetchTimer ??= setTimeout(() => {
+        refetchTimer = null;
+        /**
+         * From the cursor, not from zero: a chatty run fires this
+         * four times a second, and re-reading the whole transcript
+         * each time made the run cost quadratic in its own length.
+         * The card-switch effect above resets the cursor whenever it
+         * replaces the transcript outright.
+         */
+        const since =
+          transcriptCursor.current?.runId === followedRunId ? transcriptCursor.current.cursor : 0;
+        client
+          .getTranscript(followedRunId, since)
+          .then(({ cursor, lines }) => {
+            if (stopped) return;
+            // Another fetch replaced the transcript meanwhile; these
+            // rows would double-append.
+            const held = transcriptCursor.current;
+            if (since > 0 && (held?.runId !== followedRunId || held.cursor !== since)) return;
+            transcriptCursor.current = { runId: followedRunId, cursor };
+            if (since > 0) setTranscript((prev) => [...prev, ...lines]);
+            else setTranscript(lines);
+          })
+          .catch(() => {});
+      }, 250);
+    };
+    const stop = client.streamRun(followedRunId, {
+      onEvent: (event) => {
+        if (stopped) return;
+        // The persisted line supersedes the draft that previewed it.
+        // Assistant lines and results only: the user's own steer says
+        // nothing about the message still being typed, and clearing
+        // on it froze the draft mid sentence.
+        if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
+          dropDraft();
+        }
+        refetchTranscript();
+      },
+      onDelta: (delta) => {
+        if (stopped || delta.channel !== "text") return;
+        // Offset zero starts a draft (new message or the server's
+        // catch-up snapshot); anything else must continue this one.
+        if (delta.offset === 0) draftText = delta.text;
+        else if (delta.offset === draftText.length) draftText += delta.text;
+        else return;
+        draftTimer ??= setTimeout(() => {
+          draftTimer = null;
+          if (!stopped) setDraft(draftText);
+        }, 150);
+      },
+      onDone: () => {
+        if (stopped) return;
+        dropDraft();
+        refetchTranscript();
+      },
+      onError: () => {
+        if (stopped) return;
+        // The stream is gone (token rejected, connection dropped).
+        // The 3 second poll still covers the transcript; what must
+        // not survive is a frozen half sentence posing as live.
+        dropDraft();
+      },
+    });
+    return () => {
+      stopped = true;
+      stop();
+      if (draftTimer) clearTimeout(draftTimer);
+      if (refetchTimer) clearTimeout(refetchTimer);
+    };
+  }, [client, followedRunId]);
 
   // What the card's agents committed: files touched and the stage
   // write-ups, summarised to fit the pane.
@@ -686,7 +803,14 @@ function Console({
                   {line.slice(0, 100)}
                 </Text>
               ))}
-              {transcript.length === 0 && <Text color="gray">No output yet.</Text>}
+              {draft !== "" && (
+                // The typing edge of the message in progress: its tail,
+                // because that is where the new words appear. Flattened
+                // to one line; embedded newlines grew the fixed pane
+                // and bounced the panels below it on every flush.
+                <Text>{`${cardAgent?.name ?? "agent"}> ${draft}`.replaceAll(/\s+/g, " ").slice(-100)}</Text>
+              )}
+              {transcript.length === 0 && draft === "" && <Text color="gray">No output yet.</Text>}
             </>
           )}
         </Box>

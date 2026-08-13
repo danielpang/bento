@@ -255,19 +255,58 @@ export function AgentsPanel({
         {machine && (
           <section className="section settings-card">
             <h3 className="settings-title">Claude subscription</h3>
+            {/*
+              The token leads because it is the answer that always
+              works. Sharing this machine's login needs the server to be
+              running where that login is, which a container never is,
+              and this card used to open by telling exactly those
+              readers to run `claude auth login` on a machine with no
+              browser to open and no keychain to put the result in. The
+              token was below it, described as what to try once runs
+              were already failing.
+            */}
             <p className="muted">
-              Run Claude Code on a subscription you already pay for, instead of an API key. Agents
-              can use the Claude Code login on this machine.{" "}
+              Run Claude Code on a subscription you already pay for, instead of an API key. Mint a
+              token in a terminal with <code>claude setup-token</code> and save it here. It takes
+              effect on the next run, with no restart, and it beats a token from the environment.
+            </p>
+            <SecretField
+              value={tokenValue}
+              onChange={setTokenValue}
+              onSubmit={() =>
+                void act(async () => {
+                  await client.createSecret({ name: "CLAUDE_CODE_OAUTH_TOKEN", value: tokenValue.trim() });
+                  const rows = await client.listSecrets();
+                  const token = rows.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
+                  setTokenHint(token ? (token.hint ?? "saved") : "saved");
+                  setTokenValue("");
+                })
+              }
+              label="Claude subscription token"
+              placeholder="sk-ant-oat01-..."
+              submitLabel={tokenHint ? "Replace token" : "Save token"}
+              busy={busy}
+            />
+            {tokenHint && (
+              <p className="muted">
+                {`Saved (${tokenHint}). If runs fail with "OAuth access token has been revoked", the saved token was invalidated: mint a fresh one and save it again.`}
+              </p>
+            )}
+            <h4 className="field-heading">Or share this machine's login</h4>
+            <p className="muted">
+              When the server runs on the machine you use Claude Code from, agents can borrow that
+              login and no token is needed.{" "}
               {machine.claude?.loggedIn
                 ? `Signed in${machine.claude.email ? ` as ${machine.claude.email}` : ""}${
                     machine.claude.subscriptionType ? ` on a ${machine.claude.subscriptionType} plan` : ""
                   }.`
-                : "Not signed in yet."}
+                : "No Claude Code login was found in this server's home directory."}
             </p>
             {!machine.claude?.loggedIn && (
               <p className="muted">
-                Signing in opens a browser, so it has to happen in a terminal on that machine:{" "}
-                <code>claude auth login</code>. Then reopen this panel.
+                If the server is running on your own machine, sign in with{" "}
+                <code>claude auth login</code> in a terminal and reopen this panel. If it is running
+                in a container, there is no login of yours to share and the token above is the way.
               </p>
             )}
             <div className="actions">
@@ -290,37 +329,6 @@ export function AgentsPanel({
                 read anything its sandbox can, so use it on repositories you trust.
               </p>
             )}
-            {/*
-              The re-auth door. Keychain-copied tokens die whenever
-              Claude Code rotates its session, and a server in a
-              container cannot reach the keychain at all. A pasted
-              setup-token is stored as a secret, which beats any token
-              from the environment on the very next run: no restart.
-            */}
-            <p className="muted">
-              {tokenHint
-                ? `A subscription token is saved (${tokenHint}). If runs fail with "OAuth access token has been revoked", mint a fresh one and save it again.`
-                : "If runs fail with an authentication error, mint a long lived token in a terminal with "}
-              {!tokenHint && <code>claude setup-token</code>}
-              {!tokenHint && " and save it here. It outlives the machine login and works when the server runs in a container."}
-            </p>
-            <SecretField
-              value={tokenValue}
-              onChange={setTokenValue}
-              onSubmit={() =>
-                void act(async () => {
-                  await client.createSecret({ name: "CLAUDE_CODE_OAUTH_TOKEN", value: tokenValue.trim() });
-                  const rows = await client.listSecrets();
-                  const token = rows.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
-                  setTokenHint(token ? (token.hint ?? "saved") : "saved");
-                  setTokenValue("");
-                })
-              }
-              label="Claude subscription token"
-              placeholder="sk-ant-oat01-..."
-              submitLabel={tokenHint ? "Replace token" : "Save token"}
-              busy={busy}
-            />
           </section>
         )}
 

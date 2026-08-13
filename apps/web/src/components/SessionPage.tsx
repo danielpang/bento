@@ -43,15 +43,18 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
 
   // Run state changes arrive on the project's board stream, which is
   // what keeps the run list and the stop button honest in this tab too.
+  // A reconnect means events fired while the stream was down are gone
+  // (they are not persisted), so resync instead of trusting the gap.
   useEffect(() => {
     if (!feature?.projectId) return;
     let timer: number | null = null;
-    const stop = client.streamBoard(feature.projectId, () => {
+    const schedule = () => {
       timer ??= window.setTimeout(() => {
         timer = null;
         void refresh();
       }, 250);
-    });
+    };
+    const stop = client.streamBoard(feature.projectId, schedule, schedule);
     return () => {
       stop();
       if (timer !== null) clearTimeout(timer);

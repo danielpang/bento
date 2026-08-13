@@ -77,6 +77,8 @@ flowchart LR
 
 In runner mode the machine claims runs the server holds for it, so the board, run history, and transcripts are shared while checkouts and agent credentials never leave the machine. Runs queued for an offline runner wait for it.
 
+A server restart does not end hosted runs either: the sandbox keeps a disconnected agent running through a grace period, and the restarting server reattaches to the live session and carries the run to its normal finish. Only when the sandbox no longer holds the process (a deploy longer than the grace, or an agent that ended meanwhile) is the run closed as interrupted.
+
 ## Life of a feature card
 
 ```mermaid
@@ -126,6 +128,8 @@ Background workers deliberately skip the role switch: one process executes runs 
 
 Agent API keys belong to the organization, never the server. They are saved through `bento setup`, the web console, or the API, encrypted at rest, and resolved per run. In multi mode a sandbox only ever sees the owning organization's keys. Local mode layers stored keys over the process environment, because there is one trusted user and no tenant boundary.
 
-A subscription can stand in for a key. Locally, login sharing mounts each tool's own config read only and, for Claude Code on macOS, forwards a short lived token read from the Keychain per run. A server that runs where the login is not (a container, a hosted deployment) uses the long lived token from `claude setup-token` instead, stored as `CLAUDE_CODE_OAUTH_TOKEN` in the environment or as a secret; it satisfies the credential check exactly as a key does.
+A subscription can stand in for a key. Locally, login sharing mounts each tool's own config read only and, for Claude Code on macOS, forwards a short lived token read from the Keychain per run. A server that runs where the login is not, the container stack being the usual case, uses the long lived token from `claude setup-token` instead, stored as `CLAUDE_CODE_OAUTH_TOKEN` in the environment or as a secret; it satisfies the credential check exactly as a key does. Because the two are alternatives rather than additions, only one of them reaches the sandbox: a token supersedes the key, unless a base URL has redirected the tool off the provider's own endpoint, where a token cannot work and the key wins instead.
+
+Hosted deployments stay on API keys, and the console offers no subscription field there. Secrets are one value per organization, so a token saved by one member would put their personal subscription behind everyone's runs.
 
 GitHub credentials follow the same boundary. Each organization installs the Bento GitHub App for selected repositories. The server resolves that installation per run and narrows its short-lived token to the repository being transferred. Docker worktrees are exported as credential-free Git bundles before a trusted temporary checkout pushes them. For Sprites, the server clones privately into a trusted temporary checkout, uploads a credential-free seed bundle, and later downloads the agent's committed bundle for publishing. Installation tokens never enter a sandbox, and sandbox-controlled remotes are never used for a push.

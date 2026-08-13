@@ -5,8 +5,10 @@ import { useSession } from "../auth-client.js";
 import { AccountSettings } from "./AccountSettings.js";
 import { AppearanceSettings } from "./AppearanceSettings.js";
 import { BillingCard } from "./BillingCard.js";
+import { BrandLockup } from "./BrandLockup.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
 import { LinearPanel } from "./LinearPanel.js";
+import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
 
@@ -20,7 +22,10 @@ import { TeamSettings } from "./TeamSettings.js";
  * apply: local mode is Appearance alone, a self-hosted team adds Team,
  * and only a deployment with the billing module shows Billing.
  */
-type Tab = "appearance" | "github" | "linear" | "team" | "billing" | "account";
+type Tab = "appearance" | "projects" | "github" | "linear" | "team" | "billing" | "account";
+
+/** The tabs that exist in every mode, so a link to one always resolves. */
+const ALWAYS: Tab[] = ["appearance", "projects", "github", "linear"];
 
 export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
@@ -29,9 +34,8 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   const [hasBilling, setHasBilling] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
     const wanted = new URLSearchParams(window.location.search).get("tab");
-    return wanted === "team" || wanted === "billing" || wanted === "account" || wanted === "github" || wanted === "linear"
-      ? wanted
-      : "appearance";
+    const known: Tab[] = [...ALWAYS, "team", "billing", "account"];
+    return known.find((id) => id === wanted) ?? "appearance";
   });
 
   useEffect(() => {
@@ -52,6 +56,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
 
   const tabs: { id: Tab; label: string }[] = [
     { id: "appearance", label: "Appearance" },
+    { id: "projects", label: "Projects" },
     { id: "github", label: "GitHub" },
     { id: "linear", label: "Linear" },
     ...(mode === "multi" ? [{ id: "team" as const, label: "Team" }] : []),
@@ -63,15 +68,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="brand">
-          <span className="brand-glyph" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-            <i />
-          </span>
-          Bento
-        </span>
+        <BrandLockup />
         <span className="topbar-spacer" />
         <a className="btn btn-ghost" href="/">
           Back to the board
@@ -107,6 +104,9 @@ export function SettingsPage({ client }: { client: BentoClient }) {
 
           <Tabs.Content value="appearance" className="settings-body">
             <AppearanceSettings />
+          </Tabs.Content>
+          <Tabs.Content value="projects" className="settings-body">
+            <ProjectsSettings client={client} />
           </Tabs.Content>
           <Tabs.Content value="team" className="settings-body">
             <TeamSettings client={client} />

@@ -59,7 +59,44 @@ test("claude-code buildCommand shape", () => {
   });
   assert.equal(cmd[0], "claude");
   assert.ok(cmd.includes("--output-format") && cmd.includes("stream-json"));
+  assert.ok(cmd.includes("--include-partial-messages"), "the typing streams");
   assert.ok(cmd.includes("--resume") && cmd.includes("s1"));
+});
+
+/**
+ * The stream_event lines below are verbatim from claude 2.1.221 with
+ * --include-partial-messages. The field asymmetry is the API's own:
+ * text_delta carries `text`, thinking_delta carries `thinking`.
+ */
+test("claude-code recognizes partial message fragments and consumes the chatter", () => {
+  const text = claudeCodeAdapter.parseDelta?.(
+    '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello world"}},"session_id":"s"}',
+  );
+  assert.deepEqual(text, { channel: "text", text: "hello world" });
+
+  const thinking = claudeCodeAdapter.parseDelta?.(
+    '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking","estimated_tokens":null}},"session_id":"s"}',
+  );
+  assert.deepEqual(thinking, { channel: "thinking", text: "The user is asking" });
+
+  // Block boundaries and signatures are streaming chatter: consumed as
+  // empty fragments so they stay out of a failing run's stderr tail.
+  assert.deepEqual(
+    claudeCodeAdapter.parseDelta?.('{"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"s"}'),
+    { channel: "text", text: "" },
+  );
+  assert.deepEqual(
+    claudeCodeAdapter.parseDelta?.(
+      '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}},"session_id":"s"}',
+    ),
+    { channel: "text", text: "" },
+  );
+
+  // Whole message lines belong to parseEvent, not the fragment path.
+  assert.equal(
+    claudeCodeAdapter.parseDelta?.('{"type":"assistant","message":{"role":"assistant","content":[]}}'),
+    null,
+  );
 });
 
 test("fake adapter round trips through its own parser", () => {
