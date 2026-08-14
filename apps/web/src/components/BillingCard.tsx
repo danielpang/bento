@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { spendCoverageNote } from "@bento/core";
+import { useEffect, useState } from "react";
 import { Modal } from "./Modal.js";
 import { useToast } from "./Toasts.js";
 import {
@@ -63,36 +62,28 @@ export function BillingCard() {
     <section className="section settings-card">
       <h3 className="settings-title">Plan</h3>
       {/*
-        The price first, and the team's own total beside it. Per seat
-        pricing means the number that matters depends on the headcount,
-        and Stripe cannot show that until after the redirect, so the
-        console has to be where the customer meets it.
+        Three lines, and each is something billed: what the plan costs,
+        the seats, the hours. Live features are shown nowhere because
+        nothing charges for them, and a number on a billing card reads
+        as a number on a bill. The team's own model spend is absent for
+        the same reason: it goes to their provider, not to us, and this
+        card is about what we charge.
       */}
       <p className="muted">
         This team is on the <strong>{state.planName}</strong> plan
-        {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
+        {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 ? (
           <>
-            , {seatPrice(current.pricing).toLowerCase()}
+            , {seatPrice(current.pricing).toLowerCase()}: <strong>{monthlyTotal(current, state.seats.held)}</strong>
           </>
+        ) : (
+          "."
         )}
-        . {current && <strong>{monthlyTotal(current, state.seats.held)}</strong>}
-        {state.seats.held !== state.usage.members && "."}
       </p>
+      <p className="muted">{meter(state.usage.members, state.limits.members, "members")}.</p>
       <p className="muted">
-        {meter(state.usage.members, state.limits.members, "members")},{" "}
-        {state.usage.liveFeatures} live features. There is no cap on how many cards are live: a card
-        waiting for review costs nothing to hold, so nothing charges for it.
-      </p>
-      {/*
-        The count and the allowance only. What happens when the two
-        meet is the choice below, and saying "then $0.90 an hour" here
-        would contradict the team that has just chosen to stop.
-      */}
-      <p className="muted">
-        {state.agentHours.used} agent hours used of {state.agentHours.included} included, resetting
-        on {resetsOn(state)}. The allowance belongs to the team rather than to each seat, so it does
-        not move when somebody joins or leaves. An agent hour is an hour of a sandbox actually
-        running, so a card waiting for review costs nothing.
+        {state.agentHours.used} of {state.agentHours.included} agent hours used, resetting on{" "}
+        {resetsOn(state)}. Hours are pooled for the whole team, and only a sandbox actually running
+        spends them.
       </p>
 
       {/*
@@ -184,16 +175,6 @@ export function BillingCard() {
         </div>
       )}
 
-      {/* Reported, never enforced, and never ours: agents run on this
-          team's own provider keys, so this figure is what they spent
-          with their provider and not part of the Bento bill. Only some
-          tools print a figure, so a ceiling built on it would bite the
-          teams whose tools are honest about cost and miss everyone
-          else entirely. */}
-      <p className="muted" title={spendCoverageNote()}>
-        ${state.usage.monthlySpendUsd.toFixed(2)} of measured agent spend this month, charged to
-        this team's own provider keys rather than to Bento. {spendCoverageNote()}
-      </p>
       {notice && <p className="muted">{notice}</p>}
       {!state.canManageBilling && (
         <p className="muted">Only an owner or admin can change the plan for this team.</p>
@@ -292,11 +273,16 @@ export function BillingCard() {
 }
 
 /**
- * The ladder, priced for this team, before anybody is redirected.
+ * The ladder, priced for this team, as a full height panel.
  *
- * Every plan shows what this team in particular would pay, because per
- * seat pricing makes the headline price the least useful number on the
- * card: what a buyer needs is their own total.
+ * A panel and not a modal, because comparing four plans is a reading
+ * task: the cards sit side by side in one row, so a difference is a
+ * glance across rather than a scroll and a memory. The layout borrows
+ * the card drawer's idiom, slid in from the right over a backdrop,
+ * just wider.
+ *
+ * Every plan shows what this team in particular would pay, since per
+ * seat pricing makes the headline price the least useful number here.
  */
 function ChoosePlan({
   offers,
@@ -318,122 +304,138 @@ function ChoosePlan({
   /**
    * Two steps on purpose. The plan is the decision they came for; what
    * happens past the allowance is a second one, and stacking it into
-   * the same click is how it would get answered by not reading it.
+   * the same click is how it would get answered by not reading it. The
+   * question lands as a footer under the row, so the cards stay put
+   * for comparing against the choice.
    */
   const [picked, setPicked] = useState<PlanOffer | null>(null);
   const [policy, setPolicy] = useState<"stop" | "allow" | null>(null);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
-    <Modal
-      title="Plans"
-      description={`Priced for this team as it stands, ${heldSeats} ${heldSeats === 1 ? "person" : "people"} counting open invitations.`}
-      onClose={onClose}
-      actions={
-        <button className="btn btn-ghost" disabled={busy} onClick={onClose}>
-          Close
-        </button>
-      }
-    >
-      <div className="plan-grid">
-        {offers.map((offer) => {
-          const isCurrent = offer.plan === currentPlan;
-          const total = monthlyTotal(offer, heldSeats);
-          return (
-            <div key={offer.plan} className={`plan-option${isCurrent ? " plan-option-current" : ""}`}>
-              <div className="plan-option-head">
-                <strong>{offer.name}</strong>
-                <span className="plan-option-price">{seatPrice(offer.pricing)}</span>
-              </div>
-              {total && <p className="plan-option-total">{total}</p>}
-              <p className="muted">{offer.pricing.summary}</p>
-              <ul className="plan-option-list">
-                {offer.pricing.highlights.map((line) => (
-                  <li key={line}>{line}</li>
-                ))}
-                <li>
-                  {offer.pricing.overageUsdPerAgentHour === null
-                    ? "Runs pause once the included hours are used"
-                    : `Then ${money(offer.pricing.overageUsdPerAgentHour)} an agent hour`}
-                </li>
-              </ul>
-              {isCurrent ? (
-                <span className="muted">This team's plan</span>
-              ) : offer.pricing.perSeatUsd === null || offer.plan === "enterprise" ? (
-                <button className="btn" disabled={busy} onClick={onContactSales}>
-                  Contact sales
-                </button>
-              ) : offer.plan === "free" ? (
-                // Downgrading to Free is a cancellation, and cancelling
-                // belongs in the portal where the last invoice and the
-                // end date are visible. A button here would hide both.
-                <span className="muted">Cancel under Manage billing</span>
-              ) : (
-                <button className="btn btn-primary" disabled={busy} onClick={() => setPicked(offer)}>
-                  Choose {offer.name}
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {/*
-        The question is asked here rather than defaulted, because a
-        default is wrong for somebody either way: stopping surprises a
-        team on a deadline, paying surprises a team on a budget. This is
-        the moment they are already deciding about money.
-      */}
-      {picked && (
-        <div className="field">
-          <span className="label">
-            One more thing, for {picked.name}: what happens when the{" "}
-            {picked.pricing.includedAgentHours} hours run out?
-          </span>
-          {OVERAGE_CHOICES.map((choice) => (
-            <label key={choice.policy} className="overage-choice">
-              <input
-                type="radio"
-                name="checkout-overage"
-                checked={policy === choice.policy}
-                disabled={busy}
-                onChange={() => setPolicy(choice.policy)}
-              />
-              <span>
-                <strong>{choice.label}</strong>
-                <span className="muted"> {choice.help(picked.pricing.overageUsdPerAgentHour)}</span>
-              </span>
-            </label>
-          ))}
-          <div className="actions">
-            <button
-              className="btn btn-primary"
-              disabled={busy || policy === null}
-              onClick={() => policy && onChoose(picked.plan, policy)}
-            >
-              {policy === null ? "Pick one to continue" : `Continue to payment`}
-            </button>
-            <button className="btn btn-ghost" disabled={busy} onClick={() => setPicked(null)}>
-              Back to plans
+    <>
+      <div className="plans-backdrop" onClick={onClose} />
+      <aside className="plans-panel" role="dialog" aria-label="Plans">
+        <header className="drawer-head">
+          <div className="drawer-title-row">
+            <h2 className="drawer-title">Plans</h2>
+            <button className="btn btn-ghost" disabled={busy} onClick={onClose}>
+              Close
             </button>
           </div>
-          {/*
-            Said before they pick, not discovered when it bites. A
-            ceiling nobody was told about is worse than no ceiling: the
-            board stops and nothing on the screen explains why.
-          */}
-          <span className="muted">
-            {policy === "allow" && picked.monthlyTotalUsd !== null
-              ? `Agents stop if overage passes ${money(picked.monthlyTotalUsd)}, so your bill cannot more than double. Change or remove that under Billing whenever you like.`
-              : "You can change this later under Billing."}
-          </span>
+          <p className="muted" style={{ margin: 0 }}>
+            Priced for this team as it stands, {heldSeats} {heldSeats === 1 ? "person" : "people"}{" "}
+            counting open invitations.
+          </p>
+        </header>
+        <div className="plans-panel-body">
+          <div className="plan-row">
+            {offers.map((offer) => {
+              const isCurrent = offer.plan === currentPlan;
+              const paid = offer.pricing.perSeatUsd !== null && offer.pricing.perSeatUsd > 0;
+              return (
+                <div
+                  key={offer.plan}
+                  className={`plan-option${isCurrent ? " plan-option-current" : ""}${picked?.plan === offer.plan ? " plan-option-picked" : ""}`}
+                >
+                  <div className="plan-option-head">
+                    <strong>{offer.name}</strong>
+                    {/* The price once. The Free card said Free three
+                        times over, name, price and total, which read
+                        as a rendering fault because it was one. */}
+                    <span className="plan-option-price">{paid ? seatPrice(offer.pricing) : "$0"}</span>
+                  </div>
+                  {paid && <p className="plan-option-total">{monthlyTotal(offer, heldSeats)}</p>}
+                  <p className="muted">{offer.pricing.summary}</p>
+                  <ul className="plan-option-list">
+                    {offer.pricing.highlights.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                    <li>
+                      {offer.pricing.overageUsdPerAgentHour === null
+                        ? "Runs pause once the included hours are used"
+                        : `Then ${money(offer.pricing.overageUsdPerAgentHour)} an agent hour`}
+                    </li>
+                  </ul>
+                  {isCurrent ? (
+                    <span className="muted">This team's plan</span>
+                  ) : offer.pricing.perSeatUsd === null || offer.plan === "enterprise" ? (
+                    <button className="btn" disabled={busy} onClick={onContactSales}>
+                      Contact sales
+                    </button>
+                  ) : offer.plan === "free" ? (
+                    // Downgrading to Free is a cancellation, and
+                    // cancelling belongs in the portal where the last
+                    // invoice and the end date are visible.
+                    <span className="muted">Cancel under Manage billing</span>
+                  ) : (
+                    <button className="btn btn-primary" disabled={busy} onClick={() => setPicked(offer)}>
+                      Choose {offer.name}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
-      )}
-
-      <p className="muted">
-        An agent hour is an hour of a sandbox actually running. A card waiting for review costs
-        nothing. The allowance is one pool for the whole team, so it does not move when somebody
-        joins or leaves.
-      </p>
-    </Modal>
+        {/*
+          The question is asked here rather than defaulted, because a
+          default is wrong for somebody either way: stopping surprises
+          a team on a deadline, paying surprises a team on a budget.
+        */}
+        {picked && (
+          <footer className="plans-panel-foot">
+            <span className="label">
+              One more thing, for {picked.name}: what happens when the{" "}
+              {picked.pricing.includedAgentHours} hours run out?
+            </span>
+            {OVERAGE_CHOICES.map((choice) => (
+              <label key={choice.policy} className="overage-choice">
+                <input
+                  type="radio"
+                  name="checkout-overage"
+                  checked={policy === choice.policy}
+                  disabled={busy}
+                  onChange={() => setPolicy(choice.policy)}
+                />
+                <span>
+                  <strong>{choice.label}</strong>
+                  <span className="muted"> {choice.help(picked.pricing.overageUsdPerAgentHour)}</span>
+                </span>
+              </label>
+            ))}
+            <div className="actions">
+              <button
+                className="btn btn-primary"
+                disabled={busy || policy === null}
+                onClick={() => policy && onChoose(picked.plan, policy)}
+              >
+                {policy === null ? "Pick one to continue" : "Continue to payment"}
+              </button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setPicked(null)}>
+                Back to plans
+              </button>
+            </div>
+            {/*
+              Said before they pick, not discovered when it bites. A
+              ceiling nobody was told about is worse than no ceiling.
+            */}
+            <span className="muted">
+              {policy === "allow" && picked.monthlyTotalUsd !== null
+                ? `Agents stop if overage passes ${money(picked.monthlyTotalUsd)}, so your bill cannot more than double. Change or remove that under Billing whenever you like.`
+                : "You can change this later under Billing."}
+            </span>
+          </footer>
+        )}
+      </aside>
+    </>
   );
 }
 
