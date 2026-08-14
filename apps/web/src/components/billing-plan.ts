@@ -38,7 +38,7 @@ export interface PlanState {
   planName: string;
   status: string | null;
   limits: { members: number | null; concurrentRuns: number | null };
-  usage: { members: number; liveFeatures: number; monthlySpendUsd: number };
+  usage: { members: number };
   /**
    * Sandbox time this period against what the plan includes. `cap` is
    * the number agents actually stop at, and it is null for a team
