@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { BentoClient, GitHubConnection, GitHubRepository } from "@bento/api-client";
+import { ConnectGitHubAccount } from "./GitHubIdentity.js";
 import { Modal } from "./Modal.js";
 
 /**
@@ -328,13 +329,23 @@ export function NewProjectDialog({
             {!github?.connected ? (
               github?.canManage ? (
                 <>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => void client.startGitHubInstall().then(({ url }) => window.location.assign(url))}
-                  >
-                    Install GitHub App
-                  </button>
+                  {/* Installing binds an installation to the
+                      organization, which Bento only does for someone
+                      GitHub already shows it to. An account made with
+                      an email and a password has no GitHub identity
+                      yet, so that step comes first here rather than as
+                      a refusal on the way back from GitHub. */}
+                  {github.identityLinked ? (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => void client.startGitHubInstall().then(({ url }) => window.location.assign(url))}
+                    >
+                      Install GitHub App
+                    </button>
+                  ) : (
+                    <ConnectGitHubAccount status={github} returnTo="/" primary={false} />
+                  )}
                   <p className="muted">
                     Or create the project now and connect GitHub under Repositories later.
                   </p>

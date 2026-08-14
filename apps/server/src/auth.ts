@@ -209,6 +209,29 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       },
     },
     socialProviders,
+    /**
+     * Attaching a GitHub identity to an account that already exists.
+     *
+     * Connecting the GitHub App is gated on the caller's own GitHub
+     * identity: Bento binds an installation only to someone who can
+     * already see it on GitHub. Signing up with an email and a password
+     * leaves no such identity, so without this the hosted install flow
+     * ended in a refusal on the way back from GitHub, with nothing on
+     * offer that would fix it.
+     *
+     * allowDifferentEmails covers the explicit link only, where the
+     * caller holds a Bento session and completes GitHub's OAuth in the
+     * same request: both identities are proven, so the addresses need
+     * not match. They routinely do not. GitHub's noreply address and a
+     * personal account beside a work one are the common cases, and
+     * demanding a match would refuse precisely the people this exists
+     * for. Implicit linking at sign in is untouched and still goes by
+     * verified address, so an unverified provider address cannot walk
+     * into somebody else's account.
+     */
+    account: {
+      accountLinking: { enabled: true, allowDifferentEmails: true },
+    },
     plugins: [
       bearer(),
       deviceAuthorization({
