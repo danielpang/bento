@@ -8,9 +8,10 @@ name: Deploy hosted
 # ("production" goes through both Fly apps; "development" stops after
 # bento-development). Secrets this needs:
 #
-#   BENTO_CLOUD_TOKEN  repository secret. Fine-grained PAT, read access
-#                      to bento-cloud contents, so the private module
-#                      can be checked out beside the public code
+#   BENTO_CLOUD_TOKEN  per GitHub environment. Fine-grained PAT, read
+#                      access to bento-cloud contents, so the private
+#                      module can be checked out beside the public code
+#                      (same token in both environments)
 #   FLY_API_TOKEN      per GitHub environment ("development" and
 #                      "production"). Deploy tokens are app-scoped,
 #                      which is why they live per environment
@@ -59,11 +60,13 @@ jobs:
 
   # Build once after development migrates cleanly. Both deploys load
   # the same image artifact, so development and production never
-  # diverge from a second build.
+  # diverge from a second build. Runs in the development environment
+  # so it can read BENTO_CLOUD_TOKEN from environment secrets.
   build:
     if: github.repository == 'danielpang/bento'
     needs: migrate-development
     runs-on: ubuntu-latest
+    environment: development
     steps:
       - uses: actions/checkout@v5
 

@@ -119,7 +119,7 @@ takes either environment.
 
 | Where | Secret | What |
 | --- | --- | --- |
-| bento, repository | `BENTO_CLOUD_TOKEN` | Fine-grained PAT, read access to bento-cloud contents; the same private repo whichever environment |
+| bento, per environment | `BENTO_CLOUD_TOKEN` | Fine-grained PAT, read access to bento-cloud contents; same value in both environments, so the build job (development) can check the module out |
 | bento, per environment | `FLY_API_TOKEN` | Deploy token; these are app-scoped, so each environment's Fly app needs its own (`bento-development` / `bento-production`) |
 | bento, per environment | `DATABASE_URL` | That environment's Postgres, for the migration job |
 | bento-cloud, per environment | `BENTO_DISPATCH_TOKEN` | Fine-grained PAT for bento, contents write; the same token in both environments, so protection rules on that environment gate the trigger |
