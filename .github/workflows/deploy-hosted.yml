@@ -1,24 +1,29 @@
 name: Deploy hosted
 
 # The hosted deployment: the public image plus the private bento-cloud
-# module, shipped to Fly. Two things start it: a merge to main here,
-# and a merge to main in bento-cloud, which sends a repository_dispatch
-# so the deploy picks up the new module without a commit in this
-# repository. Secrets this needs:
+# module, shipped to Fly. Three things start it: a merge to main here,
+# a merge to main in bento-cloud, and a manual development dispatch
+# from any bento-cloud branch. The dispatch carries the module SHA in
+# client_payload.ref (the copy we layer) and client_payload.target
+# ("production" goes through both Fly apps; "development" stops after
+# bento-development). Secrets this needs:
 #
-#   BENTO_CLOUD_TOKEN  repository secret. Fine-grained PAT, read access
-#                      to bento-cloud contents, so the private module
-#                      can be checked out beside the public code
-#   FLY_API_TOKEN      in the "production" environment. Deploy token
-#                      for the Fly app; deploy tokens are app-scoped,
-#                      which is why it lives per environment
-#   DATABASE_URL       in the "production" environment. Use the direct
+#   BENTO_CLOUD_TOKEN  per GitHub environment. Fine-grained PAT, read
+#                      access to bento-cloud contents, so the private
+#                      module can be checked out beside the public code
+#                      (same token in both environments)
+#   FLY_API_TOKEN      per GitHub environment ("development" and
+#                      "production"). Deploy tokens are app-scoped,
+#                      which is why they live per environment
+#   DATABASE_URL       per GitHub environment. Use the direct
 #                      (non-pooler) URL: migrations take a session
 #                      advisory lock, which transaction-mode pooling
 #                      silently breaks
 #
-# A "development" environment exists beside "production" for a future
-# dev deployment; the manual migrate workflow already takes either.
+# Order: migrate development, deploy development, then (unless the
+# payload's target is "development") migrate production, deploy
+# production. A failed development step stops the workflow before
+# production is touched.
 on:
   push:
     branches: [main]
@@ -33,18 +38,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The database first, the code second: schema the new code needs is
-  # in place before any machine runs it. db:migrate applies only what
-  # is pending under an advisory lock, so the boot-time migration in
-  # the image stays as a second pass that finds nothing to do.
-  migrate:
+  # Schema the new code needs, on development first. If this fails,
+  # nothing below runs: production stays on the previous schema and
+  # image.
+  migrate-development:
     if: github.repository == 'danielpang/bento'
     runs-on: ubuntu-latest
-    environment: production
+    environment: development
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -54,25 +58,28 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
-  deploy:
-    # The workflow file is public along with the rest of the
-    # repository; the guard keeps forks from attempting a deploy they
-    # have no secrets for.
+  # Build once after development migrates cleanly. Both deploys load
+  # the same image artifact, so development and production never
+  # diverge from a second build. Runs in the development environment
+  # so it can read BENTO_CLOUD_TOKEN from environment secrets.
+  build:
     if: github.repository == 'danielpang/bento'
-    needs: migrate
+    needs: migrate-development
     runs-on: ubuntu-latest
-    environment: production
+    environment: development
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The private module, checked out beside the public code. The
       # public Dockerfile copies only the paths it names, so this
-      # directory cannot leak into the public image.
-      - uses: actions/checkout@v4
+      # directory cannot leak into the public image. A dispatch names
+      # the commit to layer; a bento-side deploy uses bento-cloud main.
+      - uses: actions/checkout@v5
         with:
           repository: danielpang/bento-cloud
           token: ${{ secrets.BENTO_CLOUD_TOKEN }}
           path: bento-cloud
+          ref: ${{ github.event.client_payload.ref || 'main' }}
 
       - name: Build the public image
         run: docker build -f infra/docker/Dockerfile -t bento-server:ci .
@@ -85,9 +92,84 @@ jobs:
           --build-arg BASE=bento-server:ci
           -t bento-hosted:ci bento-cloud
 
+      - name: Save the hosted image
+        run: docker save bento-hosted:ci | gzip > bento-hosted.tar.gz
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bento-hosted
+          path: bento-hosted.tar.gz
+          retention-days: 1
+
+  deploy-development:
+    if: github.repository == 'danielpang/bento'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: bento-hosted
+
+      - name: Load the hosted image
+        run: gunzip -c bento-hosted.tar.gz | docker load
+
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Push and deploy
+      - name: Push and deploy development
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl auth docker
+          docker tag bento-hosted:ci "registry.fly.io/bento-development:deploy-${GITHUB_SHA}"
+          docker push "registry.fly.io/bento-development:deploy-${GITHUB_SHA}"
+          flyctl deploy -c infra/fly/fly.development.toml --image "registry.fly.io/bento-development:deploy-${GITHUB_SHA}"
+
+  # Production migration only after development has migrated and the
+  # new image is running there. A failed development deploy, or a
+  # dispatch that asked only for development, leaves production alone.
+  migrate-production:
+    if: github.repository == 'danielpang/bento' && github.event.client_payload.target != 'development'
+    needs: deploy-development
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @bento/db... build
+      - run: pnpm db:migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  deploy-production:
+    # The workflow file is public along with the rest of the
+    # repository; the guard keeps forks from attempting a deploy they
+    # have no secrets for. needs build as well as migrate-production so
+    # the image artifact dependency is explicit, not only transitive.
+    if: github.repository == 'danielpang/bento' && github.event.client_payload.target != 'development'
+    needs: [migrate-production, build]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: bento-hosted
+
+      - name: Load the hosted image
+        run: gunzip -c bento-hosted.tar.gz | docker load
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Push and deploy production
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |

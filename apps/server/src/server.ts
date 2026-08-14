@@ -191,9 +191,18 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     mode: env.BENTO_MODE,
     sandboxDriver: env.BENTO_SANDBOX_DRIVER,
     async stop() {
-      await new Promise<void>((resolve, reject) => {
-        server.handle.close((err) => err ? reject(err) : resolve());
-      }).catch(() => {});
+      await new Promise<void>((resolve) => {
+        /**
+         * Stop accepting, then sever what is still open. An SSE stream
+         * never ends on its own, so a close that waits for connections
+         * to drain waits forever, and a deploy that gives up on it
+         * becomes a hard kill with no goodbye. Severed viewers
+         * reconnect and replay from their last seen event; severed
+         * agent runs are what the next boot's reattach is for.
+         */
+        server.handle.close(() => resolve());
+        (server.handle as { closeAllConnections?: () => void }).closeAllConnections?.();
+      });
       await boss.stop({ close: true, timeout: 2000 }).catch(() => {});
       await pool.end().catch(() => {});
     },

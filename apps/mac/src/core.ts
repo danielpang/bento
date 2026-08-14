@@ -1232,6 +1232,14 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           if (bytesEq(cards[i].id, prevId)) selectedCard = i;
         }
       }
+      // The cursor belongs to a run, not to the card: when the watched
+      // card starts a new run, a cursor carried over from the old one
+      // asks the new transcript for "everything after seq 84" and the
+      // opening of the conversation is silently never fetched.
+      const runChanged =
+        hasSelectedCard(model) &&
+        selectedCard >= 0 &&
+        !bytesEq(model.cards[model.selectedCard].runId, cards[selectedCard].runId);
       // lastError survives this poll: a refusal shown for under three
       // seconds might as well not be shown.
       return {
@@ -1240,6 +1248,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         stages: parseStages(msg.body),
         cards: cards,
         selectedCard: selectedCard,
+        ...(runChanged ? { transcript: new Uint8Array(0), cursor: 0 } : {}),
       };
     }
 

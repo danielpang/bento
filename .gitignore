@@ -7,6 +7,9 @@ dist/
 !.env.example
 .DS_Store
 coverage/
+
+# rendered email previews, from `pnpm --filter @bento/server preview:email`
+.email-preview/
 .native/
 zig-out/
 

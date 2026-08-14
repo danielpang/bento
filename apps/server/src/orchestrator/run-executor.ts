@@ -1,8 +1,10 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
-import { getAdapter, runAgent } from "@bento/agents";
+import { and, asc, desc, eq, inArray, lt, notLike, sql } from "drizzle-orm";
+import type { RunOutcome } from "@bento/core";
+import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
   agentProfiles,
   agentRuns,
+  featureMessages,
   features,
   organizationPolicies,
   projects,
@@ -22,8 +24,17 @@ import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
-import { startRunIfIdle } from "./start-run.js";
+import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import {
+  claimQueuedMessages,
+  confirmDelivered,
+  markMessagesDelivered,
+  markMessagesSent,
+  requeueDanglingClaims,
+  requeueMessages,
+  requeueUndelivered,
+} from "./messages.js";
 
 /**
  * Executes one agent run end to end: sandbox, worktree, agent CLI,
@@ -283,48 +294,17 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
-  const allStages = await ctx.db
-    .select()
-    .from(stages)
-    .where(eq(stages.pipelineId, feature.pipelineId))
-    .orderBy(asc(stages.position));
-  // Paths inside the sandbox depend on the driver: a container mounts
-  // the workspace at /workspace, the local driver uses the host path.
-  const mounted = prepared.map((repo) => {
-    const row = repoRows.find((r) => r.name === repo.name);
-    return {
-      name: repo.name,
-      mountPath: repositoryPathIn(handle.workdir, repo.name),
-      testCommand: row?.testCommand ?? null,
-    };
+  const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
+    run,
+    feature,
+    stage,
+    profile,
+    adapter,
+    repoRows,
+    prepared,
+    handle,
+    sendInitialPrompt: true,
   });
-  // With one repository the agent starts inside it, which is what a
-  // single repo project expects. With several, it starts at the
-  // workspace root so every checkout is visible; the prompt lists them.
-  const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
-
-  const prompt = run.prompt || buildStagePrompt(feature, stage, allStages, mounted, { name: profile.name, skill: profile.skill });
-
-  const commandInput = {
-    prompt,
-    model: profile.model,
-    cwd: workdir,
-    ...(run.cliSessionId ? { resumeSessionId: run.cliSessionId } : {}),
-    ...(profile.extraArgs.length ? { extraArgs: profile.extraArgs } : {}),
-  };
-  /**
-   * Live mode: the tool holds a conversation over stdin, so a message
-   * sent while it works reaches the process instead of waiting for the
-   * run to end. Needs both halves: an adapter that speaks it and a
-   * driver that can attach stdin (sprites cannot).
-   */
-  const live =
-    adapter.live && ctx.driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
-      ? adapter.live
-      : null;
-  const liveChannel = live ? new LineChannel() : null;
-  if (live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
-  const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
 
   // Credentials come from the owning organization, never from the
   // server's own environment: see resolveAgentEnv.
@@ -419,19 +399,21 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   /**
    * A live conversation settles rather than exits: after each finished
-   * turn, a message that arrived through the fallback queue is fed in;
+   * turn, messages that parked meanwhile are fed in, oldest first;
    * with nothing waiting, stdin closes and the process ends the run.
    */
   const onTurnFinished = async () => {
     if (!live || !liveChannel) return;
-    const parked = await claimQueuedPrompt(ctx, feature.id);
-    if (parked) {
-      const accepted = liveChannel.write(live.encodeMessage(parked, "followUp"));
+    const claimed = await claimQueuedMessages(ctx.db, feature.id);
+    if (claimed.length > 0) {
+      const joined = claimed.map((m) => m.text).join("\n");
+      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
       if (accepted) {
-        await sayAsUser(parked);
+        await markMessagesSent(ctx.db, claimed.map((m) => m.id), runId);
+        await sayAsUser(joined);
         return;
       }
-      await parkQueuedPrompt(ctx, feature.id, parked);
+      await requeueMessages(ctx.db, claimed.map((m) => m.id));
     }
     if (liveChannel.pending === 0) liveChannel.end();
   };
@@ -442,6 +424,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // CLI that never started.
   await saySystem(`Starting ${profile.cli} in the sandbox.`);
   let agentReported = false;
+  let sessionRecorded = false;
   try {
     result = await runAgent({
       adapter,
@@ -462,10 +445,27 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           agentReported = true;
           await saySystem(`${profile.cli} started and is working on the task.`);
         }
+        /**
+         * The session id is known the moment the CLI announces itself,
+         * but it used to reach the run row only at the very end, from
+         * the result event. A run that died without one (crash, kill,
+         * restart) left the column null, and the conversation it
+         * carried became unreachable even though the id sat in the
+         * transcript the whole time. Written once, as soon as heard.
+         */
+        if (!sessionRecorded && event.type === "init" && event.sessionId) {
+          sessionRecorded = true;
+          await ctx.db.update(agentRuns).set({ cliSessionId: event.sessionId }).where(eq(agentRuns.id, runId));
+        }
         seq += 1;
         await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
         ctx.bus.emitRunEvent({ runId, seq, event });
-        if (event.type === "result") await onTurnFinished();
+        if (event.type === "result") {
+          // A completed turn confirms every message this run was
+          // carrying; only then are new arrivals fed in.
+          await confirmDelivered(ctx.db, runId);
+          await onTurnFinished();
+        }
         // The board shows what the agent last said, so a wall of
         // running cards reads as work rather than as spinners. Only
         // spoken lines: tool starts and stops are ticker noise.
@@ -491,14 +491,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       emitBoard("cancelled");
       return;
     }
-    // The two common failures get sentences; anything else keeps the
-    // raw error, which is at least honest about being unexpected.
-    const reason = /exec timeout/.test(String(err))
-      ? `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`
-      : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
-        ? "Docker is not reachable from the server. Check that Docker is running, then run again."
-        : `exec failed: ${String(err)}`;
-    await finishRun(ctx, runId, { ok: false, error: reason }, null);
+    await finishRun(ctx, runId, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
     return;
@@ -513,6 +506,52 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
+  await settleAgentResult(ctx, {
+    runId,
+    feature,
+    stage,
+    profile,
+    repoRows,
+    prepared,
+    handle,
+    branch,
+    publisher,
+    argv,
+    result,
+    seq,
+    emitBoard,
+  });
+}
+
+/** The rows a run settlement needs, shared by first runs and resumes. */
+interface RunSettlement {
+  runId: string;
+  feature: typeof features.$inferSelect;
+  stage: typeof stages.$inferSelect;
+  profile: typeof agentProfiles.$inferSelect;
+  repoRows: (typeof repositories.$inferSelect)[];
+  prepared: PreparedRepository[];
+  handle: SandboxHandle;
+  branch: string;
+  publisher: Awaited<ReturnType<typeof githubConnectionFor>>;
+  argv: string[];
+  result: { outcome: RunOutcome; exitCode: number };
+  /** Continues the run's transcript counter for the publish notes. */
+  seq: number;
+  emitBoard: (status: string) => void;
+}
+
+/**
+ * Everything that happens after the agent process ends: naming the
+ * failure, publishing branches, and writing the terminal state. Shared
+ * by executeRun and by resumeInterruptedRun, so a run that finished
+ * under a different server process than it started under still ends
+ * exactly the way a normal run does.
+ */
+async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
+  const { runId, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
+    settlement;
+  let seq = settlement.seq;
   const { outcome, exitCode } = result;
   if (!outcome.ok) {
     // A revoked login has exactly one fix, so the failure names it.
@@ -618,6 +657,91 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   await ctx.boss.send("gate.evaluate", { featureId: feature.id });
 }
 
+/**
+ * The two common exec failures get sentences; anything else keeps the
+ * raw error, which is at least honest about being unexpected.
+ */
+function execFailureReason(ctx: AppContext, err: unknown): string {
+  return /exec timeout/.test(String(err))
+    ? `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`
+    : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
+      ? "Docker is not reachable from the server. Check that Docker is running, then run again."
+      : `exec failed: ${String(err)}`;
+}
+
+/**
+ * Builds the agent's command line and, for live adapters, the stdin
+ * channel that carries the conversation. Shared by first runs and
+ * resumes so a resume reconstructs exactly the argv the session was
+ * started with; the opening prompt is only written into the channel on
+ * a first run, because a resumed process consumed it in its first life
+ * and re-sending it would replay the whole task as a new user turn.
+ */
+async function buildRunCommand(
+  ctx: AppContext,
+  input: {
+    run: typeof agentRuns.$inferSelect;
+    feature: typeof features.$inferSelect;
+    stage: typeof stages.$inferSelect;
+    profile: typeof agentProfiles.$inferSelect;
+    adapter: AgentAdapter;
+    repoRows: (typeof repositories.$inferSelect)[];
+    prepared: PreparedRepository[];
+    handle: SandboxHandle;
+    sendInitialPrompt: boolean;
+  },
+): Promise<{
+  argv: string[];
+  live: LiveSession | null;
+  liveChannel: LineChannel | null;
+  workdir: string;
+}> {
+  const { run, feature, stage, profile, adapter, repoRows, prepared, handle } = input;
+  const allStages = await ctx.db
+    .select()
+    .from(stages)
+    .where(eq(stages.pipelineId, feature.pipelineId))
+    .orderBy(asc(stages.position));
+  // Paths inside the sandbox depend on the driver: a container mounts
+  // the workspace at /workspace, the local driver uses the host path.
+  const mounted = prepared.map((repo) => {
+    const row = repoRows.find((r) => r.name === repo.name);
+    return {
+      name: repo.name,
+      mountPath: repositoryPathIn(handle.workdir, repo.name),
+      testCommand: row?.testCommand ?? null,
+    };
+  });
+  // With one repository the agent starts inside it, which is what a
+  // single repo project expects. With several, it starts at the
+  // workspace root so every checkout is visible; the prompt lists them.
+  const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
+
+  const prompt = run.prompt || buildStagePrompt(feature, stage, allStages, mounted, { name: profile.name, skill: profile.skill });
+
+  const commandInput = {
+    prompt,
+    model: profile.model,
+    cwd: workdir,
+    ...(run.cliSessionId ? { resumeSessionId: run.cliSessionId } : {}),
+    ...(profile.extraArgs.length ? { extraArgs: profile.extraArgs } : {}),
+  };
+  /**
+   * Live mode: the tool holds a conversation over stdin, so a message
+   * sent while it works reaches the process instead of waiting for the
+   * run to end. Needs both halves: an adapter that speaks it and a
+   * driver that can attach stdin (sprites cannot).
+   */
+  const live =
+    adapter.live && ctx.driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
+      ? adapter.live
+      : null;
+  const liveChannel = live ? new LineChannel() : null;
+  if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
+  const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
+  return { argv, live, liveChannel, workdir };
+}
+
 /** Whether this organization has asked for sandboxes with no egress. */
 async function organizationRestrictsNetwork(ctx: AppContext, organizationId: string | null): Promise<boolean> {
   if (!organizationId) return false;
@@ -669,7 +793,14 @@ async function finishRun(
       status: outcome.ok ? "succeeded" : "failed",
       endedAt: new Date(),
       exitCode,
-      cliSessionId: outcome.sessionId ?? null,
+      /**
+       * Only when the agent actually said. Overwriting with null on a
+       * run that died without a result erased a still valid session id
+       * and then the failure text advised "send a message to continue",
+       * which silently started a cold conversation. Cancel always kept
+       * the column; failure now does too.
+       */
+      ...(outcome.sessionId !== undefined ? { cliSessionId: outcome.sessionId } : {}),
       costUsd: outcome.costUsd !== undefined ? String(outcome.costUsd) : null,
       numTurns: outcome.numTurns ?? null,
       error: outcome.error ?? null,
@@ -727,68 +858,73 @@ async function finishRun(
   // Wakes every open stream for this run so none of them has to poll.
   ctx.bus.emitRunDone(runId, outcome.ok ? "succeeded" : "failed");
 
+  // Messages the run took but never confirmed go back first, so the
+  // delivery below hands them to the next run instead of losing them.
+  await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 }
 
 /**
- * Delivers a message that arrived while the run was still going. A
- * headless CLI cannot hear mid-flight, so the message waited on the
- * feature; now that the run is over it becomes a resume run in the same
- * session. Cancel counts as an ending too: someone who stops the agent
- * and types a redirect means the redirect. The claim is guarded so two
- * terminal paths racing deliver once.
+ * Delivers messages that arrived while the run was still going. A
+ * headless CLI cannot hear mid-flight, so they waited as rows on the
+ * card; now that the run is over they become one resume run in the
+ * same session, oldest first. Cancel counts as an ending too: someone
+ * who stops the agent and types a redirect means the redirect. Claims
+ * lock rows, so two terminal paths racing deliver each message once.
  */
-/**
- * Claims the card's parked message atomically, so two racing terminal
- * paths (or a live turn and a finishing run) deliver it exactly once.
- */
-async function claimQueuedPrompt(ctx: AppContext, featureId: string): Promise<string | null> {
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
-  if (!feature?.queuedPrompt) return null;
-  const text = feature.queuedPrompt;
-  const [claimed] = await ctx.db
-    .update(features)
-    .set({ queuedPrompt: null })
-    .where(and(eq(features.id, featureId), eq(features.queuedPrompt, text)))
-    .returning({ id: features.id });
-  return claimed ? text : null;
-}
-
-/** Puts a claimed message back when it could not be delivered after all. */
-async function parkQueuedPrompt(ctx: AppContext, featureId: string, text: string): Promise<void> {
-  await ctx.db
-    .update(features)
-    .set({ queuedPrompt: text })
-    .where(and(eq(features.id, featureId), isNull(features.queuedPrompt)));
-}
-
 export async function deliverQueuedMessage(ctx: AppContext, runId: string): Promise<void> {
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
   if (!run) return;
-  const text = await claimQueuedPrompt(ctx, run.featureId);
-  if (!text) return;
+  const claimed = await claimQueuedMessages(ctx.db, run.featureId);
+  if (claimed.length === 0) return;
+  const ids = claimed.map((m) => m.id);
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-  if (!feature) return;
+  if (!feature) {
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
+
+  /**
+   * A judge's end can be what frees the card, but the judge is not the
+   * conversation: inheriting its profile and session had the reviewer
+   * answering the user's follow-up inside the judging session. The
+   * newest run that is not a judge run is whose agent and session the
+   * message continues.
+   */
+  const [conversation] = run.prompt.startsWith(JUDGE_PROMPT_PREFIX)
+    ? await ctx.db
+        .select()
+        .from(agentRuns)
+        .where(and(eq(agentRuns.featureId, run.featureId), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1)
+    : [run];
+  const source = conversation ?? run;
 
   const next = await startRunIfIdle(ctx.db, {
     featureId: feature.id,
-    stageId: run.stageId,
-    agentProfileId: run.agentProfileId,
-    prompt: text,
-    cliSessionId: run.cliSessionId,
-    executor: run.executor,
+    stageId: source.stageId,
+    agentProfileId: source.agentProfileId,
+    prompt: claimed.map((m) => m.text).join("\n"),
+    cliSessionId: source.cliSessionId,
+    executor: source.executor,
   }, ctx.entitlements);
   if (next === "busy") {
-    // Another run started in the gap; put the message back for its end.
-    await parkQueuedPrompt(ctx, feature.id, text);
+    // Another run started in the gap; the messages wait for its end.
+    await requeueMessages(ctx.db, ids);
     return;
   }
   if ("outOfCompute" in next) {
-    // The message keeps its place in the queue rather than being lost
-    // to a limit the person who typed it may not even have hit yet.
-    await parkQueuedPrompt(ctx, feature.id, text);
+    // Out of compute: back to queued rather than lost to a limit the
+    // sender may not even have hit yet. The stranded sweep retries once
+    // the allowance returns.
+    await requeueMessages(ctx.db, ids);
     return;
   }
+  // Delivered, not merely sent: they are this run's prompt now, carried
+  // durably by the run row, so its failure is something to read and
+  // resume rather than a message to hand out again.
+  await markMessagesDelivered(ctx.db, ids, next.id);
   ctx.bus.emitBoardEvent({
     type: "run_updated",
     projectId: feature.projectId,
@@ -796,7 +932,44 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     runId: next.id,
     status: "queued",
   });
-  if (run.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+  if (source.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+}
+
+/**
+ * Boot sweep for messages with no owner. Two ways a message strands: a
+ * claim whose process died between claiming and assigning a run, and
+ * sent rows whose run reached a terminal state on a path that could not
+ * put them back (a crash, an interrupted close from an older version).
+ * Both go back to queued; then any card holding queued messages with
+ * nothing running gets a delivery kicked off from its newest run. This
+ * is what guarantees a parked message always has a next chance, instead
+ * of waiting on a terminal-path delivery that already happened.
+ */
+async function sweepStrandedMessages(ctx: AppContext): Promise<void> {
+  await requeueDanglingClaims(ctx.db);
+  await ctx.db.execute(sql`
+    update feature_messages set status = 'queued', run_id = null, sent_at = null
+    where status = 'sent' and run_id in (
+      select id from agent_runs where status in ('succeeded', 'failed', 'cancelled')
+    )
+  `);
+  const stranded = await ctx.db
+    .selectDistinct({ featureId: featureMessages.featureId })
+    .from(featureMessages)
+    .where(eq(featureMessages.status, "queued"));
+  for (const row of stranded) {
+    const [lastRun] = await ctx.db
+      .select()
+      .from(agentRuns)
+      .where(eq(agentRuns.featureId, row.featureId))
+      .orderBy(desc(agentRuns.queuedAt))
+      .limit(1);
+    // No run yet: the messages wait for the card's first start.
+    if (!lastRun) continue;
+    // An active run's own end delivers; resumed runs count as active.
+    if ((ACTIVE_RUN_STATUSES as readonly string[]).includes(lastRun.status)) continue;
+    await deliverQueuedMessage(ctx, lastRun.id);
+  }
 }
 
 /**
@@ -837,6 +1010,7 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
     .where(eq(agentRuns.id, runId));
   announceRunFinished(ctx, runId);
   ctx.bus.emitRunDone(runId, "cancelled");
+  await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 }
 
@@ -852,64 +1026,67 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
  * The card used to sit "running" forever, its gate unevaluated, its
  * transcript cut off mid-sentence, its sandbox possibly still billing.
  *
- * The sprite the agent ran on survives, but an exec stream cannot be
- * re-attached, so the honest ending is to close the run as interrupted,
- * say so in the transcript, and hand back to the usual machinery: a
- * message parked on the card becomes a resume run in the same session,
- * and the gate re-evaluates. Runner-executed runs are not here on
+ * The sandbox outlives this process, and on drivers that can attach,
+ * so does the agent: the sprite keeps a disconnected command running
+ * through its grace period (see EXEC_DISCONNECT_GRACE), and boot
+ * reattaches to it and lets the run finish as if nothing happened. A
+ * deploy longer than the grace finds no session, and the run is closed
+ * as interrupted, which stays the honest ending for that case, for
+ * runs still in "starting" (their agent may never have spawned), and
+ * for drivers with no attach. Runner-executed runs are not here on
  * purpose: the machine running them outlives this process and reports
  * when it is done.
  *
  * This assumes the single-process deployment the event bus already
- * assumes; with two servers sharing a database, one's boot would close
- * runs the other is actively executing.
+ * assumes; with two servers sharing a database, both boots would try
+ * to attach to the same session, and one's close would race the
+ * other's run.
  */
 export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
   const orphans = await ctx.db
-    .update(agentRuns)
-    .set({
-      status: "failed",
-      endedAt: new Date(),
-      error: "interrupted by a server restart",
-    })
-    .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])))
-    .returning({ id: agentRuns.id, featureId: agentRuns.featureId });
+    .select()
+    .from(agentRuns)
+    .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])));
 
+  let closed = 0;
+  let resuming = 0;
   for (const orphan of orphans) {
-    // The sandbox was awake for as long as the run said it was, and a
-    // restart is not a refund.
-    announceRunFinished(ctx, orphan.id);
-    const [seqRow] = await ctx.db
-      .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
-      .from(runEvents)
-      .where(eq(runEvents.runId, orphan.id));
-    const seq = Number(seqRow?.maxSeq ?? 0) + 1;
-    const event = {
-      type: "message" as const,
-      role: "system" as const,
-      text: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
-    };
-    await ctx.db.insert(runEvents).values({ runId: orphan.id, seq, type: event.type, payload: event });
-    ctx.bus.emitRunEvent({ runId: orphan.id, seq, event });
-    // Any stream that reconnected before recovery ran is waiting live;
-    // this lets it close the way a normal finish would.
-    ctx.bus.emitRunDone(orphan.id, "failed");
-    const [feature] = await ctx.db.select().from(features).where(eq(features.id, orphan.featureId));
-    if (feature) {
-      ctx.bus.emitBoardEvent({
-        type: "run_updated",
-        projectId: feature.projectId,
-        featureId: feature.id,
-        runId: orphan.id,
-        status: "failed",
-      });
+    // The sandbox is found through the run's own link, never by
+    // external id: sandboxes has no unique index on external_id, so a
+    // name lookup could hand back another row for the same sprite.
+    const sandbox =
+      orphan.status === "running" && orphan.sandboxId && ctx.driver.attach
+        ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, orphan.sandboxId)).limit(1))[0]
+        : undefined;
+    if (!sandbox || sandbox.provider !== ctx.driver.provider) {
+      await failRunAsInterrupted(ctx, orphan);
+      closed += 1;
+      continue;
     }
-    await deliverQueuedMessage(ctx, orphan.id);
-    await ctx.boss.send("gate.evaluate", { featureId: orphan.featureId });
+    resuming += 1;
+    /**
+     * Fire and forget: a resume lasts as long as the agent does, and
+     * boot must not wait behind it. Every failure inside falls back to
+     * the interrupted close, whose compare-and-set means a resume that
+     * already finished cannot be clobbered.
+     */
+    void resumeInterruptedRun(ctx, orphan, sandbox).catch(async (err) => {
+      console.error(`could not resume run ${orphan.id} after the restart:`, err);
+      try {
+        await failRunAsInterrupted(ctx, orphan);
+      } catch (inner) {
+        console.error(`could not close run ${orphan.id} as interrupted either:`, inner);
+      }
+    });
   }
-  if (orphans.length > 0) {
-    console.warn(`closed ${orphans.length} run(s) interrupted by the restart`);
+  if (closed > 0) {
+    console.warn(`closed ${closed} run(s) interrupted by the restart`);
   }
+  if (resuming > 0) {
+    console.warn(`reattaching to ${resuming} run(s) still working in their sandboxes`);
+  }
+
+  await sweepStrandedMessages(ctx);
 
   /**
    * Runs that never started go back on the queue. Their run.execute
@@ -919,6 +1096,299 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
    * still sitting in the queue this sends a duplicate, which
    * executeRun's atomic claim turns into a no-op.
    */
+  await requeueWaitingRuns(ctx);
+}
+
+/**
+ * Closes one orphaned run as interrupted: transcript line, terminal
+ * status, stream close, parked message delivery, gate re-check.
+ * Compare-and-set on the status, because the paths that reach here can
+ * race a run that finished or was cancelled while recovery deliberated,
+ * and the loser must change nothing.
+ */
+async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureId: string }): Promise<void> {
+  const [closed] = await ctx.db
+    .update(agentRuns)
+    .set({
+      status: "failed",
+      endedAt: new Date(),
+      error: "interrupted by a server restart",
+    })
+    .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
+    .returning({ id: agentRuns.id });
+  if (!closed) return;
+
+  // Behind the compare-and-set on purpose: only the path that actually
+  // closed the run announces it. A resumed run is still working, and
+  // its own finish announces later; announcing here for every orphan
+  // would have billed runs that never ended. The sandbox was awake for
+  // as long as the run said it was, and a restart is not a refund.
+  announceRunFinished(ctx, run.id);
+
+  const [seqRow] = await ctx.db
+    .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
+    .from(runEvents)
+    .where(eq(runEvents.runId, run.id));
+  const seq = Number(seqRow?.maxSeq ?? 0) + 1;
+  const event = {
+    type: "message" as const,
+    role: "system" as const,
+    text: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+  };
+  await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: event.type, payload: event });
+  ctx.bus.emitRunEvent({ runId: run.id, seq, event });
+  // Any stream that reconnected before recovery ran is waiting live;
+  // this lets it close the way a normal finish would.
+  ctx.bus.emitRunDone(run.id, "failed");
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+  if (feature) {
+    ctx.bus.emitBoardEvent({
+      type: "run_updated",
+      projectId: feature.projectId,
+      featureId: feature.id,
+      runId: run.id,
+      status: "failed",
+    });
+  }
+  await requeueUndelivered(ctx.db, run.id);
+  await deliverQueuedMessage(ctx, run.id);
+  await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
+}
+
+/**
+ * Follows a run into its sandbox after a restart: the agent process
+ * kept working while this server was away, so the run's stream, abort
+ * handle, and live stdin are rebuilt around the surviving session and
+ * the run finishes the way it would have.
+ *
+ * Everything provisioning-shaped is skipped on purpose. The process
+ * already carries its environment and working directory, so resolving
+ * credentials here would add nothing except a fresh way to fail: a
+ * secret rotated during the deploy must not kill a run that never
+ * needed to read it again. No snapshot either; the pre-run checkpoint
+ * was taken in the run's first life.
+ */
+async function resumeInterruptedRun(
+  ctx: AppContext,
+  run: typeof agentRuns.$inferSelect,
+  sandbox: typeof sandboxes.$inferSelect,
+): Promise<void> {
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+  const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
+  const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, run.agentProfileId));
+  if (!feature || !stage || !profile) throw new Error(`run ${run.id} has dangling references`);
+  const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
+  if (!project) throw new Error(`project ${feature.projectId} not found`);
+
+  const selectedRepos = await ctx.db
+    .select()
+    .from(repositories)
+    .where(eq(repositories.projectId, project.id))
+    .orderBy(asc(repositories.position));
+  const repoRows =
+    ctx.env.BENTO_MODE === "multi" ? selectedRepos : await linkGitHubRemotes(ctx.db, selectedRepos);
+
+  const emitBoard = (status: string) =>
+    ctx.bus.emitBoardEvent({
+      type: "run_updated",
+      projectId: feature.projectId,
+      featureId: feature.id,
+      runId: run.id,
+      status,
+    });
+  const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
+  const publisher = await githubConnectionFor(ctx, feature.organizationId);
+  const adapter = getAdapter(profile.cli);
+
+  const handle: SandboxHandle = {
+    externalId: sandbox.externalId,
+    provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+    workdir: sandbox.workdir,
+  };
+  // Resume only exists for drivers with attach, whose publish path
+  // exports bundles through the handle, so worktreePath is never read.
+  const prepared: PreparedRepository[] = repoRows.map((r) => ({
+    name: r.name,
+    localPath: r.localPath,
+    worktreePath: "",
+  }));
+
+  const { argv, live, liveChannel } = await buildRunCommand(ctx, {
+    run,
+    feature,
+    stage,
+    profile,
+    adapter,
+    repoRows,
+    prepared,
+    handle,
+    // The process consumed its prompt in its first life; re-sending it
+    // would replay the whole task as a new user turn.
+    sendInitialPrompt: false,
+  });
+
+  // What is left of the run's budget, not a fresh one: the agent has
+  // been running since startedAt, deploy or no deploy. The floor gives
+  // a run near its limit a minute to reach a result event.
+  const timeoutMs = Math.max(
+    60_000,
+    ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - (run.startedAt ? Date.now() - run.startedAt.getTime() : 0),
+  );
+
+  // Attach before touching shared state or the transcript, so a failed
+  // attach leaves no misleading "reattached" line and no stale abort
+  // handle behind.
+  const controller = new AbortController();
+  const stream = await ctx.driver.attach!(handle, argv, {
+    timeoutMs,
+    signal: controller.signal,
+    ...(liveChannel ? { stdin: liveChannel } : {}),
+  });
+  if (!stream) {
+    liveChannel?.end();
+    await failRunAsInterrupted(ctx, run);
+    return;
+  }
+
+  // The cancel route may have fired between boot and here, aborting a
+  // controller that was not registered yet and marking the row. The
+  // abort tells the driver to stop the process it just reconnected;
+  // draining the stream lets that kill conclude.
+  const [current] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  if (!current || current.status !== "running") {
+    controller.abort();
+    liveChannel?.end();
+    for await (const chunk of stream) {
+      if (chunk.kind === "exit") break;
+    }
+    return;
+  }
+
+  ctx.running.set(run.id, controller);
+
+  // The transcript already holds this run's first life; the counter
+  // continues it, because (runId, seq) is unique and starting over
+  // would throw on the first insert.
+  const [seqRow] = await ctx.db
+    .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
+    .from(runEvents)
+    .where(eq(runEvents.runId, run.id));
+  let seq = Number(seqRow?.maxSeq ?? 0);
+  const sayAsUser = async (text: string) => {
+    seq += 1;
+    const said = { type: "message" as const, role: "user" as const, text };
+    await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: said.type, payload: said });
+    ctx.bus.emitRunEvent({ runId: run.id, seq, event: said });
+  };
+  const saySystem = async (text: string) => {
+    seq += 1;
+    const said = { type: "message" as const, role: "system" as const, text };
+    await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: said.type, payload: said });
+    ctx.bus.emitRunEvent({ runId: run.id, seq, event: said });
+  };
+
+  if (live && liveChannel) {
+    ctx.liveInputs.set(run.id, {
+      delivery: live.delivery,
+      deliver: async (text: string) => {
+        const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
+        if (accepted) await sayAsUser(text);
+        return accepted;
+      },
+    });
+  }
+  const onTurnFinished = async () => {
+    if (!live || !liveChannel) return;
+    const claimed = await claimQueuedMessages(ctx.db, feature.id);
+    if (claimed.length > 0) {
+      const joined = claimed.map((m) => m.text).join("\n");
+      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
+      if (accepted) {
+        await markMessagesSent(ctx.db, claimed.map((m) => m.id), run.id);
+        await sayAsUser(joined);
+        return;
+      }
+      await requeueMessages(ctx.db, claimed.map((m) => m.id));
+    }
+    if (liveChannel.pending === 0) liveChannel.end();
+  };
+
+  emitBoard("running");
+  await saySystem("Bento restarted and reattached to the agent still working in the sandbox.");
+
+  let result;
+  try {
+    result = await runAgent({
+      adapter,
+      argv,
+      exec: () => stream,
+      onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
+      onEvent: async (event) => {
+        seq += 1;
+        await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: event.type, payload: event });
+        ctx.bus.emitRunEvent({ runId: run.id, seq, event });
+        if (event.type === "result") {
+          await confirmDelivered(ctx.db, run.id);
+          await onTurnFinished();
+        }
+        const spoken = runOutputPreview(event);
+        if (spoken) {
+          ctx.bus.emitBoardEvent({
+            type: "run_output",
+            projectId: feature.projectId,
+            featureId: feature.id,
+            runId: run.id,
+            text: spoken,
+          });
+        }
+      },
+    });
+  } catch (err) {
+    ctx.running.delete(run.id);
+    ctx.liveInputs.delete(run.id);
+    liveChannel?.end();
+    if (controller.signal.aborted) {
+      await markCancelled(ctx, run.id);
+      emitBoard("cancelled");
+      return;
+    }
+    await finishRun(ctx, run.id, { ok: false, error: execFailureReason(ctx, err) }, null);
+    emitBoard("failed");
+    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    return;
+  }
+  ctx.running.delete(run.id);
+  ctx.liveInputs.delete(run.id);
+  liveChannel?.end();
+
+  if (controller.signal.aborted) {
+    await markCancelled(ctx, run.id);
+    emitBoard("cancelled");
+    return;
+  }
+
+  await settleAgentResult(ctx, {
+    runId: run.id,
+    feature,
+    stage,
+    profile,
+    repoRows,
+    prepared,
+    handle,
+    branch,
+    publisher,
+    argv,
+    result,
+    seq,
+    emitBoard,
+  });
+}
+
+/**
+ * Runs that never started go back on the queue; see the caller's
+ * comment for why their jobs are gone.
+ */
+async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
   const parked = await ctx.db
     .select({ id: agentRuns.id })
     .from(agentRuns)
@@ -970,6 +1440,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
         try {
           await executeRun(ctx, job.data.runId);
         } catch (err) {
+          // The in-flight draft dies with the run, or it leaks for the
+          // life of the process: this catch is the path finishRun never
+          // reaches, so nothing downstream clears it.
+          ctx.bus.dropRunDraft(job.data.runId);
           console.error(`run.execute ${job.data.runId} failed:`, err);
           throw err;
         }
@@ -1049,54 +1523,20 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     for (const row of gated) {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
     }
-    await redeliverStrandedPrompts(ctx);
+    /**
+     * Also here, not only at boot. A message parked because the team
+     * was out of compute has no active run whose finish would deliver
+     * it, and the allowance coming back is not an event anything
+     * fires on. Five minutes of lag against a period boundary is
+     * noise; a message that waits for the next deploy is a bug report.
+     */
+    await sweepStrandedMessages(ctx).catch((err: unknown) => {
+      console.warn("the stranded message sweep did not finish:", err);
+    });
   });
 }
 
-/**
- * Picks up parked prompts that nothing else will.
- *
- * The delivery invariant used to be that a prompt is only ever parked
- * while a run is active, so that run's finish redelivers it. The
- * compute gate broke that: a message sent while the team was out of
- * hours parks with no run at all, and when the allowance came back
- * days later nothing fired, so the user was told "queued" and the
- * agent never acted on it.
- *
- * Riding the existing five minute sweep rather than a timer aimed at
- * period boundaries, because it also heals every other way a prompt
- * could strand, not just the one we know about. deliverQueuedMessage
- * re-parks when the team is still out of compute, so a sweep during
- * the outage is a no-op rather than a retry storm.
- */
-async function redeliverStrandedPrompts(ctx: AppContext): Promise<void> {
-  const stranded = await ctx.db
-    .select({ id: features.id })
-    .from(features)
-    .where(and(isNotNull(features.queuedPrompt), inArray(features.status, ["active", "gated"])));
-  for (const feature of stranded) {
-    const [active] = await ctx.db
-      .select({ id: agentRuns.id })
-      .from(agentRuns)
-      .where(and(eq(agentRuns.featureId, feature.id), inArray(agentRuns.status, ["queued", "starting", "running"])))
-      .limit(1);
-    // A run is working the card, and its finish is the delivery path
-    // that already exists. This sweep is only for prompts nothing owns.
-    if (active) continue;
-    const [latest] = await ctx.db
-      .select()
-      .from(agentRuns)
-      .where(eq(agentRuns.featureId, feature.id))
-      .orderBy(desc(agentRuns.queuedAt))
-      .limit(1);
-    // No run has ever touched the card, so there is no agent or stage
-    // to resume with; the prompt waits for the first manual start.
-    if (!latest) continue;
-    await deliverQueuedMessage(ctx, latest.id).catch((err: unknown) => {
-      console.warn(`could not redeliver the parked prompt on feature ${feature.id}:`, err);
-    });
-  }
-}
+
 
 /**
  * A sandbox command that fails carries its output on the error rather

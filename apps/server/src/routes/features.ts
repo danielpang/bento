@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, notLike, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
@@ -8,6 +8,7 @@ import {
   agentProfiles,
   agentRuns,
   featureEvents,
+  featureMessages,
   featurePullRequests,
   runEvents,
   features,
@@ -26,6 +27,7 @@ import { canAccessProject, getAccessibleFeature } from "../access.js";
 import {
   advanceFeature,
   evaluateFeatureGate,
+  JUDGE_PROMPT_PREFIX,
   moveFeatureBack,
   moveFeatureTo,
   recordManualApproval,
@@ -33,6 +35,12 @@ import {
   reopenFeature,
 } from "../orchestrator/gate-evaluator.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
+import {
+  claimQueuedMessages,
+  enqueueMessage,
+  markMessagesDelivered,
+  requeueMessages,
+} from "../orchestrator/messages.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { githubConnectionFor } from "../github.js";
@@ -215,10 +223,16 @@ export function featureRoutes(ctx: AppContext) {
       // The last 30 finished runs bound the payload; a card with sixty
       // historical runs does not need them all to read as a conversation.
       const finishedRuns = runRows.filter((r) => terminal.includes(r.status)).slice(-30);
-      const profileRows = await db(c, ctx)
-        .select({ id: agentProfiles.id, name: agentProfiles.name })
-        .from(agentProfiles)
-        .where(eq(agentProfiles.ownerId, actor(c)));
+      // Looked up by the runs' own profiles rather than by who is
+      // asking: in a shared organization a colleague's agent used to
+      // render as "agent" because only the caller's profiles resolved.
+      const profileIds = [...new Set(finishedRuns.map((r) => r.agentProfileId))];
+      const profileRows = profileIds.length
+        ? await db(c, ctx)
+            .select({ id: agentProfiles.id, name: agentProfiles.name })
+            .from(agentProfiles)
+            .where(inArray(agentProfiles.id, profileIds))
+        : [];
       const names = new Map(profileRows.map((p) => [p.id, p.name]));
 
       const blocks = [];
@@ -236,7 +250,17 @@ export function featureRoutes(ctx: AppContext) {
           events: events.map((e) => e.payload),
         });
       }
-      return c.json({ blocks });
+      // Messages waiting for an agent, so a reload does not make a
+      // parked message look like it never existed.
+      const pending = await db(c, ctx)
+        .select()
+        .from(featureMessages)
+        .where(and(eq(featureMessages.featureId, feature.id), inArray(featureMessages.status, ["queued", "sent"])))
+        .orderBy(asc(featureMessages.createdAt));
+      return c.json({
+        blocks,
+        pending: pending.map((m) => ({ id: m.id, text: m.text, status: m.status, createdAt: m.createdAt })),
+      });
     })
     /**
      * A message to the card's agent, whatever the agent is doing.
@@ -264,42 +288,83 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
 
-      const queueIt = async () => {
-        await db(c, ctx)
-          .update(features)
-          .set({ queuedPrompt: feature.queuedPrompt ? `${feature.queuedPrompt}\n${text}` : text })
-          .where(eq(features.id, feature.id));
-        return c.json({ queued: true as const });
-      };
+      /**
+       * Durable before anything else: the row is the message's
+       * identity, and whatever the delivery attempt below does (a live
+       * write, a run creation, a crash between the two), the message
+       * now exists somewhere the lifecycle and the boot sweep can find
+       * it. The old single queued_prompt column was a slot, not a
+       * queue, and messages could vanish after their sender was told
+       * "queued".
+       */
+      const messageId = await enqueueMessage(db(c, ctx), feature.id, text);
 
       if (latest.status === "queued" || latest.status === "starting" || latest.status === "running") {
         // A live session hears the message now; the tool decides
         // whether that steers the current work (pi) or queues behind
         // the current turn (Claude Code). No live session: the message
-        // parks on the card until the run ends.
+        // stays parked until the run ends.
         const liveSession = ctx.liveInputs.get(latest.id);
         if (liveSession && (await liveSession.deliver(text))) {
+          await db(c, ctx)
+            .update(featureMessages)
+            .set({ status: "sent", runId: latest.id, sentAt: new Date() })
+            .where(eq(featureMessages.id, messageId));
           return c.json({ queued: false as const, live: true as const, delivery: liveSession.delivery });
         }
-        return queueIt();
+        return c.json({ queued: true as const });
+      }
+      /**
+       * The conversation a follow-up continues is the card's own work,
+       * never a judge's. Judge runs are ordinary rows on the feature,
+       * so "the newest run" was sometimes the reviewer, and the user's
+       * message came back answered by the judge inside the judging
+       * session. The newest run whose prompt is not a judge prompt is
+       * the one whose agent, stage, and session the message belongs to.
+       */
+      const [conversation] = await db(c, ctx)
+        .select()
+        .from(agentRuns)
+        .where(and(eq(agentRuns.featureId, feature.id), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1);
+      const resumeFrom = conversation ?? latest;
+      // Everything parked rides along, oldest first: the card is idle,
+      // so this message and any it queued behind become one resume run.
+      const claimed = await claimQueuedMessages(db(c, ctx), feature.id);
+      if (claimed.length === 0) {
+        // A terminal path claimed it in the same instant; its run
+        // carries the message.
+        return c.json({ queued: true as const });
       }
       const run = await startRunIfIdle(db(c, ctx), {
         featureId: feature.id,
-        stageId: latest.stageId,
-        agentProfileId: latest.agentProfileId,
-        prompt: text,
-        cliSessionId: latest.cliSessionId,
-        executor: latest.executor,
+        stageId: resumeFrom.stageId,
+        agentProfileId: resumeFrom.agentProfileId,
+        prompt: claimed.map((m) => m.text).join("\n"),
+        cliSessionId: resumeFrom.cliSessionId,
+        executor: resumeFrom.executor,
+        // The person sending the message owns the hours the resumed
+        // run spends, not whoever started the conversation.
         startedBy: actor(c),
       }, ctx.entitlements);
       // A run started in the gap between the read and the insert; the
-      // message waits for it like any other mid-run message.
-      if (run === "busy") return queueIt();
-      // Out of compute, so the message is held rather than thrown away.
-      // It is the next thing this card hears when the plan allows work
-      // again, which is what the sender meant by sending it.
-      if ("outOfCompute" in run) return queueIt();
-      if (latest.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      // messages wait for it like any other mid-run message.
+      if (run === "busy") {
+        await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
+        return c.json({ queued: true as const });
+      }
+      if ("outOfCompute" in run) {
+        // Out of compute: held rather than thrown away. Queued is the
+        // honest answer, and the stranded sweep delivers it once the
+        // plan allows work again, which is what sending it meant.
+        await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
+        return c.json({ queued: true as const });
+      }
+      // The run's prompt now carries them, so they are delivered rather
+      // than in flight: a run that fails is resumed, not redelivered.
+      await markMessagesDelivered(db(c, ctx), claimed.map((m) => m.id), run.id);
+      if (resumeFrom.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json({ queued: false as const, run }, 201);
     })
     /**

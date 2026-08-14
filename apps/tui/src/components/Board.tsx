@@ -61,11 +61,7 @@ export function Board({
               const selected = index === selectedIndex;
               const state = cardState(feature, runStatus[feature.id]);
               const waiting = feature.status === "gated" ? gateWait[feature.id] : undefined;
-              // A message the agent has not read yet outlives the
-              // notice that confirmed sending it, so it belongs on the
-              // card until a run consumes it.
-              const queued = feature.queuedPrompt ? "1 message queued" : "";
-              const detail = [waiting, queued].filter(Boolean).join(" · ");
+              const detail = waiting ?? "";
               return (
                 <Box key={feature.id} flexDirection="column">
                   <Box>

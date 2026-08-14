@@ -761,6 +761,258 @@ test("Sprite exec keeps the live conversation flowing across a reattach", async 
 });
 
 /**
+ * attach is how a freshly booted server picks up a run the previous
+ * process left working in the sandbox: find the session, connect to it,
+ * and stream as if the socket had never gone away. Only the command's
+ * first word matters for the match, and tty sessions are never ours.
+ */
+test("Sprite attach streams the surviving session to completion", async () => {
+  const child = fakeChild();
+  const spawns: { file: string; args: string[]; options?: Record<string, unknown> }[] = [];
+  const sprite = {
+    spawn(file: string, args: string[], options?: Record<string, unknown>) {
+      spawns.push({ file, args, ...(options ? { options } : {}) });
+      return child;
+    },
+    async listSessions() {
+      return [
+        { id: "tty-1", command: "claude", workdir: "/w", created: new Date(3), bytesPerSecond: 0, isActive: true, tty: true },
+        { id: "old-1", command: "claude -p earlier task", workdir: "/w", created: new Date(1), bytesPerSecond: 0, isActive: false, tty: false },
+        { id: "sess-7", command: "claude -p do the task", workdir: "/w", created: new Date(2), bytesPerSecond: 0, isActive: false, tty: false },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const attaching = driver.attach(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    ["claude", "-p", "do the task"],
+  );
+  await settle();
+  child.emit("spawn");
+  const stream = await attaching;
+  assert.ok(stream, "a listed session must be attachable");
+
+  const collected = collectExec(stream!);
+  child.stdout.write('{"type":"result"}\n');
+  child.emit("exit", 0);
+  const result = await collected;
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /result/);
+  assert.equal(spawns.length, 1);
+  assert.deepEqual(spawns[0]?.args, []);
+  assert.equal(spawns[0]?.options?.sessionId, "sess-7");
+});
+
+/**
+ * A sandbox that answers without the session is conclusive: the process
+ * ended while nobody was attached. Null, not an error, so the caller
+ * can close the run honestly instead of retrying forever.
+ */
+test("Sprite attach answers null when the process is gone", async () => {
+  let spawned = 0;
+  const sprite = {
+    spawn() {
+      spawned += 1;
+      return fakeChild();
+    },
+    async listSessions() {
+      return [
+        { id: "tty-1", command: "claude", workdir: "/w", created: new Date(0), bytesPerSecond: 0, isActive: true, tty: true },
+        { id: "sh-1", command: "sh -lc export", workdir: "/w", created: new Date(0), bytesPerSecond: 0, isActive: false, tty: false },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const stream = await driver.attach(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    ["claude"],
+  );
+  assert.equal(stream, null);
+  assert.equal(spawned, 0);
+});
+
+/**
+ * A connection that will not open is a transport failure, not proof the
+ * session is gone, so attach must reject rather than answer null: null
+ * makes the caller close the run for good.
+ */
+test("Sprite attach rejects rather than answering null when the connection will not open", async () => {
+  const child = fakeChild();
+  let signalled = false;
+  child.kill = () => {
+    signalled = true;
+  };
+  const sprite = {
+    spawn() {
+      queueMicrotask(() => child.emit("error", new Error("WebSocket error: connect refused")));
+      return child;
+    },
+    async listSessions() {
+      return [
+        { id: "sess-8", command: "claude", workdir: "/w", created: new Date(0), bytesPerSecond: 0, isActive: false, tty: false },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    driver.attach({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+    /connect refused/,
+  );
+  // The process must not be signalled for a failure that is ours.
+  assert.equal(signalled, false);
+});
+
+/**
+ * After a successful attach the stream is a full citizen: a later
+ * socket drop walks the same reattach ladder an exec-born stream does.
+ */
+test("Sprite attach inherits the drop-recovery ladder", async () => {
+  const child1 = fakeChild();
+  const child2 = fakeChild();
+  const spawns: { options?: Record<string, unknown> }[] = [];
+  const sprite = {
+    spawn(_file: string, _args: string[], options?: Record<string, unknown>) {
+      spawns.push({ ...(options ? { options } : {}) });
+      return spawns.length === 1 ? child1 : child2;
+    },
+    async listSessions() {
+      return [
+        { id: "sess-9", command: "claude", workdir: "/w", created: new Date(0), bytesPerSecond: 0, isActive: false, tty: false },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const attaching = driver.attach(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    ["claude"],
+  );
+  await settle();
+  child1.emit("spawn");
+  const stream = await attaching;
+  assert.ok(stream);
+  const collected = collectExec(stream!);
+
+  child1.emit("exit", -1); // the reattached socket dropped again
+  for (let i = 0; i < 50 && spawns.length < 2; i++) await settle();
+  assert.equal(spawns.length, 2);
+  assert.equal(spawns[1]?.options?.sessionId, "sess-9");
+  child2.emit("spawn");
+  await settle();
+  child2.stdout.write('{"type":"result"}\n');
+  child2.emit("exit", 0);
+
+  const result = await collected;
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stderr, /reattached to the running command/);
+});
+
+/**
+ * The conversation belongs to the run: an attached stream accepts live
+ * stdin exactly as an exec-born one, and the conversation ending still
+ * closes the process's stdin.
+ */
+test("Sprite attach carries the live conversation and closes stdin when it ends", async () => {
+  const child = fakeChild();
+  const sprite = {
+    spawn() {
+      return child;
+    },
+    async listSessions() {
+      return [
+        { id: "sess-10", command: "claude", workdir: "/w", created: new Date(0), bytesPerSecond: 0, isActive: false, tty: false },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const channel = new LineChannel();
+  const attaching = driver.attach(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    ["claude"],
+    { stdin: channel },
+  );
+  await settle();
+  child.emit("spawn");
+  const stream = await attaching;
+  assert.ok(stream);
+  const collected = collectExec(stream!);
+
+  const written: string[] = [];
+  child.stdin.on("data", (d: Buffer | string) => written.push(d.toString()));
+  channel.write("a follow-up");
+  await settle();
+  assert.deepEqual(written, ["a follow-up\n"]);
+  assert.equal(child.stdin.writableEnded, false);
+
+  channel.end();
+  await settle();
+  assert.equal(child.stdin.writableEnded, true);
+
+  child.emit("exit", 0);
+  const result = await collected;
+  assert.equal(result.exitCode, 0);
+});
+
+/**
+ * A cancel on a resumed run must actually stop the agent: over the
+ * socket, and over HTTP for when the socket is past helping, and it
+ * must never trigger another reattach.
+ */
+test("Sprite attach does not resurrect a cancelled run", async () => {
+  const child = fakeChild();
+  let spawned = 0;
+  const kills: { id: string; signal?: string }[] = [];
+  const sprite = {
+    spawn() {
+      spawned += 1;
+      return child;
+    },
+    async listSessions() {
+      return [
+        { id: "sess-11", command: "claude", workdir: "/w", created: new Date(0), bytesPerSecond: 0, isActive: false, tty: false },
+      ];
+    },
+    async killSession(id: string, signal?: string) {
+      kills.push({ id, ...(signal ? { signal } : {}) });
+      return { async processAll() {} };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const controller = new AbortController();
+  const attaching = driver.attach(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    ["claude"],
+    { signal: controller.signal },
+  );
+  await settle();
+  child.emit("spawn");
+  const stream = await attaching;
+  assert.ok(stream);
+  const collected = collectExec(stream!);
+
+  controller.abort();
+  child.emit("exit", -1); // the socket closed without a real exit
+  const result = await collected;
+  await settle();
+
+  assert.equal(result.exitCode, -1);
+  assert.equal(spawned, 1, "a cancelled run must not be reattached");
+  assert.deepEqual(kills, [{ id: "sess-11", signal: "SIGTERM" }]);
+});
+
+/**
  * The other half of feedStdin's contract lives in the SDK: ending the
  * stdin stream must translate into the end-of-input frame the server
  * waits for. This pins that wiring against the installed package, so

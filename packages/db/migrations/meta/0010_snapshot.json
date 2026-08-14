@@ -1,6 +1,6 @@
 {
-  "id": "0ef96c5c-1865-4412-b5c0-17fdefd25d9a",
-  "prevId": "30fb515f-bebf-4d5a-a75b-10184a5b1f5a",
+  "id": "bae64212-6e89-46da-9e70-acf88f8839bd",
+  "prevId": "1c743749-fa9b-4f47-b58f-ce83ec33f9b3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1345,6 +1345,145 @@
       },
       "isRLSEnabled": false
     },
+    "public.feature_messages": {
+      "name": "feature_messages",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "feature_id": {
+          "name": "feature_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "sent_at": {
+          "name": "sent_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "delivered_at": {
+          "name": "delivered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "feature_messages_claim_idx": {
+          "name": "feature_messages_claim_idx",
+          "columns": [
+            {
+              "expression": "feature_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "feature_messages_feature_id_features_id_fk": {
+          "name": "feature_messages_feature_id_features_id_fk",
+          "tableFrom": "feature_messages",
+          "tableTo": "features",
+          "columnsFrom": [
+            "feature_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "feature_messages_organization_id_organization_id_fk": {
+          "name": "feature_messages_organization_id_organization_id_fk",
+          "tableFrom": "feature_messages",
+          "tableTo": "organization",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "feature_messages_run_id_agent_runs_id_fk": {
+          "name": "feature_messages_run_id_agent_runs_id_fk",
+          "tableFrom": "feature_messages",
+          "tableTo": "agent_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.feature_pull_requests": {
       "name": "feature_pull_requests",
       "schema": "",
@@ -1542,12 +1681,6 @@
         },
         "branch_name": {
           "name": "branch_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "queued_prompt": {
-          "name": "queued_prompt",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -2475,7 +2608,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "sandboxes_external_id_idx": {
+          "name": "sandboxes_external_id_idx",
+          "columns": [
+            {
+              "expression": "external_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "sandboxes_project_id_projects_id_fk": {
           "name": "sandboxes_project_id_projects_id_fk",

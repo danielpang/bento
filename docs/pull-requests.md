@@ -32,4 +32,10 @@ Two kinds of connection, and either is enough.
 
 Without either, agents still commit and the work waits in the worktree; the run's transcript says exactly what is missing.
 
-App setup, if you are configuring one: the setup URL is `<BENTO_URL>/api/github/callback` and the webhook URL is `<BENTO_URL>/api/webhooks/github`. Grant repository Contents read and write, Pull requests read and write, Checks read, and Metadata read. Subscribe to installation, installation repositories, pull request, check run, check suite, and pull request review events. Users must sign in to Bento with GitHub before connecting an installation, so Bento can verify that the installation is visible to their GitHub account.
+### Connecting your own GitHub account
+
+Bento binds an installation to an organization only for someone GitHub already shows that installation to, which is how it knows the installation is yours to connect. Signing in with GitHub answers that on its own. Signing up with an email and a password does not, so those accounts connect a GitHub account first, from **Settings, GitHub** or from the same place the install button sits: it sends you to GitHub, back again, and then the install is one click away. The two addresses need not match, and the connection is yours rather than the organization's: nothing is pushed with it, and it is only ever read to check what you can see on GitHub.
+
+Reconnect from the same card if GitHub stops accepting it, which is what the "no longer connected" message means, or to hand the connection to a different GitHub account.
+
+App setup, if you are configuring one: the setup URL is `<BENTO_URL>/api/github/callback` and the webhook URL is `<BENTO_URL>/api/webhooks/github`. Grant repository Contents read and write, Pull requests read and write, Checks read, and Metadata read. Subscribe to installation, installation repositories, pull request, check run, check suite, and pull request review events. Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` as well, from the same App: those are what let people connect a GitHub account, and without them nobody on the deployment can install anything, whichever way they signed in.

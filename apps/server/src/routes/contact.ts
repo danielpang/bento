@@ -45,6 +45,7 @@ export function contactRoutes(ctx: AppContext) {
         message: body.message,
         senderName: sender.name,
         senderEmail: sender.email,
+        appUrl: ctx.env.BETTER_AUTH_URL.replace(/\/$/, ""),
       }),
     );
     return c.json({ ok: true });

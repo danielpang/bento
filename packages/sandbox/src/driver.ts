@@ -153,6 +153,22 @@ export interface SandboxDriver {
   readonly supportsRestrictedNetwork?: boolean;
   exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk>;
   /**
+   * Picks up a command a previous process started with exec and left
+   * running in the sandbox, so a server restart does not have to end
+   * the runs it was carrying. Only argv's first word is used, to find
+   * the running session; cwd and env in opts are ignored because the
+   * live process already carries them. Resolves null when the sandbox
+   * answers but no such command runs, which is conclusive: the process
+   * ended while nobody was attached. A rejection means the question
+   * could not be answered and may be retried. Only drivers whose
+   * sandboxes outlive the server process implement this.
+   */
+  attach?(
+    handle: SandboxHandle,
+    argv: string[],
+    opts?: ExecOptions,
+  ): Promise<AsyncIterable<ExecChunk> | null>;
+  /**
    * Which of these executables a sandbox here would actually have.
    *
    * Asked before a run rather than during one: picking a coding agent
