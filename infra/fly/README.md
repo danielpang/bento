@@ -101,8 +101,10 @@ deploy-hosted workflow builds the public image, checks out bento-cloud
 beside it, builds `infra/docker/Dockerfile.hosted` with the bento-cloud
 checkout as its context, and deploys the result by image reference. A
 merge to main here deploys; a merge to main in bento-cloud sends a
-repository_dispatch that deploys with the new module and this
-repository's current main.
+repository_dispatch that deploys with that commit layered on this
+repository's current main. A manual dispatch from a bento-cloud
+branch does the same for development only, so a module change can
+reach `bento-development` before it is merged.
 
 Secrets, set once in each repository's Actions settings. The bento
 repository uses GitHub environments ("development" and "production"),
@@ -110,15 +112,17 @@ so the per-deployment secrets are environment secrets and the same
 name can hold a different value per environment. The deploy-hosted
 workflow runs in this order: migrate development, deploy development,
 migrate production, deploy production. A failed development migration
-or deploy stops the workflow before production is touched. The manual
-"Migrate database" workflow still takes either environment.
+or deploy stops the workflow before production is touched. A dispatch
+with `client_payload.target` of `development` stops after the
+development deploy. The manual "Migrate database" workflow still
+takes either environment.
 
 | Where | Secret | What |
 | --- | --- | --- |
 | bento, repository | `BENTO_CLOUD_TOKEN` | Fine-grained PAT, read access to bento-cloud contents; the same private repo whichever environment |
 | bento, per environment | `FLY_API_TOKEN` | Deploy token; these are app-scoped, so each environment's Fly app needs its own (`bento-development` / `bento-production`) |
 | bento, per environment | `DATABASE_URL` | That environment's Postgres, for the migration job |
-| bento-cloud, repository | `BENTO_DISPATCH_TOKEN` | Fine-grained PAT for bento, contents write, which repository_dispatch requires |
+| bento-cloud, per environment | `BENTO_DISPATCH_TOKEN` | Fine-grained PAT for bento, contents write; the same token in both environments, so protection rules on that environment gate the trigger |
 
 The database can live anywhere that speaks Postgres; a managed provider
 like Neon works as well as `fly postgres`. One caveat for poolers:
