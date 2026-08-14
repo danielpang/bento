@@ -26,6 +26,7 @@ export function BillingCard() {
   const [notice, setNotice] = useState("");
   const [salesOpen, setSalesOpen] = useState(false);
   const [plansOpen, setPlansOpen] = useState(false);
+  const [allActivity, setAllActivity] = useState(false);
 
   if (absent || !state) return null;
 
@@ -221,10 +222,18 @@ export function BillingCard() {
       {/* Every upgrade, downgrade, cancellation and payment, so "did
           this go through" and "when did we change plan" have an answer
           in the product rather than only in the Stripe dashboard. */}
+      {/*
+        The recent few, expandable to the twenty the server sends,
+        newest first. Not paginated further on purpose: this card is a
+        glance at what happened lately, and the complete ledger with
+        every invoice already exists in Stripe's portal one button up,
+        under Manage billing. Building an archive here would duplicate
+        one that is better somewhere else.
+      */}
       {state.activity && state.activity.length > 0 && (
         <div className="field">
           <span className="label">Subscription activity</span>
-          {state.activity.map((entry, i) => (
+          {(allActivity ? state.activity : state.activity.slice(0, 5)).map((entry, i) => (
             <div key={i} className="history-row">
               <span className="history-when">{new Date(entry.occurredAt).toLocaleDateString()}</span>
               <span className="history-what">
@@ -235,6 +244,17 @@ export function BillingCard() {
               </span>
             </div>
           ))}
+          {state.activity.length > 5 && (
+            <button className="btn btn-ghost" onClick={() => setAllActivity((v) => !v)}>
+              {allActivity ? "Show recent only" : `Show all ${state.activity.length}`}
+            </button>
+          )}
+          {allActivity && state.activity.length >= 20 && (
+            <span className="muted">
+              Only the latest 20 changes are shown here. The complete history, every invoice
+              included, is under Manage billing.
+            </span>
+          )}
         </div>
       )}
 
