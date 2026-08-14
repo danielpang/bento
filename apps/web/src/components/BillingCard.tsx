@@ -56,8 +56,17 @@ export function BillingCard() {
     }
   }
 
-  const meter = (used: number, limit: number | null, word: string) =>
-    limit === null ? `${used} ${word} (no limit)` : `${used} of ${limit} ${word}`;
+  /**
+   * "1 of 3 members" where a cap exists, and where none does, the fact
+   * that matters instead: on a paid plan every member is a billed
+   * seat, which "(no limit)" said nothing about while also failing to
+   * pluralise.
+   */
+  const members = (used: number, limit: number | null) => {
+    const word = used === 1 ? "member" : "members";
+    if (limit !== null) return `${used} of ${limit} ${word}.`;
+    return `${used} ${word}, each a billed seat.`;
+  };
 
   return (
     <section className="section settings-card">
@@ -86,7 +95,7 @@ export function BillingCard() {
         own model spend is absent because it goes to their provider,
         not to us.
       */}
-      <p className="muted">{meter(state.usage.members, state.limits.members, "members")}.</p>
+      <p className="muted">{members(state.usage.members, state.limits.members)}</p>
       <p className="muted">
         {state.agentHours.used} of {state.agentHours.included} agent hours used, resetting on{" "}
         {resetsOn(state)}. Hours are pooled for the whole team, and only a sandbox actually running
