@@ -490,10 +490,15 @@ export class BentoClient {
     });
   }
 
-  /** Every finished run's events in order, with who spoke them. */
+  /**
+   * Every finished run's events in order, with who spoke them, plus
+   * the messages still waiting for an agent (queued on the card or
+   * sent to a run that has not confirmed a turn yet).
+   */
   getConversation(featureId: string) {
     return this.request<{
       blocks: { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[];
+      pending: { id: string; text: string; status: "queued" | "sent"; createdAt: string }[];
     }>(`/api/features/${featureId}/conversation`);
   }
 
