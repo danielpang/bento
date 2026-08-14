@@ -1,10 +1,10 @@
 name: Migrate database
 
 # Run the migrations against a chosen environment, by hand. The deploy
-# already migrates production on every merge; this exists for the
-# environments deploys do not cover yet (development) and for applying
-# a migration ahead of a deploy. Idempotent: drizzle applies only what
-# is pending, under an advisory lock.
+# already migrates development then production on every merge; this
+# exists for applying a migration ahead of a deploy, or for retrying
+# one environment without shipping a new image. Idempotent: drizzle
+# applies only what is pending, under an advisory lock.
 #
 # Each environment carries its own DATABASE_URL secret. Use the direct
 # (non-pooler) URL: the advisory lock is session state, which

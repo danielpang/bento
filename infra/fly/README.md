@@ -7,9 +7,24 @@ workloads scale independently.
 
 ## First deploy
 
+Create both Fly apps. Development ships first on every merge; production
+only runs after development has migrated and deployed cleanly.
+
 ```bash
+fly apps create bento-development
 fly apps create bento-production
-fly postgres create --name bento-db && fly postgres attach bento-db   # sets DATABASE_URL
+
+# Attach or set DATABASE_URL per app (or point each GitHub environment
+# at its own managed Postgres). Migrations need the direct endpoint.
+fly postgres create --name bento-db-dev && fly postgres attach bento-db-dev -a bento-development
+fly postgres create --name bento-db && fly postgres attach bento-db -a bento-production
+
+fly secrets set -a bento-development \
+  BETTER_AUTH_SECRET="$(openssl rand -hex 32)" \
+  BENTO_SECRET_KEY="$(openssl rand -hex 32)" \
+  BETTER_AUTH_URL="https://bento-development.fly.dev" \
+  BENTO_TRUSTED_ORIGINS="https://bento-development.fly.dev" \
+  SPRITES_TOKEN="<fly sprites token>"
 
 fly secrets set -a bento-production \
   BETTER_AUTH_SECRET="$(openssl rand -hex 32)" \
@@ -18,6 +33,7 @@ fly secrets set -a bento-production \
   BENTO_TRUSTED_ORIGINS="https://bento-production.fly.dev" \
   SPRITES_TOKEN="<fly sprites token>"
 
+fly deploy -c infra/fly/fly.development.toml
 fly deploy -c infra/fly/fly.toml
 ```
 
@@ -89,15 +105,18 @@ repository_dispatch that deploys with the new module and this
 repository's current main.
 
 Secrets, set once in each repository's Actions settings. The bento
-repository uses GitHub environments ("production" and "development"),
+repository uses GitHub environments ("development" and "production"),
 so the per-deployment secrets are environment secrets and the same
-name can hold a different value per environment; the deploy targets
-production, and the manual "Migrate database" workflow takes either.
+name can hold a different value per environment. The deploy-hosted
+workflow runs in this order: migrate development, deploy development,
+migrate production, deploy production. A failed development migration
+or deploy stops the workflow before production is touched. The manual
+"Migrate database" workflow still takes either environment.
 
 | Where | Secret | What |
 | --- | --- | --- |
 | bento, repository | `BENTO_CLOUD_TOKEN` | Fine-grained PAT, read access to bento-cloud contents; the same private repo whichever environment |
-| bento, per environment | `FLY_API_TOKEN` | Deploy token; these are app-scoped, so each environment's Fly app needs its own |
+| bento, per environment | `FLY_API_TOKEN` | Deploy token; these are app-scoped, so each environment's Fly app needs its own (`bento-development` / `bento-production`) |
 | bento, per environment | `DATABASE_URL` | That environment's Postgres, for the migration job |
 | bento-cloud, repository | `BENTO_DISPATCH_TOKEN` | Fine-grained PAT for bento, contents write, which repository_dispatch requires |
 
