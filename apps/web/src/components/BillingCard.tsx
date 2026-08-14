@@ -589,7 +589,7 @@ function ContactSales({ onClose, onSent }: { onClose: () => void; onSent: () => 
   return (
     <Modal
       title="Talk to us about Enterprise"
-      description="Unlimited live features, and whatever else the contract needs. Tell us about your team and we reply by email."
+      description="Unlimited agents running at once, 2000 hours a period, and whatever else the contract needs. Tell us about your team and we reply by email."
       onClose={onClose}
       actions={
         <>
@@ -622,7 +622,7 @@ function ContactSales({ onClose, onSent }: { onClose: () => void; onSent: () => 
         <textarea
           className="input skill-input"
           rows={5}
-          placeholder="Team size, how many concurrent features you expect, anything the standard plans do not cover."
+          placeholder="Team size, how many agents you expect to run at once, anything the standard plans do not cover."
           value={message}
           onChange={(e) => setMessage(e.target.value)}
         />
