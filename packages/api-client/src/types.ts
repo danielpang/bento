@@ -144,6 +144,26 @@ export interface FeatureChanges {
   repositories: RepositoryChanges[];
 }
 
+export type RunArtifactKind = "markdown" | "mermaid" | "image" | "html" | "file";
+
+/**
+ * One file an agent produced for people, captured from the sandbox when
+ * its run ended: the stage write-up, a mockup, a screenshot, a diagram.
+ * Metadata only; the body is fetched per artifact when opened.
+ */
+export interface RunArtifact {
+  id: string;
+  runId: string;
+  stageSlug: string;
+  stageName: string;
+  /** Where the agent wrote it, relative to the workspace. */
+  path: string;
+  kind: RunArtifactKind;
+  mime: string;
+  size: number;
+  createdAt: string;
+}
+
 export interface FeatureEvent {
   id: string;
   kind: "stage_moved" | "status_changed";

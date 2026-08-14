@@ -3780,6 +3780,198 @@ button.session-expand[aria-pressed="true"] {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Artifacts: what a run produced for people, listed on the card and
+   opened in a wide modal. The rows are buttons, not links: the viewer
+   is state in the drawer, and a full page load would drop the board. */
+
+.artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.artifact-row:hover {
+  border-color: var(--line-bright);
+  background: var(--panel-raised);
+}
+
+.artifact-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.artifact-when {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* Page-shaped content wants a page-shaped panel; forms do not. */
+.modal-wide {
+  width: min(920px, 100%);
+}
+
+.artifact-view {
+  min-height: 120px;
+  max-height: min(68vh, 720px);
+  overflow: auto;
+}
+
+/* The HTML preview runs sandboxed with no reach into the console; the
+   light background is the frame's own, since most generated pages
+   assume one. */
+.artifact-frame {
+  width: 100%;
+  height: min(62vh, 640px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: #fff;
+}
+
+.artifact-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-lg);
+}
+
+.artifact-source {
+  white-space: pre-wrap;
+}
+
+/* Mermaid draws for a light surface (theme "neutral"), so it brings
+   its own, and reads the same under either console theme. */
+.mermaid-diagram {
+  background: #fff;
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  overflow: auto;
+}
+
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Rendered agent markdown: the stage write-ups, finally as documents. */
+.markdown {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text);
+  overflow-wrap: break-word;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  font-family: var(--sans);
+  color: var(--text);
+  line-height: 1.3;
+  margin: 1.4em 0 0.5em;
+}
+
+.markdown h1 { font-size: 17px; }
+.markdown h2 { font-size: 15px; }
+.markdown h3 { font-size: 14px; }
+.markdown h4 { font-size: 13.5px; }
+
+.markdown p,
+.markdown ul,
+.markdown ol {
+  margin: 0.6em 0;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.4em;
+}
+
+.markdown a {
+  color: var(--brand);
+}
+
+.markdown code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+.markdown pre {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.markdown blockquote {
+  margin: 0.6em 0;
+  padding: 0 0 0 12px;
+  border-left: 2px solid var(--line-bright);
+  color: var(--text-dim);
+}
+
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: 12.5px;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--line);
+  padding: 5px 9px;
+  text-align: left;
+}
+
+.markdown th {
+  background: var(--panel-raised);
+}
+
+.markdown img {
+  max-width: 100%;
+}
+
+.markdown hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 1.2em 0;
+}
+
 /*
  * One plan card. Lives inside the plans panel's row; the price and the
  * team's own total sit at the top because per seat pricing makes the

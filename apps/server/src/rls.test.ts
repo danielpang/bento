@@ -29,6 +29,7 @@ const TENANT_TABLES = [
   "sandboxes",
   "agent_runs",
   "run_events",
+  "run_artifacts",
   "gate_checks",
   "agent_profiles",
   "secrets",
@@ -245,6 +246,61 @@ test("a run cannot reference another tenant's stage or agent", async () => {
       /organization or pipeline boundary/,
     );
   });
+});
+
+test("run artifacts inherit their organization from the run", async () => {
+  // Self-contained fixtures, so this test does not lean on rows another
+  // test happened to leave behind.
+  const projectA = "00000001-0000-0000-0000-000000000000";
+  const pipeline = "10000009-0000-0000-0000-000000000000";
+  const stage = "20000009-0000-0000-0000-000000000000";
+  const profile = "30000009-0000-0000-0000-000000000000";
+  const feature = "40000009-0000-0000-0000-000000000000";
+  const run = "50000009-0000-0000-0000-000000000000";
+  await pool.query(
+    `insert into pipelines (id,project_id,organization_id,name) values ($1,$2,'org-a','Artifacts')`,
+    [pipeline, projectA],
+  );
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,organization_id,name,cli,model)
+     values ($1,'u1','org-a','Artifacts','fake','fake-1')`,
+    [profile],
+  );
+  await pool.query(
+    `insert into stages (id,pipeline_id,organization_id,position,name,slug)
+     values ($1,$2,'org-a',0,'Design','design')`,
+    [stage, pipeline],
+  );
+  await pool.query(
+    `insert into features (id,project_id,organization_id,pipeline_id,title)
+     values ($1,$2,'org-a',$3,'Artifact feature')`,
+    [feature, projectA, pipeline],
+  );
+  await pool.query(
+    `insert into agent_runs (id,feature_id,organization_id,stage_id,agent_profile_id,prompt)
+     values ($1,$2,'org-a',$3,$4,'work')`,
+    [run, feature, stage, profile],
+  );
+
+  const inherited = await asOrg("org-a", (client) =>
+    client.query(
+      `insert into run_artifacts (run_id,feature_id,stage_slug,stage_name,path,kind,mime,size,content)
+       values ($1,$2,'design','Design','docs/bento/design.md','markdown','text/markdown',5,'hello')
+       returning organization_id`,
+      [run, feature],
+    ),
+  );
+  assert.equal(inherited.rows[0].organization_id, "org-a");
+
+  // Exactly one of the inline body and the store key, never both.
+  await assert.rejects(
+    pool.query(
+      `insert into run_artifacts (run_id,feature_id,stage_slug,stage_name,path,kind,mime,size,content,storage_key)
+       values ($1,$2,'design','Design','both.png','image','image/png',5,'x','a/key')`,
+      [run, feature],
+    ),
+    /run_artifacts_content_or_key/,
+  );
 });
 
 test("secret names are unique locally and within each organization", async () => {

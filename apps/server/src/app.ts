@@ -7,6 +7,7 @@ import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
 import { actorMiddleware } from "./middleware/actor.js";
 import { tenantMiddleware } from "./middleware/tenant.js";
+import { artifactRoutes } from "./routes/artifacts.js";
 import { boardEventRoutes, runRoutes } from "./routes/runs.js";
 import { featureRoutes } from "./routes/features.js";
 import { profileRoutes } from "./routes/profiles.js";
@@ -209,6 +210,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/projects", projectRoutes(ctx))
     .route("/board", boardEventRoutes(ctx))
     .route("/features", featureRoutes(ctx))
+    .route("/artifacts", artifactRoutes(ctx))
     .route("/profiles", profileRoutes(ctx))
     .route("/stages", stageRoutes(ctx))
     .route("/runs", runRoutes(ctx))

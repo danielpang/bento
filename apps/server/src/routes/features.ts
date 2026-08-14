@@ -10,6 +10,7 @@ import {
   featureEvents,
   featureMessages,
   featurePullRequests,
+  runArtifacts,
   runEvents,
   features,
   gateChecks,
@@ -379,6 +380,33 @@ export function featureRoutes(ctx: AppContext) {
       if (!feature) return c.json({ error: "not found" }, 404);
       const repos = await collectFeatureChanges(ctx, feature.projectId, feature.branchName);
       return c.json({ branch: feature.branchName, repositories: repos });
+    })
+    /**
+     * The card's artifacts, newest first: stage write-ups, mockups,
+     * screenshots, captured per run so earlier stages' output survives
+     * later rewrites. Metadata only; the console fetches one artifact's
+     * body from /api/artifacts/:id/content when somebody opens it.
+     */
+    .get("/:id/artifacts", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      const rows = await db(c, ctx)
+        .select({
+          id: runArtifacts.id,
+          runId: runArtifacts.runId,
+          stageSlug: runArtifacts.stageSlug,
+          stageName: runArtifacts.stageName,
+          path: runArtifacts.path,
+          kind: runArtifacts.kind,
+          mime: runArtifacts.mime,
+          size: runArtifacts.size,
+          createdAt: runArtifacts.createdAt,
+        })
+        .from(runArtifacts)
+        .where(eq(runArtifacts.featureId, feature.id))
+        .orderBy(desc(runArtifacts.createdAt))
+        .limit(200);
+      return c.json(rows);
     })
     /**
      * The same, pre-rendered as display lines: the Mac app has no JSON

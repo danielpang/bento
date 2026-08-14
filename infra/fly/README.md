@@ -53,6 +53,36 @@ fly secrets set -a bento-production GITHUB_APP_ID=... GITHUB_APP_SLUG=... \
   GITHUB_PRIVATE_KEY="$(cat private-key.pem)" GITHUB_WEBHOOK_SECRET=...
 ```
 
+## Artifact storage (Tigris)
+
+Agents leave visual artifacts on their cards: design mockups, HTML
+previews, screenshots. The text ones live in Postgres; the binary ones
+need a bucket, and without one the server keeps text artifacts only and
+says so at boot.
+
+```bash
+fly storage create -a bento-production -n bento-artifacts
+```
+
+That provisions a private Tigris bucket and sets `BUCKET_NAME`,
+`AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+and `AWS_REGION` as app secrets, which the server reads directly: no
+further configuration. Confirm with `fly storage list` and
+`fly secrets list`, then watch the deploy log for the store line.
+
+The bucket must stay private. Nothing ever reads it but the server:
+every download goes through `/api/artifacts/:id/content`, which checks
+who is asking against the artifact's row in Postgres and answers 404
+for anything that is not theirs. Objects are keyed
+`org/<org id>/feature/<feature id>/run/<run id>/<artifact id>`, which
+is bookkeeping for cleanup, not access control.
+
+To use a different S3-compatible bucket (or to override the generic
+names), set `BENTO_ARTIFACTS_BUCKET`, `BENTO_ARTIFACTS_ENDPOINT`,
+`BENTO_ARTIFACTS_ACCESS_KEY_ID`, `BENTO_ARTIFACTS_SECRET_ACCESS_KEY`,
+and optionally `BENTO_ARTIFACTS_REGION`; they win over the Tigris
+variables when both are present.
+
 Callback URLs to register: `https://bento-production.fly.dev/api/auth/callback/google` and
 `https://bento-production.fly.dev/api/auth/callback/github`. Set the GitHub App setup URL
 to `https://bento-production.fly.dev/api/github/callback` and its webhook URL to

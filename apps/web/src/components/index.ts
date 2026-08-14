@@ -11,6 +11,7 @@
 export { AcceptInvitation } from "./AcceptInvitation.js";
 export { AccountSettings } from "./AccountSettings.js";
 export { AgentSession } from "./AgentSession.js";
+export { ArtifactViewer } from "./ArtifactViewer.js";
 export { AgentsPanel } from "./AgentsPanel.js";
 export { AppearanceSettings } from "./AppearanceSettings.js";
 export { BillingCard } from "./BillingCard.js";
@@ -26,6 +27,7 @@ export { DeviceApproval } from "./DeviceApproval.js";
 export { DiffReview } from "./DiffReview.js";
 export { FeatureDrawer } from "./FeatureDrawer.js";
 export { SignOutButton, StopButton } from "./IconButtons.js";
+export { Markdown, MermaidDiagram } from "./Markdown.js";
 export { Modal } from "./Modal.js";
 export { NavMenu, type NavAction } from "./NavMenu.js";
 export { OutOfCompute } from "./OutOfCompute.js";

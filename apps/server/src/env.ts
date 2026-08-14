@@ -145,6 +145,28 @@ const envSchema = z.object({
    */
   BENTO_CONTACT_EMAIL: z.string().optional(),
 
+  /**
+   * The S3-compatible bucket binary run artifacts (screenshots, HTML
+   * previews) are stored in. All four must be set for the bucket to be
+   * used. The BENTO_ARTIFACTS_* names win when both are present; the
+   * plain AWS_* and BUCKET_NAME names below are what Fly's
+   * `fly storage create` (Tigris) injects, so that path needs no
+   * configuration at all. Without a bucket, local mode stores files
+   * under BENTO_DATA_DIR and multi mode captures text artifacts only:
+   * the machine's disk does not survive a deploy.
+   */
+  BENTO_ARTIFACTS_BUCKET: z.string().optional(),
+  BENTO_ARTIFACTS_ENDPOINT: z.string().optional(),
+  BENTO_ARTIFACTS_ACCESS_KEY_ID: z.string().optional(),
+  BENTO_ARTIFACTS_SECRET_ACCESS_KEY: z.string().optional(),
+  BENTO_ARTIFACTS_REGION: z.string().optional(),
+  /** The names `fly storage create` sets. Read only as fallbacks for the above. */
+  BUCKET_NAME: z.string().optional(),
+  AWS_ENDPOINT_URL_S3: z.string().optional(),
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  AWS_REGION: z.string().optional(),
+
   /** GitHub App credentials. Without these, PR based gates stay pending. */
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_SLUG: z.string().regex(/^[a-z0-9-]+$/).optional(),

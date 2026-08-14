@@ -29,6 +29,7 @@ import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
+import { DiskArtifactStore } from "./artifact-store.js";
 import { publishFeatureBranches } from "./orchestrator/publish.js";
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
@@ -109,6 +110,7 @@ before(async () => {
     driver: new LocalProcessDriver(),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
+    artifacts: new DiskArtifactStore(dataDir),
     running: new Map(),
     liveInputs: new Map(),
     userId,
@@ -355,6 +357,60 @@ test("a card's committed changes and artifacts can be read back", async () => {
  * claim that work as its own: the diff base is the fork point, not the
  * default branch's merge-base.
  */
+/**
+ * The whole artifact path against real parts: a run whose agent drops
+ * files in the workspace artifacts directory, the capture that reads
+ * them out through the driver, the store that keeps the binary one, and
+ * the routes that hand them back with the headers that keep agent bytes
+ * from ever acting as the console.
+ */
+test("a run's artifacts are captured, listed, and served safely", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("Artifact capture");
+  const feature = await createFeature(project.id, "Artifact card");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  const profile = await fakeProfile("artifact-fake");
+  const run = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "make ARTIFACT files" }),
+    }),
+  );
+  assert.equal(await waitForRun(run.id), "succeeded");
+
+  const listed = await json<{ id: string; path: string; kind: string; mime: string; size: number }[]>(
+    await app.request(`/api/features/${feature.id}/artifacts`),
+  );
+  const plan = listed.find((a) => a.path === "artifacts/fake-plan.md");
+  const shot = listed.find((a) => a.path === "artifacts/fake-shot.png");
+  assert.ok(plan, `the markdown artifact is listed, got ${JSON.stringify(listed)}`);
+  assert.ok(shot, "the image artifact is listed");
+  assert.equal(plan.kind, "markdown");
+  assert.equal(shot.kind, "image");
+
+  // The write-up came back inline, sandboxed and unsniffable: agent
+  // bytes served by the console must never be able to act as it.
+  const planBody = await app.request(`/api/artifacts/${plan.id}/content`);
+  assert.equal(planBody.status, 200);
+  assert.equal(planBody.headers.get("content-type"), "text/markdown");
+  assert.equal(planBody.headers.get("content-security-policy"), "sandbox");
+  assert.equal(planBody.headers.get("x-content-type-options"), "nosniff");
+  assert.match(await planBody.text(), /Fake plan/);
+
+  // The image went through the artifact store and came back byte for byte.
+  const shotBody = await app.request(`/api/artifacts/${shot.id}/content`);
+  assert.equal(shotBody.status, 200);
+  assert.equal(shotBody.headers.get("content-type"), "image/png");
+  assert.equal(await shotBody.text(), "not-really-a-png");
+
+  // Captured files leave the workspace, or the next run on this sandbox
+  // would capture them again as its own.
+  const leftBehind = await readdir(path.join(ctx.worktrees.workspacePath(feature.id), "artifacts")).catch(
+    () => [] as string[],
+  );
+  assert.deepEqual(leftBehind, [], "captured files are removed from the artifacts directory");
+});
+
 test("changes exclude work inherited from the branch point", async () => {
   const { project } = await setupProject("Fork point");
   const feature = await createFeature(project.id, "Fork point card");

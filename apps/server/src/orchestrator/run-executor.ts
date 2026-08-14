@@ -19,6 +19,7 @@ import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
 import { runRepositorySetup } from "./repo-setup.js";
+import { captureRunArtifacts, WORKSPACE_ARTIFACT_DIR } from "./capture-artifacts.js";
 import { evaluateFeatureGate, JUDGE_PROMPT_PREFIX } from "./gate-evaluator.js";
 import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
@@ -553,6 +554,12 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   const { runId, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
     settlement;
   let seq = settlement.seq;
+  const saySystem = async (text: string) => {
+    seq += 1;
+    const event = { type: "message" as const, role: "system" as const, text };
+    await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
+    ctx.bus.emitRunEvent({ runId, seq, event });
+  };
   const { outcome, exitCode } = result;
   if (!outcome.ok) {
     // A revoked login has exactly one fix, so the failure names it.
@@ -590,6 +597,24 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
     return;
   }
+
+  // What the agent produced for people (the stage write-up, mockups,
+  // screenshots) comes out of the sandbox now, while the sandbox is
+  // certainly still there. Before the gate evaluates, so an approver
+  // reading the card sees the artifacts the decision is about.
+  await captureRunArtifacts(ctx, {
+    runId,
+    featureId: feature.id,
+    organizationId: feature.organizationId,
+    stageSlug: stage.slug,
+    stageName: stage.name,
+    handle,
+    repositories: repoRows.map((row) => ({
+      name: row.name,
+      mountPath: repositoryPathIn(handle.workdir, row.name),
+    })),
+    say: saySystem,
+  });
 
   // The agent commits; the server pushes, but only when this stage
   // asked for it: Create a pull request is a per stage choice, so an
@@ -641,12 +666,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   }
   // Written into the transcript so the outcome is visible where the
   // run is read, rather than only in the server's own log.
-  for (const note of publishNotes) {
-    seq += 1;
-    const event = { type: "message" as const, role: "system" as const, text: note };
-    await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
-    ctx.bus.emitRunEvent({ runId, seq, event });
-  }
+  for (const note of publishNotes) await saySystem(note);
 
   // Publication notes are part of the run transcript. Persist and emit
   // all of them before announcing the terminal state, otherwise an SSE
@@ -718,7 +738,15 @@ async function buildRunCommand(
   // workspace root so every checkout is visible; the prompt lists them.
   const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
 
-  const prompt = run.prompt || buildStagePrompt(feature, stage, allStages, mounted, { name: profile.name, skill: profile.skill });
+  const prompt = run.prompt
+    || buildStagePrompt(
+      feature,
+      stage,
+      allStages,
+      mounted,
+      { name: profile.name, skill: profile.skill },
+      `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
+    );
 
   const commandInput = {
     prompt,

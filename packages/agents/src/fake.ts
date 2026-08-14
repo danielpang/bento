@@ -12,6 +12,8 @@ import { lastResultEvent, type AgentAdapter, type BuildCommandInput } from "./ad
  *   "VERDICT" makes it reply like a completion judge: COMPLETE, or
  *   INCOMPLETE when the prompt also carries "JUDGE_INCOMPLETE" (a
  *   test plants that through the judge profile's skill).
+ *   "ARTIFACT" makes it drop files into the workspace artifacts
+ *   directory, so a test can prove they are captured onto the card.
  */
 export const fakeAdapter: AgentAdapter = {
   cli: "fake",
@@ -44,6 +46,15 @@ export const fakeAdapter: AgentAdapter = {
         ? [`echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"${verdict}"}]}}'`]
         : []),
       ...(shouldLinger ? ["sleep 24"] : []),
+      // The workspace artifacts directory sits beside the repository
+      // checkout, which is where the executor's capture looks.
+      ...(input.prompt.includes("ARTIFACT")
+        ? [
+            "mkdir -p ../artifacts",
+            `printf '# Fake plan\\n\\nWritten by the fake agent.' > ../artifacts/fake-plan.md`,
+            "printf 'not-really-a-png' > ../artifacts/fake-shot.png",
+          ]
+        : []),
       "echo fake-artifact > .bento-fake-output",
       "git add -A >/dev/null 2>&1 || true",
       'git -c user.email=fake@bento.dev -c user.name=fake commit -qm "fake agent commit" >/dev/null 2>&1 || true',
