@@ -24,6 +24,7 @@ const TENANT_TABLES = [
   "stages",
   "features",
   "feature_events",
+  "feature_messages",
   "feature_pull_requests",
   "sandboxes",
   "agent_runs",
@@ -166,6 +167,37 @@ test("child inserts inherit their organization from the parent", async () => {
     ),
   );
   assert.equal(result.rows[0].organization_id, "org-a");
+});
+
+test("a message queued for a card belongs to that card's organization", async () => {
+  // Messages carry what a person said to a card, so a leak here is a
+  // leak of the conversation itself. The insert names no organization:
+  // the trigger has to derive it from the feature.
+  const projectA = "00000001-0000-0000-0000-000000000000";
+  const pipelineId = "10000003-0000-0000-0000-000000000000";
+  const featureId = "40000003-0000-0000-0000-000000000000";
+  await pool.query(
+    `insert into pipelines (id,project_id,organization_id,name) values ($1,$2,'org-a','messages')`,
+    [pipelineId, projectA],
+  );
+  await pool.query(
+    `insert into features (id,project_id,organization_id,pipeline_id,title)
+     values ($1,$2,'org-a',$3,'Feature with messages')`,
+    [featureId, projectA, pipelineId],
+  );
+
+  const inserted = await asOrg("org-a", (client) =>
+    client.query(
+      `insert into feature_messages (feature_id,text) values ($1,'ship it') returning organization_id`,
+      [featureId],
+    ),
+  );
+  assert.equal(inserted.rows[0].organization_id, "org-a");
+
+  const foreign = await asOrg("org-b", (client) =>
+    client.query("select count(*)::int as n from feature_messages"),
+  );
+  assert.equal(foreign.rows[0].n, 0, "another organization must not read a card's messages");
 });
 
 test("a run cannot reference another tenant's stage or agent", async () => {

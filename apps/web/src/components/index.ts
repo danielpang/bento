@@ -30,6 +30,7 @@ export { SignOutButton, StopButton } from "./IconButtons.js";
 export { Markdown, MermaidDiagram } from "./Markdown.js";
 export { Modal } from "./Modal.js";
 export { NavMenu, type NavAction } from "./NavMenu.js";
+export { OutOfCompute } from "./OutOfCompute.js";
 export { ProjectPicker } from "./ProjectPicker.js";
 export { ProjectsSettings } from "./ProjectsSettings.js";
 export { ConfirmDialog, NewFeatureDialog, NewProjectDialog, PromptDialog } from "./PromptDialog.js";

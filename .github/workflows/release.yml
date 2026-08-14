@@ -33,7 +33,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5439/app
       BENTO_SANDBOX_DRIVER: local-process
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -46,8 +46,8 @@ jobs:
             exit 1
           fi
 
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -63,9 +63,9 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -95,7 +95,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: "./bento-$TAG/bento --help"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: cli
           path: bento-cli-*.tar.gz
@@ -110,9 +110,9 @@ jobs:
       HAS_SIGNING: ${{ secrets.MACOS_SIGNING_IDENTITY != '' }}
       HAS_NOTARY: ${{ secrets.MACOS_NOTARY_PASSWORD != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           # The Native SDK toolchain requires 22.15 or newer.
           node-version: "22.15"
@@ -172,7 +172,7 @@ jobs:
         run: |
           ditto -c -k --keepParent apps/mac/zig-out/package/mac.app "bento-mac-$TAG.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: mac
           path: bento-mac-*.zip
@@ -182,8 +182,8 @@ jobs:
     needs: [cli, mac]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true

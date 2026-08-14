@@ -7,8 +7,10 @@ import { Board, matchesQuery, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
 import { BottomBar } from "./components/BottomBar.js";
 import { BrandLockup } from "./components/BrandLockup.js";
+import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { NavMenu, type NavAction } from "./components/NavMenu.js";
+import { OutOfCompute } from "./components/OutOfCompute.js";
 import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
@@ -102,6 +104,10 @@ function Console() {
   useEffect(() => {
     if (!isPending) setSessionSettled(true);
   }, [isPending]);
+
+  // Installing the App and connecting a GitHub account both leave for
+  // github.com and come back here with the outcome in the address.
+  useGitHubOutcome();
 
   useEffect(() => {
     // A dead server is not multi mode: sending someone to a sign-in
@@ -533,6 +539,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           </button>
         }
       />
+
+      {/* Ahead of the setup prompt: a team with no compute left cannot
+          act on any advice below it either. */}
+      <OutOfCompute onOpenBilling={() => window.location.assign("/settings")} />
 
       {setupNeeded && (
         <div className="setup-prompt">

@@ -3,6 +3,7 @@ import { ConfirmDialog } from "./PromptDialog.js";
 import type { BentoClient } from "@bento/api-client";
 import { authClient, useActiveOrganization, useListOrganizations } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
+import { seatChangeNote, useBillingPlan } from "./billing-plan.js";
 
 interface Member {
   id: string;
@@ -65,8 +66,19 @@ export function TeamSettings({ client }: { client: BentoClient }) {
   const owners = members.filter(isOwner);
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
   const [promoting, setPromoting] = useState<{ member: Member; role: string } | null>(null);
+  /**
+   * The pending invitation, held while the cost of the seat is
+   * confirmed. Null on a deployment without billing, where the invite
+   * goes straight out: there is nothing to warn anybody about.
+   */
+  const [confirmingInvite, setConfirmingInvite] = useState<string | null>(null);
 
   const activeId = active?.id ?? null;
+  const { plan: billing } = useBillingPlan(busy);
+  // A seat is billed the moment the invitation exists, so the price of
+  // one is something to say before the button, not after it.
+  const inviteCost = billing ? seatChangeNote(billing, 1) : null;
+  const removalCredit = billing ? seatChangeNote(billing, -1) : null;
 
   async function loadMembers() {
     if (!activeId) return;
@@ -80,6 +92,26 @@ export function TeamSettings({ client }: { client: BentoClient }) {
     setMembersFailed(false);
     void loadMembers().catch(() => setMembersFailed(true));
   }, [activeId]);
+
+  /**
+   * Sends the invitation, whether or not a confirmation preceded it.
+   * The organization is checked here rather than trusted from the
+   * caller: this used to sit inside a block that had already proved
+   * there was one.
+   */
+  function sendInvite(email: string) {
+    const organizationId = activeId;
+    if (!organizationId) return;
+    return act(async () => {
+      const result = await authClient.organization.inviteMember({
+        email,
+        role: inviteRole as "member" | "admin" | "owner",
+        organizationId,
+      });
+      setInviteEmail("");
+      return result;
+    }, "Invitation sent");
+  }
 
   async function act(
     fn: () => Promise<{ error?: { message?: string } | null }>,
@@ -309,21 +341,21 @@ export function TeamSettings({ client }: { client: BentoClient }) {
                 <button
                   className="btn btn-primary"
                   disabled={busy || !inviteEmail.trim()}
-                  onClick={() =>
-                    act(async () => {
-                      const result = await authClient.organization.inviteMember({
-                        email: inviteEmail.trim(),
-                        role: inviteRole as "member" | "admin" | "owner",
-                        organizationId: activeId,
-                      });
-                      setInviteEmail("");
-                      return result;
-                    }, "Invitation sent")
-                  }
+                  onClick={() => {
+                    const email = inviteEmail.trim();
+                    if (!email) return;
+                    // A seat that costs money gets confirmed first. On
+                    // Free, or on a deployment with no billing at all,
+                    // there is nothing to confirm and the extra click
+                    // would just be in the way.
+                    if (inviteCost) return setConfirmingInvite(email);
+                    void sendInvite(email);
+                  }}
                 >
                   Invite
                 </button>
               </div>
+              {inviteCost && <p className="muted">Each person here holds a seat. {inviteCost}</p>}
 
               {invitations.length > 0 && (
                 <div className="criteria-list">
@@ -352,10 +384,20 @@ export function TeamSettings({ client }: { client: BentoClient }) {
           </>
         )}
 
+        {confirmingInvite && inviteCost && (
+          <ConfirmDialog
+            title={`Invite ${confirmingInvite}?`}
+            description={`The seat is held as soon as the invitation goes out, whether or not it is accepted. ${inviteCost}`}
+            confirmLabel="Invite and hold a seat"
+            onClose={() => setConfirmingInvite(null)}
+            onConfirm={() => sendInvite(confirmingInvite)}
+          />
+        )}
+
         {removingMember && activeId && (
           <ConfirmDialog
             title={`Remove ${removingMember.user.name || removingMember.user.email}?`}
-            description="They lose access to this organization's boards immediately. Work they already did stays on the cards."
+            description={`They lose access to this organization's boards immediately. Work they already did stays on the cards.${removalCredit ? ` The seat is released. ${removalCredit}` : ""}`}
             confirmLabel="Remove member"
             destructive
             onClose={() => setRemovingMember(null)}

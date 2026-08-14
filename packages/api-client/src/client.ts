@@ -46,6 +46,14 @@ export interface GitHubConnection {
   canPublish: boolean;
   canManage: boolean;
   installation: { accountLogin: string; accountType: string } | null;
+  /**
+   * Whether this user has a GitHub identity attached to their Bento
+   * account. Installing the App needs one, so an account made with an
+   * email and a password has a step to do first.
+   */
+  identityLinked: boolean;
+  /** Whether attaching one is possible here, which needs GitHub sign in configured. */
+  canLinkIdentity: boolean;
 }
 
 /** An installation of the App the signed-in user could connect. */
@@ -53,6 +61,46 @@ export interface GitHubInstallationOption {
   installationId: string;
   accountLogin: string | null;
   accountType: string | null;
+}
+
+export interface LinearTeamMapping {
+  id: string;
+  linearTeamId: string;
+  linearTeamKey: string;
+  linearTeamName: string;
+  projectId: string;
+}
+
+export interface LinearConnection {
+  connected: boolean;
+  /** Masked tail of the stored key, so the UI can show which one. */
+  hint: string | null;
+  /** True when Linear can push changes to us as they happen. */
+  webhook: boolean;
+  defaultProjectId: string | null;
+  canManage: boolean;
+  mappings: LinearTeamMapping[];
+}
+
+export interface LinearTeamOption {
+  id: string;
+  key: string;
+  name: string;
+}
+
+export interface LinearIssueOption {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  stateName: string;
+  imported: boolean;
+}
+
+export interface LinearIssuePage {
+  issues: LinearIssueOption[];
+  endCursor: string | null;
+  hasNextPage: boolean;
 }
 
 export interface GitHubRepository {
@@ -354,6 +402,59 @@ export class BentoClient {
     return this.request<{ ok: boolean }>("/api/github/installation", { method: "DELETE" });
   }
 
+  linearStatus() {
+    return this.request<LinearConnection>("/api/linear/status");
+  }
+
+  connectLinear(apiKey: string) {
+    return this.request<{ connected: boolean; webhook: boolean }>("/api/linear/connect", {
+      method: "POST",
+      body: JSON.stringify({ apiKey }),
+    });
+  }
+
+  disconnectLinear() {
+    return this.request<{ ok: boolean }>("/api/linear/connect", { method: "DELETE" });
+  }
+
+  listLinearTeams() {
+    return this.request<LinearTeamOption[]>("/api/linear/teams");
+  }
+
+  createLinearMapping(input: { linearTeamId: string; projectId: string }) {
+    return this.request<LinearTeamMapping>("/api/linear/mappings", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteLinearMapping(id: string) {
+    return this.request<{ ok: boolean }>(`/api/linear/mappings/${id}`, { method: "DELETE" });
+  }
+
+  setLinearSettings(input: { defaultProjectId: string | null }) {
+    return this.request<{ defaultProjectId: string | null }>("/api/linear/settings", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  listLinearIssues(teamId: string, after?: string) {
+    const cursor = after ? `&after=${encodeURIComponent(after)}` : "";
+    return this.request<LinearIssuePage>(`/api/linear/issues?teamId=${encodeURIComponent(teamId)}${cursor}`);
+  }
+
+  importLinearIssues(input: { issueIds: string[]; projectId: string }) {
+    return this.request<{ imported: number }>("/api/linear/import", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  syncLinearNow() {
+    return this.request<{ ok: boolean }>("/api/linear/sync", { method: "POST" });
+  }
+
   removeRepository(projectId: string, repositoryId: string) {
     return this.request<{ ok: boolean }>(`/api/projects/${projectId}/repositories/${repositoryId}`, {
       method: "DELETE",
@@ -483,10 +584,15 @@ export class BentoClient {
     });
   }
 
-  /** Every finished run's events in order, with who spoke them. */
+  /**
+   * Every finished run's events in order, with who spoke them, plus
+   * the messages still waiting for an agent (queued on the card or
+   * sent to a run that has not confirmed a turn yet).
+   */
   getConversation(featureId: string) {
     return this.request<{
       blocks: { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[];
+      pending: { id: string; text: string; status: "queued" | "sent"; createdAt: string }[];
     }>(`/api/features/${featureId}/conversation`);
   }
 

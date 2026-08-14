@@ -41,6 +41,9 @@ importers:
       '@bento/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@bento/linear':
+        specifier: workspace:*
+        version: link:../../packages/linear
       '@bento/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
@@ -301,6 +304,18 @@ importers:
       '@octokit/rest':
         specifier: ^21.1.1
         version: 21.1.1
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+      tsx:
+        specifier: ^4.19.3
+        version: 4.23.1
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/linear:
     devDependencies:
       '@types/node':
         specifier: ^26.1.1

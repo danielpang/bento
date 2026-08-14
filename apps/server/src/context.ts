@@ -44,12 +44,45 @@ export interface Entitlements {
   /** Asked before a card leaves the backlog (or reopens): before it goes live. */
   canActivateFeature(organizationId: string): Promise<EntitlementRefusal | null>;
   /**
+   * Asked inside startRunIfIdle, before any run is inserted.
+   *
+   * Going live is not the only moment a plan can run out. A card
+   * already moving reaches its next stage hours later, and the team
+   * may have spent everything it had in between, so the question has
+   * to be asked again at the door where compute is actually spent.
+   * Nothing already running is stopped: an agent killed mid edit
+   * leaves a branch in a state nobody chose, and the time it has
+   * spent is spent either way.
+   */
+  canStartRun?(organizationId: string, featureId?: string): Promise<EntitlementRefusal | null>;
+  /**
+   * Told once a run reached a terminal state, so a deployment that
+   * meters compute can record what it cost.
+   *
+   * Never awaited on the caller's path and never allowed to fail one:
+   * the run is over either way, and a metering error must not turn a
+   * finished run into a failed one.
+   */
+  onRunFinished?(runId: string): Promise<void>;
+  /**
    * How many runs this organization may have working at once. Null is
    * unlimited. This is fairness rather than a paywall: without it one
    * tenant's queue occupies every worker on the instance and everybody
    * else waits behind it.
    */
   concurrentRunLimit?(organizationId: string): Promise<number | null>;
+  /**
+   * Told after the headcount changed: a member joined or left, or an
+   * invitation was created, cancelled or rejected.
+   *
+   * A deployment that bills per seat needs this, because the number it
+   * charges for is the number of people in the organization, and
+   * nothing else in this server has a reason to announce that. It is
+   * never awaited on the caller's path and its failure is never the
+   * user's problem: the invitation was sent either way, and the
+   * deployment reconciles on its own.
+   */
+  onMembershipChanged?(organizationId: string): Promise<void>;
 }
 
 export interface AppContext {

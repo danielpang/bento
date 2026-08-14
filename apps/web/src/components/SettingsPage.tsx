@@ -7,6 +7,8 @@ import { AppearanceSettings } from "./AppearanceSettings.js";
 import { BillingCard } from "./BillingCard.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
+import { GitHubAccountCard, useGitHubOutcome } from "./GitHubIdentity.js";
+import { LinearPanel } from "./LinearPanel.js";
 import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
@@ -21,10 +23,10 @@ import { TeamSettings } from "./TeamSettings.js";
  * apply: local mode is Appearance alone, a self-hosted team adds Team,
  * and only a deployment with the billing module shows Billing.
  */
-type Tab = "appearance" | "projects" | "github" | "team" | "billing" | "account";
+type Tab = "appearance" | "projects" | "github" | "linear" | "team" | "billing" | "account";
 
 /** The tabs that exist in every mode, so a link to one always resolves. */
-const ALWAYS: Tab[] = ["appearance", "projects", "github"];
+const ALWAYS: Tab[] = ["appearance", "projects", "github", "linear"];
 
 export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
@@ -36,6 +38,10 @@ export function SettingsPage({ client }: { client: BentoClient }) {
     const known: Tab[] = [...ALWAYS, "team", "billing", "account"];
     return known.find((id) => id === wanted) ?? "appearance";
   });
+
+  // A GitHub connection started from this page comes back to it, so the
+  // outcome is said here rather than only on the board.
+  useGitHubOutcome();
 
   useEffect(() => {
     void client
@@ -57,6 +63,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
     { id: "appearance", label: "Appearance" },
     { id: "projects", label: "Projects" },
     { id: "github", label: "GitHub" },
+    { id: "linear", label: "Linear" },
     ...(mode === "multi" ? [{ id: "team" as const, label: "Team" }] : []),
     ...(mode === "multi" && hasBilling ? [{ id: "billing" as const, label: "Billing" }] : []),
     ...(mode === "multi" ? [{ id: "account" as const, label: "Account" }] : []),
@@ -110,8 +117,12 @@ export function SettingsPage({ client }: { client: BentoClient }) {
             <TeamSettings client={client} />
           </Tabs.Content>
           <Tabs.Content value="github" className="settings-body">
+            <GitHubAccountCard client={client} />
             <GitHubTokenCard client={client} />
             <GitIdentityCard client={client} />
+          </Tabs.Content>
+          <Tabs.Content value="linear" className="settings-body">
+            <LinearPanel client={client} />
           </Tabs.Content>
           <Tabs.Content value="account" className="settings-body">
             <AccountSettings />
