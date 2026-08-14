@@ -25,6 +25,7 @@ import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { registerLinearJobs } from "./linear-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
 import {
   claimQueuedMessages,
@@ -1534,9 +1535,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       console.warn("the stranded message sweep did not finish:", err);
     });
   });
+
+  await registerLinearJobs(ctx);
 }
-
-
 
 /**
  * A sandbox command that fails carries its output on the error rather

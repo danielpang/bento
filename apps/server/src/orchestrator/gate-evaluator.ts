@@ -6,6 +6,7 @@ import { parseRepoUrl } from "@bento/github";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { queueLinearOutbound } from "./linear-sync.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
 
 type Feature = typeof features.$inferSelect;
@@ -228,6 +229,13 @@ export async function recordFeatureEvent(
     actorUserId: event.actorUserId ?? null,
     runId: event.runId ?? null,
     detail: event.detail ?? null,
+  });
+  // Mirror the transition to Linear when this card came from there.
+  // Queued, so a slow or failing Linear API never blocks the board.
+  await queueLinearOutbound(ctx, {
+    featureId: event.featureId,
+    toStatus: event.toStatus,
+    toStageId: event.toStageId,
   });
 }
 
