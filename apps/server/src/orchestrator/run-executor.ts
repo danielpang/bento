@@ -25,6 +25,7 @@ import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -239,6 +240,19 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       onProgress: saySystem,
     });
 
+    /**
+     * An upsert, not insert-or-ignore. The machine was just provisioned,
+     * so whatever the row said before, it is real and awake now.
+     *
+     * Ignoring the conflict was how two bugs lived in one line. A card
+     * reopened after its sandbox was reaped provisions a new machine
+     * under the same name, and the ignored insert left the row saying
+     * "destroyed": the reaper filters that status out, so the new
+     * machine was never destroyed again and billed forever. And the
+     * size recorded at provision never reached an existing row, so a
+     * deployment on large sprites metered every hour at the standard
+     * rate.
+     */
     const [sandboxRow] = await ctx.db
       .insert(sandboxes)
       .values({
@@ -248,16 +262,29 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         externalId: handle.externalId,
         status: "busy",
         workdir: handle.workdir,
+        // What this machine costs, in the price list's own words. Taken
+        // from the driver at the moment it was created, so changing the
+        // deployment's default size later cannot reprice hours already
+        // spent. Absent on the local drivers, which bill nobody.
+        ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
       })
-      .onConflictDoNothing()
+      .onConflictDoUpdate({
+        target: sandboxes.externalId,
+        set: {
+          featureId: feature.id,
+          status: "busy",
+          workdir: handle.workdir,
+          ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
+          lastUsedAt: new Date(),
+        },
+      })
       .returning();
 
-    // Link the run to its sandbox so rollback can find it later.
-    const [existingSandbox] = sandboxRow
-      ? [sandboxRow]
-      : await ctx.db.select().from(sandboxes).where(eq(sandboxes.externalId, handle.externalId)).limit(1);
-    if (existingSandbox) {
-      await ctx.db.update(agentRuns).set({ sandboxId: existingSandbox.id }).where(eq(agentRuns.id, runId));
+    // Link the run to its sandbox so rollback can find it later. The
+    // upsert always returns the row, so there is no fallback select to
+    // race with anything.
+    if (sandboxRow) {
+      await ctx.db.update(agentRuns).set({ sandboxId: sandboxRow.id }).where(eq(agentRuns.id, runId));
     }
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
@@ -779,6 +806,7 @@ async function finishRun(
       error: outcome.error ?? null,
     })
     .where(eq(agentRuns.id, runId));
+  announceRunFinished(ctx, runId);
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -880,9 +908,16 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     prompt: claimed.map((m) => m.text).join("\n"),
     cliSessionId: source.cliSessionId,
     executor: source.executor,
-  });
+  }, ctx.entitlements);
   if (next === "busy") {
     // Another run started in the gap; the messages wait for its end.
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
+  if ("outOfCompute" in next) {
+    // Out of compute: back to queued rather than lost to a limit the
+    // sender may not even have hit yet. The stranded sweep retries once
+    // the allowance returns.
     await requeueMessages(ctx.db, ids);
     return;
   }
@@ -950,6 +985,21 @@ export function runOutputPreview(event: { type: string; role?: string; text?: st
   return line.length > 160 ? `${line.slice(0, 159)}…` : line;
 }
 
+/**
+ * Tells the deployment a run is over, so it can record what it cost.
+ *
+ * Fire and forget on purpose. A run that finished has finished, and a
+ * billing module that cannot be reached must not turn that into a
+ * failure or hold up the gate evaluation waiting behind it.
+ */
+function announceRunFinished(ctx: AppContext, runId: string): void {
+  const announce = ctx.entitlements?.onRunFinished;
+  if (!announce) return;
+  void announce(runId).catch((err: unknown) => {
+    console.warn(`could not record what run ${runId} cost:`, err);
+  });
+}
+
 /** A run the user stopped. Terminal, but not a failure. */
 export async function markCancelled(ctx: AppContext, runId: string): Promise<void> {
   await ctx.db
@@ -958,6 +1008,7 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
     // as a failure reason.
     .set({ status: "cancelled", endedAt: new Date(), error: null })
     .where(eq(agentRuns.id, runId));
+  announceRunFinished(ctx, runId);
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
@@ -1066,6 +1117,13 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
     .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
     .returning({ id: agentRuns.id });
   if (!closed) return;
+
+  // Behind the compare-and-set on purpose: only the path that actually
+  // closed the run announces it. A resumed run is still working, and
+  // its own finish announces later; announcing here for every orphan
+  // would have billed runs that never ended. The sandbox was awake for
+  // as long as the run said it was, and a restart is not a refund.
+  announceRunFinished(ctx, run.id);
 
   const [seqRow] = await ctx.db
     .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
@@ -1344,8 +1402,29 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("run.execute");
   await ctx.boss.createQueue("gate.evaluate");
   await ctx.boss.createQueue("runner.reap");
+  await ctx.boss.createQueue(REAP_SANDBOX_QUEUE);
 
   await recoverInterruptedRuns(ctx);
+
+  /**
+   * A finished card's sandbox goes away, because it costs money for as
+   * long as it exists and not for as long as it is used.
+   *
+   * Sequentially rather than in parallel: this is housekeeping, and it
+   * should never compete with an agent for the provider's rate limit.
+   */
+  await ctx.boss.work<{ featureId: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, async (jobs) => {
+    for (const job of jobs) await reapSandbox(ctx, job.data.featureId);
+  });
+  /**
+   * The sweep catches the cards that finished before any of this
+   * existed, and anything the queue gave up on. Deliberately not
+   * awaited: reclaiming machines is not worth delaying the server's
+   * boot, and it retries on the next start either way.
+   */
+  void reapFinishedSandboxes(ctx).catch((err: unknown) => {
+    console.warn("the sandbox sweep did not finish:", err);
+  });
 
   /**
    * One worker per concurrent slot, each taking a single job.
@@ -1444,8 +1523,20 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     for (const row of gated) {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
     }
+    /**
+     * Also here, not only at boot. A message parked because the team
+     * was out of compute has no active run whose finish would deliver
+     * it, and the allowance coming back is not an event anything
+     * fires on. Five minutes of lag against a period boundary is
+     * noise; a message that waits for the next deploy is a bug report.
+     */
+    await sweepStrandedMessages(ctx).catch((err: unknown) => {
+      console.warn("the stranded message sweep did not finish:", err);
+    });
   });
 }
+
+
 
 /**
  * A sandbox command that fails carries its output on the error rather

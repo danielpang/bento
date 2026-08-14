@@ -78,6 +78,16 @@ export interface SpriteDriverOptions {
  */
 export class SpriteDriver implements SandboxDriver {
   provider = "sprite" as const;
+  /**
+   * Which row of the price list an hour here belongs to.
+   *
+   * Derived from the configuration rather than hardcoded, so a
+   * deployment that raises `cpus` starts recording the size it is
+   * actually paying Fly for instead of the one it used to.
+   */
+  get sandboxSize(): string {
+    return spriteSize(this.options.cpus ?? 2, this.options.ramMB ?? 4096);
+  }
   /** The SDK carries stdin over the exec socket; see feedStdin. */
   supportsStdin = true;
   private client: SpritesClient;
@@ -773,6 +783,11 @@ export class SpriteDriver implements SandboxDriver {
   async destroy(handle: SandboxHandle): Promise<void> {
     await this.client.deleteSprite(handle.externalId).catch(() => {});
   }
+
+  /** See spriteExists: a failed lookup is not a clean bill of health. */
+  async exists(handle: SandboxHandle): Promise<boolean> {
+    return spriteExists(this.client, handle.externalId);
+  }
 }
 
 /**
@@ -1061,4 +1076,22 @@ function shellQuote(value: string): string {
 function shellQuotePart(value: string): string {
   if (!/^[a-zA-Z0-9._/-]+$/.test(value)) throw new Error("unsafe git reference");
   return value;
+}
+
+/**
+ * Names a sprite's shape for the meter.
+ *
+ * The four names are the price list's, and a configuration that misses
+ * all of them is named after its own dimensions rather than rounded
+ * into the nearest one. Rounding would quietly bill an unusual machine
+ * at a familiar rate, and a name nobody recognises is a better signal
+ * than a number nobody checks.
+ */
+export function spriteSize(cpus: number, ramMB: number): string {
+  const gb = ramMB / 1024;
+  if (cpus === 1 && gb === 2) return "small";
+  if (cpus === 2 && gb === 4) return "standard";
+  if (cpus === 4 && gb === 8) return "large";
+  if (cpus === 8 && gb === 16) return "xl";
+  return `custom-${cpus}c-${gb}g`;
 }

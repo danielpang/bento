@@ -1,12 +1,14 @@
 name: Deploy hosted
 
 # The hosted deployment: the public image plus the private bento-cloud
-# module, shipped to Fly. Three things start it: a merge to main here,
-# a merge to main in bento-cloud, and a manual development dispatch
-# from any bento-cloud branch. The dispatch carries the module SHA in
-# client_payload.ref (the copy we layer) and client_payload.target
-# ("production" goes through both Fly apps; "development" stops after
-# bento-development). Secrets this needs:
+# module, shipped to Fly. Four things start it: a merge to main here, a
+# merge to main in bento-cloud, a manual development dispatch from any
+# bento-cloud branch, and a manual workflow_dispatch from any branch of
+# this repository. The repository_dispatch carries the module SHA in
+# client_payload.ref and the stop point in client_payload.target;
+# workflow_dispatch carries the same two as inputs, and runs this
+# file's copy from whichever branch it is dispatched on, which is what
+# lets an unmerged branch be tried on development. Secrets this needs:
 #
 #   BENTO_CLOUD_TOKEN  per GitHub environment. Fine-grained PAT, read
 #                      access to bento-cloud contents, so the private
@@ -30,6 +32,19 @@ on:
   repository_dispatch:
     types: [bento-cloud-updated]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to stop. development deploys the dev app only; production goes through both."
+        type: choice
+        options: [development, production]
+        # Development, because a manual run from a branch is a test by
+        # definition, and typing "production" should be the deliberate
+        # act rather than the omission.
+        default: development
+      cloud_ref:
+        description: "bento-cloud ref to layer into the image"
+        type: string
+        default: main
 
 # One deploy at a time. In-progress deploys finish rather than being
 # cancelled: a half-pushed release is worse than a slightly stale one.
@@ -79,7 +94,7 @@ jobs:
           repository: danielpang/bento-cloud
           token: ${{ secrets.BENTO_CLOUD_TOKEN }}
           path: bento-cloud
-          ref: ${{ github.event.client_payload.ref || 'main' }}
+          ref: ${{ github.event.client_payload.ref || inputs.cloud_ref || 'main' }}
 
       - name: Build the public image
         run: docker build -f infra/docker/Dockerfile -t bento-server:ci .
@@ -131,7 +146,7 @@ jobs:
   # new image is running there. A failed development deploy, or a
   # dispatch that asked only for development, leaves production alone.
   migrate-production:
-    if: github.repository == 'danielpang/bento' && github.event.client_payload.target != 'development'
+    if: github.repository == 'danielpang/bento' && github.event.client_payload.target != 'development' && inputs.target != 'development'
     needs: deploy-development
     runs-on: ubuntu-latest
     environment: production
@@ -153,7 +168,7 @@ jobs:
     # repository; the guard keeps forks from attempting a deploy they
     # have no secrets for. needs build as well as migrate-production so
     # the image artifact dependency is explicit, not only transitive.
-    if: github.repository == 'danielpang/bento' && github.event.client_payload.target != 'development'
+    if: github.repository == 'danielpang/bento' && github.event.client_payload.target != 'development' && inputs.target != 'development'
     needs: [migrate-production, build]
     runs-on: ubuntu-latest
     environment: production

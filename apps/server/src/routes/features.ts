@@ -344,10 +344,20 @@ export function featureRoutes(ctx: AppContext) {
         prompt: claimed.map((m) => m.text).join("\n"),
         cliSessionId: resumeFrom.cliSessionId,
         executor: resumeFrom.executor,
-      });
+        // The person sending the message owns the hours the resumed
+        // run spends, not whoever started the conversation.
+        startedBy: actor(c),
+      }, ctx.entitlements);
       // A run started in the gap between the read and the insert; the
       // messages wait for it like any other mid-run message.
       if (run === "busy") {
+        await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
+        return c.json({ queued: true as const });
+      }
+      if ("outOfCompute" in run) {
+        // Out of compute: held rather than thrown away. Queued is the
+        // honest answer, and the stranded sweep delivers it once the
+        // plan allows work again, which is what sending it meant.
         await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
         return c.json({ queued: true as const });
       }
@@ -785,8 +795,10 @@ export function featureRoutes(ctx: AppContext) {
         agentProfileId: profile.id,
         prompt: "",
         executor,
-      });
+        startedBy: actor(c),
+      }, ctx.entitlements);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json(run, 201);
     })

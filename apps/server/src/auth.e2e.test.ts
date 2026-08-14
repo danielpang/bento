@@ -1,7 +1,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { and, eq } from "drizzle-orm";
-import { account, agentProfiles, createDb, createPool, member, projects, runMigrations } from "@bento/db";
+import { account, agentProfiles, agentRuns, createDb, createPool, member, projects, runMigrations } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
 import { createHmac } from "node:crypto";
@@ -1049,6 +1049,155 @@ test("entitlement checks gate invitations and going live", async () => {
       headers: { authorization: `Bearer ${token}` },
     });
     assert.equal(allowed.status, 200);
+  } finally {
+    delete ctx.entitlements;
+  }
+});
+
+/**
+ * The compute door.
+ *
+ * Going live is not the only moment a plan can run out: a card that
+ * was already moving reaches its next stage later, and the team may
+ * have spent everything in between. startRunIfIdle is where every
+ * door that starts a run already converges, so it is the one place
+ * this can be asked without the next door somebody adds forgetting.
+ */
+test("a run is refused when the plan has no compute left", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "spent@bento.test",
+    password: "correct-horse-battery",
+    name: "Spent",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Spent Team", slug: "spent-team" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const project = (await (
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ name: "Spent", localPath: "/tmp" }),
+    })
+  ).json()) as { id: string };
+  const feature = (await (
+    await app.request("/api/features", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ projectId: project.id, title: "Nothing left" }),
+    })
+  ).json()) as { id: string };
+
+  // A card in the backlog has no stage to run on, so it goes live
+  // first. That transition is the other door's business; this test is
+  // about what happens at the next one.
+  const live = await app.request(`/api/features/${feature.id}/advance`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(live.status, 200);
+
+  // Going live handed the card to the first stage's agent, so a run is
+  // already working it. "Busy" is the more specific answer and would
+  // win, which would test the wrong door: the card is settled first so
+  // the only reason left to refuse is the plan.
+  await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.featureId, feature.id));
+
+  const asked: string[] = [];
+  ctx.entitlements = {
+    async canAddMember() {
+      return null;
+    },
+    // Going live is allowed: this team has cards to spare, it has
+    // hours it does not have.
+    async canActivateFeature() {
+      return null;
+    },
+    async canStartRun(organizationId) {
+      asked.push(organizationId);
+      return { reason: "The Free plan includes 5 agent hours a month and this team has used them.", code: "PLAN_LIMIT" };
+    },
+  };
+  try {
+    const started = await app.request(`/api/features/${feature.id}/quick-run`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // 402 rather than 409: nothing is busy, and there is something the
+    // team can do about it that waiting will not fix.
+    assert.equal(started.status, 402);
+    const body = (await started.json()) as { error: string; code?: string };
+    assert.match(body.error, /5 agent hours/);
+    assert.equal(body.code, "PLAN_LIMIT", "the console needs to tell a member from an admin");
+    assert.deepEqual(asked, [org.id], "the door asked about this team, once");
+  } finally {
+    delete ctx.entitlements;
+  }
+});
+
+/**
+ * Seats are billed per person, so a deployment that charges for them
+ * has to hear when the headcount moves. better-auth owns every route
+ * that moves it, and an invitation holds a seat from the moment it is
+ * created rather than from the moment it is accepted.
+ */
+test("membership changes are announced to the deployment", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "seats@bento.test",
+    password: "correct-horse-battery",
+    name: "Seats",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Seat Team", slug: "seat-team" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const announced: string[] = [];
+  ctx.entitlements = {
+    async canAddMember() {
+      return null;
+    },
+    async canActivateFeature() {
+      return null;
+    },
+    async onMembershipChanged(organizationId) {
+      announced.push(organizationId);
+    },
+  };
+  try {
+    const invite = await jsonPost(
+      "/api/auth/organization/invite-member",
+      { email: "seatholder@bento.test", role: "member", organizationId: org.id },
+      token,
+    );
+    assert.equal(invite.status, 200);
+    const invitation = (await invite.json()) as { id: string };
+
+    // The announcement is fire and forget, so it lands just after the
+    // response rather than before it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(announced, [org.id], "creating an invitation holds a seat");
+
+    // Withdrawing it releases the seat, and the organization is found
+    // from the invitation itself: cancelling deletes the row that says
+    // which team it belonged to, so it has to be read first.
+    announced.length = 0;
+    const cancelled = await jsonPost(
+      "/api/auth/organization/cancel-invitation",
+      { invitationId: invitation.id },
+      token,
+    );
+    assert.equal(cancelled.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(announced, [org.id], "withdrawing an invitation releases the seat");
+
+    // A route that changes nothing about the headcount says nothing.
+    announced.length = 0;
+    await app.request("/api/auth/organization/list", { headers: { authorization: `Bearer ${token}` } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(announced, [], "reads are not membership changes");
   } finally {
     delete ctx.entitlements;
   }

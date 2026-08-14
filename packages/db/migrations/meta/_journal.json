@@ -71,6 +71,13 @@
       "when": 1786255200000,
       "tag": "0009_feature_messages",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786720772705,
+      "tag": "0010_billing_metering",
+      "breakpoints": true
     }
   ]
 }
