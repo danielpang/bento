@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import { ConfirmDialog } from "./PromptDialog.js";
+import { ConnectGitHubAccount } from "./GitHubIdentity.js";
 import type {
   BentoClient,
   GitHubConnection,
@@ -61,8 +62,11 @@ export function RepositoriesPanel({
       setAvailable(status.connected ? await client.listGitHubRepositories() : []);
       // An installation a GitHub owner approved from a request exists
       // on GitHub with no callback ever reaching us. Offer it for
-      // adoption; an empty list costs one quiet request.
-      if (status.configured && !status.connected && status.canManage) {
+      // adoption; an empty list costs one quiet request. Skipped
+      // without a GitHub account attached, because the answer is then
+      // empty by definition: it is that account's installations we ask
+      // for.
+      if (status.configured && !status.connected && status.canManage && status.identityLinked) {
         setAdoptable(await client.listGitHubInstallations().catch(() => []));
       } else {
         setAdoptable([]);
@@ -200,7 +204,15 @@ export function RepositoriesPanel({
               ) : (
                 <div className="actions">
                   <p className="muted">Connect GitHub and choose which repositories Bento may read and write.</p>
-                  {github.canManage && (
+                  {github.canManage && (!github.identityLinked ? (
+                    /* First things first. Installing binds an
+                       installation to this organization, and Bento only
+                       does that for someone GitHub already shows it to,
+                       so an account made with an email and a password
+                       has a GitHub account to attach before the install
+                       button means anything. */
+                    <ConnectGitHubAccount status={github} returnTo="/" />
+                  ) : (
                     <>
                       {/* An approved request first: the App is already
                           installed on GitHub and only needs adopting,
@@ -232,7 +244,7 @@ export function RepositoriesPanel({
                         work in the meantime.
                       </p>
                     </>
-                  )}
+                  ))}
                 </div>
               )
             ) : (
