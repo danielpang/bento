@@ -7,6 +7,7 @@ import type { AgentDelta } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
+import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun } from "../access.js";
@@ -54,8 +55,10 @@ export function runRoutes(ctx: AppContext) {
         prompt: body.prompt ?? "",
         cliSessionId: body.resumeSessionId ?? null,
         executor,
-      });
+        startedBy: actor(c),
+      }, ctx.entitlements);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
 
       // Runner-executed runs stay queued until a machine claims them.
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
@@ -91,8 +94,12 @@ export function runRoutes(ctx: AppContext) {
         prompt: c.req.valid("json").prompt,
         cliSessionId: previous.cliSessionId,
         executor: previous.executor,
-      });
+        // The person resuming owns the hours, not whoever started the
+        // run being resumed.
+        startedBy: actor(c),
+      }, ctx.entitlements);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (previous.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json(run, 201);
     })

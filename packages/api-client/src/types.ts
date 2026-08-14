@@ -78,12 +78,6 @@ export interface Feature {
   prNumber: number | null;
   /** The first pull request's address, so the number can be reached. */
   prUrl?: string | null;
-  /**
-   * What was said to the card while its agent was busy. The next run
-   * picks it up and clears it, so a client can show it as a message
-   * still waiting rather than one already delivered.
-   */
-  queuedPrompt?: string | null;
 }
 
 export interface AgentRun {

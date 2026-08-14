@@ -1,0 +1,35 @@
+# Hosted Bento, development. Same shape as production; a separate Fly
+# app so a bad migration or image never lands on the live service first.
+# The deploy-hosted workflow migrates and ships here before production.
+app = "bento-development"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../infra/docker/Dockerfile"
+
+[env]
+  BENTO_MODE = "multi"
+  BENTO_SANDBOX_DRIVER = "sprite"
+  PORT = "8080"
+  # The console is served from this same app, so the browser sees one
+  # origin: session cookies, OAuth callbacks, the /device page and the
+  # /accept-invitation link all work without CORS.
+  BENTO_WEB_DIR = "/app/apps/web/dist"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # Keep one machine warm: the orchestrator owns queue workers and the
+  # gate sweep, which should not stop when web traffic goes quiet.
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+# Secrets are set out of band, never committed:
+#   fly secrets set -a bento-development BETTER_AUTH_SECRET=... BENTO_SECRET_KEY=... SPRITES_TOKEN=...
+#   fly secrets set -a bento-development GITHUB_APP_ID=... GITHUB_APP_SLUG=... GITHUB_PRIVATE_KEY=... GITHUB_WEBHOOK_SECRET=...
+#   fly secrets set -a bento-development GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=...

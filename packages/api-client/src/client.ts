@@ -45,6 +45,14 @@ export interface GitHubConnection {
   canPublish: boolean;
   canManage: boolean;
   installation: { accountLogin: string; accountType: string } | null;
+  /**
+   * Whether this user has a GitHub identity attached to their Bento
+   * account. Installing the App needs one, so an account made with an
+   * email and a password has a step to do first.
+   */
+  identityLinked: boolean;
+  /** Whether attaching one is possible here, which needs GitHub sign in configured. */
+  canLinkIdentity: boolean;
 }
 
 /** An installation of the App the signed-in user could connect. */
@@ -575,10 +583,15 @@ export class BentoClient {
     });
   }
 
-  /** Every finished run's events in order, with who spoke them. */
+  /**
+   * Every finished run's events in order, with who spoke them, plus
+   * the messages still waiting for an agent (queued on the card or
+   * sent to a run that has not confirmed a turn yet).
+   */
   getConversation(featureId: string) {
     return this.request<{
       blocks: { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[];
+      pending: { id: string; text: string; status: "queued" | "sent"; createdAt: string }[];
     }>(`/api/features/${featureId}/conversation`);
   }
 

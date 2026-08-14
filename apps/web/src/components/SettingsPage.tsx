@@ -7,6 +7,7 @@ import { AppearanceSettings } from "./AppearanceSettings.js";
 import { BillingCard } from "./BillingCard.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
+import { GitHubAccountCard, useGitHubOutcome } from "./GitHubIdentity.js";
 import { LinearPanel } from "./LinearPanel.js";
 import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
@@ -37,6 +38,10 @@ export function SettingsPage({ client }: { client: BentoClient }) {
     const known: Tab[] = [...ALWAYS, "team", "billing", "account"];
     return known.find((id) => id === wanted) ?? "appearance";
   });
+
+  // A GitHub connection started from this page comes back to it, so the
+  // outcome is said here rather than only on the board.
+  useGitHubOutcome();
 
   useEffect(() => {
     void client
@@ -112,6 +117,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
             <TeamSettings client={client} />
           </Tabs.Content>
           <Tabs.Content value="github" className="settings-body">
+            <GitHubAccountCard client={client} />
             <GitHubTokenCard client={client} />
             <GitIdentityCard client={client} />
           </Tabs.Content>

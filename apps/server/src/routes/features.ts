@@ -8,6 +8,7 @@ import {
   agentProfiles,
   agentRuns,
   featureEvents,
+  featureMessages,
   featurePullRequests,
   runEvents,
   features,
@@ -34,6 +35,12 @@ import {
   reopenFeature,
 } from "../orchestrator/gate-evaluator.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
+import {
+  claimQueuedMessages,
+  enqueueMessage,
+  markMessagesDelivered,
+  requeueMessages,
+} from "../orchestrator/messages.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { githubConnectionFor } from "../github.js";
@@ -243,7 +250,17 @@ export function featureRoutes(ctx: AppContext) {
           events: events.map((e) => e.payload),
         });
       }
-      return c.json({ blocks });
+      // Messages waiting for an agent, so a reload does not make a
+      // parked message look like it never existed.
+      const pending = await db(c, ctx)
+        .select()
+        .from(featureMessages)
+        .where(and(eq(featureMessages.featureId, feature.id), inArray(featureMessages.status, ["queued", "sent"])))
+        .orderBy(asc(featureMessages.createdAt));
+      return c.json({
+        blocks,
+        pending: pending.map((m) => ({ id: m.id, text: m.text, status: m.status, createdAt: m.createdAt })),
+      });
     })
     /**
      * A message to the card's agent, whatever the agent is doing.
@@ -272,29 +289,30 @@ export function featureRoutes(ctx: AppContext) {
       }
 
       /**
-       * One SQL statement, not a read-modify-write: two messages sent
-       * in the same instant both read the same queuedPrompt, and the
-       * second SET silently erased the first while both callers were
-       * told "queued". The database does the append, so both survive.
+       * Durable before anything else: the row is the message's
+       * identity, and whatever the delivery attempt below does (a live
+       * write, a run creation, a crash between the two), the message
+       * now exists somewhere the lifecycle and the boot sweep can find
+       * it. The old single queued_prompt column was a slot, not a
+       * queue, and messages could vanish after their sender was told
+       * "queued".
        */
-      const queueIt = async () => {
-        await db(c, ctx)
-          .update(features)
-          .set({ queuedPrompt: sql`coalesce(${features.queuedPrompt} || E'\n', '') || ${text}` })
-          .where(eq(features.id, feature.id));
-        return c.json({ queued: true as const });
-      };
+      const messageId = await enqueueMessage(db(c, ctx), feature.id, text);
 
       if (latest.status === "queued" || latest.status === "starting" || latest.status === "running") {
         // A live session hears the message now; the tool decides
         // whether that steers the current work (pi) or queues behind
         // the current turn (Claude Code). No live session: the message
-        // parks on the card until the run ends.
+        // stays parked until the run ends.
         const liveSession = ctx.liveInputs.get(latest.id);
         if (liveSession && (await liveSession.deliver(text))) {
+          await db(c, ctx)
+            .update(featureMessages)
+            .set({ status: "sent", runId: latest.id, sentAt: new Date() })
+            .where(eq(featureMessages.id, messageId));
           return c.json({ queued: false as const, live: true as const, delivery: liveSession.delivery });
         }
-        return queueIt();
+        return c.json({ queued: true as const });
       }
       /**
        * The conversation a follow-up continues is the card's own work,
@@ -311,17 +329,41 @@ export function featureRoutes(ctx: AppContext) {
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
       const resumeFrom = conversation ?? latest;
+      // Everything parked rides along, oldest first: the card is idle,
+      // so this message and any it queued behind become one resume run.
+      const claimed = await claimQueuedMessages(db(c, ctx), feature.id);
+      if (claimed.length === 0) {
+        // A terminal path claimed it in the same instant; its run
+        // carries the message.
+        return c.json({ queued: true as const });
+      }
       const run = await startRunIfIdle(db(c, ctx), {
         featureId: feature.id,
         stageId: resumeFrom.stageId,
         agentProfileId: resumeFrom.agentProfileId,
-        prompt: text,
+        prompt: claimed.map((m) => m.text).join("\n"),
         cliSessionId: resumeFrom.cliSessionId,
         executor: resumeFrom.executor,
-      });
+        // The person sending the message owns the hours the resumed
+        // run spends, not whoever started the conversation.
+        startedBy: actor(c),
+      }, ctx.entitlements);
       // A run started in the gap between the read and the insert; the
-      // message waits for it like any other mid-run message.
-      if (run === "busy") return queueIt();
+      // messages wait for it like any other mid-run message.
+      if (run === "busy") {
+        await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
+        return c.json({ queued: true as const });
+      }
+      if ("outOfCompute" in run) {
+        // Out of compute: held rather than thrown away. Queued is the
+        // honest answer, and the stranded sweep delivers it once the
+        // plan allows work again, which is what sending it meant.
+        await requeueMessages(db(c, ctx), claimed.map((m) => m.id));
+        return c.json({ queued: true as const });
+      }
+      // The run's prompt now carries them, so they are delivered rather
+      // than in flight: a run that fails is resumed, not redelivered.
+      await markMessagesDelivered(db(c, ctx), claimed.map((m) => m.id), run.id);
       if (resumeFrom.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json({ queued: false as const, run }, 201);
     })
@@ -753,8 +795,10 @@ export function featureRoutes(ctx: AppContext) {
         agentProfileId: profile.id,
         prompt: "",
         executor,
-      });
+        startedBy: actor(c),
+      }, ctx.entitlements);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
       return c.json(run, 201);
     })

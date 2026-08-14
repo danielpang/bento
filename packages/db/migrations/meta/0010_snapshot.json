@@ -1,6 +1,6 @@
 {
-  "id": "1c743749-fa9b-4f47-b58f-ce83ec33f9b3",
-  "prevId": "793858c5-d476-427c-8571-6053ae212b6e",
+  "id": "bae64212-6e89-46da-9e70-acf88f8839bd",
+  "prevId": "1c743749-fa9b-4f47-b58f-ce83ec33f9b3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -961,6 +961,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "started_by": {
+          "name": "started_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -1115,6 +1121,20 @@
             "id"
           ],
           "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "agent_runs_started_by_user_id_fk": {
+          "name": "agent_runs_started_by_user_id_fk",
+          "tableFrom": "agent_runs",
+          "tableTo": "user",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "started_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -2561,6 +2581,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "size": {
+          "name": "size",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "last_used_at": {
           "name": "last_used_at",
           "type": "timestamp with time zone",
@@ -2582,7 +2608,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "sandboxes_external_id_idx": {
+          "name": "sandboxes_external_id_idx",
+          "columns": [
+            {
+              "expression": "external_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "sandboxes_project_id_projects_id_fk": {
           "name": "sandboxes_project_id_projects_id_fk",

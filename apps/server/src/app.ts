@@ -19,7 +19,7 @@ import { stageRoutes } from "./routes/stages.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import { catalogRoutes } from "./routes/catalog.js";
 import { and, eq } from "drizzle-orm";
-import { member } from "@bento/db";
+import { invitation, member } from "@bento/db";
 import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
 import { contactRoutes } from "./routes/contact.js";
@@ -109,9 +109,89 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
           }
         }
       }
-      return auth.handler(c.req.raw);
+      return handleAuth(c);
     });
-    app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+    app.on(["GET", "POST"], "/api/auth/*", (c) => handleAuth(c));
+
+    /**
+     * better-auth's own handler, plus one announcement.
+     *
+     * A deployment that bills per seat has to hear about a headcount
+     * that moved, and better-auth owns every route that moves it.
+     *
+     * The organization is resolved before the handler runs because two
+     * of these routes carry only an invitation id. better-auth marks an
+     * invitation rejected or cancelled rather than deleting it, so the
+     * row would still be readable afterwards, but reading it first
+     * keeps this from depending on that.
+     */
+    async function handleAuth(c: { req: { url: string; raw: Request } }): Promise<Response> {
+      const announce = ctx.entitlements?.onMembershipChanged;
+      const action = membershipAction(new URL(c.req.url).pathname);
+      if (!announce || !action) return auth.handler(c.req.raw);
+
+      const body = (await c.req.raw.clone().json().catch(() => null)) as
+        | { organizationId?: string; invitationId?: string }
+        | null;
+      const organizationId = await organizationForAction(c, body);
+      const response = await auth.handler(c.req.raw);
+      // Only a change that happened. A refused invitation moves no
+      // seat, and billing for one would be charging for the error.
+      if (organizationId && response.ok) {
+        void announce(organizationId).catch((err: unknown) => {
+          // The membership change already succeeded and the user has
+          // been told so. A deployment that cannot reach its billing
+          // provider reconciles later; failing the request here would
+          // undo nothing and confuse everyone.
+          console.warn(`membership change announcement failed for ${organizationId}:`, err);
+        });
+      }
+      return response;
+    }
+
+    /**
+     * Which organization a membership route is about, before it runs.
+     *
+     * The body's organization id is checked against a membership this
+     * caller actually holds, the same way the invite-member route above
+     * does it and for the same reason: the discipline in this file is
+     * that an id from a request body is a claim, not a fact. Nothing
+     * here is exploitable today, since better-auth authorizes the
+     * action itself and the announcement only fires when it succeeded.
+     * But resolving the wrong organization would sync the wrong team's
+     * seats, and that is a rule worth keeping rather than an assumption
+     * about somebody else's library worth relying on.
+     */
+    async function organizationForAction(
+      c: { req: { url: string; raw: Request } },
+      body: { organizationId?: string; invitationId?: string } | null,
+    ): Promise<string | null> {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (!session) return null;
+
+      const claimed = body?.organizationId ?? null;
+      if (claimed) {
+        const [membership] = await ctx.db
+          .select({ id: member.id })
+          .from(member)
+          .where(and(eq(member.organizationId, claimed), eq(member.userId, session.user.id)))
+          .limit(1);
+        // A leave request is the one case where the membership may
+        // already be gone by the time this runs; the session's own
+        // active organization then answers for it below.
+        if (membership) return claimed;
+      }
+
+      if (body?.invitationId) {
+        const [row] = await ctx.db
+          .select({ organizationId: invitation.organizationId })
+          .from(invitation)
+          .where(eq(invitation.id, body.invitationId))
+          .limit(1);
+        if (row) return row.organizationId;
+      }
+      return session.session.activeOrganizationId ?? null;
+    }
   }
 
   if (extras.cloudRoutes) app.route("/api/billing", extras.cloudRoutes);
@@ -194,3 +274,34 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
 }
 
 export type AppType = ReturnType<typeof createApp>;
+
+/**
+ * The better-auth organization routes that change how many people an
+ * organization holds, or null for everything else.
+ *
+ * Invitations count. A deployment that bills per seat counts members
+ * plus invitations still open, so that an invitation reserves the seat
+ * it is about to occupy: otherwise a team could hold twenty pending
+ * invitations, pay for two, and have the bill jump the day everybody
+ * happened to accept.
+ *
+ * accept-invitation is here even though it is net zero, one invitation
+ * becoming one member. It costs a count that usually matches and does
+ * nothing, and it is the moment a deployment is most likely to want to
+ * check its arithmetic.
+ */
+function membershipAction(pathname: string): string | null {
+  const prefix = "/api/auth/organization/";
+  if (!pathname.startsWith(prefix)) return null;
+  const action = pathname.slice(prefix.length);
+  return MEMBERSHIP_ACTIONS.has(action) ? action : null;
+}
+
+const MEMBERSHIP_ACTIONS = new Set([
+  "invite-member",
+  "accept-invitation",
+  "reject-invitation",
+  "cancel-invitation",
+  "remove-member",
+  "leave",
+]);

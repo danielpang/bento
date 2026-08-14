@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import {
   account,
   agentProfiles,
+  agentRuns,
   createDb,
   createPool,
   linearConnections,
@@ -684,6 +685,12 @@ test("a GitHub App installation is bound to the active organization", async () =
       canPublish: true,
       canManage: true,
       installation: { accountLogin: "acme", accountType: "Organization" },
+      // This account was given a GitHub identity above, which is what
+      // let the install bind at all.
+      identityLinked: true,
+      // No GitHub sign in is configured on this test server, so there
+      // would be nothing to offer someone without one.
+      canLinkIdentity: false,
     });
     const repositories = await app.request("/api/github/repositories", {
       headers: { authorization: `Bearer ${token}` },
@@ -740,6 +747,155 @@ test("a GitHub App installation is bound to the active organization", async () =
     else mutableEnv.BENTO_SECRET_KEY = originalKey;
     if (originalWebhookSecret === undefined) delete mutableEnv.GITHUB_WEBHOOK_SECRET;
     else mutableEnv.GITHUB_WEBHOOK_SECRET = originalWebhookSecret;
+  }
+});
+
+/**
+ * The journey of an account that never touched GitHub to sign in.
+ *
+ * Binding an installation is only allowed for someone GitHub already
+ * shows it to, and an account made with an email and a password has no
+ * GitHub identity to ask. That used to be discovered on the way back
+ * from GitHub, as a JSON refusal in a browser tab, with nothing on
+ * offer that would fix it. Now the console can see the missing step
+ * before it offers the button, every refusal names what to do, and
+ * attaching an identity makes the same install work.
+ */
+test("an account signed up with a password can install once GitHub is connected", async () => {
+  const signedUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "password-only@bento.test",
+    password: "correct-horse-battery",
+    name: "Password Only",
+  });
+  const token = signedUp.headers.get("set-auth-token")!;
+  const userId = ((await signedUp.json()) as { user: { id: string } }).user.id;
+  const organization = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Password Team", slug: "password-team" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: organization.id }, token);
+
+  const originalFetch = globalThis.fetch;
+  const originalApp = ctx.githubApp;
+  const mutableEnv = ctx.env as typeof ctx.env & {
+    GITHUB_APP_SLUG?: string;
+    GITHUB_APP_ID?: string;
+    GITHUB_CLIENT_ID?: string;
+    GITHUB_CLIENT_SECRET?: string;
+    BENTO_SECRET_KEY?: string;
+  };
+  const saved = {
+    slug: mutableEnv.GITHUB_APP_SLUG,
+    appId: mutableEnv.GITHUB_APP_ID,
+    clientId: mutableEnv.GITHUB_CLIENT_ID,
+    clientSecret: mutableEnv.GITHUB_CLIENT_SECRET,
+    key: mutableEnv.BENTO_SECRET_KEY,
+  };
+  mutableEnv.GITHUB_APP_SLUG = "bento-test";
+  mutableEnv.GITHUB_APP_ID = "4242";
+  mutableEnv.GITHUB_CLIENT_ID = "client-id";
+  mutableEnv.GITHUB_CLIENT_SECRET = "client-secret";
+  mutableEnv.BENTO_SECRET_KEY = "github-install-state-key-at-least-32-characters";
+  ctx.githubApp = {
+    async installation(id: string) {
+      return { id, accountLogin: "acme", accountType: "Organization" };
+    },
+    forInstallation() {
+      return { async listRepositories() { return []; } };
+    },
+  } as unknown as NonNullable<AppContext["githubApp"]>;
+
+  /** What GitHub answers the user token with, per stage of the story. */
+  let githubReply: () => Response = () => {
+    throw new Error("GitHub must not be asked for a user with no linked account");
+  };
+  globalThis.fetch = (async () => githubReply()) as typeof fetch;
+
+  /** A signed install state, the way the console gets one. */
+  async function beginInstall(): Promise<string> {
+    const begin = await jsonPost("/api/github/install", {}, token);
+    assert.equal(begin.status, 200);
+    const url = new URL(((await begin.json()) as { url: string }).url);
+    return url.searchParams.get("state")!;
+  }
+
+  try {
+    const before = (await (
+      await app.request("/api/github/status", { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { identityLinked: boolean; canLinkIdentity: boolean; connected: boolean };
+    assert.equal(before.identityLinked, false, "signing up with a password leaves no GitHub identity");
+    assert.equal(before.canLinkIdentity, true, "and GitHub sign in is configured, so one can be attached");
+
+    // Nothing here asks GitHub: without a token there is nobody to ask,
+    // and the throwing fetch above proves it.
+    const listed = await app.request("/api/github/installations", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.deepEqual(await listed.json(), []);
+    const connect = await jsonPost("/api/github/connect", { installationId: "77" }, token);
+    assert.equal(connect.status, 403);
+    assert.equal(((await connect.json()) as { code: string }).code, "GITHUB_IDENTITY_MISSING");
+
+    // Following the install through anyway comes back to the console
+    // with the reason, rather than to a page of JSON.
+    const refused = await app.request(
+      `/api/github/callback?installation_id=77&state=${encodeURIComponent(await beginInstall())}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    assert.equal(refused.status, 302);
+    assert.equal(refused.headers.get("location"), "/?github=identity");
+
+    // Connecting a GitHub account is what better-auth's link flow
+    // writes: one account row, with a usable token.
+    await ctx.db.insert(account).values({
+      id: "github-account-linked-after-signup",
+      accountId: "54321",
+      providerId: "github",
+      userId,
+      accessToken: "linked-user-token",
+    });
+    githubReply = () => Response.json({ installations: [{ id: 77, app_id: 4242, account: { login: "acme", type: "Organization" } }] });
+
+    const after = (await (
+      await app.request("/api/github/status", { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { identityLinked: boolean };
+    assert.equal(after.identityLinked, true);
+    const offered = (await (
+      await app.request("/api/github/installations", { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { installationId: string }[];
+    assert.deepEqual(offered.map((row) => row.installationId), ["77"], "the App's own installations are offered");
+
+    const installed = await app.request(
+      `/api/github/callback?installation_id=77&state=${encodeURIComponent(await beginInstall())}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    assert.equal(installed.status, 302);
+    assert.equal(installed.headers.get("location"), "/?github=connected");
+    const status = (await (
+      await app.request("/api/github/status", { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { connected: boolean };
+    assert.equal(status.connected, true, "the same install now binds to the organization");
+
+    // A token GitHub no longer accepts is its own sentence: telling
+    // someone to install an App they already installed is what the old
+    // silence did.
+    githubReply = () => new Response("", { status: 401 });
+    const stale = await jsonPost("/api/github/connect", { installationId: "77" }, token);
+    assert.equal(stale.status, 403);
+    assert.equal(((await stale.json()) as { code: string }).code, "GITHUB_IDENTITY_STALE");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApp) ctx.githubApp = originalApp;
+    else delete ctx.githubApp;
+    if (saved.slug === undefined) delete mutableEnv.GITHUB_APP_SLUG;
+    else mutableEnv.GITHUB_APP_SLUG = saved.slug;
+    if (saved.appId === undefined) delete mutableEnv.GITHUB_APP_ID;
+    else mutableEnv.GITHUB_APP_ID = saved.appId;
+    if (saved.clientId === undefined) delete mutableEnv.GITHUB_CLIENT_ID;
+    else mutableEnv.GITHUB_CLIENT_ID = saved.clientId;
+    if (saved.clientSecret === undefined) delete mutableEnv.GITHUB_CLIENT_SECRET;
+    else mutableEnv.GITHUB_CLIENT_SECRET = saved.clientSecret;
+    if (saved.key === undefined) delete mutableEnv.BENTO_SECRET_KEY;
+    else mutableEnv.BENTO_SECRET_KEY = saved.key;
   }
 });
 
@@ -908,6 +1064,155 @@ test("entitlement checks gate invitations and going live", async () => {
       headers: { authorization: `Bearer ${token}` },
     });
     assert.equal(allowed.status, 200);
+  } finally {
+    delete ctx.entitlements;
+  }
+});
+
+/**
+ * The compute door.
+ *
+ * Going live is not the only moment a plan can run out: a card that
+ * was already moving reaches its next stage later, and the team may
+ * have spent everything in between. startRunIfIdle is where every
+ * door that starts a run already converges, so it is the one place
+ * this can be asked without the next door somebody adds forgetting.
+ */
+test("a run is refused when the plan has no compute left", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "spent@bento.test",
+    password: "correct-horse-battery",
+    name: "Spent",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Spent Team", slug: "spent-team" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const project = (await (
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ name: "Spent", localPath: "/tmp" }),
+    })
+  ).json()) as { id: string };
+  const feature = (await (
+    await app.request("/api/features", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ projectId: project.id, title: "Nothing left" }),
+    })
+  ).json()) as { id: string };
+
+  // A card in the backlog has no stage to run on, so it goes live
+  // first. That transition is the other door's business; this test is
+  // about what happens at the next one.
+  const live = await app.request(`/api/features/${feature.id}/advance`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(live.status, 200);
+
+  // Going live handed the card to the first stage's agent, so a run is
+  // already working it. "Busy" is the more specific answer and would
+  // win, which would test the wrong door: the card is settled first so
+  // the only reason left to refuse is the plan.
+  await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.featureId, feature.id));
+
+  const asked: string[] = [];
+  ctx.entitlements = {
+    async canAddMember() {
+      return null;
+    },
+    // Going live is allowed: this team has cards to spare, it has
+    // hours it does not have.
+    async canActivateFeature() {
+      return null;
+    },
+    async canStartRun(organizationId) {
+      asked.push(organizationId);
+      return { reason: "The Free plan includes 5 agent hours a month and this team has used them.", code: "PLAN_LIMIT" };
+    },
+  };
+  try {
+    const started = await app.request(`/api/features/${feature.id}/quick-run`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // 402 rather than 409: nothing is busy, and there is something the
+    // team can do about it that waiting will not fix.
+    assert.equal(started.status, 402);
+    const body = (await started.json()) as { error: string; code?: string };
+    assert.match(body.error, /5 agent hours/);
+    assert.equal(body.code, "PLAN_LIMIT", "the console needs to tell a member from an admin");
+    assert.deepEqual(asked, [org.id], "the door asked about this team, once");
+  } finally {
+    delete ctx.entitlements;
+  }
+});
+
+/**
+ * Seats are billed per person, so a deployment that charges for them
+ * has to hear when the headcount moves. better-auth owns every route
+ * that moves it, and an invitation holds a seat from the moment it is
+ * created rather than from the moment it is accepted.
+ */
+test("membership changes are announced to the deployment", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "seats@bento.test",
+    password: "correct-horse-battery",
+    name: "Seats",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Seat Team", slug: "seat-team" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const announced: string[] = [];
+  ctx.entitlements = {
+    async canAddMember() {
+      return null;
+    },
+    async canActivateFeature() {
+      return null;
+    },
+    async onMembershipChanged(organizationId) {
+      announced.push(organizationId);
+    },
+  };
+  try {
+    const invite = await jsonPost(
+      "/api/auth/organization/invite-member",
+      { email: "seatholder@bento.test", role: "member", organizationId: org.id },
+      token,
+    );
+    assert.equal(invite.status, 200);
+    const invitation = (await invite.json()) as { id: string };
+
+    // The announcement is fire and forget, so it lands just after the
+    // response rather than before it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(announced, [org.id], "creating an invitation holds a seat");
+
+    // Withdrawing it releases the seat, and the organization is found
+    // from the invitation itself: cancelling deletes the row that says
+    // which team it belonged to, so it has to be read first.
+    announced.length = 0;
+    const cancelled = await jsonPost(
+      "/api/auth/organization/cancel-invitation",
+      { invitationId: invitation.id },
+      token,
+    );
+    assert.equal(cancelled.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(announced, [org.id], "withdrawing an invitation releases the seat");
+
+    // A route that changes nothing about the headcount says nothing.
+    announced.length = 0;
+    await app.request("/api/auth/organization/list", { headers: { authorization: `Bearer ${token}` } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(announced, [], "reads are not membership changes");
   } finally {
     delete ctx.entitlements;
   }

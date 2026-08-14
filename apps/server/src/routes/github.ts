@@ -44,6 +44,19 @@ export function githubRoutes(ctx: AppContext) {
       canPublish: Boolean(await githubConnectionFor(ctx, organizationId)),
       canManage: membership ? canManage(membership.role) : false,
       installation: installation ?? null,
+      // Installing is gated on the caller's own GitHub identity, so the
+      // console has to know whether they have one before it offers the
+      // install button. Someone who signed up with an email and a
+      // password has none, and without this the first sign they got was
+      // a refusal on the way back from GitHub. Read from the database
+      // rather than by asking GitHub: this runs on every panel open.
+      identityLinked: await hasLinkedIdentity(ctx, actor(c)),
+      // Whether attaching one is even possible here. GitHub sign in is
+      // configured separately from the App, and an operator who set up
+      // one without the other leaves nobody able to install.
+      canLinkIdentity: Boolean(
+        ctx.env.BENTO_MODE === "multi" && ctx.env.GITHUB_CLIENT_ID && ctx.env.GITHUB_CLIENT_SECRET,
+      ),
     });
   });
 
@@ -105,24 +118,30 @@ export function githubRoutes(ctx: AppContext) {
     return c.json({ url: url.toString() });
   });
 
+  /**
+   * Where GitHub sends the browser back after an install.
+   *
+   * Every answer here is a redirect, never JSON. A person arrives on
+   * this route by being bounced off github.com, so a refusal rendered
+   * as `{"error":...}` is a dead end page in a tab they cannot get out
+   * of. The console reads the outcome off the query string and says
+   * what to do next, which for the common refusal is one button away.
+   */
   routes.get("/callback", async (c) => {
-    if (!ctx.githubApp || !ctx.env.BENTO_SECRET_KEY) return c.json({ error: "GitHub App is not configured" }, 503);
+    if (!ctx.githubApp || !ctx.env.BENTO_SECRET_KEY) return outcome(c, "unconfigured");
     const state = verifyState(c.req.query("state"), ctx.env.BENTO_SECRET_KEY);
     const installationId = c.req.query("installation_id");
     if (!state || !installationId || state.expiresAt < Date.now() || state.userId !== actor(c)) {
-      return c.json({ error: "invalid or expired GitHub installation request" }, 400);
+      return outcome(c, "invalid");
     }
-    if (activeOrg(c) !== state.organizationId) {
-      return c.json({ error: "switch back to the organization that started this installation" }, 409);
-    }
+    if (activeOrg(c) !== state.organizationId) return outcome(c, "organization");
     const membership = await membershipFor(ctx, c, state.organizationId);
-    if (!membership || !canManage(membership.role)) return c.json({ error: "not found" }, 404);
-    if (!(await userCanAccessInstallation(ctx, actor(c), installationId))) {
-      return c.json({ error: "sign in with GitHub using an account that can manage this installation" }, 403);
-    }
+    if (!membership || !canManage(membership.role)) return outcome(c, "denied");
+    const refusal = await installationRefusal(ctx, actor(c), installationId);
+    if (refusal) return outcome(c, refusalOutcome(refusal));
 
     await bindInstallation(ctx, c, state.organizationId, installationId);
-    return c.redirect("/?github=connected");
+    return outcome(c, "connected");
   });
 
   /**
@@ -143,7 +162,13 @@ export function githubRoutes(ctx: AppContext) {
       return c.json({ error: "GitHub App installation is not configured" }, 503);
     }
     const appId = Number(ctx.env.GITHUB_APP_ID);
-    const rows = (await accessibleInstallations(ctx, actor(c)))
+    const identity = await githubIdentity(ctx, actor(c));
+    // No GitHub identity is not an error here: it is the ordinary state
+    // of an account made with an email and a password, and the console
+    // offers to attach one. An empty list says the same thing to a
+    // client that only knows how to render installations.
+    if (identity.state !== "linked") return c.json([]);
+    const rows = identity.installations
       // Only this App's installations: the user's token sees every app
       // they have anywhere, and offering a stranger's would fail at
       // listRepositories with a confusing credential error.
@@ -169,9 +194,8 @@ export function githubRoutes(ctx: AppContext) {
       // identity must be able to see this installation. Without it any
       // admin could bind any organization's installation by guessing
       // ids.
-      if (!(await userCanAccessInstallation(ctx, actor(c), installationId))) {
-        return c.json({ error: "sign in with GitHub using an account that can manage this installation" }, 403);
-      }
+      const refusal = await installationRefusal(ctx, actor(c), installationId);
+      if (refusal) return c.json({ error: refusalMessage(refusal), code: refusalCode(refusal) }, 403);
       await bindInstallation(ctx, c, membership.organizationId, installationId);
       return c.json({ ok: true });
     },
@@ -293,6 +317,34 @@ type AccessibleInstallation = {
 };
 
 /**
+ * What the caller's own GitHub identity can prove.
+ *
+ * The three states are three different sentences to the person. There
+ * is no GitHub account attached to this Bento account, which is where
+ * everyone who signed up with an email and a password starts and is
+ * fixed by attaching one. There is one and GitHub no longer accepts its
+ * token, which is fixed by attaching it again. Or there is one, and
+ * these are the installations it sees.
+ */
+type GitHubIdentity =
+  | { state: "linked"; installations: AccessibleInstallation[] }
+  | { state: "missing" }
+  | { state: "stale" };
+
+/** Why an installation may not be bound, or null when it may. */
+type Refusal = "missing" | "stale" | "unseen";
+
+/** Whether a GitHub account is attached at all, without asking GitHub. */
+async function hasLinkedIdentity(ctx: AppContext, userId: string): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ accessToken: account.accessToken })
+    .from(account)
+    .where(and(eq(account.userId, userId), eq(account.providerId, "github")))
+    .limit(1);
+  return Boolean(row?.accessToken);
+}
+
+/**
  * The installations the user's own GitHub identity can reach.
  *
  * This is what makes connecting after the fact possible: an install
@@ -302,13 +354,13 @@ type AccessibleInstallation = {
  * installation here, and seeing it is the proof the callback's check
  * was already built on.
  */
-async function accessibleInstallations(ctx: AppContext, userId: string): Promise<AccessibleInstallation[]> {
+async function githubIdentity(ctx: AppContext, userId: string): Promise<GitHubIdentity> {
   const [githubAccount] = await ctx.db
     .select({ accessToken: account.accessToken })
     .from(account)
     .where(and(eq(account.userId, userId), eq(account.providerId, "github")))
     .limit(1);
-  if (!githubAccount?.accessToken) return [];
+  if (!githubAccount?.accessToken) return { state: "missing" };
 
   const found: AccessibleInstallation[] = [];
   for (let page = 1; page <= 10; page += 1) {
@@ -319,7 +371,22 @@ async function accessibleInstallations(ctx: AppContext, userId: string): Promise
         "x-github-api-version": "2022-11-28",
       },
     });
-    if (!response.ok) return found;
+    // 401 is the one answer that means the stored token is no longer an
+    // identity: revoked, or expired if the App issues expiring user
+    // tokens. Said plainly, because "no installations found" sent
+    // people back to GitHub to install an App they had already
+    // installed. A 403 is not in this bucket: rate limiting arrives as
+    // one, and telling someone to reconnect over a spent quota would be
+    // a lie they cannot act on.
+    if (response.status === 401) return { state: "stale" };
+    // Any other failure keeps whatever pages did arrive, as before: an
+    // incomplete list is still worth offering. Logged, because from the
+    // console it is indistinguishable from an account that simply has
+    // no installations, and the two want opposite fixes.
+    if (!response.ok) {
+      console.warn(`[github] /user/installations answered ${response.status} for user ${userId}`);
+      break;
+    }
     const body = (await response.json()) as {
       installations?: { id: number; app_id?: number; account?: { login?: string; type?: string } }[];
     };
@@ -334,10 +401,48 @@ async function accessibleInstallations(ctx: AppContext, userId: string): Promise
     }
     if (rows.length < 100) break;
   }
-  return found;
+  return { state: "linked", installations: found };
 }
 
-async function userCanAccessInstallation(ctx: AppContext, userId: string, installationId: string): Promise<boolean> {
-  const rows = await accessibleInstallations(ctx, userId);
-  return rows.some((row) => String(row.id) === installationId);
+async function installationRefusal(
+  ctx: AppContext,
+  userId: string,
+  installationId: string,
+): Promise<Refusal | null> {
+  const identity = await githubIdentity(ctx, userId);
+  if (identity.state !== "linked") return identity.state;
+  return identity.installations.some((row) => String(row.id) === installationId) ? null : "unseen";
+}
+
+function refusalMessage(refusal: Refusal): string {
+  if (refusal === "missing") {
+    return "connect your GitHub account to Bento first, under Settings, GitHub";
+  }
+  if (refusal === "stale") {
+    return "your GitHub account is no longer connected to Bento; connect it again under Settings, GitHub";
+  }
+  return "connect a GitHub account that can manage this installation";
+}
+
+/** Machine readable twin of the message, so a client can act on it. */
+function refusalCode(refusal: Refusal): string {
+  if (refusal === "missing") return "GITHUB_IDENTITY_MISSING";
+  if (refusal === "stale") return "GITHUB_IDENTITY_STALE";
+  return "GITHUB_INSTALLATION_NOT_VISIBLE";
+}
+
+/** What the console is told, for each way the callback can end. */
+type Outcome = "connected" | "invalid" | "organization" | "denied" | "unconfigured" | "identity" | "stale" | "unseen";
+
+/**
+ * How the install callback answers: a redirect to the console carrying
+ * what happened, for it to explain.
+ */
+function outcome(c: Parameters<typeof actor>[0], result: Outcome) {
+  return c.redirect(`/?github=${result}`);
+}
+
+/** The same refusals, named for the person rather than for the check. */
+function refusalOutcome(refusal: Refusal): Outcome {
+  return refusal === "missing" ? "identity" : refusal;
 }
