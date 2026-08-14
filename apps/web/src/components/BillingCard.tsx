@@ -60,25 +60,31 @@ export function BillingCard() {
 
   return (
     <section className="section settings-card">
-      <h3 className="settings-title">Plan</h3>
       {/*
-        Three lines, and each is something billed: what the plan costs,
-        the seats, the hours. Live features are shown nowhere because
-        nothing charges for them, and a number on a billing card reads
-        as a number on a bill. The team's own model spend is absent for
-        the same reason: it goes to their provider, not to us, and this
-        card is about what we charge.
+        The plan is the headline, not a word inside a sentence. The old
+        line buried "Pro" mid-paragraph, and the one fact everyone
+        opens this tab for should be readable from across the room: the
+        name large, the team's own total beside it, and the per seat
+        rate as the small print under both.
       */}
-      <p className="muted">
-        This team is on the <strong>{state.planName}</strong> plan
-        {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 ? (
-          <>
-            , {seatPrice(current.pricing).toLowerCase()}: <strong>{monthlyTotal(current, state.seats.held)}</strong>
-          </>
-        ) : (
-          "."
+      <div className="plan-head">
+        <h3 className="settings-title">Plan</h3>
+        <div className="plan-head-row">
+          <span className="plan-name">{state.planName}</span>
+          {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
+            <span className="plan-total">{monthlyTotal(current, state.seats.held)}</span>
+          )}
+        </div>
+        {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
+          <span className="muted plan-rate">{seatPrice(current.pricing)}</span>
         )}
-      </p>
+      </div>
+      {/*
+        Then one line per thing billed: seats, hours. Live features are
+        shown nowhere because nothing charges for them, and the team's
+        own model spend is absent because it goes to their provider,
+        not to us.
+      */}
       <p className="muted">{meter(state.usage.members, state.limits.members, "members")}.</p>
       <p className="muted">
         {state.agentHours.used} of {state.agentHours.included} agent hours used, resetting on{" "}

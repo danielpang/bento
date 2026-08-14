@@ -3927,3 +3927,37 @@ button.session-expand[aria-pressed="true"] {
   gap: 8px;
   background: var(--panel-raised);
 }
+
+/* The plan as a headline. The name is the one fact everyone opens the
+   Billing tab for, so it reads at a glance rather than mid-sentence;
+   the team's own total sits beside it, the per seat rate beneath. */
+.plan-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.plan-head-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.plan-name {
+  font-size: 22px;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  color: var(--brand);
+  line-height: 1.2;
+}
+
+.plan-total {
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.plan-rate {
+  font-size: 12.5px;
+}
