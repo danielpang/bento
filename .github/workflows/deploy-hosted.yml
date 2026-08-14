@@ -45,9 +45,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: development
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -65,13 +65,13 @@ jobs:
     needs: migrate-development
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The private module, checked out beside the public code. The
       # public Dockerfile copies only the paths it names, so this
       # directory cannot leak into the public image. A dispatch names
       # the commit to layer; a bento-side deploy uses bento-cloud main.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: danielpang/bento-cloud
           token: ${{ secrets.BENTO_CLOUD_TOKEN }}
@@ -92,7 +92,7 @@ jobs:
       - name: Save the hosted image
         run: docker save bento-hosted:ci | gzip > bento-hosted.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: bento-hosted
           path: bento-hosted.tar.gz
@@ -104,9 +104,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: development
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: bento-hosted
 
@@ -133,9 +133,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -155,9 +155,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: bento-hosted
 
