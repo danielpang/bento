@@ -65,6 +65,33 @@ test("an unrecognised model is attributed to nobody", () => {
   assert.equal(providerForProfile("opencode", "GLM-5.2"), undefined);
 });
 
+/**
+ * Cursor bills every model it runs through the Cursor plan, so its
+ * picker is not limited to the companies Bento holds a key for. These
+ * are the ids that were typeable but unlisted before.
+ */
+test("Cursor reaches the models that are only its own", () => {
+  assert.equal(providerForProfile("cursor", "composer-1")?.id, "cursor");
+  assert.equal(providerForProfile("cursor", "grok-4.5")?.id, "xai");
+  assert.equal(checkAgentPairing("cursor", "composer-1").status, "ok");
+  assert.equal(checkAgentPairing("cursor", "grok-4.5").status, "ok");
+  // And still reaches the two it always did.
+  assert.equal(providerForProfile("cursor", "claude-sonnet-5")?.id, "anthropic");
+  assert.equal(providerForProfile("cursor", "gpt-5.4")?.id, "openai");
+});
+
+/**
+ * The other half of listing them: a provider in the catalog is a
+ * provider every tool is checked against, so Composer is now refused
+ * where it could only have failed inside a sandbox before.
+ */
+test("a Cursor only model is impossible for the other tools", () => {
+  const verdict = checkAgentPairing("claude-code", "composer-1");
+  assert.equal(verdict.status, "impossible");
+  assert.match(verdict.detail, /cannot run Cursor models/);
+  assert.equal(checkAgentPairing("codex", "grok-4.5").status, "impossible");
+});
+
 test("the fake agent has no provider", () => {
   assert.equal(providerForProfile("fake", "fake-1"), undefined);
 });

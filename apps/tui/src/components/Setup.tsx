@@ -783,7 +783,7 @@ export function Setup({
     const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
     return (
       <Frame title={`${tool?.label ?? screen.cli}: which provider?`} hint="j/k move · Enter choose · Escape back">
-        <Text color="gray">Only providers whose key Bento can store are listed.</Text>
+        <Text color="gray">Only providers this tool can reach are listed.</Text>
         <Box flexDirection="column" marginTop={1}>
           {options.map((provider, i) => (
             <Row
