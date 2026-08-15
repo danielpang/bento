@@ -1506,6 +1506,12 @@ button {
   border-color: var(--line);
 }
 
+/* A chip closing a row: held at its own width, so a long issue title
+   wraps rather than squeezing "Already in Bento" onto three lines. */
+.gate-check .chip {
+  flex: none;
+}
+
 /* Shell, so it is read as shell: a proportional font turns a pasted
    command into something that has to be squinted at. */
 .repo-command-input {
