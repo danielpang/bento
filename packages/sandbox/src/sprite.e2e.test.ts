@@ -247,9 +247,14 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * construction.
    */
   await t.test("a warm provision sweeps around artifacts and strays, and reaps checkouts", { skip: needsSprite() }, async () => {
+    // The abandoned .git carries a file, as every real one does: the
+    // live API lists an empty directory as no entries at all, which
+    // the SDK maps to ENOENT, so a bare mkdir'd .git reads as missing
+    // and the checkout is (correctly, it is not one) left alone.
     const staged = await shell(
       [
         "mkdir -p /workspace/artifacts /workspace/stray /workspace/abandoned/.git",
+        "printf 'ref: refs/heads/main\\n' > /workspace/abandoned/.git/HEAD",
         "printf 'kept' > /workspace/artifacts/mockup.html",
       ].join(" && "),
     );
