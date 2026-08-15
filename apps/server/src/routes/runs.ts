@@ -297,6 +297,16 @@ export function runRoutes(ctx: AppContext) {
           finished = status;
           nudge();
         });
+        // The replication listener reconnected, so events emitted on
+        // another machine may have passed unheard. The loop answers
+        // with the same catch-up query the stream runs at open. This
+        // is the one exception to "the database exactly once", and it
+        // fires only after a LISTEN outage, never on a timer.
+        let needResync = false;
+        const unsubscribeResync = ctx.bus.onResync(() => {
+          needResync = true;
+          nudge();
+        });
 
         try {
           const replay = await db(c, ctx)
@@ -355,6 +365,29 @@ export function runRoutes(ctx: AppContext) {
               await stream.writeSSE({ event: "run_event", id: String(item.seq), data: JSON.stringify(item.event) });
               lastSeq = item.seq;
             }
+            if (needResync && !finished) {
+              needResync = false;
+              const missed = await db(c, ctx)
+                .select()
+                .from(runEvents)
+                .where(and(eq(runEvents.runId, runId), gt(runEvents.seq, lastSeq)))
+                .orderBy(asc(runEvents.seq));
+              for (const row of missed) {
+                await stream.writeSSE({ event: "run_event", id: String(row.seq), data: JSON.stringify(row.payload) });
+                lastSeq = row.seq;
+              }
+              // The run may have ended while this process was deaf,
+              // and the run_done that says so is not replayable.
+              const [now] = await db(c, ctx)
+                .select({ status: agentRuns.status })
+                .from(agentRuns)
+                .where(eq(agentRuns.id, runId));
+              if (!now || TERMINAL.has(now.status)) finished = now?.status ?? "unknown";
+              // Queued live events may now be stale duplicates of the
+              // replay above; the seq guard at the top of the drain
+              // already discards them, so loop rather than sleep.
+              continue;
+            }
             if (finished) {
               await stream.writeSSE({ event: "done", data: JSON.stringify({ status: finished }) });
               return;
@@ -381,6 +414,7 @@ export function runRoutes(ctx: AppContext) {
           unsubscribeEvents();
           unsubscribeDeltas();
           unsubscribeDone();
+          unsubscribeResync();
         }
       });
     });
