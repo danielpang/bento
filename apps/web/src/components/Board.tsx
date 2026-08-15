@@ -579,7 +579,19 @@ const Card = memo(function Card({
     if (runStatus !== "succeeded" && runStatus !== "failed") return;
     setFinishing(runStatus);
     const timer = setTimeout(() => setFinishing(null), 900);
-    return () => clearTimeout(timer);
+    /*
+     * The sweep is dropped here as well as on the timer, because a run
+     * starting inside those 900ms cancels the timer and leaves nothing
+     * to drop it: the card would wear data-finish from then on, and the
+     * finish rule sits after the running one at equal weight and ends
+     * at opacity 0, so the next agent would work behind a dead card.
+     * The card an agent is working glows; the closing gesture gives way
+     * to it.
+     */
+    return () => {
+      clearTimeout(timer);
+      setFinishing(null);
+    };
   }, [runActive, runStatus]);
 
   return (
@@ -631,13 +643,14 @@ const Card = memo(function Card({
       </span>
       {/*
         The agent's own words while it works, and its last words when it
-        fails, which is the reason the card went red. Keyed on the run
-        rather than the card state, which is what kept the narration on
-        a card whose gate still holds it. Hidden once everything
-        settles: yesterday's sentence on an idle card reads as though
-        something is still happening.
+        fails, which is why the run ended where it did. Keyed on the run
+        rather than the card state: a run that fails under a gate still
+        holding the card leaves the card reading "gated", and the reason
+        it failed is exactly what a person needs at that point. Hidden
+        once everything settles: yesterday's sentence on an idle card
+        reads as though something is still happening.
       */}
-      {lastOutput && (runActive || state === "failed") && (
+      {lastOutput && (runActive || runStatus === "failed") && (
         <span className="card-line" title={lastOutput}>
           {lastOutput}
         </span>
