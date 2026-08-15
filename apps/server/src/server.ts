@@ -1,5 +1,7 @@
 import { serve } from "@hono/node-server";
-import { createDb, createPool, runMigrations } from "@bento/db";
+import { createDb, createPool, runMigrations, runEvents } from "@bento/db";
+import type { AgentEvent } from "@bento/core";
+import { attachPgBus } from "./pg-bus.js";
 import { WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import { createApp } from "./app.js";
@@ -108,6 +110,27 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   await registerJobs(ctx);
 
   /**
+   * Replicates bus events across server processes, so a viewer whose
+   * SSE stream landed on one machine sees a run executing on another.
+   * The load callback runs as the server, not a tenant: access was
+   * already checked when the receiving stream subscribed, exactly as
+   * it is for locally emitted events.
+   */
+  const pgBus = await attachPgBus({
+    bus: ctx.bus,
+    pool,
+    connectionString: env.DATABASE_URL,
+    loadRunEvent: async (runId, seq) => {
+      const [row] = await db
+        .select({ payload: runEvents.payload })
+        .from(runEvents)
+        .where(and(eq(runEvents.runId, runId), eq(runEvents.seq, seq)))
+        .limit(1);
+      return (row?.payload as AgentEvent | undefined) ?? null;
+    },
+  });
+
+  /**
    * The deployment extension, when one is configured. Everything about
    * plans and billing lives in that module, not here: this loader hands
    * it the database, the mailer, and a way to answer "who is asking",
@@ -213,6 +236,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         (server.handle as { closeAllConnections?: () => void }).closeAllConnections?.();
       });
       await boss.stop({ close: true, timeout: 2000 }).catch(() => {});
+      await pgBus.stop().catch(() => {});
       await pool.end().catch(() => {});
     },
   };
