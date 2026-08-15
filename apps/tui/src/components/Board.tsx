@@ -82,15 +82,20 @@ export function Board({
 }
 
 /**
- * What a card is doing, in one word: where the card stands first, then
- * its newest run. The run status has to be known for every card and not
- * just the selected one, or a board of working agents reads as four
- * idle cards and one that is doing something.
+ * What a card is doing, in one word: a working agent first, then where
+ * the card stands, then its newest run. The run status has to be known
+ * for every card and not just the selected one, or a board of working
+ * agents reads as four idle cards and one that is doing something.
+ *
+ * A working agent outranks the gate for the same reason: a card stays
+ * gated while an agent judges it or re-runs its stage, and reporting
+ * only the gate hid every one of those agents. The wait line underneath
+ * still says what the gate is holding out for.
  */
 export function cardState(feature: Feature, runStatus: string | undefined): string {
-  if (feature.status === "gated") return "gated";
   if (feature.status === "done") return "done";
   if (runStatus === "queued" || runStatus === "starting" || runStatus === "running") return runStatus;
+  if (feature.status === "gated") return "gated";
   if (!feature.currentStageId) return "backlog";
   return runStatus ?? "idle";
 }
