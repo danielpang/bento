@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
-import { stageArtifactPath } from "@bento/core";
+import { stageArtifactPath, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { runArtifacts } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
@@ -25,9 +25,6 @@ import type { AppContext } from "../context.js";
  * code. Capture failing must never fail the run: the work is already
  * done, and a note in the transcript beats a red card.
  */
-
-/** Directory inside the workspace, next to the repository checkouts. */
-export const WORKSPACE_ARTIFACT_DIR = "artifacts";
 
 /** One oversized screencast must not become a surprise storage bill. */
 export const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
@@ -135,8 +132,11 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
   }));
 
   const artifactDir = `${args.handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`;
+  // The routes reserve the directory's name, but a repository row
+  // created before they did could still check out here; nothing under
+  // a .git is ever an artifact, and capture deletes what it keeps.
   const listing = await sh(
-    `[ -d ${shellQuote(artifactDir)} ] || exit 0; find ${shellQuote(artifactDir)} -type f | sort`,
+    `[ -d ${shellQuote(artifactDir)} ] || exit 0; find ${shellQuote(artifactDir)} -type f -not -path '*/.git/*' | sort`,
   );
   const listed = listing.exitCode === 0
     ? listing.stdout.split("\n").map((line) => line.trim()).filter(Boolean)

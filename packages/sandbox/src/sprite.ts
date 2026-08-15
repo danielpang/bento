@@ -1,4 +1,5 @@
-import { APIError, SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
+import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
+import { APIError, FilesystemError, SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
 import {
   AGENT_BINARIES,
   AGENT_TOOLCHAIN_SCRIPT,
@@ -231,8 +232,11 @@ export class SpriteDriver implements SandboxDriver {
 
     // A Sprite persists for the life of a feature. Removing a repository
     // from the project must remove its old checkout too, otherwise every
-    // later agent can still read and modify it.
-    const keep = new Set((spec.repositories ?? []).map((repo) => repo.name));
+    // later agent can still read and modify it. The artifacts directory
+    // is kept the same way the checkouts are: it is Bento's own, named
+    // to the agent by the prompt and read back by capture, and the
+    // repository routes reserve the name so no checkout can claim it.
+    const keep = new Set([WORKSPACE_ARTIFACT_DIR, ...(spec.repositories ?? []).map((repo) => repo.name)]);
     const filesystem = sprite.filesystem("/");
     /**
      * An empty workspace is not an error, though the SDK makes it look
@@ -250,7 +254,11 @@ export class SpriteDriver implements SandboxDriver {
      */
     const entries = await bounded(
       filesystem.readdir(this.workdir, { withFileTypes: true }).catch((err: unknown) => {
-        if (err instanceof TypeError) return [];
+        // Only the SDK's own null dereference; undici reports a
+        // transport failure as TypeError("fetch failed") too, but that
+        // one carries the underlying error as its cause and an outage
+        // must not read as an empty workspace with nothing to sweep.
+        if (err instanceof TypeError && err.cause === undefined) return [];
         throw err;
       }),
       FILESYSTEM_TIMEOUT_MS,
@@ -259,9 +267,25 @@ export class SpriteDriver implements SandboxDriver {
     for (const entry of entries) {
       if (!entry.isDirectory() || keep.has(entry.name)) continue;
       const candidate = `${this.workdir}/${entry.name}`;
-      if (!(await bounded(filesystem.exists(`${candidate}/.git`), FILESYSTEM_TIMEOUT_MS, "checking a checkout"))) {
-        continue;
-      }
+      /**
+       * exists() is not to be trusted with a missing path: the SDK only
+       * maps a structured ENOENT to false, and the live API answers a
+       * missing path with the OS's own words and no code, which the
+       * SDK rethrows. The first artifacts directory a reused sprite
+       * grew failed every later provision of its card exactly there.
+       * A path shown to be missing is not a checkout; see
+       * pathWasMissing for why the error class alone is not trusted.
+       * The catch sits inside bounded so its timeout still travels.
+       */
+      const isCheckout = await bounded(
+        filesystem.exists(`${candidate}/.git`).catch((err: unknown) => {
+          if (pathWasMissing(err)) return false;
+          throw err;
+        }),
+        FILESYSTEM_TIMEOUT_MS,
+        "checking a checkout",
+      );
+      if (!isCheckout) continue;
       await bounded(
         filesystem.rm(candidate, { recursive: true, force: true }),
         FILESYSTEM_TIMEOUT_MS,
@@ -857,6 +881,27 @@ const EXEC_CONNECT_TIMEOUT_MS = 2 * 60_000;
 const FILESYSTEM_TIMEOUT_MS = 5 * 60_000;
 const CHECKPOINT_TIMEOUT_MS = 5 * 60_000;
 const RESTORE_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Whether a filesystem call failed because the path is not there, as
+ * opposed to the API failing to answer.
+ *
+ * Being a FilesystemError proves nothing: the SDK wraps every non-ok
+ * response in that class, so an expired token or a 503 arrives wearing
+ * it too, and forgiving the class would let an API outage silently
+ * cancel the sweep that removes dropped repositories. Only the shapes
+ * that name a missing path are forgiven: a structured ENOENT, the live
+ * API's unmapped "no such file or directory" (code UNKNOWN), and the
+ * SDK's own null dereference when /list answers with entries: null,
+ * the same quirk the readdir workaround above absorbs. undici's
+ * transport TypeError carries a cause and still travels.
+ */
+function pathWasMissing(err: unknown): boolean {
+  if (err instanceof TypeError) return err.cause === undefined;
+  if (!(err instanceof FilesystemError)) return false;
+  if (err.code === "ENOENT") return true;
+  return err.code === "UNKNOWN" && /no such file or directory/i.test(err.message);
+}
 
 /**
  * Races unbounded SDK work against a deadline. The underlying request

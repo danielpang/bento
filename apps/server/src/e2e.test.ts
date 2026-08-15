@@ -2487,6 +2487,56 @@ test("a project keeps at least one repository", { timeout: 60_000 }, async () =>
   assert.equal(res.status, 409, "removing the last repository is refused");
 });
 
+/**
+ * The workspace has one directory that is not a checkout: artifacts/,
+ * where agents put mockups and previews. A repository with that name
+ * would collide with it, so a typed name is refused outright, and a
+ * name derived from a path (or a GitHub repository actually called
+ * artifacts) is suffixed the same way a duplicate is.
+ */
+test("a repository cannot claim the artifacts directory", { timeout: 60_000 }, async () => {
+  const { project } = await setupProject("Reserved name");
+
+  const typed = await app.request(`/api/projects/${project.id}/repositories`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "artifacts", localPath: repoDir }),
+  });
+  assert.equal(typed.status, 400, "a repository named artifacts should be refused");
+
+  // A checkout whose directory is named artifacts, the shape a GitHub
+  // repository called artifacts arrives in.
+  const parent = await mkdtemp(path.join(tmpdir(), "bento-fixture-reserved-"));
+  const dir = path.join(parent, "artifacts");
+  await mkdir(dir);
+  await run("git", ["-C", dir, "init", "-b", "main"]);
+  await writeFile(path.join(dir, "README.md"), "reserved\n");
+  await run("git", ["-C", dir, "add", "-A"]);
+  await run("git", ["-C", dir, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "init"]);
+
+  const derived = await json<{ name: string }>(
+    await app.request(`/api/projects/${project.id}/repositories`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ localPath: dir }),
+    }),
+  );
+  assert.equal(derived.name, "artifacts-2", "a derived artifacts name should be suffixed, not claimed");
+
+  // And the same at project creation, where names settle in one batch.
+  const created = await json<{ id: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Reserved at creation", repositories: [{ localPath: dir }] }),
+    }),
+  );
+  const names = (await json<{ name: string }[]>(
+    await app.request(`/api/projects/${created.id}/repositories`),
+  )).map((r) => r.name);
+  assert.deepEqual(names, ["artifacts-2"]);
+});
+
 test("publication transcript events arrive before a successful run is done", { timeout: 90_000 }, async () => {
   const source = await fixtureRepo("publication-order");
 

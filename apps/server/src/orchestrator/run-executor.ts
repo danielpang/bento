@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, lt, notLike, sql } from "drizzle-orm";
-import type { RunOutcome } from "@bento/core";
+import { WORKSPACE_ARTIFACT_DIR, type RunOutcome } from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
   agentProfiles,
@@ -19,7 +19,7 @@ import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
 import { runRepositorySetup } from "./repo-setup.js";
-import { captureRunArtifacts, WORKSPACE_ARTIFACT_DIR } from "./capture-artifacts.js";
+import { captureRunArtifacts } from "./capture-artifacts.js";
 import { evaluateFeatureGate, JUDGE_PROMPT_PREFIX } from "./gate-evaluator.js";
 import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";

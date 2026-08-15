@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, inArray, isNull, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { gateCriteria } from "@bento/core";
+import { gateCriteria, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -49,6 +49,11 @@ const repositoryInput = z.object({
     .max(64)
     .regex(/^[a-zA-Z0-9._-]+$/, "use letters, numbers, dots, dashes, or underscores")
     .refine((v) => !/^\.+$/.test(v), "name cannot be only dots")
+    // The workspace has one non-checkout directory of its own, where
+    // agents put mockups and previews. A checkout with that name would
+    // be swept up by artifact capture (its files uploaded and then
+    // deleted) and could never be reaped when removed.
+    .refine((v) => v !== WORKSPACE_ARTIFACT_DIR, `${WORKSPACE_ARTIFACT_DIR} is reserved for agent output`)
     .optional(),
   localPath: z.string().min(1).optional(),
   repoUrl: z.string().optional(),
@@ -112,9 +117,15 @@ async function mirrorFirstRepository(
     .where(eq(projects.id, projectId));
 }
 
-/** Makes each repository name unique within the project. */
+/**
+ * Makes each repository name unique within the project. The schema
+ * refuses the reserved artifacts name only when it was typed; a name
+ * derived from a GitHub repository or a local path arrives here
+ * unchecked, so the reserved name starts out taken and such a
+ * repository checks out under a suffixed directory instead.
+ */
 function uniqueNames(names: string[]): string[] {
-  const seen = new Map<string, number>();
+  const seen = new Map<string, number>([[WORKSPACE_ARTIFACT_DIR, 1]]);
   return names.map((name) => {
     const count = seen.get(name) ?? 0;
     seen.set(name, count + 1);
@@ -301,7 +312,8 @@ export function projectRoutes(ctx: AppContext) {
 
       const existing = await db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId));
       const wanted = body.name ?? repoNameFromPath(body.localPath);
-      const taken = new Set(existing.map((r) => r.name));
+      // The reserved artifacts directory counts as taken; see uniqueNames.
+      const taken = new Set([WORKSPACE_ARTIFACT_DIR, ...existing.map((r) => r.name)]);
       let name = wanted;
       for (let i = 2; taken.has(name); i++) name = `${wanted}-${i}`;
 
