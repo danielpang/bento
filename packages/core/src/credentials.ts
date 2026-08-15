@@ -53,7 +53,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "CURSOR_API_KEY",
     label: "Cursor",
-    help: "Used by the Cursor CLI.",
+    help: "Used by the Cursor CLI, whichever model it runs. Composer, Grok, Claude and GPT are all billed through your Cursor plan, so none of them needs that company's own key.",
     secret: true,
   },
   {
@@ -134,8 +134,9 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     cli: "cursor",
     label: "Cursor CLI",
     defaultModel: "claude-sonnet-5",
-    format: "A model id supported by your Cursor plan.",
-    examples: ["claude-sonnet-5"],
+    format:
+      "A model id supported by your Cursor plan. Cursor bills all of them, so Composer and Grok need no key of their own.",
+    examples: ["claude-sonnet-5", "composer-1", "grok-4.5", "auto"],
     binary: "cursor-agent",
     installUrl: "https://cursor.com/cli",
     installCommand: "curl -fsS https://cursor.com/install | bash",

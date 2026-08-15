@@ -1,5 +1,6 @@
 import { AGENT_CREDENTIALS, MODEL_GUIDANCE } from "./credentials.js";
-import { MODEL_CATALOG } from "./model-catalog.generated.js";
+import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
+import { MANUAL_CATALOG } from "./model-catalog.manual.js";
 
 export interface CatalogModel {
   id: string;
@@ -16,7 +17,14 @@ export interface CatalogProvider {
   models: readonly CatalogModel[];
 }
 
-export { MODEL_CATALOG };
+/**
+ * Every provider Bento knows, refreshed ones first.
+ *
+ * The generated half comes from models.dev; the manual half is what that
+ * snapshot cannot describe. Order matters only where a bare model id is
+ * served by more than one provider, and the two halves overlap in no id.
+ */
+export const MODEL_CATALOG: readonly CatalogProvider[] = [...GENERATED_CATALOG, ...MANUAL_CATALOG];
 
 /**
  * Which providers a tool can be pointed at.
@@ -26,14 +34,18 @@ export { MODEL_CATALOG };
  * base URL is set. The provider agnostic ones name the provider in the
  * model string, so they can use anything in the catalog.
  *
- * Cursor is absent from models.dev and its list depends on the plan, so
- * it offers the ids people actually use there and relies on manual entry
- * for the rest.
+ * Cursor is the exception on both counts. It takes a bare id like the
+ * single provider tools, but it is not tied to one company: everything
+ * it runs is billed through the Cursor plan, so Composer and Grok are
+ * offered beside Claude and GPT rather than needing a key each. Its
+ * catalogue depends on the plan, so manual entry still covers the rest.
+ * Anthropic stays first because Cursor's default model is a Claude one,
+ * which is the fallback providerForProfile leans on.
  */
 const BY_CLI: Record<string, readonly string[]> = {
   "claude-code": ["anthropic", "openrouter"],
   codex: ["openai", "openrouter"],
-  cursor: ["anthropic", "openai"],
+  cursor: ["anthropic", "openai", "google", "xai", "cursor"],
   opencode: ["anthropic", "openai", "google", "openrouter"],
   pi: ["anthropic", "openai", "google", "openrouter"],
   fake: [],
