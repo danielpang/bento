@@ -1557,6 +1557,45 @@ button {
   overscroll-behavior: contain;
 }
 
+/*
+ * The way back to the newest line. The anchor is the last row and
+ * sticks to the pane's bottom edge, so the button hovers over the
+ * conversation wherever the reader has scrolled to. It carries no
+ * height of its own and the button hangs off it absolutely: appearing
+ * must not nudge the transcript, or every new line while scrolled up
+ * would shift the text being read.
+ */
+.chat-jump-anchor {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  height: 0;
+  align-self: stretch;
+}
+.chat-jump {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 4px 12px;
+  border: 1px solid var(--line-bright);
+  border-radius: 999px;
+  background: var(--panel-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  /* A ring of the pane's own background first, so the pill reads as
+     floating above the conversation instead of blending into whichever
+     bubble happens to be behind it. */
+  box-shadow: 0 0 0 3px var(--bg), 0 6px 20px var(--shadow-2);
+}
+.chat-jump:hover {
+  border-color: var(--field-line);
+}
+
 .chat-section {
   display: flex;
   flex-direction: column;

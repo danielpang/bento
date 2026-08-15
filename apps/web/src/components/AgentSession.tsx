@@ -22,6 +22,13 @@ function orbStateFor(tool: string | null): OrbState {
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
 
 /**
+ * How close to the end still counts as reading the newest line, in
+ * pixels. Inside it the pane keeps following the agent; outside it the
+ * reader is somewhere further up and is offered the way back down.
+ */
+const AT_BOTTOM_SLACK = 120;
+
+/**
  * The conversation is rendered from these, never from raw events: a
  * run's event list is folded into rows first, so tool bursts collapse
  * and the pane reads as an exchange between people.
@@ -151,6 +158,39 @@ export function AgentSession({
   const paneRef = useRef<HTMLDivElement>(null);
   /** Whether the pane is pinned to the newest row; reading history unpins it. */
   const stickToBottom = useRef(true);
+  /**
+   * Whether the way back down is offered. A ref cannot drive it: the
+   * pin above is read during scroll and paint, while this decides what
+   * renders, so it has to be state.
+   */
+  const [scrolledUp, setScrolledUp] = useState(false);
+
+  /**
+   * Read the pane's position once and let both halves follow from it,
+   * so the pin and the button can never disagree about where the
+   * reader is.
+   */
+  const readPosition = () => {
+    const el = paneRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < AT_BOTTOM_SLACK;
+    stickToBottom.current = atBottom;
+    setScrolledUp(!atBottom);
+  };
+
+  /**
+   * Straight to the newest line, and pinned there again. Not a smooth
+   * scroll: a long history is thousands of pixels of somebody else's
+   * conversation to sit through, and every frame on the way down reads
+   * as scrolled up, which flickers this very button back into view.
+   */
+  const jumpToBottom = () => {
+    const el = paneRef.current;
+    if (!el) return;
+    stickToBottom.current = true;
+    setScrolledUp(false);
+    el.scrollTop = el.scrollHeight;
+  };
 
   // The server sends runs newest first.
   const latestRun = runs[0];
@@ -359,7 +399,13 @@ export function AgentSession({
     // the draft updates once per animation frame while text streams.
     const frame = requestAnimationFrame(() => {
       const el = paneRef.current;
-      if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+      if (!el) return;
+      if (stickToBottom.current) el.scrollTop = el.scrollHeight;
+      // Output that arrives while the reader is up in the history
+      // pushes the newest line further away, so the offer to jump has
+      // to be reconsidered whenever the transcript grows, not only
+      // when the reader scrolls.
+      readPosition();
     });
     return () => cancelAnimationFrame(frame);
   }, [sections, visiblePending.length, draft]);
@@ -441,15 +487,7 @@ export function AgentSession({
             <span className="muted">{workingName} is getting started...</span>
           </div>
         ) : (
-          <div
-            className="chat"
-            ref={paneRef}
-            onScroll={() => {
-              const el = paneRef.current;
-              if (!el) return;
-              stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-            }}
-          >
+          <div className="chat" ref={paneRef} onScroll={readPosition}>
             {sections.length === 0 && !hasMessages && !draft && <p className="muted">Waiting for output...</p>}
             {sections.map((section) => (
               <div className="chat-section" key={section.key}>
@@ -482,6 +520,20 @@ export function AgentSession({
                   state="pending"
                 />
               ))}
+            {/*
+              The way back down, offered only while the reader is far
+              enough up that the newest line is out of sight. It rides
+              the bottom of the pane rather than the end of the
+              transcript, so it stays reachable from anywhere in a long
+              history.
+            */}
+            {scrolledUp && (
+              <div className="chat-jump-anchor">
+                <button type="button" className="chat-jump" onClick={jumpToBottom}>
+                  Jump to latest ↓
+                </button>
+              </div>
+            )}
           </div>
         )
       ) : (
