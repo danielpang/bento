@@ -49,10 +49,20 @@ export async function attachPgBus(options: PgBusOptions): Promise<PgBus> {
   let stopped = false;
   let client: pg.Client | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
+  /**
+   * Notifications are handled strictly in arrival order. Dispatch is
+   * async (a run_event fetches its payload), and two fetches racing
+   * can resolve out of order; the stream's seq guard would then
+   * discard the earlier event as stale and the viewer would lose it
+   * until a resync that only fires on connection loss.
+   */
+  let dispatchChain: Promise<void> = Promise.resolve();
 
   bus.setPublisher((payload: BusWirePayload) => {
     const body = JSON.stringify({ origin, ...payload });
-    if (body.length > MAX_PAYLOAD_BYTES) {
+    // Bytes, not code units: NOTIFY's limit is a byte count, and a
+    // multibyte delta can double its length on the wire.
+    if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) {
       if (payload.kind === "run_delta") return;
       // Nothing else should ever get here: run events travel as
       // coordinates and the rest is small by construction.
@@ -112,9 +122,12 @@ export async function attachPgBus(options: PgBusOptions): Promise<PgBus> {
     client = next;
     next.on("notification", (msg) => {
       if (msg.payload === undefined) return;
-      void dispatch(msg.payload).catch((err) => {
-        console.error("pg bus: dispatch failed:", err);
-      });
+      const raw = msg.payload;
+      dispatchChain = dispatchChain
+        .then(() => dispatch(raw))
+        .catch((err) => {
+          console.error("pg bus: dispatch failed:", err);
+        });
     });
     // A dead LISTEN connection makes this process deaf, not fine:
     // reconnect, and then tell local streams to re-query what they
