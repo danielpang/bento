@@ -137,8 +137,16 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   // that itself points at logs ("check server logs") has not explained
   // anything either; opencode wraps every internal failure that way,
   // and the actual reason is in the stderr tail.
-  const explained = events.some((event) => event.type === "result");
-  const unexplained = !explained || /check server logs/i.test(outcome.error ?? "");
+  // A failed result with no error text explained nothing either:
+  // claude-code's error_during_execution arrives exactly that way, and
+  // the reason sits in the stderr tail.
+  const explained = events.some((event) => event.type === "result" && (event.ok || Boolean(event.error)));
+  // A subtype name ("Claude Code reported during execution") is a
+  // shape, not a reason; the tail still carries the substance.
+  const unexplained =
+    !explained ||
+    /check server logs/i.test(outcome.error ?? "") ||
+    /^Claude Code reported /.test(outcome.error ?? "");
   if (!outcome.ok && unexplained && tail) {
     return { events, exitCode, outcome: { ...outcome, error: `${outcome.error ?? "failed"}: ${tail}` } };
   }

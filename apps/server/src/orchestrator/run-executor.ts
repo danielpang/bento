@@ -846,15 +846,23 @@ async function finishRun(
    *
    * Only when the transcript does not already end in the agent's own
    * result: an agent that reported its failure said so on its final
-   * event, and saying it twice reads like two failures.
+   * event, and saying it twice reads like two failures. A result event
+   * that carried no error text explained nothing, so the reason still
+   * goes in; without this, claude-code's bare error_during_execution
+   * results left the card reading "no reason reported" while the
+   * enriched reason sat in a column nothing rendered.
    */
   if (!outcome.ok && outcome.error) {
     const [reported] = await ctx.db
-      .select({ seq: runEvents.seq })
+      .select({ payload: runEvents.payload })
       .from(runEvents)
       .where(and(eq(runEvents.runId, runId), eq(runEvents.type, "result")))
       .limit(1);
-    if (!reported) {
+    const resultExplained =
+      reported !== undefined &&
+      typeof (reported.payload as { error?: unknown } | null)?.error === "string" &&
+      ((reported.payload as { error: string }).error.trim() !== "");
+    if (!resultExplained) {
       const [last] = await ctx.db
         .select({ seq: runEvents.seq })
         .from(runEvents)

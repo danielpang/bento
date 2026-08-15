@@ -44,6 +44,22 @@ test("claude-code adapter fails on error result", () => {
   assert.equal(outcome.error, "boom");
 });
 
+/**
+ * error_during_execution and error_max_turns results arrive with no
+ * `result` field at all. The subtype names the failure so the run does
+ * not read "no reason reported"; runAgent appends the stderr tail.
+ */
+test("claude-code adapter names a reasonless error result by its subtype", () => {
+  const event = claudeCodeAdapter.parseEvent(
+    `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"abc"}`,
+  );
+  assert.ok(event?.type === "result" && !event.ok);
+  assert.equal(event.error, "Claude Code reported error during execution");
+  const outcome = claudeCodeAdapter.extractOutcome([event], 1);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error, "Claude Code reported error during execution");
+});
+
 test("claude-code adapter fails when stream ends without result", () => {
   const outcome = claudeCodeAdapter.extractOutcome([], 137);
   assert.equal(outcome.ok, false);

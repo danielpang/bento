@@ -141,7 +141,18 @@ export const claudeCodeAdapter: AgentAdapter = {
       if (parsed.session_id !== undefined) ev.sessionId = parsed.session_id;
       if (parsed.total_cost_usd !== undefined) ev.costUsd = parsed.total_cost_usd;
       if (parsed.num_turns !== undefined) ev.numTurns = parsed.num_turns;
-      if (parsed.is_error && parsed.result !== undefined) ev.error = parsed.result;
+      /**
+       * Error results do not always carry text: subtypes like
+       * error_during_execution and error_max_turns arrive with no
+       * `result` field at all, and a reasonless failure rendered as
+       * "no reason reported". The subtype at least names the shape of
+       * the failure; runAgent appends the stderr tail for the rest.
+       */
+      if (parsed.is_error) {
+        ev.error =
+          parsed.result ??
+          (parsed.subtype ? `Claude Code reported ${parsed.subtype.replaceAll("_", " ")}` : undefined);
+      }
       return ev;
     }
 
