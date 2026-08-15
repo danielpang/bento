@@ -396,18 +396,13 @@ function ImportCard({ client, projects }: { client: BentoClient; projects: Proje
         <p className="muted">No open backlog issues in this team.</p>
       )}
       {issues.map((issue) => (
-        <label key={issue.id} className="gate-check">
-          <input
-            type="checkbox"
-            checked={selected.has(issue.id)}
-            disabled={busy || issue.imported}
-            onChange={() => toggle(issue.id)}
-          />
-          <span className="gate-check-text">
-            {issue.identifier} {issue.title}
-            {issue.imported ? " (imported)" : ""}
-          </span>
-        </label>
+        <ImportIssueRow
+          key={issue.id}
+          issue={issue}
+          checked={selected.has(issue.id)}
+          busy={busy}
+          onToggle={() => toggle(issue.id)}
+        />
       ))}
       {cursor && teamId && (
         <button className="btn btn-ghost" disabled={busy} onClick={() => void loadIssues(teamId, cursor)}>
@@ -415,5 +410,47 @@ function ImportCard({ client, projects }: { client: BentoClient; projects: Proje
         </button>
       )}
     </section>
+  );
+}
+
+/** Why an already linked row will not check, at length. */
+const ALREADY_IN_BENTO = "This issue is already a card in Bento, so it cannot be imported again.";
+
+/**
+ * One issue in the import list.
+ *
+ * An issue Bento already has cannot be selected, and a checkbox that
+ * refuses with no reason beside it reads as broken, so the row says why
+ * twice: a chip for anyone scanning the list, and hover text for the
+ * longer version. The chip sits inside the label, so it is part of the
+ * checkbox's name rather than decoration a screen reader skips.
+ *
+ * The link is unique per organization, not per project, so the chip
+ * claims Bento has the issue and not that this project does.
+ */
+export function ImportIssueRow({
+  issue,
+  checked,
+  busy,
+  onToggle,
+}: {
+  issue: LinearIssueOption;
+  checked: boolean;
+  busy: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <label className="gate-check" title={issue.imported ? ALREADY_IN_BENTO : undefined}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={busy || issue.imported}
+        onChange={onToggle}
+      />
+      <span className="gate-check-text">
+        {issue.identifier} {issue.title}
+      </span>
+      {issue.imported && <span className="chip chip-soft">Already in Bento</span>}
+    </label>
   );
 }
