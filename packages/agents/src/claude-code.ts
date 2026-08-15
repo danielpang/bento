@@ -16,6 +16,12 @@ interface ClaudeLine {
   model?: string;
   is_error?: boolean;
   result?: string;
+  /**
+   * On error results: the actual reasons. A failed resume, for one,
+   * arrives as errors: ["No conversation found with session ID: ..."]
+   * with no `result` field at all.
+   */
+  errors?: unknown[];
   total_cost_usd?: number;
   num_turns?: number;
   message?: { role?: string; content?: ClaudeContentBlock[] };
@@ -142,16 +148,21 @@ export const claudeCodeAdapter: AgentAdapter = {
       if (parsed.total_cost_usd !== undefined) ev.costUsd = parsed.total_cost_usd;
       if (parsed.num_turns !== undefined) ev.numTurns = parsed.num_turns;
       /**
-       * Error results do not always carry text: subtypes like
-       * error_during_execution and error_max_turns arrive with no
-       * `result` field at all, and a reasonless failure rendered as
-       * "no reason reported". The subtype at least names the shape of
-       * the failure; runAgent appends the stderr tail for the rest.
+       * Error results do not always carry text in `result`: subtypes
+       * like error_during_execution put the reasons in `errors`
+       * instead, and error_max_turns can arrive with neither. Checked
+       * in that order, with the subtype as the last resort so a
+       * reasonless failure never renders as "no reason reported";
+       * runAgent appends the stderr tail when only the subtype spoke.
        */
       if (parsed.is_error) {
+        const listed = (parsed.errors ?? [])
+          .filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
+          .join("; ");
         ev.error =
           parsed.result ??
-          (parsed.subtype ? `Claude Code reported ${parsed.subtype.replaceAll("_", " ")}` : undefined);
+          (listed ||
+            (parsed.subtype ? `Claude Code reported ${parsed.subtype.replaceAll("_", " ")}` : undefined));
       }
       return ev;
     }

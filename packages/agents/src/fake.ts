@@ -14,12 +14,23 @@ import { lastResultEvent, type AgentAdapter, type BuildCommandInput } from "./ad
  *   test plants that through the judge profile's skill).
  *   "ARTIFACT" makes it drop files into the workspace artifacts
  *   directory, so a test can prove they are captured onto the card.
+ *   "DEADSESSION" makes a resuming run fail the way claude-code does
+ *   when the sandbox no longer holds the conversation; the same
+ *   prompt without a resume session succeeds, so tests can prove the
+ *   executor's fresh restart.
  */
 export const fakeAdapter: AgentAdapter = {
   cli: "fake",
   requiredEnv: [],
 
   buildCommand(input: BuildCommandInput): string[] {
+    // Resume against a conversation the sandbox lost: an instant error
+    // result naming the session, no init, exit 1, like claude-code.
+    if (input.prompt.includes("DEADSESSION") && input.resumeSessionId) {
+      const session = input.resumeSessionId.replace(/[^a-zA-Z0-9-]/g, "");
+      const script = `echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"No conversation found with session ID: ${session}","session_id":"${session}","total_cost_usd":0,"num_turns":0}' && exit 1`;
+      return ["sh", "-c", script];
+    }
     const shouldFail = input.prompt.includes("FAIL");
     // A run that lasts long enough to be cancelled mid-flight.
     const shouldLinger = input.prompt.includes("SLOW");

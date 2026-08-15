@@ -724,6 +724,64 @@ test("a message sent mid-run is queued and delivered when the run ends", { timeo
 });
 
 /**
+ * A resume against a conversation the sandbox no longer holds fails
+ * instantly, and before the executor learned to recover, the dead
+ * session id was re-persisted and every retry resumed it again: one
+ * card failed the same way three times in a row. Now the id is wiped
+ * and a fresh run with the same prompt starts by itself.
+ */
+test("a resume against a lost conversation restarts fresh instead of failing forever", { timeout: 120_000 }, async () => {
+  const { project } = await setupProject("Dead session");
+  const feature = await createFeature(project.id, "Amnesiac card");
+  const profile = await fakeProfile("deadsession-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  const first = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "settle in" }),
+    }),
+  );
+  assert.equal(await waitForRun(first.id, 90_000), "succeeded");
+
+  // A message on the idle card becomes a resume run in the recorded
+  // session, which the fake then reports as gone.
+  await app.request(`/api/features/${feature.id}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "DEADSESSION carry on" }),
+  });
+
+  interface RunRow {
+    id: string;
+    prompt: string;
+    status: string;
+    cliSessionId: string | null;
+    error: string | null;
+  }
+  // The failed resume and its fresh replacement, which must succeed.
+  let failed: RunRow | undefined;
+  let retried: RunRow | undefined;
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline && !(failed && retried?.status === "succeeded")) {
+    const { runs } = await json<{ runs: RunRow[] }>(await app.request(`/api/features/${feature.id}`));
+    const followUps = runs.filter((r) => r.prompt === "DEADSESSION carry on");
+    failed = followUps.find((r) => r.status === "failed");
+    retried = followUps.find((r) => r.status === "succeeded");
+    if (!(failed && retried)) await new Promise((r) => setTimeout(r, 250));
+  }
+  assert.ok(failed, "the dead resume fails");
+  assert.match(failed.error ?? "", /No conversation found with session ID/, "the failure names the reason");
+  assert.equal(failed.cliSessionId, null, "the dead session id is wiped, so nothing resumes it again");
+  assert.ok(retried && retried.id !== failed.id, "a fresh run with the same prompt starts by itself");
+  assert.equal(retried.status, "succeeded");
+
+  const transcript = await (await app.request(`/api/runs/${failed.id}/transcript`)).text();
+  assert.match(transcript, /cannot be resumed/, "the transcript says what happened and what happens next");
+});
+
+/**
  * The stream's replay cursor. Every frame carries its seq as the SSE
  * id, and EventSource sends the last one it saw as Last-Event-ID when
  * it reconnects on its own. Honouring that header is what keeps a

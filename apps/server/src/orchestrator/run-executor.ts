@@ -562,6 +562,61 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   };
   const { outcome, exitCode } = result;
   if (!outcome.ok) {
+    /**
+     * A resume against a conversation the sandbox no longer holds
+     * (recreated machine, cleared CLI state) fails instantly, and the
+     * failing result echoes the dead session id back. Left alone, that
+     * id gets re-persisted, the next run resumes it again, and the card
+     * fails forever: three identical runs on one card is how this was
+     * found. The dead id is wiped and a fresh run with the same prompt
+     * starts in its place. Bounded by construction: the retry carries
+     * no session id, so it cannot fail this way again.
+     */
+    const [runRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+    const deadSession =
+      Boolean(runRow?.cliSessionId) && /No conversation found with session ID/i.test(outcome.error ?? "");
+    if (deadSession) {
+      await ctx.db.update(agentRuns).set({ cliSessionId: null }).where(eq(agentRuns.id, runId));
+      const { sessionId: _dead, ...rest } = outcome;
+      await finishRun(
+        ctx,
+        runId,
+        {
+          ...rest,
+          error: `${outcome.error}. The sandbox no longer holds this conversation, so it cannot be resumed. A fresh run with the same instructions starts now.`,
+        },
+        exitCode,
+      );
+      emitBoard("failed");
+      await saySystem(
+        "The sandbox no longer holds this conversation, so it cannot be resumed. A fresh run with the same instructions starts now.",
+      );
+      if (runRow) {
+        // Through the one door every run start uses. Busy means the
+        // queued-message delivery in finishRun already started the
+        // continuation, which is the same fresh session this would be.
+        const next = await startRunIfIdle(ctx.db, {
+          featureId: feature.id,
+          stageId: runRow.stageId,
+          agentProfileId: runRow.agentProfileId,
+          prompt: runRow.prompt,
+          executor: runRow.executor,
+        }, ctx.entitlements);
+        if (next !== "busy" && !("outOfCompute" in next)) {
+          ctx.bus.emitBoardEvent({
+            type: "run_updated",
+            projectId: feature.projectId,
+            featureId: feature.id,
+            runId: next.id,
+            status: "queued",
+          });
+          if (runRow.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+          return;
+        }
+      }
+      await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+      return;
+    }
     // A revoked login has exactly one fix, so the failure names it.
     // Keychain-copied tokens die whenever Claude Code rotates its
     // session, which makes this the most common auth failure.
