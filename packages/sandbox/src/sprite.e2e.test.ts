@@ -235,6 +235,43 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   /**
+   * The workspace sweep, against the real filesystem API. The fix for
+   * the artifacts directory rests on what that API answers for a
+   * missing path (an unmapped "no such file or directory" the SDK
+   * rethrows rather than a structured ENOENT), and only a live machine
+   * can say whether that shape still holds: the stray directory below
+   * forces the probe onto exactly that path, so an SDK or API that
+   * changes its answer fails this provision the way every provision of
+   * a real card would. The stub version of this test is in
+   * sprite.test.ts; this is the one that cannot agree with the code by
+   * construction.
+   */
+  await t.test("a warm provision sweeps around artifacts and strays, and reaps checkouts", { skip: needsSprite() }, async () => {
+    // The abandoned .git carries a file, as every real one does: the
+    // live API lists an empty directory as no entries at all, which
+    // the SDK maps to ENOENT, so a bare mkdir'd .git reads as missing
+    // and the checkout is (correctly, it is not one) left alone.
+    const staged = await shell(
+      [
+        "mkdir -p /workspace/artifacts /workspace/stray /workspace/abandoned/.git",
+        "printf 'ref: refs/heads/main\\n' > /workspace/abandoned/.git/HEAD",
+        "printf 'kept' > /workspace/artifacts/mockup.html",
+      ].join(" && "),
+    );
+    assert.equal(staged.exitCode, 0, `staging the workspace failed: ${staged.stderr}`);
+
+    await provision();
+
+    const { out } = await shell("for d in artifacts stray abandoned; do [ -d /workspace/$d ] && echo $d; done; cat /workspace/artifacts/mockup.html");
+    assert.deepEqual(
+      out.split("\n").filter(Boolean),
+      ["artifacts", "stray", "kept"],
+      "the sweep should keep artifacts and the stray directory, reap the abandoned checkout, and leave artifact files untouched",
+    );
+    await shell("rm -rf /workspace/stray /workspace/artifacts");
+  });
+
+  /**
    * The bug, reproduced against the real installers: a CLI that is not
    * there must come back, and only that one. Before the fix the marker
    * ended the script before it ever looked, so this sprite would have

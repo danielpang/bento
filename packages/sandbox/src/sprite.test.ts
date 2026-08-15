@@ -5,7 +5,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
+import { FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { LineChannel, collectExec } from "./driver.js";
 import { SpriteDriver, spriteName } from "./sprite.js";
 
@@ -153,6 +153,162 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
   assert.ok(messages.some((m) => m.includes("cloud sandbox")));
   assert.ok(messages.some((m) => m.includes("Installing the agent tools")));
   assert.ok(messages.includes("Repository api is ready on branch feature/work."));
+});
+
+/**
+ * The workspace sweep between runs must leave Bento's own artifacts
+ * directory alone, and it once could not: the SDK's exists() only maps
+ * a structured ENOENT to false, and the sprites API answers a missing
+ * path with the OS's own words ("open ...: no such file or directory")
+ * and no code, so probing artifacts/.git threw instead of answering.
+ * The first card whose agent wrote an artifact failed every later
+ * provision of its reused sandbox with exactly that error.
+ */
+test("Sprite provisioning leaves the artifacts directory and unreadable directories alone", async () => {
+  const probed: string[] = [];
+  const removed: string[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          return [
+            { name: "api", isDirectory: () => true },
+            { name: "artifacts", isDirectory: () => true },
+            { name: "half-deleted", isDirectory: () => true },
+            { name: "mid-clone", isDirectory: () => true },
+            { name: "removed-repository", isDirectory: () => true },
+          ];
+        },
+        async exists(path: string) {
+          probed.push(path);
+          if (path === "/workspace/removed-repository/.git") return true;
+          // The SDK's other missing-path shape: /list answering with
+          // entries null makes stat() dereference it unguarded.
+          if (path === "/workspace/mid-clone/.git") {
+            throw new TypeError("Cannot read properties of null (reading 'length')");
+          }
+          // What the live API really does with a missing path; the
+          // SDK wraps it with code UNKNOWN, not ENOENT.
+          throw new FilesystemError(`open ${path}: no such file or directory`, "UNKNOWN", path, "stat");
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+    repositories: [{ name: "api", cloneUrl: "https://github.com/acme/api.git", branch: "main" }],
+  });
+
+  // The artifacts directory is known, not probed: a name check must
+  // not depend on the filesystem API's error shape.
+  assert.ok(!probed.includes("/workspace/artifacts/.git"));
+  // A directory whose probe failed is left standing; the one that
+  // answered "checkout" is reaped.
+  assert.deepEqual(removed, ["/workspace/removed-repository"]);
+});
+
+/**
+ * The forgiveness above is only for the shapes that name a missing
+ * path. The SDK wraps every failed response in a FilesystemError, an
+ * expired token and a 503 included, so the class alone must not be
+ * enough: swallowing those would hand back a sandbox whose sweep
+ * silently never ran, and a dropped repository's checkout would stay.
+ */
+test("Sprite provisioning still fails when the checkout probe fails for other reasons", async () => {
+  const failures: (() => never)[] = [
+    // A real 503 through the SDK: FilesystemError, but not a missing path.
+    () => {
+      throw new FilesystemError("stat failed with status 503", "UNKNOWN", "/workspace/leftover/.git", "stat");
+    },
+    // undici's transport failure: a TypeError, but it carries a cause.
+    () => {
+      throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") });
+    },
+  ];
+  for (const fail of failures) {
+    const sprite = {
+      spawn(_file: string, args: string[]) {
+        const child = fakeChild();
+        queueMicrotask(() => {
+          if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 0);
+        });
+        return child;
+      },
+      filesystem() {
+        return {
+          async readdir() {
+            return [{ name: "leftover", isDirectory: () => true }];
+          },
+          async exists() {
+            fail();
+          },
+        };
+      },
+    };
+    const driver = new SpriteDriver({ token: "token" });
+    stubClient(driver, sprite);
+
+    await assert.rejects(
+      driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+      /503|fetch failed/,
+    );
+  }
+});
+
+/**
+ * The same distinction on the workspace listing: the SDK's own null
+ * dereference means an empty workspace, but undici reports a transport
+ * failure as a TypeError too, and an outage must not read as a
+ * workspace with nothing to sweep.
+ */
+test("Sprite provisioning still fails when listing the workspace hits a transport failure", async () => {
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") });
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    /fetch failed/,
+  );
 });
 
 /**

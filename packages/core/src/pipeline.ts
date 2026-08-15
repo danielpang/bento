@@ -159,3 +159,18 @@ export const STAGE_ARTIFACT_DIR = "docs/bento";
 export function stageArtifactPath(stageSlug: string): string {
   return `${STAGE_ARTIFACT_DIR}/${stageSlug}.md`;
 }
+
+/**
+ * Where agents put output that does not belong in a repository:
+ * mockups, screenshots, HTML previews. Lives at the workspace root,
+ * next to the checkouts.
+ *
+ * Named once for the same reason STAGE_ARTIFACT_DIR is, but the
+ * parties are further apart: the prompt names it to the agent, capture
+ * reads it back after a run, and the sprite driver must know it is not
+ * an abandoned checkout when it sweeps the workspace between runs. The
+ * driver deleting it would lose nothing (capture has already run), but
+ * probing it for a .git that is not there is how a whole card's
+ * provisioning once failed.
+ */
+export const WORKSPACE_ARTIFACT_DIR = "artifacts";
