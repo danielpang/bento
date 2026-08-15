@@ -52,6 +52,13 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
+      # tsx runs the sandbox sources directly, but a workspace
+      # dependency resolves through its package exports, which point at
+      # dist. Without this build the test dies at import, and so does
+      # the cleanup step below it, which is the one that stops a
+      # cancelled run's sprite from being billed forever.
+      - run: pnpm turbo run build --filter=@bento/sandbox^...
+
       # A pull request from a fork is not given secrets, which is not
       # that pull request's fault. Said out loud and passed over, so the
       # contributor is not staring at a red tick they cannot clear.
