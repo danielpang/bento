@@ -405,6 +405,28 @@ test("an agent that explained itself in a result keeps its own error", async () 
   assert.doesNotMatch(outcome.error ?? "", /warning noise/, "stderr must not bury the agent's own answer");
 });
 
+/**
+ * A result event that carried no error text explained nothing. Seen
+ * live: claude-code's error_during_execution results have no `result`
+ * field, so runs failed as "no reason reported" while the reason sat
+ * on stderr.
+ */
+test("a reasonless error result still carries the stderr tail", async () => {
+  const adapter = getAdapter("claude-code");
+  async function* reasonless(): AsyncIterable<{ kind: "stdout" | "stderr" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stderr", data: "API Error: 429 rate limited\n" };
+    yield {
+      kind: "stdout",
+      data: JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "s1" }) + "\n",
+    };
+    yield { kind: "exit", exitCode: 1 };
+  }
+  const { outcome } = await runAgent({ adapter, argv: ["claude"], exec: reasonless });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error ?? "", /error during execution/);
+  assert.match(outcome.error ?? "", /rate limited/, "the reason rides along");
+});
+
 test("provider agnostic tools require the key their model implies", () => {
   assert.deepEqual(providerKeyFor("openrouter/openai/gpt-5.6-sol"), ["OPENROUTER_API_KEY"]);
   assert.deepEqual(providerKeyFor("anthropic/claude-sonnet-5"), ["ANTHROPIC_API_KEY"]);

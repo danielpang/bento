@@ -44,6 +44,35 @@ test("claude-code adapter fails on error result", () => {
   assert.equal(outcome.error, "boom");
 });
 
+/**
+ * error_during_execution and error_max_turns results arrive with no
+ * `result` field at all. The subtype names the failure so the run does
+ * not read "no reason reported"; runAgent appends the stderr tail.
+ */
+test("claude-code adapter names a reasonless error result by its subtype", () => {
+  const event = claudeCodeAdapter.parseEvent(
+    `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"abc"}`,
+  );
+  assert.ok(event?.type === "result" && !event.ok);
+  assert.equal(event.error, "Claude Code reported error during execution");
+  const outcome = claudeCodeAdapter.extractOutcome([event], 1);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error, "Claude Code reported error during execution");
+});
+
+/**
+ * Verbatim shape from a live failure: a resume against a conversation
+ * the sandbox no longer holds puts the reason in `errors`, not
+ * `result`.
+ */
+test("claude-code adapter reads the errors array on error results", () => {
+  const event = claudeCodeAdapter.parseEvent(
+    `{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"errors":["No conversation found with session ID: 48a12654-2d0e-4e07-a4c5-21960fad25de"],"session_id":"48a12654-2d0e-4e07-a4c5-21960fad25de"}`,
+  );
+  assert.ok(event?.type === "result" && !event.ok);
+  assert.match(event.error ?? "", /No conversation found with session ID/);
+});
+
 test("claude-code adapter fails when stream ends without result", () => {
   const outcome = claudeCodeAdapter.extractOutcome([], 137);
   assert.equal(outcome.ok, false);
