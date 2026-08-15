@@ -377,7 +377,7 @@ export function Board({
       key={feature.id}
       feature={feature}
       state={cardState(feature, runStatusByFeature[feature.id])}
-      runActive={RUN_ACTIVE.has(runStatusByFeature[feature.id] ?? "")}
+      runStatus={runStatusByFeature[feature.id]}
       lastOutput={lastOutputByFeature[feature.id]}
       pulse={pulses[feature.id]}
       selected={feature.id === selectedId}
@@ -534,7 +534,7 @@ const RUN_ACTIVE = new Set(["queued", "starting", "running"]);
 const Card = memo(function Card({
   feature,
   state,
-  runActive,
+  runStatus,
   lastOutput,
   pulse,
   selected,
@@ -542,13 +542,15 @@ const Card = memo(function Card({
 }: {
   feature: Feature;
   state: CardState;
-  runActive: boolean;
+  /** The newest run's status, which the card reads for itself. */
+  runStatus: string | undefined;
   lastOutput: string | undefined;
   pulse: CardPulse | undefined;
   selected: boolean;
   onSelect: (id: string) => void;
 }) {
   const finished = feature.status === "done" || feature.status === "cancelled";
+  const runActive = RUN_ACTIVE.has(runStatus ?? "");
   const self = useRef<HTMLButtonElement>(null);
   // A card in a right lane opens under the drawer; bring it out.
   useEffect(() => {
@@ -569,11 +571,28 @@ const Card = memo(function Card({
     const stopped = wasActive.current && !runActive;
     wasActive.current = runActive;
     if (!stopped || REDUCED_MOTION) return;
-    if (state !== "succeeded" && state !== "failed") return;
-    setFinishing(state);
+    /*
+     * The run's own outcome, not the card's state. A run that ends on a
+     * card its gate is still holding leaves the card reading "gated",
+     * and the sweep is a gesture about the run that just stopped.
+     */
+    if (runStatus !== "succeeded" && runStatus !== "failed") return;
+    setFinishing(runStatus);
     const timer = setTimeout(() => setFinishing(null), 900);
-    return () => clearTimeout(timer);
-  }, [runActive, state]);
+    /*
+     * The sweep is dropped here as well as on the timer, because a run
+     * starting inside those 900ms cancels the timer and leaves nothing
+     * to drop it: the card would wear data-finish from then on, and the
+     * finish rule sits after the running one at equal weight and ends
+     * at opacity 0, so the next agent would work behind a dead card.
+     * The card an agent is working glows; the closing gesture gives way
+     * to it.
+     */
+    return () => {
+      clearTimeout(timer);
+      setFinishing(null);
+    };
+  }, [runActive, runStatus]);
 
   return (
     <button
@@ -624,14 +643,14 @@ const Card = memo(function Card({
       </span>
       {/*
         The agent's own words while it works, and its last words when it
-        fails, which is the reason the card went red. Keyed on the run
-        rather than the card state: a gated card can be re-run, and its
-        gate outranks "running" in the colour scheme, which must not
-        also silence the narration. Hidden once everything settles:
-        yesterday's sentence on an idle card reads as though something
-        is still happening.
+        fails, which is why the run ended where it did. Keyed on the run
+        rather than the card state: a run that fails under a gate still
+        holding the card leaves the card reading "gated", and the reason
+        it failed is exactly what a person needs at that point. Hidden
+        once everything settles: yesterday's sentence on an idle card
+        reads as though something is still happening.
       */}
-      {lastOutput && (runActive || state === "failed") && (
+      {lastOutput && (runActive || runStatus === "failed") && (
         <span className="card-line" title={lastOutput}>
           {lastOutput}
         </span>
@@ -669,8 +688,18 @@ export function cardState(feature: Feature, runStatus: string | undefined): Card
   // and "never started" the same word.
   if (feature.status === "done") return "done";
   if (feature.status === "cancelled") return "cancelled";
+  /*
+   * An agent at work outranks the gate holding the card. A card sits at
+   * "gated" for as long as its requirements are unmet, and plenty of
+   * work happens in that time: an agent_judge gate starts its judge
+   * while the card is gated, and re-running a held card (or sending it
+   * a message) starts an agent without clearing the gate. The card
+   * reported "waiting at gate" through all of it, with no halo, so a
+   * live agent read as a card nobody was touching. The gate is not
+   * forgotten: it comes back the moment the run stops.
+   */
+  if (RUN_ACTIVE.has(runStatus ?? "")) return "running";
   if (feature.status === "gated") return "gated";
-  if (runStatus === "running" || runStatus === "starting" || runStatus === "queued") return "running";
   if (runStatus === "succeeded") return "succeeded";
   if (runStatus === "failed") return "failed";
   return "idle";
