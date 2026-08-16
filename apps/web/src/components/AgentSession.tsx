@@ -493,12 +493,9 @@ export function AgentSession({
       */}
       {runs.length > 0 && (
         <div className="session-runs">
-          <label className="label" htmlFor={`run-picker-${featureId}`}>
-            Viewing
-          </label>
           <select
-            id={`run-picker-${featureId}`}
             className="select run-picker"
+            aria-label="Run shown in the conversation"
             value={viewedRun?.id ?? ""}
             onChange={(e) => setViewedRunId(e.target.value === latestRun?.id ? null : e.target.value)}
           >
