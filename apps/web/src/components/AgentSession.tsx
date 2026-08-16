@@ -483,6 +483,42 @@ export function AgentSession({
           )}
         </span>
       </span>
+      {/*
+        The latest run is what the pane follows by default; earlier
+        runs stay reachable through this picker rather than a list, so
+        a long card's history does not stack rows in the pane. At the
+        top, because it says what the pane below is showing. Picking
+        the newest entry hands the pane back to "follow the latest",
+        which is also where it snaps when a new run starts.
+      */}
+      {runs.length > 0 && (
+        <div className="session-runs">
+          <label className="label" htmlFor={`run-picker-${featureId}`}>
+            Viewing
+          </label>
+          <select
+            id={`run-picker-${featureId}`}
+            className="select run-picker"
+            value={viewedRun?.id ?? ""}
+            onChange={(e) => setViewedRunId(e.target.value === latestRun?.id ? null : e.target.value)}
+          >
+            {runs.map((run, i) => {
+              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
+              const stage = stages?.find((s) => s.id === run.stageId)?.name;
+              return (
+                <option key={run.id} value={run.id}>
+                  {i === 0 ? "Latest: " : ""}
+                  {stage ? `${stage} · ` : ""}
+                  {agent} {runWords(run.status)} · {runTime(run.queuedAt)}
+                  {run.costUsd !== null && run.costUsd !== undefined
+                    ? ` · $${Number(run.costUsd).toFixed(2)}`
+                    : ""}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      )}
       {latestRun ? (
         !hasMessages && !draft && runActive && !viewedRunId ? (
           <div className="chat orb-hero" aria-label="The agent is starting">
@@ -620,41 +656,6 @@ export function AgentSession({
         </p>
       )}
 
-      {/*
-        The latest run is what the pane follows by default; earlier
-        runs stay reachable through this picker rather than a list, so
-        a long card's history does not stack rows under the composer.
-        Picking the newest entry hands the pane back to "follow the
-        latest", which is also where it snaps when a new run starts.
-      */}
-      {runs.length > 0 && (
-        <div className="session-runs">
-          <label className="label" htmlFor={`run-picker-${featureId}`}>
-            Viewing
-          </label>
-          <select
-            id={`run-picker-${featureId}`}
-            className="select run-picker"
-            value={viewedRun?.id ?? ""}
-            onChange={(e) => setViewedRunId(e.target.value === latestRun?.id ? null : e.target.value)}
-          >
-            {runs.map((run, i) => {
-              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
-              const stage = stages?.find((s) => s.id === run.stageId)?.name;
-              return (
-                <option key={run.id} value={run.id}>
-                  {i === 0 ? "Latest: " : ""}
-                  {stage ? `${stage} · ` : ""}
-                  {agent} {runWords(run.status)} · {runTime(run.queuedAt)}
-                  {run.costUsd !== null && run.costUsd !== undefined
-                    ? ` · $${Number(run.costUsd).toFixed(2)}`
-                    : ""}
-                </option>
-              );
-            })}
-          </select>
-        </div>
-      )}
     </section>
   );
 }
