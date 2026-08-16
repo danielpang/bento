@@ -2,7 +2,14 @@ import { and, eq, isNull } from "drizzle-orm";
 import { features, linearConnections, linearIssueLinks, linearTeamMappings, stages } from "@bento/db";
 import type { LinearWebhookIssue } from "@bento/linear";
 import type { AppContext } from "../context.js";
-import { importLinearIssue, linearConnectionFor, resolveTeamState, stateTypeForStatus } from "../linear.js";
+import {
+  importLinearIssue,
+  linearConnectionFor,
+  linearConnectionRow,
+  resolveIssueTarget,
+  resolveTeamState,
+  stateTypeForStatus,
+} from "../linear.js";
 
 const BENTO_LABEL = "bento";
 
@@ -214,6 +221,99 @@ export async function handleLinearOutbound(
   }
 }
 
+/**
+ * Files the Linear issue for a card created in Bento, and links the two
+ * so every later transition follows the outbound path.
+ *
+ * Idempotent by way of the link: a card imported from Linear already has
+ * one and is left alone, and a retried job finds the link it wrote.
+ */
+export async function handleLinearIssueCreate(
+  ctx: AppContext,
+  job: { featureId: string },
+): Promise<void> {
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, job.featureId)).limit(1);
+  if (!feature) return;
+
+  const [existing] = await ctx.db
+    .select({ id: linearIssueLinks.id })
+    .from(linearIssueLinks)
+    .where(eq(linearIssueLinks.featureId, feature.id))
+    .limit(1);
+  if (existing) return;
+
+  const connection = await linearConnectionFor(ctx, feature.organizationId);
+  if (!connection) return;
+
+  const [mapping] = await ctx.db
+    .select({ linearTeamId: linearTeamMappings.linearTeamId })
+    .from(linearTeamMappings)
+    .where(
+      and(
+        mappingOrgFilter(feature.organizationId),
+        eq(linearTeamMappings.projectId, feature.projectId),
+      ),
+    )
+    .limit(1);
+
+  const target = resolveIssueTarget(connection.connection, mapping?.linearTeamId ?? null);
+  if (!target) return;
+
+  const issue = await connection.client.createIssue({
+    teamId: target.teamId,
+    title: feature.title,
+    description: feature.description || undefined,
+    projectId: target.projectId ?? undefined,
+  });
+
+  // lastOutboundStateType stays null: Linear chose the state, not us, so
+  // there is nothing yet for the echo check to recognize.
+  await ctx.db
+    .insert(linearIssueLinks)
+    .values({
+      featureId: feature.id,
+      linearIssueId: issue.id,
+      linearIssueIdentifier: issue.identifier,
+      linearIssueUrl: issue.url,
+      linearTeamId: target.teamId,
+    })
+    .onConflictDoNothing();
+
+  // The card may have started while this job waited its turn, and the
+  // transitions it made in the meantime found no link to push through.
+  const [current] = await ctx.db
+    .select({ status: features.status, currentStageId: features.currentStageId })
+    .from(features)
+    .where(eq(features.id, feature.id))
+    .limit(1);
+  if (current && current.status !== "backlog") {
+    await queueLinearOutbound(ctx, {
+      featureId: feature.id,
+      toStatus: current.status,
+      toStageId: current.currentStageId,
+    });
+  }
+}
+
+/**
+ * Called from the create card route. The connection check keeps the
+ * queue quiet for deployments with no Linear and for workspaces that
+ * turned issue creation off.
+ */
+export async function queueLinearIssueCreate(
+  ctx: AppContext,
+  feature: { id: string; organizationId: string | null },
+): Promise<void> {
+  try {
+    const connection = await linearConnectionRow(ctx, feature.organizationId);
+    if (!connection?.createIssues) return;
+    await ctx.boss.send("linear.create-issue", { featureId: feature.id });
+  } catch (err) {
+    // Filing the issue must never cost someone the card they just made.
+    console.error(`linear.create-issue enqueue for ${feature.id} failed:`, err);
+  }
+}
+
 /** Called from recordFeatureEvent; a quick link check keeps the queue quiet. */
 export async function queueLinearOutbound(
   ctx: AppContext,
@@ -241,6 +341,7 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("linear.backlog-sync");
   await ctx.boss.createQueue("linear.inbound");
   await ctx.boss.createQueue("linear.outbound");
+  await ctx.boss.createQueue("linear.create-issue");
 
   await ctx.boss.work<{ organizationId: string | null }>("linear.backlog-sync", async (jobs) => {
     for (const job of jobs) {
@@ -268,6 +369,17 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
         await handleLinearInbound(ctx, job.data);
       } catch (err) {
         console.error("linear.inbound failed:", err);
+        throw err;
+      }
+    }
+  });
+
+  await ctx.boss.work<Parameters<typeof handleLinearIssueCreate>[1]>("linear.create-issue", async (jobs) => {
+    for (const job of jobs) {
+      try {
+        await handleLinearIssueCreate(ctx, job.data);
+      } catch (err) {
+        console.error(`linear.create-issue ${job.data.featureId} failed:`, err);
         throw err;
       }
     }

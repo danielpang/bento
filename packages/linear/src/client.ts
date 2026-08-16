@@ -12,6 +12,11 @@ export interface LinearTeam {
   name: string;
 }
 
+export interface LinearProject {
+  id: string;
+  name: string;
+}
+
 export interface LinearWorkflowState {
   id: string;
   name: string;
@@ -107,6 +112,17 @@ export class LinearClient {
     return data.teams.nodes;
   }
 
+  /** The team's projects, for the picker that chooses where new issues land. */
+  async teamProjects(teamId: string): Promise<LinearProject[]> {
+    const data = await this.query<{ team: { projects: { nodes: LinearProject[] } } }>(
+      `query TeamProjects($teamId: String!) {
+        team(id: $teamId) { projects(first: 100) { nodes { id name } } }
+      }`,
+      { teamId },
+    );
+    return data.team.projects.nodes;
+  }
+
   async teamStates(teamId: string): Promise<LinearWorkflowState[]> {
     const data = await this.query<{ team: { states: { nodes: LinearWorkflowState[] } } }>(
       `query TeamStates($teamId: String!) {
@@ -151,6 +167,38 @@ export class LinearClient {
       { id },
     );
     return data.issue;
+  }
+
+  /**
+   * Files a new issue. Linear picks the team's default workflow state,
+   * which is a backlog or unstarted one, matching where a new Bento card
+   * sits. Returns the identity the issue link needs.
+   */
+  async createIssue(input: {
+    teamId: string;
+    title: string;
+    description?: string | undefined;
+    projectId?: string | undefined;
+  }): Promise<{ id: string; identifier: string; url: string }> {
+    const data = await this.query<{
+      issueCreate: { success: boolean; issue: { id: string; identifier: string; url: string } | null };
+    }>(
+      `mutation IssueCreate($input: IssueCreateInput!) {
+        issueCreate(input: $input) { success issue { id identifier url } }
+      }`,
+      {
+        input: {
+          teamId: input.teamId,
+          title: input.title,
+          ...(input.description ? { description: input.description } : {}),
+          ...(input.projectId ? { projectId: input.projectId } : {}),
+        },
+      },
+    );
+    if (!data.issueCreate.success || !data.issueCreate.issue) {
+      throw new LinearApiError("Linear refused to create the issue");
+    }
+    return data.issueCreate.issue;
   }
 
   async updateIssueState(issueId: string, stateId: string): Promise<void> {

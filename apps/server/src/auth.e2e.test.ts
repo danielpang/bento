@@ -400,6 +400,11 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", "/api/linear/mappings", { body: JSON.stringify({ linearTeamId: "team-x", projectId: project.id }) }],
     ["DELETE", "/api/linear/mappings/00000000-0000-0000-0000-000000000000"],
     ["PATCH", "/api/linear/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
+    [
+      "PATCH",
+      "/api/linear/settings",
+      { body: JSON.stringify({ createIssues: true, defaultTeamId: "team-x" }) },
+    ],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
     // Last: a delete that went through would refuse everything after it
     // for the wrong reason.

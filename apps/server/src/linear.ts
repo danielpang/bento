@@ -44,6 +44,32 @@ export async function linearConnectionFor(
   }
 }
 
+/**
+ * Where a card created in Bento files its issue, or null for "file
+ * nothing".
+ *
+ * The team mapped to the card's project wins, so both directions agree
+ * about which team a project belongs to, and the configured default
+ * covers every project without a mapping. Without either there is no
+ * team, and Linear cannot create an issue without one, so the card
+ * simply stays Bento only.
+ *
+ * The Linear project rides along only with the default team, because a
+ * project belongs to the team it was created under: attaching it to an
+ * issue filed in a mapped team would either be refused or file the work
+ * somewhere that project does not cover.
+ */
+export function resolveIssueTarget(
+  connection: Pick<LinearConnectionRow, "createIssues" | "defaultTeamId" | "defaultLinearProjectId">,
+  mappedTeamId: string | null,
+): { teamId: string; projectId: string | null } | null {
+  if (!connection.createIssues) return null;
+  const teamId = mappedTeamId ?? connection.defaultTeamId;
+  if (!teamId) return null;
+  const sameTeam = teamId === connection.defaultTeamId;
+  return { teamId, projectId: sameTeam ? (connection.defaultLinearProjectId ?? null) : null };
+}
+
 /** Bento lifecycle to Linear workflow state type. */
 export function stateTypeForStatus(status: string): string | null {
   switch (status) {

@@ -78,6 +78,14 @@ export interface LinearConnection {
   /** True when Linear can push changes to us as they happen. */
   webhook: boolean;
   defaultProjectId: string | null;
+  /** Whether a card created in Bento files an issue in Linear. */
+  createIssues: boolean;
+  /** Where those issues go when the card's project maps no team. */
+  defaultTeamId: string | null;
+  defaultTeamKey: string | null;
+  defaultTeamName: string | null;
+  defaultLinearProjectId: string | null;
+  defaultLinearProjectName: string | null;
   canManage: boolean;
   mappings: LinearTeamMapping[];
 }
@@ -86,6 +94,19 @@ export interface LinearTeamOption {
   id: string;
   key: string;
   name: string;
+}
+
+/** A project inside Linear, not a Bento project. */
+export interface LinearProjectOption {
+  id: string;
+  name: string;
+}
+
+export interface LinearSettings {
+  defaultProjectId?: string | null;
+  createIssues?: boolean;
+  defaultTeamId?: string | null;
+  defaultLinearProjectId?: string | null;
 }
 
 export interface LinearIssueOption {
@@ -421,6 +442,12 @@ export class BentoClient {
     return this.request<LinearTeamOption[]>("/api/linear/teams");
   }
 
+  listLinearProjects(teamId: string) {
+    return this.request<LinearProjectOption[]>(
+      `/api/linear/projects?teamId=${encodeURIComponent(teamId)}`,
+    );
+  }
+
   createLinearMapping(input: { linearTeamId: string; projectId: string }) {
     return this.request<LinearTeamMapping>("/api/linear/mappings", {
       method: "POST",
@@ -432,8 +459,8 @@ export class BentoClient {
     return this.request<{ ok: boolean }>(`/api/linear/mappings/${id}`, { method: "DELETE" });
   }
 
-  setLinearSettings(input: { defaultProjectId: string | null }) {
-    return this.request<{ defaultProjectId: string | null }>("/api/linear/settings", {
+  setLinearSettings(input: LinearSettings) {
+    return this.request<Required<LinearSettings>>("/api/linear/settings", {
       method: "PATCH",
       body: JSON.stringify(input),
     });

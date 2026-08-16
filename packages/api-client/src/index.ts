@@ -10,6 +10,8 @@ export {
   type LinearConnection,
   type LinearTeamMapping,
   type LinearTeamOption,
+  type LinearProjectOption,
+  type LinearSettings,
   type LinearIssueOption,
   type LinearIssuePage,
   type TokenStore,

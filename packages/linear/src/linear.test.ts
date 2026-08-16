@@ -61,3 +61,48 @@ test("LinearClient surfaces GraphQL errors", async () => {
   const client = new LinearClient("k", fetchImpl);
   await assert.rejects(() => client.viewer(), /nope/);
 });
+
+test("createIssue sends only the fields it was given", async () => {
+  const bodies: any[] = [];
+  const fetchImpl = (async (_url: any, init: any) => {
+    bodies.push(JSON.parse(String(init.body)));
+    return new Response(
+      JSON.stringify({
+        data: { issueCreate: { success: true, issue: { id: "i1", identifier: "ENG-7", url: "u" } } },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  const client = new LinearClient("k", fetchImpl);
+
+  const issue = await client.createIssue({ teamId: "t1", title: "Ship it", description: "why" });
+  assert.deepEqual(issue, { id: "i1", identifier: "ENG-7", url: "u" });
+  assert.deepEqual(bodies[0].variables.input, { teamId: "t1", title: "Ship it", description: "why" });
+
+  // An empty description and no project must not reach Linear as nulls:
+  // it treats a supplied null as "set this field to nothing".
+  await client.createIssue({ teamId: "t1", title: "Bare", description: undefined });
+  assert.deepEqual(bodies[1].variables.input, { teamId: "t1", title: "Bare" });
+
+  await client.createIssue({ teamId: "t1", title: "Filed", projectId: "p1" });
+  assert.deepEqual(bodies[2].variables.input, { teamId: "t1", title: "Filed", projectId: "p1" });
+});
+
+test("createIssue refuses to invent an issue Linear did not make", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ data: { issueCreate: { success: false, issue: null } } }), {
+      status: 200,
+    })) as typeof fetch;
+  const client = new LinearClient("k", fetchImpl);
+  await assert.rejects(() => client.createIssue({ teamId: "t1", title: "x" }), /refused/);
+});
+
+test("teamProjects reads the team's project nodes", async () => {
+  const fetchImpl = (async () =>
+    new Response(
+      JSON.stringify({ data: { team: { projects: { nodes: [{ id: "p1", name: "Platform" }] } } } }),
+      { status: 200 },
+    )) as typeof fetch;
+  const client = new LinearClient("k", fetchImpl);
+  assert.deepEqual(await client.teamProjects("t1"), [{ id: "p1", name: "Platform" }]);
+});
