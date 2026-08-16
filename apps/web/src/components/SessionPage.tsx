@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges } from "@bento/api-client";
+import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges, Stage } from "@bento/api-client";
 import { AgentSession } from "./AgentSession.js";
 import { DiffReview, type LineQuote } from "./DiffReview.js";
 import { useToast } from "./Toasts.js";
@@ -15,6 +15,7 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
   /** Whether the load failed, so the page says so instead of sitting blank. */
   const [loadFailed, setLoadFailed] = useState(false);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+  const [stages, setStages] = useState<Stage[]>([]);
   const [changes, setChanges] = useState<FeatureChanges | null>(null);
   const [quote, setQuote] = useState<LineQuote | null>(null);
   /** Which pane a one-column screen shows; side by side ignores it. */
@@ -27,9 +28,14 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
         client.listProfiles(),
         client.getChanges(featureId).catch(() => null),
       ]);
+      // After the feature, not alongside it: the pipeline is keyed by
+      // project, which is only known once the card has loaded. Absent
+      // stages degrade the run picker's labels, not the page.
+      const pipeline = await client.getPipeline(detail.projectId).catch(() => null);
       setFeature(detail);
       setProfiles(profileRows);
       setChanges(committed);
+      setStages(pipeline?.stages ?? []);
       setLoadFailed(false);
     } catch (err) {
       // Both: the toast carries what went wrong, and the flag keeps the
@@ -126,6 +132,7 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
           featureId={feature.id}
           runs={feature.runs}
           profiles={profiles}
+          stages={stages}
           finished={finished}
           onChanged={() => void refresh()}
           quote={quote}

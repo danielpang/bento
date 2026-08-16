@@ -3129,9 +3129,17 @@ button.session-expand[aria-pressed="true"] {
 }
 /* Old runs stay reachable without pushing the composer away. */
 .session-page .session-runs {
-  max-height: 132px;
-  overflow-y: auto;
   flex-shrink: 0;
+}
+/* One row: the label, then the picker taking the rest of it. */
+.session-runs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.run-picker {
+  flex: 1;
+  min-width: 0;
 }
 
 /*

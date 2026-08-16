@@ -602,6 +602,7 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
           featureId={feature.id}
           runs={runs}
           profiles={profiles}
+          stages={stages}
           finished={finished}
           onChanged={onChanged}
           onEvent={onEvent}
