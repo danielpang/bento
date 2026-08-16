@@ -10,7 +10,10 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
  * the drift a phone user would have been the last to notice.
  */
 export type NavAction =
-  | { id: string; label: string; onSelect: () => void; href?: never; current?: boolean }
+  // `current` belongs to the address entries alone: only the anchor
+  // renderings emit aria-current, so allowing it on a panel action
+  // would type-check and then silently do nothing.
+  | { id: string; label: string; onSelect: () => void; href?: never; current?: never }
   | { id: string; label: string; href: string; onSelect?: never; current?: boolean };
 
 /**

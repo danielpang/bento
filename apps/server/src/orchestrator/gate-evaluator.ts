@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, isNull, ne, notLike, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, ne, sql } from "drizzle-orm";
 import { gateCriteria, type GateCriterion } from "@bento/core";
 import { agentProfiles, agentRuns, featureEvents, featurePullRequests, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
 import { evaluateGate, type GateContext, type GateResult } from "@bento/gates";
@@ -902,7 +902,7 @@ async function judgeStageWork(
     .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.stageId, stage.id)))
     .orderBy(desc(agentRuns.queuedAt));
   const isJudgeRun = (run: (typeof runs)[number]) =>
-    run.agentProfileId === criterion.agentProfileId && (run.prompt ?? "").startsWith(JUDGE_PROMPT_PREFIX);
+    run.agentProfileId === criterion.agentProfileId && run.kind === "judge";
   const latestJudge = runs.find(isJudgeRun);
   const latestWork = runs.find((run) => !isJudgeRun(run));
 
@@ -958,6 +958,7 @@ async function judgeStageWork(
     stageId: stage.id,
     agentProfileId: judgeProfile.id,
     prompt: buildJudgePrompt(stage, judgeProfile),
+    kind: "judge",
     executor: executor === "runner" ? "runner" : "server",
   }, ctx.entitlements);
   if (run === "busy") {
@@ -1020,7 +1021,7 @@ async function stageIsLooping(ctx: AppContext, featureId: string, stageId: strin
         eq(agentRuns.stageId, stageId),
         gte(agentRuns.queuedAt, since),
         isNull(agentRuns.startedBy),
-        notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`),
+        ne(agentRuns.kind, "judge"),
       ),
     );
   const started = row?.count ?? 0;

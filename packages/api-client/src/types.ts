@@ -106,15 +106,10 @@ export interface ProjectSession {
   runCount: number;
   /** Null when no run on the card reported a cost, which is not zero. */
   totalCostUsd: number | null;
-  latestRun: {
-    id: string;
-    status: RunStatus;
-    agentProfileId: string;
-    queuedAt: string;
-    startedAt: string | null;
-    endedAt: string | null;
-    costUsd: string | null;
-  };
+  latestRun: Pick<
+    AgentRun,
+    "id" | "status" | "agentProfileId" | "queuedAt" | "startedAt" | "endedAt" | "costUsd"
+  >;
 }
 
 export interface AgentProfile {

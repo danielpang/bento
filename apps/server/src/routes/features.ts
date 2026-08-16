@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray, ne, notLike, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
@@ -29,7 +29,6 @@ import {
   advanceFeature,
   evaluateFeatureGate,
   finishFeature,
-  JUDGE_PROMPT_PREFIX,
   moveFeatureBack,
   moveFeatureTo,
   recordManualApproval,
@@ -327,13 +326,13 @@ export function featureRoutes(ctx: AppContext) {
        * never a judge's. Judge runs are ordinary rows on the feature,
        * so "the newest run" was sometimes the reviewer, and the user's
        * message came back answered by the judge inside the judging
-       * session. The newest run whose prompt is not a judge prompt is
-       * the one whose agent, stage, and session the message belongs to.
+       * session. The newest run that is not a judge run is the one
+       * whose agent, stage, and session the message belongs to.
        */
       const [conversation] = await db(c, ctx)
         .select()
         .from(agentRuns)
-        .where(and(eq(agentRuns.featureId, feature.id), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)))
+        .where(and(eq(agentRuns.featureId, feature.id), ne(agentRuns.kind, "judge")))
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
       const resumeFrom = conversation ?? latest;

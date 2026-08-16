@@ -109,7 +109,16 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
         {hasDiff && changes && (
           <div className="review-diff">
             <span className="label">Changes</span>
-            <DiffReview changes={changes} onQuote={setQuote} />
+            <DiffReview
+              changes={changes}
+              // The chip and composer live in the conversation pane, so
+              // on one column a quote must also bring that pane back;
+              // otherwise the tap lands in a pane CSS has hidden.
+              onQuote={(q) => {
+                setQuote(q);
+                setPane("chat");
+              }}
+            />
           </div>
         )}
         <AgentSession

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentProfile, BentoClient, ProjectSession } from "@bento/api-client";
-import { runTime, runWords } from "./AgentSession.js";
+import { runDot, runTime, runWords } from "./AgentSession.js";
 import { useToast } from "./Toasts.js";
 
 /**
@@ -22,28 +22,47 @@ export function SessionsPage({
   const toast = useToast();
   const [sessions, setSessions] = useState<ProjectSession[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  // Through a ref, because useToast without a ToastHost above it hands
+  // back a fresh object per render, and that identity in refresh's
+  // dependencies would turn the load effect into a fetch loop.
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  /**
+   * The newest request wins. A slow response for the previously picked
+   * project must not land on top of the current one's rows, so every
+   * refresh takes a number and only the latest is allowed to write.
+   */
+  const requestSeq = useRef(0);
 
   const refresh = useCallback(async () => {
-    if (!projectId) {
-      setSessions([]);
-      return;
-    }
+    // No project yet means still resolving, not "no sessions": leave
+    // the list in its loading state rather than announcing an empty one.
+    if (!projectId) return;
+    const seq = ++requestSeq.current;
     try {
       const list = await client.listSessions(projectId);
+      if (seq !== requestSeq.current) return;
       setSessions(list.sessions);
       setLoadFailed(false);
     } catch (err) {
-      toast.fail(err);
+      if (seq !== requestSeq.current) return;
+      toastRef.current.fail(err);
       setLoadFailed(true);
     }
-  }, [client, projectId, toast]);
+  }, [client, projectId]);
 
+  // A project switch starts the list over; stale rows from the old
+  // project must not sit under the new project's name while it loads.
   useEffect(() => {
+    setSessions(null);
+    setLoadFailed(false);
     void refresh();
   }, [refresh]);
 
-  // Run state changes arrive on the project's board stream. A
-  // reconnect means missed events are gone, so resync either way.
+  // Run state changes arrive on the project's board stream. run_output
+  // is the agent's per-line chatter and moves nothing this list shows,
+  // so it must not refetch; the board's own handler skips it for the
+  // same reason. A reconnect means missed events are gone, so resync.
   useEffect(() => {
     if (!projectId) return;
     let timer: number | null = null;
@@ -53,18 +72,31 @@ export function SessionsPage({
         void refresh();
       }, 250);
     };
-    const stop = client.streamBoard(projectId, schedule, schedule);
+    const stop = client.streamBoard(
+      projectId,
+      (event) => {
+        if ((event as { type?: string }).type === "run_output") return;
+        schedule();
+      },
+      schedule,
+    );
     return () => {
       stop();
       if (timer !== null) clearTimeout(timer);
     };
   }, [client, projectId, refresh]);
 
-  if (loadFailed) {
+  // Only a first load with nothing to show becomes an error screen; a
+  // failed background resync keeps the rows already on screen, because
+  // a stale list beats an empty one with advice on it.
+  if (loadFailed && sessions === null) {
     return (
       <div className="sessions-screen">
         <p className="error">Could not load sessions.</p>
-        <p className="muted">Check that the server is reachable and that you are signed in, then reload.</p>
+        <p className="muted">Check that the server is reachable and that you are signed in.</p>
+        <button className="btn" onClick={() => void refresh()}>
+          Retry
+        </button>
       </div>
     );
   }
@@ -96,16 +128,18 @@ export function SessionsPage({
                     <span className="session-card-time">{runTime(run.queuedAt)}</span>
                   </span>
                   <span className="session-card-sub">
-                    <span
-                      className="dot"
-                      data-state={
-                        run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running"
-                      }
-                    />
+                    <span className="dot" data-state={runDot(run.status)} />
                     <span className="session-card-status">
                       {agent} {runWords(run.status)}
                     </span>
-                    <span className="session-card-tail">
+                    <span
+                      className="session-card-tail"
+                      // The topbar's spend chip counts every run including
+                      // the gate evaluator's judges, and several tools
+                      // report no cost at all, so this figure is neither
+                      // that one nor exact. Say so where it is shown.
+                      title="This conversation's agent runs. Judge runs are not counted, and runs that report no cost are missing from the total, so it is a floor, not a total."
+                    >
                       {session.runCount === 1 ? "1 run" : `${session.runCount} runs`}
                       {session.totalCostUsd !== null ? ` · $${session.totalCostUsd.toFixed(2)}` : ""}
                     </span>

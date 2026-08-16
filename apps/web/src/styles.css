@@ -2857,14 +2857,26 @@ button {
 }
 
 /* The full-page session: the log gets the room it deserves. */
+/*
+ * The session page is an app screen, not a document: the header and
+ * composer stay put, and the diff and the log each scroll themselves.
+ * At every width, so a phone gets a chat screen rather than a long
+ * document with the composer somewhere in the middle. Scoped to the
+ * page so the drawer keeps its natural flow. Overflow scrolls rather
+ * than clips: on a viewport too short for the column's fixed parts
+ * (landscape phone, raised keyboard) a hidden overflow put the
+ * composer past the edge with no way to reach it.
+ */
 .session-page {
   max-width: 980px;
   margin: 0 auto;
-  padding: 20px 24px 40px;
+  padding: 20px 24px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 100dvh;
+  height: 100dvh;
+  min-height: 0;
+  overflow-y: auto;
 }
 .session-page .chat {
   min-height: 50vh;
@@ -2969,6 +2981,10 @@ button.session-expand[aria-pressed="true"] {
 }
 .review-diff {
   min-width: 0;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 .diff-review {
   display: flex;
@@ -3085,19 +3101,9 @@ button.session-expand[aria-pressed="true"] {
   font-size: 11.5px;
 }
 
-/*
- * The session page is an app screen, not a document: the header and
- * composer stay put, and the diff and the log each scroll themselves.
- * At every width, so a phone gets a chat screen rather than a long
- * document with the composer somewhere in the middle. Scoped to the
- * page so the drawer keeps its natural flow.
- */
-.session-page {
-  height: 100dvh;
-  min-height: 0;
-  overflow: hidden;
-  padding-bottom: 16px;
-}
+/* The app-screen internals: each region of the session page scrolls
+   itself. The page-level sizing lives on .session-page above, beside
+   the rest of its rules, one block per selector. */
 .session-body {
   flex: 1;
   min-height: 0;
@@ -3107,12 +3113,6 @@ button.session-expand[aria-pressed="true"] {
 .session-body.review-grid {
   display: grid;
   min-height: 0;
-}
-.review-diff {
-  height: 100%;
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 4px;
 }
 .session-page .agent-session {
   display: flex;
@@ -3167,7 +3167,10 @@ button.session-expand[aria-pressed="true"] {
     display: none;
   }
 }
-@media (max-width: 1100px) {
+/* The exact complement of the query above, not max-width: 1100px: a
+   fractional width between the two (browser zoom, 125% DPI) would
+   otherwise show a toggle whose buttons changed nothing. */
+@media not (min-width: 1101px) {
   /* One visible pane, one track, stretched to the screen so the pane
      scrolls inside itself instead of growing past the composer. */
   .session-body.review-grid {

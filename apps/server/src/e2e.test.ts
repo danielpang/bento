@@ -1294,6 +1294,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   const plant = async (values: {
     profileId: string;
     prompt: string;
+    kind?: "task" | "judge";
     cliSessionId: string;
     queuedAt: Date;
   }) => {
@@ -1304,6 +1305,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
         stageId: stage.id,
         agentProfileId: values.profileId,
         prompt: values.prompt,
+        kind: values.kind ?? "task",
         status: "succeeded",
         executor: "server",
         cliSessionId: values.cliSessionId,
@@ -1321,6 +1323,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   await plant({
     profileId: judge.id,
     prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build". Decide whether it is complete.`,
+    kind: "judge",
     cliSessionId: "judge-sess",
     queuedAt: new Date(),
   });

@@ -628,10 +628,7 @@ export function AgentSession({
           title="Show this run's conversation"
           onClick={() => setViewedRunId(run.id === latestRun?.id ? null : run.id)}
         >
-          <span
-            className="dot"
-            data-state={run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running"}
-          />
+          <span className="dot" data-state={runDot(run.status)} />
           <span className="criterion-cmd">
             {profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent"} {runWords(run.status)}
           </span>
@@ -825,4 +822,23 @@ export function runWords(status: string): string {
 /** "Jul 29, 11:42 PM": enough to tell runs apart without a full ISO stamp. */
 export function runTime(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * A run's status as a dot state. One mapping for every run list, so a
+ * stopped run cannot pulse as live in one place while reading as
+ * stopped in another: cancelled gets its own grey, and only the
+ * statuses that are actually in motion get the breathing dot.
+ */
+export function runDot(status: string): "succeeded" | "failed" | "cancelled" | "running" {
+  switch (status) {
+    case "succeeded":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "running";
+  }
 }

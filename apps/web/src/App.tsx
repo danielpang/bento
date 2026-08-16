@@ -185,8 +185,11 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   // Sessions is a sibling tab of the board inside the same chrome, so
   // both addresses land here and only the slab between the topbar and
   // the bottom bar differs. Navigation is full page loads, so reading
-  // the address once at render is the routing.
-  const screen: "board" | "sessions" = window.location.pathname === "/sessions" ? "sessions" : "board";
+  // the address once at render is the routing. Trailing slashes are
+  // tolerated: the SPA fallback serves "/sessions/" too, and answering
+  // it with the board under a sessions address helped nobody.
+  const screen: "board" | "sessions" =
+    window.location.pathname.replace(/\/+$/, "") === "/sessions" ? "sessions" : "board";
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   // Remembered across reloads: which board a user was last looking at.
   // The list effect below still re-checks the stored id against the
@@ -312,9 +315,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
 
   // Board events tell us a card moved or a run changed state. Status
   // lands optimistically; the refetch is coalesced so a burst of events
-  // costs one round trip instead of one per event.
+  // costs one round trip instead of one per event. Board screen only:
+  // the sessions tab runs its own stream for its own list, and holding
+  // a second one here meant two connections per viewer, both refetching
+  // board data nothing on that screen renders. The one initial
+  // refresh() still happens on either screen, because the panels
+  // (Pipeline, Repositories) read stages and features wherever opened.
   useEffect(() => {
-    if (!projectId) return;
+    if (!projectId || screen !== "board") return;
     let timer: number | null = null;
     const stop = client.streamBoard(
       projectId,
@@ -574,7 +582,11 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       )}
 
       {screen === "sessions" ? (
-        <SessionsPage client={client} projectId={projectId} profiles={profiles} />
+        // Its own boundary, like the panels and the drawer: without one
+        // the chunk load suspends to the app root and blanks the chrome.
+        <Suspense fallback={<div className="center" />}>
+          <SessionsPage client={client} projectId={projectId} profiles={profiles} />
+        </Suspense>
       ) : (
       <Board
         drawerOpen={selected !== null}

@@ -40,6 +40,7 @@ export { RepositoriesPanel } from "./RepositoriesPanel.js";
 export { ResetPassword } from "./ResetPassword.js";
 export { SecretField } from "./SecretField.js";
 export { SessionPage } from "./SessionPage.js";
+export { SessionsPage } from "./SessionsPage.js";
 export { SettingsPage } from "./SettingsPage.js";
 export { SignIn } from "./SignIn.js";
 export { StageConfig } from "./StageConfig.js";
