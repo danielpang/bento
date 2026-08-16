@@ -10,6 +10,7 @@ import type {
   GateState,
   Pipeline,
   Project,
+  ProjectSession,
   Repository,
   RunArtifact,
   Stage,
@@ -320,6 +321,11 @@ export class BentoClient {
     return this.request<{ ok: boolean; deletedCards: number }>(`/api/projects/${projectId}`, {
       method: "DELETE",
     });
+  }
+
+  /** Every conversation in the project, newest activity first. */
+  listSessions(projectId: string) {
+    return this.request<{ sessions: ProjectSession[] }>(`/api/projects/${projectId}/sessions`);
   }
 
   getPipeline(projectId: string) {

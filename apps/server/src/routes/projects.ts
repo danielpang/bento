@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, count, desc, eq, inArray, isNull, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, notLike, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { gateCriteria, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
@@ -27,6 +27,7 @@ import {
 import { githubForOrganization } from "../github.js";
 import { githubRemoteOf } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { JUDGE_PROMPT_PREFIX } from "../orchestrator/gate-evaluator.js";
 
 /**
  * The two shells a repository can carry. Shared by the add and edit
@@ -395,6 +396,70 @@ export function projectRoutes(ctx: AppContext) {
       if (!(await canAccessProject(ctx, c, c.req.param("id")))) return c.json({ error: "not found" }, 404);
       const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, c.req.param("id")));
       return c.json(project);
+    })
+    /**
+     * Every conversation in the project, one entry per card that has
+     * runs. Judge runs are left out: they are the gate evaluator
+     * talking to itself, not a conversation anyone can join.
+     */
+    .get("/:id/sessions", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+
+      const rows = await db(c, ctx)
+        .select({
+          featureId: agentRuns.featureId,
+          title: features.title,
+          id: agentRuns.id,
+          status: agentRuns.status,
+          agentProfileId: agentRuns.agentProfileId,
+          queuedAt: agentRuns.queuedAt,
+          startedAt: agentRuns.startedAt,
+          endedAt: agentRuns.endedAt,
+          costUsd: agentRuns.costUsd,
+        })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(
+          and(eq(features.projectId, projectId), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)),
+        )
+        .orderBy(desc(agentRuns.queuedAt));
+
+      const sessions = new Map<
+        string,
+        {
+          featureId: string;
+          title: string;
+          runCount: number;
+          totalCostUsd: number | null;
+          latestRun: {
+            id: string;
+            status: string;
+            agentProfileId: string;
+            queuedAt: Date;
+            startedAt: Date | null;
+            endedAt: Date | null;
+            costUsd: string | null;
+          };
+        }
+      >();
+      for (const row of rows) {
+        const { featureId, title, ...run } = row;
+        const existing = sessions.get(featureId);
+        if (!existing) {
+          sessions.set(featureId, {
+            featureId,
+            title,
+            runCount: 1,
+            totalCostUsd: run.costUsd === null ? null : Number(run.costUsd),
+            latestRun: run,
+          });
+          continue;
+        }
+        existing.runCount += 1;
+        if (run.costUsd !== null) existing.totalCostUsd = (existing.totalCostUsd ?? 0) + Number(run.costUsd);
+      }
+      return c.json({ sessions: [...sessions.values()] });
     })
     /**
      * The name, and nothing else: checkouts, branches and the pipeline

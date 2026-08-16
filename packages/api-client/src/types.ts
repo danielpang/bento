@@ -96,6 +96,27 @@ export interface AgentRun {
   endedAt: string | null;
 }
 
+/**
+ * One conversation on the sessions page: a card and its run history,
+ * summarized by the newest run. Judge runs are not counted.
+ */
+export interface ProjectSession {
+  featureId: string;
+  title: string;
+  runCount: number;
+  /** Null when no run on the card reported a cost, which is not zero. */
+  totalCostUsd: number | null;
+  latestRun: {
+    id: string;
+    status: RunStatus;
+    agentProfileId: string;
+    queuedAt: string;
+    startedAt: string | null;
+    endedAt: string | null;
+    costUsd: string | null;
+  };
+}
+
 export interface AgentProfile {
   /** User-authored operating instructions, injected into stage prompts. */
   skill?: string | null;

@@ -38,6 +38,7 @@ const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m
 const RepositoriesPanel = lazy(() => import("./components/RepositoriesPanel.js").then((m) => ({ default: m.RepositoriesPanel })));
 const ResetPassword = lazy(() => import("./components/ResetPassword.js").then((m) => ({ default: m.ResetPassword })));
 const SessionPage = lazy(() => import("./components/SessionPage.js").then((m) => ({ default: m.SessionPage })));
+const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) => ({ default: m.SessionsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
 
@@ -181,6 +182,11 @@ function FirstTeamGate({ userName }: { userName: string }) {
 }
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
+  // Sessions is a sibling tab of the board inside the same chrome, so
+  // both addresses land here and only the slab between the topbar and
+  // the bottom bar differs. Navigation is full page loads, so reading
+  // the address once at render is the routing.
+  const screen: "board" | "sessions" = window.location.pathname === "/sessions" ? "sessions" : "board";
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   // Remembered across reloads: which board a user was last looking at.
   // The list effect below still re-checks the stored id against the
@@ -466,6 +472,8 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * before the menu existed.
    */
   const actions: NavAction[] = [
+    { id: "board", label: "Board", href: "/", current: screen === "board" },
+    { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
     { id: "agents", label: "Agents", onSelect: () => setPanel("agents") },
     ...(projects.length > 0
       ? [
@@ -527,16 +535,20 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           />
         }
         search={
-          <BoardSearch
-            value={query}
-            onChange={setQuery}
-            matches={features.filter((f) => matchesQuery(f, query)).length}
-          />
+          screen === "board" ? (
+            <BoardSearch
+              value={query}
+              onChange={setQuery}
+              matches={features.filter((f) => matchesQuery(f, query)).length}
+            />
+          ) : undefined
         }
         primary={
-          <button className="btn btn-primary" onClick={() => setDialog("feature")}>
-            New card
-          </button>
+          screen === "board" ? (
+            <button className="btn btn-primary" onClick={() => setDialog("feature")}>
+              New card
+            </button>
+          ) : undefined
         }
       />
 
@@ -561,6 +573,9 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         </div>
       )}
 
+      {screen === "sessions" ? (
+        <SessionsPage client={client} projectId={projectId} profiles={profiles} />
+      ) : (
       <Board
         drawerOpen={selected !== null}
         query={query}
@@ -605,11 +620,12 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             .finally(() => void refresh());
         }}
       />
+      )}
 
       {/* Same reason as the panels: the board stays put while the
           drawer's code arrives. */}
       <Suspense fallback={null}>
-        {selected && (
+        {screen === "board" && selected && (
           <FeatureDrawer
             client={client}
             feature={selected}
@@ -727,7 +743,7 @@ function TopBar({
               {action.label}
             </button>
           ) : (
-            <a key={action.id} className="btn btn-ghost" href={action.href}>
+            <a key={action.id} className="btn btn-ghost" href={action.href} aria-current={action.current ? "page" : undefined}>
               {action.label}
             </a>
           ),

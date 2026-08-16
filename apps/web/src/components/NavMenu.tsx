@@ -10,8 +10,8 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
  * the drift a phone user would have been the last to notice.
  */
 export type NavAction =
-  | { id: string; label: string; onSelect: () => void; href?: never }
-  | { id: string; label: string; href: string; onSelect?: never };
+  | { id: string; label: string; onSelect: () => void; href?: never; current?: boolean }
+  | { id: string; label: string; href: string; onSelect?: never; current?: boolean };
 
 /**
  * The navigation, collapsed.
@@ -47,7 +47,7 @@ export function NavMenu({ actions }: { actions: NavAction[] }) {
                  with an onSelect that assigns location does none of
                  those, and the address is the point of these two. */
               <Menu.Item key={action.id} className="picker-item" asChild>
-                <a href={action.href}>
+                <a href={action.href} aria-current={action.current ? "page" : undefined}>
                   <span className="picker-item-name">{action.label}</span>
                 </a>
               </Menu.Item>

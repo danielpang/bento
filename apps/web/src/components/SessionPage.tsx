@@ -17,6 +17,8 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [changes, setChanges] = useState<FeatureChanges | null>(null);
   const [quote, setQuote] = useState<LineQuote | null>(null);
+  /** Which pane a one-column screen shows; side by side ignores it. */
+  const [pane, setPane] = useState<"chat" | "changes">("chat");
 
   const refresh = useCallback(async () => {
     try {
@@ -87,12 +89,23 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
           Back to the board
         </a>
       </header>
+      {hasDiff && (
+        <div className="pane-toggle" role="group" aria-label="Pane">
+          <button type="button" aria-pressed={pane === "chat"} onClick={() => setPane("chat")}>
+            Conversation
+          </button>
+          <button type="button" aria-pressed={pane === "changes"} onClick={() => setPane("changes")}>
+            Changes
+          </button>
+        </div>
+      )}
       {/*
         With committed changes this page reads like a pull request:
         the diff on the left, the agent on the right, and any line can
-        be quoted straight into the conversation.
+        be quoted straight into the conversation. On one column the
+        toggle above picks which of the two is on screen.
       */}
-      <div className={hasDiff ? "session-body review-grid" : "session-body"}>
+      <div className={hasDiff ? "session-body review-grid" : "session-body"} data-pane={hasDiff ? pane : undefined}>
         {hasDiff && changes && (
           <div className="review-diff">
             <span className="label">Changes</span>
