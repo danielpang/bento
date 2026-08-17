@@ -1,5 +1,6 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { agentRuns, type Db } from "@bento/db";
+import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
@@ -41,8 +42,12 @@ export async function startRunIfIdle(
   db: Db,
   values: NewRun,
   entitlements?: Entitlements,
+  analytics?: Analytics,
 ): Promise<AgentRun | "busy" | OutOfCompute> {
-  return db.transaction(async (tx) => {
+  // Read out of the transaction so the capture below can name the
+  // tenant without waiting on a second query.
+  let organizationId: string | null = null;
+  const result = await db.transaction(async (tx) => {
     /**
      * The lock also answers whose organization this is. Callers do not
      * pass it: `organization_id` on a run is derived by an insert
@@ -52,7 +57,7 @@ export async function startRunIfIdle(
     const locked = await tx.execute(
       sql`select organization_id from features where id = ${values.featureId} for update`,
     );
-    const organizationId =
+    organizationId =
       (locked.rows[0] as { organization_id: string | null } | undefined)?.organization_id ?? null;
 
     const [active] = await tx
@@ -62,7 +67,7 @@ export async function startRunIfIdle(
       .limit(1);
     // Busy first: it is the more specific answer, and a card already
     // being worked is not a question about anybody's plan.
-    if (active) return "busy";
+    if (active) return "busy" as const;
 
     if (entitlements?.canStartRun && organizationId) {
       const refusal = await entitlements.canStartRun(organizationId, values.featureId);
@@ -73,4 +78,22 @@ export async function startRunIfIdle(
     if (!run) throw new Error("run insert returned no row");
     return run;
   });
+
+  // After the transaction, so a run counted is a run committed.
+  if (result !== "busy" && !("outOfCompute" in result)) {
+    analytics?.capture({
+      event: "agent run started",
+      userId: values.startedBy ?? null,
+      organizationId,
+      properties: {
+        run_id: result.id,
+        feature_id: result.featureId,
+        stage_id: result.stageId,
+        kind: result.kind,
+        executor: result.executor,
+        resumed: Boolean(values.cliSessionId),
+      },
+    });
+  }
+  return result;
 }

@@ -269,6 +269,33 @@ export function runnerRoutes(ctx: AppContext) {
         .where(eq(agentRuns.id, runId));
       await deliverQueuedMessage(ctx, runId);
 
+      // Runner runs end here rather than in finishRun, so the metric
+      // that every other ending emits there is emitted here.
+      if (ctx.analytics) {
+        const [runRow] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
+        if (runRow) {
+          ctx.analytics.capture({
+            event: "agent run finished",
+            userId: runRow.startedBy ?? null,
+            organizationId: feature.organizationId,
+            properties: {
+              status: body.ok ? "succeeded" : "failed",
+              success: body.ok,
+              run_id: runId,
+              feature_id: feature.id,
+              stage_id: runRow.stageId,
+              project_id: feature.projectId,
+              kind: runRow.kind,
+              executor: runRow.executor,
+              cost_usd: body.costUsd ?? null,
+              num_turns: body.numTurns ?? null,
+              exit_code: body.exitCode ?? null,
+              error: body.error ?? null,
+            },
+          });
+        }
+      }
+
       {
         ctx.bus.emitRunDone(runId, body.ok ? "succeeded" : "failed");
         ctx.bus.emitBoardEvent({

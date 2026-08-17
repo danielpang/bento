@@ -23,7 +23,7 @@ import {
 import type { SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
-import { actor } from "../middleware/actor.js";
+import { activeOrg, actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
 import {
   advanceFeature,
@@ -167,6 +167,12 @@ export function featureRoutes(ctx: AppContext) {
       // from reaching the board, and queued after the commit, so the
       // worker cannot look for this card before it exists.
       deferAfterCommit(c, () => queueLinearIssueCreate(ctx, feature));
+      ctx.analytics?.capture({
+        event: "feature card created",
+        userId: actor(c),
+        organizationId: feature.organizationId ?? activeOrg(c),
+        properties: { feature_id: feature.id, project_id: feature.projectId },
+      });
       return c.json(feature, 201);
     })
     .get("/:id", async (c) => {
@@ -354,7 +360,7 @@ export function featureRoutes(ctx: AppContext) {
         // The person sending the message owns the hours the resumed
         // run spends, not whoever started the conversation.
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics);
       // A run started in the gap between the read and the insert; the
       // messages wait for it like any other mid-run message.
       if (run === "busy") {
@@ -856,7 +862,7 @@ export function featureRoutes(ctx: AppContext) {
         prompt: "",
         executor,
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });

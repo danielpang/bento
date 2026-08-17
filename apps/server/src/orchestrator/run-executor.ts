@@ -610,7 +610,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           agentProfileId: runRow.agentProfileId,
           prompt: runRow.prompt,
           executor: runRow.executor,
-        }, ctx.entitlements);
+        }, ctx.entitlements, ctx.analytics);
         if (next !== "busy" && !("outOfCompute" in next)) {
           ctx.bus.emitBoardEvent({
             type: "run_updated",
@@ -912,7 +912,7 @@ async function finishRun(
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id });
   if (!closed) return;
-  announceRunFinished(ctx, runId);
+  announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed");
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -1014,7 +1014,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     prompt: claimed.map((m) => m.text).join("\n"),
     cliSessionId: source.cliSessionId,
     executor: source.executor,
-  }, ctx.entitlements);
+  }, ctx.entitlements, ctx.analytics);
   if (next === "busy") {
     // Another run started in the gap; the messages wait for its end.
     await requeueMessages(ctx.db, ids);
@@ -1092,17 +1092,59 @@ export function runOutputPreview(event: { type: string; role?: string; text?: st
 }
 
 /**
- * Tells the deployment a run is over, so it can record what it cost.
+ * Tells the deployment a run is over, so it can record what it cost,
+ * and tells analytics how it ended.
  *
- * Fire and forget on purpose. A run that finished has finished, and a
- * billing module that cannot be reached must not turn that into a
- * failure or hold up the gate evaluation waiting behind it.
+ * Fire and forget on purpose, both of them. A run that finished has
+ * finished, and a billing module that cannot be reached must not turn
+ * that into a failure or hold up the gate evaluation waiting behind
+ * it. Every terminal path comes through here (success, failure,
+ * cancel, a restart closing an orphan), each behind its caller's
+ * compare-and-set, so one run ends exactly once in the metrics too.
  */
-function announceRunFinished(ctx: AppContext, runId: string): void {
+function announceRunFinished(
+  ctx: AppContext,
+  runId: string,
+  status: "succeeded" | "failed" | "cancelled",
+): void {
   const announce = ctx.entitlements?.onRunFinished;
-  if (!announce) return;
-  void announce(runId).catch((err: unknown) => {
-    console.warn(`could not record what run ${runId} cost:`, err);
+  if (announce) {
+    void announce(runId).catch((err: unknown) => {
+      console.warn(`could not record what run ${runId} cost:`, err);
+    });
+  }
+
+  const analytics = ctx.analytics;
+  if (!analytics) return;
+  void (async () => {
+    const [row] = await ctx.db
+      .select({ run: agentRuns, organizationId: features.organizationId, projectId: features.projectId })
+      .from(agentRuns)
+      .innerJoin(features, eq(features.id, agentRuns.featureId))
+      .where(eq(agentRuns.id, runId))
+      .limit(1);
+    if (!row) return;
+    analytics.capture({
+      event: "agent run finished",
+      userId: row.run.startedBy ?? null,
+      organizationId: row.organizationId,
+      properties: {
+        status,
+        success: status === "succeeded",
+        run_id: runId,
+        feature_id: row.run.featureId,
+        stage_id: row.run.stageId,
+        project_id: row.projectId,
+        kind: row.run.kind,
+        executor: row.run.executor,
+        cost_usd: row.run.costUsd === null ? null : Number(row.run.costUsd),
+        num_turns: row.run.numTurns,
+        exit_code: row.run.exitCode,
+        error: row.run.error,
+      },
+    });
+  })().catch((err: unknown) => {
+    console.warn(`could not record analytics for run ${runId}:`, err);
   });
 }
 
@@ -1118,7 +1160,7 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id });
   if (!closed) return;
-  announceRunFinished(ctx, runId);
+  announceRunFinished(ctx, runId, "cancelled");
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
@@ -1233,7 +1275,7 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   // its own finish announces later; announcing here for every orphan
   // would have billed runs that never ended. The sandbox was awake for
   // as long as the run said it was, and a restart is not a refund.
-  announceRunFinished(ctx, run.id);
+  announceRunFinished(ctx, run.id, "failed");
 
   await appendRunEvent(ctx, run.id, {
     type: "message",

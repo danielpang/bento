@@ -167,6 +167,16 @@ const envSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_REGION: z.string().optional(),
 
+  /**
+   * PostHog: product analytics, error tracking, and log export. All
+   * three read the same project token. Without a key nothing is sent
+   * and nothing breaks; the server says so once at boot outside
+   * production, because events silently missed are worse than a line
+   * of noise.
+   */
+  POSTHOG_API_KEY: z.string().optional(),
+  POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),
+
   /** GitHub App credentials. Without these, PR based gates stay pending. */
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_SLUG: z.string().regex(/^[a-z0-9-]+$/).optional(),

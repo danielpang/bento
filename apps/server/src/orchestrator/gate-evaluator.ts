@@ -314,6 +314,12 @@ export async function advanceFeature(
     // The card is over, so the machine it was worked on goes. It costs
     // money for as long as it exists, not for as long as it is used.
     await queueSandboxReap(ctx, feature.id);
+    ctx.analytics?.capture({
+      event: "feature completed",
+      userId: actorUserId ?? null,
+      organizationId: feature.organizationId,
+      properties: { feature_id: feature.id, project_id: feature.projectId, trigger },
+    });
   }
 
   ctx.bus.emitBoardEvent({
@@ -347,7 +353,7 @@ export async function advanceFeature(
       agentProfileId: nextStage.defaultAgentProfileId,
       prompt: "",
       executor,
-    }, ctx.entitlements);
+    }, ctx.entitlements, ctx.analytics);
     // Runner-executed runs wait to be claimed by a machine. A card that
     // ran the team out of compute stops here, on its new stage, with no
     // agent working it: the same shape as a stage nobody assigned an
@@ -466,7 +472,7 @@ export async function moveFeatureTo(
         agentProfileId: target.defaultAgentProfileId,
         prompt: "",
         executor,
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics);
       if (run !== "busy" && !("outOfCompute" in run) && executor === "server") {
         await ctx.boss.send("run.execute", { runId: run.id });
       }
@@ -545,6 +551,12 @@ export async function finishFeature(
   });
   // The card is over, so the machine it was worked on goes.
   await queueSandboxReap(ctx, feature.id);
+  ctx.analytics?.capture({
+    event: "feature completed",
+    userId: actorUserId ?? null,
+    organizationId: feature.organizationId,
+    properties: { feature_id: feature.id, project_id: feature.projectId, trigger: "manual" },
+  });
 
   ctx.bus.emitBoardEvent({
     type: "feature_updated",
@@ -960,7 +972,7 @@ async function judgeStageWork(
     prompt: buildJudgePrompt(stage, judgeProfile),
     kind: "judge",
     executor: executor === "runner" ? "runner" : "server",
-  }, ctx.entitlements);
+  }, ctx.entitlements, ctx.analytics);
   if (run === "busy") {
     return { status: "pending", detail: "Waiting for the current run to finish before judging" };
   }

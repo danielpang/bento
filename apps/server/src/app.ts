@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { HTTPException } from "hono/http-exception";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
-import { actorMiddleware } from "./middleware/actor.js";
+import { actorMiddleware, maybeActor } from "./middleware/actor.js";
 import { tenantMiddleware } from "./middleware/tenant.js";
 import { artifactRoutes } from "./routes/artifacts.js";
 import { boardEventRoutes, runRoutes } from "./routes/runs.js";
@@ -37,6 +38,23 @@ export interface AppExtras {
 
 export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   const app = new Hono();
+
+  /**
+   * The last stop for an error no route caught. An HTTPException is a
+   * refusal somebody wrote on purpose and keeps its own response;
+   * everything else is a bug, so it goes to error tracking with its
+   * stack trace and the request that provoked it, and the caller gets
+   * the same JSON error shape every route already speaks.
+   */
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) return err.getResponse();
+    ctx.analytics?.captureException(err, maybeActor(c), {
+      path: c.req.path,
+      method: c.req.method,
+    });
+    console.error(`unhandled error on ${c.req.method} ${c.req.path}:`, err);
+    return c.json({ error: "internal server error" }, 500);
+  });
 
   // CORS must be registered before the routes it covers. set-auth-token
   // has to be exposed or browsers silently drop the bearer token.

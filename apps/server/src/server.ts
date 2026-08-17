@@ -1,6 +1,8 @@
 import { serve } from "@hono/node-server";
 import { createDb, createPool, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
+import { createAnalytics } from "./analytics.js";
+import { startLogExport } from "./log-export.js";
 import { attachPgBus } from "./pg-bus.js";
 import { WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
@@ -52,6 +54,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
 
   if (options.migrate) await runMigrations(env.DATABASE_URL);
 
+  // Before anything logs: the export wraps console, so the earlier it
+  // starts the more of the boot story PostHog gets to keep.
+  const logExport = startLogExport(env);
+  const analytics = createAnalytics(env);
+
   const pool = createPool(env.DATABASE_URL);
   const db = createDb(pool);
 
@@ -68,6 +75,15 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
    * hook travels as a holder rather than as a value.
    */
   const authHooks: AuthHooks = {};
+  if (analytics) {
+    authHooks.onUserSignedUp = (u) => {
+      analytics.capture({
+        event: "user signed up",
+        userId: u.id,
+        properties: { $set: { email: u.email, name: u.name } },
+      });
+    };
+  }
   const auth = createAuth(env, db, mailer, authHooks);
 
   if (env.BENTO_MODE === "multi" && !env.BENTO_SECRET_KEY) {
@@ -107,6 +123,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const githubApp = createGitHubApp(env);
   if (githubApp) ctx.githubApp = githubApp;
   if (auth) ctx.auth = auth;
+  if (analytics) ctx.analytics = analytics;
 
   await registerJobs(ctx);
 
@@ -246,6 +263,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       });
       await boss.stop({ close: true, timeout: 2000 }).catch(() => {});
       await pgBus.stop().catch(() => {});
+      // Flush before the pool closes: capture is fire and forget, so
+      // whatever queued in the last seconds is only on this machine.
+      await analytics?.shutdown().catch(() => {});
+      await logExport?.stop().catch(() => {});
       await pool.end().catch(() => {});
     },
   };

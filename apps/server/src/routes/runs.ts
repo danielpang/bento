@@ -56,7 +56,7 @@ export function runRoutes(ctx: AppContext) {
         cliSessionId: body.resumeSessionId ?? null,
         executor,
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
 
@@ -97,7 +97,7 @@ export function runRoutes(ctx: AppContext) {
         // The person resuming owns the hours, not whoever started the
         // run being resumed.
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (previous.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
