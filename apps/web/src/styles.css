@@ -3172,7 +3172,7 @@ button.session-expand[aria-pressed="true"] {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg);
-  align-self: flex-start;
+  align-self: flex-end;
   flex-shrink: 0;
 }
 .pane-toggle button {
