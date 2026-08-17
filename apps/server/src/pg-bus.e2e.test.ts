@@ -70,6 +70,7 @@ async function makeContext(): Promise<AppContext> {
     artifacts: new DiskArtifactStore(dataDir),
     running: new Map(),
     liveInputs: new Map(),
+    draining: false,
     userId,
   };
 }

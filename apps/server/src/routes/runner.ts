@@ -8,6 +8,7 @@ import { canAccessProject, visibleProjectFilter } from "../access.js";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { buildStagePrompt } from "../orchestrator/prompt.js";
+import { isUniqueViolation } from "../orchestrator/transcript.js";
 import { deliverQueuedMessage } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 
@@ -183,31 +184,46 @@ export function runnerRoutes(ctx: AppContext) {
        * and collided on the (runId, seq) unique index halfway through,
        * leaving one batch partially written and the runner retrying
        * into duplicates.
+       *
+       * Retried as a whole on that collision: the transaction rolled
+       * back cleanly, and the server also writes to this transcript
+       * (the reaper's requeue note, a finish line), so a collision does
+       * not need the runner to notice and resend the batch.
        */
       const events = c.req.valid("json").events;
-      const seq = await db(c, ctx).transaction(async (tx) => {
-        // max() in SQL: loading every row grew with transcript length.
-        const [highest] = await tx
-          .select({ seq: max(runEvents.seq) })
-          .from(runEvents)
-          .where(eq(runEvents.runId, runId));
-        let next = highest?.seq ?? 0;
-        for (const event of events) {
-          next += 1;
-          await tx.insert(runEvents).values({ runId, seq: next, type: event.type, payload: event });
-          /**
-           * The session id reaches the run row the moment the CLI
-           * announces it, same as server-executed runs: a runner whose
-           * machine dies mid-run must not take the conversation's only
-           * key with it.
-           */
-          const announced = (event as { type?: string; sessionId?: string }).sessionId;
-          if (event.type === "init" && typeof announced === "string" && announced) {
-            await tx.update(agentRuns).set({ cliSessionId: announced }).where(eq(agentRuns.id, runId));
+      const writeBatch = () =>
+        db(c, ctx).transaction(async (tx) => {
+          // max() in SQL: loading every row grew with transcript length.
+          const [highest] = await tx
+            .select({ seq: max(runEvents.seq) })
+            .from(runEvents)
+            .where(eq(runEvents.runId, runId));
+          let next = highest?.seq ?? 0;
+          for (const event of events) {
+            next += 1;
+            await tx.insert(runEvents).values({ runId, seq: next, type: event.type, payload: event });
+            /**
+             * The session id reaches the run row the moment the CLI
+             * announces it, same as server-executed runs: a runner whose
+             * machine dies mid-run must not take the conversation's only
+             * key with it.
+             */
+            const announced = (event as { type?: string; sessionId?: string }).sessionId;
+            if (event.type === "init" && typeof announced === "string" && announced) {
+              await tx.update(agentRuns).set({ cliSessionId: announced }).where(eq(agentRuns.id, runId));
+            }
           }
+          return next;
+        });
+      let seq: number;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          seq = await writeBatch();
+          break;
+        } catch (err) {
+          if (!isUniqueViolation(err) || attempt >= 5) throw err;
         }
-        return next;
-      });
+      }
 
       let emitted = seq - events.length;
       for (const event of events) {
