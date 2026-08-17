@@ -114,10 +114,10 @@ export const gate = {
  * `fromStatus`/`toStatus` or they render as "new to unknown".
  */
 export const history = [
-  { id: "e4", featureId: "f1", kind: "status_changed", fromStatus: "active", toStatus: "gated", trigger: "gate_auto", at: at(20) },
-  { id: "e3", featureId: "f1", kind: "stage_moved", fromStageId: "s1", toStageId: "s2", trigger: "gate_auto", at: at(41) },
-  { id: "e2", featureId: "f1", kind: "status_changed", fromStatus: "backlog", toStatus: "active", trigger: "manual", at: at(170) },
-  { id: "e1", featureId: "f1", kind: "status_changed", fromStatus: null, toStatus: "backlog", trigger: "manual", at: at(180) },
+  { id: "e4", featureId: "f1", kind: "status_changed", fromStatus: "active", toStatus: "gated", trigger: "gate_auto", actorName: null, actorEmail: null, at: at(20) },
+  { id: "e3", featureId: "f1", kind: "stage_moved", fromStageId: "s1", toStageId: "s2", trigger: "gate_auto", actorName: null, actorEmail: null, at: at(41) },
+  { id: "e2", featureId: "f1", kind: "status_changed", fromStatus: "backlog", toStatus: "active", trigger: "manual", actorName: "Ada Lovelace", actorEmail: "ada@acme.test", at: at(170) },
+  { id: "e1", featureId: "f1", kind: "status_changed", fromStatus: null, toStatus: "backlog", trigger: "manual", actorName: "Ada Lovelace", actorEmail: "ada@acme.test", at: at(180) },
 ];
 
 /** What each client method answers with. Absent method → null. */

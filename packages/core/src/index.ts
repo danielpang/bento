@@ -5,3 +5,4 @@ export * from "./sse.js";
 export * from "./pipeline.js";
 export * from "./credentials.js";
 export * from "./models.js";
+export * from "./history.js";

@@ -4339,6 +4339,8 @@ test("a feature's history records moves and status changes", { timeout: 90_000 }
       toStageId: string | null;
       toStatus: string | null;
       trigger: string;
+      actorName: string | null;
+      actorEmail: string | null;
       detail: { failedCriteria?: string[] } | null;
     }[]
   >(await app.request(`/api/features/${feature.id}/history`));
@@ -4350,6 +4352,8 @@ test("a feature's history records moves and status changes", { timeout: 90_000 }
   assert.equal(moves[0]!.fromStageId, null);
   assert.equal(moves[0]!.toStageId, stages[0]!.id);
   assert.equal(moves[0]!.trigger, "manual");
+  assert.equal(moves[0]!.actorName, "Local User", "a named account is shown as their name");
+  assert.equal(moves[0]!.actorEmail, "local@bento.dev");
 
   // Returning to the backlog: no destination stage, and the direction is
   // readable from the trigger without comparing stage positions.
@@ -4361,6 +4365,12 @@ test("a feature's history records moves and status changes", { timeout: 90_000 }
   const held = history.find((e) => e.kind === "status_changed" && e.toStatus === "gated");
   assert.ok(held, "being held at a gate must appear in the history");
   assert.deepEqual(held.detail?.failedCriteria, ["command"], "the history should say which criterion held it");
+  assert.equal(held.actorName, null, "a gate is not a person");
+
+  const plain = await (await app.request(`/api/features/${feature.id}/history/plain`)).text();
+  assert.match(plain, /by Local User/, "plain history names the person who moved the card");
+  assert.match(plain, /sent back by Local User/);
+  assert.match(plain, /by a gate/);
 
   // The older endpoint still answers, for clients written before this.
   const transitions = await app.request(`/api/features/${feature.id}/transitions`);

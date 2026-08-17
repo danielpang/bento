@@ -189,6 +189,9 @@ export interface FeatureEvent {
   toStatus: string | null;
   trigger: string;
   actorUserId: string | null;
+  /** Present when a person moved the card and their account still exists. */
+  actorName: string | null;
+  actorEmail: string | null;
   runId: string | null;
   detail: { failedCriteria?: string[] } | null;
   at: string;
