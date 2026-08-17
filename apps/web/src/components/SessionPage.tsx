@@ -91,8 +91,8 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
         <span className="chip" data-status={feature.status}>
           {feature.status}
         </span>
-        <a className="btn btn-ghost" href="/">
-          Back to the board
+        <a className="btn btn-ghost" href="/sessions">
+          Back
         </a>
       </header>
       {hasDiff && (

@@ -633,8 +633,14 @@ export function AgentSession({
               }}
             />
           )}
-          <button className="btn btn-primary" type="submit" disabled={busy || !say.trim()}>
-            Send
+          <button
+            className="btn btn-primary composer-send"
+            type="submit"
+            disabled={busy || !say.trim()}
+            aria-label="Send"
+            title="Send"
+          >
+            <SendMark />
           </button>
         </form>
       )}
@@ -833,6 +839,31 @@ export function runWords(status: string): string {
     default:
       return status;
   }
+}
+
+/**
+ * The send arrow. Drawn on the same stroke weight as the console's
+ * other marks, and used instead of a worded button so the composer's
+ * width goes to the input.
+ */
+function SendMark() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M8 13.25V3.25" />
+      <path d="M3.75 7.5 8 3.25 12.25 7.5" />
+    </svg>
+  );
 }
 
 /** "Jul 29, 11:42 PM": enough to tell runs apart without a full ISO stamp. */
