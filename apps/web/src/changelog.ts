@@ -25,6 +25,21 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "finish-early",
+    date: "2026-08-17",
+    title: "Move a card to Done from anywhere",
+    items: [
+      {
+        title: "The Done lane takes drops",
+        body: "Drag a card onto Done from any lane, including the backlog, and it is marked done with the remaining stages skipped rather than approved one at a time. A one-line copy fix does not need a design review, and a card somebody finished by hand wants recording rather than running.",
+      },
+      {
+        title: "Mark done in the card's drawer",
+        body: "The same move without a mouse, beside the stage actions. The card keeps the stage it was in, so Reopen puts it back there, and a card finished from the backlog reopens into the backlog.",
+      },
+    ],
+  },
+  {
     id: "board-navigation",
     date: "2026-08-07",
     title: "A board you can work from a phone",

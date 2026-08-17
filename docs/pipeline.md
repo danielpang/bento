@@ -19,6 +19,8 @@ A stage with an assigned agent starts it automatically when a card arrives, so a
 
 **Where a card stops.** A card holds where you can see why: an agent that failed or was stopped, a requirement that did not pass, or a stage with no agent to run. A card past the last stage is done. Done cards take no stage actions and no agent will run on one, and a single Reopen action returns it to the stage it finished in so the work can be corrected.
 
+**Finishing early.** A card can be marked done from wherever it is, by dragging it onto the board's Done lane or with Mark done in its drawer, and the stages between are skipped rather than approved. Not every card needs the whole pipeline: a one-line copy fix wants no design review, and a card somebody finished by hand wants recording rather than running. It keeps the stage it was in, so Reopen puts it back there (the backlog, for a card that never started).
+
 ## Gates
 
 Each stage carries criteria, and all of them must pass:

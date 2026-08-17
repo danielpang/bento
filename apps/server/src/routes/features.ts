@@ -28,6 +28,7 @@ import { canAccessProject, getAccessibleFeature } from "../access.js";
 import {
   advanceFeature,
   evaluateFeatureGate,
+  finishFeature,
   JUDGE_PROMPT_PREFIX,
   moveFeatureBack,
   moveFeatureTo,
@@ -474,7 +475,6 @@ export function featureRoutes(ctx: AppContext) {
     .post("/:id/back", async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
       if (!feature) return c.json({ error: "not found" }, 404);
-      if (!feature.currentStageId) return c.json({ error: "feature is already in the backlog" }, 409);
       if (feature.status === "cancelled") return c.json({ error: "feature is cancelled" }, 409);
 
       /**
@@ -486,6 +486,10 @@ export function featureRoutes(ctx: AppContext) {
        * so one mis-click on the final approve was permanent. Reopening
        * starts nothing by itself; the reopened stage waits for a person
        * the way any freshly entered stage does.
+       *
+       * Asked before the backlog refusal below, because a card marked
+       * done straight from the backlog has no stage either and is
+       * exactly the card that must not be frozen.
        */
       if (feature.status === "done") {
         const refused = await activationRefusal(ctx, feature);
@@ -496,7 +500,30 @@ export function featureRoutes(ctx: AppContext) {
         return c.json(updated);
       }
 
+      if (!feature.currentStageId) return c.json({ error: "feature is already in the backlog" }, 409);
+
       const result = await moveFeatureBack(ctx, feature.id, "manual", actor(c));
+      if (!result) return c.json({ error: "the card moved while you were looking at it" }, 409);
+      const [updated] = await db(c, ctx).select().from(features).where(eq(features.id, feature.id));
+      return c.json(updated);
+    })
+    /**
+     * Marks the card done from wherever it is, skipping the stages it
+     * has not been through. This is what dropping a card on the board's
+     * Done lane calls.
+     *
+     * Its own route rather than a target of /move, because done is a
+     * status and not a stage: /move puts a card in a lane the pipeline
+     * defines, and there is no stage id to name here.
+     */
+    .post("/:id/finish", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      if (feature.status === "done") return c.json({ error: "feature is already done" }, 409);
+      if (feature.status === "cancelled") return c.json({ error: "feature is cancelled; reopen it first" }, 409);
+      // No activation check: a card going to done stops being live, and
+      // the plan counts live cards.
+      const result = await finishFeature(ctx, feature.id, actor(c));
       if (!result) return c.json({ error: "the card moved while you were looking at it" }, 409);
       const [updated] = await db(c, ctx).select().from(features).where(eq(features.id, feature.id));
       return c.json(updated);
@@ -860,10 +887,11 @@ export function featureRoutes(ctx: AppContext) {
           .from(featureEvents)
           .where(eq(featureEvents.featureId, feature.id))
           .orderBy(asc(featureEvents.at)),
-        db(c, ctx).select().from(stages).where(eq(stages.pipelineId, feature.pipelineId)),
+        db(c, ctx).select().from(stages).where(eq(stages.pipelineId, feature.pipelineId)).orderBy(asc(stages.position)),
       ]);
       const nameOf = (id: string | null) =>
         id ? (stageRows.find((s) => s.id === id)?.name ?? "unknown") : "Backlog";
+      const lastStage = stageRows[stageRows.length - 1];
 
       const lines = rows.map((row) => {
         const when = row.at.toISOString();
@@ -872,12 +900,16 @@ export function featureRoutes(ctx: AppContext) {
          * tells them apart: a backward move went to the backlog, a
          * forward one left the last stage, which is finishing. Reading
          * both as "to Backlog" told a finished card's history exactly
-         * backwards.
+         * backwards. A forward one off an earlier stage is a card
+         * marked done with stages left, which is a third story: that
+         * stage was not finished, it was skipped.
          */
         const description =
           row.kind === "stage_moved"
             ? !row.toStageId && row.fromStageId && !row.trigger.endsWith("_back")
-              ? `finished ${nameOf(row.fromStageId)}`
+              ? lastStage && row.fromStageId !== lastStage.id
+                ? `done from ${nameOf(row.fromStageId)}`
+                : `finished ${nameOf(row.fromStageId)}`
               : `${nameOf(row.fromStageId)} to ${nameOf(row.toStageId)}`
             : `${row.fromStatus ?? "new"} to ${row.toStatus ?? "unknown"}`;
         return `event|${when}|${row.kind}|${TRIGGER_WORDS[row.trigger] ?? row.trigger}|${description}`;

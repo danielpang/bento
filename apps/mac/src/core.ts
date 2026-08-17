@@ -2804,7 +2804,9 @@ export function gateEmptyText(model: Model): Uint8Array {
   if (bytesEq(card.status, asciiBytes("gated"))) {
     return asciiBytes("Waiting for your approval. Approve moves it on, Reject sends it back.");
   }
-  if (bytesEq(card.status, asciiBytes("done"))) return asciiBytes("This card finished the pipeline.");
+  // Not "finished the pipeline": a card can be marked done from any
+  // stage, so it may have finished none of them.
+  if (bytesEq(card.status, asciiBytes("done"))) return asciiBytes("This card is done.");
   return asciiBytes("Nothing is blocking this card.");
 }
 
