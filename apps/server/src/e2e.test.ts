@@ -47,7 +47,8 @@ import { appendRunEvent } from "./orchestrator/transcript.js";
 import { JUDGE_PROMPT_PREFIX, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { claudeCodeAdapter } from "@bento/agents";
+import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 
 const run = promisify(execFile);
 
@@ -827,6 +828,122 @@ test("concurrent transcript appends all land, with contiguous seqs", async () =>
   );
   const texts = new Set(rows.map((r) => (r.payload as { text: string }).text));
   assert.equal(texts.size, writers, "no message was lost or duplicated");
+});
+
+/**
+ * The transcript hole a restart leaves. A detached agent keeps
+ * working, and what it says while nobody listens survives only in the
+ * CLI's own session record inside the sandbox. Resuming the session
+ * reads that record back and appends what the transcript never got,
+ * exactly once, however many times the card is resumed after.
+ */
+test("resuming a session recovers the messages the agent sent while detached", async () => {
+  const { project, stages: projectStages } = await setupProject("Session recovery");
+  const feature = await createFeature(project.id, "Went dark");
+  const profile = await fakeProfile("recovery-fake");
+
+  const plant = async (status: "failed" | "running") => {
+    const [run] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: projectStages[0]!.id,
+        agentProfileId: profile.id,
+        prompt: status === "failed" ? "do the task" : "hello",
+        status,
+        cliSessionId: "ses_recovery1",
+        executor: "server",
+      })
+      .returning();
+    return run!;
+  };
+  // The run that went dark: it delivered one message, then the restart
+  // detached it and the agent said two more things into the void.
+  const interrupted = await plant("failed");
+  await appendRunEvent(ctx, interrupted.id, {
+    type: "message",
+    role: "assistant",
+    text: "Reading the code now.",
+    raw: { type: "text", part: { id: "prt_1", messageID: "msg_1", type: "text", text: "Reading the code now." } },
+  });
+  // The resume the user's ping started.
+  const resumed = await plant("running");
+
+  const workdir = await mkdtemp(path.join(tmpdir(), "bento-recovery-"));
+  const logPath = path.join(workdir, "export.json");
+  await writeFile(
+    logPath,
+    JSON.stringify({
+      info: { id: "ses_recovery1" },
+      messages: [
+        {
+          info: { role: "assistant", id: "msg_1" },
+          parts: [{ type: "text", text: "Reading the code now.", id: "prt_1", messageID: "msg_1" }],
+        },
+        {
+          info: { role: "assistant", id: "msg_2" },
+          parts: [{ type: "text", text: "The fix is in, committing.", id: "prt_2", messageID: "msg_2" }],
+        },
+        {
+          info: { role: "assistant", id: "msg_3" },
+          parts: [{ type: "text", text: "All done, the branch is ready.", id: "prt_3", messageID: "msg_3" }],
+        },
+      ],
+    }),
+  );
+  // The real opencode parser and diff over a record read out of the
+  // "sandbox" by the real driver; only the CLI invocation is replaced,
+  // because the test machine cannot assume an opencode install.
+  const adapter = {
+    ...opencodeAdapter,
+    sessionRecovery: {
+      ...opencodeAdapter.sessionRecovery!,
+      readLogCommand: () => ["cat", logPath],
+    },
+  };
+  const handle: SandboxHandle = { externalId: "local-recovery", provider: "local-process", workdir };
+
+  const recoverArgs = {
+    handle,
+    adapter,
+    featureId: feature.id,
+    runId: resumed.id,
+    sessionId: "ses_recovery1",
+    cwd: workdir,
+  };
+  await recoverMissedMessages(ctx, recoverArgs);
+
+  const transcript = async () =>
+    (
+      await ctx.db
+        .select({ payload: runEvents.payload })
+        .from(runEvents)
+        .where(eq(runEvents.runId, resumed.id))
+        .orderBy(sql`seq`)
+    ).map((r) => r.payload as { role?: string; text?: string });
+
+  const first = await transcript();
+  assert.equal(first.length, 3, "one explanation plus the two missed messages");
+  assert.match(first[0]!.text ?? "", /kept working while Bento was disconnected/);
+  assert.match(first[0]!.text ?? "", /2 messages/);
+  assert.deepEqual(
+    first.slice(1).map((r) => [r.role, r.text]),
+    [
+      ["assistant", "The fix is in, committing."],
+      ["assistant", "All done, the branch is ready."],
+    ],
+    "only the undelivered messages arrive, in conversation order",
+  );
+
+  // Recovery is idempotent: the recovered rows carry the same native
+  // ids delivered ones do, so running it again finds nothing missing.
+  await recoverMissedMessages(ctx, recoverArgs);
+  assert.equal((await transcript()).length, 3, "a second recovery adds nothing");
+
+  // A session id the CLI never minted (an agent-controlled string with
+  // shell metacharacters) recovers nothing rather than reaching a shell.
+  await recoverMissedMessages(ctx, { ...recoverArgs, sessionId: 'ses"; rm -rf /tmp/x; "' });
+  assert.equal((await transcript()).length, 3);
 });
 
 /**

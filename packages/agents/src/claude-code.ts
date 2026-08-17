@@ -1,5 +1,10 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { lastResultEvent, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
+import {
+  lastResultEvent,
+  type AgentAdapter,
+  type BuildCommandInput,
+  type RecoveredMessage,
+} from "./adapter.js";
 
 interface ClaudeContentBlock {
   type: string;
@@ -97,6 +102,78 @@ export const claudeCodeAdapter: AgentAdapter = {
       if (delta.type === "thinking_delta" && delta.thinking) return { channel: "thinking", text: delta.thinking };
     }
     return { channel: "text", text: "" };
+  },
+
+  /**
+   * Claude Code writes every session to
+   * ~/.claude/projects/<slugified cwd>/<sessionId>.jsonl, one JSON
+   * entry per message chunk. Assistant entries embed the API message
+   * (message.id, message.content), and the same message.id rides the
+   * stream-json "assistant" lines this adapter persists, so the
+   * delivered/missed diff matches on ids rather than text. Verified
+   * against claude 2.x session files: the slug replaces every
+   * character outside [A-Za-z0-9] with a dash, sidechain entries are
+   * subagent chatter, and one API message can span several entries
+   * that share its id.
+   */
+  sessionRecovery: {
+    readLogCommand(sessionId: string, cwd: string): string[] {
+      const slug = cwd.replace(/[^A-Za-z0-9]/g, "-");
+      // The slug and the orchestrator-validated session id are both
+      // shell-safe by construction; $HOME resolves inside the sandbox.
+      return ["sh", "-c", `cat "$HOME/.claude/projects/${slug}/${sessionId}.jsonl"`];
+    },
+
+    parseLog(raw: string): RecoveredMessage[] {
+      const order: string[] = [];
+      const texts = new Map<string, string>();
+      for (const line of raw.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("{")) continue;
+        let entry: {
+          type?: string;
+          isSidechain?: boolean;
+          message?: { id?: string; content?: ClaudeContentBlock[] };
+        };
+        try {
+          entry = JSON.parse(trimmed) as typeof entry;
+        } catch {
+          continue;
+        }
+        if (entry.type !== "assistant" || entry.isSidechain) continue;
+        const id = entry.message?.id;
+        if (typeof id !== "string" || !id) continue;
+        const text = (entry.message?.content ?? [])
+          .filter((b) => b.type === "text" && typeof b.text === "string")
+          .map((b) => b.text)
+          .join("\n");
+        if (!text) continue;
+        if (texts.has(id)) texts.set(id, `${texts.get(id)}\n${text}`);
+        else {
+          order.push(id);
+          texts.set(id, text);
+        }
+      }
+      return order.map((id) => {
+        const text = texts.get(id)!;
+        // The stream-json line shape, so persistedIds and rendering
+        // treat a recovered message like a delivered one.
+        return {
+          text,
+          raw: {
+            type: "assistant",
+            recovered: true,
+            message: { id, role: "assistant", content: [{ type: "text", text }] },
+          },
+        };
+      });
+    },
+
+    persistedIds(event: AgentEvent): string[] {
+      if (event.type !== "message" || event.role !== "assistant") return [];
+      const id = (event.raw as { message?: { id?: unknown } } | undefined)?.message?.id;
+      return typeof id === "string" && id !== "" ? [id] : [];
+    },
   },
 
   parseEvent(line: string): AgentEvent | null {

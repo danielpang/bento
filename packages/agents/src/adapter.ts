@@ -38,6 +38,56 @@ export interface LiveSession {
   encodeMessage(text: string, kind: "initial" | "followUp"): string;
 }
 
+/**
+ * One assistant message read back out of a CLI's own session record,
+ * for transcripts with holes in them.
+ */
+export interface RecoveredMessage {
+  text: string;
+  /**
+   * The event's raw payload, in the same shape this adapter's live
+   * stream would have produced, so a recovered message is
+   * indistinguishable from a delivered one everywhere downstream and
+   * carries the ids that keep it from being recovered twice.
+   */
+  raw: unknown;
+}
+
+/**
+ * Reads the conversation back out of the CLI's own session storage.
+ *
+ * The stream is not the only copy of what an agent said: every CLI
+ * also writes its session to disk in the sandbox, and that record
+ * survives the disconnects that eat the stream. When a server restart
+ * cuts a run loose and the agent keeps working, the messages it
+ * produces reach nobody; the next run that resumes the session uses
+ * this to read them back and fill the hole in the transcript.
+ *
+ * Optional because it needs a documented, stable way to get the
+ * session back out of the tool. Adapters without it lose detached
+ * messages the way they always did.
+ */
+export interface SessionRecovery {
+  /**
+   * argv that prints the session's record to stdout inside the
+   * sandbox. cwd is where the agent ran, for tools that key their
+   * storage on the project directory. A non-zero exit means "no
+   * record", which callers treat as nothing to recover.
+   */
+  readLogCommand(sessionId: string, cwd: string): string[];
+  /** The assistant messages the record holds, in conversation order. */
+  parseLog(raw: string): RecoveredMessage[];
+  /**
+   * The CLI-native ids carried by a persisted assistant message event,
+   * used to tell delivered messages from missed ones. Applies to both
+   * streamed events and previously recovered ones, so recovery is
+   * idempotent. Empty for events that carry no usable identity; those
+   * are never recovered against, because without an id "missing" and
+   * "already there" cannot be told apart.
+   */
+  persistedIds(event: AgentEvent): string[];
+}
+
 export interface AgentAdapter {
   cli: AgentCli;
   /** Env var names that must be present in the sandbox for this CLI. */
@@ -75,6 +125,8 @@ export interface AgentAdapter {
   requiredEnvFor?(model: string): string[];
   /** Present when the tool can hold a live stdin conversation. */
   live?: LiveSession;
+  /** Present when the tool's session storage can be read back. */
+  sessionRecovery?: SessionRecovery;
   buildCommand(input: BuildCommandInput): string[];
   /** Parse one stdout line. Return null for lines that are not events. */
   parseEvent(line: string): AgentEvent | null;

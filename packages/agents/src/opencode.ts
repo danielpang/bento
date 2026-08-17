@@ -1,5 +1,10 @@
 import type { AgentEvent, RunOutcome } from "@bento/core";
-import { providerKeyFor, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
+import {
+  providerKeyFor,
+  type AgentAdapter,
+  type BuildCommandInput,
+  type RecoveredMessage,
+} from "./adapter.js";
 
 interface OpencodePart {
   type?: string;
@@ -7,6 +12,16 @@ interface OpencodePart {
   tool?: string;
   callID?: string;
   state?: { status?: string };
+  id?: string;
+  messageID?: string;
+}
+
+/** The shape `opencode export <sessionID>` prints, as of opencode 1.18. */
+interface OpencodeExport {
+  messages?: {
+    info?: { role?: string; id?: string };
+    parts?: OpencodePart[];
+  }[];
 }
 
 interface OpencodeLine {
@@ -60,6 +75,60 @@ export const opencodeAdapter: AgentAdapter = {
     if (input.extraArgs?.length) cmd.push(...input.extraArgs);
     cmd.push(input.prompt);
     return cmd;
+  },
+
+  /**
+   * `opencode export` prints the session as one JSON document, read
+   * from the same storage the TUI's session list uses. Verified
+   * against opencode 1.18: messages carry info.role and info.id
+   * (msg_...), and each part carries its own id (prt_...) plus its
+   * messageID. Those are the same ids the live stream stamps on every
+   * "text" line's part, which is what makes the delivered/missed diff
+   * exact rather than a text comparison.
+   */
+  sessionRecovery: {
+    readLogCommand(sessionId: string): string[] {
+      return ["opencode", "export", sessionId];
+    },
+
+    parseLog(raw: string): RecoveredMessage[] {
+      let parsed: OpencodeExport;
+      try {
+        parsed = JSON.parse(raw) as OpencodeExport;
+      } catch {
+        return [];
+      }
+      const recovered: RecoveredMessage[] = [];
+      for (const message of parsed.messages ?? []) {
+        if (message.info?.role !== "assistant") continue;
+        for (const part of message.parts ?? []) {
+          if (part.type !== "text" || !part.text) continue;
+          // Rebuilt in the live stream's own line shape, so everything
+          // downstream (rendering, persistedIds, a later recovery)
+          // treats it exactly like a message that arrived on time.
+          recovered.push({
+            text: part.text,
+            raw: {
+              type: "text",
+              recovered: true,
+              part: {
+                id: part.id,
+                messageID: part.messageID ?? message.info.id,
+                type: "text",
+                text: part.text,
+              },
+            },
+          });
+        }
+      }
+      return recovered;
+    },
+
+    persistedIds(event: AgentEvent): string[] {
+      if (event.type !== "message" || event.role !== "assistant") return [];
+      const part = (event.raw as { part?: { id?: unknown; messageID?: unknown } } | undefined)?.part;
+      return [part?.id, part?.messageID].filter((id): id is string => typeof id === "string" && id !== "");
+    },
   },
 
   parseEvent(line: string): AgentEvent | null {
