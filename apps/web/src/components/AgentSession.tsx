@@ -501,14 +501,15 @@ export function AgentSession({
           >
             {runs.map((run) => {
               // A native option cannot carry a styled dot, so the dot
-              // is a character: colour is the entire message, stage
-              // name the entire label. The agent, time, and cost live
-              // in the transcript the pick reveals.
+              // is a character: colour carries the outcome, the stage
+              // names the work, and the timestamp tells three red
+              // "Code review" attempts apart. Agent and cost live in
+              // the transcript the pick reveals.
               const stage = stages?.find((s) => s.id === run.stageId)?.name;
               const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
               return (
                 <option key={run.id} value={run.id}>
-                  {runDotChar(run.status)} {stage ?? agent}
+                  {runDotChar(run.status)} {stage ?? agent} · {runTime(run.queuedAt)}
                 </option>
               );
             })}
