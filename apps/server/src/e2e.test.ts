@@ -43,10 +43,12 @@ import {
   recoverInterruptedRuns,
 } from "./orchestrator/run-executor.js";
 import { reapSandbox } from "./orchestrator/reap-sandbox.js";
+import { appendRunEvent } from "./orchestrator/transcript.js";
 import { JUDGE_PROMPT_PREFIX, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { claudeCodeAdapter } from "@bento/agents";
+import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 
 const run = promisify(execFile);
 
@@ -113,6 +115,7 @@ before(async () => {
     artifacts: new DiskArtifactStore(dataDir),
     running: new Map(),
     liveInputs: new Map(),
+    draining: false,
     userId,
   };
   await registerJobs(ctx);
@@ -779,6 +782,196 @@ test("a resume against a lost conversation restarts fresh instead of failing for
 
   const transcript = await (await app.request(`/api/runs/${failed.id}/transcript`)).text();
   assert.match(transcript, /cannot be resumed/, "the transcript says what happened and what happens next");
+});
+
+/**
+ * Transcript writes survive concurrent writers. During a restart the
+ * dying process's loop and the new process's reattached loop briefly
+ * drive the same run, and with in-memory seq counters their first
+ * collision on the (run_id, seq) unique index killed a loop and dropped
+ * an agent message. Seq is now allocated in the database with a retry,
+ * so every message lands exactly once, whoever writes it.
+ */
+test("concurrent transcript appends all land, with contiguous seqs", async () => {
+  const { project, stages: projectStages } = await setupProject("Concurrent transcript");
+  const feature = await createFeature(project.id, "Two writers");
+  const profile = await fakeProfile("append-fake");
+  const [run] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: projectStages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "hold still",
+      status: "running",
+      executor: "server",
+    })
+    .returning();
+
+  const writers = 25;
+  await Promise.all(
+    Array.from({ length: writers }, (_, i) =>
+      appendRunEvent(ctx, run!.id, { type: "message", role: "system", text: `line ${i}` }),
+    ),
+  );
+
+  const rows = await ctx.db
+    .select({ seq: runEvents.seq, payload: runEvents.payload })
+    .from(runEvents)
+    .where(eq(runEvents.runId, run!.id))
+    .orderBy(sql`seq`);
+  assert.equal(rows.length, writers, "every append landed despite racing for the same seq");
+  assert.deepEqual(
+    rows.map((r) => r.seq),
+    Array.from({ length: writers }, (_, i) => i + 1),
+    "seqs are contiguous from 1, with no gaps for a stream cursor to fall into",
+  );
+  const texts = new Set(rows.map((r) => (r.payload as { text: string }).text));
+  assert.equal(texts.size, writers, "no message was lost or duplicated");
+});
+
+/**
+ * The transcript hole a restart leaves. A detached agent keeps
+ * working, and what it says while nobody listens survives only in the
+ * CLI's own session record inside the sandbox. Resuming the session
+ * reads that record back and appends what the transcript never got,
+ * exactly once, however many times the card is resumed after.
+ */
+test("resuming a session recovers the messages the agent sent while detached", async () => {
+  const { project, stages: projectStages } = await setupProject("Session recovery");
+  const feature = await createFeature(project.id, "Went dark");
+  const profile = await fakeProfile("recovery-fake");
+
+  const plant = async (status: "failed" | "running") => {
+    const [run] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: projectStages[0]!.id,
+        agentProfileId: profile.id,
+        prompt: status === "failed" ? "do the task" : "hello",
+        status,
+        cliSessionId: "ses_recovery1",
+        executor: "server",
+      })
+      .returning();
+    return run!;
+  };
+  // The run that went dark: it delivered one message, then the restart
+  // detached it and the agent said two more things into the void.
+  const interrupted = await plant("failed");
+  await appendRunEvent(ctx, interrupted.id, {
+    type: "message",
+    role: "assistant",
+    text: "Reading the code now.",
+    raw: { type: "text", part: { id: "prt_1", messageID: "msg_1", type: "text", text: "Reading the code now." } },
+  });
+  // The resume the user's ping started.
+  const resumed = await plant("running");
+
+  const workdir = await mkdtemp(path.join(tmpdir(), "bento-recovery-"));
+  const logPath = path.join(workdir, "export.json");
+  await writeFile(
+    logPath,
+    JSON.stringify({
+      info: { id: "ses_recovery1" },
+      messages: [
+        {
+          info: { role: "assistant", id: "msg_1" },
+          parts: [{ type: "text", text: "Reading the code now.", id: "prt_1", messageID: "msg_1" }],
+        },
+        {
+          info: { role: "assistant", id: "msg_2" },
+          parts: [{ type: "text", text: "The fix is in, committing.", id: "prt_2", messageID: "msg_2" }],
+        },
+        {
+          info: { role: "assistant", id: "msg_3" },
+          parts: [{ type: "text", text: "All done, the branch is ready.", id: "prt_3", messageID: "msg_3" }],
+        },
+      ],
+    }),
+  );
+  // The real opencode parser and diff over a record read out of the
+  // "sandbox" by the real driver; only the CLI invocation is replaced,
+  // because the test machine cannot assume an opencode install.
+  const adapter = {
+    ...opencodeAdapter,
+    sessionRecovery: {
+      ...opencodeAdapter.sessionRecovery!,
+      readLogCommand: () => ["cat", logPath],
+    },
+  };
+  const handle: SandboxHandle = { externalId: "local-recovery", provider: "local-process", workdir };
+
+  const recoverArgs = {
+    handle,
+    adapter,
+    featureId: feature.id,
+    runId: resumed.id,
+    sessionId: "ses_recovery1",
+    cwd: workdir,
+  };
+  await recoverMissedMessages(ctx, recoverArgs);
+
+  const transcript = async () =>
+    (
+      await ctx.db
+        .select({ payload: runEvents.payload })
+        .from(runEvents)
+        .where(eq(runEvents.runId, resumed.id))
+        .orderBy(sql`seq`)
+    ).map((r) => r.payload as { role?: string; text?: string });
+
+  const first = await transcript();
+  assert.equal(first.length, 3, "one explanation plus the two missed messages");
+  assert.match(first[0]!.text ?? "", /kept working while Bento was disconnected/);
+  assert.match(first[0]!.text ?? "", /2 messages/);
+  assert.deepEqual(
+    first.slice(1).map((r) => [r.role, r.text]),
+    [
+      ["assistant", "The fix is in, committing."],
+      ["assistant", "All done, the branch is ready."],
+    ],
+    "only the undelivered messages arrive, in conversation order",
+  );
+
+  // Recovery is idempotent: the recovered rows carry the same native
+  // ids delivered ones do, so running it again finds nothing missing.
+  await recoverMissedMessages(ctx, recoverArgs);
+  assert.equal((await transcript()).length, 3, "a second recovery adds nothing");
+
+  // A session id the CLI never minted (an agent-controlled string with
+  // shell metacharacters) recovers nothing rather than reaching a shell.
+  await recoverMissedMessages(ctx, { ...recoverArgs, sessionId: 'ses"; rm -rf /tmp/x; "' });
+  assert.equal((await transcript()).length, 3);
+});
+
+/**
+ * Terminal states are written once. Two paths racing a run's ending
+ * (a draining process's loop and its successor, or cancel against a
+ * natural finish) used to both write, and the loser overwrote the
+ * winner's status.
+ */
+test("a run already ended cannot be cancelled over its terminal state", async () => {
+  const { project, stages: projectStages } = await setupProject("Terminal CAS");
+  const feature = await createFeature(project.id, "Finished card");
+  const profile = await fakeProfile("cas-fake");
+  const [run] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: projectStages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "already over",
+      status: "succeeded",
+      executor: "server",
+    })
+    .returning();
+
+  await markCancelled(ctx, run!.id);
+
+  const [after] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run!.id));
+  assert.equal(after!.status, "succeeded", "the finished status survived the late cancel");
 });
 
 /**
@@ -4345,13 +4538,15 @@ test("a finished run is announced once, and the card it belongs to is named at t
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.deepEqual(finished, [run.id], "the run that ended is the run announced");
 
-    // Cancelling again must not announce it twice: the deployment
-    // keys its ledger on the run, but a server that shouts twice makes
-    // that guarantee do work it should not have to.
+    // Cancelling again announces nothing: the terminal write is a
+    // compare-and-set, so only the call that actually ended the run
+    // speaks. The deployment keys its ledger on the run either way,
+    // but "announced once" is now the server's guarantee, not the
+    // ledger's cleanup.
     finished.length = 0;
     await markCancelled(ctx, run.id);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(finished, [run.id], "an already cancelled run still announces its own id, not another");
+    assert.deepEqual(finished, [], "an already cancelled run is not announced again");
   } finally {
     delete ctx.entitlements;
   }

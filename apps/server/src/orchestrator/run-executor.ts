@@ -26,6 +26,8 @@ import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { appendRunEvent } from "./transcript.js";
+import { recoverMissedMessages } from "./recover-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
 import {
@@ -141,19 +143,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * clones), and a card that sits silent for all of it reads as hung,
    * so the driver reports each step through saySystem as it happens.
    */
-  let seq = 0;
-  const sayAsUser = async (text: string) => {
-    seq += 1;
-    const said = { type: "message" as const, role: "user" as const, text };
-    await ctx.db.insert(runEvents).values({ runId, seq, type: said.type, payload: said });
-    ctx.bus.emitRunEvent({ runId, seq, event: said });
-  };
-  const saySystem = async (text: string) => {
-    seq += 1;
-    const said = { type: "message" as const, role: "system" as const, text };
-    await ctx.db.insert(runEvents).values({ runId, seq, type: said.type, payload: said });
-    ctx.bus.emitRunEvent({ runId, seq, event: said });
-  };
+  const sayAsUser = (text: string) =>
+    appendRunEvent(ctx, runId, { type: "message", role: "user", text });
+  const saySystem = (text: string) =>
+    appendRunEvent(ctx, runId, { type: "message", role: "system", text });
   // The prompt the user typed is their own line in the conversation,
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
@@ -382,6 +375,25 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
+  /**
+   * A resumed conversation may have a hole: the previous run's agent
+   * kept working after a restart detached it, and what it said reached
+   * nobody. The CLI's session record in this sandbox still holds those
+   * messages, so they are read back and appended here, before the
+   * resumed process starts, where the user is about to look. Never on
+   * a fresh session, which has nothing to have missed.
+   */
+  if (run.cliSessionId) {
+    await recoverMissedMessages(ctx, {
+      handle,
+      adapter,
+      featureId: feature.id,
+      runId,
+      sessionId: run.cliSessionId,
+      cwd: workdir,
+    });
+  }
+
   let result;
   const controller = new AbortController();
   ctx.running.set(runId, controller);
@@ -443,6 +455,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       // message; open streams get the typing.
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
       onEvent: async (event) => {
+        // A draining process only consumes: its successor has the run.
+        if (ctx.draining) return;
         if (!agentReported) {
           agentReported = true;
           await saySystem(`${profile.cli} started and is working on the task.`);
@@ -459,9 +473,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           sessionRecorded = true;
           await ctx.db.update(agentRuns).set({ cliSessionId: event.sessionId }).where(eq(agentRuns.id, runId));
         }
-        seq += 1;
-        await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
-        ctx.bus.emitRunEvent({ runId, seq, event });
+        await appendRunEvent(ctx, runId, event);
         if (event.type === "result") {
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
@@ -487,6 +499,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     ctx.running.delete(runId);
     ctx.liveInputs.delete(runId);
     liveChannel?.end();
+    // A draining process does not end runs: the agent is still working
+    // in the sandbox and the next boot reattaches to it. Whatever threw
+    // here is this process's shutdown seen from inside the loop.
+    if (ctx.draining) return;
     // A cancelled run is not a failure: the user asked for it to stop.
     if (controller.signal.aborted) {
       await markCancelled(ctx, runId);
@@ -499,9 +515,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
   ctx.running.delete(runId);
-    ctx.liveInputs.delete(runId);
-    liveChannel?.end();
+  ctx.liveInputs.delete(runId);
+  liveChannel?.end();
 
+  if (ctx.draining) return;
   if (controller.signal.aborted) {
     await markCancelled(ctx, runId);
     emitBoard("cancelled");
@@ -520,7 +537,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     publisher,
     argv,
     result,
-    seq,
     emitBoard,
   });
 }
@@ -538,8 +554,6 @@ interface RunSettlement {
   publisher: Awaited<ReturnType<typeof githubConnectionFor>>;
   argv: string[];
   result: { outcome: RunOutcome; exitCode: number };
-  /** Continues the run's transcript counter for the publish notes. */
-  seq: number;
   emitBoard: (status: string) => void;
 }
 
@@ -553,13 +567,8 @@ interface RunSettlement {
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
   const { runId, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
     settlement;
-  let seq = settlement.seq;
-  const saySystem = async (text: string) => {
-    seq += 1;
-    const event = { type: "message" as const, role: "system" as const, text };
-    await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
-    ctx.bus.emitRunEvent({ runId, seq, event });
-  };
+  const saySystem = (text: string) =>
+    appendRunEvent(ctx, runId, { type: "message", role: "system", text });
   const { outcome, exitCode } = result;
   if (!outcome.ok) {
     /**
@@ -871,7 +880,18 @@ async function finishRun(
   outcome: { ok: boolean; sessionId?: string; costUsd?: number; numTurns?: number; error?: string },
   exitCode: number | null,
 ): Promise<void> {
-  await ctx.db
+  // Ending runs belongs to the successor once shutdown starts; see the
+  // drain checks in the executor loops.
+  if (ctx.draining) return;
+  /**
+   * Compare-and-set: only a run still active can be finished, and only
+   * whoever moved it gets to write the rest (the transcript line, the
+   * done signal, the message delivery). During a restart two loops can
+   * briefly drive one run, and without this the loser overwrote the
+   * winner's terminal status and stamped a spurious failure line onto a
+   * run that had succeeded.
+   */
+  const [closed] = await ctx.db
     .update(agentRuns)
     .set({
       status: outcome.ok ? "succeeded" : "failed",
@@ -889,7 +909,9 @@ async function finishRun(
       numTurns: outcome.numTurns ?? null,
       error: outcome.error ?? null,
     })
-    .where(eq(agentRuns.id, runId));
+    .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+    .returning({ id: agentRuns.id });
+  if (!closed) return;
   announceRunFinished(ctx, runId);
 
   /**
@@ -918,16 +940,8 @@ async function finishRun(
       typeof (reported.payload as { error?: unknown } | null)?.error === "string" &&
       ((reported.payload as { error: string }).error.trim() !== "");
     if (!resultExplained) {
-      const [last] = await ctx.db
-        .select({ seq: runEvents.seq })
-        .from(runEvents)
-        .where(eq(runEvents.runId, runId))
-        .orderBy(desc(runEvents.seq))
-        .limit(1);
-      const seq = (last?.seq ?? 0) + 1;
       const event = { type: "message" as const, role: "system" as const, text: outcome.error };
-      await ctx.db.insert(runEvents).values({ runId, seq, type: event.type, payload: event });
-      ctx.bus.emitRunEvent({ runId, seq, event });
+      await appendRunEvent(ctx, runId, event);
       // The board card should say why it went red, not just that it did.
       const [owner] = await ctx.db
         .select({ featureId: agentRuns.featureId, projectId: features.projectId })
@@ -1094,12 +1108,16 @@ function announceRunFinished(ctx: AppContext, runId: string): void {
 
 /** A run the user stopped. Terminal, but not a failure. */
 export async function markCancelled(ctx: AppContext, runId: string): Promise<void> {
-  await ctx.db
+  const [closed] = await ctx.db
     .update(agentRuns)
     // No error: a cancellation is a choice, and clients render run.error
     // as a failure reason.
     .set({ status: "cancelled", endedAt: new Date(), error: null })
-    .where(eq(agentRuns.id, runId));
+    // Same compare-and-set as finishRun: a run another path already
+    // ended is not cancelled twice, and the loser changes nothing.
+    .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+    .returning({ id: agentRuns.id });
+  if (!closed) return;
   announceRunFinished(ctx, runId);
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
@@ -1217,18 +1235,11 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   // as long as the run said it was, and a restart is not a refund.
   announceRunFinished(ctx, run.id);
 
-  const [seqRow] = await ctx.db
-    .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
-    .from(runEvents)
-    .where(eq(runEvents.runId, run.id));
-  const seq = Number(seqRow?.maxSeq ?? 0) + 1;
-  const event = {
-    type: "message" as const,
-    role: "system" as const,
+  await appendRunEvent(ctx, run.id, {
+    type: "message",
+    role: "system",
     text: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
-  };
-  await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: event.type, payload: event });
-  ctx.bus.emitRunEvent({ runId: run.id, seq, event });
+  });
   // Any stream that reconnected before recovery ran is waiting live;
   // this lets it close the way a normal finish would.
   ctx.bus.emitRunDone(run.id, "failed");
@@ -1331,11 +1342,31 @@ async function resumeInterruptedRun(
   // attach leaves no misleading "reattached" line and no stale abort
   // handle behind.
   const controller = new AbortController();
-  const stream = await ctx.driver.attach!(handle, argv, {
-    timeoutMs,
-    signal: controller.signal,
-    ...(liveChannel ? { stdin: liveChannel } : {}),
-  });
+  /**
+   * Retried, because a rejection is "could not ask", not "no session":
+   * boot often races the same network or platform hiccup that caused
+   * the restart, and giving up on the first failed API call closed runs
+   * whose agents were alive and still working. Those agents' messages
+   * were produced into a transcript nobody was writing, which the user
+   * met as an agent gone dark until they pinged it. Null stays
+   * conclusive and is never retried.
+   */
+  const attach = async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await ctx.driver.attach!(handle, argv, {
+          timeoutMs,
+          signal: controller.signal,
+          ...(liveChannel ? { stdin: liveChannel } : {}),
+        });
+      } catch (err) {
+        if (attempt >= 2) throw err;
+        console.warn(`attach to run ${run.id} failed (attempt ${attempt + 1}), retrying:`, err);
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+      }
+    }
+  };
+  const stream = await attach();
   if (!stream) {
     liveChannel?.end();
     await failRunAsInterrupted(ctx, run);
@@ -1358,26 +1389,10 @@ async function resumeInterruptedRun(
 
   ctx.running.set(run.id, controller);
 
-  // The transcript already holds this run's first life; the counter
-  // continues it, because (runId, seq) is unique and starting over
-  // would throw on the first insert.
-  const [seqRow] = await ctx.db
-    .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
-    .from(runEvents)
-    .where(eq(runEvents.runId, run.id));
-  let seq = Number(seqRow?.maxSeq ?? 0);
-  const sayAsUser = async (text: string) => {
-    seq += 1;
-    const said = { type: "message" as const, role: "user" as const, text };
-    await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: said.type, payload: said });
-    ctx.bus.emitRunEvent({ runId: run.id, seq, event: said });
-  };
-  const saySystem = async (text: string) => {
-    seq += 1;
-    const said = { type: "message" as const, role: "system" as const, text };
-    await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: said.type, payload: said });
-    ctx.bus.emitRunEvent({ runId: run.id, seq, event: said });
-  };
+  const sayAsUser = (text: string) =>
+    appendRunEvent(ctx, run.id, { type: "message", role: "user", text });
+  const saySystem = (text: string) =>
+    appendRunEvent(ctx, run.id, { type: "message", role: "system", text });
 
   if (live && liveChannel) {
     ctx.liveInputs.set(run.id, {
@@ -1416,9 +1431,9 @@ async function resumeInterruptedRun(
       exec: () => stream,
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
       onEvent: async (event) => {
-        seq += 1;
-        await ctx.db.insert(runEvents).values({ runId: run.id, seq, type: event.type, payload: event });
-        ctx.bus.emitRunEvent({ runId: run.id, seq, event });
+        // A draining process only consumes: its successor has the run.
+        if (ctx.draining) return;
+        await appendRunEvent(ctx, run.id, event);
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);
           await onTurnFinished();
@@ -1439,6 +1454,8 @@ async function resumeInterruptedRun(
     ctx.running.delete(run.id);
     ctx.liveInputs.delete(run.id);
     liveChannel?.end();
+    // The next boot reattaches; this process just leaves quietly.
+    if (ctx.draining) return;
     if (controller.signal.aborted) {
       await markCancelled(ctx, run.id);
       emitBoard("cancelled");
@@ -1453,6 +1470,7 @@ async function resumeInterruptedRun(
   ctx.liveInputs.delete(run.id);
   liveChannel?.end();
 
+  if (ctx.draining) return;
   if (controller.signal.aborted) {
     await markCancelled(ctx, run.id);
     emitBoard("cancelled");
@@ -1471,7 +1489,6 @@ async function resumeInterruptedRun(
     publisher,
     argv,
     result,
-    seq,
     emitBoard,
   });
 }
@@ -1565,18 +1582,11 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     // Told where the user is looking: a card snapping from "starting"
     // back to "queued" with no explanation reads as a glitch.
     for (const run of stale) {
-      const [seqRow] = await ctx.db
-        .select({ maxSeq: sql<number>`coalesce(max(seq), 0)` })
-        .from(runEvents)
-        .where(eq(runEvents.runId, run.id));
-      const maxSeq = seqRow?.maxSeq ?? 0;
-      const event = {
-        type: "message" as const,
-        role: "system" as const,
+      await appendRunEvent(ctx, run.id, {
+        type: "message",
+        role: "system",
         text: "The machine running this stopped reporting, so the run was returned to the queue.",
-      };
-      await ctx.db.insert(runEvents).values({ runId: run.id, seq: maxSeq + 1, type: event.type, payload: event });
-      ctx.bus.emitRunEvent({ runId: run.id, seq: maxSeq + 1, event });
+      });
       const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
       if (feature) {
         ctx.bus.emitBoardEvent({

@@ -102,6 +102,7 @@ before(async () => {
     artifacts: new DiskArtifactStore(dataDir),
     running: new Map(),
     liveInputs: new Map(),
+    draining: false,
     userId,
   };
   await registerLinearJobs(ctx);
