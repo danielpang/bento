@@ -499,17 +499,17 @@ export function AgentSession({
             value={viewedRun?.id ?? ""}
             onChange={(e) => setViewedRunId(e.target.value === latestRun?.id ? null : e.target.value)}
           >
-            {runs.map((run, i) => {
-              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
+            {runs.map((run) => {
+              // A native option cannot carry a styled dot, so the dot
+              // is a character: colour carries the outcome, the stage
+              // names the work, and the timestamp tells three red
+              // "Code review" attempts apart. Agent and cost live in
+              // the transcript the pick reveals.
               const stage = stages?.find((s) => s.id === run.stageId)?.name;
+              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
               return (
                 <option key={run.id} value={run.id}>
-                  {i === 0 ? "Latest: " : ""}
-                  {stage ? `${stage} · ` : ""}
-                  {agent} {runWords(run.status)} · {runTime(run.queuedAt)}
-                  {run.costUsd !== null && run.costUsd !== undefined
-                    ? ` · $${Number(run.costUsd).toFixed(2)}`
-                    : ""}
+                  {runDotChar(run.status)} {stage ?? agent} · {runTime(run.queuedAt)}
                 </option>
               );
             })}
@@ -633,8 +633,14 @@ export function AgentSession({
               }}
             />
           )}
-          <button className="btn btn-primary" type="submit" disabled={busy || !say.trim()}>
-            Send
+          <button
+            className="btn btn-primary composer-send"
+            type="submit"
+            disabled={busy || !say.trim()}
+            aria-label="Send"
+            title="Send"
+          >
+            <SendMark />
           </button>
         </form>
       )}
@@ -835,6 +841,31 @@ export function runWords(status: string): string {
   }
 }
 
+/**
+ * The send arrow. Drawn on the same stroke weight as the console's
+ * other marks, and used instead of a worded button so the composer's
+ * width goes to the input.
+ */
+function SendMark() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M8 13.25V3.25" />
+      <path d="M3.75 7.5 8 3.25 12.25 7.5" />
+    </svg>
+  );
+}
+
 /** "Jul 29, 11:42 PM": enough to tell runs apart without a full ISO stamp. */
 export function runTime(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -856,5 +887,23 @@ export function runDot(status: string): "succeeded" | "failed" | "cancelled" | "
       return "cancelled";
     default:
       return "running";
+  }
+}
+
+/**
+ * The same mapping for the one place CSS cannot reach: a native
+ * select's options, where the dot has to be a character. Blue is
+ * anything still in motion; a stopped run gets the hollow circle.
+ */
+function runDotChar(status: string): string {
+  switch (runDot(status)) {
+    case "succeeded":
+      return "\u{1F7E2}"; // green circle
+    case "failed":
+      return "\u{1F534}"; // red circle
+    case "cancelled":
+      return "⚪"; // hollow circle
+    default:
+      return "\u{1F535}"; // blue circle
   }
 }
