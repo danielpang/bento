@@ -5,6 +5,7 @@ import type { AppContext } from "../context.js";
 import { activeOrg } from "./actor.js";
 
 export const TENANT_DB_KEY = "bentoDb";
+const AFTER_COMMIT_KEY = "bentoAfterCommit";
 
 /**
  * Runs a request inside a transaction that row-level security applies to.
@@ -25,9 +26,14 @@ export const TENANT_DB_KEY = "bentoDb";
  */
 export function tenantMiddleware(ctx: AppContext): MiddlewareHandler {
   return async (c, next) => {
+    const deferred: (() => Promise<void>)[] = [];
+    c.set(AFTER_COMMIT_KEY, deferred);
+
     if (ctx.env.BENTO_MODE !== "multi" || isStream(c.req.path)) {
       c.set(TENANT_DB_KEY, ctx.db);
-      return next();
+      await next();
+      await runDeferred(deferred);
+      return;
     }
 
     const orgId = activeOrg(c) ?? "";
@@ -42,7 +48,47 @@ export function tenantMiddleware(ctx: AppContext): MiddlewareHandler {
       c.set(TENANT_DB_KEY, tx as unknown as Db);
       await next();
     });
+    // Only now are the handler's rows visible to anyone else.
+    await runDeferred(deferred);
   };
+}
+
+/**
+ * Defers work until the request's rows are committed and visible to
+ * other connections.
+ *
+ * Queueing a job is the case this exists for. pg-boss writes on its own
+ * connection and commits immediately, so a job sent from inside the
+ * tenant transaction can be claimed by a worker before the row it names
+ * exists anywhere that worker can see it. The worker then finds nothing,
+ * and a job that finds nothing is indistinguishable from a job whose
+ * subject was deleted: it acks, and the work is silently dropped.
+ *
+ * A task that throws is logged and the rest still run. The transaction
+ * is already committed by then, so there is nothing left to undo, and
+ * the response has been decided.
+ */
+export function deferAfterCommit(
+  c: { get: (key: string) => unknown },
+  task: () => Promise<void>,
+): void {
+  const deferred = c.get(AFTER_COMMIT_KEY) as (() => Promise<void>)[] | undefined;
+  if (!deferred) {
+    // No tenant middleware in this chain (tests mounting a route bare).
+    void task().catch((err) => console.error("deferred task failed:", err));
+    return;
+  }
+  deferred.push(task);
+}
+
+async function runDeferred(tasks: (() => Promise<void>)[]): Promise<void> {
+  for (const task of tasks) {
+    try {
+      await task();
+    } catch (err) {
+      console.error("deferred task failed:", err);
+    }
+  }
 }
 
 /** The database handle for this request: scoped in multi mode. */

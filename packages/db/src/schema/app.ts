@@ -705,6 +705,18 @@ export const linearIssueLinks = pgTable(
     lastInboundUpdatedAt: timestamp("last_inbound_updated_at", { withTimezone: true }),
     /** Set when Linear deletes the issue; the feature stays. */
     stale: boolean("stale").notNull().default(false),
+    /**
+     * Set while Bento is filing this issue and not yet sure it exists.
+     *
+     * A card created in Bento reserves its link, with the issue id it
+     * is about to ask Linear for, before it calls Linear at all. That
+     * reservation is what makes the filing safe to retry: a second
+     * attempt finds it and recovers the issue rather than filing
+     * another one. It also claims the issue id before Linear's webhook
+     * can announce the issue back to us, which would otherwise import
+     * Bento's own new issue as a second card.
+     */
+    pending: boolean("pending").notNull().default(false),
     ...timestamps,
   },
   (t) => [

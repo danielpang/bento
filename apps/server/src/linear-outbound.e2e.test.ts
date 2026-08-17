@@ -51,7 +51,21 @@ let mappedProjectId: string;
 const originalFetch = globalThis.fetch;
 
 /** Every issueCreate input the server sent, in order. */
-const filed: { teamId: string; title: string; description?: string; projectId?: string }[] = [];
+const filed: { id?: string; teamId: string; title: string; description?: string; projectId?: string }[] =
+  [];
+/** The issues the stub believes exist, by id. */
+const issuesById = new Map<string, { id: string; identifier: string; url: string }>();
+/** Every issueUpdate the server sent, so a push can be shown not to happen. */
+const stateUpdates: string[] = [];
+
+async function pipelineFor(project: string): Promise<string> {
+  const [row] = await ctx.db
+    .select({ id: pipelines.id })
+    .from(pipelines)
+    .where(eq(pipelines.projectId, project))
+    .limit(1);
+  return row!.id;
+}
 
 before(async () => {
   const admin = new pg.Client({ connectionString: baseUrl });
@@ -131,7 +145,12 @@ after(async () => {
   await ctx.pool.end();
 });
 
-/** Linear, reduced to the two calls this path makes. */
+/**
+ * Linear, reduced to the calls this path makes, and refusing a repeated
+ * issue id the way Linear does. That refusal is the whole reason the
+ * filing is safe to retry, so a stub that quietly accepted it would
+ * agree with a broken implementation.
+ */
 function stubLinear(): typeof fetch {
   let issueNumber = 0;
   return (async (_url: string | URL | Request, init?: RequestInit) => {
@@ -140,18 +159,42 @@ function stubLinear(): typeof fetch {
       variables?: Record<string, any>;
     };
     if (body.query.includes("IssueCreate")) {
-      filed.push(body.variables!.input);
+      const input = body.variables!.input;
+      if (input.id && issuesById.has(input.id)) {
+        return new Response(
+          JSON.stringify({ errors: [{ message: "Entity with that id already exists" }] }),
+          { status: 200 },
+        );
+      }
+      filed.push(input);
       issueNumber += 1;
+      const issue = {
+        id: input.id ?? `issue-${issueNumber}`,
+        identifier: `DEF-${issueNumber}`,
+        url: `https://linear.app/bento/issue/DEF-${issueNumber}`,
+      };
+      issuesById.set(issue.id, issue);
+      return new Response(
+        JSON.stringify({ data: { issueCreate: { success: true, issue } } }),
+        { status: 200 },
+      );
+    }
+    if (body.query.includes("UpdateIssue")) {
+      stateUpdates.push(String(body.variables!.issueId));
+      return new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), { status: 200 });
+    }
+    if (body.query.startsWith("query Issue(")) {
+      const found = issuesById.get(body.variables!.id) ?? null;
       return new Response(
         JSON.stringify({
           data: {
-            issueCreate: {
-              success: true,
-              issue: {
-                id: `issue-${issueNumber}`,
-                identifier: `DEF-${issueNumber}`,
-                url: `https://linear.app/bento/issue/DEF-${issueNumber}`,
-              },
+            issue: found && {
+              ...found,
+              description: null,
+              updatedAt: new Date(0).toISOString(),
+              state: { id: "s1", name: "Todo", type: "unstarted" },
+              team: { id: "team-default" },
+              labels: { nodes: [] },
             },
           },
         }),
@@ -200,6 +243,10 @@ test("a card created in Bento files a Linear issue and links it", async () => {
   assert.equal(link.linearIssueIdentifier, "DEF-1");
   assert.equal(link.linearIssueUrl, "https://linear.app/bento/issue/DEF-1");
   assert.equal(link.linearTeamId, "team-default");
+  assert.equal(link.pending, false, "a confirmed link must not stay pending");
+  // Bento chooses the id, which is what lets it claim the issue before
+  // asking for it and recognize its own issue when Linear announces it.
+  assert.equal(link.linearIssueId, featureId);
   // Linear chose the state, so there is nothing for the echo check yet.
   assert.equal(link.lastOutboundStateType, null);
 
@@ -281,6 +328,109 @@ test("an imported card is never filed a second time", async () => {
     filed.some((input) => input.title === "Came from Linear"),
     false,
   );
+});
+
+test("a retry after a lost confirmation adopts the issue instead of filing another", async () => {
+  const { handleLinearIssueCreate } = await import("./orchestrator/linear-sync.js");
+  const featureId = await createCard(projectId, "Filed once");
+  await waitForLink(featureId);
+  const before = filed.length;
+
+  // The state a crash between the Linear call and the confirming write
+  // leaves behind: the issue exists, the link still says pending.
+  await ctx.db
+    .update(linearIssueLinks)
+    .set({ pending: true, linearIssueIdentifier: "", linearIssueUrl: "" })
+    .where(eq(linearIssueLinks.featureId, featureId));
+
+  await handleLinearIssueCreate(ctx, { featureId });
+
+  const [link] = await ctx.db
+    .select()
+    .from(linearIssueLinks)
+    .where(eq(linearIssueLinks.featureId, featureId))
+    .limit(1);
+  assert.equal(link!.pending, false, "the retry must confirm the link");
+  assert.match(link!.linearIssueUrl, /DEF-/, "the retry must recover the issue it already filed");
+  assert.equal(filed.length, before, "no second issue may be filed");
+  assert.equal(
+    filed.filter((input) => input.title === "Filed once").length,
+    1,
+  );
+});
+
+test("an issue Bento is still filing is not imported back as a second card", async () => {
+  const { handleLinearInbound } = await import("./orchestrator/linear-sync.js");
+  const [feature] = await ctx.db
+    .insert(features)
+    .values({
+      projectId: mappedProjectId,
+      pipelineId: await pipelineFor(mappedProjectId),
+      title: "Being filed",
+    })
+    .returning({ id: features.id });
+  await ctx.db.insert(linearIssueLinks).values({
+    featureId: feature!.id,
+    linearIssueId: feature!.id,
+    linearIssueIdentifier: "",
+    linearIssueUrl: "",
+    linearTeamId: "team-mapped",
+    pending: true,
+  });
+
+  const countBefore = (await ctx.db.select().from(features)).length;
+  // Linear announcing the issue Bento just asked it for, in a mapped
+  // team, which is the shape that imports a new card.
+  await handleLinearInbound(ctx, {
+    organizationId: null,
+    action: "create",
+    issue: {
+      id: feature!.id,
+      identifier: "MAP-4",
+      title: "Being filed",
+      url: "https://linear.app/bento/issue/MAP-4",
+      teamId: "team-mapped",
+      state: { id: "s", name: "Backlog", type: "backlog" },
+    } as any,
+  });
+
+  assert.equal(
+    (await ctx.db.select().from(features)).length,
+    countBefore,
+    "the reservation must stop Bento importing its own issue as a second card",
+  );
+});
+
+test("a pending link takes no state pushes", async () => {
+  const { handleLinearOutbound } = await import("./orchestrator/linear-sync.js");
+  const featureId = await createCard(projectId, "Still filing");
+  await waitForLink(featureId);
+  await ctx.db
+    .update(linearIssueLinks)
+    .set({ pending: true })
+    .where(eq(linearIssueLinks.featureId, featureId));
+
+  const before = stateUpdates.length;
+  await handleLinearOutbound(ctx, { featureId, toStatus: "active", toStageId: null });
+  assert.equal(stateUpdates.length, before, "an issue that may not exist yet must not be pushed to");
+});
+
+test("the oldest mapping decides the team", async () => {
+  // Two teams mapping to one project is reachable: the picker filters
+  // teams, not projects. The target must not depend on row order.
+  await ctx.db.insert(linearTeamMappings).values({
+    linearTeamId: "team-second",
+    linearTeamKey: "SEC",
+    linearTeamName: "Second",
+    projectId: mappedProjectId,
+  });
+  try {
+    const featureId = await createCard(mappedProjectId, "Two mappings");
+    const link = await waitForLink(featureId);
+    assert.equal(link.linearTeamId, "team-mapped");
+  } finally {
+    await ctx.db.delete(linearTeamMappings).where(eq(linearTeamMappings.linearTeamId, "team-second"));
+  }
 });
 
 test("the settings route stores a default team and project", async () => {

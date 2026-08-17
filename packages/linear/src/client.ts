@@ -173,8 +173,13 @@ export class LinearClient {
    * Files a new issue. Linear picks the team's default workflow state,
    * which is a backlog or unstarted one, matching where a new Bento card
    * sits. Returns the identity the issue link needs.
+   *
+   * `id` supplies the issue's UUID rather than letting Linear generate
+   * one, which is what makes filing safe to retry: the same id twice is
+   * refused instead of producing a second issue.
    */
   async createIssue(input: {
+    id?: string | undefined;
     teamId: string;
     title: string;
     description?: string | undefined;
@@ -188,6 +193,7 @@ export class LinearClient {
       }`,
       {
         input: {
+          ...(input.id ? { id: input.id } : {}),
           teamId: input.teamId,
           title: input.title,
           ...(input.description ? { description: input.description } : {}),

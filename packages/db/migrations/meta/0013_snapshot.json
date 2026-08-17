@@ -1,5 +1,5 @@
 {
-  "id": "2f8598f2-a46d-487e-9eef-ef0928eb8fc8",
+  "id": "efc57ae8-c9c8-4454-9868-5043527c3a4e",
   "prevId": "ceca37bf-91d1-4f2e-90e4-0ec00d6c5ac5",
   "version": "7",
   "dialect": "postgresql",
@@ -2243,6 +2243,13 @@
         },
         "stale": {
           "name": "stale",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "pending": {
+          "name": "pending",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
