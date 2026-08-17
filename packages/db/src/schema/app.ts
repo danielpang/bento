@@ -633,6 +633,24 @@ export const linearConnections = pgTable(
     encryptedWebhookSecret: text("encrypted_webhook_secret"),
     /** Target project for "bento" label imports from unmapped teams. */
     defaultProjectId: uuid("default_project_id").references(() => projects.id, { onDelete: "set null" }),
+    /**
+     * Whether a card created in Bento files an issue in Linear. On by
+     * default: a connected workspace is one someone wants their work to
+     * show up in, and a card with no issue is the surprise, not the
+     * other way round.
+     */
+    createIssues: boolean("create_issues").notNull().default(true),
+    /**
+     * Where those issues go. The team is required for a create, so an
+     * unset team means nothing is filed; the key and name are kept so
+     * settings can name the team without calling Linear. The Linear
+     * project is optional, and belongs to the default team.
+     */
+    defaultTeamId: text("default_team_id"),
+    defaultTeamKey: text("default_team_key"),
+    defaultTeamName: text("default_team_name"),
+    defaultLinearProjectId: text("default_linear_project_id"),
+    defaultLinearProjectName: text("default_linear_project_name"),
     ...timestamps,
   },
   (t) => [
@@ -687,6 +705,18 @@ export const linearIssueLinks = pgTable(
     lastInboundUpdatedAt: timestamp("last_inbound_updated_at", { withTimezone: true }),
     /** Set when Linear deletes the issue; the feature stays. */
     stale: boolean("stale").notNull().default(false),
+    /**
+     * Set while Bento is filing this issue and not yet sure it exists.
+     *
+     * A card created in Bento reserves its link, with the issue id it
+     * is about to ask Linear for, before it calls Linear at all. That
+     * reservation is what makes the filing safe to retry: a second
+     * attempt finds it and recovers the issue rather than filing
+     * another one. It also claims the issue id before Linear's webhook
+     * can announce the issue back to us, which would otherwise import
+     * Bento's own new issue as a second card.
+     */
+    pending: boolean("pending").notNull().default(false),
     ...timestamps,
   },
   (t) => [

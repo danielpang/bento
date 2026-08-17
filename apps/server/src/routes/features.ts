@@ -22,7 +22,7 @@ import {
 } from "@bento/db";
 import type { SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
 import {
@@ -36,6 +36,7 @@ import {
   reopenFeature,
 } from "../orchestrator/gate-evaluator.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
+import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
   claimQueuedMessages,
   enqueueMessage,
@@ -161,6 +162,11 @@ export function featureRoutes(ctx: AppContext) {
         })
         .returning();
       if (!feature) return c.json({ error: "something went wrong saving the card; try again" }, 500);
+      // Mirror the card into Linear when the workspace wants that.
+      // Queued, so a slow or failing Linear API never keeps the card
+      // from reaching the board, and queued after the commit, so the
+      // worker cannot look for this card before it exists.
+      deferAfterCommit(c, () => queueLinearIssueCreate(ctx, feature));
       return c.json(feature, 201);
     })
     .get("/:id", async (c) => {

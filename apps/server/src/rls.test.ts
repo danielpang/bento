@@ -34,6 +34,8 @@ const TENANT_TABLES = [
   "agent_profiles",
   "secrets",
   "github_installations",
+  "linear_team_mappings",
+  "linear_issue_links",
 ];
 
 let pool: pg.Pool;

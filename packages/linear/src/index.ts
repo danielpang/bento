@@ -3,6 +3,7 @@ export {
   LinearApiError,
   type LinearViewer,
   type LinearTeam,
+  type LinearProject,
   type LinearWorkflowState,
   type LinearIssue,
   type LinearIssueState,
