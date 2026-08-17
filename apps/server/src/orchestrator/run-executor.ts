@@ -27,6 +27,7 @@ import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { appendRunEvent } from "./transcript.js";
+import { recoverMissedMessages } from "./recover-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
 import {
@@ -372,6 +373,25 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
     return;
+  }
+
+  /**
+   * A resumed conversation may have a hole: the previous run's agent
+   * kept working after a restart detached it, and what it said reached
+   * nobody. The CLI's session record in this sandbox still holds those
+   * messages, so they are read back and appended here, before the
+   * resumed process starts, where the user is about to look. Never on
+   * a fresh session, which has nothing to have missed.
+   */
+  if (run.cliSessionId) {
+    await recoverMissedMessages(ctx, {
+      handle,
+      adapter,
+      featureId: feature.id,
+      runId,
+      sessionId: run.cliSessionId,
+      cwd: workdir,
+    });
   }
 
   let result;
