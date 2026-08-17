@@ -511,6 +511,12 @@ button {
   appearance: none;
   -webkit-appearance: none;
   padding-right: 30px;
+  /* The padding alone is not enough: Chromium lets a value too long
+     for the field slide under it, over the chevron. Ellipsis at the
+     content edge keeps the mark visible however long the value is. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   background-repeat: no-repeat;
   background-position: right 10px center;
   background-size: 12px 12px;
