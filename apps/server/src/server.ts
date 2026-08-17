@@ -102,6 +102,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     running: new Map(),
     liveInputs: new Map(),
     userId,
+    draining: false,
   };
   const githubApp = createGitHubApp(env);
   if (githubApp) ctx.githubApp = githubApp;
@@ -223,6 +224,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     mode: env.BENTO_MODE,
     sandboxDriver: env.BENTO_SANDBOX_DRIVER,
     async stop() {
+      /**
+       * First, before anything closes: run loops survive every await
+       * below, and the replacement process may already be reattaching
+       * to their runs. From here they consume their streams silently
+       * and write nothing, so the successor is the transcript's only
+       * writer.
+       */
+      ctx.draining = true;
       await new Promise<void>((resolve) => {
         /**
          * Stop accepting, then sever what is still open. An SSE stream
