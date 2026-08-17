@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, count, desc, eq, inArray, isNull, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { gateCriteria, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
@@ -395,6 +395,66 @@ export function projectRoutes(ctx: AppContext) {
       if (!(await canAccessProject(ctx, c, c.req.param("id")))) return c.json({ error: "not found" }, 404);
       const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, c.req.param("id")));
       return c.json(project);
+    })
+    /**
+     * Every conversation in the project, one entry per card that has
+     * runs. Judge runs are left out: they are the gate evaluator
+     * talking to itself, not a conversation anyone can join.
+     *
+     * Two queries, both sized by card count rather than run history:
+     * the rollup groups in the database, and the newest run per card
+     * comes from DISTINCT ON over the (feature, queued_at) index. The
+     * old shape fetched every run row the project ever made and folded
+     * them here, which grew a request by the week.
+     */
+    .get("/:id/sessions", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const [totals, latest] = await Promise.all([
+        db(c, ctx)
+          .select({
+            featureId: agentRuns.featureId,
+            title: features.title,
+            runCount: count(agentRuns.id),
+            // sum() skips nulls, so this is null only when no run on
+            // the card reported a figure, which is not the same as $0.
+            totalCostUsd: sum(agentRuns.costUsd),
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .groupBy(agentRuns.featureId, features.title),
+        db(c, ctx)
+          .selectDistinctOn([agentRuns.featureId], {
+            featureId: agentRuns.featureId,
+            id: agentRuns.id,
+            status: agentRuns.status,
+            agentProfileId: agentRuns.agentProfileId,
+            queuedAt: agentRuns.queuedAt,
+            startedAt: agentRuns.startedAt,
+            endedAt: agentRuns.endedAt,
+            costUsd: agentRuns.costUsd,
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .orderBy(agentRuns.featureId, desc(agentRuns.queuedAt)),
+      ]);
+
+      const latestByFeature = new Map(latest.map(({ featureId, ...run }) => [featureId, run]));
+      const sessions = totals
+        .map((row) => ({
+          featureId: row.featureId,
+          title: row.title,
+          runCount: Number(row.runCount),
+          totalCostUsd: row.totalCostUsd === null ? null : Number(row.totalCostUsd),
+          latestRun: latestByFeature.get(row.featureId)!,
+        }))
+        .filter((s) => s.latestRun !== undefined)
+        .sort((a, b) => b.latestRun.queuedAt.getTime() - a.latestRun.queuedAt.getTime());
+      return c.json({ sessions });
     })
     /**
      * The name, and nothing else: checkouts, branches and the pipeline

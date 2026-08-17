@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges } from "@bento/api-client";
+import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges, Stage } from "@bento/api-client";
 import { AgentSession } from "./AgentSession.js";
 import { DiffReview, type LineQuote } from "./DiffReview.js";
 import { useToast } from "./Toasts.js";
@@ -15,8 +15,11 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
   /** Whether the load failed, so the page says so instead of sitting blank. */
   const [loadFailed, setLoadFailed] = useState(false);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+  const [stages, setStages] = useState<Stage[]>([]);
   const [changes, setChanges] = useState<FeatureChanges | null>(null);
   const [quote, setQuote] = useState<LineQuote | null>(null);
+  /** Which pane a one-column screen shows; side by side ignores it. */
+  const [pane, setPane] = useState<"chat" | "changes">("chat");
 
   const refresh = useCallback(async () => {
     try {
@@ -25,9 +28,14 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
         client.listProfiles(),
         client.getChanges(featureId).catch(() => null),
       ]);
+      // After the feature, not alongside it: the pipeline is keyed by
+      // project, which is only known once the card has loaded. Absent
+      // stages degrade the run picker's labels, not the page.
+      const pipeline = await client.getPipeline(detail.projectId).catch(() => null);
       setFeature(detail);
       setProfiles(profileRows);
       setChanges(committed);
+      setStages(pipeline?.stages ?? []);
       setLoadFailed(false);
     } catch (err) {
       // Both: the toast carries what went wrong, and the flag keeps the
@@ -87,16 +95,36 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
           Back to the board
         </a>
       </header>
+      {hasDiff && (
+        <div className="pane-toggle" role="group" aria-label="Pane">
+          <button type="button" aria-pressed={pane === "chat"} onClick={() => setPane("chat")}>
+            Conversation
+          </button>
+          <button type="button" aria-pressed={pane === "changes"} onClick={() => setPane("changes")}>
+            Changes
+          </button>
+        </div>
+      )}
       {/*
         With committed changes this page reads like a pull request:
         the diff on the left, the agent on the right, and any line can
-        be quoted straight into the conversation.
+        be quoted straight into the conversation. On one column the
+        toggle above picks which of the two is on screen.
       */}
-      <div className={hasDiff ? "session-body review-grid" : "session-body"}>
+      <div className={hasDiff ? "session-body review-grid" : "session-body"} data-pane={hasDiff ? pane : undefined}>
         {hasDiff && changes && (
           <div className="review-diff">
             <span className="label">Changes</span>
-            <DiffReview changes={changes} onQuote={setQuote} />
+            <DiffReview
+              changes={changes}
+              // The chip and composer live in the conversation pane, so
+              // on one column a quote must also bring that pane back;
+              // otherwise the tap lands in a pane CSS has hidden.
+              onQuote={(q) => {
+                setQuote(q);
+                setPane("chat");
+              }}
+            />
           </div>
         )}
         <AgentSession
@@ -104,6 +132,7 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
           featureId={feature.id}
           runs={feature.runs}
           profiles={profiles}
+          stages={stages}
           finished={finished}
           onChanged={() => void refresh()}
           quote={quote}

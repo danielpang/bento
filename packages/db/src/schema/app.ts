@@ -207,7 +207,9 @@ export const organizationPolicies = pgTable("organization_policies", {
   ...timestamps,
 });
 
-export const features = pgTable("features", {
+export const features = pgTable(
+  "features",
+  {
   id: uuid("id").primaryKey().defaultRandom(),
   projectId: uuid("project_id")
     .notNull()
@@ -239,7 +241,11 @@ export const features = pgTable("features", {
    */
   prNumber: integer("pr_number"),
   ...timestamps,
-});
+  },
+  // Postgres does not index FK columns on its own, and every board,
+  // run, and session query starts from "the cards of this project".
+  (t) => [index("features_project_idx").on(t.projectId)],
+);
 
 /**
  * One pull request per repository a feature changed.
@@ -381,7 +387,9 @@ export const sandboxes = pgTable("sandboxes", {
   (t) => [uniqueIndex("sandboxes_external_id_idx").on(t.externalId)],
 );
 
-export const agentRuns = pgTable("agent_runs", {
+export const agentRuns = pgTable(
+  "agent_runs",
+  {
   id: uuid("id").primaryKey().defaultRandom(),
   featureId: uuid("feature_id")
     .notNull()
@@ -435,6 +443,15 @@ export const agentRuns = pgTable("agent_runs", {
     .notNull()
     .default("queued"),
   prompt: text("prompt").notNull(),
+  /**
+   * What this run is, structurally. "judge" is the gate evaluator's
+   * completion check; everything else is work someone can talk to.
+   * A column rather than a prompt-prefix test, because the prompt is
+   * user-reachable text: a chat message that happened to open with the
+   * judge sentence used to make its run drop out of every "not a
+   * judge" query in the server.
+   */
+  kind: text("kind", { enum: ["task", "judge"] }).notNull().default("task"),
   /** Copied from the project when the run is created. */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /** Sandbox snapshot taken before this run, for rolling it back. */
@@ -450,7 +467,11 @@ export const agentRuns = pgTable("agent_runs", {
   queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
   startedAt: timestamp("started_at", { withTimezone: true }),
   endedAt: timestamp("ended_at", { withTimezone: true }),
-});
+  },
+  // "This card's runs, newest first" is the shape of every conversation,
+  // resume, and session query; without this it is a table scan per ask.
+  (t) => [index("agent_runs_feature_queued_idx").on(t.featureId, t.queuedAt)],
+);
 
 export const runEvents = pgTable(
   "run_events",

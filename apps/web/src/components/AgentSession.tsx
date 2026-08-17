@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ThinkingOrb, type OrbState } from "thinking-orbs";
-import type { AgentProfile, AgentRun, BentoClient } from "@bento/api-client";
+import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
 import type { AgentEvent } from "@bento/core";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
@@ -62,6 +62,7 @@ export function AgentSession({
   featureId,
   runs,
   profiles,
+  stages,
   finished,
   onChanged,
   onEvent,
@@ -75,6 +76,8 @@ export function AgentSession({
   featureId: string;
   runs: AgentRun[];
   profiles: AgentProfile[];
+  /** Names the stage each run belongs to in the run picker, when known. */
+  stages?: Stage[];
   /** A finished card takes no messages; reopen first. */
   finished: boolean;
   onChanged: () => void;
@@ -480,6 +483,39 @@ export function AgentSession({
           )}
         </span>
       </span>
+      {/*
+        The latest run is what the pane follows by default; earlier
+        runs stay reachable through this picker rather than a list, so
+        a long card's history does not stack rows in the pane. At the
+        top, because it says what the pane below is showing. Picking
+        the newest entry hands the pane back to "follow the latest",
+        which is also where it snaps when a new run starts.
+      */}
+      {runs.length > 0 && (
+        <div className="session-runs">
+          <select
+            className="select run-picker"
+            aria-label="Run shown in the conversation"
+            value={viewedRun?.id ?? ""}
+            onChange={(e) => setViewedRunId(e.target.value === latestRun?.id ? null : e.target.value)}
+          >
+            {runs.map((run, i) => {
+              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
+              const stage = stages?.find((s) => s.id === run.stageId)?.name;
+              return (
+                <option key={run.id} value={run.id}>
+                  {i === 0 ? "Latest: " : ""}
+                  {stage ? `${stage} · ` : ""}
+                  {agent} {runWords(run.status)} · {runTime(run.queuedAt)}
+                  {run.costUsd !== null && run.costUsd !== undefined
+                    ? ` · $${Number(run.costUsd).toFixed(2)}`
+                    : ""}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      )}
       {latestRun ? (
         !hasMessages && !draft && runActive && !viewedRunId ? (
           <div className="chat orb-hero" aria-label="The agent is starting">
@@ -617,29 +653,6 @@ export function AgentSession({
         </p>
       )}
 
-      <div className="session-runs">
-      <span className="label">Runs</span>
-      {runs.length === 0 && <p className="muted">None yet.</p>}
-      {runs.map((run) => (
-        <button
-          key={run.id}
-          className="criterion run-row"
-          data-viewing={run.id === viewedRun?.id || undefined}
-          title="Show this run's conversation"
-          onClick={() => setViewedRunId(run.id === latestRun?.id ? null : run.id)}
-        >
-          <span
-            className="dot"
-            data-state={run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running"}
-          />
-          <span className="criterion-cmd">
-            {profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent"} {runWords(run.status)}
-          </span>
-          <span className="muted">{runTime(run.queuedAt)}</span>
-          {run.costUsd !== null && run.costUsd !== undefined && <span>${Number(run.costUsd).toFixed(2)}</span>}
-        </button>
-      ))}
-      </div>
     </section>
   );
 }
@@ -825,4 +838,23 @@ export function runWords(status: string): string {
 /** "Jul 29, 11:42 PM": enough to tell runs apart without a full ISO stamp. */
 export function runTime(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * A run's status as a dot state. One mapping for every run list, so a
+ * stopped run cannot pulse as live in one place while reading as
+ * stopped in another: cancelled gets its own grey, and only the
+ * statuses that are actually in motion get the breathing dot.
+ */
+export function runDot(status: string): "succeeded" | "failed" | "cancelled" | "running" {
+  switch (status) {
+    case "succeeded":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "running";
+  }
 }

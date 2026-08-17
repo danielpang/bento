@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, lt, notLike, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import { WORKSPACE_ARTIFACT_DIR, type RunOutcome } from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
@@ -20,7 +20,7 @@ import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
-import { evaluateFeatureGate, JUDGE_PROMPT_PREFIX } from "./gate-evaluator.js";
+import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
@@ -158,7 +158,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
   // judge's would read as a message nobody sent.
-  if (run.prompt && !run.prompt.startsWith(JUDGE_PROMPT_PREFIX)) await sayAsUser(run.prompt);
+  if (run.prompt && run.kind !== "judge") await sayAsUser(run.prompt);
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
@@ -983,11 +983,11 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * newest run that is not a judge run is whose agent and session the
    * message continues.
    */
-  const [conversation] = run.prompt.startsWith(JUDGE_PROMPT_PREFIX)
+  const [conversation] = run.kind === "judge"
     ? await ctx.db
         .select()
         .from(agentRuns)
-        .where(and(eq(agentRuns.featureId, run.featureId), notLike(agentRuns.prompt, `${JUDGE_PROMPT_PREFIX}%`)))
+        .where(and(eq(agentRuns.featureId, run.featureId), ne(agentRuns.kind, "judge")))
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1)
     : [run];
