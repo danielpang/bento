@@ -126,6 +126,15 @@ export interface AppContext {
    * from the request session instead; see middleware/actor.ts.
    */
   userId: string;
+  /**
+   * True once this process has begun shutting down. Run loops stay
+   * alive through the shutdown grace while their agents keep working in
+   * the sandboxes, and the next boot reattaches to those agents; this
+   * flag is what keeps the dying process from writing to transcripts
+   * its successor now owns. Two processes writing one run's events is
+   * how an agent's answer was once lost to a seq collision.
+   */
+  draining: boolean;
 }
 
 export function createDriver(env: Env): SandboxDriver {
