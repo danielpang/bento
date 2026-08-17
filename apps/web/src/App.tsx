@@ -590,6 +590,20 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             )
             .finally(() => void refresh());
         }}
+        onFinish={(featureId) => {
+          // Optimistic like a move, and the card keeps its stage: that
+          // is what the server does, and what reopening reads.
+          setFeatures((current) =>
+            current.map((f) => (f.id === featureId ? { ...f, status: "done" } : f)),
+          );
+          void client
+            .finishFeature(featureId)
+            .then(() => setLoadError(""))
+            .catch((err: unknown) =>
+              setLoadError(`The move was refused: ${err instanceof Error ? err.message : String(err)}`),
+            )
+            .finally(() => void refresh());
+        }}
       />
 
       {/* Same reason as the panels: the board stays put while the

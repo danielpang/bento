@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, isNull, notLike, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, ne, notLike, sql } from "drizzle-orm";
 import { gateCriteria, type GateCriterion } from "@bento/core";
 import { agentProfiles, agentRuns, featureEvents, featurePullRequests, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
 import { evaluateGate, type GateContext, type GateResult } from "@bento/gates";
@@ -477,6 +477,87 @@ export async function moveFeatureTo(
 }
 
 /**
+ * Marks a card done from wherever it is, without walking it through
+ * the stages it has left.
+ *
+ * The board's Done lane takes drops, and this is what a drop calls.
+ * Plenty of work turns out not to need the rest of the pipeline: a
+ * one-line copy fix does not want a design review, and a card someone
+ * finished by hand outside Bento wants recording rather than running.
+ * Approving through four stages to say so was four decisions nobody
+ * was making.
+ *
+ * Everything a card reaching the end of the pipeline gets, it gets
+ * here too, because "done" is one state and not two: the stage it was
+ * in is kept (that is what reopening returns it to), the history says
+ * it left that stage and changed status, and the sandbox is reaped
+ * because the card is over.
+ *
+ * Nothing is started and no gate is consulted: the person is the gate,
+ * the same way `/advance` treats them. Returns null when the card
+ * moved under the caller.
+ */
+export async function finishFeature(
+  ctx: AppContext,
+  featureId: string,
+  actorUserId?: string,
+): Promise<{ status: string; currentStageId: string | null } | null> {
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
+  if (!feature) return null;
+
+  /**
+   * Guarded on the stage the card is in and on it not being done
+   * already, so two clicks (or a drop racing a gate that advanced the
+   * card) write one finish rather than two pairs of history rows.
+   */
+  const [updated] = await ctx.db
+    .update(features)
+    .set({ status: "done", updatedAt: new Date() })
+    .where(
+      and(
+        eq(features.id, feature.id),
+        feature.currentStageId
+          ? eq(features.currentStageId, feature.currentStageId)
+          : isNull(features.currentStageId),
+        ne(features.status, "done"),
+      ),
+    )
+    .returning();
+  if (!updated) return null;
+
+  await recordFeatureEvent(ctx, {
+    featureId: feature.id,
+    kind: "stage_moved",
+    fromStageId: feature.currentStageId,
+    // Null the way the end of the pipeline is null: there is nowhere
+    // further for this card to go.
+    toStageId: null,
+    trigger: "manual",
+    actorUserId: actorUserId ?? null,
+  });
+  await recordFeatureEvent(ctx, {
+    featureId: feature.id,
+    kind: "status_changed",
+    fromStatus: feature.status,
+    toStatus: "done",
+    trigger: "manual",
+    actorUserId: actorUserId ?? null,
+  });
+  // The card is over, so the machine it was worked on goes.
+  await queueSandboxReap(ctx, feature.id);
+
+  ctx.bus.emitBoardEvent({
+    type: "feature_updated",
+    projectId: feature.projectId,
+    featureId: feature.id,
+    status: "done",
+    currentStageId: feature.currentStageId,
+  });
+
+  return { status: "done", currentStageId: feature.currentStageId };
+}
+
+/**
  * Brings a finished card back onto the board, into the stage it
  * finished in.
  *
@@ -495,9 +576,7 @@ export async function reopenFeature(
   actorUserId?: string,
 ): Promise<{ status: string; currentStageId: string | null } | null> {
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
-  // Done cards keep the stage they finished in, which is what makes
-  // reopening into it possible at all.
-  if (!feature || feature.status !== "done" || !feature.currentStageId) return null;
+  if (!feature || feature.status !== "done") return null;
 
   const [updated] = await ctx.db
     .update(features)
@@ -506,9 +585,17 @@ export async function reopenFeature(
     .returning();
   if (!updated) return null;
 
-  await ctx.db
-    .delete(gateChecks)
-    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)));
+  /**
+   * A card finished straight from the backlog has no stage to discard
+   * verdicts for, and reopens into the backlog. Requiring a stage here
+   * would leave that card the frozen thing reopening exists to
+   * prevent.
+   */
+  if (feature.currentStageId) {
+    await ctx.db
+      .delete(gateChecks)
+      .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)));
+  }
 
   await recordFeatureEvent(ctx, {
     featureId: feature.id,
@@ -699,6 +786,30 @@ async function holdFeature(ctx: AppContext, feature: Feature, stageId: string, r
     ) === describe(rows);
   if (already) return;
 
+  if (feature.status !== "gated") {
+    /**
+     * Guarded on the status this evaluation started from, and nothing
+     * is written when the guard misses. A card marked done (or moved)
+     * while the gate was being worked out was being dragged back to
+     * gated by an answer about where it used to be, held by a stage it
+     * had already left.
+     */
+    const [held] = await ctx.db
+      .update(features)
+      .set({ status: "gated", updatedAt: new Date() })
+      .where(and(eq(features.id, feature.id), eq(features.status, feature.status)))
+      .returning();
+    if (!held) return;
+    await recordFeatureEvent(ctx, {
+      featureId: feature.id,
+      kind: "status_changed",
+      fromStatus: feature.status,
+      toStatus: "gated",
+      trigger: "gate_auto",
+      detail: { message: rows[rows.length - 1]?.message ?? "" },
+    });
+  }
+
   await ctx.db.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stageId)));
   await ctx.db.insert(gateChecks).values(
     rows.map((row) => ({
@@ -711,17 +822,6 @@ async function holdFeature(ctx: AppContext, feature: Feature, stageId: string, r
     })),
   );
 
-  if (feature.status !== "gated") {
-    await ctx.db.update(features).set({ status: "gated", updatedAt: new Date() }).where(eq(features.id, feature.id));
-    await recordFeatureEvent(ctx, {
-      featureId: feature.id,
-      kind: "status_changed",
-      fromStatus: feature.status,
-      toStatus: "gated",
-      trigger: "gate_auto",
-      detail: { message: rows[rows.length - 1]?.message ?? "" },
-    });
-  }
   ctx.bus.emitBoardEvent({
     type: "feature_updated",
     projectId: feature.projectId,

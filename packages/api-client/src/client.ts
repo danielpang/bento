@@ -541,6 +541,14 @@ export class BentoClient {
     return this.request<Feature>(`/api/features/${featureId}/back`, { method: "POST" });
   }
 
+  /**
+   * Marks the card done from whatever stage it is in, skipping the rest
+   * of the pipeline. It keeps that stage, so reopening returns it there.
+   */
+  finishFeature(featureId: string) {
+    return this.request<Feature>(`/api/features/${featureId}/finish`, { method: "POST" });
+  }
+
   /** Stops a running agent so a person can take over. */
   cancelRun(runId: string) {
     return this.request<AgentRun>(`/api/runs/${runId}/cancel`, { method: "POST" });

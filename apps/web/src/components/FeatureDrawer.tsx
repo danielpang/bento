@@ -253,8 +253,7 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
           */}
           {finished && (
             <p className="muted">
-              This card has been through every stage. Reopen it to change something; it returns to the
-              stage it finished in.
+              This card is finished. Reopen it to change something; it comes back to where it left off.
             </p>
           )}
           {/* One grid, so buttons line up in even columns instead of
@@ -297,6 +296,19 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
                 onClick={() => act(() => client.advanceFeature(feature.id))}
               >
                 Start pipeline
+              </button>
+            )}
+            {/*
+              Done from wherever the card is, without walking it through
+              the stages that are left. The board's Done lane takes a
+              drop for the same reason, and this is the way there for
+              anyone not using a mouse. Not the primary button anywhere:
+              finishing early is the exception, and reopening is one
+              click away when it was the wrong call.
+            */}
+            {!finished && (
+              <button className="btn" disabled={busy} onClick={() => act(() => client.finishFeature(feature.id))}>
+                Mark done
               </button>
             )}
             {stageAgent && feature.currentStageId && !finished && (
@@ -657,7 +669,13 @@ function describeEvent(event: FeatureEvent, stages: Stage[]): string {
     // as finished made a rejected first stage card claim it had
     // finished the stage it was just thrown out of.
     if (!event.toStageId && event.fromStageId && !event.trigger.endsWith("_back")) {
-      return `Finished ${stageName(event.fromStageId, stages)}`;
+      // Off the last stage is finishing it. Off an earlier one is a card
+      // marked done with stages to spare, and "finished" said of a stage
+      // that was never worked is the same wrong story in a new place.
+      const last = stages[stages.length - 1];
+      return last && event.fromStageId !== last.id
+        ? `Done from ${stageName(event.fromStageId, stages)}`
+        : `Finished ${stageName(event.fromStageId, stages)}`;
     }
     return `${stageName(event.fromStageId, stages)} to ${stageName(event.toStageId, stages)}`;
   }

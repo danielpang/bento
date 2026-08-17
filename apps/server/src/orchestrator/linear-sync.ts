@@ -203,7 +203,9 @@ export async function handleLinearOutbound(
   const comment = stageName
     ? `Bento moved this card to the ${stageName} stage.`
     : status === "done"
-      ? "Bento finished this card. Every stage is complete."
+      // Not "every stage is complete": a card can be marked done from
+      // any stage, so the sentence has to be true of that card too.
+      ? "Bento finished this card."
       : status === "cancelled"
         ? "Bento cancelled this card."
         : status === "backlog"

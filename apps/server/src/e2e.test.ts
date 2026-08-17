@@ -1769,12 +1769,20 @@ test("a done card refuses new work and can be reopened", { timeout: 90_000 }, as
   assert.equal(done.status, "done");
   const lastStage = projectStages[projectStages.length - 1]!;
   assert.equal(done.currentStageId, lastStage.id, "a done card keeps the stage it finished in");
+  const plainDone = await (await app.request(`/api/features/${feature.id}/history/plain`)).text();
+  assert.match(plainDone, /finished /, "clearing the last stage reads as finishing it");
 
   // Nothing moves it except reopening, and nothing runs on it.
-  for (const path of ["advance", "approve", "reject"]) {
+  for (const path of ["advance", "approve", "reject", "finish"]) {
     const res = await app.request(`/api/features/${feature.id}/${path}`, { method: "POST" });
     assert.equal(res.status, 409, `${path} must refuse a done card`);
   }
+  const dragged = await app.request(`/api/features/${feature.id}/move`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stageId: projectStages[0]!.id }),
+  });
+  assert.equal(dragged.status, 409, "move must refuse a done card too");
   const started = await app.request("/api/runs", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1801,6 +1809,91 @@ test("a done card refuses new work and can be reopened", { timeout: 90_000 }, as
   assert.equal(again.status, 200, "the reopened stage can be approved");
   const finished = await json<{ status: string }>(await app.request(`/api/features/${feature.id}`));
   assert.equal(finished.status, "done");
+});
+
+/**
+ * Finishing early, which is what dropping a card on the board's Done
+ * lane does. Plenty of work does not want the rest of the pipeline: a
+ * one-line copy fix needs no design review, and a card someone finished
+ * by hand wants recording rather than running. The card keeps the stage
+ * it was in, so this stays one kind of done rather than two.
+ */
+test("a card can be marked done from any stage, and reopens into the one it left", { timeout: 90_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Early finish");
+  const feature = await createFeature(project.id, "Finish early");
+  const profile = await fakeProfile("early-finish-fake");
+  const second = projectStages[1]!;
+
+  // Into the second stage, then done from there with four stages left.
+  await app.request(`/api/features/${feature.id}/move`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stageId: second.id }),
+  });
+  const done = await json<{ status: string; currentStageId: string | null }>(
+    await app.request(`/api/features/${feature.id}/finish`, { method: "POST" }),
+  );
+  assert.equal(done.status, "done");
+  assert.equal(done.currentStageId, second.id, "the card keeps the stage it was finished from");
+
+  // Both halves are in the history: it left the stage, and its status
+  // changed. The stage's gate is asked when the card arrives there, and
+  // that evaluation has to leave a finished card alone.
+  await new Promise((r) => setTimeout(r, 1500));
+  const settled = await json<{ status: string }>(await app.request(`/api/features/${feature.id}`));
+  assert.equal(settled.status, "done", "the stage's gate must not un-finish the card behind you");
+  const history = await json<
+    { kind: string; trigger: string; fromStageId: string | null; toStageId: string | null; toStatus: string | null }[]
+  >(await app.request(`/api/features/${feature.id}/history`));
+  const left = history.filter((e) => e.kind === "stage_moved" && e.toStageId === null);
+  assert.equal(left.length, 1, "finishing records the move off the stage once");
+  assert.equal(left[0]?.fromStageId, second.id);
+  assert.equal(left[0]?.trigger, "manual");
+  assert.ok(
+    history.some((e) => e.kind === "status_changed" && e.toStatus === "done" && e.trigger === "manual"),
+    "and the status change, so the history does not read as a trip to the backlog",
+  );
+  const plain = await (await app.request(`/api/features/${feature.id}/history/plain`)).text();
+  assert.match(
+    plain,
+    new RegExp(`done from ${projectStages[1]!.name.replace("/", "\\/")}`),
+    "the plain history says the stage was skipped, not finished",
+  );
+
+  // It is a done card in every other respect.
+  const started = await app.request("/api/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+  });
+  assert.equal(started.status, 409, "an agent must not start on a card marked done early");
+  const twice = await app.request(`/api/features/${feature.id}/finish`, { method: "POST" });
+  assert.equal(twice.status, 409, "finishing it again is refused rather than logged twice");
+
+  // Reopening returns it to the stage it was finished from.
+  const reopened = await json<{ status: string; currentStageId: string | null }>(
+    await app.request(`/api/features/${feature.id}/back`, { method: "POST" }),
+  );
+  assert.equal(reopened.status, "active");
+  assert.equal(reopened.currentStageId, second.id, "not the last stage, and not the one before it");
+
+  /**
+   * A card still in the backlog can be finished too, and it is the one
+   * with no stage to come back to. It reopens into the backlog rather
+   * than being frozen done, which is the trap reopening exists to
+   * prevent.
+   */
+  const never = await createFeature(project.id, "Never started");
+  const skipped = await json<{ status: string; currentStageId: string | null }>(
+    await app.request(`/api/features/${never.id}/finish`, { method: "POST" }),
+  );
+  assert.equal(skipped.status, "done");
+  assert.equal(skipped.currentStageId, null);
+  const backToBacklog = await json<{ status: string; currentStageId: string | null }>(
+    await app.request(`/api/features/${never.id}/back`, { method: "POST" }),
+  );
+  assert.equal(backToBacklog.status, "active");
+  assert.equal(backToBacklog.currentStageId, null, "a card finished from the backlog reopens there");
 });
 
 test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => {

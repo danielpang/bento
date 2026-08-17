@@ -364,6 +364,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/reject`],
     ["POST", `/api/features/${feature.id}/back`],
     ["POST", `/api/features/${feature.id}/move`, { body: JSON.stringify({ stageId: null }) }],
+    ["POST", `/api/features/${feature.id}/finish`],
     ["GET", `/api/features/${feature.id}/gate`],
     ["GET", `/api/features/${feature.id}/gate/plain`],
     ["GET", `/api/features/${feature.id}/changes`],

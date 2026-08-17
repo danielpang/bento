@@ -111,7 +111,12 @@ function describeEvent(event: FeatureEvent, stages: Stage[]): string {
     // The trigger tells the two null-destination stories apart: a
     // backward move went to the backlog, a forward one finished.
     if (!event.toStageId && event.fromStageId && !event.trigger.endsWith("_back")) {
-      return `finished ${name(event.fromStageId)}`;
+      // Off the last stage is finishing it; off an earlier one is a card
+      // marked done with stages left, which finished nothing.
+      const last = stages[stages.length - 1];
+      return last && event.fromStageId !== last.id
+        ? `done from ${name(event.fromStageId)}`
+        : `finished ${name(event.fromStageId)}`;
     }
     return `${name(event.fromStageId)} to ${name(event.toStageId)}`;
   }

@@ -201,6 +201,8 @@ interface BoardProps {
   onSelect: (featureId: string) => void;
   /** Called when a card is dropped on a lane. Null means the backlog. */
   onMove: (featureId: string, stageId: string | null) => void;
+  /** Called when a card is dropped on the Done lane, from any stage. */
+  onFinish: (featureId: string) => void;
   /** Opens the new-card dialog; the empty backlog offers it inline. */
   onNewCard: () => void;
   /** The drawer covers the right edge; the board makes room for it. */
@@ -318,6 +320,7 @@ export function Board({
   selectedId,
   onSelect,
   onMove,
+  onFinish,
   onNewCard,
   drawerOpen,
   query = "",
@@ -345,11 +348,25 @@ export function Board({
    */
   const [dropLane, setDropLane] = useState<string | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
-  // Re-measured whenever a card's lane could have changed.
-  useCardTravel(boardRef, features.map((f) => `${f.id}:${f.currentStageId ?? ""}`).join(","));
+  /*
+   * Re-measured whenever a card's lane could have changed, which
+   * includes finishing: a card marked done leaves for the Done lane
+   * without its stage changing, so the status has to be part of the key
+   * or that one move is the only one that does not travel.
+   */
+  useCardTravel(
+    boardRef,
+    features.map((f) => `${f.id}:${f.currentStageId ?? ""}:${isFinished(f) ? "done" : ""}`).join(","),
+  );
   const expecting = useExpectedArrivals(stages, features, runStatusByFeature);
 
-  const laneDropProps = (laneKey: string, stageId: string | null) => ({
+  /**
+   * A lane's drop behaviour. The lane's key and what a drop does are
+   * separate arguments because the Done lane is not a stage: it takes
+   * drops like any other lane, but what it calls is finishing rather
+   * than moving.
+   */
+  const laneDropProps = (laneKey: string, drop: (featureId: string) => void) => ({
     over: dropLane === laneKey,
     onDragOver: (e: React.DragEvent) => {
       // Only card drags are welcome; without this the browser refuses
@@ -368,7 +385,7 @@ export function Board({
       e.preventDefault();
       setDropLane(null);
       const featureId = e.dataTransfer.getData("application/x-bento-feature");
-      if (featureId) onMove(featureId, stageId);
+      if (featureId) drop(featureId);
     },
   });
 
@@ -404,7 +421,7 @@ export function Board({
             </button>
           )
         }
-        {...laneDropProps("backlog", null)}
+        {...laneDropProps("backlog", (featureId) => onMove(featureId, null))}
       >
         {backlog.map(card)}
       </Lane>
@@ -421,7 +438,7 @@ export function Board({
             agent={agent}
             expecting={expecting.has(stage.id)}
             {...(searching ? { empty: nothingFound } : {})}
-            {...laneDropProps(stage.id, stage.id)}
+            {...laneDropProps(stage.id, (featureId) => onMove(featureId, stage.id))}
           >
             {inStage.map(card)}
           </Lane>
@@ -431,12 +448,14 @@ export function Board({
       {/*
         Where the work ends up.
 
-        No drop handlers, so nothing can be dragged in: the server has
-        no "mark done" move, and a card reaches this lane by clearing
-        the last stage's gate. A lane that accepted a drop and then
-        bounced the card back would be a worse answer than one that
-        never lifts. Cards leave it by being reopened from the drawer,
-        which is why they are not draggable out either.
+        It takes drops from any lane, because plenty of cards are
+        finished before the pipeline says so and approving through four
+        stages to record that was four decisions nobody was making. The
+        card keeps the stage it was dropped from, so reopening it from
+        the drawer puts it back there. Cards are not draggable out
+        again: leaving is reopening, which is a decision with a
+        consequence (the stage's verdicts are discarded) rather than a
+        rearrangement.
       */}
       <Lane
         name="Done"
@@ -445,6 +464,7 @@ export function Board({
         note="finished work"
         expecting={expecting.has(DONE_LANE)}
         empty={searching ? nothingFound : <p className="lane-empty">Nothing finished yet</p>}
+        {...laneDropProps(DONE_LANE, onFinish)}
       >
         {finished.map(card)}
       </Lane>
@@ -475,7 +495,7 @@ function Lane({
   note?: string;
   /** Shown in place of the default empty slot when the lane has no cards. */
   empty?: React.ReactNode;
-  /** Absent on a lane that takes no drops, which is what makes it terminal. */
+  /** True while a card is being dragged over this lane. */
   over?: boolean;
   /** A run upstream just succeeded and this lane is next in line. */
   expecting?: boolean;

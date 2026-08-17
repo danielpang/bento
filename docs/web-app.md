@@ -214,7 +214,8 @@ The console updates itself: it subscribes to `/api/board/:id/events`, a server-s
 
 ## Two things about the board that are not in the schema
 
-**The Done lane is drawn, not stored.** A finished card keeps the stage it finished in, because reopening one puts it back there, so "done" is a status and not a seventh stage. The board reads that status and moves the card to a lane of its own at the right. Nothing can be dropped into that lane: there is no server route that marks a card done from an arbitrary stage, and a lane that accepted the drop and then bounced the card would be worse than one that never lifts. Cards leave it by being reopened from the drawer.
+**The Done lane is drawn, not stored.** A finished card keeps the stage it finished in, because reopening one puts it back there, so "done" is a status and not a seventh stage. The board reads that status and moves the card to a lane of its own at the right. The lane takes drops from any other lane: a card dropped there is marked done from the stage it was in, skipping the stages that are left, and `Mark done` in the drawer is the same move for anyone not using a mouse. Cards are not draggable out again, because leaving is reopening, which discards the stage's verdicts rather than rearranging anything.
+
 
 **Search filters inside the board, not around it.** The topbar's field holds the query, but `Board` does the filtering, so the unfiltered feature list stays the one the spend chip counts and the SSE handler refetches. `matchesQuery` is exported and covered by `apps/web/src/search.test.ts`; it matches on title and description, and compares each term twice, once as typed and once with punctuation stripped, so `ENG-441`, `eng 441`, and `eng441` all find the same card.
 
