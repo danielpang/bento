@@ -1,12 +1,11 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { HTTPException } from "hono/http-exception";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
-import { actorMiddleware, maybeActor } from "./middleware/actor.js";
+import { activeOrg, actorMiddleware, maybeActor } from "./middleware/actor.js";
 import { tenantMiddleware } from "./middleware/tenant.js";
 import { artifactRoutes } from "./routes/artifacts.js";
 import { boardEventRoutes, runRoutes } from "./routes/runs.js";
@@ -45,10 +44,21 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
    * everything else is a bug, so it goes to error tracking with its
    * stack trace and the request that provoked it, and the caller gets
    * the same JSON error shape every route already speaks.
+   *
+   * The exception check is duck-typed the way Hono's own default
+   * handler does it, not instanceof: hono is a peer dependency of the
+   * middleware packages, and an HTTPException thrown by a second
+   * resolved copy must not have its deliberate 401 rewritten as a 500.
    */
   app.onError((err, c) => {
-    if (err instanceof HTTPException) return err.getResponse();
-    ctx.analytics?.captureException(err, maybeActor(c), {
+    const refusal = err as { getResponse?: () => Response };
+    if (typeof refusal.getResponse === "function") {
+      const res = refusal.getResponse();
+      // The cast bridges Node's two ReadableStream declarations, which
+      // disagree about an optional field; the value is the same stream.
+      return c.newResponse(res.body as unknown as ReadableStream | null, res);
+    }
+    ctx.analytics?.captureException(err, maybeActor(c), activeOrg(c), {
       path: c.req.path,
       method: c.req.method,
     });

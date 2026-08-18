@@ -9,8 +9,9 @@ import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { buildStagePrompt } from "../orchestrator/prompt.js";
 import { isUniqueViolation } from "../orchestrator/transcript.js";
-import { deliverQueuedMessage } from "../orchestrator/run-executor.js";
+import { captureRunFinished, deliverQueuedMessage } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
+import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 
 const claimInput = z.object({
   /** Identifies the machine claiming work, for display and debugging. */
@@ -252,7 +253,15 @@ export function runnerRoutes(ctx: AppContext) {
       if ("error" in authorized) return c.json({ error: authorized.error }, authorized.status);
       const { feature } = authorized;
 
-      await db(c, ctx)
+      /**
+       * Compare-and-set, the same one every other terminal writer
+       * uses. Without it, a report retried after a lost response, or
+       * one landing after the user cancelled, overwrote the terminal
+       * status (a cancelled run read as succeeded) and counted the
+       * run's ending twice. The loser changes nothing and is told ok:
+       * the run has ended, which is all the runner was reporting.
+       */
+      const [closed] = await db(c, ctx)
         .update(agentRuns)
         .set({
           status: body.ok ? "succeeded" : "failed",
@@ -266,35 +275,17 @@ export function runnerRoutes(ctx: AppContext) {
           numTurns: body.numTurns ?? null,
           error: body.error ?? null,
         })
-        .where(eq(agentRuns.id, runId));
+        .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+        .returning({ id: agentRuns.id });
+      if (!closed) return c.json({ ok: true });
       await deliverQueuedMessage(ctx, runId);
 
-      // Runner runs end here rather than in finishRun, so the metric
-      // that every other ending emits there is emitted here.
-      if (ctx.analytics) {
-        const [runRow] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
-        if (runRow) {
-          ctx.analytics.capture({
-            event: "agent run finished",
-            userId: runRow.startedBy ?? null,
-            organizationId: feature.organizationId,
-            properties: {
-              status: body.ok ? "succeeded" : "failed",
-              success: body.ok,
-              run_id: runId,
-              feature_id: feature.id,
-              stage_id: runRow.stageId,
-              project_id: feature.projectId,
-              kind: runRow.kind,
-              executor: runRow.executor,
-              cost_usd: body.costUsd ?? null,
-              num_turns: body.numTurns ?? null,
-              exit_code: body.exitCode ?? null,
-              error: body.error ?? null,
-            },
-          });
-        }
-      }
+      // Runner runs end here rather than in finishRun, so the same
+      // event every other ending emits is emitted here, through the
+      // same builder. Only the capture: entitlements' onRunFinished
+      // meters the deployment's compute, and a runner run burned the
+      // runner's own machine.
+      await captureRunFinished(ctx, runId, body.ok ? "succeeded" : "failed");
 
       {
         ctx.bus.emitRunDone(runId, body.ok ? "succeeded" : "failed");

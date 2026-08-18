@@ -43,10 +43,18 @@ export async function startRunIfIdle(
   values: NewRun,
   entitlements?: Entitlements,
   analytics?: Analytics,
+  /**
+   * Runs the "agent run started" capture once the caller's surrounding
+   * transaction has committed. The HTTP routes pass `db(c, ctx)`, which
+   * in multi mode is the request's tenant transaction, so the
+   * db.transaction below is only a savepoint there and finishing it
+   * proves nothing: the request can still roll back, and an event
+   * captured now would count a run that never existed. Those callers
+   * pass their deferAfterCommit. Orchestrator callers run on the owner
+   * pool, where the transaction below really commits, and omit this.
+   */
+  defer?: (task: () => void) => void,
 ): Promise<AgentRun | "busy" | OutOfCompute> {
-  // Read out of the transaction so the capture below can name the
-  // tenant without waiting on a second query.
-  let organizationId: string | null = null;
   const result = await db.transaction(async (tx) => {
     /**
      * The lock also answers whose organization this is. Callers do not
@@ -57,7 +65,7 @@ export async function startRunIfIdle(
     const locked = await tx.execute(
       sql`select organization_id from features where id = ${values.featureId} for update`,
     );
-    organizationId =
+    const organizationId =
       (locked.rows[0] as { organization_id: string | null } | undefined)?.organization_id ?? null;
 
     const [active] = await tx
@@ -79,21 +87,26 @@ export async function startRunIfIdle(
     return run;
   });
 
-  // After the transaction, so a run counted is a run committed.
   if (result !== "busy" && !("outOfCompute" in result)) {
-    analytics?.capture({
-      event: "agent run started",
-      userId: values.startedBy ?? null,
-      organizationId,
-      properties: {
-        run_id: result.id,
-        feature_id: result.featureId,
-        stage_id: result.stageId,
-        kind: result.kind,
-        executor: result.executor,
-        resumed: Boolean(values.cliSessionId),
-      },
-    });
+    // The insert trigger derived organization_id from the feature, and
+    // RETURNING reads the row after BEFORE triggers ran, so the row
+    // carries the tenant without another query.
+    const capture = () =>
+      analytics?.capture({
+        event: "agent run started",
+        userId: result.startedBy ?? null,
+        organizationId: result.organizationId,
+        properties: {
+          run_id: result.id,
+          feature_id: result.featureId,
+          stage_id: result.stageId,
+          kind: result.kind,
+          executor: result.executor,
+          resumed: Boolean(values.cliSessionId),
+        },
+      });
+    if (defer) defer(capture);
+    else capture();
   }
   return result;
 }

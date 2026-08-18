@@ -18,10 +18,29 @@ const CONSOLE_LEVELS = [
   ["error", SeverityNumber.ERROR, "error"],
 ] as const;
 
+type ConsoleMethod = (typeof CONSOLE_LEVELS)[number][0];
+type ConsoleFn = (...args: unknown[]) => void;
+
+/**
+ * One export per process. startServer is not a singleton (the embedded
+ * TUI and the e2e suite boot repeatedly in one process), and nested
+ * console wrappers cannot be restored in any order without one of them
+ * clobbering the other, so a second start while one is live is refused
+ * rather than stacked.
+ */
+let active = false;
+
+/**
+ * How long stop() may spend flushing. The exporter's own timeout plus
+ * retries can exceed the process's ten second shutdown deadline; a
+ * flush that slow forfeits its records rather than the clean exit.
+ */
+const STOP_BUDGET_MS = 3000;
+
 /**
  * Ships the server's logs to PostHog over OTLP, or returns null when
- * no key is configured. (The missing key is announced by
- * createAnalytics; it is the same variable, and one line is enough.)
+ * no key is configured. (The missing key is announced by server.ts;
+ * it is the same variable, and one line is enough.)
  *
  * This server logs through console, everywhere and on purpose, so the
  * bridge wraps the console methods rather than introducing a logger
@@ -32,7 +51,12 @@ const CONSOLE_LEVELS = [
  */
 export function startLogExport(env: Env): LogExport | null {
   if (!env.POSTHOG_API_KEY) return null;
+  if (active) return null;
+  active = true;
 
+  // posthog-node strips a trailing slash from the same variable; a
+  // host that works for analytics must not silently 404 every log.
+  const host = env.POSTHOG_HOST.replace(/\/+$/, "");
   const provider = new LoggerProvider({
     resource: resourceFromAttributes({
       "service.name": "bento-server",
@@ -41,7 +65,7 @@ export function startLogExport(env: Env): LogExport | null {
     processors: [
       new BatchLogRecordProcessor({
         exporter: new OTLPLogExporter({
-          url: `${env.POSTHOG_HOST}/i/v1/logs`,
+          url: `${host}/i/v1/logs`,
           headers: { Authorization: `Bearer ${env.POSTHOG_API_KEY}` },
         }),
       }),
@@ -49,11 +73,16 @@ export function startLogExport(env: Env): LogExport | null {
   });
   const logger: Logger = provider.getLogger("bento-server");
 
-  const originals = new Map<string, (...args: unknown[]) => void>();
+  /**
+   * Plain references, not bound copies: restore must hand back the
+   * exact function objects Node installed, or console.info stops
+   * aliasing console.log after a correct stop() and anything comparing
+   * them concludes the console is still patched.
+   */
+  const wrapped: Array<{ method: ConsoleMethod; original: ConsoleFn; wrapper: ConsoleFn }> = [];
   for (const [method, severityNumber, severityText] of CONSOLE_LEVELS) {
-    const original = console[method].bind(console) as (...args: unknown[]) => void;
-    originals.set(method, original);
-    console[method] = (...args: unknown[]) => {
+    const original = console[method] as ConsoleFn;
+    const wrapper: ConsoleFn = (...args: unknown[]) => {
       original(...args);
       try {
         logger.emit({
@@ -67,14 +96,23 @@ export function startLogExport(env: Env): LogExport | null {
         // code path that was merely logging.
       }
     };
+    wrapped.push({ method, original, wrapper });
+    console[method] = wrapper;
   }
 
   return {
     async stop(): Promise<void> {
-      for (const [method, original] of originals) {
-        (console as unknown as Record<string, (...args: unknown[]) => void>)[method] = original;
+      for (const { method, original, wrapper } of wrapped) {
+        // Only restore what is still ours: if someone else wrapped on
+        // top of this wrapper, blind assignment would tear their layer
+        // off along with this one.
+        if (console[method] === wrapper) console[method] = original;
       }
-      await provider.shutdown();
+      active = false;
+      await Promise.race([
+        provider.shutdown(),
+        new Promise<void>((resolve) => setTimeout(resolve, STOP_BUDGET_MS).unref()),
+      ]);
     },
   };
 }
