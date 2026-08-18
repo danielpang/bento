@@ -61,6 +61,9 @@ export function startLogExport(env: Env): LogExport | null {
     resource: resourceFromAttributes({
       "service.name": "bento-server",
       "bento.mode": env.BENTO_MODE,
+      // The same name and values the events carry, so one filter works
+      // across metrics, errors, and logs.
+      environment: env.BENTO_ENVIRONMENT,
     }),
     processors: [
       new BatchLogRecordProcessor({

@@ -102,6 +102,16 @@ export function createAnalytics(env: Env): Analytics | null {
   });
 
   const mode = env.BENTO_MODE;
+  const environment = env.BENTO_ENVIRONMENT;
+
+  /**
+   * Super properties ride on every event this client captures,
+   * including the exceptions its own autocapture handler reports,
+   * which never pass through the wrappers below. The wrappers still
+   * set both explicitly, so an event cannot lose them to the register
+   * call's timing.
+   */
+  void client.register({ environment, bento_mode: mode });
 
   return {
     capture({ event, userId, organizationId, properties }: ServerEvent): void {
@@ -115,6 +125,7 @@ export function createAnalytics(env: Env): Analytics | null {
         distinctId,
         event,
         properties: {
+          environment,
           bento_mode: mode,
           ...(userId ? {} : { $process_person_profile: false }),
           ...properties,
@@ -130,6 +141,7 @@ export function createAnalytics(env: Env): Analytics | null {
       properties?: Record<string, unknown>,
     ): void {
       client.captureException(error instanceof Error ? error : new Error(String(error)), userId ?? undefined, {
+        environment,
         bento_mode: mode,
         // The event-level group property, so error tracking can answer
         // "which tenant is this hitting".
