@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@bento/core": "workspace:*",
+    "@opentelemetry/api": "^1.9.1",
     "drizzle-orm": "^0.44.0",
     "pg": "^8.14.0"
   },

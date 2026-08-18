@@ -1,6 +1,7 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { features, linearConnections, linearIssueLinks, linearTeamMappings, stages } from "@bento/db";
 import type { LinearClient, LinearWebhookIssue } from "@bento/linear";
+import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import {
   importLinearIssue,
@@ -424,6 +425,7 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
         await syncLinearBacklog(ctx, job.data.organizationId);
       } catch (err) {
         console.error("linear.backlog-sync failed:", err);
+        ctx.analytics?.captureException(err, null, null, { queue: "linear.backlog-sync" });
         throw err;
       }
     }
@@ -432,11 +434,11 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
   // Webhook fallback: deployments Linear cannot reach still converge.
   await ctx.boss.createQueue("linear.sweep");
   await ctx.boss.schedule("linear.sweep", "*/15 * * * *");
-  await ctx.boss.work("linear.sweep", async () => {
+  await ctx.boss.work("linear.sweep", captureJobErrors(ctx.analytics, "linear.sweep", async () => {
     for (const organizationId of await linearConnectedOrgs(ctx)) {
       await ctx.boss.send("linear.backlog-sync", { organizationId });
     }
-  });
+  }));
 
   await ctx.boss.work<Parameters<typeof handleLinearInbound>[1]>("linear.inbound", async (jobs) => {
     for (const job of jobs) {
@@ -444,6 +446,7 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
         await handleLinearInbound(ctx, job.data);
       } catch (err) {
         console.error("linear.inbound failed:", err);
+        ctx.analytics?.captureException(err, null, null, { queue: "linear.inbound" });
         throw err;
       }
     }
@@ -455,6 +458,7 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
         await handleLinearIssueCreate(ctx, job.data);
       } catch (err) {
         console.error(`linear.create-issue ${job.data.featureId} failed:`, err);
+        ctx.analytics?.captureException(err, null, null, { queue: "linear.create-issue", feature_id: job.data.featureId });
         throw err;
       }
     }
@@ -466,6 +470,7 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
         await handleLinearOutbound(ctx, job.data);
       } catch (err) {
         console.error(`linear.outbound ${job.data.featureId} failed:`, err);
+        ctx.analytics?.captureException(err, null, null, { queue: "linear.outbound", feature_id: job.data.featureId });
         throw err;
       }
     }

@@ -178,8 +178,19 @@ export function featureRoutes(ctx: AppContext) {
       // Mirror the card into Linear when the workspace wants that.
       // Queued, so a slow or failing Linear API never keeps the card
       // from reaching the board, and queued after the commit, so the
-      // worker cannot look for this card before it exists.
-      deferAfterCommit(c, () => queueLinearIssueCreate(ctx, feature));
+      // worker cannot look for this card before it exists. The metric
+      // waits for the commit for the same reason: an event counted for
+      // a card whose transaction rolled back is a card that never was.
+      const createdBy = actor(c);
+      deferAfterCommit(c, async () => {
+        ctx.analytics?.capture({
+          event: "feature card created",
+          userId: createdBy,
+          organizationId: feature.organizationId,
+          properties: { feature_id: feature.id, project_id: feature.projectId },
+        });
+        await queueLinearIssueCreate(ctx, feature);
+      });
       return c.json(feature, 201);
     })
     .get("/:id", async (c) => {
@@ -367,7 +378,7 @@ export function featureRoutes(ctx: AppContext) {
         // The person sending the message owns the hours the resumed
         // run spends, not whoever started the conversation.
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       // A run started in the gap between the read and the insert; the
       // messages wait for it like any other mid-run message.
       if (run === "busy") {
@@ -869,7 +880,7 @@ export function featureRoutes(ctx: AppContext) {
         prompt: "",
         executor,
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });

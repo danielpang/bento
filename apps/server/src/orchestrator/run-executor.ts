@@ -14,6 +14,7 @@ import {
   stages,
 } from "@bento/db";
 import { LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
+import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
@@ -610,7 +611,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           agentProfileId: runRow.agentProfileId,
           prompt: runRow.prompt,
           executor: runRow.executor,
-        }, ctx.entitlements);
+        }, ctx.entitlements, ctx.analytics);
         if (next !== "busy" && !("outOfCompute" in next)) {
           ctx.bus.emitBoardEvent({
             type: "run_updated",
@@ -912,7 +913,7 @@ async function finishRun(
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id });
   if (!closed) return;
-  announceRunFinished(ctx, runId);
+  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed");
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -1014,7 +1015,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     prompt: claimed.map((m) => m.text).join("\n"),
     cliSessionId: source.cliSessionId,
     executor: source.executor,
-  }, ctx.entitlements);
+  }, ctx.entitlements, ctx.analytics);
   if (next === "busy") {
     // Another run started in the gap; the messages wait for its end.
     await requeueMessages(ctx.db, ids);
@@ -1091,19 +1092,96 @@ export function runOutputPreview(event: { type: string; role?: string; text?: st
   return line.length > 160 ? `${line.slice(0, 159)}…` : line;
 }
 
+/** Failure text can be agent stderr, which is unbounded and untrusted. */
+const ERROR_PROPERTY_CAP = 500;
+
 /**
- * Tells the deployment a run is over, so it can record what it cost.
- *
- * Fire and forget on purpose. A run that finished has finished, and a
- * billing module that cannot be reached must not turn that into a
- * failure or hold up the gate evaluation waiting behind it.
+ * The one builder of the "agent run finished" event, shared with the
+ * runner report route so the two executors cannot drift apart on the
+ * event's shape. Reads the persisted row, so it reports what actually
+ * ended, not what a request body claimed. Awaited by its callers: a
+ * detached capture raced the shutdown flush, and lost exactly the runs
+ * that finish in the last second before every deploy.
  */
-function announceRunFinished(ctx: AppContext, runId: string): void {
+export async function captureRunFinished(
+  ctx: AppContext,
+  runId: string,
+  status: "succeeded" | "failed" | "cancelled",
+): Promise<void> {
+  const analytics = ctx.analytics;
+  if (!analytics) return;
+  try {
+    const [row] = await ctx.db
+      .select({
+        startedBy: agentRuns.startedBy,
+        featureId: agentRuns.featureId,
+        stageId: agentRuns.stageId,
+        kind: agentRuns.kind,
+        executor: agentRuns.executor,
+        costUsd: agentRuns.costUsd,
+        numTurns: agentRuns.numTurns,
+        exitCode: agentRuns.exitCode,
+        error: agentRuns.error,
+        organizationId: features.organizationId,
+        projectId: features.projectId,
+      })
+      .from(agentRuns)
+      .innerJoin(features, eq(features.id, agentRuns.featureId))
+      .where(eq(agentRuns.id, runId))
+      .limit(1);
+    if (!row) return;
+    analytics.capture({
+      event: "agent run finished",
+      userId: row.startedBy ?? null,
+      organizationId: row.organizationId,
+      properties: {
+        status,
+        success: status === "succeeded",
+        run_id: runId,
+        feature_id: row.featureId,
+        stage_id: row.stageId,
+        project_id: row.projectId,
+        kind: row.kind,
+        executor: row.executor,
+        cost_usd: row.costUsd === null ? null : Number(row.costUsd),
+        num_turns: row.numTurns,
+        exit_code: row.exitCode,
+        // Capped: the column holds whatever the agent's failure said,
+        // and a third party analytics store is no place for its tail.
+        error: row.error === null ? null : row.error.slice(0, ERROR_PROPERTY_CAP),
+      },
+    });
+  } catch (err) {
+    console.warn(`could not record analytics for run ${runId}:`, err);
+  }
+}
+
+/**
+ * Tells the deployment a run is over, so it can record what it cost,
+ * and tells analytics how it ended.
+ *
+ * The billing announcement stays fire and forget: a billing module
+ * that cannot be reached must not fail a run that already finished.
+ * The analytics capture is awaited so it is enqueued before the caller
+ * moves on, which keeps "finished" ahead of the follow-up run's
+ * "started" and inside the shutdown flush. Every server-executed
+ * terminal path comes through here behind its caller's
+ * compare-and-set; the runner report route calls captureRunFinished
+ * directly, because its runs bill the runner's own machine and have no
+ * onRunFinished to announce.
+ */
+async function announceRunFinished(
+  ctx: AppContext,
+  runId: string,
+  status: "succeeded" | "failed" | "cancelled",
+): Promise<void> {
   const announce = ctx.entitlements?.onRunFinished;
-  if (!announce) return;
-  void announce(runId).catch((err: unknown) => {
-    console.warn(`could not record what run ${runId} cost:`, err);
-  });
+  if (announce) {
+    void announce(runId).catch((err: unknown) => {
+      console.warn(`could not record what run ${runId} cost:`, err);
+    });
+  }
+  await captureRunFinished(ctx, runId, status);
 }
 
 /** A run the user stopped. Terminal, but not a failure. */
@@ -1118,7 +1196,7 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id });
   if (!closed) return;
-  announceRunFinished(ctx, runId);
+  await announceRunFinished(ctx, runId, "cancelled");
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
@@ -1233,7 +1311,7 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   // its own finish announces later; announcing here for every orphan
   // would have billed runs that never ended. The sandbox was awake for
   // as long as the run said it was, and a restart is not a refund.
-  announceRunFinished(ctx, run.id);
+  await announceRunFinished(ctx, run.id, "failed");
 
   await appendRunEvent(ctx, run.id, {
     type: "message",
@@ -1522,9 +1600,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * Sequentially rather than in parallel: this is housekeeping, and it
    * should never compete with an agent for the provider's rate limit.
    */
-  await ctx.boss.work<{ featureId: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, async (jobs) => {
+  await ctx.boss.work<{ featureId: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
     for (const job of jobs) await reapSandbox(ctx, job.data.featureId);
-  });
+  }));
   /**
    * The sweep catches the cards that finished before any of this
    * existed, and anything the queue gave up on. Deliberately not
@@ -1533,6 +1611,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    */
   void reapFinishedSandboxes(ctx).catch((err: unknown) => {
     console.warn("the sandbox sweep did not finish:", err);
+    ctx.analytics?.captureException(err, null, null, { queue: "sandbox.sweep" });
   });
 
   /**
@@ -1554,6 +1633,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
           // reaches, so nothing downstream clears it.
           ctx.bus.dropRunDraft(job.data.runId);
           console.error(`run.execute ${job.data.runId} failed:`, err);
+          ctx.analytics?.captureException(err, null, null, { queue: "run.execute", run_id: job.data.runId });
           throw err;
         }
       }
@@ -1566,7 +1646,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * "starting" forever and the card's pipeline is stuck.
    */
   await ctx.boss.schedule("runner.reap", "*/5 * * * *");
-  await ctx.boss.work("runner.reap", async () => {
+  await ctx.boss.work("runner.reap", captureJobErrors(ctx.analytics, "runner.reap", async () => {
     const cutoff = new Date(Date.now() - ctx.env.BENTO_RUNNER_CLAIM_TIMEOUT_MIN * 60_000);
     const stale = await ctx.db
       .update(agentRuns)
@@ -1601,7 +1681,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     if (stale.length > 0) {
       console.warn(`requeued ${stale.length} run(s) whose runner went away`);
     }
-  });
+  }));
 
   await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5 }, async (jobs) => {
     await Promise.all(
@@ -1610,6 +1690,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
           await evaluateFeatureGate(ctx, job.data.featureId);
         } catch (err) {
           console.error(`gate.evaluate ${job.data.featureId} failed:`, err);
+          ctx.analytics?.captureException(err, null, null, { queue: "gate.evaluate", feature_id: job.data.featureId });
           throw err;
         }
       }),
@@ -1620,7 +1701,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   // running check, a self-hosted instance with no public URL).
   await ctx.boss.createQueue("gate.sweep");
   await ctx.boss.schedule("gate.sweep", "*/5 * * * *");
-  await ctx.boss.work("gate.sweep", async () => {
+  await ctx.boss.work("gate.sweep", captureJobErrors(ctx.analytics, "gate.sweep", async () => {
     const gated = await ctx.db.select({ id: features.id }).from(features).where(eq(features.status, "gated"));
     for (const row of gated) {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
@@ -1634,8 +1715,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
      */
     await sweepStrandedMessages(ctx).catch((err: unknown) => {
       console.warn("the stranded message sweep did not finish:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
     });
-  });
+  }));
 
   await registerLinearJobs(ctx);
 }
