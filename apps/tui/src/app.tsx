@@ -10,6 +10,7 @@ import {
   type GateState,
   type Stage,
 } from "@bento/api-client";
+import { actorDisplayName, historyTriggerLabel } from "@bento/core";
 import { Board, orderFeatures, statusColor } from "./components/Board.js";
 import { describeCriterion } from "./criteria.js";
 import { Login } from "./components/Login.js";
@@ -122,6 +123,10 @@ function describeEvent(event: FeatureEvent, stages: Stage[]): string {
   }
   const why = event.detail?.failedCriteria?.length ? ` (${event.detail.failedCriteria.join(", ")})` : "";
   return `status ${event.fromStatus ?? "new"} to ${event.toStatus ?? "?"}${why}`;
+}
+
+function triggerLabel(event: FeatureEvent): string {
+  return historyTriggerLabel(event.trigger, actorDisplayName(event.actorName, event.actorEmail));
 }
 
 /**
@@ -795,7 +800,7 @@ function Console({
               {history.slice(-8).map((event) => (
                 <Text key={event.id} color="gray">
                   {new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{" "}
-                  {describeEvent(event, stages)}
+                  {describeEvent(event, stages)} {triggerLabel(event)}
                 </Text>
               ))}
               {history.length === 0 && <Text color="gray">Nothing has happened yet.</Text>}

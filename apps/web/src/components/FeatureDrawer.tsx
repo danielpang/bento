@@ -22,7 +22,7 @@ import type {
 const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
-import { spendCoverageNote, type AgentEvent } from "@bento/core";
+import { actorDisplayName, historyTriggerLabel, spendCoverageNote, type AgentEvent } from "@bento/core";
 
 interface DrawerProps {
   client: BentoClient;
@@ -494,7 +494,7 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
               <div key={event.id} className="history-row">
                 <span className="history-when">{formatWhen(event.at)}</span>
                 <span className="history-what">
-                  {describeEvent(event, stages)} <span className="muted">{triggerLabel(event.trigger)}</span>
+                  {describeEvent(event, stages)} <span className="muted">{triggerLabel(event)}</span>
                 </span>
               </div>
             ))}
@@ -706,17 +706,8 @@ function GateTick({ index }: { index: number }) {
   );
 }
 
-const TRIGGER_LABELS: Record<string, string> = {
-  manual: "by a person",
-  manual_back: "sent back",
-  gate_auto: "by a gate",
-  gate_auto_back: "returned by a gate",
-  agent_run: "by an agent",
-  system: "automatic",
-};
-
-function triggerLabel(trigger: string): string {
-  return TRIGGER_LABELS[trigger] ?? trigger;
+function triggerLabel(event: FeatureEvent): string {
+  return historyTriggerLabel(event.trigger, actorDisplayName(event.actorName, event.actorEmail));
 }
 
 /**
