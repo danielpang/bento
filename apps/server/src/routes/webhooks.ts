@@ -2,10 +2,14 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { parseRepoUrl, verifyWebhookSignature, webhookTarget } from "@bento/github";
 import { parseIssueWebhook, verifyLinearWebhookSignature } from "@bento/linear";
-import { features, githubInstallations, projects } from "@bento/db";
+import { verifySlackSignature } from "@bento/slack";
+import { features, githubInstallations, projects, slackConnections, slackPendingMentions } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { linearConnectionRow } from "../linear.js";
+import { slackClientFor, slackConnectionByTeam } from "../slack.js";
+import { parseReviewTarget, rejectModal } from "../orchestrator/slack-notify.js";
+import type { SlackInboundJob } from "../orchestrator/slack-sync.js";
 
 /**
  * GitHub webhook receiver. Any event that touches a PR we track queues a
@@ -104,5 +108,205 @@ export function webhookRoutes(ctx: AppContext) {
       }
     }
     return c.json({ ok: true, matched });
-  });
+  })
+    /**
+     * Slack Events API. Signature checked against the app signing
+     * secret; the workspace is resolved later from team_id. Answered
+     * immediately so Slack does not retry while the worker creates
+     * the card.
+     */
+    .post("/slack/events", async (c) => {
+      const raw = await c.req.text();
+      const signed = slackSignatureStatus(ctx, raw, c.req.header("x-slack-request-timestamp"), c.req.header("x-slack-signature"));
+      if (signed !== "ok") {
+        return c.json({ error: signed === "missing" ? "webhooks not configured" : "invalid signature" }, signed === "missing" ? 503 : 401);
+      }
+      let payload: SlackEventPayload;
+      try {
+        payload = JSON.parse(raw) as SlackEventPayload;
+      } catch {
+        return c.json({ error: "invalid payload" }, 400);
+      }
+      if (payload.type === "url_verification" && typeof payload.challenge === "string") {
+        return c.json({ challenge: payload.challenge });
+      }
+      if (payload.type === "event_callback" && payload.team_id && (
+        payload.event?.type === "app_uninstalled" || payload.event?.type === "tokens_revoked"
+      )) {
+        await ctx.db.delete(slackPendingMentions).where(eq(slackPendingMentions.slackTeamId, payload.team_id));
+        await ctx.db.delete(slackConnections).where(eq(slackConnections.slackTeamId, payload.team_id));
+        return c.json({ ok: true });
+      }
+      if (payload.type === "event_callback" && payload.event?.type === "app_mention") {
+        const event = payload.event;
+        if (event.user && event.channel && event.ts && payload.team_id) {
+          await ctx.boss.send("slack.inbound", {
+            kind: "mention",
+            teamId: payload.team_id,
+            channelId: event.channel,
+            userId: event.user,
+            text: event.text ?? "",
+            ts: event.ts,
+            threadTs: event.thread_ts ?? event.ts,
+          } satisfies SlackInboundJob);
+        }
+      }
+      return c.json({ ok: true });
+    })
+    /**
+     * Slack interactivity: project picker, Approve, Reject. Reject
+     * opens a modal here because Slack's trigger_id expires in three
+     * seconds, too short to wait on the queue.
+     */
+    .post("/slack/interactive", async (c) => {
+      const raw = await c.req.text();
+      const signed = slackSignatureStatus(ctx, raw, c.req.header("x-slack-request-timestamp"), c.req.header("x-slack-signature"));
+      if (signed !== "ok") {
+        return c.json({ error: signed === "missing" ? "webhooks not configured" : "invalid signature" }, signed === "missing" ? 503 : 401);
+      }
+      const payload = parseInteractivePayload(raw);
+      if (!payload) return c.json({ ok: true });
+
+      if (payload.type === "block_actions") {
+        const action = payload.actions?.[0];
+        if (!action || !payload.user?.id || !payload.team?.id || !payload.channel?.id) {
+          return c.json({ ok: true });
+        }
+        if (action.action_id === "reject" && action.value && payload.trigger_id && payload.message?.ts) {
+          const target = parseReviewTarget(action.value);
+          const connection = await slackConnectionByTeam(ctx, payload.team.id);
+          const client = connection ? await slackClientFor(ctx, connection) : null;
+          if (client && target) {
+            await client.openView({
+              triggerId: payload.trigger_id,
+              view: rejectModal({
+                featureId: target.featureId,
+                stageId: target.stageId,
+                channelId: payload.channel.id,
+                messageTs: payload.message.ts,
+              }),
+            });
+          }
+          return c.json({ ok: true });
+        }
+        if (action.action_id === "pick_project" && action.selected_option?.value) {
+          const pendingId = action.block_id ?? payload.container?.block_id ?? "";
+          if (!pendingId) return c.json({ ok: true });
+          await ctx.boss.send("slack.inbound", {
+            kind: "pick_project",
+            teamId: payload.team.id,
+            channelId: payload.channel.id,
+            userId: payload.user.id,
+            pendingId,
+            projectId: action.selected_option.value,
+          } satisfies SlackInboundJob);
+        }
+        if (action.action_id === "approve" && action.value && payload.message?.ts) {
+          const target = parseReviewTarget(action.value);
+          if (target) {
+            await ctx.boss.send("slack.inbound", {
+              kind: "approve",
+              teamId: payload.team.id,
+              channelId: payload.channel.id,
+              userId: payload.user.id,
+              featureId: target.featureId,
+              stageId: target.stageId,
+              messageTs: payload.message.ts,
+            } satisfies SlackInboundJob);
+          }
+        }
+        return c.json({ ok: true });
+      }
+
+      if (payload.type === "view_submission" && payload.view?.callback_id === "reject_card") {
+        let meta: { featureId?: string; stageId?: string; channelId?: string; messageTs?: string };
+        try {
+          meta = JSON.parse(payload.view.private_metadata ?? "{}") as {
+            featureId?: string;
+            stageId?: string;
+            channelId?: string;
+            messageTs?: string;
+          };
+        } catch {
+          return c.json({ ok: true });
+        }
+        const reason = payload.view.state?.values?.reason?.reason?.value ?? "";
+        if (
+          payload.user?.id
+          && payload.team?.id
+          && meta.featureId
+          && meta.stageId
+          && meta.channelId
+          && meta.messageTs
+        ) {
+          await ctx.boss.send("slack.inbound", {
+            kind: "reject",
+            teamId: payload.team.id,
+            channelId: meta.channelId,
+            userId: payload.user.id,
+            featureId: meta.featureId,
+            stageId: meta.stageId,
+            messageTs: meta.messageTs,
+            reason,
+          } satisfies SlackInboundJob);
+        }
+      }
+      return c.json({ ok: true });
+    });
+}
+
+function slackSignatureStatus(
+  ctx: AppContext,
+  body: string,
+  timestamp: string | undefined,
+  signature: string | undefined,
+): "ok" | "missing" | "invalid" {
+  const secret = ctx.env.SLACK_SIGNING_SECRET;
+  if (!secret) return "missing";
+  return verifySlackSignature(secret, body, timestamp, signature) ? "ok" : "invalid";
+}
+
+interface SlackEventPayload {
+  type?: string;
+  challenge?: string;
+  team_id?: string;
+  event?: {
+    type?: string;
+    user?: string;
+    text?: string;
+    ts?: string;
+    thread_ts?: string;
+    channel?: string;
+  };
+}
+
+interface SlackInteractivePayload {
+  type?: string;
+  trigger_id?: string;
+  user?: { id?: string };
+  team?: { id?: string };
+  channel?: { id?: string };
+  message?: { ts?: string };
+  container?: { block_id?: string };
+  actions?: {
+    action_id?: string;
+    block_id?: string;
+    value?: string;
+    selected_option?: { value?: string };
+  }[];
+  view?: {
+    callback_id?: string;
+    private_metadata?: string;
+    state?: { values?: { reason?: { reason?: { value?: string } } } };
+  };
+}
+
+function parseInteractivePayload(raw: string): SlackInteractivePayload | null {
+  const params = new URLSearchParams(raw);
+  const encoded = params.get("payload") ?? raw;
+  try {
+    return JSON.parse(encoded) as SlackInteractivePayload;
+  } catch {
+    return null;
+  }
 }

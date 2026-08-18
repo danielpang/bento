@@ -410,6 +410,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ],
     ["GET", "/api/linear/projects?teamId=team-x"],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
+    ["PATCH", "/api/slack/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
     // Last: a delete that went through would refuse everything after it
     // for the wrong reason.
     ["DELETE", `/api/projects/${project.id}`],
@@ -1803,5 +1804,76 @@ test("the Linear webhook demands a valid signature", async () => {
     assert.deepEqual(await signed.json(), { ok: true, matched: 1 });
   } finally {
     await ctx.db.delete(linearConnections);
+  }
+});
+
+test("Slack status is unconfigured without app credentials", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "slack-status@bento.test",
+    password: "correct-horse-battery",
+    name: "Slack",
+  });
+  assert.equal(signup.status, 200);
+  const token = signup.headers.get("set-auth-token")!;
+  await jsonPost("/api/auth/organization/create", { name: "Slack Co", slug: "slack-status-co" }, token);
+  const status = await app.request("/api/slack/status", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(status.status, 200);
+  assert.deepEqual(await status.json(), {
+    configured: false,
+    connected: false,
+    canManage: true,
+    teamName: null,
+    defaultProjectId: null,
+  });
+  const install = await jsonPost("/api/slack/install", {}, token);
+  assert.equal(install.status, 503);
+});
+
+test("the Slack webhook demands a valid signature", async () => {
+  const body = JSON.stringify({ type: "url_verification", challenge: "abc" });
+  const missing = await app.request("/api/webhooks/slack/events", { method: "POST", body });
+  assert.equal(missing.status, 503);
+
+  const mutableEnv = ctx.env as typeof ctx.env & { SLACK_SIGNING_SECRET?: string };
+  const original = mutableEnv.SLACK_SIGNING_SECRET;
+  mutableEnv.SLACK_SIGNING_SECRET = "slack-signing-secret";
+  const ts = String(Math.floor(Date.now() / 1000));
+  try {
+    const forged = await app.request("/api/webhooks/slack/events", {
+      method: "POST",
+      body,
+      headers: {
+        "x-slack-request-timestamp": ts,
+        "x-slack-signature": `v0=${createHmac("sha256", "wrong").update(`v0:${ts}:${body}`).digest("hex")}`,
+      },
+    });
+    assert.equal(forged.status, 401);
+
+    const signed = await app.request("/api/webhooks/slack/events", {
+      method: "POST",
+      body,
+      headers: {
+        "x-slack-request-timestamp": ts,
+        "x-slack-signature": `v0=${createHmac("sha256", "slack-signing-secret").update(`v0:${ts}:${body}`).digest("hex")}`,
+      },
+    });
+    assert.equal(signed.status, 200);
+    assert.deepEqual(await signed.json(), { challenge: "abc" });
+
+    const interactiveBody = "payload=%7B%7D";
+    const forgedInteractive = await app.request("/api/webhooks/slack/interactive", {
+      method: "POST",
+      body: interactiveBody,
+      headers: {
+        "x-slack-request-timestamp": ts,
+        "x-slack-signature": `v0=${createHmac("sha256", "wrong").update(`v0:${ts}:${interactiveBody}`).digest("hex")}`,
+      },
+    });
+    assert.equal(forgedInteractive.status, 401);
+  } finally {
+    if (original === undefined) delete mutableEnv.SLACK_SIGNING_SECRET;
+    else mutableEnv.SLACK_SIGNING_SECRET = original;
   }
 });

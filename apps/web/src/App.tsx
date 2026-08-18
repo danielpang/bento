@@ -269,9 +269,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   }, [projectId]);
 
   useEffect(() => {
+    const wantedFeature = new URLSearchParams(window.location.search).get("feature");
     void client
       .listProjects()
-      .then((rows) => {
+      .then(async (rows) => {
         setProjects(rows);
         // The selection is rebuilt rather than kept: after an
         // organization switch the project it names belongs to a tenant
@@ -280,6 +281,17 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         setProjectId((current) =>
           current && rows.some((row) => row.id === current) ? current : (rows[0]?.id ?? null),
         );
+        if (wantedFeature) {
+          setSelectedId(wantedFeature);
+          try {
+            const feature = await client.getFeature(wantedFeature);
+            if (rows.some((row) => row.id === feature.projectId)) {
+              setProjectId(feature.projectId);
+            }
+          } catch {
+            setSelectedId(null);
+          }
+        }
         setLoadError("");
       })
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));

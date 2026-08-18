@@ -172,6 +172,15 @@ const envSchema = z.object({
   GITHUB_APP_SLUG: z.string().regex(/^[a-z0-9-]+$/).optional(),
   GITHUB_PRIVATE_KEY: z.string().optional(),
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
+
+  /**
+   * Slack app credentials. Without these, the Slack tab says the
+   * integration is not configured rather than offering an install that
+   * cannot finish.
+   */
+  SLACK_CLIENT_ID: z.string().optional(),
+  SLACK_CLIENT_SECRET: z.string().optional(),
+  SLACK_SIGNING_SECRET: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

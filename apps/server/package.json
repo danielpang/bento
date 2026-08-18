@@ -19,6 +19,7 @@
     "@bento/gates": "workspace:*",
     "@bento/github": "workspace:*",
     "@bento/linear": "workspace:*",
+    "@bento/slack": "workspace:*",
     "@bento/sandbox": "workspace:*",
     "@hono/node-server": "^1.19.15",
     "@hono/zod-validator": "^0.4.3",

@@ -62,6 +62,7 @@ Turn on "Create a pull request" on any stage and a successful run there pushes t
 | [Pipelines](./docs/pipeline.md) | Stages, gates, judge agents, the pipeline file, repository commands |
 | [Coding agents](./docs/agents.md) | What each tool can do, how each authenticates, talking to a working agent |
 | [Pull requests](./docs/pull-requests.md) | Publishing, what stays out of the diff, connecting GitHub |
+| [Slack](./docs/slack.md) | Installing the app, @bento mentions, review buttons in the thread |
 | [How it works](./docs/concepts.md) | Cards, sandboxes, worktrees, spend, tenancy |
 | [Web app setup](./docs/web-app.md) | Running it for a team, multi mode, troubleshooting, contributing |
 | [Other clients](./docs/clients.md) | The terminal and macOS apps, both in progress |

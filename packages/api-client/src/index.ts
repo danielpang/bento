@@ -15,5 +15,6 @@ export {
   type LinearIssueOption,
   type LinearIssuePage,
   type TokenStore,
+  type SlackConnection,
 } from "./client.js";
 export { DeviceFlow, type DeviceCodeResponse, type DeviceFlowOptions } from "./device-flow.js";

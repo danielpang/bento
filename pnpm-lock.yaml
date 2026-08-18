@@ -47,6 +47,9 @@ importers:
       '@bento/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
+      '@bento/slack':
+        specifier: workspace:*
+        version: link:../../packages/slack
       '@hono/node-server':
         specifier: ^1.19.15
         version: 1.19.15(hono@4.12.32)
@@ -342,6 +345,18 @@ importers:
       '@types/dockerode':
         specifier: ^3.3.35
         version: 3.3.47
+      tsx:
+        specifier: ^4.19.3
+        version: 4.23.1
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/slack:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
       tsx:
         specifier: ^4.19.3
         version: 4.23.1

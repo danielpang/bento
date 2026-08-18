@@ -34,6 +34,7 @@ import {
   recordManualApproval,
   recordRejection,
   reopenFeature,
+  activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
@@ -117,22 +118,6 @@ async function withPullRequestUrls<T extends { id: string; prNumber: number | nu
 /** "acme/api" from a GitHub address, for a repository no longer in the project. */
 function repoNameFromUrl(repoUrl: string): string {
   return repoUrl.replace(/\.git$/, "").split("/").slice(-2).join("/") || repoUrl;
-}
-
-/**
- * Asks the deployment's plan limits whether this card may go live. The
- * open source server has no limits and answers yes by standing aside;
- * a hosted deployment counts live cards against the organization's
- * plan. Only transitions INTO being live are asked: a live card moving
- * between stages changes nothing the plan counts.
- */
-async function activationRefusal(
-  ctx: AppContext,
-  feature: { organizationId: string | null },
-): Promise<string | null> {
-  if (!ctx.entitlements || !feature.organizationId) return null;
-  const refusal = await ctx.entitlements.canActivateFeature(feature.organizationId);
-  return refusal ? refusal.reason : null;
 }
 
 export function featureRoutes(ctx: AppContext) {

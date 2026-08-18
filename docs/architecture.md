@@ -37,6 +37,7 @@ flowchart TB
 
     agents["Agent CLIs<br/>Claude Code, Codex, Cursor, opencode, pi"]
     github["GitHub App<br/>checks, PR threads, webhooks"]
+    slack["Slack app<br/>mentions, thread progress"]
 
     tui --> api
     web --> api
@@ -54,6 +55,7 @@ flowchart TB
     sprite --> agents
     localproc --> agents
     orch <--> github
+    orch <--> slack
     orch --> bus
     bus --> api
     orch --> store

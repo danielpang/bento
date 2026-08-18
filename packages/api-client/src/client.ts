@@ -91,6 +91,14 @@ export interface LinearConnection {
   mappings: LinearTeamMapping[];
 }
 
+export interface SlackConnection {
+  configured: boolean;
+  connected: boolean;
+  canManage: boolean;
+  teamName: string | null;
+  defaultProjectId: string | null;
+}
+
 export interface LinearTeamOption {
   id: string;
   key: string;
@@ -486,6 +494,25 @@ export class BentoClient {
 
   syncLinearNow() {
     return this.request<{ ok: boolean }>("/api/linear/sync", { method: "POST" });
+  }
+
+  slackStatus() {
+    return this.request<SlackConnection>("/api/slack/status");
+  }
+
+  startSlackInstall() {
+    return this.request<{ url: string }>("/api/slack/install", { method: "POST" });
+  }
+
+  disconnectSlack() {
+    return this.request<{ ok: boolean }>("/api/slack/installation", { method: "DELETE" });
+  }
+
+  setSlackSettings(input: { defaultProjectId: string | null }) {
+    return this.request<{ defaultProjectId: string | null }>("/api/slack/settings", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
   }
 
   removeRepository(projectId: string, repositoryId: string) {

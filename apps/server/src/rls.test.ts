@@ -36,6 +36,10 @@ const TENANT_TABLES = [
   "github_installations",
   "linear_team_mappings",
   "linear_issue_links",
+  "slack_connections",
+  "slack_user_settings",
+  "slack_thread_links",
+  "slack_pending_mentions",
 ];
 
 let pool: pg.Pool;
@@ -333,4 +337,33 @@ test("background workers keep the cross-organization access they need", async ()
   // evaluate gates for every tenant.
   const { rows } = await pool.query("select count(*)::int as n from projects");
   assert.equal(rows[0].n, 2, "the worker role must see every organization's rows");
+});
+
+test("a Slack thread link inherits its organization from the card", async () => {
+  const projectA = "00000001-0000-0000-0000-000000000000";
+  const pipelineId = "1000000a-0000-0000-0000-000000000000";
+  const featureId = "4000000a-0000-0000-0000-000000000000";
+  await pool.query(
+    `insert into pipelines (id,project_id,organization_id,name) values ($1,$2,'org-a','slack')`,
+    [pipelineId, projectA],
+  );
+  await pool.query(
+    `insert into features (id,project_id,organization_id,pipeline_id,title)
+     values ($1,$2,'org-a',$3,'Slack card')`,
+    [featureId, projectA, pipelineId],
+  );
+
+  const inserted = await asOrg("org-a", (client) =>
+    client.query(
+      `insert into slack_thread_links (feature_id,slack_team_id,slack_channel_id,slack_thread_ts,slack_user_id)
+       values ($1,'T1','C1','1.0','U1') returning organization_id`,
+      [featureId],
+    ),
+  );
+  assert.equal(inserted.rows[0].organization_id, "org-a");
+
+  const foreign = await asOrg("org-b", (client) =>
+    client.query("select count(*)::int as n from slack_thread_links"),
+  );
+  assert.equal(foreign.rows[0].n, 0, "another organization must not read a Slack thread link");
 });

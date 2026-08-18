@@ -11,6 +11,7 @@ import { buildStagePrompt } from "../orchestrator/prompt.js";
 import { isUniqueViolation } from "../orchestrator/transcript.js";
 import { deliverQueuedMessage } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
+import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 
 const claimInput = z.object({
   /** Identifies the machine claiming work, for display and debugging. */
@@ -268,6 +269,7 @@ export function runnerRoutes(ctx: AppContext) {
         })
         .where(eq(agentRuns.id, runId));
       await deliverQueuedMessage(ctx, runId);
+      await queueRunFinishedSlack(ctx, runId);
 
       {
         ctx.bus.emitRunDone(runId, body.ok ? "succeeded" : "failed");
