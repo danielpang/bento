@@ -53,9 +53,15 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
     name: "Cursor",
     env: ["CURSOR_API_KEY"],
     logo: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCA0MCA0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBvbHlnb24gcG9pbnRzPSIyMCw0LjAyIDMzLjIsMTEuNSAyMCwxOC45OCA2LjgsMTEuNSIgZmlsbD0iY3VycmVudENvbG9yIi8+Cjxwb2x5Z29uIHBvaW50cz0iNS45LDEzLjAzIDE5LjEsMjAuNTEgMTkuMSwzNS40NyA1LjksMjcuOTkiIGZpbGw9ImN1cnJlbnRDb2xvciIvPgo8cG9seWdvbiBwb2ludHM9IjIwLjksMjAuNTEgMzQuMSwxMy4wMyAzNC4xLDI3Ljk5IDIwLjksMzUuNDciIGZpbGw9ImN1cnJlbnRDb2xvciIvPgo8L3N2Zz4K",
-    // Cursor's own models. Auto is a router rather than a model: it
-    // picks per request, which is what most Cursor plans default to.
+    // Cursor's own models. The CLI takes these as bare ids on --model.
+    // Auto is a router rather than a model: it picks per request, which
+    // is what most Cursor plans default to. Newest Composer first, so
+    // the picker does not bury the current ones behind Composer 1.
     models: [
+      { id: "composer-2.5", name: "Composer 2.5" },
+      { id: "composer-2.5-fast", name: "Composer 2.5 Fast" },
+      { id: "composer-2", name: "Composer 2" },
+      { id: "composer-2-fast", name: "Composer 2 Fast" },
       { id: "composer-1", name: "Composer 1" },
       { id: "auto", name: "Auto (Cursor picks per request)" },
     ],

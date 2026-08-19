@@ -136,7 +136,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     defaultModel: "claude-sonnet-5",
     format:
       "A model id supported by your Cursor plan. Cursor bills all of them, so Composer and Grok need no key of their own.",
-    examples: ["claude-sonnet-5", "composer-1", "grok-4.5", "auto"],
+    examples: ["claude-sonnet-5", "composer-2.5", "grok-4.5", "auto"],
     binary: "cursor-agent",
     installUrl: "https://cursor.com/cli",
     installCommand: "curl -fsS https://cursor.com/install | bash",

@@ -25,6 +25,17 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "cursor-composer-2",
+    date: "2026-08-19",
+    title: "Composer 2 and Composer 2.5 in the Cursor CLI picker",
+    items: [
+      {
+        title: "Cursor's own models include the current Composer ids",
+        body: "Choosing Cursor CLI, then the Cursor provider, listed Composer 1 and Auto. Composer 2, Composer 2.5, and their Fast variants are in that list now, using the same ids the CLI takes on --model.",
+      },
+    ],
+  },
+  {
     id: "finish-early",
     date: "2026-08-17",
     title: "Move a card to Done from anywhere",
