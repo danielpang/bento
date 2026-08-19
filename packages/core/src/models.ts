@@ -20,11 +20,36 @@ export interface CatalogProvider {
 /**
  * Every provider Bento knows, refreshed ones first.
  *
- * The generated half comes from models.dev; the manual half is what that
- * snapshot cannot describe. Order matters only where a bare model id is
- * served by more than one provider, and the two halves overlap in no id.
+ * The generated half comes from models.dev. The manual half is what that
+ * snapshot cannot describe, currently Cursor's own Composer ids. Where
+ * both halves name the same provider, generated models come first and
+ * manual ids that the snapshot missed are appended, so Composer stays
+ * listed even after models.dev grows a Cursor provider of its own.
  */
-export const MODEL_CATALOG: readonly CatalogProvider[] = [...GENERATED_CATALOG, ...MANUAL_CATALOG];
+export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(GENERATED_CATALOG, MANUAL_CATALOG);
+
+/** Generated providers first; manual ids fill gaps on the same provider. */
+export function mergeCatalogs(
+  generated: readonly CatalogProvider[],
+  manual: readonly CatalogProvider[],
+): CatalogProvider[] {
+  const byId = new Map<string, CatalogProvider>();
+  for (const provider of generated) byId.set(provider.id, provider);
+  const extraIds: string[] = [];
+  for (const extra of manual) {
+    const existing = byId.get(extra.id);
+    if (!existing) {
+      byId.set(extra.id, extra);
+      extraIds.push(extra.id);
+      continue;
+    }
+    const seen = new Set(existing.models.map((m) => m.id));
+    const added = extra.models.filter((m) => !seen.has(m.id));
+    if (added.length === 0) continue;
+    byId.set(extra.id, { ...existing, models: [...existing.models, ...added] });
+  }
+  return [...generated.map((p) => byId.get(p.id)!), ...extraIds.map((id) => byId.get(id)!)];
+}
 
 /**
  * Which providers a tool can be pointed at.
@@ -37,10 +62,11 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [...GENERATED_CATALOG, 
  * Cursor is the exception on both counts. It takes a bare id like the
  * single provider tools, but it is not tied to one company: everything
  * it runs is billed through the Cursor plan, so Composer and Grok are
- * offered beside Claude and GPT rather than needing a key each. Its
- * catalogue depends on the plan, so manual entry still covers the rest.
- * Anthropic stays first because Cursor's default model is a Claude one,
- * which is the fallback providerForProfile leans on.
+ * offered beside Claude and GPT rather than needing a key each. Grok
+ * comes from the models.dev xAI snapshot; Composer is still listed by
+ * hand because that snapshot has no Cursor provider. Anthropic stays
+ * first because Cursor's default model is a Claude one, which is the
+ * fallback providerForProfile leans on.
  */
 const BY_CLI: Record<string, readonly string[]> = {
   "claude-code": ["anthropic", "openrouter"],

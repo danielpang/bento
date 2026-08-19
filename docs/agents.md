@@ -7,7 +7,7 @@ Every stage of a pipeline runs one of these tools, paired with a model, as an ag
 | Claude Code | `claude-sonnet-5` | `ANTHROPIC_API_KEY`, or a subscription token | Yes: messages queue behind the current step, same conversation | Yes |
 | pi | `anthropic/claude-sonnet-5` | Whichever provider key the model needs | Yes: messages steer the agent while it works | Yes |
 | Codex CLI | `gpt-5-codex` | `OPENAI_API_KEY` | Between runs: delivered when the run ends | No |
-| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.5` | `CURSOR_API_KEY`, whichever model it runs | Between runs: delivered when the run ends | No |
+| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY`, whichever model it runs | Between runs: delivered when the run ends | No |
 | opencode | `anthropic/claude-sonnet-5` | Whichever provider key the model needs | Between runs: delivered when the run ends | No |
 
 Keys are stored encrypted, per organization in multi mode and locally in local mode, through the web console, `bento setup`, or the Mac app. To route Claude Code or Codex through OpenRouter, save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
@@ -61,7 +61,7 @@ OpenAI's agent. Bare model ids (`gpt-5-codex`). Credential: `OPENAI_API_KEY`, or
 
 ### Cursor CLI
 
-Cursor's terminal agent. Bare model ids, subject to your Cursor plan. Credential: `CURSOR_API_KEY`, which pays for whichever model the agent runs: the picker offers Cursor's own Composer, Grok, Gemini, Claude and GPT, and none of them needs that company's key on top. Cursor's catalogue moves with your plan, so anything the list has not caught up with can still be typed in. Its headless mode takes no input while running, so messages are delivered between runs; that is a limit of the tool, not a configuration. Does not report cost.
+Cursor's terminal agent. Bare model ids, subject to your Cursor plan. Credential: `CURSOR_API_KEY`, which pays for whichever model the agent runs: the picker offers Cursor's own Composer, Grok, Gemini, Claude and GPT, and none of them needs that company's key on top. Grok ids refresh from models.dev; Composer is listed by hand because that source has no Cursor provider. Anything the list has not caught up with can still be typed in. Its headless mode takes no input while running, so messages are delivered between runs; that is a limit of the tool, not a configuration. Does not report cost.
 
 ### opencode
 

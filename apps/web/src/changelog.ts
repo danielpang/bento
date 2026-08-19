@@ -33,6 +33,10 @@ export const CHANGELOG: ChangelogEntry[] = [
         title: "Cursor's own models include the current Composer ids",
         body: "Choosing Cursor CLI, then the Cursor provider, listed Composer 1 and Auto. Composer 2, Composer 2.5, and their Fast variants are in that list now, using the same ids the CLI takes on --model.",
       },
+      {
+        title: "Grok for Cursor CLI refreshes from models.dev",
+        body: "The xAI list the Cursor CLI offers is now the models.dev snapshot, billed through your Cursor key, so ids such as Grok 4.6 show up when that snapshot is refreshed. Composer is still listed by hand: models.dev has no Cursor provider for it.",
+      },
     ],
   },
   {
