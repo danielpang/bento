@@ -19,8 +19,9 @@ import { teamRoutes } from "./routes/team.js";
 import { stageRoutes } from "./routes/stages.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import { catalogRoutes } from "./routes/catalog.js";
-import { and, eq, sql } from "drizzle-orm";
-import { invitation, member, organization, user } from "@bento/db";
+import { and, eq } from "drizzle-orm";
+import { invitation, member } from "@bento/db";
+import { invitationPreviewRoutes } from "./routes/invitations.js";
 import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
 import { contactRoutes } from "./routes/contact.js";
@@ -221,52 +222,6 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
       }
       return session.session.activeOrganizationId ?? null;
     }
-
-    /**
-     * What the invitation link may show before there is a session.
-     *
-     * The id is the capability: it travels only in the invitation
-     * email, so presenting it entitles the visitor to the invitee's own
-     * facts (which address was invited, which team, and whether that
-     * address already has an account) and nothing more. The last one is
-     * what lets the page open on sign up for someone new instead of a
-     * sign-in form they cannot use. Deliberately narrower than
-     * better-auth's get-invitation, which requires a session this
-     * visitor does not have yet; and an unknown, spent, or expired id
-     * answers 404, indistinguishable from no invitation at all.
-     * Accepting still goes through better-auth, which checks the
-     * session's email against the invitation.
-     */
-    app.get("/api/invitation-preview", async (c) => {
-      const id = c.req.query("id");
-      if (!id) return c.json({ error: "not found" }, 404);
-      const [invite] = await ctx.db
-        .select({
-          email: invitation.email,
-          status: invitation.status,
-          expiresAt: invitation.expiresAt,
-          organizationName: organization.name,
-        })
-        .from(invitation)
-        .innerJoin(organization, eq(organization.id, invitation.organizationId))
-        .where(eq(invitation.id, id))
-        .limit(1);
-      if (!invite || invite.status !== "pending" || invite.expiresAt < new Date()) {
-        return c.json({ error: "not found" }, 404);
-      }
-      // Case folded on both sides: the inviter typed the address, and
-      // sign up may have normalized it differently.
-      const [existing] = await ctx.db
-        .select({ id: user.id })
-        .from(user)
-        .where(sql`lower(${user.email}) = ${invite.email.toLowerCase()}`)
-        .limit(1);
-      return c.json({
-        email: invite.email,
-        organizationName: invite.organizationName,
-        userExists: Boolean(existing),
-      });
-    });
   }
 
   if (extras.cloudRoutes) app.route("/api/billing", extras.cloudRoutes);
@@ -277,6 +232,13 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // The model catalog is the same for everyone and carries no tenant
   // data, so it sits outside the authenticated routes.
   app.route("/api/catalog", catalogRoutes());
+
+  // The invitation email's pre-session read: who was invited, which
+  // team, and whether that address already has an account. Public on
+  // purpose; the invitation id is the capability. Mounted in every
+  // mode so the page's contract holds everywhere: local mode has no
+  // invitation rows, so every id answers 404 there.
+  app.route("/api/invitation-preview", invitationPreviewRoutes(ctx));
 
   const api = new Hono()
     .use("*", actorMiddleware(ctx))

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -70,6 +70,46 @@ export function teamRoutes(ctx: AppContext) {
           set: { restrictNetwork, updatedAt: new Date() },
         });
       return c.json({ restrictNetwork });
+    })
+    /**
+     * The caller's own pending invitations, by the address on their
+     * account. This is what offers a fresh sign-up their invitation
+     * instead of a blank "name your team" form.
+     *
+     * Exists because better-auth's list-user-invitations refuses any
+     * session whose email is unverified, and a no-SMTP install never
+     * verifies anyone, so the console could not see invitations on the
+     * deployments that most need the fallback. On a deployment that
+     * does verify, every session is verified by construction (sign in
+     * is refused until the address is confirmed), so answering here
+     * discloses nothing extra.
+     *
+     * Only invitations the accept endpoint would actually take: pending
+     * and unexpired, oldest first. Offering one that accept would then
+     * refuse walled people off from creating a team at all.
+     */
+    .get("/invitations", async (c) => {
+      if (ctx.env.BENTO_MODE !== "multi") return c.json([]);
+      const userId = actor(c);
+      const handle = db(c, ctx);
+      const [me] = await handle.select({ email: user.email }).from(user).where(eq(user.id, userId)).limit(1);
+      if (!me) return c.json([]);
+      // Scoped by hand to the caller's own address, like everything in
+      // this file. Plain equality: better-auth lowercases both sides
+      // on write, and re-folding case would abandon the email index.
+      const rows = await handle
+        .select({ id: invitation.id, organizationName: organization.name })
+        .from(invitation)
+        .innerJoin(organization, eq(organization.id, invitation.organizationId))
+        .where(
+          and(
+            eq(invitation.email, me.email),
+            eq(invitation.status, "pending"),
+            gt(invitation.expiresAt, new Date()),
+          ),
+        )
+        .orderBy(asc(invitation.createdAt));
+      return c.json(rows);
     })
     .get("/plain", async (c) => {
     // Local mode has one trusted user and no organizations at all.

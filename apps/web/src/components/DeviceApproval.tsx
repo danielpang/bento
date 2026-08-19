@@ -92,7 +92,7 @@ export function DeviceApproval() {
           <>
             <p className="muted">A terminal is asking to sign in as you.</p>
             <div className="user-code">{code}</div>
-            <div className="actions">
+            <div className="actions actions-centered">
               <button className="btn btn-primary" disabled={deciding} onClick={() => decide(true)}>
                 Approve
               </button>

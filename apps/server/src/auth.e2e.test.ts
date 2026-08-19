@@ -7,6 +7,7 @@ import {
   agentRuns,
   createDb,
   createPool,
+  invitation,
   linearConnections,
   member,
   projects,
@@ -283,6 +284,9 @@ test("an invitation can be previewed before sign in, and only while it is pendin
   // Unauthenticated on purpose: holding the id is the authorization.
   const fresh = await app.request(`/api/invitation-preview?id=${invite.id}`);
   assert.equal(fresh.status, 200);
+  // The body names a personal address and the URL is the capability,
+  // so no shared cache may keep either.
+  assert.equal(fresh.headers.get("cache-control"), "no-store");
   const before = (await fresh.json()) as { email: string; organizationName: string; userExists: boolean };
   assert.equal(before.organizationName, "Preview Team");
   assert.equal(before.email.toLowerCase(), "preview-invitee@bento.test");
@@ -306,6 +310,172 @@ test("an invitation can be previewed before sign in, and only while it is pendin
   assert.equal((await app.request(`/api/invitation-preview?id=${invite.id}`)).status, 404);
   assert.equal((await app.request("/api/invitation-preview?id=no-such-invitation")).status, 404);
   assert.equal((await app.request("/api/invitation-preview")).status, 404);
+
+  // Expired and cancelled answer the same 404: without these, the
+  // seven day window would silently become permanent disclosure.
+  const expiredRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "preview-expired@bento.test", role: "member", organizationId: org.id },
+    token,
+  );
+  const expired = (await expiredRes.json()) as { id: string };
+  assert.equal((await app.request(`/api/invitation-preview?id=${expired.id}`)).status, 200);
+  await ctx.db
+    .update(invitation)
+    .set({ expiresAt: new Date(Date.now() - 1000) })
+    .where(eq(invitation.id, expired.id));
+  assert.equal((await app.request(`/api/invitation-preview?id=${expired.id}`)).status, 404);
+
+  const cancelledRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "preview-cancelled@bento.test", role: "member", organizationId: org.id },
+    token,
+  );
+  const cancelled = (await cancelledRes.json()) as { id: string };
+  await jsonPost("/api/auth/organization/cancel-invitation", { invitationId: cancelled.id }, token);
+  assert.equal((await app.request(`/api/invitation-preview?id=${cancelled.id}`)).status, 404);
+});
+
+/**
+ * The preview is the one unauthenticated route that touches the
+ * database outside better-auth's limiter, so it carries its own brake.
+ */
+test("the invitation preview meters repeat lookups", async () => {
+  for (let i = 0; i < 60; i++) {
+    const res = await app.request("/api/invitation-preview?id=rate-limit-probe");
+    assert.equal(res.status, 404);
+  }
+  const throttled = await app.request("/api/invitation-preview?id=rate-limit-probe");
+  assert.equal(throttled.status, 429, "the 61st lookup of one id inside a minute is refused");
+});
+
+/**
+ * The console's fallback for an invitee who signed up at the root: the
+ * invitations their own address could actually accept. Scoped to the
+ * caller, and only offers what the accept endpoint would honour.
+ */
+test("pending invitations follow the caller's own address", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "gate-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Gate Owner",
+  });
+  const ownerToken = owner.headers.get("set-auth-token")!;
+  const orgRes = await jsonPost("/api/auth/organization/create", { name: "Gate Team", slug: "gate-team" }, ownerToken);
+  const org = (await orgRes.json()) as { id: string };
+  const inviteRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "gate-invitee@bento.test", role: "member", organizationId: org.id },
+    ownerToken,
+  );
+  const invite = (await inviteRes.json()) as { id: string };
+
+  const invitee = await jsonPost("/api/auth/sign-up/email", {
+    email: "gate-invitee@bento.test",
+    password: "correct-horse-battery",
+    name: "Gate Invitee",
+  });
+  const inviteeToken = invitee.headers.get("set-auth-token")!;
+  const outsider = await jsonPost("/api/auth/sign-up/email", {
+    email: "gate-outsider@bento.test",
+    password: "correct-horse-battery",
+    name: "Gate Outsider",
+  });
+  const outsiderToken = outsider.headers.get("set-auth-token")!;
+
+  const mine = (await (
+    await app.request("/api/team/invitations", { headers: { authorization: `Bearer ${inviteeToken}` } })
+  ).json()) as { id: string; organizationName: string }[];
+  assert.deepEqual(mine, [{ id: invite.id, organizationName: "Gate Team" }]);
+
+  const theirs = (await (
+    await app.request("/api/team/invitations", { headers: { authorization: `Bearer ${outsiderToken}` } })
+  ).json()) as unknown[];
+  assert.deepEqual(theirs, [], "another account sees nothing of it");
+
+  // An expired invitation vanishes rather than being offered to a page
+  // that can only refuse it.
+  await ctx.db
+    .update(invitation)
+    .set({ expiresAt: new Date(Date.now() - 1000) })
+    .where(eq(invitation.id, invite.id));
+  const after = (await (
+    await app.request("/api/team/invitations", { headers: { authorization: `Bearer ${inviteeToken}` } })
+  ).json()) as unknown[];
+  assert.deepEqual(after, [], "an expired invitation is not offered");
+});
+
+/**
+ * The invitation must survive the verification detour: sign-up on the
+ * invitation page sends the accept page as callbackURL, and the emailed
+ * link has to land back there rather than on the board.
+ */
+test("the verification email returns an invitee to the invitation", async () => {
+  const gatedEnv = loadEnv({
+    BENTO_MODE: "multi",
+    DATABASE_URL: testUrl,
+    BENTO_DATA_DIR: "/tmp",
+    BENTO_SANDBOX_DRIVER: "local-process",
+    BETTER_AUTH_SECRET: "test-secret-that-is-long-enough-for-hmac",
+    BETTER_AUTH_URL: "http://localhost:4400",
+    BENTO_REQUIRE_EMAIL_VERIFICATION: "true",
+  } as NodeJS.ProcessEnv);
+  const sent: { to: string; subject: string; text: string }[] = [];
+  const gatedAuth = createAuth(gatedEnv, ctx.db, {
+    description: "test",
+    async send(message) {
+      sent.push(message);
+    },
+  });
+  assert.ok(gatedAuth);
+  const gatedApp = createApp({ ...ctx, env: gatedEnv, auth: gatedAuth });
+
+  // The invitation is minted on the ungated app, where the owner
+  // already holds a session.
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "detour-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Detour Owner",
+  });
+  const ownerToken = owner.headers.get("set-auth-token")!;
+  const orgRes = await jsonPost(
+    "/api/auth/organization/create",
+    { name: "Detour Team", slug: "detour-team" },
+    ownerToken,
+  );
+  const org = (await orgRes.json()) as { id: string };
+  const inviteRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "detour-invitee@bento.test", role: "member", organizationId: org.id },
+    ownerToken,
+  );
+  const invite = (await inviteRes.json()) as { id: string };
+
+  const signUp = await gatedApp.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "detour-invitee@bento.test",
+      password: "correct-horse-battery",
+      name: "Detour Invitee",
+      callbackURL: `/accept-invitation?id=${invite.id}`,
+    }),
+  });
+  assert.equal(signUp.status, 200);
+  assert.equal(signUp.headers.get("set-auth-token"), null, "no session until the address is confirmed");
+
+  const mail = sent.find((m) => m.to === "detour-invitee@bento.test");
+  assert.ok(mail, "the verification email went out");
+  const link = /(?<url>http[^\s]*verify-email\?token=[^\s]+)/.exec(mail.text)?.groups?.url;
+  assert.ok(link, "carrying a usable link");
+  const parsed = new URL(link);
+  const verify = await gatedApp.request(parsed.pathname + parsed.search);
+  assert.ok(verify.status === 302 || verify.status === 200, `verification answered ${verify.status}`);
+  const location = verify.headers.get("location") ?? "";
+  assert.ok(
+    location.includes(`/accept-invitation?id=${invite.id}`),
+    `the link lands on the invitation, got ${location || "(no redirect)"}`,
+  );
 });
 
 /**

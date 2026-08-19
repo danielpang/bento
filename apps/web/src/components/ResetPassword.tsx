@@ -11,7 +11,18 @@ import { BrandLockup } from "./BrandLockup.js";
  * says so and offers the way back, which is asking for a fresh link.
  */
 export function ResetPassword() {
-  const token = new URLSearchParams(window.location.search).get("token") ?? "";
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token") ?? "";
+  /**
+   * Where to go once the password works. The sign-in page threads the
+   * place the person started (an invitation, usually) through the
+   * reset email; without it, resetting from an invitation link dropped
+   * the invitation on the floor. Only a path inside this app is
+   * honoured: anything absolute (or protocol relative) in the address
+   * would make this an open redirect.
+   */
+  const rawReturn = params.get("returnTo") ?? "";
+  const returnTo = rawReturn.startsWith("/") && !rawReturn.startsWith("//") ? rawReturn : "/";
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -51,7 +62,7 @@ export function ResetPassword() {
         ) : done ? (
           <>
             <p className="muted">Your password is changed. Sign in with it now.</p>
-            <a className="btn btn-primary" href="/">
+            <a className="btn btn-primary" href={returnTo}>
               Go to sign in
             </a>
           </>

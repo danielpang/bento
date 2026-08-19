@@ -30,6 +30,7 @@ export function SignIn({
   social: supplied,
   initialMode = "in",
   initialEmail = "",
+  lockEmail = false,
   callbackURL = "/",
   note,
 }: {
@@ -37,6 +38,13 @@ export function SignIn({
   /** Open on sign up instead: the invitation page knows the invitee has no account yet. */
   initialMode?: "in" | "up";
   initialEmail?: string;
+  /**
+   * Keep the address as given. An invitation is only acceptable by the
+   * invited address, so an edit or an autofill here could only end in
+   * a refusal after the account already exists, with the invitation
+   * never surfacing again.
+   */
+  lockEmail?: boolean;
   /**
    * Where to land once the account works. Sign up can detour through a
    * verification email or an OAuth provider, and both come back to this
@@ -103,7 +111,13 @@ export function SignIn({
     event.preventDefault();
     setBusy(true);
     setError("");
-    const result = await authClient.requestPasswordReset({ email, redirectTo: "/reset-password" });
+    // The reset flow leaves the app entirely, so the way back rides in
+    // the link: ResetPassword reads returnTo and sends the person to
+    // the invitation (or wherever they started) instead of the board.
+    // This was the one door that still dropped the invitation.
+    const redirectTo =
+      callbackURL === "/" ? "/reset-password" : `/reset-password?returnTo=${encodeURIComponent(callbackURL)}`;
+    const result = await authClient.requestPasswordReset({ email, redirectTo });
     setBusy(false);
     // The same answer either way: whether an address has an account is
     // not something a sign-in form should disclose.
@@ -122,9 +136,11 @@ export function SignIn({
             <BrandLockup size="lg" />
             <h1>Confirm your email</h1>
           </div>
+          {/* "Where you left off", not "your board": the link follows
+              callbackURL, and for an invitee that is the invitation. */}
           <p className="muted">
-            We sent a link to <strong>{pendingEmail}</strong>. Open it and you land straight on your
-            board. Accounts stay locked until the address is confirmed.
+            We sent a link to <strong>{pendingEmail}</strong>. Open it and you continue where you
+            left off. Accounts stay locked until the address is confirmed.
           </p>
           {notice && <p className="muted">{notice}</p>}
           <button className="btn btn-block" disabled={busy} onClick={() => void resend()}>
@@ -163,6 +179,7 @@ export function SignIn({
                 className="input"
                 type="email"
                 required
+                readOnly={lockEmail}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoComplete="email"
@@ -231,6 +248,7 @@ export function SignIn({
               className="input"
               type="email"
               required
+              readOnly={lockEmail}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"

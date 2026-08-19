@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { BentoClient, type AgentProfile, type Feature, type Stage } from "@bento/api-client";
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
-import { authClient, useSession, useListOrganizations, signOut } from "./auth-client.js";
+import { useSession, useListOrganizations, signOut } from "./auth-client.js";
+import { teamDisplayName } from "./team-name.js";
 import { useCountUp } from "./count-up.js";
 import { Board, matchesQuery, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
@@ -181,41 +182,77 @@ function FirstTeamGate({ userName }: { userName: string }) {
   return <BoardScreen showSignOut />;
 }
 
+/** What /api/team/invitations answers with: only offers accept would honour. */
+interface PendingInvitation {
+  id: string;
+  organizationName: string;
+}
+
 /**
  * An account with no organization is not always one that should found
- * a team. An invitee who signed up and then landed here instead of on
- * the invitation link still has that invitation pending, and opening on
- * "name your team" buries the team they were actually asked to join. So
- * pending invitations are checked first, and the oldest one wins; the
- * accept page handles the rest. Only when there is nothing waiting does
- * this fall through to creating a team.
+ * a team. An invitee who signed up at the root instead of through the
+ * invitation link still has that invitation pending, and opening on
+ * "name your team" buries the team they were actually asked to join.
+ *
+ * An offer, not a redirect: a redirect walls off creating a team until
+ * every invitation is declined, and a broken invitation would wall it
+ * off forever. The server already filters to invitations the accept
+ * endpoint would honour (pending, unexpired, oldest first), so nothing
+ * offered here can bounce.
  */
 function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () => void }) {
-  const [checked, setChecked] = useState(false);
+  const [invites, setInvites] = useState<PendingInvitation[] | null>(null);
+  const [createInstead, setCreateInstead] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    void authClient.organization
-      .listUserInvitations()
-      .then((result) => {
-        if (cancelled) return;
-        const first = (Array.isArray(result.data) ? result.data : [])[0] as { id?: string } | undefined;
-        if (first?.id) {
-          window.location.replace(`/accept-invitation?id=${encodeURIComponent(first.id)}`);
-          return;
-        }
-        setChecked(true);
+    // Warm the CreateTeam chunk while the invitations load, so the
+    // common no-invitations answer does not then wait on a download.
+    void import("./components/CreateTeam.js").catch(() => undefined);
+    void fetch("/api/team/invitations", { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((rows: PendingInvitation[]) => {
+        if (!cancelled) setInvites(Array.isArray(rows) ? rows : []);
       })
-      // A failed lookup must not block onboarding: with no invitation
-      // to show, creating a team remains the only door forward.
+      // A failed lookup must not block onboarding: with nothing to
+      // offer, creating a team remains the door forward.
       .catch(() => {
-        if (!cancelled) setChecked(true);
+        if (!cancelled) setInvites([]);
       });
     return () => {
       cancelled = true;
     };
   }, []);
-  if (!checked) return <div className="center" />;
-  return <CreateTeam userName={userName} onCreated={onCreated} />;
+  if (createInstead || (invites !== null && invites.length === 0)) {
+    return <CreateTeam userName={userName} onCreated={onCreated} />;
+  }
+  if (invites === null) return <div className="center" />;
+  return (
+    <div className="center">
+      <div className="card-panel card-panel-centered">
+        <div className="auth-head">
+          <BrandLockup size="lg" />
+          <h1>You are invited</h1>
+        </div>
+        <p className="muted">
+          {invites.length === 1
+            ? "A team is waiting for you."
+            : "These teams are waiting for you."}
+        </p>
+        {invites.map((invite) => (
+          <a
+            key={invite.id}
+            className="btn btn-primary"
+            href={`/accept-invitation?id=${encodeURIComponent(invite.id)}`}
+          >
+            Join {teamDisplayName(invite.organizationName)}
+          </a>
+        ))}
+        <button className="btn" onClick={() => setCreateInstead(true)}>
+          Create a new team instead
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
