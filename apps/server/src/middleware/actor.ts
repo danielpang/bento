@@ -45,3 +45,13 @@ export function actor(c: Context): string {
 export function activeOrg(c: Context): string | null {
   return (c.get(ORG_KEY) as string | null | undefined) ?? null;
 }
+
+/**
+ * The acting user when the middleware ran, or null outside it. For
+ * paths that observe rather than authorize (the error handler), where
+ * throwing over a missing actor would replace the error being
+ * reported.
+ */
+export function maybeActor(c: Context): string | null {
+  return (c.get(ACTOR_KEY) as string | undefined) ?? null;
+}

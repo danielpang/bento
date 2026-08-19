@@ -283,6 +283,27 @@ export async function activationRefusal(
 }
 
 /**
+ * The one builder of the "feature completed" event, shared by the two
+ * writers of status "done" (the last-stage advance and the Done-lane
+ * drop), so the two ways a card can finish cannot drift into two
+ * event shapes. Both callers run on the owner pool, so their status
+ * update has committed by the time this fires.
+ */
+function captureFeatureCompleted(
+  ctx: AppContext,
+  feature: { id: string; projectId: string; organizationId: string | null },
+  trigger: "manual" | "gate_auto",
+  actorUserId?: string,
+): void {
+  ctx.analytics?.capture({
+    event: "feature completed",
+    userId: actorUserId ?? null,
+    organizationId: feature.organizationId,
+    properties: { feature_id: feature.id, project_id: feature.projectId, trigger },
+  });
+}
+
+/**
  * Moves a feature to the next stage (or done) and, when the next stage
  * has a default agent profile, queues that stage's run automatically.
  * Shared by the manual approve route and automatic gate advancement.
@@ -316,13 +337,17 @@ export async function advanceFeature(
   const branchName = feature.branchName ?? `feature/${slugify(feature.title)}-${feature.id.slice(0, 8)}`;
 
   // The stage guard is part of the update, so the check and the move are
-  // one atomic step rather than two.
+  // one atomic step rather than two. Excluding done matters on the last
+  // stage: the done-update leaves currentStageId unchanged, so a stage
+  // guard alone let two concurrent evaluations both match and complete
+  // the card twice, with two history rows and two completed events.
+  const notDone = ne(features.status, "done");
   const guard =
     expectedStageId === undefined
-      ? eq(features.id, feature.id)
+      ? and(eq(features.id, feature.id), notDone)
       : expectedStageId === null
-        ? and(eq(features.id, feature.id), isNull(features.currentStageId))
-        : and(eq(features.id, feature.id), eq(features.currentStageId, expectedStageId));
+        ? and(eq(features.id, feature.id), isNull(features.currentStageId), notDone)
+        : and(eq(features.id, feature.id), eq(features.currentStageId, expectedStageId), notDone);
 
   const [updated] = await ctx.db
     .update(features)
@@ -357,6 +382,7 @@ export async function advanceFeature(
     // The card is over, so the machine it was worked on goes. It costs
     // money for as long as it exists, not for as long as it is used.
     await queueSandboxReap(ctx, feature.id);
+    captureFeatureCompleted(ctx, feature, trigger, actorUserId);
   }
 
   ctx.bus.emitBoardEvent({
@@ -390,7 +416,7 @@ export async function advanceFeature(
       agentProfileId: nextStage.defaultAgentProfileId,
       prompt: "",
       executor,
-    }, ctx.entitlements);
+    }, ctx.entitlements, ctx.analytics);
     // Runner-executed runs wait to be claimed by a machine. A card that
     // ran the team out of compute stops here, on its new stage, with no
     // agent working it: the same shape as a stage nobody assigned an
@@ -509,7 +535,7 @@ export async function moveFeatureTo(
         agentProfileId: target.defaultAgentProfileId,
         prompt: "",
         executor,
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics);
       if (run !== "busy" && !("outOfCompute" in run) && executor === "server") {
         await ctx.boss.send("run.execute", { runId: run.id });
       }
@@ -588,6 +614,7 @@ export async function finishFeature(
   });
   // The card is over, so the machine it was worked on goes.
   await queueSandboxReap(ctx, feature.id);
+  captureFeatureCompleted(ctx, feature, "manual", actorUserId);
 
   ctx.bus.emitBoardEvent({
     type: "feature_updated",
@@ -1015,7 +1042,7 @@ async function judgeStageWork(
     prompt: buildJudgePrompt(stage, judgeProfile),
     kind: "judge",
     executor: executor === "runner" ? "runner" : "server",
-  }, ctx.entitlements);
+  }, ctx.entitlements, ctx.analytics);
   if (run === "busy") {
     return { status: "pending", detail: "Waiting for the current run to finish before judging" };
   }

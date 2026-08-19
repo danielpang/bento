@@ -3,7 +3,7 @@ import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
-import { agentCli, checkAgentPairing, gateCriterion } from "@bento/core";
+import { actorDisplayName, agentCli, checkAgentPairing, gateCriterion, historyTriggerLabel } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -19,6 +19,7 @@ import {
   repositories,
   sandboxes,
   stages,
+  user,
 } from "@bento/db";
 import type { SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
@@ -80,15 +81,27 @@ const CRITERION_LABELS: Record<string, string> = {
   pr_comments_resolved: "Review comments",
 };
 
-/** Who or what moved the card, in words rather than trigger tokens. */
-const TRIGGER_WORDS: Record<string, string> = {
-  manual: "by you",
-  manual_back: "sent back by you",
-  gate_auto: "by the gate",
-  gate_auto_back: "returned by the gate",
-  agent_run: "by an agent",
-  system: "automatically",
-};
+/** Pipes and newlines would split the Mac/TUI line protocol. */
+function wireSafe(value: string): string {
+  return value.replaceAll(/[|\r\n]+/g, " ").trim();
+}
+
+/**
+ * The card's own log, with the person who moved it when a person did.
+ * The join is here so every history reader names them the same way.
+ */
+function featureHistory(c: Parameters<typeof db>[0], ctx: AppContext, featureId: string) {
+  return db(c, ctx)
+    .select({
+      event: featureEvents,
+      actorName: user.name,
+      actorEmail: user.email,
+    })
+    .from(featureEvents)
+    .leftJoin(user, eq(user.id, featureEvents.actorUserId))
+    .where(eq(featureEvents.featureId, featureId))
+    .orderBy(asc(featureEvents.at));
+}
 
 /**
  * Attaches the first pull request's URL to each card.
@@ -150,8 +163,19 @@ export function featureRoutes(ctx: AppContext) {
       // Mirror the card into Linear when the workspace wants that.
       // Queued, so a slow or failing Linear API never keeps the card
       // from reaching the board, and queued after the commit, so the
-      // worker cannot look for this card before it exists.
-      deferAfterCommit(c, () => queueLinearIssueCreate(ctx, feature));
+      // worker cannot look for this card before it exists. The metric
+      // waits for the commit for the same reason: an event counted for
+      // a card whose transaction rolled back is a card that never was.
+      const createdBy = actor(c);
+      deferAfterCommit(c, async () => {
+        ctx.analytics?.capture({
+          event: "feature card created",
+          userId: createdBy,
+          organizationId: feature.organizationId,
+          properties: { feature_id: feature.id, project_id: feature.projectId },
+        });
+        await queueLinearIssueCreate(ctx, feature);
+      });
       return c.json(feature, 201);
     })
     .get("/:id", async (c) => {
@@ -339,7 +363,7 @@ export function featureRoutes(ctx: AppContext) {
         // The person sending the message owns the hours the resumed
         // run spends, not whoever started the conversation.
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       // A run started in the gap between the read and the insert; the
       // messages wait for it like any other mid-run message.
       if (run === "busy") {
@@ -841,7 +865,7 @@ export function featureRoutes(ctx: AppContext) {
         prompt: "",
         executor,
         startedBy: actor(c),
-      }, ctx.entitlements);
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
       if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
@@ -850,12 +874,14 @@ export function featureRoutes(ctx: AppContext) {
     /** Full history: stage moves and status changes, oldest first. */
     .get("/:id/history", async (c) => {
       if (!(await getAccessibleFeature(ctx, c, c.req.param("id")))) return c.json({ error: "not found" }, 404);
-      const rows = await db(c, ctx)
-        .select()
-        .from(featureEvents)
-        .where(eq(featureEvents.featureId, c.req.param("id")))
-        .orderBy(asc(featureEvents.at));
-      return c.json(rows);
+      const rows = await featureHistory(c, ctx, c.req.param("id"));
+      return c.json(
+        rows.map(({ event, actorName, actorEmail }) => ({
+          ...event,
+          actorName: actorName ?? null,
+          actorEmail: actorEmail ?? null,
+        })),
+      );
     })
     /**
      * Line format: event|<at>|<kind>|<trigger>|<description>
@@ -866,18 +892,14 @@ export function featureRoutes(ctx: AppContext) {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
       if (!feature) return c.text("error|not found", 404);
       const [rows, stageRows] = await Promise.all([
-        db(c, ctx)
-          .select()
-          .from(featureEvents)
-          .where(eq(featureEvents.featureId, feature.id))
-          .orderBy(asc(featureEvents.at)),
+        featureHistory(c, ctx, feature.id),
         db(c, ctx).select().from(stages).where(eq(stages.pipelineId, feature.pipelineId)).orderBy(asc(stages.position)),
       ]);
       const nameOf = (id: string | null) =>
         id ? (stageRows.find((s) => s.id === id)?.name ?? "unknown") : "Backlog";
       const lastStage = stageRows[stageRows.length - 1];
 
-      const lines = rows.map((row) => {
+      const lines = rows.map(({ event: row, actorName, actorEmail }) => {
         const when = row.at.toISOString();
         /**
          * A null destination is two different stories, and the trigger
@@ -896,7 +918,8 @@ export function featureRoutes(ctx: AppContext) {
                 : `finished ${nameOf(row.fromStageId)}`
               : `${nameOf(row.fromStageId)} to ${nameOf(row.toStageId)}`
             : `${row.fromStatus ?? "new"} to ${row.toStatus ?? "unknown"}`;
-        return `event|${when}|${row.kind}|${TRIGGER_WORDS[row.trigger] ?? row.trigger}|${description}`;
+        const who = historyTriggerLabel(row.trigger, actorDisplayName(actorName, actorEmail));
+        return `event|${when}|${row.kind}|${wireSafe(who)}|${description}`;
       });
       return c.text(lines.join("\n"));
     })

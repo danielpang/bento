@@ -23,6 +23,10 @@
     "@bento/sandbox": "workspace:*",
     "@hono/node-server": "^1.19.15",
     "@hono/zod-validator": "^0.4.3",
+    "@opentelemetry/api-logs": "^0.221.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
     "aws4fetch": "^1.0.20",
     "better-auth": "^1.6.0",
     "dockerode": "^4.0.4",
@@ -31,6 +35,7 @@
     "nodemailer": "^9.0.3",
     "pg": "^8.14.0",
     "pg-boss": "^10.1.6",
+    "posthog-node": "^5.49.1",
     "yaml": "^2.9.0",
     "zod": "^3.24.2"
   },

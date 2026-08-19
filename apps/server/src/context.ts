@@ -4,6 +4,7 @@ import { GitHubApp } from "@bento/github";
 import { DockerDriver, LocalProcessDriver, SpriteDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import type PgBoss from "pg-boss";
 import type pg from "pg";
+import type { Analytics } from "./analytics.js";
 import type { ArtifactStore } from "./artifact-store.js";
 import type { Auth } from "./auth.js";
 import type { SecretBox } from "./secrets.js";
@@ -99,6 +100,8 @@ export interface AppContext {
   auth?: Auth;
   /** Plan limits; absent on open source installs, where nothing is limited. */
   entitlements?: Entitlements;
+  /** PostHog, when a key is configured; absent means nothing is sent. */
+  analytics?: Analytics;
   /** Encrypts organization secrets at rest. */
   secretBox: SecretBox;
   /**

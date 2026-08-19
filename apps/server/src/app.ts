@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
-import { actorMiddleware } from "./middleware/actor.js";
+import { activeOrg, actorMiddleware, maybeActor } from "./middleware/actor.js";
 import { tenantMiddleware } from "./middleware/tenant.js";
 import { artifactRoutes } from "./routes/artifacts.js";
 import { boardEventRoutes, runRoutes } from "./routes/runs.js";
@@ -38,6 +38,34 @@ export interface AppExtras {
 
 export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   const app = new Hono();
+
+  /**
+   * The last stop for an error no route caught. An HTTPException is a
+   * refusal somebody wrote on purpose and keeps its own response;
+   * everything else is a bug, so it goes to error tracking with its
+   * stack trace and the request that provoked it, and the caller gets
+   * the same JSON error shape every route already speaks.
+   *
+   * The exception check is duck-typed the way Hono's own default
+   * handler does it, not instanceof: hono is a peer dependency of the
+   * middleware packages, and an HTTPException thrown by a second
+   * resolved copy must not have its deliberate 401 rewritten as a 500.
+   */
+  app.onError((err, c) => {
+    const refusal = err as { getResponse?: () => Response };
+    if (typeof refusal.getResponse === "function") {
+      const res = refusal.getResponse();
+      // The cast bridges Node's two ReadableStream declarations, which
+      // disagree about an optional field; the value is the same stream.
+      return c.newResponse(res.body as unknown as ReadableStream | null, res);
+    }
+    ctx.analytics?.captureException(err, maybeActor(c), activeOrg(c), {
+      path: c.req.path,
+      method: c.req.method,
+    });
+    console.error(`unhandled error on ${c.req.method} ${c.req.path}:`, err);
+    return c.json({ error: "internal server error" }, 500);
+  });
 
   // CORS must be registered before the routes it covers. set-auth-token
   // has to be exposed or browsers silently drop the bearer token.

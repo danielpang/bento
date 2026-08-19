@@ -60,6 +60,13 @@ async function sendOrLog(mailer: Mailer, message: Parameters<Mailer["send"]>[0],
  */
 export interface AuthHooks {
   onOrganizationDeleted?: (organizationId: string) => Promise<void>;
+  /**
+   * Fires once when the account row is created, whatever door it came
+   * through: email sign up, Google, GitHub. Observation only, and never
+   * awaited into the sign up's fate: an analytics outage must not
+   * refuse an account.
+   */
+  onUserSignedUp?: (user: { id: string; email: string; name: string }) => void;
 }
 
 function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
@@ -126,6 +133,17 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
      * setActive remains for.
      */
     databaseHooks: {
+      user: {
+        create: {
+          async after(newUser) {
+            try {
+              hooks.onUserSignedUp?.({ id: newUser.id, email: newUser.email, name: newUser.name });
+            } catch (err) {
+              console.warn("sign up hook failed:", err);
+            }
+          },
+        },
+      },
       session: {
         create: {
           async before(newSession) {

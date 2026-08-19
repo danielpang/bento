@@ -385,6 +385,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
     ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
+    ["GET", `/api/features/${feature.id}/history`],
+    ["GET", `/api/features/${feature.id}/history/plain`],
     ["GET", `/api/stages/${stageId}`],
     ["PATCH", `/api/stages/${stageId}`, { body: JSON.stringify({ gateCriteria: [{ type: "command", cmd: "id", timeoutSec: 5 }] }) }],
     ["PATCH", `/api/profiles/${profile.id}`, { body: JSON.stringify({ name: "stolen" }) }],
@@ -461,6 +463,66 @@ test("every entity route refuses a foreign tenant", async () => {
     !stage.gateCriteria.some((criterion) => criterion.type === "command"),
     "the intruder's gateCriteria write must not land",
   );
+});
+
+/**
+ * History names the person who moved the card. "by a person" told a
+ * team nothing about who approved or dragged something, and the actor
+ * was already stored; the list just never resolved them.
+ */
+test("history names the person who moved the card", async () => {
+  const signed = await jsonPost("/api/auth/sign-up/email", {
+    email: "history-actor@bento.test",
+    password: "correct-horse-battery",
+    name: "Ada Lovelace",
+  });
+  const token = signed.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "History", slug: "history-actor" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const asUser = (path: string, init: RequestInit = {}) =>
+    app.request(path, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        ...(init.headers ?? {}),
+      },
+    });
+
+  const project = (await (
+    await asUser("/api/projects", { method: "POST", body: JSON.stringify({ name: "Named", localPath: "/tmp" }) })
+  ).json()) as { id: string };
+  const pipeline = (await (await asUser(`/api/projects/${project.id}/pipeline`)).json()) as {
+    stages: { id: string }[];
+  };
+  for (const stage of pipeline.stages) {
+    await asUser(`/api/stages/${stage.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ defaultAgentProfileId: null }),
+    });
+  }
+  const feature = (await (
+    await asUser("/api/features", { method: "POST", body: JSON.stringify({ projectId: project.id, title: "Who" }) })
+  ).json()) as { id: string };
+  const advanced = await asUser(`/api/features/${feature.id}/advance`, { method: "POST" });
+  assert.equal(advanced.status, 200);
+
+  const history = (await (await asUser(`/api/features/${feature.id}/history`)).json()) as {
+    trigger: string;
+    actorName: string | null;
+    actorEmail: string | null;
+  }[];
+  const moved = history.find((event) => event.trigger === "manual");
+  assert.ok(moved, "advancing the card writes a manual history row");
+  assert.equal(moved.actorName, "Ada Lovelace");
+  assert.equal(moved.actorEmail, "history-actor@bento.test");
+
+  const plain = await (await asUser(`/api/features/${feature.id}/history/plain`)).text();
+  assert.match(plain, /by Ada Lovelace/);
+  assert.doesNotMatch(plain, /by a person/);
 });
 
 /**

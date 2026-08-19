@@ -511,6 +511,12 @@ button {
   appearance: none;
   -webkit-appearance: none;
   padding-right: 30px;
+  /* The padding alone is not enough: Chromium lets a value too long
+     for the field slide under it, over the chevron. Ellipsis at the
+     content edge keeps the mark visible however long the value is. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   background-repeat: no-repeat;
   background-position: right 10px center;
   background-size: 12px 12px;
@@ -2720,10 +2726,9 @@ button {
   font-weight: 600;
   letter-spacing: -0.01em;
   line-height: 1.35;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 .session-card-time {
   flex: none;
@@ -2789,6 +2794,14 @@ button {
   color: var(--failed);
   border-color: var(--failed);
   flex-shrink: 0;
+}
+/* A square the height of the input, all of it arrow. */
+.composer-send {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
 }
 .stop-square {
   width: 9px;
@@ -2910,11 +2923,17 @@ button {
   align-items: center;
   gap: 12px;
 }
+/* One line always; the full title waits in the tooltip. A wrapped
+   heading pushed the conversation down on exactly the screens with
+   the least height to give. */
 .session-head h1 {
   font-size: 17px;
   margin: 0;
   flex: 1;
   min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* The agent's between-words state: an orb, not a wall of tool noise. */
@@ -3153,7 +3172,7 @@ button.session-expand[aria-pressed="true"] {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg);
-  align-self: flex-start;
+  align-self: flex-end;
   flex-shrink: 0;
 }
 .pane-toggle button {
@@ -3193,8 +3212,8 @@ button.session-expand[aria-pressed="true"] {
   }
 }
 
-/* The phone fit: tighter frame, a title that stops at two lines, and
-   an input large enough that iOS does not zoom into it. */
+/* The phone fit: tighter frame, and an input large enough that iOS
+   does not zoom into it. */
 @media (max-width: 720px) {
   .session-page {
     padding: 10px 12px 10px;
@@ -3202,11 +3221,6 @@ button.session-expand[aria-pressed="true"] {
   }
   .session-head h1 {
     font-size: 15px;
-    line-height: 1.35;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
   }
   .session-page .composer-input {
     font-size: 16px;

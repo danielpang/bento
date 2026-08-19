@@ -167,6 +167,23 @@ const envSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_REGION: z.string().optional(),
 
+  /**
+   * PostHog: product analytics, error tracking, and log export. All
+   * three read the same project token. Without a key nothing is sent
+   * and nothing breaks; in multi mode the server says so once at boot,
+   * because events silently missed are worse than a line of noise.
+   */
+  POSTHOG_API_KEY: z.string().optional(),
+  POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),
+  /**
+   * Stamped as the `environment` property on every PostHog event,
+   * exception, and log record, so one project can hold both
+   * environments without dev noise polluting production dashboards.
+   * Defaults to development: production is a claim a deployment makes
+   * explicitly (the Docker image does), never one it drifts into.
+   */
+  BENTO_ENVIRONMENT: z.enum(["development", "production"]).default("development"),
+
   /** GitHub App credentials. Without these, PR based gates stay pending. */
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_SLUG: z.string().regex(/^[a-z0-9-]+$/).optional(),
