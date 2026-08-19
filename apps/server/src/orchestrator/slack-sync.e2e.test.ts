@@ -167,11 +167,14 @@ after(async () => {
 
 function stubSlack(): typeof fetch {
   return (async (url: string | URL | Request, init?: RequestInit) => {
-    const method = String(url).split("/").pop() ?? "";
-    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const parsed = new URL(String(url));
+    const method = parsed.pathname.split("/").pop() ?? "";
+    const body = init?.body
+      ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+      : Object.fromEntries(parsed.searchParams.entries());
     slackCalls.push({ method, body });
     if (method === "users.info") {
-      const userId = String(body.user ?? "");
+      const userId = String(body.user ?? parsed.searchParams.get("user") ?? "");
       const email = emails.get(userId) ?? null;
       return new Response(
         JSON.stringify({

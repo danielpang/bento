@@ -83,6 +83,32 @@ test("SlackClient surfaces Slack errors", async () => {
   await assert.rejects(() => client.postMessage({ channel: "C1", text: "hi" }), /channel_not_found/);
 });
 
+test("usersInfo GETs the user id rather than posting JSON", async () => {
+  let captured: { url: string; method: string | undefined } | null = null;
+  const fetchImpl = (async (url: any, init: any) => {
+    captured = { url: String(url), method: init?.method };
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        user: { id: "U1", name: "dan", profile: { email: "dan@example.com", real_name: "Dan" } },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  const client = new SlackClient("xoxb-test", fetchImpl);
+  const info = await client.usersInfo("U1");
+  assert.deepEqual(info, { id: "U1", email: "dan@example.com", name: "Dan" });
+  assert.equal(captured!.method, "GET");
+  assert.equal(captured!.url, "https://slack.com/api/users.info?user=U1");
+});
+
+test("usersInfo treats an unknown Slack user as missing, not as a thrown error", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ ok: false, error: "user_not_found" }), { status: 200 })) as typeof fetch;
+  const client = new SlackClient("k", fetchImpl);
+  assert.equal(await client.usersInfo("Umissing"), null);
+});
+
 test("exchangeOAuthCode reads the bot token out of the v2 payload", async () => {
   const fetchImpl = (async () =>
     new Response(

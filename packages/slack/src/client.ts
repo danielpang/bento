@@ -91,15 +91,37 @@ export class SlackClient {
   }
 
   async usersInfo(userId: string): Promise<SlackUserInfo | null> {
-    const result = await this.call<{
-      user?: { id?: string; name?: string; profile?: { email?: string; real_name?: string } };
-    }>("users.info", { user: userId });
-    if (!result.user?.id) return null;
-    return {
-      id: result.user.id,
-      email: result.user.profile?.email ?? null,
-      name: result.user.profile?.real_name ?? result.user.name ?? null,
-    };
+    /**
+     * users.info is a GET method. Posting JSON (the way chat.postMessage
+     * works) leaves `user` unset, and Slack answers user_not_found even
+     * for a member of the workspace.
+     */
+    try {
+      const result = await this.get<{
+        user?: { id?: string; name?: string; profile?: { email?: string; real_name?: string } };
+      }>("users.info", { user: userId });
+      if (!result.user?.id) return null;
+      return {
+        id: result.user.id,
+        email: result.user.profile?.email ?? null,
+        name: result.user.profile?.real_name ?? result.user.name ?? null,
+      };
+    } catch (err) {
+      if (err instanceof SlackApiError && (err.code === "user_not_found" || err.code === "user_not_visible")) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  private async get<T>(method: string, query: Record<string, string>): Promise<T & SlackOk> {
+    const url = new URL(`${SLACK_API}/${method}`);
+    for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+    const res = await this.fetchImpl(url.toString(), {
+      method: "GET",
+      headers: { authorization: `Bearer ${this.token}` },
+    });
+    return this.read(method, res);
   }
 
   private async call<T>(method: string, body: Record<string, unknown>): Promise<T & SlackOk> {
@@ -111,6 +133,10 @@ export class SlackClient {
       },
       body: JSON.stringify(body),
     });
+    return this.read(method, res);
+  }
+
+  private async read<T>(method: string, res: Response): Promise<T & SlackOk> {
     const json = (await res.json()) as T & SlackOk;
     if (!json.ok) throw new SlackApiError(json.error ?? `Slack ${method} failed`, json.error);
     return json;
