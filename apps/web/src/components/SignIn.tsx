@@ -26,10 +26,30 @@ function useSocialProviders(supplied?: { github: boolean; google: boolean }) {
   return supplied ?? discovered;
 }
 
-export function SignIn({ social: supplied }: { social?: { github: boolean; google: boolean } }) {
+export function SignIn({
+  social: supplied,
+  initialMode = "in",
+  initialEmail = "",
+  callbackURL = "/",
+  note,
+}: {
+  social?: { github: boolean; google: boolean };
+  /** Open on sign up instead: the invitation page knows the invitee has no account yet. */
+  initialMode?: "in" | "up";
+  initialEmail?: string;
+  /**
+   * Where to land once the account works. Sign up can detour through a
+   * verification email or an OAuth provider, and both come back to this
+   * address rather than the board: an invitee who lost their invitation
+   * on the way was asked to create a team instead of joining one.
+   */
+  callbackURL?: string;
+  /** Replaces the tagline, so the invitation page can say whose team this is. */
+  note?: string;
+}) {
   const social = useSocialProviders(supplied);
-  const [mode, setMode] = useState<"in" | "up">("in");
-  const [email, setEmail] = useState("");
+  const [mode, setMode] = useState<"in" | "up">(initialMode);
+  const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -47,7 +67,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
     const result =
       mode === "in"
         ? await signIn.email({ email, password })
-        : await signUp.email({ email, password, name: name || email });
+        : await signUp.email({ email, password, name: name || email, callbackURL });
     setBusy(false);
     if (!result.error) {
       // Signing up no longer signs you in: the address has to be
@@ -70,7 +90,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
     setBusy(true);
     setNotice("");
     try {
-      await authClient.sendVerificationEmail({ email: pendingEmail, callbackURL: "/" });
+      await authClient.sendVerificationEmail({ email: pendingEmail, callbackURL });
       setNotice("Sent. Check your inbox again, including the spam folder.");
     } catch {
       setNotice("Could not send it just now. Try again in a moment.");
@@ -172,7 +192,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
           {/* The product's own rule, not a value proposition. A line
               a maintainer would write beats a line a marketing page
               would. */}
-          <p className="muted">One card, one agent, one branch.</p>
+          <p className="muted">{note ?? "One card, one agent, one branch."}</p>
         </div>
 
         {/* Only providers the server actually has credentials for: a
@@ -182,13 +202,13 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
           <>
             <div className="auth-social">
               {social.github && (
-                <button className="btn btn-block" onClick={() => signIn.social({ provider: "github" })}>
+                <button className="btn btn-block" onClick={() => signIn.social({ provider: "github", callbackURL })}>
                   <GitHubIcon />
                   Continue with GitHub
                 </button>
               )}
               {social.google && (
-                <button className="btn btn-block" onClick={() => signIn.social({ provider: "google" })}>
+                <button className="btn btn-block" onClick={() => signIn.social({ provider: "google", callbackURL })}>
                   <GoogleIcon />
                   Continue with Google
                 </button>

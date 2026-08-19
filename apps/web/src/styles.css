@@ -2012,6 +2012,20 @@ button {
   color: var(--text-faint);
 }
 
+/* A pair of decisions (Accept and Decline, Approve and Deny) sits under
+   the centred masthead with no form around it, so it centres with the
+   masthead rather than hanging off the card's left edge. */
+.card-panel .actions {
+  justify-content: center;
+}
+
+/* The invitation card is a message with two buttons, not a form, so its
+   prose centres with the masthead too. Cards with fields keep their
+   left edge: a label has to share an edge with the field under it. */
+.card-panel-centered {
+  text-align: center;
+}
+
 /* Left aligned, on the same edge as every label and field below it.
    Centring a heading over a left aligned form is the layout of a
    letterhead, and it is most of why this read as corporate. */

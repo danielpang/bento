@@ -256,6 +256,59 @@ test("organization members share projects, outsiders do not", async () => {
 });
 
 /**
+ * The invitation preview is the one read the sign-in page may make
+ * before there is a session. It answers only for a live pending
+ * invitation id, which travels nowhere but the invitation email, and
+ * everything else looks exactly like nothing.
+ */
+test("an invitation can be previewed before sign in, and only while it is pending", async () => {
+  const inviter = await jsonPost("/api/auth/sign-up/email", {
+    email: "preview-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Preview Owner",
+  });
+  const token = inviter.headers.get("set-auth-token")!;
+  const orgRes = await jsonPost("/api/auth/organization/create", { name: "Preview Team", slug: "preview-team" }, token);
+  const org = (await orgRes.json()) as { id: string };
+  assert.ok(org.id);
+
+  const inviteRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "preview-invitee@bento.test", role: "member", organizationId: org.id },
+    token,
+  );
+  const invite = (await inviteRes.json()) as { id: string };
+  assert.ok(invite.id);
+
+  // Unauthenticated on purpose: holding the id is the authorization.
+  const fresh = await app.request(`/api/invitation-preview?id=${invite.id}`);
+  assert.equal(fresh.status, 200);
+  const before = (await fresh.json()) as { email: string; organizationName: string; userExists: boolean };
+  assert.equal(before.organizationName, "Preview Team");
+  assert.equal(before.email.toLowerCase(), "preview-invitee@bento.test");
+  assert.equal(before.userExists, false, "the invitee has not signed up yet");
+
+  // Signing up in a different case still counts as the same account.
+  const invitee = await jsonPost("/api/auth/sign-up/email", {
+    email: "Preview-Invitee@bento.test",
+    password: "correct-horse-battery",
+    name: "Invitee",
+  });
+  const inviteeToken = invitee.headers.get("set-auth-token")!;
+  const after = (await (await app.request(`/api/invitation-preview?id=${invite.id}`)).json()) as {
+    userExists: boolean;
+  };
+  assert.equal(after.userExists, true, "the invited address now has an account");
+
+  // A spent invitation answers exactly like one that never existed.
+  const accepted = await jsonPost("/api/auth/organization/accept-invitation", { invitationId: invite.id }, inviteeToken);
+  assert.equal(accepted.status, 200);
+  assert.equal((await app.request(`/api/invitation-preview?id=${invite.id}`)).status, 404);
+  assert.equal((await app.request("/api/invitation-preview?id=no-such-invitation")).status, 404);
+  assert.equal((await app.request("/api/invitation-preview")).status, 404);
+});
+
+/**
  * The authorization matrix: every route that acts on a feature, run,
  * stage, or project must refuse a token from a different tenant. This
  * exists because the earlier "scoped to owner" test only covered

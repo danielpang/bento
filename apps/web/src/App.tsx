@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { BentoClient, type AgentProfile, type Feature, type Stage } from "@bento/api-client";
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
-import { useSession, useListOrganizations, signOut } from "./auth-client.js";
+import { authClient, useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { useCountUp } from "./count-up.js";
 import { Board, matchesQuery, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
@@ -176,9 +176,46 @@ function FirstTeamGate({ userName }: { userName: string }) {
     );
   }
   if (!created && Array.isArray(organizations) && organizations.length === 0) {
-    return <CreateTeam userName={userName} onCreated={() => setCreated(true)} />;
+    return <FirstTeam userName={userName} onCreated={() => setCreated(true)} />;
   }
   return <BoardScreen showSignOut />;
+}
+
+/**
+ * An account with no organization is not always one that should found
+ * a team. An invitee who signed up and then landed here instead of on
+ * the invitation link still has that invitation pending, and opening on
+ * "name your team" buries the team they were actually asked to join. So
+ * pending invitations are checked first, and the oldest one wins; the
+ * accept page handles the rest. Only when there is nothing waiting does
+ * this fall through to creating a team.
+ */
+function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () => void }) {
+  const [checked, setChecked] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void authClient.organization
+      .listUserInvitations()
+      .then((result) => {
+        if (cancelled) return;
+        const first = (Array.isArray(result.data) ? result.data : [])[0] as { id?: string } | undefined;
+        if (first?.id) {
+          window.location.replace(`/accept-invitation?id=${encodeURIComponent(first.id)}`);
+          return;
+        }
+        setChecked(true);
+      })
+      // A failed lookup must not block onboarding: with no invitation
+      // to show, creating a team remains the only door forward.
+      .catch(() => {
+        if (!cancelled) setChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (!checked) return <div className="center" />;
+  return <CreateTeam userName={userName} onCreated={onCreated} />;
 }
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {

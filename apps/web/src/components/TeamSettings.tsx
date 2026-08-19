@@ -290,33 +290,10 @@ export function TeamSettings({ client }: { client: BentoClient }) {
                 </div>
               ))}
               <p className="muted">{ROLES.map((role) => `${role.label}: ${role.help}`).join(" ")}</p>
-            </section>
 
-            <NetworkPolicyCard />
-
-            {/*
-              Agent credentials belong to the organization, not the
-              server: without them the operator's own key would end up
-              inside every tenant's sandbox. They are entered under
-              Agents, which is the one door for them in every mode; a
-              second copy here drifted from that one and showed neither
-              which providers were set nor what was missing.
-            */}
-            <section className="section settings-card">
-              <h3 className="settings-title">Agent credentials</h3>
-              <p className="muted">
-                This organization's model provider keys live under Agents, and its GitHub token on
-                the GitHub tab here. Agents run on your keys, so nothing is billed to anyone else.
-              </p>
-              <div className="actions">
-                <a className="btn" href="/">
-                  Open the board, then Agents
-                </a>
-              </div>
-            </section>
-
-            <section className="section settings-card">
-              <h3 className="settings-title">Invite someone</h3>
+              {/* Inviting lives with the roster it grows: as its own
+                  card further down, the two read as unrelated. */}
+              <h4 className="field-heading">Invite a teammate</h4>
               <div className="actions">
                 <input
                   className="input"
@@ -381,6 +358,30 @@ export function TeamSettings({ client }: { client: BentoClient }) {
                 </div>
               )}
             </section>
+
+            <NetworkPolicyCard />
+
+            {/*
+              Agent credentials belong to the organization, not the
+              server: without them the operator's own key would end up
+              inside every tenant's sandbox. They are entered under
+              Agents, which is the one door for them in every mode; a
+              second copy here drifted from that one and showed neither
+              which providers were set nor what was missing.
+            */}
+            <section className="section settings-card">
+              <h3 className="settings-title">Agent credentials</h3>
+              <p className="muted">
+                This organization's model provider keys live under Agents, and its GitHub token on
+                the GitHub tab here. Agents run on your keys, so nothing is billed to anyone else.
+              </p>
+              <div className="actions">
+                <a className="btn" href="/">
+                  Open the board, then Agents
+                </a>
+              </div>
+            </section>
+
           </>
         )}
 
