@@ -9,8 +9,8 @@ export function Active() {
         <input
           className="input composer-input"
           defaultValue=""
-          placeholder="Message the agent"
-          aria-label="Message the agent"
+          placeholder="Send a message..."
+          aria-label="Send a message"
           readOnly
         />
         <StopButton disabled={false} onClick={() => {}} />
@@ -31,8 +31,8 @@ export function Disabled() {
         <input
           className="input composer-input"
           defaultValue=""
-          placeholder="Message the agent"
-          aria-label="Message the agent"
+          placeholder="Send a message..."
+          aria-label="Send a message"
           readOnly
           disabled
         />

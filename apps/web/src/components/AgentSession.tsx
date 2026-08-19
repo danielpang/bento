@@ -445,13 +445,7 @@ export function AgentSession({
   }
 
   const workingName = latestAgent?.name ?? "the agent";
-  const placeholder = !runActive
-    ? "Tell the agent what to do next..."
-    : liveKind === "steer"
-      ? `Steer ${workingName} while it works...`
-      : liveKind === "queue"
-        ? `Message ${workingName}; it reads it after the current step...`
-        : `Message ${workingName} (delivered when this run finishes)...`;
+  const composer = composerPrompt(runActive, liveKind);
 
   return (
     <section className="section agent-session">
@@ -617,8 +611,8 @@ export function AgentSession({
             value={say}
             onChange={(e) => setSay(e.target.value)}
             disabled={busy}
-            placeholder={placeholder}
-            aria-label="Message the agent"
+            placeholder={composer.placeholder}
+            aria-label={composer.ariaLabel}
           />
           {runActive && (
             <StopButton
@@ -637,8 +631,8 @@ export function AgentSession({
             className="btn btn-primary composer-send"
             type="submit"
             disabled={busy || !say.trim()}
-            aria-label="Send"
-            title="Send"
+            aria-label={composer.ariaLabel}
+            title={composer.ariaLabel}
           >
             <SendMark />
           </button>
@@ -815,6 +809,23 @@ function toolSummary(event: Extract<AgentEvent, { type: "tool" }>): string | nul
   const text = pick("command", "file_path", "path", "pattern", "url", "query", "description", "prompt");
   if (!text) return null;
   return text.length > 80 ? `${text.slice(0, 79)}…` : text;
+}
+
+/**
+ * What the composer field says. Naming the agent ("Message Claude")
+ * made the box look like a DM, and hid whether the words go now or
+ * wait. Send vs queue is the distinction the box needs to make: idle
+ * and live-steer deliver immediately; a live queue and tools that only
+ * take messages between runs wait.
+ */
+export function composerPrompt(
+  runActive: boolean,
+  liveKind: "steer" | "queue" | undefined,
+): { placeholder: string; ariaLabel: string } {
+  if (!runActive || liveKind === "steer") {
+    return { placeholder: "Send a message...", ariaLabel: "Send a message" };
+  }
+  return { placeholder: "Queue a message...", ariaLabel: "Queue a message" };
 }
 
 /**
