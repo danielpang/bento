@@ -185,6 +185,13 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
         "/sign-up/email": { window: 60 * 60, max: 20 },
         // The mail ones stay strict: the cost of abuse lands in
         // somebody else's inbox, not on this server.
+        //
+        // Invitations are a mail sender and, through the preview
+        // endpoint, answer whether an address has an account, so
+        // minting them is metered too. Loose enough to invite a real
+        // team in one sitting, tight enough that sweeping an address
+        // list through it is slow and noisy.
+        "/organization/invite-member": { window: 60 * 60, max: 30 },
         "/request-password-reset": { window: 60 * 60, max: 10 },
         "/reset-password": { window: 60 * 60, max: 20 },
         "/send-verification-email": { window: 60 * 60, max: 10 },

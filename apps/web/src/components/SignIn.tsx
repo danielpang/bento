@@ -26,10 +26,38 @@ function useSocialProviders(supplied?: { github: boolean; google: boolean }) {
   return supplied ?? discovered;
 }
 
-export function SignIn({ social: supplied }: { social?: { github: boolean; google: boolean } }) {
+export function SignIn({
+  social: supplied,
+  initialMode = "in",
+  initialEmail = "",
+  lockEmail = false,
+  callbackURL = "/",
+  note,
+}: {
+  social?: { github: boolean; google: boolean };
+  /** Open on sign up instead: the invitation page knows the invitee has no account yet. */
+  initialMode?: "in" | "up";
+  initialEmail?: string;
+  /**
+   * Keep the address as given. An invitation is only acceptable by the
+   * invited address, so an edit or an autofill here could only end in
+   * a refusal after the account already exists, with the invitation
+   * never surfacing again.
+   */
+  lockEmail?: boolean;
+  /**
+   * Where to land once the account works. Sign up can detour through a
+   * verification email or an OAuth provider, and both come back to this
+   * address rather than the board: an invitee who lost their invitation
+   * on the way was asked to create a team instead of joining one.
+   */
+  callbackURL?: string;
+  /** Replaces the tagline, so the invitation page can say whose team this is. */
+  note?: string;
+}) {
   const social = useSocialProviders(supplied);
-  const [mode, setMode] = useState<"in" | "up">("in");
-  const [email, setEmail] = useState("");
+  const [mode, setMode] = useState<"in" | "up">(initialMode);
+  const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -47,7 +75,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
     const result =
       mode === "in"
         ? await signIn.email({ email, password })
-        : await signUp.email({ email, password, name: name || email });
+        : await signUp.email({ email, password, name: name || email, callbackURL });
     setBusy(false);
     if (!result.error) {
       // Signing up no longer signs you in: the address has to be
@@ -70,7 +98,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
     setBusy(true);
     setNotice("");
     try {
-      await authClient.sendVerificationEmail({ email: pendingEmail, callbackURL: "/" });
+      await authClient.sendVerificationEmail({ email: pendingEmail, callbackURL });
       setNotice("Sent. Check your inbox again, including the spam folder.");
     } catch {
       setNotice("Could not send it just now. Try again in a moment.");
@@ -83,7 +111,13 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
     event.preventDefault();
     setBusy(true);
     setError("");
-    const result = await authClient.requestPasswordReset({ email, redirectTo: "/reset-password" });
+    // The reset flow leaves the app entirely, so the way back rides in
+    // the link: ResetPassword reads returnTo and sends the person to
+    // the invitation (or wherever they started) instead of the board.
+    // This was the one door that still dropped the invitation.
+    const redirectTo =
+      callbackURL === "/" ? "/reset-password" : `/reset-password?returnTo=${encodeURIComponent(callbackURL)}`;
+    const result = await authClient.requestPasswordReset({ email, redirectTo });
     setBusy(false);
     // The same answer either way: whether an address has an account is
     // not something a sign-in form should disclose.
@@ -102,9 +136,11 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
             <BrandLockup size="lg" />
             <h1>Confirm your email</h1>
           </div>
+          {/* "Where you left off", not "your board": the link follows
+              callbackURL, and for an invitee that is the invitation. */}
           <p className="muted">
-            We sent a link to <strong>{pendingEmail}</strong>. Open it and you land straight on your
-            board. Accounts stay locked until the address is confirmed.
+            We sent a link to <strong>{pendingEmail}</strong>. Open it and you continue where you
+            left off. Accounts stay locked until the address is confirmed.
           </p>
           {notice && <p className="muted">{notice}</p>}
           <button className="btn btn-block" disabled={busy} onClick={() => void resend()}>
@@ -143,6 +179,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
                 className="input"
                 type="email"
                 required
+                readOnly={lockEmail}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoComplete="email"
@@ -172,7 +209,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
           {/* The product's own rule, not a value proposition. A line
               a maintainer would write beats a line a marketing page
               would. */}
-          <p className="muted">One card, one agent, one branch.</p>
+          <p className="muted">{note ?? "One card, one agent, one branch."}</p>
         </div>
 
         {/* Only providers the server actually has credentials for: a
@@ -182,13 +219,13 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
           <>
             <div className="auth-social">
               {social.github && (
-                <button className="btn btn-block" onClick={() => signIn.social({ provider: "github" })}>
+                <button className="btn btn-block" onClick={() => signIn.social({ provider: "github", callbackURL })}>
                   <GitHubIcon />
                   Continue with GitHub
                 </button>
               )}
               {social.google && (
-                <button className="btn btn-block" onClick={() => signIn.social({ provider: "google" })}>
+                <button className="btn btn-block" onClick={() => signIn.social({ provider: "google", callbackURL })}>
                   <GoogleIcon />
                   Continue with Google
                 </button>
@@ -211,6 +248,7 @@ export function SignIn({ social: supplied }: { social?: { github: boolean; googl
               className="input"
               type="email"
               required
+              readOnly={lockEmail}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"

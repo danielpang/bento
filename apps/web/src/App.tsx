@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import { BentoClient, type AgentProfile, type Feature, type Stage } from "@bento/api-client";
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
+import { teamDisplayName } from "./team-name.js";
 import { useCountUp } from "./count-up.js";
 import { Board, matchesQuery, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
@@ -176,9 +177,82 @@ function FirstTeamGate({ userName }: { userName: string }) {
     );
   }
   if (!created && Array.isArray(organizations) && organizations.length === 0) {
-    return <CreateTeam userName={userName} onCreated={() => setCreated(true)} />;
+    return <FirstTeam userName={userName} onCreated={() => setCreated(true)} />;
   }
   return <BoardScreen showSignOut />;
+}
+
+/** What /api/team/invitations answers with: only offers accept would honour. */
+interface PendingInvitation {
+  id: string;
+  organizationName: string;
+}
+
+/**
+ * An account with no organization is not always one that should found
+ * a team. An invitee who signed up at the root instead of through the
+ * invitation link still has that invitation pending, and opening on
+ * "name your team" buries the team they were actually asked to join.
+ *
+ * An offer, not a redirect: a redirect walls off creating a team until
+ * every invitation is declined, and a broken invitation would wall it
+ * off forever. The server already filters to invitations the accept
+ * endpoint would honour (pending, unexpired, oldest first), so nothing
+ * offered here can bounce.
+ */
+function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () => void }) {
+  const [invites, setInvites] = useState<PendingInvitation[] | null>(null);
+  const [createInstead, setCreateInstead] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    // Warm the CreateTeam chunk while the invitations load, so the
+    // common no-invitations answer does not then wait on a download.
+    void import("./components/CreateTeam.js").catch(() => undefined);
+    void fetch("/api/team/invitations", { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((rows: PendingInvitation[]) => {
+        if (!cancelled) setInvites(Array.isArray(rows) ? rows : []);
+      })
+      // A failed lookup must not block onboarding: with nothing to
+      // offer, creating a team remains the door forward.
+      .catch(() => {
+        if (!cancelled) setInvites([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (createInstead || (invites !== null && invites.length === 0)) {
+    return <CreateTeam userName={userName} onCreated={onCreated} />;
+  }
+  if (invites === null) return <div className="center" />;
+  return (
+    <div className="center">
+      <div className="card-panel card-panel-centered">
+        <div className="auth-head">
+          <BrandLockup size="lg" />
+          <h1>You are invited</h1>
+        </div>
+        <p className="muted">
+          {invites.length === 1
+            ? "A team is waiting for you."
+            : "These teams are waiting for you."}
+        </p>
+        {invites.map((invite) => (
+          <a
+            key={invite.id}
+            className="btn btn-primary"
+            href={`/accept-invitation?id=${encodeURIComponent(invite.id)}`}
+          >
+            Join {teamDisplayName(invite.organizationName)}
+          </a>
+        ))}
+        <button className="btn" onClick={() => setCreateInstead(true)}>
+          Create a new team instead
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {

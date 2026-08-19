@@ -21,6 +21,7 @@ import { webhookRoutes } from "./routes/webhooks.js";
 import { catalogRoutes } from "./routes/catalog.js";
 import { and, eq } from "drizzle-orm";
 import { invitation, member } from "@bento/db";
+import { invitationPreviewRoutes } from "./routes/invitations.js";
 import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
 import { contactRoutes } from "./routes/contact.js";
@@ -231,6 +232,13 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // The model catalog is the same for everyone and carries no tenant
   // data, so it sits outside the authenticated routes.
   app.route("/api/catalog", catalogRoutes());
+
+  // The invitation email's pre-session read: who was invited, which
+  // team, and whether that address already has an account. Public on
+  // purpose; the invitation id is the capability. Mounted in every
+  // mode so the page's contract holds everywhere: local mode has no
+  // invitation rows, so every id answers 404 there.
+  app.route("/api/invitation-preview", invitationPreviewRoutes(ctx));
 
   const api = new Hono()
     .use("*", actorMiddleware(ctx))
