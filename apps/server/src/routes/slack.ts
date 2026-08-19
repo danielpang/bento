@@ -32,12 +32,15 @@ export function slackRoutes(ctx: AppContext) {
         ),
       )
       .limit(1);
+    const origin = ctx.env.BETTER_AUTH_URL.replace(/\/$/, "");
     return c.json({
       configured: slackConfigured(ctx),
       connected: Boolean(connection),
       canManage: access.canManage,
       teamName: connection?.slackTeamName ?? null,
       defaultProjectId: settings?.defaultProjectId ?? null,
+      eventsUrl: `${origin}/api/webhooks/slack/events`,
+      interactivityUrl: `${origin}/api/webhooks/slack/interactive`,
     });
   });
 

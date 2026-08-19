@@ -113,6 +113,12 @@ export function SlackPanel({ client }: { client: BentoClient }) {
           Invite @bento to a channel, then tag it to create a card. Progress, stage write-ups,
           and review buttons land in that thread.
         </p>
+        {status.canManage && status.interactivityUrl && (
+          <p className="muted">
+            Slack Interactivity request URL must be {status.interactivityUrl}. Without that,
+            project buttons and Approve do nothing.
+          </p>
+        )}
         {status.canManage && (
           <div className="actions">
             <button className="btn btn-ghost" disabled={busy} onClick={() => setDisconnecting(true)}>

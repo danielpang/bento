@@ -405,41 +405,72 @@ export function parseProjectPick(value: string | undefined): { pendingId: string
 }
 
 /**
- * Slack sometimes omits `channel` / `team` on block_actions (threads,
- * Slack Connect, enterprise). It also rewrites `block_id` when the id
- * looks unlike Slack's own, so the pending row id rides on the option
- * value rather than on the block.
+ * Skip the picker when a default is usable, or when there is only one
+ * project the member can put a card in. Asking is what made @bento
+ * look broken for a team that already had a project chosen.
+ */
+export function chooseSlackProject(
+  defaultProjectId: string | null | undefined,
+  options: { id: string }[],
+): string | null {
+  const wanted = defaultProjectId?.toLowerCase();
+  if (wanted) {
+    const match = options.find((project) => project.id.toLowerCase() === wanted);
+    if (match) return match.id;
+  }
+  return options.length === 1 ? (options[0]?.id ?? null) : null;
+}
+
+export type SlackInteractiveAction = {
+  action_id?: string;
+  block_id?: string;
+  value?: string;
+  selected_option?: { value?: string };
+};
+
+/**
+ * Slack omits `channel` / `team` on some block_actions (threads, Slack
+ * Connect, org-installed apps). The pending row id rides on the
+ * button value so a rewritten `block_id` cannot drop the click.
+ *
+ * Team and channel may be empty here; the webhook fills them from the
+ * pending row before the worker runs.
  */
 export function projectPickFromInteractive(payload: {
   user?: { id?: string; team_id?: string };
   team?: { id?: string };
   channel?: { id?: string } | string;
   container?: { channel_id?: string; block_id?: string };
-  actions?: {
-    action_id?: string;
-    block_id?: string;
-    selected_option?: { value?: string };
-  }[];
+  actions?: SlackInteractiveAction[];
   state?: {
     values?: Record<string, Record<string, { selected_option?: { value?: string } } | undefined> | undefined>;
   };
 }): { teamId: string; channelId: string; userId: string; pendingId: string; projectId: string } | null {
   const userId = payload.user?.id;
-  const teamId = payload.team?.id ?? payload.user?.team_id;
-  const channelId = interactiveChannelId(payload);
-  if (!userId || !teamId || !channelId) return null;
+  if (!userId) return null;
+  const teamId = interactiveTeamId(payload) ?? "";
+  const channelId = interactiveChannelId(payload) ?? "";
 
-  const action = payload.actions?.find((item) => item.action_id === "pick_project") ?? payload.actions?.[0];
-  const encoded = parseProjectPick(action?.selected_option?.value);
-  if (encoded) return { teamId, channelId, userId, ...encoded };
+  for (const action of payload.actions ?? []) {
+    if (!isPickAction(action.action_id)) continue;
+    const encoded = parseProjectPick(actionValue(action));
+    if (encoded) return { teamId, channelId, userId, ...encoded };
+    const pendingId = pendingIdFromBlock(action.block_id ?? payload.container?.block_id) ?? "";
+    const projectId = actionValue(action);
+    if (isUuid(projectId)) return { teamId, channelId, userId, pendingId, projectId };
+  }
 
   const fromState = pickFromState(payload.state?.values);
   if (fromState) return { teamId, channelId, userId, ...fromState };
-
-  const pendingId = pendingIdFromBlock(action?.block_id ?? payload.container?.block_id) ?? "";
-  const projectId = action?.selected_option?.value;
-  if (isUuid(projectId)) return { teamId, channelId, userId, pendingId, projectId };
   return null;
+}
+
+function isPickAction(actionId: string | undefined): boolean {
+  return actionId === "pick_project" || Boolean(actionId?.startsWith("pick_project_"));
+}
+
+function actionValue(action: SlackInteractiveAction): string | undefined {
+  return action.selected_option?.value ?? action.value;
 }
 
 export function interactiveChannelId(payload: {
@@ -478,28 +509,33 @@ function pendingIdFromBlock(blockId: string | undefined): string | undefined {
   return isUuid(id) ? id : undefined;
 }
 
+/**
+ * Buttons, not a select. Slack delivers a button click as `actions[].value`
+ * the same way it delivers Approve. A select was a silent no-op when
+ * Slack omitted `selected_option` or the Interactivity URL never ran.
+ *
+ * Five buttons per actions block is Slack's limit. Unique action_ids
+ * because Slack asks for that inside one block.
+ */
 export function projectPickerBlocks(
   pendingId: string,
   options: { id: string; name: string }[],
 ): SlackBlock[] {
-  return [
-    section("Which project should this card go to?"),
-    {
+  const buttons = options.slice(0, 25).map((project, index) => ({
+    type: "button",
+    action_id: `pick_project_${index}`,
+    value: projectPickValue(pendingId, project.id),
+    text: { type: "plain_text", text: project.name.slice(0, 75) },
+  }));
+  const blocks: SlackBlock[] = [section("Which project should this card go to?")];
+  for (let i = 0; i < buttons.length; i += 5) {
+    blocks.push({
       type: "actions",
-      block_id: `pick_${pendingId}`,
-      elements: [
-        {
-          type: "static_select",
-          action_id: "pick_project",
-          placeholder: { type: "plain_text", text: "Choose a project" },
-          options: options.slice(0, 100).map((project) => ({
-            text: { type: "plain_text", text: project.name.slice(0, 75) },
-            value: projectPickValue(pendingId, project.id),
-          })),
-        },
-      ],
-    },
-  ];
+      block_id: i === 0 ? `pick_${pendingId}` : `pick_${pendingId}_${i / 5}`,
+      elements: buttons.slice(i, i + 5),
+    });
+  }
+  return blocks;
 }
 
 export function rejectModal(input: {

@@ -286,6 +286,30 @@ test("a rewritten picker block id still creates the card from the thread", async
   assert.equal(leftover.length, 0);
 });
 
+test("a second @bento in the same thread uses a default instead of staying silent", async () => {
+  await ctx.db
+    .update(slackUserSettings)
+    .set({ defaultProjectId: null, updatedAt: new Date() })
+    .where(eq(slackUserSettings.userId, LOCAL_USER_ID));
+  slackCalls.length = 0;
+  await mention(MEMBER_SLACK, `<@${BOT}> add retry default`, "39.0");
+  const picker = slackCalls.find(
+    (call) => call.method === "chat.postMessage" && String(call.body.text).includes("Which project"),
+  );
+  assert.ok(picker);
+  await ctx.db
+    .update(slackUserSettings)
+    .set({ defaultProjectId: projectId, updatedAt: new Date() })
+    .where(eq(slackUserSettings.userId, LOCAL_USER_ID));
+  slackCalls.length = 0;
+  await mention(MEMBER_SLACK, `<@${BOT}> add retry default`, "39.0");
+  const cards = await ctx.db.select().from(features).where(eq(features.title, "add retry default"));
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]?.projectId, projectId);
+  const askedAgain = slackCalls.find((call) => String(call.body.text ?? "").includes("Which project"));
+  assert.equal(askedAgain, undefined);
+});
+
 test("a default project creates the card without a picker", async () => {
   await ctx.db
     .update(slackUserSettings)

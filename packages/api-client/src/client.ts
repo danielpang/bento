@@ -97,6 +97,8 @@ export interface SlackConnection {
   canManage: boolean;
   teamName: string | null;
   defaultProjectId: string | null;
+  eventsUrl?: string | null;
+  interactivityUrl?: string | null;
 }
 
 export interface LinearTeamOption {

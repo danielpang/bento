@@ -8,13 +8,7 @@ import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { linearConnectionRow } from "../linear.js";
 import { slackClientFor, slackConnectionByTeam } from "../slack.js";
-import {
-  interactiveChannelId,
-  interactiveTeamId,
-  parseReviewTarget,
-  projectPickFromInteractive,
-  rejectModal,
-} from "../orchestrator/slack-notify.js";
+import { interactiveChannelId, interactiveTeamId, isUuid, parseReviewTarget, projectPickFromInteractive, rejectModal } from "../orchestrator/slack-notify.js";
 import type { SlackInboundJob } from "../orchestrator/slack-sync.js";
 
 /**
@@ -176,12 +170,31 @@ export function webhookRoutes(ctx: AppContext) {
       if (payload.type === "block_actions") {
         const action = payload.actions?.[0];
         const userId = payload.user?.id;
+        const pick = projectPickFromInteractive(payload);
+        if (pick) {
+          const resolved = await resolvePickLocation(ctx, pick);
+          if (resolved) {
+            await ctx.boss.send("slack.inbound", {
+              kind: "pick_project",
+              teamId: resolved.teamId,
+              channelId: resolved.channelId,
+              userId: pick.userId,
+              pendingId: pick.pendingId,
+              projectId: pick.projectId,
+            } satisfies SlackInboundJob);
+            if (payload.response_url) {
+              void replaceInteractive(payload.response_url, "Creating that card...");
+            }
+          } else {
+            console.warn("slack interactive pick had no team or pending row", {
+              pendingId: pick.pendingId,
+              hasTeam: Boolean(pick.teamId),
+            });
+          }
+        }
         const teamId = interactiveTeamId(payload);
         const channelId = interactiveChannelId(payload);
-        if (!action || !userId || !teamId) {
-          return c.json({ ok: true });
-        }
-        if (action.action_id === "reject" && action.value && payload.trigger_id && payload.message?.ts && channelId) {
+        if (action?.action_id === "reject" && action.value && payload.trigger_id && payload.message?.ts && teamId && channelId && userId) {
           const target = parseReviewTarget(action.value);
           const connection = await slackConnectionByTeam(ctx, teamId);
           const client = connection ? await slackClientFor(ctx, connection) : null;
@@ -198,18 +211,7 @@ export function webhookRoutes(ctx: AppContext) {
           }
           return c.json({ ok: true });
         }
-        const pick = projectPickFromInteractive(payload);
-        if (pick) {
-          await ctx.boss.send("slack.inbound", {
-            kind: "pick_project",
-            teamId: pick.teamId,
-            channelId: pick.channelId,
-            userId: pick.userId,
-            pendingId: pick.pendingId,
-            projectId: pick.projectId,
-          } satisfies SlackInboundJob);
-        }
-        if (action.action_id === "approve" && action.value && payload.message?.ts && channelId) {
+        if (action?.action_id === "approve" && action.value && payload.message?.ts && teamId && channelId && userId) {
           const target = parseReviewTarget(action.value);
           if (target) {
             await ctx.boss.send("slack.inbound", {
@@ -222,6 +224,14 @@ export function webhookRoutes(ctx: AppContext) {
               messageTs: payload.message.ts,
             } satisfies SlackInboundJob);
           }
+        }
+        if (!pick && action?.action_id && action.action_id !== "approve" && action.action_id !== "reject" && action.action_id !== "open_card") {
+          console.warn("slack interactive ignored", {
+            actionId: action.action_id,
+            hasTeam: Boolean(teamId),
+            hasChannel: Boolean(channelId),
+            hasValue: Boolean(action.value ?? action.selected_option?.value),
+          });
         }
         return c.json({ ok: true });
       }
@@ -292,6 +302,7 @@ interface SlackEventPayload {
 interface SlackInteractivePayload {
   type?: string;
   trigger_id?: string;
+  response_url?: string;
   user?: { id?: string; team_id?: string };
   team?: { id?: string };
   channel?: { id?: string } | string;
@@ -320,5 +331,41 @@ function parseInteractivePayload(raw: string): SlackInteractivePayload | null {
     return JSON.parse(encoded) as SlackInteractivePayload;
   } catch {
     return null;
+  }
+}
+
+async function resolvePickLocation(
+  ctx: AppContext,
+  pick: { teamId: string; channelId: string; pendingId: string },
+): Promise<{ teamId: string; channelId: string } | null> {
+  if (pick.teamId) return { teamId: pick.teamId, channelId: pick.channelId };
+  if (!isUuid(pick.pendingId)) return null;
+  const [pending] = await ctx.db
+    .select({
+      slackTeamId: slackPendingMentions.slackTeamId,
+      slackChannelId: slackPendingMentions.slackChannelId,
+    })
+    .from(slackPendingMentions)
+    .where(eq(slackPendingMentions.id, pick.pendingId))
+    .limit(1);
+  if (!pending) return null;
+  return {
+    teamId: pending.slackTeamId,
+    channelId: pick.channelId || pending.slackChannelId,
+  };
+}
+
+async function replaceInteractive(responseUrl: string, text: string): Promise<void> {
+  try {
+    const res = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ replace_original: true, text }),
+    });
+    if (!res.ok) {
+      console.warn(`slack response_url failed: HTTP ${res.status}`);
+    }
+  } catch (err) {
+    console.error("slack response_url failed:", err);
   }
 }

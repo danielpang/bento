@@ -28,7 +28,14 @@ import {
   recordManualApproval,
   recordRejection,
 } from "./gate-evaluator.js";
-import { handleSlackNotify, isUuid, projectPickerBlocks, queueSlackNotify, type SlackNotifyJob } from "./slack-notify.js";
+import {
+  chooseSlackProject,
+  handleSlackNotify,
+  isUuid,
+  projectPickerBlocks,
+  queueSlackNotify,
+  type SlackNotifyJob,
+} from "./slack-notify.js";
 
 const PENDING_TTL_MS = 30 * 60_000;
 const UNKNOWN_MEMBER =
@@ -139,27 +146,28 @@ async function handleMention(
   });
   if (!claimed) return;
 
-  const projectId = memberRow.defaultProjectId;
-  if (projectId && (await memberCanUseProject(ctx, projectId, memberRow))) {
+  const defaultProjectId = await loadDefaultProject(ctx, memberRow);
+  const options = await listMemberProjects(ctx, memberRow);
+  const projectId = chooseSlackProject(defaultProjectId, options);
+  if (projectId) {
     await createSlackCard(ctx, {
       organizationId: memberRow.organizationId,
       userId: memberRow.userId,
       projectId,
-      title,
-      description: claimed.description,
+      title: claimed.pending.title,
+      description: claimed.pending.description,
       teamId: job.teamId,
       channelId: job.channelId,
       threadTs: job.threadTs,
       slackUserId: job.userId,
       client,
     });
-    await ctx.db.delete(slackPendingMentions).where(eq(slackPendingMentions.id, claimed.id));
+    await ctx.db.delete(slackPendingMentions).where(eq(slackPendingMentions.id, claimed.pending.id));
     return;
   }
 
-  const options = await listMemberProjects(ctx, memberRow);
   if (options.length === 0) {
-    await ctx.db.delete(slackPendingMentions).where(eq(slackPendingMentions.id, claimed.id));
+    await ctx.db.delete(slackPendingMentions).where(eq(slackPendingMentions.id, claimed.pending.id));
     await client.postMessage({
       channel: job.channelId,
       threadTs: job.threadTs,
@@ -168,11 +176,26 @@ async function handleMention(
     return;
   }
 
+  if (!claimed.isNew) {
+    await client.postEphemeral({
+      channel: job.channelId,
+      user: job.userId,
+      text: "Pick a project on the message above. You can also set a default project in Bento Settings under Slack.",
+    });
+    return;
+  }
+
+  if (defaultProjectId) {
+    console.warn(
+      `slack mention ignored default project ${defaultProjectId} for user ${memberRow.userId}: not in this team's project list`,
+    );
+  }
+
   await client.postMessage({
     channel: job.channelId,
     threadTs: job.threadTs,
     text: "Which project should this card go to?",
-    blocks: projectPickerBlocks(claimed.id, options),
+    blocks: projectPickerBlocks(claimed.pending.id, options),
   });
 }
 
@@ -196,26 +219,37 @@ async function handlePickProject(
     });
     return;
   }
+  const channelId = pending.slackChannelId || job.channelId;
   if (!(await memberCanUseProject(ctx, job.projectId, memberRow))) {
     await client.postEphemeral({
-      channel: pending.slackChannelId,
+      channel: channelId,
       user: job.userId,
       text: "That project is not on this team.",
     });
     return;
   }
-  await createSlackCard(ctx, {
-    organizationId: memberRow.organizationId,
-    userId: memberRow.userId,
-    projectId: job.projectId,
-    title: pending.title,
-    description: pending.description,
-    teamId: job.teamId,
-    channelId: pending.slackChannelId,
-    threadTs: pending.slackThreadTs,
-    slackUserId: job.userId,
-    client,
-  });
+  try {
+    await createSlackCard(ctx, {
+      organizationId: memberRow.organizationId,
+      userId: memberRow.userId,
+      projectId: job.projectId,
+      title: pending.title,
+      description: pending.description,
+      teamId: job.teamId || pending.slackTeamId,
+      channelId: pending.slackChannelId,
+      threadTs: pending.slackThreadTs,
+      slackUserId: job.userId,
+      client,
+    });
+  } catch (err) {
+    console.error("slack pick_project failed:", err);
+    await client.postEphemeral({
+      channel: channelId,
+      user: job.userId,
+      text: "Could not create that card. Try tagging @bento again.",
+    });
+    return;
+  }
   await ctx.db
     .delete(slackPendingMentions)
     .where(and(eq(slackPendingMentions.id, pending.id), eq(slackPendingMentions.slackUserId, job.userId)));
@@ -440,7 +474,7 @@ async function claimMention(
     title: string;
     description: string;
   },
-) {
+): Promise<{ pending: typeof slackPendingMentions.$inferSelect; isNew: boolean } | null> {
   const [linked] = await ctx.db
     .select({ id: slackThreadLinks.id })
     .from(slackThreadLinks)
@@ -453,7 +487,8 @@ async function claimMention(
     )
     .limit(1);
   if (linked) return null;
-  const [pending] = await ctx.db
+  const expiresAt = new Date(Date.now() + PENDING_TTL_MS);
+  const [inserted] = await ctx.db
     .insert(slackPendingMentions)
     .values({
       organizationId: input.organizationId,
@@ -463,11 +498,53 @@ async function claimMention(
       slackThreadTs: input.threadTs,
       title: input.title,
       description: input.description,
-      expiresAt: new Date(Date.now() + PENDING_TTL_MS),
+      expiresAt,
     })
     .onConflictDoNothing()
     .returning();
-  return pending ?? null;
+  if (inserted) return { pending: inserted, isNew: true };
+
+  const [existing] = await ctx.db
+    .select()
+    .from(slackPendingMentions)
+    .where(
+      and(
+        eq(slackPendingMentions.slackTeamId, input.teamId),
+        eq(slackPendingMentions.slackChannelId, input.channelId),
+        eq(slackPendingMentions.slackThreadTs, input.threadTs),
+      ),
+    )
+    .limit(1);
+  if (!existing) return null;
+  const [updated] = await ctx.db
+    .update(slackPendingMentions)
+    .set({
+      title: input.title,
+      description: input.description,
+      slackUserId: input.userId,
+      expiresAt,
+    })
+    .where(eq(slackPendingMentions.id, existing.id))
+    .returning();
+  return { pending: updated ?? existing, isNew: false };
+}
+
+/**
+ * Settings writes the default by (org, user). The first Slack lookup
+ * is by Slack user id. Re-read by user id so a default saved in the
+ * console is the one @bento uses, even when those rows were created
+ * in a different order.
+ */
+async function loadDefaultProject(
+  ctx: AppContext,
+  memberRow: ResolvedMember,
+): Promise<string | null> {
+  const [row] = await ctx.db
+    .select({ defaultProjectId: slackUserSettings.defaultProjectId })
+    .from(slackUserSettings)
+    .where(and(settingsOrgFilter(memberRow.organizationId), eq(slackUserSettings.userId, memberRow.userId)))
+    .limit(1);
+  return row?.defaultProjectId ?? memberRow.defaultProjectId;
 }
 
 /**

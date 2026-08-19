@@ -1888,6 +1888,8 @@ test("Slack status is unconfigured without app credentials", async () => {
     canManage: true,
     teamName: null,
     defaultProjectId: null,
+    eventsUrl: "http://localhost:4400/api/webhooks/slack/events",
+    interactivityUrl: "http://localhost:4400/api/webhooks/slack/interactive",
   });
   const install = await jsonPost("/api/slack/install", {}, token);
   assert.equal(install.status, 503);
@@ -1971,6 +1973,38 @@ test("the Slack webhook demands a valid signature", async () => {
           kind: "pick_project",
           teamId: "T1",
           channelId: "C1",
+          userId: "U1",
+          pendingId: "11111111-1111-1111-1111-111111111111",
+          projectId: "22222222-2222-2222-2222-222222222222",
+        },
+      }]);
+
+      queued.length = 0;
+      const buttonPayload = JSON.stringify({
+        type: "block_actions",
+        user: { id: "U1", team_id: "T1" },
+        actions: [{
+          action_id: "pick_project_22222222-2222-2222-2222-222222222222",
+          value: "11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222",
+        }],
+      });
+      const buttonBody = `payload=${encodeURIComponent(buttonPayload)}`;
+      const buttonTs = String(Math.floor(Date.now() / 1000));
+      const buttoned = await app.request("/api/webhooks/slack/interactive", {
+        method: "POST",
+        body: buttonBody,
+        headers: {
+          "x-slack-request-timestamp": buttonTs,
+          "x-slack-signature": `v0=${createHmac("sha256", "slack-signing-secret").update(`v0:${buttonTs}:${buttonBody}`).digest("hex")}`,
+        },
+      });
+      assert.equal(buttoned.status, 200);
+      assert.deepEqual(queued, [{
+        name: "slack.inbound",
+        data: {
+          kind: "pick_project",
+          teamId: "T1",
+          channelId: "",
           userId: "U1",
           pendingId: "11111111-1111-1111-1111-111111111111",
           projectId: "22222222-2222-2222-2222-222222222222",
