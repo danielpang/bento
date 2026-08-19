@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MODEL_GUIDANCE } from "./credentials.js";
-import { checkAgentPairing, modelStringFor, providerForProfile, providersForCli } from "./models.js";
+import {
+  checkAgentPairing,
+  mergeCatalogs,
+  modelStringFor,
+  providerForProfile,
+  providersForCli,
+} from "./models.js";
 
 test("a prefixed model string names its own provider", () => {
   assert.equal(providerForProfile("opencode", "anthropic/claude-sonnet-5")?.id, "anthropic");
@@ -72,12 +78,75 @@ test("an unrecognised model is attributed to nobody", () => {
  */
 test("Cursor reaches the models that are only its own", () => {
   assert.equal(providerForProfile("cursor", "composer-1")?.id, "cursor");
+  assert.equal(providerForProfile("cursor", "composer-2")?.id, "cursor");
+  assert.equal(providerForProfile("cursor", "composer-2.5")?.id, "cursor");
   assert.equal(providerForProfile("cursor", "grok-4.5")?.id, "xai");
   assert.equal(checkAgentPairing("cursor", "composer-1").status, "ok");
+  assert.equal(checkAgentPairing("cursor", "composer-2").status, "ok");
+  assert.equal(checkAgentPairing("cursor", "composer-2.5").status, "ok");
   assert.equal(checkAgentPairing("cursor", "grok-4.5").status, "ok");
   // And still reaches the two it always did.
   assert.equal(providerForProfile("cursor", "claude-sonnet-5")?.id, "anthropic");
   assert.equal(providerForProfile("cursor", "gpt-5.4")?.id, "openai");
+});
+
+/**
+ * The Cursor provider list is hand maintained and has gone stale
+ * before: Composer 2 and 2.5 shipped, the picker still offered 1.
+ * Assert the ids the CLI actually takes so a missing one is a test
+ * failure rather than a blank dropdown.
+ */
+test("Cursor's picker lists Composer 2 and Composer 2.5", () => {
+  const cursor = providersForCli("cursor").find((p) => p.id === "cursor");
+  const ids = cursor?.models.map((m) => m.id) ?? [];
+  for (const id of ["composer-2.5", "composer-2.5-fast", "composer-2", "composer-2-fast", "composer-1"]) {
+    assert.ok(ids.includes(id), `Cursor picker is missing ${id}`);
+  }
+});
+
+/**
+ * Grok for Cursor is generated from models.dev, billed through the
+ * Cursor key, not a hand list that misses grok-4.6 the way Composer 2
+ * was missed. Image and video Grok models are not agent models.
+ */
+test("Cursor's xAI list comes from models.dev and bills through Cursor", () => {
+  const xai = providersForCli("cursor").find((p) => p.id === "xai");
+  assert.ok(xai, "Cursor CLI should offer the xAI provider");
+  assert.deepEqual(xai.env, ["CURSOR_API_KEY"]);
+  const ids = xai.models.map((m) => m.id);
+  assert.ok(ids.includes("grok-4.6"), "xAI picker is missing grok-4.6");
+  assert.ok(ids.includes("grok-4.5"), "xAI picker is missing grok-4.5");
+  assert.ok(
+    ids.every((id) => !id.includes("imagine")),
+    `xAI picker still lists an Imagine model: ${ids.filter((id) => id.includes("imagine")).join(", ")}`,
+  );
+});
+
+/**
+ * Manual ids fill gaps on a generated provider rather than replacing it,
+ * so Composer stays listed if models.dev later grows a Cursor provider.
+ */
+test("manual catalog ids append onto a generated provider of the same id", () => {
+  const merged = mergeCatalogs(
+    [{ id: "cursor", name: "Cursor", env: ["CURSOR_API_KEY"], logo: "", models: [{ id: "composer-2.5", name: "Composer 2.5" }] }],
+    [
+      {
+        id: "cursor",
+        name: "Cursor",
+        env: ["CURSOR_API_KEY"],
+        logo: "",
+        models: [
+          { id: "composer-2.5", name: "ignored duplicate" },
+          { id: "auto", name: "Auto (Cursor picks per request)" },
+        ],
+      },
+    ],
+  );
+  assert.equal(merged.length, 1);
+  assert.deepEqual(
+    merged[0]!.models.map((m) => m.id),
+    ["composer-2.5", "auto"],
+  );
 });
 
 /**
@@ -89,6 +158,7 @@ test("a Cursor only model is impossible for the other tools", () => {
   const verdict = checkAgentPairing("claude-code", "composer-1");
   assert.equal(verdict.status, "impossible");
   assert.match(verdict.detail, /cannot run Cursor models/);
+  assert.equal(checkAgentPairing("claude-code", "composer-2.5").status, "impossible");
   assert.equal(checkAgentPairing("codex", "grok-4.5").status, "impossible");
 });
 
