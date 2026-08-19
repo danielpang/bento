@@ -8,7 +8,13 @@ import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { linearConnectionRow } from "../linear.js";
 import { slackClientFor, slackConnectionByTeam } from "../slack.js";
-import { parseReviewTarget, rejectModal } from "../orchestrator/slack-notify.js";
+import {
+  interactiveChannelId,
+  interactiveTeamId,
+  parseReviewTarget,
+  projectPickFromInteractive,
+  rejectModal,
+} from "../orchestrator/slack-notify.js";
 import type { SlackInboundJob } from "../orchestrator/slack-sync.js";
 
 /**
@@ -169,12 +175,15 @@ export function webhookRoutes(ctx: AppContext) {
 
       if (payload.type === "block_actions") {
         const action = payload.actions?.[0];
-        if (!action || !payload.user?.id || !payload.team?.id || !payload.channel?.id) {
+        const userId = payload.user?.id;
+        const teamId = interactiveTeamId(payload);
+        const channelId = interactiveChannelId(payload);
+        if (!action || !userId || !teamId) {
           return c.json({ ok: true });
         }
-        if (action.action_id === "reject" && action.value && payload.trigger_id && payload.message?.ts) {
+        if (action.action_id === "reject" && action.value && payload.trigger_id && payload.message?.ts && channelId) {
           const target = parseReviewTarget(action.value);
-          const connection = await slackConnectionByTeam(ctx, payload.team.id);
+          const connection = await slackConnectionByTeam(ctx, teamId);
           const client = connection ? await slackClientFor(ctx, connection) : null;
           if (client && target) {
             await client.openView({
@@ -182,33 +191,32 @@ export function webhookRoutes(ctx: AppContext) {
               view: rejectModal({
                 featureId: target.featureId,
                 stageId: target.stageId,
-                channelId: payload.channel.id,
+                channelId,
                 messageTs: payload.message.ts,
               }),
             });
           }
           return c.json({ ok: true });
         }
-        if (action.action_id === "pick_project" && action.selected_option?.value) {
-          const pendingId = action.block_id ?? payload.container?.block_id ?? "";
-          if (!pendingId) return c.json({ ok: true });
+        const pick = projectPickFromInteractive(payload);
+        if (pick) {
           await ctx.boss.send("slack.inbound", {
             kind: "pick_project",
-            teamId: payload.team.id,
-            channelId: payload.channel.id,
-            userId: payload.user.id,
-            pendingId,
-            projectId: action.selected_option.value,
+            teamId: pick.teamId,
+            channelId: pick.channelId,
+            userId: pick.userId,
+            pendingId: pick.pendingId,
+            projectId: pick.projectId,
           } satisfies SlackInboundJob);
         }
-        if (action.action_id === "approve" && action.value && payload.message?.ts) {
+        if (action.action_id === "approve" && action.value && payload.message?.ts && channelId) {
           const target = parseReviewTarget(action.value);
           if (target) {
             await ctx.boss.send("slack.inbound", {
               kind: "approve",
-              teamId: payload.team.id,
-              channelId: payload.channel.id,
-              userId: payload.user.id,
+              teamId,
+              channelId,
+              userId,
               featureId: target.featureId,
               stageId: target.stageId,
               messageTs: payload.message.ts,
@@ -231,9 +239,10 @@ export function webhookRoutes(ctx: AppContext) {
           return c.json({ ok: true });
         }
         const reason = payload.view.state?.values?.reason?.reason?.value ?? "";
+        const teamId = interactiveTeamId(payload);
         if (
           payload.user?.id
-          && payload.team?.id
+          && teamId
           && meta.featureId
           && meta.stageId
           && meta.channelId
@@ -241,7 +250,7 @@ export function webhookRoutes(ctx: AppContext) {
         ) {
           await ctx.boss.send("slack.inbound", {
             kind: "reject",
-            teamId: payload.team.id,
+            teamId,
             channelId: meta.channelId,
             userId: payload.user.id,
             featureId: meta.featureId,
@@ -283,17 +292,20 @@ interface SlackEventPayload {
 interface SlackInteractivePayload {
   type?: string;
   trigger_id?: string;
-  user?: { id?: string };
+  user?: { id?: string; team_id?: string };
   team?: { id?: string };
-  channel?: { id?: string };
+  channel?: { id?: string } | string;
   message?: { ts?: string };
-  container?: { block_id?: string };
+  container?: { block_id?: string; channel_id?: string };
   actions?: {
     action_id?: string;
     block_id?: string;
     value?: string;
     selected_option?: { value?: string };
   }[];
+  state?: {
+    values?: Record<string, Record<string, { selected_option?: { value?: string } } | undefined> | undefined>;
+  };
   view?: {
     callback_id?: string;
     private_metadata?: string;

@@ -29,7 +29,7 @@ const PERMANENT_SLACK_ERRORS = new Set([
 const NOTIFY_SEND_OPTIONS = { retryLimit: 8, retryDelay: 15, retryBackoff: true } as const;
 
 export type SlackNotifyJob =
-  | { type: "created"; featureId: string }
+  | { type: "created"; featureId: string; setupNote?: string }
   | {
       type: "feature_event";
       featureId: string;
@@ -124,7 +124,8 @@ export async function handleSlackNotify(ctx: AppContext, job: SlackNotifyJob): P
   if (job.type === "created") {
     const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId)).limit(1);
     const projectName = project?.name ?? "the project";
-    const text = `Created *${feature.title}* in *${projectName}*.`;
+    const extra = job.setupNote?.trim() ? ` ${job.setupNote.trim()}` : "";
+    const text = `Created *${feature.title}* in *${projectName}*.${extra}`;
     await post(text, [section(text), actions([urlButton("Open card", url)])]);
     return;
   }
@@ -382,6 +383,101 @@ export function reviewBlocks(text: string, featureId: string, stageId: string | 
   ];
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: string | undefined): value is string {
+  return Boolean(value && UUID_RE.test(value));
+}
+
+/** Slack option values cap at 75 characters. Two UUIDs and a colon are 73. */
+export function projectPickValue(pendingId: string, projectId: string): string {
+  return `${pendingId}:${projectId}`;
+}
+
+export function parseProjectPick(value: string | undefined): { pendingId: string; projectId: string } | null {
+  if (!value) return null;
+  const split = value.indexOf(":");
+  if (split === -1) return null;
+  const pendingId = value.slice(0, split);
+  const projectId = value.slice(split + 1);
+  if (!isUuid(pendingId) || !isUuid(projectId)) return null;
+  return { pendingId, projectId };
+}
+
+/**
+ * Slack sometimes omits `channel` / `team` on block_actions (threads,
+ * Slack Connect, enterprise). It also rewrites `block_id` when the id
+ * looks unlike Slack's own, so the pending row id rides on the option
+ * value rather than on the block.
+ */
+export function projectPickFromInteractive(payload: {
+  user?: { id?: string; team_id?: string };
+  team?: { id?: string };
+  channel?: { id?: string } | string;
+  container?: { channel_id?: string; block_id?: string };
+  actions?: {
+    action_id?: string;
+    block_id?: string;
+    selected_option?: { value?: string };
+  }[];
+  state?: {
+    values?: Record<string, Record<string, { selected_option?: { value?: string } } | undefined> | undefined>;
+  };
+}): { teamId: string; channelId: string; userId: string; pendingId: string; projectId: string } | null {
+  const userId = payload.user?.id;
+  const teamId = payload.team?.id ?? payload.user?.team_id;
+  const channelId = interactiveChannelId(payload);
+  if (!userId || !teamId || !channelId) return null;
+
+  const action = payload.actions?.find((item) => item.action_id === "pick_project") ?? payload.actions?.[0];
+  const encoded = parseProjectPick(action?.selected_option?.value);
+  if (encoded) return { teamId, channelId, userId, ...encoded };
+
+  const fromState = pickFromState(payload.state?.values);
+  if (fromState) return { teamId, channelId, userId, ...fromState };
+
+  const pendingId = pendingIdFromBlock(action?.block_id ?? payload.container?.block_id) ?? "";
+  const projectId = action?.selected_option?.value;
+  if (isUuid(projectId)) return { teamId, channelId, userId, pendingId, projectId };
+  return null;
+}
+
+export function interactiveChannelId(payload: {
+  channel?: { id?: string } | string;
+  container?: { channel_id?: string };
+}): string | undefined {
+  if (typeof payload.channel === "string" && payload.channel) return payload.channel;
+  if (typeof payload.channel === "object" && payload.channel?.id) return payload.channel.id;
+  return payload.container?.channel_id;
+}
+
+export function interactiveTeamId(payload: {
+  team?: { id?: string };
+  user?: { team_id?: string };
+}): string | undefined {
+  return payload.team?.id ?? payload.user?.team_id;
+}
+
+function pickFromState(
+  values: Record<string, Record<string, { selected_option?: { value?: string } } | undefined> | undefined> | undefined,
+): { pendingId: string; projectId: string } | null {
+  if (!values) return null;
+  for (const [blockId, fields] of Object.entries(values)) {
+    const encoded = parseProjectPick(fields?.pick_project?.selected_option?.value);
+    if (encoded) return encoded;
+    const pendingId = pendingIdFromBlock(blockId);
+    const projectId = fields?.pick_project?.selected_option?.value;
+    if (pendingId && isUuid(projectId)) return { pendingId, projectId };
+  }
+  return null;
+}
+
+function pendingIdFromBlock(blockId: string | undefined): string | undefined {
+  if (!blockId) return undefined;
+  const id = blockId.startsWith("pick_") ? blockId.slice("pick_".length) : blockId;
+  return isUuid(id) ? id : undefined;
+}
+
 export function projectPickerBlocks(
   pendingId: string,
   options: { id: string; name: string }[],
@@ -390,7 +486,7 @@ export function projectPickerBlocks(
     section("Which project should this card go to?"),
     {
       type: "actions",
-      block_id: pendingId,
+      block_id: `pick_${pendingId}`,
       elements: [
         {
           type: "static_select",
@@ -398,7 +494,7 @@ export function projectPickerBlocks(
           placeholder: { type: "plain_text", text: "Choose a project" },
           options: options.slice(0, 100).map((project) => ({
             text: { type: "plain_text", text: project.name.slice(0, 75) },
-            value: project.id,
+            value: projectPickValue(pendingId, project.id),
           })),
         },
       ],

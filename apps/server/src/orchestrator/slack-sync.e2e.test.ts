@@ -31,7 +31,7 @@ import { ensureLocalUser, LOCAL_USER_ID, type AppContext } from "../context.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { handleSlackInbound } from "./slack-sync.js";
-import { handleSlackNotify, queueSlackNotify } from "./slack-notify.js";
+import { handleSlackNotify, queueSlackNotify, type SlackNotifyJob } from "./slack-notify.js";
 
 /**
  * Slack inbound and notify against a real database. Slack itself is
@@ -62,6 +62,7 @@ const emails = new Map<string, string | null>([
   [STRANGER_SLACK, "stranger@example.com"],
 ]);
 let notifySent = 0;
+const notifyJobs: SlackNotifyJob[] = [];
 let realSend: PgBoss["send"];
 
 before(async () => {
@@ -108,7 +109,10 @@ before(async () => {
 
   realSend = ctx.boss.send.bind(ctx.boss);
   ctx.boss.send = (async (name: string, data: object | null, options?: object) => {
-    if (name === "slack.notify") notifySent += 1;
+    if (name === "slack.notify") {
+      notifySent += 1;
+      notifyJobs.push(data as SlackNotifyJob);
+    }
     return realSend(name, data as never, options as never);
   }) as PgBoss["send"];
 
@@ -262,11 +266,32 @@ test("picking a project creates the card and advances it off the backlog", async
   assert.equal(leftover.length, 0);
 });
 
+test("a rewritten picker block id still creates the card from the thread", async () => {
+  slackCalls.length = 0;
+  await mention(MEMBER_SLACK, `<@${BOT}> add search`, "12.5");
+  const pending = await ctx.db.select().from(slackPendingMentions);
+  assert.equal(pending.length, 1);
+  slackCalls.length = 0;
+  await handleSlackInbound(ctx, {
+    kind: "pick_project",
+    teamId: TEAM,
+    channelId: CHANNEL,
+    userId: MEMBER_SLACK,
+    pendingId: "=rewritten",
+    projectId,
+  });
+  const cards = await ctx.db.select().from(features).where(eq(features.title, "add search"));
+  assert.equal(cards.length, 1);
+  const leftover = await ctx.db.select().from(slackPendingMentions);
+  assert.equal(leftover.length, 0);
+});
+
 test("a default project creates the card without a picker", async () => {
   await ctx.db
     .update(slackUserSettings)
     .set({ defaultProjectId: otherProjectId, updatedAt: new Date() })
     .where(eq(slackUserSettings.userId, LOCAL_USER_ID));
+  notifyJobs.length = 0;
   slackCalls.length = 0;
   await mention(MEMBER_SLACK, `<@${BOT}> add receipts`, "13.0");
   const cards = await ctx.db.select().from(features).where(eq(features.title, "add receipts"));
@@ -274,6 +299,39 @@ test("a default project creates the card without a picker", async () => {
   assert.equal(cards[0]?.projectId, otherProjectId);
   const picker = slackCalls.find((call) => String(call.body.text ?? "").includes("Which project"));
   assert.equal(picker, undefined);
+  const leftover = await ctx.db.select().from(slackPendingMentions);
+  assert.equal(leftover.length, 0);
+  const created = notifyJobs.find((job) => job.type === "created" && job.featureId === cards[0]?.id);
+  assert.match(created?.setupNote ?? "", /no pipeline stages yet/i);
+});
+
+test("a project with no pipeline still gets a card and is told to finish setup", async () => {
+  const [empty] = await ctx.db.insert(projects).values({ ownerId: LOCAL_USER_ID, name: "Empty" }).returning();
+  assert.ok(empty);
+  await ctx.db
+    .update(slackUserSettings)
+    .set({ defaultProjectId: empty.id, updatedAt: new Date() })
+    .where(eq(slackUserSettings.userId, LOCAL_USER_ID));
+  notifyJobs.length = 0;
+  slackCalls.length = 0;
+  await mention(MEMBER_SLACK, `<@${BOT}> add onboarding`, "14.0");
+
+  const cards = await ctx.db.select().from(features).where(eq(features.title, "add onboarding"));
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]?.projectId, empty.id);
+  const pipes = await ctx.db.select().from(pipelines).where(eq(pipelines.projectId, empty.id));
+  assert.equal(pipes.length, 1);
+  const created = notifyJobs.filter((job) => job.type === "created");
+  assert.equal(created.length, 1);
+  assert.match(created[0]?.setupNote ?? "", /no agents are set up yet/i);
+
+  slackCalls.length = 0;
+  await handleSlackNotify(ctx, created[0]!);
+  const posted = slackCalls.find((call) => call.method === "chat.postMessage");
+  assert.ok(posted);
+  assert.match(String(posted.body.text), /add onboarding/);
+  assert.match(String(posted.body.text), /no agents are set up yet/i);
+  assert.match(JSON.stringify(posted.body.blocks), /Open card/);
 });
 
 test("a stranger cannot approve; a member can", async () => {

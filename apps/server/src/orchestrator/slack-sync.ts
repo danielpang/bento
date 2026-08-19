@@ -1,12 +1,15 @@
-import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import {
+  agentProfiles,
   features,
   member,
   pipelines,
   projects,
+  seedDefaultPipeline,
   slackPendingMentions,
   slackThreadLinks,
   slackUserSettings,
+  stages,
   user,
 } from "@bento/db";
 import { mentionTitle } from "@bento/slack";
@@ -25,7 +28,7 @@ import {
   recordManualApproval,
   recordRejection,
 } from "./gate-evaluator.js";
-import { handleSlackNotify, projectPickerBlocks, queueSlackNotify, type SlackNotifyJob } from "./slack-notify.js";
+import { handleSlackNotify, isUuid, projectPickerBlocks, queueSlackNotify, type SlackNotifyJob } from "./slack-notify.js";
 
 const PENDING_TTL_MS = 30 * 60_000;
 const UNKNOWN_MEMBER =
@@ -70,7 +73,13 @@ export type SlackInboundJob =
       reason: string;
     };
 
-type ResolvedMember = { userId: string; organizationId: string | null };
+type ResolvedMember = {
+  userId: string;
+  organizationId: string | null;
+  defaultProjectId: string | null;
+};
+
+type SlackCardCreate = "created" | "exists";
 
 export async function handleSlackInbound(ctx: AppContext, job: SlackInboundJob): Promise<void> {
   const connection = await slackConnectionByTeam(ctx, job.teamId);
@@ -130,9 +139,8 @@ async function handleMention(
   });
   if (!claimed) return;
 
-  const settings = await userSettings(ctx, memberRow);
-  const projectId = settings?.defaultProjectId ?? null;
-  if (projectId && (await projectInTenant(ctx, projectId, memberRow))) {
+  const projectId = memberRow.defaultProjectId;
+  if (projectId && (await memberCanUseProject(ctx, projectId, memberRow))) {
     await createSlackCard(ctx, {
       organizationId: memberRow.organizationId,
       userId: memberRow.userId,
@@ -145,10 +153,11 @@ async function handleMention(
       slackUserId: job.userId,
       client,
     });
+    await ctx.db.delete(slackPendingMentions).where(eq(slackPendingMentions.id, claimed.id));
     return;
   }
 
-  const options = await listTenantProjects(ctx, memberRow.organizationId);
+  const options = await listMemberProjects(ctx, memberRow);
   if (options.length === 0) {
     await ctx.db.delete(slackPendingMentions).where(eq(slackPendingMentions.id, claimed.id));
     await client.postMessage({
@@ -178,32 +187,23 @@ async function handlePickProject(
     await client.postEphemeral({ channel: job.channelId, user: job.userId, text: UNKNOWN_MEMBER });
     return;
   }
-  const [pending] = await ctx.db
-    .select()
-    .from(slackPendingMentions)
-    .where(and(eq(slackPendingMentions.id, job.pendingId), gt(slackPendingMentions.expiresAt, new Date())))
-    .limit(1);
+  const pending = await loadPending(ctx, job);
   if (!pending || pending.slackUserId !== job.userId) {
     await client.postEphemeral({
-      channel: job.channelId,
+      channel: job.channelId || pending?.slackChannelId || "",
       user: job.userId,
       text: "That project picker has expired. Tag @bento again.",
     });
     return;
   }
-  if (!(await projectInTenant(ctx, job.projectId, memberRow))) {
+  if (!(await memberCanUseProject(ctx, job.projectId, memberRow))) {
     await client.postEphemeral({
-      channel: job.channelId,
+      channel: pending.slackChannelId,
       user: job.userId,
       text: "That project is not on this team.",
     });
     return;
   }
-  const [consumed] = await ctx.db
-    .delete(slackPendingMentions)
-    .where(and(eq(slackPendingMentions.id, pending.id), eq(slackPendingMentions.slackUserId, job.userId)))
-    .returning();
-  if (!consumed) return;
   await createSlackCard(ctx, {
     organizationId: memberRow.organizationId,
     userId: memberRow.userId,
@@ -216,6 +216,9 @@ async function handlePickProject(
     slackUserId: job.userId,
     client,
   });
+  await ctx.db
+    .delete(slackPendingMentions)
+    .where(and(eq(slackPendingMentions.id, pending.id), eq(slackPendingMentions.slackUserId, job.userId)));
 }
 
 async function handleApprove(
@@ -329,7 +332,7 @@ async function createSlackCard(
     slackUserId: string;
     client: NonNullable<Awaited<ReturnType<typeof slackClientFor>>>;
   },
-): Promise<void> {
+): Promise<SlackCardCreate> {
   const existingLink = await ctx.db
     .select({ id: slackThreadLinks.id })
     .from(slackThreadLinks)
@@ -341,31 +344,19 @@ async function createSlackCard(
       ),
     )
     .limit(1);
-  if (existingLink[0]) return;
+  if (existingLink[0]) return "exists";
 
-  const [pipeline] = await ctx.db
-    .select()
-    .from(pipelines)
-    .where(eq(pipelines.projectId, input.projectId))
-    .limit(1);
-  if (!pipeline) {
-    await input.client.postMessage({
-      channel: input.channelId,
-      threadTs: input.threadTs,
-      text: "That project has no pipeline yet. Add stages in Bento, then try again.",
-    });
-    return;
-  }
+  const pipelineId = await ensureProjectPipeline(ctx, input.projectId);
   const [feature] = await ctx.db
     .insert(features)
     .values({
       projectId: input.projectId,
-      pipelineId: pipeline.id,
+      pipelineId,
       title: input.title,
       description: input.description,
     })
     .returning();
-  if (!feature) return;
+  if (!feature) throw new Error("feature insert returned no row");
   try {
     await ctx.db.insert(slackThreadLinks).values({
       featureId: feature.id,
@@ -376,10 +367,14 @@ async function createSlackCard(
     });
   } catch {
     await ctx.db.delete(features).where(eq(features.id, feature.id));
-    return;
+    return "exists";
   }
   await queueLinearIssueCreate(ctx, feature);
-  await queueSlackNotify(ctx, { type: "created", featureId: feature.id });
+  const setupNote = await slackSetupGap(ctx, pipelineId, {
+    userId: input.userId,
+    organizationId: input.organizationId,
+  });
+  await queueSlackNotify(ctx, { type: "created", featureId: feature.id, ...(setupNote ? { setupNote } : {}) });
   const refused = await activationRefusal(ctx, feature);
   if (refused) {
     await input.client.postMessage({
@@ -387,9 +382,51 @@ async function createSlackCard(
       threadTs: input.threadTs,
       text: refused,
     });
-    return;
+    return "created";
   }
   await advanceFeature(ctx, feature.id, "manual", input.userId);
+  return "created";
+}
+
+async function ensureProjectPipeline(ctx: AppContext, projectId: string): Promise<string> {
+  const [existing] = await ctx.db
+    .select({ id: pipelines.id })
+    .from(pipelines)
+    .where(eq(pipelines.projectId, projectId))
+    .limit(1);
+  if (existing) return existing.id;
+  return seedDefaultPipeline(ctx.db, projectId);
+}
+
+/**
+ * Missing stages or agents are a setup gap, not a failed mention. The
+ * card still belongs on the board; Slack tells the person what to
+ * finish in Bento so the card can run.
+ */
+async function slackSetupGap(
+  ctx: AppContext,
+  pipelineId: string,
+  memberRow: { userId: string; organizationId: string | null },
+): Promise<string | null> {
+  const stageRows = await ctx.db
+    .select({ id: stages.id, defaultAgentProfileId: stages.defaultAgentProfileId })
+    .from(stages)
+    .where(eq(stages.pipelineId, pipelineId))
+    .orderBy(asc(stages.position));
+  if (stageRows.length === 0) {
+    return "This project has no pipeline stages yet. Add stages in Bento, then open the card to start it.";
+  }
+  const agentWhere = memberRow.organizationId
+    ? eq(agentProfiles.organizationId, memberRow.organizationId)
+    : eq(agentProfiles.ownerId, memberRow.userId);
+  const [agent] = await ctx.db.select({ id: agentProfiles.id }).from(agentProfiles).where(agentWhere).limit(1);
+  if (!agent) {
+    return "No agents are set up yet, so nothing will run. Create an agent in Bento and assign it to a stage, then open the card to start it.";
+  }
+  if (!stageRows[0]?.defaultAgentProfileId) {
+    return "The first stage has no agent, so nothing will run. Assign one in Bento, then open the card to start it.";
+  }
+  return null;
 }
 
 async function claimMention(
@@ -453,7 +490,13 @@ export async function resolveSlackMember(
       ),
     )
     .limit(1);
-  if (bySlack) return { userId: bySlack.userId, organizationId: bySlack.organizationId };
+  if (bySlack) {
+    return {
+      userId: bySlack.userId,
+      organizationId: bySlack.organizationId,
+      defaultProjectId: bySlack.defaultProjectId,
+    };
+  }
 
   const info = await client.usersInfo(slackUserId);
   const email = info?.email?.trim().toLowerCase();
@@ -474,14 +517,18 @@ export async function resolveSlackMember(
       .update(slackUserSettings)
       .set({ slackUserId, updatedAt: new Date() })
       .where(eq(slackUserSettings.id, existing.id));
-  } else {
-    await ctx.db.insert(slackUserSettings).values({
-      organizationId: matched.organizationId,
-      userId: matched.userId,
-      slackUserId,
-    });
+    return {
+      userId: existing.userId,
+      organizationId: existing.organizationId,
+      defaultProjectId: existing.defaultProjectId,
+    };
   }
-  return matched;
+  await ctx.db.insert(slackUserSettings).values({
+    organizationId: matched.organizationId,
+    userId: matched.userId,
+    slackUserId,
+  });
+  return { ...matched, defaultProjectId: null };
 }
 
 async function memberByEmail(
@@ -495,7 +542,7 @@ async function memberByEmail(
     .innerJoin(user, eq(member.userId, user.id))
     .where(and(eq(member.organizationId, organizationId), sql`lower(${user.email}) = ${email}`))
     .limit(1);
-  return row ? { userId: row.userId, organizationId } : null;
+  return row ? { userId: row.userId, organizationId, defaultProjectId: null } : null;
 }
 
 async function localUserByEmail(ctx: AppContext, email: string): Promise<ResolvedMember | null> {
@@ -504,16 +551,7 @@ async function localUserByEmail(ctx: AppContext, email: string): Promise<Resolve
     .from(user)
     .where(and(eq(user.id, LOCAL_USER_ID), sql`lower(${user.email}) = ${email}`))
     .limit(1);
-  return row ? { userId: row.userId, organizationId: null } : null;
-}
-
-async function userSettings(ctx: AppContext, memberRow: ResolvedMember) {
-  const [row] = await ctx.db
-    .select()
-    .from(slackUserSettings)
-    .where(and(settingsOrgFilter(memberRow.organizationId), eq(slackUserSettings.userId, memberRow.userId)))
-    .limit(1);
-  return row ?? null;
+  return row ? { userId: row.userId, organizationId: null, defaultProjectId: null } : null;
 }
 
 function settingsOrgFilter(organizationId: string | null) {
@@ -522,25 +560,73 @@ function settingsOrgFilter(organizationId: string | null) {
     : isNull(slackUserSettings.organizationId);
 }
 
-async function projectInTenant(
+async function loadPending(
+  ctx: AppContext,
+  job: { pendingId: string; userId: string; teamId: string; channelId: string },
+) {
+  const now = new Date();
+  if (isUuid(job.pendingId)) {
+    const [byId] = await ctx.db
+      .select()
+      .from(slackPendingMentions)
+      .where(and(eq(slackPendingMentions.id, job.pendingId), gt(slackPendingMentions.expiresAt, now)))
+      .limit(1);
+    if (byId) return byId;
+  }
+  if (!job.channelId) return null;
+  const [byThread] = await ctx.db
+    .select()
+    .from(slackPendingMentions)
+    .where(
+      and(
+        eq(slackPendingMentions.slackTeamId, job.teamId),
+        eq(slackPendingMentions.slackChannelId, job.channelId),
+        eq(slackPendingMentions.slackUserId, job.userId),
+        gt(slackPendingMentions.expiresAt, now),
+      ),
+    )
+    .limit(1);
+  return byThread ?? null;
+}
+
+/**
+ * Same reach as Settings' default-project dropdown: org projects this
+ * member can see, plus org-less projects they still own. A default
+ * saved in Settings that @bento then refused is how the picker showed
+ * up after someone had already chosen.
+ */
+async function memberCanUseProject(
   ctx: AppContext,
   projectId: string,
   memberRow: ResolvedMember,
 ): Promise<boolean> {
+  if (!isUuid(projectId)) return false;
   const [project] = await ctx.db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
   if (!project) return false;
-  if (memberRow.organizationId) return project.organizationId === memberRow.organizationId;
-  return project.ownerId === memberRow.userId;
+  if (!project.organizationId) return project.ownerId === memberRow.userId;
+  if (project.organizationId === memberRow.organizationId) return true;
+  if (!memberRow.organizationId) return false;
+  const [membership] = await ctx.db
+    .select({ id: member.id })
+    .from(member)
+    .where(and(eq(member.userId, memberRow.userId), eq(member.organizationId, project.organizationId)))
+    .limit(1);
+  return Boolean(membership);
 }
 
-async function listTenantProjects(
+async function listMemberProjects(
   ctx: AppContext,
-  organizationId: string | null,
+  memberRow: ResolvedMember,
 ): Promise<{ id: string; name: string }[]> {
+  const ownedOrgless = and(eq(projects.ownerId, memberRow.userId), isNull(projects.organizationId));
+  const where = memberRow.organizationId
+    ? or(eq(projects.organizationId, memberRow.organizationId), ownedOrgless)
+    : ownedOrgless;
+  if (!where) return [];
   return ctx.db
     .select({ id: projects.id, name: projects.name })
     .from(projects)
-    .where(organizationId ? eq(projects.organizationId, organizationId) : isNull(projects.organizationId))
+    .where(where)
     .orderBy(asc(projects.name));
 }
 

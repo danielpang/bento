@@ -1934,6 +1934,51 @@ test("the Slack webhook demands a valid signature", async () => {
       },
     });
     assert.equal(forgedInteractive.status, 401);
+
+    const queued: { name: string; data: unknown }[] = [];
+    const realSend = ctx.boss.send.bind(ctx.boss);
+    ctx.boss.send = (async (name: string, data?: object | null) => {
+      queued.push({ name, data });
+      return "job-id";
+    }) as typeof ctx.boss.send;
+    try {
+      const payload = JSON.stringify({
+        type: "block_actions",
+        user: { id: "U1", team_id: "T1" },
+        container: { channel_id: "C1" },
+        actions: [{
+          action_id: "pick_project",
+          block_id: "=rewritten",
+          selected_option: {
+            value: "11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222",
+          },
+        }],
+      });
+      const pickBody = `payload=${encodeURIComponent(payload)}`;
+      const pickTs = String(Math.floor(Date.now() / 1000));
+      const picked = await app.request("/api/webhooks/slack/interactive", {
+        method: "POST",
+        body: pickBody,
+        headers: {
+          "x-slack-request-timestamp": pickTs,
+          "x-slack-signature": `v0=${createHmac("sha256", "slack-signing-secret").update(`v0:${pickTs}:${pickBody}`).digest("hex")}`,
+        },
+      });
+      assert.equal(picked.status, 200);
+      assert.deepEqual(queued, [{
+        name: "slack.inbound",
+        data: {
+          kind: "pick_project",
+          teamId: "T1",
+          channelId: "C1",
+          userId: "U1",
+          pendingId: "11111111-1111-1111-1111-111111111111",
+          projectId: "22222222-2222-2222-2222-222222222222",
+        },
+      }]);
+    } finally {
+      ctx.boss.send = realSend;
+    }
   } finally {
     if (original === undefined) delete mutableEnv.SLACK_SIGNING_SECRET;
     else mutableEnv.SLACK_SIGNING_SECRET = original;
