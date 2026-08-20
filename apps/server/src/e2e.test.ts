@@ -449,7 +449,7 @@ test("a project can be renamed, and removing it takes its board", async () => {
   const { project } = await setupProject("Working title");
   const feature = await createFeature(project.id, "Card that goes with it");
 
-  const renamed = await json<{ name: string }>(
+  const renamed = await json<{ name: string; autoStartPipeline: boolean }>(
     await app.request(`/api/projects/${project.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -457,6 +457,7 @@ test("a project can be renamed, and removing it takes its board", async () => {
     }),
   );
   assert.equal(renamed.name, "Payments revamp", "the stored name is trimmed");
+  assert.equal(renamed.autoStartPipeline, false, "a new project waits for a person by default");
 
   const blank = await app.request(`/api/projects/${project.id}`, {
     method: "PATCH",
@@ -464,6 +465,18 @@ test("a project can be renamed, and removing it takes its board", async () => {
     body: JSON.stringify({ name: "   " }),
   });
   assert.equal(blank.status, 400, "a name of only spaces is not a name");
+
+  // One field at a time: the panel flips the toggle without restating
+  // the name, and doing so must not blank it.
+  const toggled = await json<{ name: string; autoStartPipeline: boolean }>(
+    await app.request(`/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ autoStartPipeline: true }),
+    }),
+  );
+  assert.equal(toggled.autoStartPipeline, true);
+  assert.equal(toggled.name, "Payments revamp", "a settings write leaves the name alone");
 
   const removed = await json<{ deletedCards: number }>(
     await app.request(`/api/projects/${project.id}`, { method: "DELETE" }),

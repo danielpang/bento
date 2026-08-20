@@ -48,6 +48,14 @@ export const projects = pgTable("projects", {
    * is how a hosted board drives containers on your laptop.
    */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
+  /**
+   * Whether an issue arriving from Linear enters this project's first
+   * stage instead of waiting in the backlog. Per project, because one
+   * team's intake is triaged by a person and another's is meant to be
+   * picked up like a CI job. Off by default: it puts an agent on a
+   * ticket nobody has read yet.
+   */
+  autoStartPipeline: boolean("auto_start_pipeline").notNull().default(false),
   ...timestamps,
 });
 
@@ -307,7 +315,7 @@ export const featureEvents = pgTable(
 
     /** Distinguishes direction, which stage ids alone do not. */
     trigger: text("trigger", {
-      enum: ["manual", "manual_back", "gate_auto", "gate_auto_back", "agent_run", "system"],
+      enum: ["manual", "manual_back", "gate_auto", "gate_auto_back", "agent_run", "linear_auto", "system"],
     }).notNull(),
     actorUserId: text("actor_user_id").references(() => user.id),
     /** The run that caused this, when one did. */

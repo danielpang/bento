@@ -1,0 +1,1 @@
+ALTER TABLE "projects" ADD COLUMN "auto_start_pipeline" boolean DEFAULT false NOT NULL;

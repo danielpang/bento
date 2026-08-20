@@ -231,7 +231,7 @@ export async function recordFeatureEvent(
     toStageId?: string | null;
     fromStatus?: string | null;
     toStatus?: string | null;
-    trigger: "manual" | "manual_back" | "gate_auto" | "gate_auto_back" | "agent_run" | "system";
+    trigger: "manual" | "manual_back" | "gate_auto" | "gate_auto_back" | "agent_run" | "linear_auto" | "system";
     actorUserId?: string | null;
     runId?: string | null;
     detail?: Record<string, unknown> | null;
@@ -292,7 +292,7 @@ export async function activationRefusal(
 function captureFeatureCompleted(
   ctx: AppContext,
   feature: { id: string; projectId: string; organizationId: string | null },
-  trigger: "manual" | "gate_auto",
+  trigger: "manual" | "gate_auto" | "linear_auto",
   actorUserId?: string,
 ): void {
   ctx.analytics?.capture({
@@ -306,12 +306,13 @@ function captureFeatureCompleted(
 /**
  * Moves a feature to the next stage (or done) and, when the next stage
  * has a default agent profile, queues that stage's run automatically.
- * Shared by the manual approve route and automatic gate advancement.
+ * Shared by the manual approve route, automatic gate advancement, and the
+ * Linear import that starts a card the moment its issue is created.
  */
 export async function advanceFeature(
   ctx: AppContext,
   featureId: string,
-  trigger: "manual" | "gate_auto",
+  trigger: "manual" | "gate_auto" | "linear_auto",
   actorUserId?: string,
   /**
    * The stage the caller believes the card is on: a stage id, or null

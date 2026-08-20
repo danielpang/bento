@@ -207,7 +207,8 @@ function MappingsCard({
       <h3 className="settings-title">Team mappings</h3>
       <p className="muted">
         Each mapped team's backlog issues become cards in its project. New backlog issues in a
-        mapped team arrive as they are created.
+        mapped team arrive as they are created. Whether an arriving issue waits in the backlog or
+        starts the pipeline is each project's own setting, under Settings, Projects.
       </p>
       {status.mappings.length === 0 && <p className="muted">No teams mapped yet.</p>}
       {status.mappings.map((mapping) => (

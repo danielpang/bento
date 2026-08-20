@@ -1,5 +1,5 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { features, linearConnections, linearIssueLinks, linearTeamMappings, stages } from "@bento/db";
+import { features, linearConnections, linearIssueLinks, linearTeamMappings, projects, stages } from "@bento/db";
 import type { LinearClient, LinearWebhookIssue } from "@bento/linear";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
@@ -11,6 +11,10 @@ import {
   resolveTeamState,
   stateTypeForStatus,
 } from "../linear.js";
+// The gate evaluator mirrors its transitions out to Linear through this
+// module, so the two import each other. Both sides call functions at run
+// time only, which is what keeps the cycle harmless.
+import { advanceFeature } from "./gate-evaluator.js";
 
 const BENTO_LABEL = "bento";
 
@@ -135,7 +139,7 @@ export async function handleLinearInbound(
   }
   if (!projectId) return;
 
-  await importLinearIssue(ctx, {
+  const featureId = await importLinearIssue(ctx, {
     organizationId,
     projectId,
     issue: {
@@ -147,6 +151,62 @@ export async function handleLinearInbound(
       teamId: issue.teamId,
     },
   });
+  // Only a genuinely new card, and only the event that says the issue
+  // was just written: a dedupe or a lost race returns no id, and an
+  // update is somebody editing a ticket that has been sitting there.
+  if (featureId && action === "create") {
+    await autoStartImportedFeature(ctx, { organizationId, projectId, featureId });
+  }
+}
+
+/**
+ * Moves a just-imported card into the first pipeline stage when its
+ * project asked for that, so agent work begins without anyone opening
+ * the board. Everything after the move is the ordinary pipeline: a
+ * manual first stage still waits for approval, and a stage with an agent
+ * starts one.
+ *
+ * The project decides, not the connection: one team's intake is triaged
+ * by a person and another's is meant to be picked up like a CI job, and
+ * the label path can put an issue in a project the mapping never named.
+ *
+ * Only the webhook's create event reaches here. The sweep imports
+ * whatever a backlog has been holding for months, and starting all of it
+ * at once would put an agent on every old ticket nobody triaged.
+ */
+async function autoStartImportedFeature(
+  ctx: AppContext,
+  target: { organizationId: string | null; projectId: string; featureId: string },
+): Promise<void> {
+  const { organizationId, projectId, featureId } = target;
+  try {
+    const [project] = await ctx.db
+      .select({ autoStartPipeline: projects.autoStartPipeline })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    if (!project?.autoStartPipeline) return;
+
+    // A card leaving the backlog is a card going live, which is what a
+    // paid plan counts. Refused, the import stays in the backlog, where
+    // advancing it by hand asks the same question and says so.
+    if (organizationId && ctx.entitlements) {
+      const refusal = await ctx.entitlements.canActivateFeature(organizationId);
+      if (refusal) {
+        console.warn(`linear auto-start skipped for feature ${featureId}: ${refusal.reason}`);
+        return;
+      }
+    }
+
+    // expectedStageId null: only a card still in the backlog moves, so a
+    // person who advanced it in the meantime does not get a second move.
+    await advanceFeature(ctx, featureId, "linear_auto", undefined, null);
+  } catch (err) {
+    // The card is already on the board. Failing to start it must not
+    // fail the inbound job, whose retry would find the issue linked and
+    // do nothing: the card waits in the backlog for a manual advance.
+    console.error(`linear auto-start for feature ${featureId} failed:`, err);
+  }
 }
 
 async function defaultProjectFor(ctx: AppContext, organizationId: string | null): Promise<string | null> {

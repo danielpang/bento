@@ -5,8 +5,9 @@ import { PromptDialog } from "./PromptDialog.js";
 import { useToast } from "./Toasts.js";
 
 /**
- * Renaming and removing projects. Creating one stays on the board,
- * which is where you are when you want another; neither of these is
+ * Each project's own settings: its name, whether an arriving Linear
+ * issue starts its pipeline, and removal. Creating one stays on the
+ * board, which is where you are when you want another; none of this is
  * board work, and removing takes every card with it.
  *
  * The server scopes the list per request, so in multi mode this is the
@@ -20,6 +21,13 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
   const [renaming, setRenaming] = useState<Project | null>(null);
   const [removing, setRemoving] = useState<Project | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Whether Linear is connected, and whether it can reach this server.
+   * Nothing arrives from Linear without a connection, so the auto-start
+   * toggle would be a switch that does nothing: it stays hidden until
+   * there is something for it to act on.
+   */
+  const [linear, setLinear] = useState<{ connected: boolean; webhook: boolean } | null>(null);
 
   async function load() {
     try {
@@ -33,7 +41,26 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
 
   useEffect(() => {
     void load();
+    void client
+      .linearStatus()
+      .then((status) => setLinear({ connected: status.connected, webhook: status.webhook }))
+      // An older server, or one this user may not ask: say nothing.
+      .catch(() => setLinear(null));
   }, [client]);
+
+  async function setAutoStart(project: Project, next: boolean) {
+    setBusy(true);
+    try {
+      await client.updateProject(project.id, { autoStartPipeline: next });
+      await load();
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const showAutoStart = linear?.connected === true;
 
   return (
     <section className="section settings-card">
@@ -42,6 +69,14 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
         Every board belongs to a project. Renaming one changes what it is called everywhere;
         removing one takes its cards, its runs, and its pipeline with it.
       </p>
+      {showAutoStart && (
+        <p className="muted">
+          Each project also decides what happens to an issue arriving from Linear. Start its pipeline
+          and the card leaves the backlog for the first stage as it is imported, with the pipeline
+          deciding the rest: a stage that waits for approval still waits, one with an agent starts a
+          run. Sync now and the scheduled backlog import always leave their cards in the backlog.
+        </p>
+      )}
 
       {failed ? (
         <p className="error">Could not load the projects. Retry once the server is reachable.</p>
@@ -51,28 +86,50 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
         <p className="muted">No projects yet. Create one from the board.</p>
       ) : (
         projects.map((project) => (
-          <div key={project.id} className="gate-check">
-            <span className="gate-check-text">
-              <span className="gate-check-name">{project.name}</span>
-              {/* A project can exist before its code does, so this is often absent. */}
-              {project.localPath && (
-                <>
-                  <br />
-                  {project.localPath}
-                </>
-              )}
-            </span>
-            {/* One slot for both, so they stay together as a path wraps. */}
-            <span className="member-action">
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setRenaming(project)}>
-                Rename
-              </button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(project)}>
-                Remove
-              </button>
-            </span>
+          <div key={project.id} className="field">
+            <div className="gate-check">
+              <span className="gate-check-text">
+                <span className="gate-check-name">{project.name}</span>
+                {/* A project can exist before its code does, so this is often absent. */}
+                {project.localPath && (
+                  <>
+                    <br />
+                    {project.localPath}
+                  </>
+                )}
+              </span>
+              {/* One slot for both, so they stay together as a path wraps. */}
+              <span className="member-action">
+                <button className="btn btn-ghost" disabled={busy} onClick={() => setRenaming(project)}>
+                  Rename
+                </button>
+                <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(project)}>
+                  Remove
+                </button>
+              </span>
+            </div>
+            {showAutoStart && (
+              <label className="gate-check">
+                <input
+                  type="checkbox"
+                  checked={project.autoStartPipeline}
+                  disabled={busy}
+                  onChange={(e) => void setAutoStart(project, e.target.checked)}
+                />
+                <span className="gate-check-text">
+                  Start the pipeline when an issue arrives from Linear.
+                </span>
+              </label>
+            )}
           </div>
         ))
+      )}
+
+      {showAutoStart && linear?.webhook === false && projects?.some((p) => p.autoStartPipeline) && (
+        <p className="muted">
+          Linear cannot notify this server, so new issues arrive with the scheduled sync instead.
+          Those cards wait in the backlog, and nothing starts on its own until the webhook works.
+        </p>
       )}
 
       {renaming && (
@@ -87,7 +144,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
             if (name === renaming.name) return;
             setBusy(true);
             try {
-              await client.renameProject(renaming.id, name);
+              await client.updateProject(renaming.id, { name });
               await load();
             } catch (err) {
               toast.fail(err);

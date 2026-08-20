@@ -315,11 +315,14 @@ export class BentoClient {
     return this.request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
   }
 
-  /** The name, and nothing else about the project. */
-  renameProject(projectId: string, name: string) {
+  /**
+   * The project's own settings: its name, and whether an arriving Linear
+   * issue starts its pipeline. Only what is passed is written.
+   */
+  updateProject(projectId: string, patch: { name?: string; autoStartPipeline?: boolean }) {
     return this.request<Project>(`/api/projects/${projectId}`, {
       method: "PATCH",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(patch),
     });
   }
 

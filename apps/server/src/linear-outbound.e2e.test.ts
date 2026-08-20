@@ -231,7 +231,10 @@ async function waitForLink(featureId: string, timeoutMs = 30_000) {
       .from(linearIssueLinks)
       .where(eq(linearIssueLinks.featureId, featureId))
       .limit(1);
-    if (link) return link;
+    // A pending row is the reservation the worker writes before it calls
+    // Linear, not a filed issue: returning it read the identifier as
+    // empty whenever the machine was busy enough to be looked at first.
+    if (link && !link.pending) return link;
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`no Linear issue was filed for feature ${featureId} within ${timeoutMs}ms`);

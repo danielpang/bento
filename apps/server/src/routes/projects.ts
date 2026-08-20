@@ -457,21 +457,38 @@ export function projectRoutes(ctx: AppContext) {
       return c.json({ sessions });
     })
     /**
-     * The name, and nothing else: checkouts, branches and the pipeline
-     * are each pointed at by something and change where they are
-     * configured.
+     * The name, and whether an arriving Linear issue starts the
+     * pipeline. Checkouts, branches and the pipeline itself are each
+     * pointed at by something and change where they are configured.
+     *
+     * Every field is optional and only what was sent is written, so one
+     * toggle can be flipped without restating the name.
      */
-    .patch("/:id", zValidator("json", z.object({ name: projectName })), async (c) => {
-      const projectId = c.req.param("id");
-      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
-      const [updated] = await db(c, ctx)
-        .update(projects)
-        .set({ name: c.req.valid("json").name, updatedAt: new Date() })
-        .where(eq(projects.id, projectId))
-        .returning();
-      if (!updated) return c.json({ error: "not found" }, 404);
-      return c.json(updated);
-    })
+    .patch(
+      "/:id",
+      zValidator(
+        "json",
+        z.object({
+          name: projectName.optional(),
+          autoStartPipeline: z.boolean().optional(),
+        }),
+      ),
+      async (c) => {
+        const projectId = c.req.param("id");
+        if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+        const body = c.req.valid("json");
+        const patch: Partial<typeof projects.$inferInsert> = { updatedAt: new Date() };
+        if (body.name !== undefined) patch.name = body.name;
+        if (body.autoStartPipeline !== undefined) patch.autoStartPipeline = body.autoStartPipeline;
+        const [updated] = await db(c, ctx)
+          .update(projects)
+          .set(patch)
+          .where(eq(projects.id, projectId))
+          .returning();
+        if (!updated) return c.json({ error: "not found" }, 404);
+        return c.json(updated);
+      },
+    )
     /**
      * The project and everything hanging off it: repositories, the
      * pipeline, every card, and every run and transcript on those cards.

@@ -557,6 +557,7 @@ test("every entity route refuses a foreign tenant", async () => {
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
     ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ name: "Stolen" }) }],
+    ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ autoStartPipeline: true }) }],
     ["GET", `/api/projects/${project.id}/pipeline`],
     ["GET", `/api/projects/${project.id}/pipeline/export`],
     [
@@ -652,10 +653,14 @@ test("every entity route refuses a foreign tenant", async () => {
   // The project is still there, under its own name.
   const projectAfter = await asOwner(`/api/projects/${project.id}`);
   assert.equal(projectAfter.status, 200, "the intruder must not have deleted the owner's project");
+  const projectBody = (await projectAfter.json()) as { name: string; autoStartPipeline: boolean };
+  assert.equal(projectBody.name, "Matrix", "the intruder must not have renamed the owner's project");
+  // A flag flipped from outside would put an agent on every issue this
+  // team's Linear files, which is spend the intruder chose for them.
   assert.equal(
-    ((await projectAfter.json()) as { name: string }).name,
-    "Matrix",
-    "the intruder must not have renamed the owner's project",
+    projectBody.autoStartPipeline,
+    false,
+    "the intruder must not have turned on auto-start for the owner's project",
   );
 
   // The agent is still the owner's, under its own name. A rename that

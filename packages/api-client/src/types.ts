@@ -6,6 +6,8 @@ export interface Project {
   repoUrl: string | null;
   localPath: string | null;
   defaultBranch: string;
+  /** Whether an issue arriving from Linear starts this project's pipeline. */
+  autoStartPipeline: boolean;
 }
 
 export interface Repository {
