@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges, Stage } from "@bento/api-client";
 import { AgentSession } from "./AgentSession.js";
 import { DiffReview, type LineQuote } from "./DiffReview.js";
@@ -7,9 +7,32 @@ import { useToast } from "./Toasts.js";
 /**
  * A card's agent conversation in its own tab, for when the drawer's
  * pane is too small a window on the work. Same component as the
- * drawer's session, with room to breathe.
+ * drawer's session, with room to breathe. The sessions tab's split
+ * view seats this same page in its right pane.
  */
-export function SessionPage({ client, featureId }: { client: BentoClient; featureId: string }) {
+export function SessionPage({
+  client,
+  featureId,
+  onClose,
+  refreshSignal,
+}: {
+  client: BentoClient;
+  featureId: string;
+  /**
+   * Present when the page is a pane inside the sessions split rather
+   * than a tab of its own: closing hands control back to the list
+   * without a navigation, so the list keeps its scroll and its rows.
+   */
+  onClose?: () => void;
+  /**
+   * Bumped by a parent that already holds this project's board stream.
+   * Its presence is what says "do not open a second one": in the split
+   * the list and this pane were both subscribed to the same project,
+   * which is two connections and two refetch storms for one viewer,
+   * the pair the board itself dropped for the same reason.
+   */
+  refreshSignal?: number;
+}) {
   const toast = useToast();
   const [feature, setFeature] = useState<(Feature & { runs: AgentRun[] }) | null>(null);
   /** Whether the load failed, so the page says so instead of sitting blank. */
@@ -53,7 +76,10 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
   // what keeps the run list and the stop button honest in this tab too.
   // A reconnect means events fired while the stream was down are gone
   // (they are not persisted), so resync instead of trusting the gap.
+  // Only when nobody above is already listening, or the split would
+  // hold two streams on one project for one viewer.
   useEffect(() => {
+    if (refreshSignal !== undefined) return;
     if (!feature?.projectId) return;
     let timer: number | null = null;
     const schedule = () => {
@@ -67,19 +93,69 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
       stop();
       if (timer !== null) clearTimeout(timer);
     };
-  }, [client, feature?.projectId, refresh]);
+  }, [client, feature?.projectId, refresh, refreshSignal]);
+
+  // The parent's stream, relayed. The value it starts on is the one
+  // the load above already answered, so only changes to it refetch.
+  const seenSignal = useRef(refreshSignal);
+  useEffect(() => {
+    if (refreshSignal === undefined) return;
+    if (seenSignal.current === refreshSignal) return;
+    seenSignal.current = refreshSignal;
+    void refresh();
+  }, [refreshSignal, refresh]);
+
+  /**
+   * The way out, which every state needs including the ones that never
+   * loaded. The two branches below used to return above the header, so
+   * a card that failed to load left the split pane with no Close; on a
+   * narrow window, where the list is hidden behind that pane, it took
+   * the whole tab with it and only a reload got out.
+   */
+  const exit = onClose ? (
+    <button type="button" className="btn btn-ghost" onClick={onClose}>
+      Close
+    </button>
+  ) : (
+    <a className="btn btn-ghost" href="/sessions">
+      Back
+    </a>
+  );
 
   if (loadFailed) {
     return (
       <div className="session-page">
+        <header className="session-head">
+          <h1>Conversation</h1>
+          {exit}
+        </header>
         <p className="error">Could not load this card.</p>
-        <p className="muted">
-          Check that the server is reachable and that you are signed in, then reload.
-        </p>
+        <p className="muted">Check that the server is reachable and that you are signed in.</p>
+        <div className="actions">
+          <button
+            className="btn btn-primary"
+            onClick={() => {
+              setLoadFailed(false);
+              void refresh();
+            }}
+          >
+            Try again
+          </button>
+        </div>
       </div>
     );
   }
-  if (!feature) return <div className="center" />;
+  if (!feature) {
+    return (
+      <div className="session-page">
+        <header className="session-head">
+          <h1>Conversation</h1>
+          {exit}
+        </header>
+        <div className="center" />
+      </div>
+    );
+  }
 
   const finished = feature.status === "done" || feature.status === "cancelled";
   const hasDiff = !!changes && changes.repositories.some((r) => r.diff.trim().length > 0);
@@ -91,9 +167,7 @@ export function SessionPage({ client, featureId }: { client: BentoClient; featur
         <span className="chip" data-status={feature.status}>
           {feature.status}
         </span>
-        <a className="btn btn-ghost" href="/sessions">
-          Back
-        </a>
+        {exit}
       </header>
       {hasDiff && (
         <div className="pane-toggle" role="group" aria-label="Pane">
