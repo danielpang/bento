@@ -30,6 +30,8 @@ import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
+import { queueRunFinishedSlack } from "./slack-notify.js";
+import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
 import {
   claimQueuedMessages,
@@ -969,6 +971,8 @@ async function finishRun(
   // delivery below hands them to the next run instead of losing them.
   await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
+
+  await queueRunFinishedSlack(ctx, runId);
 }
 
 /**
@@ -1333,6 +1337,7 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   }
   await requeueUndelivered(ctx.db, run.id);
   await deliverQueuedMessage(ctx, run.id);
+  await queueRunFinishedSlack(ctx, run.id);
   await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
 }
 
@@ -1720,6 +1725,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   }));
 
   await registerLinearJobs(ctx);
+  await registerSlackJobs(ctx);
 }
 
 /**

@@ -262,6 +262,7 @@ flowchart LR
         b["features · agent_runs · run_events · gate_checks"]
         c["feature_events · feature_pull_requests · sandboxes"]
         d["agent_profiles · secrets · github_installations"]
+        e["linear_connections · slack_connections · slack_user_settings · slack_thread_links · slack_pending_mentions"]
     end
     org --> tagged
 ```

@@ -7,6 +7,7 @@ import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { queueLinearOutbound } from "./linear-sync.js";
+import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
 
 type Feature = typeof features.$inferSelect;
@@ -153,6 +154,17 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
     }
   }
 
+  const existingChecks = await ctx.db
+    .select()
+    .from(gateChecks)
+    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  const existingSig = checkSignature(
+    existingChecks.map((row) => ({
+      status: row.status,
+      message: (row.detail as { message?: string } | null)?.message ?? "",
+    })),
+  );
+
   const outcome = await evaluateGate(criteria, gateCtx);
 
   await ctx.db.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
@@ -190,6 +202,13 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
         status: "gated",
         currentStageId: stage.id,
       });
+    } else {
+      const nextSig = checkSignature(
+        outcome.outcomes.map((o) => ({ status: o.result.status, message: o.result.detail ?? "" })),
+      );
+      if (nextSig !== existingSig) {
+        await queueSlackNotify(ctx, gatedReasonJob(feature.id, stage.id));
+      }
     }
     return;
   }
@@ -237,6 +256,30 @@ export async function recordFeatureEvent(
     toStatus: event.toStatus,
     toStageId: event.toStageId,
   });
+  await queueSlackNotify(ctx, {
+    type: "feature_event",
+    featureId: event.featureId,
+    kind: event.kind,
+    trigger: event.trigger,
+    fromStageId: event.fromStageId ?? null,
+    toStageId: event.toStageId ?? null,
+    fromStatus: event.fromStatus ?? null,
+    toStatus: event.toStatus ?? null,
+  });
+}
+
+/**
+ * A hosted deployment counts live cards against the organization's
+ * plan. Only transitions INTO being live are asked: a live card moving
+ * between stages changes nothing the plan counts.
+ */
+export async function activationRefusal(
+  ctx: AppContext,
+  feature: { organizationId: string | null },
+): Promise<string | null> {
+  if (!ctx.entitlements || !feature.organizationId) return null;
+  const refusal = await ctx.entitlements.canActivateFeature(feature.organizationId);
+  return refusal ? refusal.reason : null;
 }
 
 /**
@@ -799,18 +842,20 @@ interface HoldRow {
   message: string;
 }
 
+function checkSignature(rows: { status: string; message: string }[]): string {
+  return rows.map((row) => `${row.status}:${row.message}`).join("|");
+}
+
 async function holdFeature(ctx: AppContext, feature: Feature, stageId: string, rows: HoldRow[]): Promise<void> {
   const existing = await ctx.db
     .select()
     .from(gateChecks)
     .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stageId)));
-  const describe = (list: { status: string; message: string }[]) =>
-    list.map((r) => `${r.status}:${r.message}`).join("|");
   const already =
     feature.status === "gated" &&
-    describe(
+    checkSignature(
       existing.map((r) => ({ status: r.status, message: (r.detail as { message?: string } | null)?.message ?? "" })),
-    ) === describe(rows);
+    ) === checkSignature(rows);
   if (already) return;
 
   if (feature.status !== "gated") {
@@ -827,16 +872,10 @@ async function holdFeature(ctx: AppContext, feature: Feature, stageId: string, r
       .where(and(eq(features.id, feature.id), eq(features.status, feature.status)))
       .returning();
     if (!held) return;
-    await recordFeatureEvent(ctx, {
-      featureId: feature.id,
-      kind: "status_changed",
-      fromStatus: feature.status,
-      toStatus: "gated",
-      trigger: "gate_auto",
-      detail: { message: rows[rows.length - 1]?.message ?? "" },
-    });
   }
 
+  // Checks first, then Slack: the notify job reads these rows for the
+  // waiting reason and for whether Approve/Reject belong on the message.
   await ctx.db.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stageId)));
   await ctx.db.insert(gateChecks).values(
     rows.map((row) => ({
@@ -848,6 +887,22 @@ async function holdFeature(ctx: AppContext, feature: Feature, stageId: string, r
       lastEvaluatedAt: new Date(),
     })),
   );
+
+  if (feature.status !== "gated") {
+    await recordFeatureEvent(ctx, {
+      featureId: feature.id,
+      kind: "status_changed",
+      fromStatus: feature.status,
+      toStatus: "gated",
+      trigger: "gate_auto",
+      detail: { message: rows[rows.length - 1]?.message ?? "" },
+    });
+  } else {
+    // Already waiting, but the reason changed (a new run, a new judge
+    // question). The first gating already wrote history; Slack still
+    // needs the new sentence.
+    await queueSlackNotify(ctx, gatedReasonJob(feature.id, stageId));
+  }
 
   ctx.bus.emitBoardEvent({
     type: "feature_updated",

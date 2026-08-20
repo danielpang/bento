@@ -746,6 +746,117 @@ export const linearIssueLinks = pgTable(
   ],
 );
 
+/**
+ * One Slack workspace connection per organization. The bot token is
+ * encrypted at rest. organizationId is null in local mode, and a
+ * partial unique index keeps local mode to a single connection.
+ */
+export const slackConnections = pgTable(
+  "slack_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackTeamName: text("slack_team_name").notNull(),
+    botUserId: text("bot_user_id").notNull(),
+    encryptedBotToken: text("encrypted_bot_token").notNull(),
+    installedBy: text("installed_by")
+      .notNull()
+      .references(() => user.id),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("slack_connections_org_idx").on(t.organizationId),
+    uniqueIndex("slack_connections_local_idx").on(sql`(organization_id is null)`).where(sql`${t.organizationId} is null`),
+    uniqueIndex("slack_connections_team_idx").on(t.slackTeamId),
+  ],
+);
+
+/**
+ * Per-member Slack preferences. The default project is what @bento
+ * uses when creating a card; slackUserId is filled on the first
+ * successful email match so later lookups do not depend on Slack
+ * exposing the member's email.
+ */
+export const slackUserSettings = pgTable(
+  "slack_user_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    slackUserId: text("slack_user_id"),
+    defaultProjectId: uuid("default_project_id").references(() => projects.id, { onDelete: "set null" }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("slack_user_settings_org_user_idx").on(t.organizationId, t.userId),
+    uniqueIndex("slack_user_settings_local_user_idx").on(t.userId).where(sql`${t.organizationId} is null`),
+    uniqueIndex("slack_user_settings_org_slack_user_idx")
+      .on(t.organizationId, t.slackUserId)
+      .where(sql`${t.slackUserId} is not null`),
+    uniqueIndex("slack_user_settings_local_slack_user_idx")
+      .on(t.slackUserId)
+      .where(sql`${t.organizationId} is null AND ${t.slackUserId} is not null`),
+  ],
+);
+
+/**
+ * Links a Slack-created card to the thread that created it. Notify
+ * jobs no-op without this row, so Bento-only cards stay off Slack.
+ */
+export const slackThreadLinks = pgTable(
+  "slack_thread_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    featureId: uuid("feature_id")
+      .notNull()
+      .unique()
+      .references(() => features.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackThreadTs: text("slack_thread_ts").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    /** ts of the needs-review message, so a later decision can update it. */
+    reviewMessageTs: text("review_message_ts"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("slack_thread_links_org_feature_idx").on(t.organizationId, t.featureId),
+    uniqueIndex("slack_thread_links_local_feature_idx").on(t.featureId).where(sql`${t.organizationId} is null`),
+    uniqueIndex("slack_thread_links_thread_idx").on(t.slackTeamId, t.slackChannelId, t.slackThreadTs),
+  ],
+);
+
+/**
+ * Short-lived @bento mention waiting on a project picker. Expires so
+ * an abandoned picker cannot create a card later under a stale title.
+ */
+export const slackPendingMentions = pgTable(
+  "slack_pending_mentions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackThreadTs: text("slack_thread_ts").notNull(),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("slack_pending_mentions_expires_idx").on(t.expiresAt),
+    uniqueIndex("slack_pending_mentions_thread_idx").on(t.slackTeamId, t.slackChannelId, t.slackThreadTs),
+  ],
+);
+
 /** One GitHub App installation selected by each hosted organization. */
 export const githubInstallations = pgTable("github_installations", {
   id: uuid("id").primaryKey().defaultRandom(),

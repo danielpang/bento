@@ -635,6 +635,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ],
     ["GET", "/api/linear/projects?teamId=team-x"],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
+    ["PATCH", "/api/slack/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
     // Last: a delete that went through would refuse everything after it
     // for the wrong reason.
     ["DELETE", `/api/projects/${project.id}`],
@@ -2088,5 +2089,155 @@ test("the Linear webhook demands a valid signature", async () => {
     assert.deepEqual(await signed.json(), { ok: true, matched: 1 });
   } finally {
     await ctx.db.delete(linearConnections);
+  }
+});
+
+test("Slack status is unconfigured without app credentials", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "slack-status@bento.test",
+    password: "correct-horse-battery",
+    name: "Slack",
+  });
+  assert.equal(signup.status, 200);
+  const token = signup.headers.get("set-auth-token")!;
+  await jsonPost("/api/auth/organization/create", { name: "Slack Co", slug: "slack-status-co" }, token);
+  const status = await app.request("/api/slack/status", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(status.status, 200);
+  assert.deepEqual(await status.json(), {
+    configured: false,
+    connected: false,
+    canManage: true,
+    teamName: null,
+    defaultProjectId: null,
+    eventsUrl: "http://localhost:4400/api/webhooks/slack/events",
+    interactivityUrl: "http://localhost:4400/api/webhooks/slack/interactive",
+  });
+  const install = await jsonPost("/api/slack/install", {}, token);
+  assert.equal(install.status, 503);
+});
+
+test("the Slack webhook demands a valid signature", async () => {
+  const body = JSON.stringify({ type: "url_verification", challenge: "abc" });
+  const missing = await app.request("/api/webhooks/slack/events", { method: "POST", body });
+  assert.equal(missing.status, 503);
+
+  const mutableEnv = ctx.env as typeof ctx.env & { SLACK_SIGNING_SECRET?: string };
+  const original = mutableEnv.SLACK_SIGNING_SECRET;
+  mutableEnv.SLACK_SIGNING_SECRET = "slack-signing-secret";
+  const ts = String(Math.floor(Date.now() / 1000));
+  try {
+    const forged = await app.request("/api/webhooks/slack/events", {
+      method: "POST",
+      body,
+      headers: {
+        "x-slack-request-timestamp": ts,
+        "x-slack-signature": `v0=${createHmac("sha256", "wrong").update(`v0:${ts}:${body}`).digest("hex")}`,
+      },
+    });
+    assert.equal(forged.status, 401);
+
+    const signed = await app.request("/api/webhooks/slack/events", {
+      method: "POST",
+      body,
+      headers: {
+        "x-slack-request-timestamp": ts,
+        "x-slack-signature": `v0=${createHmac("sha256", "slack-signing-secret").update(`v0:${ts}:${body}`).digest("hex")}`,
+      },
+    });
+    assert.equal(signed.status, 200);
+    assert.deepEqual(await signed.json(), { challenge: "abc" });
+
+    const interactiveBody = "payload=%7B%7D";
+    const forgedInteractive = await app.request("/api/webhooks/slack/interactive", {
+      method: "POST",
+      body: interactiveBody,
+      headers: {
+        "x-slack-request-timestamp": ts,
+        "x-slack-signature": `v0=${createHmac("sha256", "wrong").update(`v0:${ts}:${interactiveBody}`).digest("hex")}`,
+      },
+    });
+    assert.equal(forgedInteractive.status, 401);
+
+    const queued: { name: string; data: unknown }[] = [];
+    const realSend = ctx.boss.send.bind(ctx.boss);
+    ctx.boss.send = (async (name: string, data?: object | null) => {
+      queued.push({ name, data });
+      return "job-id";
+    }) as typeof ctx.boss.send;
+    try {
+      const payload = JSON.stringify({
+        type: "block_actions",
+        user: { id: "U1", team_id: "T1" },
+        container: { channel_id: "C1" },
+        actions: [{
+          action_id: "pick_project",
+          block_id: "=rewritten",
+          selected_option: {
+            value: "11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222",
+          },
+        }],
+      });
+      const pickBody = `payload=${encodeURIComponent(payload)}`;
+      const pickTs = String(Math.floor(Date.now() / 1000));
+      const picked = await app.request("/api/webhooks/slack/interactive", {
+        method: "POST",
+        body: pickBody,
+        headers: {
+          "x-slack-request-timestamp": pickTs,
+          "x-slack-signature": `v0=${createHmac("sha256", "slack-signing-secret").update(`v0:${pickTs}:${pickBody}`).digest("hex")}`,
+        },
+      });
+      assert.equal(picked.status, 200);
+      assert.deepEqual(queued, [{
+        name: "slack.inbound",
+        data: {
+          kind: "pick_project",
+          teamId: "T1",
+          channelId: "C1",
+          userId: "U1",
+          pendingId: "11111111-1111-1111-1111-111111111111",
+          projectId: "22222222-2222-2222-2222-222222222222",
+        },
+      }]);
+
+      queued.length = 0;
+      const buttonPayload = JSON.stringify({
+        type: "block_actions",
+        user: { id: "U1", team_id: "T1" },
+        actions: [{
+          action_id: "pick_project_22222222-2222-2222-2222-222222222222",
+          value: "11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222",
+        }],
+      });
+      const buttonBody = `payload=${encodeURIComponent(buttonPayload)}`;
+      const buttonTs = String(Math.floor(Date.now() / 1000));
+      const buttoned = await app.request("/api/webhooks/slack/interactive", {
+        method: "POST",
+        body: buttonBody,
+        headers: {
+          "x-slack-request-timestamp": buttonTs,
+          "x-slack-signature": `v0=${createHmac("sha256", "slack-signing-secret").update(`v0:${buttonTs}:${buttonBody}`).digest("hex")}`,
+        },
+      });
+      assert.equal(buttoned.status, 200);
+      assert.deepEqual(queued, [{
+        name: "slack.inbound",
+        data: {
+          kind: "pick_project",
+          teamId: "T1",
+          channelId: "",
+          userId: "U1",
+          pendingId: "11111111-1111-1111-1111-111111111111",
+          projectId: "22222222-2222-2222-2222-222222222222",
+        },
+      }]);
+    } finally {
+      ctx.boss.send = realSend;
+    }
+  } finally {
+    if (original === undefined) delete mutableEnv.SLACK_SIGNING_SECRET;
+    else mutableEnv.SLACK_SIGNING_SECRET = original;
   }
 });

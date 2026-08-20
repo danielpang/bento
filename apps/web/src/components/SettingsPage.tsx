@@ -9,6 +9,7 @@ import { BrandLockup } from "./BrandLockup.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
 import { GitHubAccountCard, useGitHubOutcome } from "./GitHubIdentity.js";
 import { LinearPanel } from "./LinearPanel.js";
+import { SlackPanel } from "./SlackPanel.js";
 import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
@@ -23,10 +24,10 @@ import { TeamSettings } from "./TeamSettings.js";
  * apply: local mode is Appearance alone, a self-hosted team adds Team,
  * and only a deployment with the billing module shows Billing.
  */
-type Tab = "appearance" | "projects" | "github" | "linear" | "team" | "billing" | "account";
+type Tab = "appearance" | "projects" | "github" | "linear" | "slack" | "team" | "billing" | "account";
 
 /** The tabs that exist in every mode, so a link to one always resolves. */
-const ALWAYS: Tab[] = ["appearance", "projects", "github", "linear"];
+const ALWAYS: Tab[] = ["appearance", "projects", "github", "linear", "slack"];
 
 export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
@@ -64,6 +65,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
     { id: "projects", label: "Projects" },
     { id: "github", label: "GitHub" },
     { id: "linear", label: "Linear" },
+    { id: "slack", label: "Slack" },
     ...(mode === "multi" ? [{ id: "team" as const, label: "Team" }] : []),
     ...(mode === "multi" && hasBilling ? [{ id: "billing" as const, label: "Billing" }] : []),
     ...(mode === "multi" ? [{ id: "account" as const, label: "Account" }] : []),
@@ -123,6 +125,9 @@ export function SettingsPage({ client }: { client: BentoClient }) {
           </Tabs.Content>
           <Tabs.Content value="linear" className="settings-body">
             <LinearPanel client={client} />
+          </Tabs.Content>
+          <Tabs.Content value="slack" className="settings-body">
+            <SlackPanel client={client} />
           </Tabs.Content>
           <Tabs.Content value="account" className="settings-body">
             <AccountSettings />

@@ -11,6 +11,7 @@ import { buildStagePrompt } from "../orchestrator/prompt.js";
 import { isUniqueViolation } from "../orchestrator/transcript.js";
 import { captureRunFinished, deliverQueuedMessage } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
+import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 
 const claimInput = z.object({
@@ -279,6 +280,7 @@ export function runnerRoutes(ctx: AppContext) {
         .returning({ id: agentRuns.id });
       if (!closed) return c.json({ ok: true });
       await deliverQueuedMessage(ctx, runId);
+      await queueRunFinishedSlack(ctx, runId);
 
       // Runner runs end here rather than in finishRun, so the same
       // event every other ending emits is emitted here, through the

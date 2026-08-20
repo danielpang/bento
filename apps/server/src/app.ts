@@ -24,6 +24,7 @@ import { invitation, member } from "@bento/db";
 import { invitationPreviewRoutes } from "./routes/invitations.js";
 import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
+import { slackRoutes } from "./routes/slack.js";
 import { contactRoutes } from "./routes/contact.js";
 
 export interface AppExtras {
@@ -254,6 +255,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/secrets", secretRoutes(ctx))
     .route("/github", githubRoutes(ctx))
     .route("/linear", linearRoutes(ctx))
+    .route("/slack", slackRoutes(ctx))
     .route("/team", teamRoutes(ctx))
     .route("/contact", contactRoutes(ctx))
     .route("/settings", settingsRoutes(ctx));
