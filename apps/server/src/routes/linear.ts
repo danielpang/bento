@@ -3,7 +3,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
-import { linearConnections, linearIssueLinks, linearTeamMappings, member } from "@bento/db";
+import { linearConnections, linearIssueLinks, linearTeamMappings, member, projects } from "@bento/db";
 import { LinearClient } from "@bento/linear";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
@@ -30,14 +30,6 @@ export function linearRoutes(ctx: AppContext) {
       hint: connection?.hint ?? null,
       webhook: Boolean(connection?.webhookId),
       defaultProjectId: connection?.defaultProjectId ?? null,
-      // Issue creation defaults to on, so a connection made before this
-      // existed reads as on too.
-      createIssues: connection?.createIssues ?? true,
-      defaultTeamId: connection?.defaultTeamId ?? null,
-      defaultTeamKey: connection?.defaultTeamKey ?? null,
-      defaultTeamName: connection?.defaultTeamName ?? null,
-      defaultLinearProjectId: connection?.defaultLinearProjectId ?? null,
-      defaultLinearProjectName: connection?.defaultLinearProjectName ?? null,
       canManage: access.canManage,
       mappings: mappings.map((m) => ({
         id: m.id,
@@ -227,8 +219,8 @@ export function linearRoutes(ctx: AppContext) {
   });
 
   /**
-   * Every field is optional and only what was sent is written, so the
-   * panel can flip one toggle without restating the rest.
+   * Workspace-level settings: only the inbound default is left here.
+   * Whether a card files an issue, and where, is set per project.
    */
   routes.patch(
     "/settings",
@@ -236,9 +228,6 @@ export function linearRoutes(ctx: AppContext) {
       "json",
       z.object({
         defaultProjectId: z.string().uuid().nullable().optional(),
-        createIssues: z.boolean().optional(),
-        defaultTeamId: z.string().min(1).nullable().optional(),
-        defaultLinearProjectId: z.string().min(1).nullable().optional(),
       }),
     ),
     async (c) => {
@@ -257,64 +246,6 @@ export function linearRoutes(ctx: AppContext) {
         }
         values.defaultProjectId = body.defaultProjectId;
       }
-      if (body.createIssues !== undefined) values.createIssues = body.createIssues;
-
-      // The team a Linear project is checked against: the one this
-      // request sets, or the stored one when it leaves the team alone.
-      let teamId = connection.defaultTeamId;
-
-      if (body.defaultTeamId !== undefined) {
-        if (body.defaultTeamId === null) {
-          values.defaultTeamId = null;
-          values.defaultTeamKey = null;
-          values.defaultTeamName = null;
-          // A Linear project belongs to a team, so it cannot outlive one.
-          values.defaultLinearProjectId = null;
-          values.defaultLinearProjectName = null;
-          teamId = null;
-        } else {
-          const client = await linearConnectionFor(ctx, access.organizationId);
-          if (!client) return c.json({ error: "connect Linear first" }, 409);
-          let team;
-          try {
-            team = (await client.client.teams()).find((t) => t.id === body.defaultTeamId);
-          } catch {
-            return c.json({ error: "Linear did not answer. Check the API key and try again." }, 502);
-          }
-          if (!team) return c.json({ error: "not found" }, 404);
-          values.defaultTeamId = team.id;
-          values.defaultTeamKey = team.key;
-          values.defaultTeamName = team.name;
-          if (team.id !== connection.defaultTeamId) {
-            // The stored project belonged to the team being replaced.
-            values.defaultLinearProjectId = null;
-            values.defaultLinearProjectName = null;
-          }
-          teamId = team.id;
-        }
-      }
-
-      if (body.defaultLinearProjectId !== undefined) {
-        if (body.defaultLinearProjectId === null) {
-          values.defaultLinearProjectId = null;
-          values.defaultLinearProjectName = null;
-        } else {
-          if (!teamId) return c.json({ error: "pick a default team first" }, 400);
-          const client = await linearConnectionFor(ctx, access.organizationId);
-          if (!client) return c.json({ error: "connect Linear first" }, 409);
-          let project;
-          try {
-            project = (await client.client.teamProjects(teamId)).find(
-              (p) => p.id === body.defaultLinearProjectId,
-            );
-          } catch {
-            return c.json({ error: "Linear did not answer. Check the API key and try again." }, 502);
-          }
-          if (!project) return c.json({ error: "not found" }, 404);
-          values.defaultLinearProjectId = project.id;
-          values.defaultLinearProjectName = project.name;
-        }
-      }
 
       const [updated] = await db(c, ctx)
         .update(linearConnections)
@@ -322,14 +253,114 @@ export function linearRoutes(ctx: AppContext) {
         .where(orgFilter(linearConnections.organizationId, access.organizationId))
         .returning();
       if (!updated) return c.json({ error: "connect Linear first" }, 409);
+      return c.json({ defaultProjectId: updated.defaultProjectId });
+    },
+  );
+
+  /**
+   * One project's outbound settings: whether its cards file issues, the
+   * team they are filed in, and the Linear project they join. Every
+   * field is optional and only what was sent is written, so the panel
+   * can flip one toggle without restating the rest.
+   */
+  routes.patch(
+    "/projects/:projectId/settings",
+    zValidator(
+      "json",
+      z.object({
+        createIssues: z.boolean().optional(),
+        teamId: z.string().min(1).nullable().optional(),
+        linearProjectId: z.string().min(1).nullable().optional(),
+      }),
+    ),
+    async (c) => {
+      const access = await requireAccess(ctx, c);
+      if (!access.ok) return c.json({ error: "not found" }, 404);
+      if (!access.canManage) return c.json({ error: "organization admin required" }, 403);
+      const projectId = c.req.param("projectId");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+      const body = c.req.valid("json");
+      const [project] = await db(c, ctx)
+        .select()
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .limit(1);
+      if (!project) return c.json({ error: "not found" }, 404);
+
+      const values: Partial<typeof projects.$inferInsert> = { updatedAt: new Date() };
+
+      if (body.createIssues !== undefined) values.linearCreateIssues = body.createIssues;
+
+      // The team a Linear project is checked against: the one this
+      // request sets, or the stored one when it leaves the team alone.
+      let teamId = project.linearTeamId;
+
+      if (body.teamId !== undefined) {
+        if (body.teamId === null) {
+          values.linearTeamId = null;
+          values.linearTeamKey = null;
+          values.linearTeamName = null;
+          // A Linear project belongs to a team, so it cannot outlive one.
+          values.linearProjectId = null;
+          values.linearProjectName = null;
+          teamId = null;
+        } else {
+          const client = await linearConnectionFor(ctx, access.organizationId);
+          if (!client) return c.json({ error: "connect Linear first" }, 409);
+          let team;
+          try {
+            team = (await client.client.teams()).find((t) => t.id === body.teamId);
+          } catch {
+            return c.json({ error: "Linear did not answer. Check the API key and try again." }, 502);
+          }
+          if (!team) return c.json({ error: "not found" }, 404);
+          values.linearTeamId = team.id;
+          values.linearTeamKey = team.key;
+          values.linearTeamName = team.name;
+          if (team.id !== project.linearTeamId) {
+            // The stored project belonged to the team being replaced.
+            values.linearProjectId = null;
+            values.linearProjectName = null;
+          }
+          teamId = team.id;
+        }
+      }
+
+      if (body.linearProjectId !== undefined) {
+        if (body.linearProjectId === null) {
+          values.linearProjectId = null;
+          values.linearProjectName = null;
+        } else {
+          if (!teamId) return c.json({ error: "pick a team first" }, 400);
+          const client = await linearConnectionFor(ctx, access.organizationId);
+          if (!client) return c.json({ error: "connect Linear first" }, 409);
+          let linearProject;
+          try {
+            linearProject = (await client.client.teamProjects(teamId)).find(
+              (p) => p.id === body.linearProjectId,
+            );
+          } catch {
+            return c.json({ error: "Linear did not answer. Check the API key and try again." }, 502);
+          }
+          if (!linearProject) return c.json({ error: "not found" }, 404);
+          values.linearProjectId = linearProject.id;
+          values.linearProjectName = linearProject.name;
+        }
+      }
+
+      const [updated] = await db(c, ctx)
+        .update(projects)
+        .set(values)
+        .where(eq(projects.id, projectId))
+        .returning();
+      if (!updated) return c.json({ error: "not found" }, 404);
       return c.json({
-        defaultProjectId: updated.defaultProjectId,
-        createIssues: updated.createIssues,
-        defaultTeamId: updated.defaultTeamId,
-        defaultTeamKey: updated.defaultTeamKey,
-        defaultTeamName: updated.defaultTeamName,
-        defaultLinearProjectId: updated.defaultLinearProjectId,
-        defaultLinearProjectName: updated.defaultLinearProjectName,
+        linearCreateIssues: updated.linearCreateIssues,
+        linearTeamId: updated.linearTeamId,
+        linearTeamKey: updated.linearTeamKey,
+        linearTeamName: updated.linearTeamName,
+        linearProjectId: updated.linearProjectId,
+        linearProjectName: updated.linearProjectName,
       });
     },
   );

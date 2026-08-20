@@ -350,6 +350,43 @@ test("the invitation preview meters repeat lookups", async () => {
 });
 
 /**
+ * The brake that meters a sweep.
+ *
+ * Per id alone could not: a caller who never repeats an id never
+ * repeats a key, so every probe took the fresh window branch, was
+ * allowed, and ran its own three table join. Metering the caller is
+ * what bounds that, and it only happens where a proxy names one.
+ */
+test("the invitation preview meters a sweep of distinct ids from one caller", async () => {
+  const statuses: number[] = [];
+  for (let i = 0; i < 130; i++) {
+    const res = await app.request(`/api/invitation-preview?id=sweepprobe${String(i).padStart(4, "0")}`, {
+      headers: { "x-forwarded-for": "198.51.100.9" },
+    });
+    statuses.push(res.status);
+  }
+  assert.ok(statuses.includes(429), `expected a 429 among ${statuses.slice(0, 5).join(", ")}...`);
+  assert.equal(statuses.at(-1), 429, "and the door stays shut for the rest of the window");
+});
+
+/**
+ * An id that could not exist is refused for the price of a regex,
+ * before it reaches the database, and without taking a slot in the
+ * limiter's map. Flooding that map used to be worth doing: it cleared
+ * itself wholesale at ten thousand entries, which reset the counters
+ * of the ids actually being metered.
+ */
+test("the invitation preview refuses ids that could not exist", async () => {
+  for (const id of ["short", "has spaces", "a".repeat(65), "../../etc/passwd", "%00", "a/b"]) {
+    const res = await app.request(`/api/invitation-preview?id=${encodeURIComponent(id)}`);
+    assert.equal(res.status, 404, `expected ${JSON.stringify(id)} to be refused`);
+  }
+  // Junk cannot spend a real id's budget: this one is still answering.
+  const real = await app.request("/api/invitation-preview?id=stillmetered01");
+  assert.equal(real.status, 404, "a well formed id is still served after the junk");
+});
+
+/**
  * The console's fallback for an invitee who signed up at the root: the
  * invitations their own address could actually accept. Scoped to the
  * caller, and only offers what the accept endpoint would honour.
@@ -631,8 +668,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["PATCH", "/api/linear/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
     [
       "PATCH",
-      "/api/linear/settings",
-      { body: JSON.stringify({ createIssues: true, defaultTeamId: "team-x" }) },
+      `/api/linear/projects/${project.id}/settings`,
+      { body: JSON.stringify({ createIssues: true, teamId: "team-x" }) },
     ],
     ["GET", "/api/linear/projects?teamId=team-x"],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],

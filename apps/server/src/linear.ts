@@ -1,5 +1,5 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { features, linearConnections, linearIssueLinks, pipelines } from "@bento/db";
+import { features, linearConnections, linearIssueLinks, pipelines, projects } from "@bento/db";
 import { LinearClient, type LinearIssue, type LinearWorkflowState } from "@bento/linear";
 import type { AppContext } from "./context.js";
 
@@ -44,30 +44,36 @@ export async function linearConnectionFor(
   }
 }
 
+export type ProjectLinearSettings = Pick<
+  typeof projects.$inferSelect,
+  "linearCreateIssues" | "linearTeamId" | "linearProjectId"
+>;
+
 /**
  * Where a card created in Bento files its issue, or null for "file
- * nothing".
+ * nothing". The settings are the card's project's own: each project
+ * decides whether its cards file issues and into which team.
  *
  * The team mapped to the card's project wins, so both directions agree
- * about which team a project belongs to, and the configured default
- * covers every project without a mapping. Without either there is no
- * team, and Linear cannot create an issue without one, so the card
- * simply stays Bento only.
+ * about which team a project belongs to, and the project's default
+ * covers it when nothing is mapped. Without either there is no team,
+ * and Linear cannot create an issue without one, so the card simply
+ * stays Bento only.
  *
- * The Linear project rides along only with the default team, because a
- * project belongs to the team it was created under: attaching it to an
- * issue filed in a mapped team would either be refused or file the work
- * somewhere that project does not cover.
+ * The Linear project rides along only with the project's default team,
+ * because a Linear project belongs to the team it was created under:
+ * attaching it to an issue filed in a mapped team would either be
+ * refused or file the work somewhere that project does not cover.
  */
 export function resolveIssueTarget(
-  connection: Pick<LinearConnectionRow, "createIssues" | "defaultTeamId" | "defaultLinearProjectId">,
+  project: ProjectLinearSettings,
   mappedTeamId: string | null,
 ): { teamId: string; projectId: string | null } | null {
-  if (!connection.createIssues) return null;
-  const teamId = mappedTeamId ?? connection.defaultTeamId;
+  if (!project.linearCreateIssues) return null;
+  const teamId = mappedTeamId ?? project.linearTeamId;
   if (!teamId) return null;
-  const sameTeam = teamId === connection.defaultTeamId;
-  return { teamId, projectId: sameTeam ? (connection.defaultLinearProjectId ?? null) : null };
+  const sameTeam = teamId === project.linearTeamId;
+  return { teamId, projectId: sameTeam ? (project.linearProjectId ?? null) : null };
 }
 
 /** Bento lifecycle to Linear workflow state type. */

@@ -328,6 +328,18 @@ export async function handleLinearIssueCreate(
   const connection = await linearConnectionFor(ctx, feature.organizationId);
   if (!connection) return;
 
+  // Whether this card files an issue, and where, is the project's call.
+  const [project] = await ctx.db
+    .select({
+      linearCreateIssues: projects.linearCreateIssues,
+      linearTeamId: projects.linearTeamId,
+      linearProjectId: projects.linearProjectId,
+    })
+    .from(projects)
+    .where(eq(projects.id, feature.projectId))
+    .limit(1);
+  if (!project) return;
+
   const [mapping] = await ctx.db
     .select({ linearTeamId: linearTeamMappings.linearTeamId })
     .from(linearTeamMappings)
@@ -347,7 +359,7 @@ export async function handleLinearIssueCreate(
   // already exist in it, so a retry keeps that choice even if the
   // mappings moved underneath it.
   const target = resolveIssueTarget(
-    connection.connection,
+    project,
     existing?.linearTeamId ?? mapping?.linearTeamId ?? null,
   );
   if (!target) return;
@@ -433,16 +445,22 @@ async function fileIssue(
 
 /**
  * Called from the create card route. The connection check keeps the
- * queue quiet for deployments with no Linear and for workspaces that
- * turned issue creation off.
+ * queue quiet for deployments with no Linear, and the project check for
+ * projects that turned issue creation off.
  */
 export async function queueLinearIssueCreate(
   ctx: AppContext,
-  feature: { id: string; organizationId: string | null },
+  feature: { id: string; organizationId: string | null; projectId: string },
 ): Promise<void> {
   try {
     const connection = await linearConnectionRow(ctx, feature.organizationId);
-    if (!connection?.createIssues) return;
+    if (!connection) return;
+    const [project] = await ctx.db
+      .select({ linearCreateIssues: projects.linearCreateIssues })
+      .from(projects)
+      .where(eq(projects.id, feature.projectId))
+      .limit(1);
+    if (!project?.linearCreateIssues) return;
     await ctx.boss.send("linear.create-issue", { featureId: feature.id });
   } catch (err) {
     // Filing the issue must never cost someone the card they just made.
