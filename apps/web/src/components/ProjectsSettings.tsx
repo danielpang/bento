@@ -71,9 +71,8 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
     <section className="section settings-card">
       <h3 className="settings-title">Projects</h3>
       <p className="muted">
-        Every board belongs to a project. Open one to change how it works, including whether its
-        cards file Linear issues; renaming changes what it is called everywhere, and removing takes
-        its cards, its runs, and its pipeline with it.
+        Every board belongs to a project. Open one to change how it works with Linear. Removing one
+        takes its cards, runs, and pipeline with it.
       </p>
 
       {failed ? (

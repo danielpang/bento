@@ -48,20 +48,20 @@ export function ProjectSettings({
   return (
     <>
       <section className="section settings-card">
-        <h3 className="settings-title">{project.name}</h3>
-        {/* A project can exist before its code does, so this is often absent. */}
-        {project.localPath && <p className="muted">{project.localPath}</p>}
-        <div className="actions">
+        <div className="settings-title-row">
+          <h3 className="settings-title">{project.name}</h3>
           <button className="btn btn-ghost" onClick={onBack}>
             Back
           </button>
         </div>
+        {/* A project can exist before its code does, so this is often absent. */}
+        {project.localPath && <p className="muted">{project.localPath}</p>}
       </section>
       {/* Hidden rather than disabled when Linear is not connected:
           nothing arrives from Linear without a connection, so the
           toggle would be a switch that does nothing. */}
       {status?.connected && (
-        <AutoStartCard client={client} project={project} status={status} onChanged={onChanged} />
+        <AutoStartCard client={client} project={project} onChanged={onChanged} />
       )}
       <CreateIssuesCard
         client={client}
@@ -81,12 +81,10 @@ export function ProjectSettings({
 function AutoStartCard({
   client,
   project,
-  status,
   onChanged,
 }: {
   client: BentoClient;
   project: Project;
-  status: LinearConnection;
   onChanged: () => void;
 }) {
   const toast = useToast();
@@ -108,10 +106,8 @@ function AutoStartCard({
     <section className="section settings-card">
       <h3 className="settings-title">Cards arriving from Linear</h3>
       <p className="muted">
-        An issue arriving from Linear becomes a card here. Start the pipeline and the card leaves
-        the backlog for the first stage as it is imported, with the pipeline deciding the rest: a
-        stage that waits for approval still waits, one with an agent starts a run. Sync now and the
-        scheduled backlog import always leave their cards in the backlog.
+        Issues arriving from Linear become cards here. Start the pipeline and they go straight to
+        the first stage; otherwise they wait in the backlog.
       </p>
       <label className="gate-check">
         <input
@@ -122,12 +118,6 @@ function AutoStartCard({
         />
         <span className="gate-check-text">Start the pipeline when an issue arrives from Linear.</span>
       </label>
-      {!status.webhook && project.autoStartPipeline && (
-        <p className="muted">
-          Linear cannot notify this server, so new issues arrive with the scheduled sync instead.
-          Those cards wait in the backlog, and nothing starts on its own until the webhook works.
-        </p>
-      )}
     </section>
   );
 }
@@ -195,9 +185,8 @@ function CreateIssuesCard({
 
   const intro = (
     <p className="muted">
-      A card made in this project files an issue in Linear, so work started here is visible to
-      everyone working there. The issue then follows the card like an imported one does: its state
-      changes as the card moves, with a comment naming each stage.
+      A card created here files a Linear issue, which then follows the card: its state changes as
+      the card moves.
     </p>
   );
 
@@ -225,10 +214,7 @@ function CreateIssuesCard({
       <section className="section settings-card">
         <h3 className="settings-title">Cards created in Bento</h3>
         {intro}
-        <p className="muted">
-          Linear is not connected yet. Connect it under Settings, then Linear, and come back here
-          to choose where this project's cards land.
-        </p>
+        <p className="muted">Linear is not connected yet. Connect it under Settings, then Linear.</p>
       </section>
     );
   }
@@ -274,8 +260,7 @@ function CreateIssuesCard({
       <div className="field">
         <h4 className="field-heading">Team</h4>
         <p className="muted">
-          The team new issues are filed in. When this project syncs a mapped team's backlog, issues
-          go to that team instead, so both directions agree about where this project's work lives.
+          The team new issues are filed in. A team mapped to this project wins over this choice.
         </p>
         <select
           className="input"
@@ -298,8 +283,7 @@ function CreateIssuesCard({
       <div className="field">
         <h4 className="field-heading">Linear project</h4>
         <p className="muted">
-          The Linear project those issues join. Optional, and it applies to the team above only: a
-          Linear project belongs to one team, so issues filed into a mapped team join no project.
+          The Linear project those issues join. Optional, and it applies to the team above only.
         </p>
         <select
           className="input"

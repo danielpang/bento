@@ -91,8 +91,7 @@ export function LinearPanel({ client }: { client: BentoClient }) {
           </p>
         )}
         <p className="muted">
-          Whether a card created in Bento files an issue, and which team it lands in, is set per
-          project: open Settings, then Projects, and pick the project.
+          How each project trades cards with Linear is set under Settings, then Projects.
         </p>
         <div className="actions">
           <button
@@ -208,9 +207,8 @@ function MappingsCard({
     <section className="section settings-card">
       <h3 className="settings-title">Team mappings</h3>
       <p className="muted">
-        Each mapped team's backlog issues become cards in its project. New backlog issues in a
-        mapped team arrive as they are created. Whether an arriving issue waits in the backlog or
-        starts the pipeline is each project's own setting, under Settings, Projects.
+        Each mapped team's backlog issues become cards in its project, arriving as they are
+        created.
       </p>
       {status.mappings.length === 0 && <p className="muted">No teams mapped yet.</p>}
       {status.mappings.map((mapping) => (
