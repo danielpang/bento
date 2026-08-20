@@ -93,8 +93,8 @@ const PROVIDER_KEYS = [
   { label: "Anthropic", name: "ANTHROPIC_API_KEY" },
   { label: "OpenAI", name: "OPENAI_API_KEY" },
   { label: "OpenRouter", name: "OPENROUTER_API_KEY" },
-  { label: "Gemini", name: "GEMINI_API_KEY" },
   { label: "Cursor", name: "CURSOR_API_KEY" },
+  { label: "Gemini", name: "GEMINI_API_KEY" },
 ] as const;
 
 export function Setup({
