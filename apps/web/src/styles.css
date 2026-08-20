@@ -2776,6 +2776,84 @@ button {
   color: var(--text-faint);
 }
 
+/*
+ * The sessions split: on screens with room for two panes (a desktop
+ * window, an iPad), an opened conversation sits to the right of the
+ * list, like a mail client. First load is the list alone; the split
+ * only exists once a row has been picked, and phones never enter it
+ * because their rows navigate to the session's own page.
+ */
+.sessions-pane {
+  /* Invisible until the split engages, so the one-pane view lays out
+     exactly as it did before the wrapper existed. */
+  display: contents;
+}
+/*
+ * Whether two panes fit, and the only place that decides it.
+ *
+ * SessionsPage reads this off the element to choose between opening a
+ * conversation beside the list and following the row's link, so the
+ * breakpoint is not written twice. It used to be: a matchMedia query
+ * in the component holding the hand written complement of the number
+ * in the media query below, which agreed only until somebody retuned
+ * one of them.
+ */
+.sessions-screen {
+  --split: 1;
+}
+.sessions-screen[data-split] {
+  max-width: 1560px;
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  overflow: hidden;
+  padding-bottom: 0;
+}
+/* Each pane scrolls itself; the screen stops being the scroller. */
+.sessions-screen[data-split] .sessions-pane {
+  display: block;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 16px;
+}
+.session-card[data-selected] {
+  background: var(--panel-raised);
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+.sessions-detail {
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+}
+/* The page sizes itself to the pane, not to the viewport it fills
+   when it is a tab of its own. */
+.sessions-detail .session-page {
+  height: 100%;
+  max-width: none;
+  padding: 4px 4px 12px 20px;
+}
+/* Shrunk below two panes with a conversation open (a narrowed window,
+   a rotated phone): the conversation wins the width, and its Close
+   button is the way back to the list. */
+@media (max-width: 720px) {
+  /* Read by SessionsPage: below this width a row navigates instead of
+     opening a pane. Changing the width here moves both. */
+  .sessions-screen {
+    --split: 0;
+  }
+  .sessions-screen[data-split] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sessions-screen[data-split] .sessions-pane {
+    display: none;
+  }
+  .sessions-detail {
+    border-left: none;
+  }
+  .sessions-detail .session-page {
+    padding: 4px 0 10px;
+  }
+}
+
 /* The skill editor: prose-sized, since roles are written in sentences. */
 .skill-input {
   min-height: 110px;
