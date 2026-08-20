@@ -1,6 +1,10 @@
 node_modules/
 dist/
 .turbo/
+# TypeScript's incremental build cache: rewritten by every `tsc -b`, so
+# tracking it dirtied the tree on every build and conflicted on every
+# merge of two branches that had both been built.
+*.tsbuildinfo
 *.log
 .env
 .env.*
