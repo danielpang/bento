@@ -6,6 +6,20 @@ export interface Project {
   repoUrl: string | null;
   localPath: string | null;
   defaultBranch: string;
+  /** Whether an issue arriving from Linear starts this project's pipeline. */
+  autoStartPipeline: boolean;
+  /** Whether a card created in this project files an issue in Linear. */
+  linearCreateIssues: boolean;
+  /**
+   * Where those issues go when no Linear team is mapped to this project.
+   * The key and name are kept so settings can name the team without
+   * calling Linear.
+   */
+  linearTeamId: string | null;
+  linearTeamKey: string | null;
+  linearTeamName: string | null;
+  linearProjectId: string | null;
+  linearProjectName: string | null;
 }
 
 export interface Repository {

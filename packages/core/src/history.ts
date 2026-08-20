@@ -35,6 +35,8 @@ export function historyTriggerLabel(trigger: string, actor: string | null): stri
       return "returned by a gate";
     case "agent_run":
       return "by an agent";
+    case "linear_auto":
+      return "on arrival from Linear";
     case "system":
       return "automatic";
     default:

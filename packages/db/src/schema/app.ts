@@ -48,6 +48,33 @@ export const projects = pgTable("projects", {
    * is how a hosted board drives containers on your laptop.
    */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
+  /**
+   * Whether an issue arriving from Linear enters this project's first
+   * stage instead of waiting in the backlog. Per project, because one
+   * team's intake is triaged by a person and another's is meant to be
+   * picked up like a CI job. Off by default: it puts an agent on a
+   * ticket nobody has read yet.
+   */
+  autoStartPipeline: boolean("auto_start_pipeline").notNull().default(false),
+  /**
+   * Whether a card created in this project files an issue in Linear. On
+   * by default: a connected workspace is one someone wants their work to
+   * show up in, and a card with no issue is the surprise, not the other
+   * way round. Meaningless until the organization connects Linear.
+   */
+  linearCreateIssues: boolean("linear_create_issues").notNull().default(true),
+  /**
+   * Where those issues go when no Linear team is mapped to this project.
+   * The team is required for a create, so an unset team means nothing is
+   * filed; the key and name are kept so settings can name the team
+   * without calling Linear. The Linear project is optional, and belongs
+   * to that team.
+   */
+  linearTeamId: text("linear_team_id"),
+  linearTeamKey: text("linear_team_key"),
+  linearTeamName: text("linear_team_name"),
+  linearProjectId: text("linear_project_id"),
+  linearProjectName: text("linear_project_name"),
   ...timestamps,
 });
 
@@ -307,7 +334,7 @@ export const featureEvents = pgTable(
 
     /** Distinguishes direction, which stage ids alone do not. */
     trigger: text("trigger", {
-      enum: ["manual", "manual_back", "gate_auto", "gate_auto_back", "agent_run", "system"],
+      enum: ["manual", "manual_back", "gate_auto", "gate_auto_back", "agent_run", "linear_auto", "system"],
     }).notNull(),
     actorUserId: text("actor_user_id").references(() => user.id),
     /** The run that caused this, when one did. */
@@ -654,24 +681,9 @@ export const linearConnections = pgTable(
     encryptedWebhookSecret: text("encrypted_webhook_secret"),
     /** Target project for "bento" label imports from unmapped teams. */
     defaultProjectId: uuid("default_project_id").references(() => projects.id, { onDelete: "set null" }),
-    /**
-     * Whether a card created in Bento files an issue in Linear. On by
-     * default: a connected workspace is one someone wants their work to
-     * show up in, and a card with no issue is the surprise, not the
-     * other way round.
-     */
-    createIssues: boolean("create_issues").notNull().default(true),
-    /**
-     * Where those issues go. The team is required for a create, so an
-     * unset team means nothing is filed; the key and name are kept so
-     * settings can name the team without calling Linear. The Linear
-     * project is optional, and belongs to the default team.
-     */
-    defaultTeamId: text("default_team_id"),
-    defaultTeamKey: text("default_team_key"),
-    defaultTeamName: text("default_team_name"),
-    defaultLinearProjectId: text("default_linear_project_id"),
-    defaultLinearProjectName: text("default_linear_project_name"),
+    // Whether a card files an issue, and into which team and Linear
+    // project, lives on the projects table: each project decides for
+    // itself, so those columns are not here.
     ...timestamps,
   },
   (t) => [

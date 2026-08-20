@@ -3,7 +3,6 @@ import type {
   BentoClient,
   LinearConnection,
   LinearIssueOption,
-  LinearProjectOption,
   LinearTeamOption,
   Project,
 } from "@bento/api-client";
@@ -91,6 +90,9 @@ export function LinearPanel({ client }: { client: BentoClient }) {
             Sync now to pull the mapped backlogs immediately.
           </p>
         )}
+        <p className="muted">
+          How each project trades cards with Linear is set under Settings, then Projects.
+        </p>
         <div className="actions">
           <button
             className="btn"
@@ -113,7 +115,6 @@ export function LinearPanel({ client }: { client: BentoClient }) {
       </section>
 
       <MappingsCard client={client} status={status} projects={projects} busy={busy} act={act} />
-      <CreateIssuesCard client={client} status={status} busy={busy} act={act} />
       <ImportCard client={client} projects={projects} />
 
       {disconnecting && (
@@ -148,8 +149,8 @@ function ConnectCard({
         Bring your Linear backlog onto the board. Map a team to a project to sync its backlog, add
         a "bento" label to any issue to pull it in ad hoc, or import issues by hand. As cards move
         through the pipeline, their Linear issues follow: state changes plus a comment naming the
-        stage. It works the other way too: a card created in Bento files an issue, which you can
-        turn off once connected. Paste a personal API key from Linear under Settings, then Security
+        stage. It works the other way too: a card created in Bento files an issue, which each
+        project can turn off in its own settings. Paste a personal API key from Linear under Settings, then Security
         and access. It stays on the server, encrypted, and is never given to an agent.
       </p>
       <SecretField
@@ -206,8 +207,8 @@ function MappingsCard({
     <section className="section settings-card">
       <h3 className="settings-title">Team mappings</h3>
       <p className="muted">
-        Each mapped team's backlog issues become cards in its project. New backlog issues in a
-        mapped team arrive as they are created.
+        Each mapped team's backlog issues become cards in its project, arriving as they are
+        created.
       </p>
       {status.mappings.length === 0 && <p className="muted">No teams mapped yet.</p>}
       {status.mappings.map((mapping) => (
@@ -281,138 +282,6 @@ function MappingsCard({
         >
           <option value="">No default project</option>
           {projects.map((project) => (
-            <option key={project.id} value={project.id}>
-              {project.name}
-            </option>
-          ))}
-        </select>
-      </div>
-    </section>
-  );
-}
-
-/**
- * The other direction: a card made on the board files an issue in
- * Linear. On unless someone turns it off, so a connected workspace sees
- * the work either way round.
- *
- * Both selects fall back to the name stored with the connection when
- * Linear cannot be reached, because a select whose value matches none of
- * its options renders blank, and blank here reads as "nothing is set"
- * when something is.
- */
-function CreateIssuesCard({
-  client,
-  status,
-  busy,
-  act,
-}: {
-  client: BentoClient;
-  status: LinearConnection;
-  busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
-}) {
-  const [teams, setTeams] = useState<LinearTeamOption[]>([]);
-  const [linearProjects, setLinearProjects] = useState<LinearProjectOption[]>([]);
-
-  useEffect(() => {
-    void client
-      .listLinearTeams()
-      .then(setTeams)
-      .catch(() => setTeams([]));
-  }, [client]);
-
-  const teamId = status.defaultTeamId;
-  useEffect(() => {
-    if (!teamId) {
-      setLinearProjects([]);
-      return;
-    }
-    void client
-      .listLinearProjects(teamId)
-      .then(setLinearProjects)
-      .catch(() => setLinearProjects([]));
-  }, [client, teamId]);
-
-  const teamOptions =
-    teamId && !teams.some((team) => team.id === teamId)
-      ? [{ id: teamId, key: status.defaultTeamKey ?? "", name: status.defaultTeamName ?? "the saved team" }, ...teams]
-      : teams;
-  const projectOptions =
-    status.defaultLinearProjectId &&
-    !linearProjects.some((project) => project.id === status.defaultLinearProjectId)
-      ? [
-          {
-            id: status.defaultLinearProjectId,
-            name: status.defaultLinearProjectName ?? "the saved project",
-          },
-          ...linearProjects,
-        ]
-      : linearProjects;
-
-  const disabled = busy || !status.canManage;
-
-  return (
-    <section className="section settings-card">
-      <h3 className="settings-title">Cards created in Bento</h3>
-      <p className="muted">
-        A card made on the board files an issue in Linear, so work started here is visible to
-        everyone working there. The issue then follows the card like an imported one does: its state
-        changes as the card moves, with a comment naming each stage.
-      </p>
-      <label className="gate-check">
-        <input
-          type="checkbox"
-          checked={status.createIssues}
-          disabled={disabled}
-          onChange={(e) => void act(() => client.setLinearSettings({ createIssues: e.target.checked }))}
-        />
-        <span className="gate-check-text">File a Linear issue for every card created in Bento.</span>
-      </label>
-      {status.createIssues && !status.defaultTeamId && (
-        <p className="muted">
-          No default team yet, so cards in projects with no mapped team file nothing. Pick one below.
-        </p>
-      )}
-      <div className="field">
-        <h4 className="field-heading">Default team</h4>
-        <p className="muted">
-          The team new issues are filed in. A card whose project is mapped to a team above goes to
-          that team instead, so both directions agree about where a project's work lives.
-        </p>
-        <select
-          className="input"
-          value={status.defaultTeamId ?? ""}
-          disabled={disabled}
-          aria-label="Default Linear team"
-          onChange={(e) => void act(() => client.setLinearSettings({ defaultTeamId: e.target.value || null }))}
-        >
-          <option value="">No default team</option>
-          {teamOptions.map((team) => (
-            <option key={team.id} value={team.id}>
-              {team.name}
-              {team.key ? ` (${team.key})` : ""}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="field">
-        <h4 className="field-heading">Default Linear project</h4>
-        <p className="muted">
-          The Linear project those issues join. Optional, and it applies to the default team only:
-          a project belongs to one team, so issues filed into a mapped team join no project.
-        </p>
-        <select
-          className="input"
-          value={status.defaultLinearProjectId ?? ""}
-          disabled={disabled || !status.defaultTeamId}
-          aria-label="Default Linear project"
-          onChange={(e) =>
-            void act(() => client.setLinearSettings({ defaultLinearProjectId: e.target.value || null }))
-          }
-        >
-          <option value="">No project</option>
-          {projectOptions.map((project) => (
             <option key={project.id} value={project.id}>
               {project.name}
             </option>

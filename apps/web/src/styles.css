@@ -3419,6 +3419,14 @@ button.session-expand[aria-pressed="true"] {
   font-weight: 650;
   letter-spacing: 0.01em;
 }
+/* A heading with one action beside it, for cards that are a page of
+   their own and need a way back on the heading line. */
+.settings-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 
 /* Provider tabs inside the settings card. The dot answers "which of
    these is already set" without opening each tab. */

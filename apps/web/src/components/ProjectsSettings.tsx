@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import type { BentoClient, Project } from "@bento/api-client";
 import { Modal } from "./Modal.js";
+import { ProjectSettings } from "./ProjectSettings.js";
 import { PromptDialog } from "./PromptDialog.js";
 import { useToast } from "./Toasts.js";
 
 /**
- * Renaming and removing projects. Creating one stays on the board,
- * which is where you are when you want another; neither of these is
- * board work, and removing takes every card with it.
+ * The projects list, and each project's own settings behind it.
+ * Creating one stays on the board, which is where you are when you want
+ * another; none of this is board work, and removing takes every card
+ * with it.
  *
  * The server scopes the list per request, so in multi mode this is the
  * active organization's projects and nothing else.
@@ -20,6 +22,15 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
   const [renaming, setRenaming] = useState<Project | null>(null);
   const [removing, setRemoving] = useState<Project | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Which project's settings are open, held as an id rather than a row:
+   * the rows are refetched after every edit, and a held copy would go
+   * on showing the values from before the edit. From the address first,
+   * so a reload or a shared link lands on the same project.
+   */
+  const [openId, setOpenId] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get("project"),
+  );
 
   async function load() {
     try {
@@ -35,12 +46,33 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
     void load();
   }, [client]);
 
+  function show(id: string | null) {
+    setOpenId(id);
+    // The address mirrors the open project so a reload or a shared
+    // link lands on the same settings.
+    history.replaceState(null, "", id ? `/settings?tab=projects&project=${id}` : "/settings?tab=projects");
+  }
+
+  // A stale id (an organization switch, a removed project) simply falls
+  // back to the list; the rows here are already scoped to this tenant.
+  const open = projects?.find((p) => p.id === openId) ?? null;
+  if (open) {
+    return (
+      <ProjectSettings
+        client={client}
+        project={open}
+        onBack={() => show(null)}
+        onChanged={() => void load()}
+      />
+    );
+  }
+
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Projects</h3>
       <p className="muted">
-        Every board belongs to a project. Renaming one changes what it is called everywhere;
-        removing one takes its cards, its runs, and its pipeline with it.
+        Every board belongs to a project. Open one to change how it works with Linear. Removing one
+        takes its cards, runs, and pipeline with it.
       </p>
 
       {failed ? (
@@ -62,8 +94,11 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
                 </>
               )}
             </span>
-            {/* One slot for both, so they stay together as a path wraps. */}
+            {/* One slot for all three, so they stay together as a path wraps. */}
             <span className="member-action">
+              <button className="btn btn-ghost" disabled={busy} onClick={() => show(project.id)}>
+                Settings
+              </button>
               <button className="btn btn-ghost" disabled={busy} onClick={() => setRenaming(project)}>
                 Rename
               </button>
@@ -87,7 +122,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
             if (name === renaming.name) return;
             setBusy(true);
             try {
-              await client.renameProject(renaming.id, name);
+              await client.updateProject(renaming.id, { name });
               await load();
             } catch (err) {
               toast.fail(err);

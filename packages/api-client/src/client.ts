@@ -79,14 +79,6 @@ export interface LinearConnection {
   /** True when Linear can push changes to us as they happen. */
   webhook: boolean;
   defaultProjectId: string | null;
-  /** Whether a card created in Bento files an issue in Linear. */
-  createIssues: boolean;
-  /** Where those issues go when the card's project maps no team. */
-  defaultTeamId: string | null;
-  defaultTeamKey: string | null;
-  defaultTeamName: string | null;
-  defaultLinearProjectId: string | null;
-  defaultLinearProjectName: string | null;
   canManage: boolean;
   mappings: LinearTeamMapping[];
 }
@@ -115,9 +107,23 @@ export interface LinearProjectOption {
 
 export interface LinearSettings {
   defaultProjectId?: string | null;
+}
+
+/** One project's outbound settings: only what was sent is written. */
+export interface ProjectLinearSettings {
   createIssues?: boolean;
-  defaultTeamId?: string | null;
-  defaultLinearProjectId?: string | null;
+  teamId?: string | null;
+  linearProjectId?: string | null;
+}
+
+/** What the project settings PATCH answers with: the stored values. */
+export interface ProjectLinearState {
+  linearCreateIssues: boolean;
+  linearTeamId: string | null;
+  linearTeamKey: string | null;
+  linearTeamName: string | null;
+  linearProjectId: string | null;
+  linearProjectName: string | null;
 }
 
 export interface LinearIssueOption {
@@ -315,11 +321,14 @@ export class BentoClient {
     return this.request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
   }
 
-  /** The name, and nothing else about the project. */
-  renameProject(projectId: string, name: string) {
+  /**
+   * The project's own settings: its name, and whether an arriving Linear
+   * issue starts its pipeline. Only what is passed is written.
+   */
+  updateProject(projectId: string, patch: { name?: string; autoStartPipeline?: boolean }) {
     return this.request<Project>(`/api/projects/${projectId}`, {
       method: "PATCH",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(patch),
     });
   }
 
@@ -480,6 +489,13 @@ export class BentoClient {
       method: "PATCH",
       body: JSON.stringify(input),
     });
+  }
+
+  setProjectLinearSettings(projectId: string, input: ProjectLinearSettings) {
+    return this.request<ProjectLinearState>(
+      `/api/linear/projects/${encodeURIComponent(projectId)}/settings`,
+      { method: "PATCH", body: JSON.stringify(input) },
+    );
   }
 
   listLinearIssues(teamId: string, after?: string) {

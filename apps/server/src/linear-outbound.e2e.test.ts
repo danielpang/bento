@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import {
@@ -131,13 +131,20 @@ before(async () => {
     ownerId: userId,
     organizationId: null,
     encryptedApiKey: ctx.secretBox.encrypt("lin_api_test"),
-    createIssues: true,
-    defaultTeamId: "team-default",
-    defaultTeamKey: "DEF",
-    defaultTeamName: "Default",
-    defaultLinearProjectId: "linear-project-1",
-    defaultLinearProjectName: "Q3",
   });
+
+  // Where cards go is the project's own setting: the unmapped project
+  // names a team directly, the mapped one relies on its mapping.
+  await db
+    .update(projects)
+    .set({
+      linearTeamId: "team-default",
+      linearTeamKey: "DEF",
+      linearTeamName: "Default",
+      linearProjectId: "linear-project-1",
+      linearProjectName: "Q3",
+    })
+    .where(eq(projects.id, projectId));
 });
 
 after(async () => {
@@ -231,7 +238,10 @@ async function waitForLink(featureId: string, timeoutMs = 30_000) {
       .from(linearIssueLinks)
       .where(eq(linearIssueLinks.featureId, featureId))
       .limit(1);
-    if (link) return link;
+    // A pending row is the reservation the worker writes before it calls
+    // Linear, not a filed issue: returning it read the identifier as
+    // empty whenever the machine was busy enough to be looked at first.
+    if (link && !link.pending) return link;
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`no Linear issue was filed for feature ${featureId} within ${timeoutMs}ms`);
@@ -258,7 +268,7 @@ test("a card created in Bento files a Linear issue and links it", async () => {
   assert.equal(sent.description, "from the board");
 });
 
-test("a card in a mapped project files into that team, without the default project", async () => {
+test("a card in a mapped project files into that team, without the Linear project", async () => {
   const featureId = await createCard(mappedProjectId, "Mapped work");
   const link = await waitForLink(featureId);
   assert.equal(link.linearTeamId, "team-mapped");
@@ -269,14 +279,14 @@ test("a card in a mapped project files into that team, without the default proje
   assert.equal(sent.projectId, undefined, "a project belongs to the default team only");
 });
 
-test("turning issue creation off leaves the card Bento only", async () => {
-  await ctx.db.update(linearConnections).set({ createIssues: false });
+test("turning issue creation off for the project leaves the card Bento only", async () => {
+  await ctx.db.update(projects).set({ linearCreateIssues: false }).where(eq(projects.id, projectId));
   const quiet = await createCard(projectId, "No issue please");
 
   // A card made after it is switched back on is the barrier: once its
   // issue exists, the queue has been past the point where the first
   // card's would have been filed.
-  await ctx.db.update(linearConnections).set({ createIssues: true });
+  await ctx.db.update(projects).set({ linearCreateIssues: true }).where(eq(projects.id, projectId));
   const loud = await createCard(projectId, "Issue please");
   await waitForLink(loud);
 
@@ -434,7 +444,7 @@ test("the oldest mapping decides the team", async () => {
   }
 });
 
-test("the settings route stores a default team and project", async () => {
+test("the project settings route stores a team and Linear project", async () => {
   // The picker route and the write it feeds, over the wire.
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}")) as { query: string };
@@ -456,46 +466,45 @@ test("the settings route stores a default team and project", async () => {
     assert.equal(listed.status, 200);
     assert.deepEqual(await listed.json(), [{ id: "linear-project-2", name: "Q4" }]);
 
-    const res = await app.request("/api/linear/settings", {
+    const res = await app.request(`/api/linear/projects/${projectId}/settings`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ defaultTeamId: "team-other", defaultLinearProjectId: "linear-project-2" }),
+      body: JSON.stringify({ teamId: "team-other", linearProjectId: "linear-project-2" }),
     });
     const stored = await res.text();
     assert.equal(res.status, 200, stored);
     assert.deepEqual(JSON.parse(stored), {
-      defaultProjectId: null,
-      createIssues: true,
-      defaultTeamId: "team-other",
-      defaultTeamKey: "OTH",
-      defaultTeamName: "Other",
-      defaultLinearProjectId: "linear-project-2",
-      defaultLinearProjectName: "Q4",
+      linearCreateIssues: true,
+      linearTeamId: "team-other",
+      linearTeamKey: "OTH",
+      linearTeamName: "Other",
+      linearProjectId: "linear-project-2",
+      linearProjectName: "Q4",
     });
 
     // A team Linear does not know must not be storable, and a project
     // from the old team must not survive the switch.
-    const unknown = await app.request("/api/linear/settings", {
+    const unknown = await app.request(`/api/linear/projects/${projectId}/settings`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ defaultTeamId: "team-nope" }),
+      body: JSON.stringify({ teamId: "team-nope" }),
     });
     assert.equal(unknown.status, 404);
 
-    const cleared = await app.request("/api/linear/settings", {
+    const cleared = await app.request(`/api/linear/projects/${projectId}/settings`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ defaultTeamId: null }),
+      body: JSON.stringify({ teamId: null }),
     });
     assert.equal(cleared.status, 200);
     const [row] = await ctx.db
       .select()
-      .from(linearConnections)
-      .where(and(eq(linearConnections.ownerId, ctx.userId)))
+      .from(projects)
+      .where(eq(projects.id, projectId))
       .limit(1);
-    assert.equal(row!.defaultTeamId, null);
-    assert.equal(row!.defaultLinearProjectId, null, "a project cannot outlive its team");
-    assert.equal(row!.defaultLinearProjectName, null);
+    assert.equal(row!.linearTeamId, null);
+    assert.equal(row!.linearProjectId, null, "a Linear project cannot outlive its team");
+    assert.equal(row!.linearProjectName, null);
   } finally {
     globalThis.fetch = stubLinear();
   }

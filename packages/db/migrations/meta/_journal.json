@@ -113,6 +113,20 @@
       "when": 1787094600000,
       "tag": "0015_slack_integration",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1787235589512,
+      "tag": "0016_project_auto_start",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787235742363,
+      "tag": "0017_project_linear_settings",
+      "breakpoints": true
     }
   ]
 }
