@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentRun, Feature, Stage } from "@bento/api-client";
 import { neighbourCardId } from "./components/Board.js";
-import { deleteConsequences } from "./components/FeatureDrawer.js";
+import { deleteConsequences } from "./components/delete-consequences.js";
 
 /**
  * The two pieces of the delete that are decisions rather than plumbing:
