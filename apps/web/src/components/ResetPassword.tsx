@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { authClient } from "../auth-client.js";
+import { internalPath } from "../internal-path.js";
 import { BrandLockup } from "./BrandLockup.js";
 
 /**
@@ -18,11 +19,11 @@ export function ResetPassword() {
    * place the person started (an invitation, usually) through the
    * reset email; without it, resetting from an invitation link dropped
    * the invitation on the floor. Only a path inside this app is
-   * honoured: anything absolute (or protocol relative) in the address
-   * would make this an open redirect.
+   * honoured, and internalPath is what decides that: this is the page
+   * shown immediately after a credential change, so a link off this
+   * origin here is a phishing hand-off at the worst possible moment.
    */
-  const rawReturn = params.get("returnTo") ?? "";
-  const returnTo = rawReturn.startsWith("/") && !rawReturn.startsWith("//") ? rawReturn : "/";
+  const returnTo = internalPath(params.get("returnTo"), window.location.origin);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

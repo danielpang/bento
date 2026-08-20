@@ -202,28 +202,72 @@ interface PendingInvitation {
  */
 function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () => void }) {
   const [invites, setInvites] = useState<PendingInvitation[] | null>(null);
+  /**
+   * A lookup that failed is not an account with no invitations. Read
+   * as one it showed "name your team" to somebody who had a team
+   * waiting: they founded a second, empty organization, and because
+   * this screen only runs while an account has none, the invitation
+   * was never offered here again. The gate above draws the same
+   * distinction for the same reason.
+   */
+  const [lookupFailed, setLookupFailed] = useState(false);
   const [createInstead, setCreateInstead] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
     // Warm the CreateTeam chunk while the invitations load, so the
     // common no-invitations answer does not then wait on a download.
     void import("./components/CreateTeam.js").catch(() => undefined);
+    setLookupFailed(false);
     void fetch("/api/team/invitations", { credentials: "include" })
-      .then((res) => (res.ok ? res.json() : []))
-      .then((rows: PendingInvitation[]) => {
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          setLookupFailed(true);
+          return;
+        }
+        const rows = (await res.json()) as PendingInvitation[];
         if (!cancelled) setInvites(Array.isArray(rows) ? rows : []);
       })
-      // A failed lookup must not block onboarding: with nothing to
-      // offer, creating a team remains the door forward.
       .catch(() => {
-        if (!cancelled) setInvites([]);
+        if (!cancelled) setLookupFailed(true);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
   if (createInstead || (invites !== null && invites.length === 0)) {
     return <CreateTeam userName={userName} onCreated={onCreated} />;
+  }
+  /*
+   * Said out loud, with both doors open. A failed lookup must still not
+   * block onboarding, so creating a team stays available; what it must
+   * not do any more is pretend the answer was "nothing waiting".
+   */
+  if (lookupFailed) {
+    return (
+      <div className="center">
+        <div className="card-panel card-panel-centered">
+          <div className="auth-head">
+            <BrandLockup size="lg" />
+            <h1>Join a team</h1>
+          </div>
+          <p className="error">Could not check whether a team is waiting for you.</p>
+          <p className="muted">
+            If you were invited, try again rather than creating a team: a team you create is a
+            separate, empty one.
+          </p>
+          <div className="actions actions-centered">
+            <button className="btn btn-primary" onClick={() => setAttempt((n) => n + 1)}>
+              Try again
+            </button>
+            <button className="btn" onClick={() => setCreateInstead(true)}>
+              Create a team anyway
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
   if (invites === null) return <div className="center" />;
   return (

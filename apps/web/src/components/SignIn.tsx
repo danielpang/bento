@@ -72,9 +72,13 @@ export function SignIn({
     setBusy(true);
     setError("");
     setNotice("");
+    // Both carry it. Signing in can also send a verification mail when
+    // the address was never confirmed, and better-auth defaults that
+    // link to the board: an invitee would then hold two mails pointing
+    // at different places, only one of which keeps the invitation.
     const result =
       mode === "in"
-        ? await signIn.email({ email, password })
+        ? await signIn.email({ email, password, callbackURL })
         : await signUp.email({ email, password, name: name || email, callbackURL });
     setBusy(false);
     if (!result.error) {

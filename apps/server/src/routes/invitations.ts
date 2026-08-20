@@ -29,29 +29,49 @@ import type { AppContext } from "../context.js";
  */
 export function invitationPreviewRoutes(ctx: AppContext) {
   /**
-   * A small brake on repeat lookups, per invitation id.
+   * A small brake on lookups: one budget per invitation id, and one
+   * per caller wherever a proxy in front of this server names them.
    *
    * In memory and per instance on purpose: the query behind it is a
    * single indexed probe, so this only has to stop tight loops, not
    * survive restarts or coordinate across machines the way the auth
    * limiter does. Legitimate use is a handful of page loads.
+   *
+   * Both budgets are needed. Per id alone cannot meter a sweep, since
+   * a caller who never repeats an id never repeats a key, so every
+   * probe took the fresh-window branch and ran its own join. The
+   * caller budget is what bounds that, and it is also what bounds how
+   * far this map can grow.
    */
   const hits = new Map<string, { windowStart: number; count: number }>();
   const WINDOW_MS = 60_000;
-  const MAX_PER_WINDOW = 60;
-  function allow(id: string): boolean {
+  const MAX_PER_ID = 60;
+  const MAX_PER_CLIENT = 120;
+
+  /**
+   * Only the windows that have already rolled over.
+   *
+   * This used to clear the map outright, which meant a flood of junk
+   * ids wiped the counters of the ids actually being metered: an
+   * attacker held at the limit on one id could seed enough keys to
+   * trip the clear and resume at full rate, over and over.
+   */
+  function sweepExpired(now: number): void {
+    for (const [key, hit] of hits) {
+      if (now - hit.windowStart > WINDOW_MS) hits.delete(key);
+    }
+  }
+
+  function allow(key: string, max: number): boolean {
     const now = Date.now();
-    const hit = hits.get(id);
+    const hit = hits.get(key);
     if (!hit || now - hit.windowStart > WINDOW_MS) {
-      // The map only grows by one entry per distinct id, and minting
-      // ids costs a rate-limited authenticated call; the clear is a
-      // backstop, not a strategy.
-      if (hits.size > 10_000) hits.clear();
-      hits.set(id, { windowStart: now, count: 1 });
+      if (hits.size > 10_000) sweepExpired(now);
+      hits.set(key, { windowStart: now, count: 1 });
       return true;
     }
     hit.count += 1;
-    return hit.count <= MAX_PER_WINDOW;
+    return hit.count <= max;
   }
 
   return new Hono().get("/", async (c) => {
@@ -59,8 +79,19 @@ export function invitationPreviewRoutes(ctx: AppContext) {
     // so neither belongs in a shared cache.
     c.header("cache-control", "no-store");
     const id = c.req.query("id");
-    if (!id) return c.json({ error: "not found" }, 404);
-    if (!allow(id)) return c.json({ error: "too many requests" }, 429);
+    // Bounded rather than exact, so this does not have to track how
+    // better-auth mints ids: an id that could not exist is refused for
+    // the cost of a regex instead of a three table join.
+    if (!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) return c.json({ error: "not found" }, 404);
+    // The first hop of the forwarded chain, which is what the proxy in
+    // front of a hosted deployment writes. Only metered when one is
+    // present: a deployment with no proxy has no caller to tell apart,
+    // and one shared bucket would lock every visitor out together.
+    const client = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+    if (client && !allow(`client:${client}`, MAX_PER_CLIENT)) {
+      return c.json({ error: "too many requests" }, 429);
+    }
+    if (!allow(`id:${id}`, MAX_PER_ID)) return c.json({ error: "too many requests" }, 429);
     // One indexed query. better-auth lowercases both user.email and
     // invitation.email on write, so plain equality joins on the unique
     // index; re-folding case here would throw that index away. The
