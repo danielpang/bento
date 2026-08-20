@@ -33,6 +33,57 @@ const MISSING_CODE_MESSAGE = "This link is missing its invitation code. Ask for 
 const DEAD_INVITATION_MESSAGE =
   "This invitation is no longer valid. It may have expired, been cancelled, or been sent to a different email address.";
 const LOOKUP_FAILED_MESSAGE = "Could not check this invitation just now. Check the connection, then try again.";
+const ACTION_FAILED_MESSAGE = "Could not finish that just now. Check the connection, then try again.";
+
+/** better-auth's answer when the session's address is not the invited one. */
+const NOT_THE_RECIPIENT = "YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION";
+
+/**
+ * A dead end, and what can be done about it.
+ *
+ * The affordances ride here as flags. They used to be inferred by
+ * comparing the message against the copy constant above, which made a
+ * user facing sentence into control flow: rewording it would have
+ * silently removed the retry button, and any error whose text happened
+ * to match would have grown one.
+ */
+interface Problem {
+  message: string;
+  /** A failure that may not repeat, as opposed to a verdict on the invitation. */
+  canRetry?: boolean;
+  /** Signed in as somebody this invitation is not for, so offer the way out. */
+  canSignOut?: boolean;
+}
+
+/**
+ * What went wrong, told apart by code and status rather than by the
+ * sentence better-auth wrote.
+ *
+ * The client answers with { error } for every non-2xx instead of
+ * throwing, so a deploy window 502 arrived in the same branch as a
+ * spent invitation and was reported as "no longer valid" to people
+ * whose link was perfectly good.
+ */
+function invitationProblem(
+  error: { code?: string; status?: number; message?: string },
+  signedInAs?: string,
+): Problem {
+  if (error.code === NOT_THE_RECIPIENT) {
+    return {
+      message: signedInAs
+        ? `This invitation was sent to a different address. You are signed in as ${signedInAs}.`
+        : "This invitation was sent to a different address than the one you are signed in with.",
+      canSignOut: true,
+    };
+  }
+  // Nothing here is a verdict on the invitation: the server either
+  // failed, was busy, or never answered at all.
+  const status = error.status ?? 0;
+  if (status === 0 || status === 408 || status === 429 || status >= 500) {
+    return { message: LOOKUP_FAILED_MESSAGE, canRetry: true };
+  }
+  return { message: DEAD_INVITATION_MESSAGE };
+}
 
 /**
  * Landing page for the link in an invitation email.
@@ -45,7 +96,7 @@ export function AcceptInvitation() {
   const invitationId = new URLSearchParams(window.location.search).get("id") ?? "";
   const [phase, setPhase] = useState<Phase>("checking");
   const [organizationName, setOrganizationName] = useState("this team");
-  const [message, setMessage] = useState("");
+  const [problem, setProblem] = useState<Problem | null>(null);
   const [preview, setPreview] = useState<PreviewState>("loading");
   /** Bumped by the Try again button; the preview effect keys on it. */
   const [attempt, setAttempt] = useState(0);
@@ -111,7 +162,7 @@ export function AcceptInvitation() {
     if (phase !== "checking") return;
     if (!invitationId) {
       setPhase("error");
-      setMessage(MISSING_CODE_MESSAGE);
+      setProblem({ message: MISSING_CODE_MESSAGE });
       return;
     }
     let cancelled = false;
@@ -121,7 +172,7 @@ export function AcceptInvitation() {
         if (cancelled) return;
         if (result.error) {
           setPhase("error");
-          setMessage(DEAD_INVITATION_MESSAGE);
+          setProblem(invitationProblem(result.error, session.user.email));
           return;
         }
         setOrganizationName((result.data as { organizationName?: string })?.organizationName ?? "the organization");
@@ -131,7 +182,7 @@ export function AcceptInvitation() {
         // the invitation, and must not strand the page on "checking".
         if (!cancelled) {
           setPhase("error");
-          setMessage(LOOKUP_FAILED_MESSAGE);
+          setProblem({ message: LOOKUP_FAILED_MESSAGE, canRetry: true });
         }
       }
     })();
@@ -166,29 +217,59 @@ export function AcceptInvitation() {
 
   async function decide(accept: boolean) {
     setPhase("accepting");
-    const result = accept
-      ? await authClient.organization.acceptInvitation({ invitationId })
-      : await authClient.organization.rejectInvitation({ invitationId });
-    if (result.error) {
+    try {
+      const result = accept
+        ? await authClient.organization.acceptInvitation({ invitationId })
+        : await authClient.organization.rejectInvitation({ invitationId });
+      if (result.error) {
+        setPhase("error");
+        setProblem(invitationProblem(result.error, session?.user.email));
+        return;
+      }
+      if (!accept) {
+        setPhase("declined");
+        return;
+      }
+      // Land the new member on the board they just joined. Best effort
+      // on purpose: the membership already exists by now, and failing
+      // to make it the active organization is not a failed join. Told
+      // as one, it sent people back to an invitation they had in fact
+      // accepted, which then answered that it was no longer valid.
+      const orgId = (result.data as { invitation?: { organizationId?: string } })?.invitation?.organizationId;
+      if (orgId) {
+        await authClient.organization.setActive({ organizationId: orgId }).catch(() => undefined);
+      }
+      setPhase("accepted");
+    } catch {
+      // A throw is the connection, not an answer. Without this the
+      // page sat on "Joining..." with both buttons disabled and
+      // nothing said, and only a reload got out of it.
       setPhase("error");
-      setMessage(result.error.message ?? "That did not work. Ask for a new invitation.");
-      return;
+      setProblem({ message: ACTION_FAILED_MESSAGE, canRetry: true });
     }
-    if (!accept) {
-      setPhase("declined");
-      return;
+  }
+
+  /** Back to the lookup, which settles what the invitation is now. */
+  async function signOutAndRetry() {
+    try {
+      await authClient.signOut();
+    } finally {
+      // Reloaded rather than re-rendered: with the session gone this
+      // page reopens on the invitation itself, which puts the sign in
+      // form back with the invited address filled in.
+      window.location.reload();
     }
-    // Land the new member on the board they just joined.
-    const orgId = (result.data as { invitation?: { organizationId?: string } })?.invitation?.organizationId;
-    if (orgId) await authClient.organization.setActive({ organizationId: orgId });
-    setPhase("accepted");
   }
 
   if (phase === "error") {
+    // Never an empty card: an error with no detail set is still an
+    // error, and the dead invitation reading is the safe one.
+    const shown = problem ?? { message: DEAD_INVITATION_MESSAGE };
     return (
       <InvitationProblem
-        message={message}
-        onRetry={message === LOOKUP_FAILED_MESSAGE ? () => setPhase("checking") : undefined}
+        message={shown.message}
+        onRetry={shown.canRetry ? () => setPhase("checking") : undefined}
+        onSignOut={shown.canSignOut ? () => void signOutAndRetry() : undefined}
       />
     );
   }
@@ -246,7 +327,22 @@ export function AcceptInvitation() {
  * out: a person whose invitation is spent may still hold an account and
  * a board here, and a card with no doors strands them.
  */
-function InvitationProblem({ message, onRetry }: { message: string; onRetry?: () => void }) {
+function InvitationProblem({
+  message,
+  onRetry,
+  onSignOut,
+}: {
+  message: string;
+  onRetry?: () => void;
+  /**
+   * Offered when the session is the problem. Social sign in carries no
+   * address constraint, so an invitee can arrive here authenticated as
+   * somebody else entirely, and with a session in hand this page never
+   * shows a sign in form again: without this button the only exits
+   * were the board and the back button.
+   */
+  onSignOut?: () => void;
+}) {
   return (
     <div className="center">
       <div className="card-panel card-panel-centered">
@@ -259,6 +355,11 @@ function InvitationProblem({ message, onRetry }: { message: string; onRetry?: ()
           {onRetry && (
             <button className="btn btn-primary" onClick={onRetry}>
               Try again
+            </button>
+          )}
+          {onSignOut && (
+            <button className="btn btn-primary" onClick={onSignOut}>
+              Sign out and use another account
             </button>
           )}
           <a className="btn" href="/">
