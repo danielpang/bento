@@ -16,6 +16,8 @@ export function McpPanel({ client }: { client: BentoClient }) {
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  useMcpOutcome();
+
   const reload = useCallback(async () => {
     try {
       setStatus(await client.mcpStatus());
@@ -123,8 +125,50 @@ function McpServerCard({
               : "No key stored yet, so this server is not attached to runs."}
           </p>
         )}
-        {server.authType === "oauth" && (
-          <p className="muted">Sign-in connections for this server arrive with a later update.</p>
+        {server.authType === "oauth" && server.credentialScope === "org" && (
+          <p className="muted">
+            {server.orgCredential?.connected
+              ? "Connected for the whole organization."
+              : "Not connected. An owner or admin signs in once for the organization."}
+          </p>
+        )}
+        {server.authType === "oauth" && server.credentialScope === "user" && (
+          <p className={server.userCredential?.connected ? "muted" : "error"}>
+            {server.userCredential?.connected
+              ? "You have connected this server."
+              : `You have not connected ${server.name}, so it is not available to your runs.`}
+          </p>
+        )}
+        {server.authType === "oauth" && oauthCanConnect(server, canManage) && (
+          <div className="actions">
+            <button
+              className="btn btn-primary"
+              disabled={busy}
+              onClick={() =>
+                void act(async () => {
+                  const { url } = await client.startMcpConnect(server.id);
+                  window.location.assign(url);
+                })
+              }
+            >
+              {oauthConnected(server) ? "Reconnect" : "Connect"}
+            </button>
+            {oauthConnected(server) && (
+              <button
+                className="btn btn-ghost"
+                disabled={busy}
+                onClick={() =>
+                  void act(() =>
+                    server.credentialScope === "user"
+                      ? client.disconnectMcpUserCredential(server.id)
+                      : client.disconnectMcpCredential(server.id),
+                  )
+                }
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
         )}
         {canManage && server.authType === "api_key" && (
           <SecretField
@@ -186,7 +230,8 @@ function AddServerCard({
   const [slugTouched, setSlugTouched] = useState(false);
   const [url, setUrl] = useState("");
   const [transport, setTransport] = useState<"http" | "sse">("http");
-  const [authType, setAuthType] = useState<"none" | "api_key">("api_key");
+  const [authType, setAuthType] = useState<"none" | "api_key" | "oauth">("api_key");
+  const [credentialScope, setCredentialScope] = useState<"org" | "user">("org");
 
   function deriveSlug(from: string): string {
     return from
@@ -217,6 +262,7 @@ function AddServerCard({
               url: url.trim(),
               transport,
               authType,
+              ...(authType === "oauth" ? { credentialScope } : {}),
             });
             setName("");
             setSlug("");
@@ -265,15 +311,65 @@ function AddServerCard({
           className="input"
           aria-label="Authentication"
           value={authType}
-          onChange={(e) => setAuthType(e.target.value as "none" | "api_key")}
+          onChange={(e) => setAuthType(e.target.value as "none" | "api_key" | "oauth")}
         >
           <option value="api_key">API key</option>
+          <option value="oauth">Sign in (OAuth)</option>
           <option value="none">No auth</option>
         </select>
+        {authType === "oauth" && (
+          <select
+            className="input"
+            aria-label="Who signs in"
+            value={credentialScope}
+            onChange={(e) => setCredentialScope(e.target.value as "org" | "user")}
+          >
+            <option value="org">One sign in for the organization</option>
+            <option value="user">Each member signs in</option>
+          </select>
+        )}
         <button className="btn btn-primary" type="submit" disabled={busy || !ready}>
           Add server
         </button>
       </form>
     </section>
   );
+}
+
+/** True when this OAuth server already has the credential it needs. */
+function oauthConnected(server: McpServerStatus): boolean {
+  return server.credentialScope === "user"
+    ? Boolean(server.userCredential?.connected)
+    : Boolean(server.orgCredential?.connected);
+}
+
+/** Whether the viewer may start a connect: any member for a per-user server, admins for org. */
+function oauthCanConnect(server: McpServerStatus, canManage: boolean): boolean {
+  return server.credentialScope === "user" || canManage;
+}
+
+const OUTCOMES: Record<string, string> = {
+  connected: "MCP server connected.",
+  invalid: "That connection link had expired. Start it again.",
+  organization: "You switched organizations part way through. Switch back and connect again.",
+  denied: "You are not allowed to connect this server.",
+  unconfigured: "This server has no signing key configured.",
+  failed: "The sign in did not complete. Try again.",
+};
+
+function useMcpOutcome(): void {
+  const toast = useToast();
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("mcp");
+    if (!result) return;
+    const message = OUTCOMES[result];
+    if (message) {
+      if (result === "connected") toast.note(message);
+      else toast.fail(message);
+    }
+    params.delete("mcp");
+    const query = params.toString();
+    history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+  }, [toast]);
 }

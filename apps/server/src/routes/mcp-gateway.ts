@@ -4,6 +4,7 @@ import { mcpCredentials, mcpServers, member } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { credentialHeader } from "../mcp/client.js";
 import { resolveGrant, recordGrantUse, type ResolvedGrant } from "../mcp/grants.js";
+import { refreshCredential } from "../mcp/refresh.js";
 import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../mcp/safe-fetch.js";
 
 /**
@@ -56,6 +57,8 @@ function takeToken(grantId: string): boolean {
 interface GatewayTarget {
   grant: ResolvedGrant;
   server: typeof mcpServers.$inferSelect;
+  /** The stored credential row, or null for auth_type none. */
+  credentialRow: typeof mcpCredentials.$inferSelect | null;
   /** Header attached upstream, or null for auth_type none. */
   credential: { name: string; value: string } | null;
 }
@@ -89,7 +92,7 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     if (!server || !server.enabled) return null;
     if ((server.organizationId ?? null) !== (grant.organizationId ?? null)) return null;
 
-    if (server.authType === "none") return { grant, server, credential: null };
+    if (server.authType === "none") return { grant, server, credentialRow: null, credential: null };
 
     const perUser = server.authType === "oauth" && server.credentialScope === "user";
     let row: typeof mcpCredentials.$inferSelect | undefined;
@@ -126,8 +129,27 @@ export function mcpGatewayRoutes(ctx: AppContext) {
       // here that is a 404 like any other missing credential.
       return null;
     }
+    return { grant, server, credentialRow: row, credential: headerFor(server, secret) };
+  }
+
+  function headerFor(server: typeof mcpServers.$inferSelect, secret: string): { name: string; value: string } {
     const headerName = server.authType === "api_key" ? server.apiKeyHeader : "Authorization";
-    return { grant, server, credential: credentialHeader(headerName, secret) };
+    return credentialHeader(headerName, secret);
+  }
+
+  /**
+   * On an upstream 401 for an OAuth credential, refresh once and retry.
+   * The refresh is serialized across processes by an advisory lock, so
+   * concurrent 401s do not each rotate the refresh token. Returns the
+   * refreshed target, or null when there is nothing to refresh or the
+   * grant is dead (the 401 then passes through).
+   */
+  async function refreshedTarget(target: GatewayTarget): Promise<GatewayTarget | null> {
+    const row = target.credentialRow;
+    if (!row || row.kind !== "oauth" || !row.encryptedRefreshToken) return null;
+    const fresh = await refreshCredential(ctx, target.server, row.id);
+    if (!fresh) return null;
+    return { ...target, credential: headerFor(target.server, fresh) };
   }
 
   function upstreamHeaders(c: Context, target: GatewayTarget): Record<string, string> {
@@ -149,6 +171,20 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     return c.body((upstream.body as unknown as ReadableStream) ?? null);
   }
 
+  async function fetchUpstream(c: Context, target: GatewayTarget, url: string, init: { method: string; body?: string }) {
+    return safeFetch(
+      url,
+      {
+        method: init.method,
+        headers: upstreamHeaders(c, target),
+        ...(init.body !== undefined ? { body: init.body } : {}),
+        signal: c.req.raw.signal,
+        headersTimeoutMs: UPSTREAM_HEADER_TIMEOUT_MS,
+      },
+      safeFetchPolicy(ctx.env),
+    );
+  }
+
   async function forward(
     c: Context,
     target: GatewayTarget,
@@ -157,17 +193,18 @@ export function mcpGatewayRoutes(ctx: AppContext) {
   ) {
     let upstream;
     try {
-      upstream = await safeFetch(
-        url,
-        {
-          method: init.method,
-          headers: upstreamHeaders(c, target),
-          ...(init.body !== undefined ? { body: init.body } : {}),
-          signal: c.req.raw.signal,
-          headersTimeoutMs: UPSTREAM_HEADER_TIMEOUT_MS,
-        },
-        safeFetchPolicy(ctx.env),
-      );
+      upstream = await fetchUpstream(c, target, url, init);
+      // An OAuth access token the upstream rejects gets one refresh and
+      // one retry. The body was buffered by the caller, so replaying it
+      // is safe. Anything but 401 (including a refreshed-then-still-401)
+      // passes straight back.
+      if (upstream.status === 401 && init.body !== undefined) {
+        const refreshed = await refreshedTarget(target);
+        if (refreshed) {
+          upstream.body?.cancel().catch(() => {});
+          upstream = await fetchUpstream(c, refreshed, url, init);
+        }
+      }
     } catch (err) {
       if (err instanceof SafeFetchRefused) return notFound(c);
       return c.json({ error: "the MCP server did not answer" }, 502);

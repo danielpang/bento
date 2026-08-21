@@ -597,6 +597,16 @@ export class BentoClient {
     return this.request<{ ok: boolean }>(`/api/mcp/${id}/credential`, { method: "DELETE" });
   }
 
+  startMcpConnect(id: string) {
+    return this.request<{ url: string; authorizationHost: string }>(`/api/mcp/${id}/connect`, {
+      method: "POST",
+    });
+  }
+
+  disconnectMcpUserCredential(id: string) {
+    return this.request<{ ok: boolean }>(`/api/mcp/${id}/user-credential`, { method: "DELETE" });
+  }
+
   slackStatus() {
     return this.request<SlackConnection>("/api/slack/status");
   }
