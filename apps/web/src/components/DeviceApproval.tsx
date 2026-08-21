@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { authClient } from "../auth-client.js";
 import { useSession } from "../auth-client.js";
 import { BrandLockup } from "./BrandLockup.js";
+import { CenteredPanelSkeleton } from "./Skeleton.js";
 import { SignIn } from "./SignIn.js";
 
 type Phase = "entering" | "claiming" | "ready" | "done" | "denied" | "error";
@@ -60,7 +61,7 @@ export function DeviceApproval() {
     }
   }
 
-  if (isPending) return <div className="center" />;
+  if (isPending) return <CenteredPanelSkeleton />;
   if (!session) return <SignIn />;
 
   return (

@@ -25,6 +25,7 @@ const ArtifactViewer = lazy(() =>
 );
 import { actorDisplayName, historyTriggerLabel, spendCoverageNote, type AgentEvent } from "@bento/core";
 import { deleteConsequences } from "./delete-consequences.js";
+import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
 interface DrawerProps {
   client: BentoClient;
@@ -120,6 +121,24 @@ export function FeatureDrawer({
   const stage = stages.find((s) => s.id === feature.currentStageId);
   // The server sends runs newest first.
   const latestRun = runs[0];
+  /**
+   * Detail that is fetched, not the card row the board already had.
+   * Until it lands, sections that would say "nothing has happened"
+   * are still a guess.
+   */
+  const detailsPending = loadedId !== feature.id && !loadFailed;
+
+  useEffect(() => {
+    setRuns([]);
+    setGate(null);
+    setHistory([]);
+    setChanges(null);
+    setArtifacts([]);
+    setPullRequests([]);
+    setLoadedId(null);
+    setLoadFailed(false);
+    setPublishNotes([]);
+  }, [feature.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -554,7 +573,22 @@ export function FeatureDrawer({
         {feature.currentStageId && !finished && (
           <section className="section">
             <span className="label">What has to happen here</span>
-            {gate && gate.checks.length > 0 ? (
+            {detailsPending ? (
+              <div className="skeleton-stack">
+                <div className="gate-check" aria-hidden="true">
+                  <span className="gate-check-text skeleton-lines">
+                    <Skeleton height={13} width="62%" />
+                    <Skeleton height={11} width="84%" />
+                  </span>
+                </div>
+                <div className="gate-check" aria-hidden="true">
+                  <span className="gate-check-text skeleton-lines">
+                    <Skeleton height={13} width="54%" />
+                    <Skeleton height={11} width="70%" />
+                  </span>
+                </div>
+              </div>
+            ) : gate && gate.checks.length > 0 ? (
               gate.checks.map((check, i) => (
                 <div key={check.id} className="gate-check">
                   {check.status === "passed" ? (
@@ -657,10 +691,16 @@ export function FeatureDrawer({
               </a>
             )}
           </span>
-          {!changes || changes.repositories.length === 0 ? (
+          {!detailsPending && (!changes || changes.repositories.length === 0) ? (
             <p className="muted">Nothing committed yet. Changes and stage write-ups appear once an agent commits.</p>
+          ) : detailsPending ? (
+            <div className="skeleton-stack">
+              <Skeleton height={12} width="88%" />
+              <Skeleton height={12} width="64%" />
+              <Skeleton height={72} />
+            </div>
           ) : (
-            changes.repositories.map((repo) => (
+            (changes?.repositories ?? []).map((repo) => (
               <div key={repo.name} className="repo-changes">
                 <p className="repo-changes-head">
                   <span className="gate-check-name">{repo.name}</span>{" "}
@@ -707,17 +747,21 @@ export function FeatureDrawer({
           )}
         </section>
 
-        <AgentSession
-          client={client}
-          featureId={feature.id}
-          runs={runs}
-          profiles={profiles}
-          stages={stages}
-          finished={finished}
-          onChanged={onChanged}
-          onEvent={onEvent}
-          expandHref={`/session/${feature.id}`}
-        />
+        {detailsPending ? (
+          <ChatSkeleton />
+        ) : (
+          <AgentSession
+            client={client}
+            featureId={feature.id}
+            runs={runs}
+            profiles={profiles}
+            stages={stages}
+            finished={finished}
+            onChanged={onChanged}
+            onEvent={onEvent}
+            expandHref={`/session/${feature.id}`}
+          />
+        )}
       </div>
     </aside>
   );

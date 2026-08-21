@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { BentoClient, GitHubConnection } from "@bento/api-client";
 import { authClient } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
+import { SettingsCardSkeleton } from "./Skeleton.js";
 
 const CONNECT_NOTE =
   "Sends you to GitHub to confirm who you are, then back here. It is your own account, not the "
@@ -108,15 +109,35 @@ const RECONNECT_NOTE =
 export function GitHubAccountCard({ client }: { client: BentoClient }) {
   const toast = useToast();
   const [status, setStatus] = useState<GitHubConnection | null>(null);
+  const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    void client.githubStatus().then(setStatus).catch(() => setStatus(null));
+    void client
+      .githubStatus()
+      .then((next) => {
+        setStatus(next);
+        setFailed(false);
+      })
+      .catch(() => setFailed(true));
   }, [client]);
+
+  if (failed) {
+    return (
+      <section className="section settings-card">
+        <h3 className="settings-title">Your GitHub account</h3>
+        <p className="error">
+          Could not reach the server, so this cannot say whether a GitHub account is connected.
+        </p>
+      </section>
+    );
+  }
+
+  if (!status) return <SettingsCardSkeleton rows={2} />;
 
   // Local mode has one trusted user and no sign in, so there is no
   // account to attach and nothing here to say.
-  if (!status || (!status.configured && !status.canLinkIdentity)) return null;
+  if (!status.configured && !status.canLinkIdentity) return null;
 
   return (
     <section className="section settings-card">

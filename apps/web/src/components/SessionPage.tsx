@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@bento/api-client";
 import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges, Stage } from "@bento/api-client";
 import { AgentSession } from "./AgentSession.js";
+import { ChatSkeleton } from "./Skeleton.js";
 import { DiffReview, type LineQuote } from "./DiffReview.js";
 import { useToast } from "./Toasts.js";
 
@@ -173,12 +174,12 @@ export function SessionPage({
   }
   if (!feature) {
     return (
-      <div className="session-page">
+      <div className="session-page" aria-busy="true">
         <header className="session-head">
           <h1>Conversation</h1>
           {exit}
         </header>
-        <div className="center" />
+        <ChatSkeleton tall />
       </div>
     );
   }
