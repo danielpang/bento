@@ -49,6 +49,16 @@ const envSchema = z.object({
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),
   BETTER_AUTH_URL: z.string().default("http://localhost:4400"),
+
+  /**
+   * Base URL a sandbox uses to reach the MCP gateway. Defaults to
+   * BETTER_AUTH_URL, which is right when the server is publicly
+   * routable. Set it when sandboxes cannot reach that address: a Docker
+   * driver on a localhost base rewrites the host to host.docker.internal
+   * automatically, but a sprite fleet or a segregated gateway host
+   * needs this pointed at a URL the sandbox can actually open.
+   */
+  BENTO_MCP_GATEWAY_URL: z.string().optional(),
   /** Origins allowed to call the API with credentials, comma separated. */
   BENTO_TRUSTED_ORIGINS: z
     .string()
