@@ -20,6 +20,33 @@ export const codexAdapter: AgentAdapter = {
   optionalEnv: ["OPENAI_BASE_URL"],
   configPaths: [".codex"],
 
+  /**
+   * Codex reads remote MCP servers from config.toml: a [mcp_servers.<name>]
+   * table with a url and a static http_headers table (v0.131.0+, no
+   * experimental flag). The sandbox home is Bento's to write, and the
+   * orchestrator skips this adapter when local mode has ~/.codex mounted
+   * read-only over it.
+   */
+  mcp: {
+    renderConfig(servers) {
+      const body = servers
+        .map((server) => {
+          const headers = Object.entries(server.headers)
+            .map(([name, value]) => `${tomlString(name)} = ${tomlString(value)}`)
+            .join(", ");
+          return [
+            `[mcp_servers.${tomlKey(server.slug)}]`,
+            `url = ${tomlString(server.url)}`,
+            headers ? `http_headers = { ${headers} }` : "",
+          ]
+            .filter(Boolean)
+            .join("\n");
+        })
+        .join("\n\n");
+      return [{ path: "/root/.codex/config.toml", content: body ? `${body}\n` : "" }];
+    },
+  },
+
   buildCommand(input: BuildCommandInput): string[] {
     const cmd = input.resumeSessionId
       ? ["codex", "exec", "resume", input.resumeSessionId, input.prompt]
@@ -99,3 +126,18 @@ export const codexAdapter: AgentAdapter = {
     return outcome;
   },
 };
+
+/** A TOML basic string, escaping the characters TOML requires. */
+function tomlString(value: string): string {
+  const escaped = value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\n")
+    .replaceAll("\t", "\\t");
+  return `"${escaped}"`;
+}
+
+/** A TOML bare key when the slug allows it, otherwise a quoted key. */
+function tomlKey(slug: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(slug) ? slug : tomlString(slug);
+}

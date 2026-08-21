@@ -99,6 +99,22 @@ export async function runGrantExists(ctx: AppContext, runId: string): Promise<bo
   return Boolean(row);
 }
 
+/**
+ * Whether a run actually attached MCP servers: a grant that is not
+ * revoked and pins at least one server. The resume path keys the MCP
+ * flags off this, so a run that minted no grant (nothing attached) or
+ * had its grant revoked (a failed config write) does not gain
+ * --mcp-config on reattach that its first life never had.
+ */
+export async function runHasActiveMcp(ctx: AppContext, runId: string): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ serverIds: mcpRunGrants.serverIds, revokedAt: mcpRunGrants.revokedAt })
+    .from(mcpRunGrants)
+    .where(eq(mcpRunGrants.runId, runId))
+    .limit(1);
+  return Boolean(row && !row.revokedAt && Array.isArray(row.serverIds) && row.serverIds.length > 0);
+}
+
 /** Sweep: expired rows are audit noise after a week. */
 export async function sweepExpiredGrants(ctx: AppContext): Promise<void> {
   const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60_000);

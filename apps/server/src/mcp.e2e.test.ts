@@ -164,6 +164,18 @@ test("a server can be defined, listed, and slugs stay unique", async () => {
   assert.equal(body.userConnectionsNeeded, 0);
 });
 
+test("the plain route lists servers as pipe-delimited lines for the TUI", async () => {
+  const text = await (await app.request("/api/mcp/plain")).text();
+  const line = text.split("\n").find((l) => l.includes("|fixture|"));
+  assert.ok(line, "the fixture server appears in the plain listing");
+  const [tag, , slug, authType, scope, enabled] = line!.split("|");
+  assert.equal(tag, "mcp");
+  assert.equal(slug, "fixture");
+  assert.equal(authType, "api_key");
+  assert.equal(scope, "org");
+  assert.equal(enabled, "true");
+});
+
 test("a reserved API key header is refused at write time", async () => {
   const res = await jsonRequest("/api/mcp", "POST", {
     name: "Bad header",
@@ -402,4 +414,18 @@ test("the callback rejects a tampered state, a wrong issuer, and a mismatched se
     `/api/mcp/callback/${otherId}?state=${encodeURIComponent(state)}&code=the-auth-code&iss=${encodeURIComponent(authBase)}`,
   );
   assert.match(wrongPath.headers.get("location") ?? "", /mcp=invalid/, "a code cannot be redeemed via another server's callback");
+});
+
+test("the callback rejects a missing iss when the authorization server advertises support", async () => {
+  const id = await makeOAuthServer("org");
+  const connect = await jsonRequest(`/api/mcp/${id}/connect`, "POST");
+  const { url } = (await connect.json()) as { url: string };
+  const state = new URL(url).searchParams.get("state")!;
+
+  // The fake AS advertises authorization_response_iss_parameter_supported,
+  // so a response with no iss must be refused (RFC 9207).
+  const [server] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+  assert.equal(server!.issParamSupported, true, "discovery persisted the iss support flag");
+  const noIss = await app.request(`/api/mcp/callback/${id}?state=${encodeURIComponent(state)}&code=the-auth-code`);
+  assert.match(noIss.headers.get("location") ?? "", /mcp=invalid/, "an omitted iss is refused when advertised");
 });
