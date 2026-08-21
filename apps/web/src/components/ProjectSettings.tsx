@@ -7,6 +7,7 @@ import type {
   Project,
 } from "@bento/api-client";
 import { useToast } from "./Toasts.js";
+import { SettingsCardSkeleton } from "./Skeleton.js";
 
 /**
  * One project's own settings, opened from the Projects tab. Today that
@@ -201,14 +202,7 @@ function CreateIssuesCard({
       </section>
     );
   }
-  if (!status) {
-    return (
-      <section className="section settings-card">
-        <h3 className="settings-title">Cards created in Bento</h3>
-        {intro}
-      </section>
-    );
-  }
+  if (!status) return <SettingsCardSkeleton rows={3} />;
   if (!status.connected) {
     return (
       <section className="section settings-card">

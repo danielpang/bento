@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { BentoClient, RunArtifact } from "@bento/api-client";
 import { Markdown, MermaidDiagram } from "./Markdown.js";
 import { Modal } from "./Modal.js";
+import { Skeleton } from "./Skeleton.js";
 
 /**
  * Opens one artifact: rendered markdown, a drawn diagram, an image, or
@@ -56,7 +57,17 @@ export function ArtifactViewer({
     if (artifact.kind === "image") {
       return <img className="artifact-image" src={client.artifactContentUrl(artifact.id)} alt={artifact.path} />;
     }
-    if (needsText && text === null) return <p className="muted">Loading...</p>;
+    if (needsText && text === null) {
+      return (
+        <div className="skeleton-stack" aria-busy="true">
+          <Skeleton height={12} width="88%" />
+          <Skeleton height={12} width="74%" />
+          <Skeleton height={12} width="81%" />
+          <Skeleton height={12} width="62%" />
+          <Skeleton height={12} width="70%" />
+        </div>
+      );
+    }
     if (artifact.kind === "markdown") return <Markdown text={text!} />;
     if (artifact.kind === "mermaid") return <MermaidDiagram source={text!} />;
     if (artifact.kind === "html") {

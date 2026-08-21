@@ -3,6 +3,7 @@ import { useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { ConnectGitHubAccount } from "./GitHubIdentity.js";
+import { RepoCardSkeleton, Skeleton } from "./Skeleton.js";
 import type {
   BentoClient,
   GitHubConnection,
@@ -31,7 +32,7 @@ export function RepositoriesPanel({
   const toast = useToast();
   const panel = useDismissable<HTMLElement>(onClose);
   const [busy, setBusy] = useState(false);
-  const [repos, setRepos] = useState<Repository[]>([]);
+  const [repos, setRepos] = useState<Repository[] | null>(null);
   const [newRepo, setNewRepo] = useState("");
   const [github, setGitHub] = useState<GitHubConnection | null>(null);
   const [githubChecked, setGitHubChecked] = useState(false);
@@ -48,11 +49,18 @@ export function RepositoriesPanel({
   const [githubUnknown, setGitHubUnknown] = useState(false);
 
   useEffect(() => {
+    setRepos(null);
+  }, [projectId]);
+
+  useEffect(() => {
     if (!projectId) return;
     void client
       .listRepositories(projectId)
       .then(setRepos)
-      .catch((err: unknown) => toast.fail(err));
+      .catch((err: unknown) => {
+        toast.fail(err);
+        setRepos([]);
+      });
   }, [client, projectId, busy]);
 
   useEffect(() => {
@@ -121,7 +129,13 @@ export function RepositoriesPanel({
         {!projectId && <p className="muted">Create a project first.</p>}
         {projectId && (
           <section className="section">
-            {repos.map((repo, i) => (
+            {repos === null ? (
+              <>
+                <RepoCardSkeleton />
+                <RepoCardSkeleton />
+              </>
+            ) : (
+              repos.map((repo, i) => (
               <div key={repo.id} className="repo-card">
                 <div className="repo-card-head">
                   {/* Order is meaningful: the first repository is the
@@ -151,9 +165,13 @@ export function RepositoriesPanel({
                   }
                 />
               </div>
-            ))}
+            ))
+            )}
             {!githubChecked ? (
-              <p className="muted">Loading repository access...</p>
+              <div className="skeleton-stack">
+                <Skeleton height={12} width="70%" />
+                <Skeleton height={36} />
+              </div>
             ) : githubUnknown ? (
               <div className="actions">
                 <p className="muted">
@@ -175,7 +193,7 @@ export function RepositoriesPanel({
                   >
                     <option value="">Choose a GitHub repository</option>
                     {available
-                      .filter((candidate) => !repos.some((repo) => repo.githubRepoId === String(candidate.id)))
+                      .filter((candidate) => !(repos ?? []).some((repo) => repo.githubRepoId === String(candidate.id)))
                       .map((candidate) => (
                         <option key={candidate.id} value={candidate.id}>{candidate.fullName}</option>
                       ))}

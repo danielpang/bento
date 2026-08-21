@@ -3,6 +3,7 @@ import type { BentoClient, Project } from "@bento/api-client";
 import { Modal } from "./Modal.js";
 import { ProjectSettings } from "./ProjectSettings.js";
 import { PromptDialog } from "./PromptDialog.js";
+import { ListRowsSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
 
 /**
@@ -78,7 +79,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
       {failed ? (
         <p className="error">Could not load the projects. Retry once the server is reachable.</p>
       ) : projects === null ? (
-        <p className="muted">Loading projects...</p>
+        <ListRowsSkeleton rows={3} />
       ) : projects.length === 0 ? (
         <p className="muted">No projects yet. Create one from the board.</p>
       ) : (

@@ -8,6 +8,7 @@ import type {
 } from "@bento/api-client";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { SecretField } from "./SecretField.js";
+import { SettingsCardSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
 
 /**
@@ -68,7 +69,7 @@ export function LinearPanel({ client }: { client: BentoClient }) {
       </section>
     );
   }
-  if (!status) return <div className="center" />;
+  if (!status) return <SettingsCardSkeleton rows={3} />;
 
   if (!status.connected) {
     return <ConnectCard client={client} busy={busy} act={act} />;
