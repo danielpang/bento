@@ -31,7 +31,14 @@ export const agentFile = z.object({
    * describe fields this one would silently drop.
    */
   version: z.literal(1).default(1),
-  agents: z.array(agentEntry).max(50).default([]),
+  /**
+   * Higher than the pipeline file's 50: that cap is "agents a board
+   * uses", and a roster can be larger than the stages that point at it.
+   * Export writes the whole list, so a cap below how many profiles a
+   * person can create would make export fail for a file that import
+   * could never have written.
+   */
+  agents: z.array(agentEntry).max(200).default([]),
 });
 
 export type AgentFile = z.infer<typeof agentFile>;

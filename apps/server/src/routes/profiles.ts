@@ -5,7 +5,7 @@ import { z } from "zod";
 import { MODEL_GUIDANCE, agentCli, checkAgentPairing, providerForProfile } from "@bento/core";
 import { agentProfiles, agentRuns, stages } from "@bento/db";
 import { getActiveOrganizationMembership } from "../access.js";
-import { agentFile, parseAgentFile, writeAgentFile } from "../agent-file.js";
+import { parseAgentFile, writeAgentFile } from "../agent-file.js";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
@@ -154,24 +154,26 @@ export function profileRoutes(ctx: AppContext) {
         .from(agentProfiles)
         .where(eq(agentProfiles.ownerId, actor(c)))
         .orderBy(...byName);
-      const file = {
-        version: 1 as const,
-        agents: rows.map((agent) => ({
-          name: agent.name,
-          tool: agent.cli,
-          model: agent.model,
-          skill: agent.skill ?? null,
-          extraArgs: agent.extraArgs ?? [],
-        })),
-      };
-      const parsed = agentFile.safeParse(file);
-      if (!parsed.success) {
-        return c.json({ error: "these agents cannot be exported yet; please report it" }, 500);
-      }
-      return c.text(writeAgentFile(parsed.data), 200, {
-        "content-type": "application/yaml; charset=utf-8",
-        "content-disposition": 'attachment; filename="bento-agents.yaml"',
-      });
+      // Written from the rows themselves, not re-validated against the
+      // import cap: a roster can grow past what one file will accept,
+      // and refusing to export it would trap the agents in this database.
+      return c.text(
+        writeAgentFile({
+          version: 1,
+          agents: rows.map((agent) => ({
+            name: agent.name,
+            tool: agent.cli,
+            model: agent.model,
+            skill: agent.skill ?? null,
+            extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : [],
+          })),
+        }),
+        200,
+        {
+          "content-type": "application/yaml; charset=utf-8",
+          "content-disposition": 'attachment; filename="bento-agents.yaml"',
+        },
+      );
     })
     /**
      * Applies an agents file to this user. Matched by name, so
