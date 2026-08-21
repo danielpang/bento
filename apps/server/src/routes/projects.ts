@@ -15,6 +15,7 @@ import {
   stages,
 } from "@bento/db";
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
+import { upsertAgentsFromFile } from "../upsert-agents.js";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
@@ -787,27 +788,12 @@ export function projectRoutes(ctx: AppContext) {
       // Agents first: a stage cannot point at one that does not exist
       // yet. Matched by name, so importing twice edits rather than
       // duplicates.
-      const owned = await db(c, ctx).select().from(agentProfiles).where(eq(agentProfiles.ownerId, actor(c)));
-      const agentIdByName = new Map(owned.map((agent) => [agent.name, agent.id]));
-      for (const agent of file.agents) {
-        const existingId = agentIdByName.get(agent.name);
-        const values = {
-          name: agent.name,
-          cli: agent.tool,
-          model: agent.model,
-          skill: agent.skill ?? null,
-          extraArgs: agent.extraArgs,
-        };
-        if (existingId) {
-          await db(c, ctx).update(agentProfiles).set(values).where(eq(agentProfiles.id, existingId));
-        } else {
-          const [created] = await db(c, ctx)
-            .insert(agentProfiles)
-            .values({ ...values, ownerId: actor(c), organizationId: membership?.organizationId ?? null })
-            .returning({ id: agentProfiles.id });
-          if (created) agentIdByName.set(agent.name, created.id);
-        }
-      }
+      const applied = await upsertAgentsFromFile(db(c, ctx), file.agents, {
+        ownerId: actor(c),
+        organizationId: membership?.organizationId ?? null,
+      });
+      if ("error" in applied) return c.json({ error: applied.error }, 400);
+      const agentIdByName = applied.idsByName;
 
       const existingStages = await db(c, ctx)
         .select()

@@ -199,7 +199,7 @@ export function SettingsPageSkeleton() {
       <div className="settings-page">
         <Skeleton height={22} width="7rem" />
         <div className="tab-row" aria-hidden="true">
-          {["5.2rem", "4.4rem", "3.8rem", "3.6rem", "3.2rem"].map((w) => (
+          {["5.2rem", "4.4rem", "3.6rem", "3.8rem", "3.6rem", "3.2rem"].map((w) => (
             <Skeleton key={w} height={11} width={w} />
           ))}
         </div>

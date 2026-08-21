@@ -89,6 +89,10 @@ Commands
                        Change one in place. Every stage using it follows,
                        which deleting and re-adding would not do.
   agents remove <name> Remove one.
+  agents export [file] Write every named agent as YAML: the tool, the
+                       model, and the skill. Prints to stdout with no file.
+  agents import <file> Apply one. Agents are matched by name, so importing
+                       twice edits rather than duplicating.
   pipeline export [file]
                        Write the whole pipeline as YAML: its stages, their
                        requirements, the agents that run them, and each
@@ -156,6 +160,10 @@ Examples
   bento pipeline export team-pipeline.yaml
       Keep the pipeline beside the code it describes, and import it into
       the next project rather than clicking it together again.
+
+  bento agents export team-agents.yaml
+      Keep the named agents beside the code they work in, and import them
+      into the next install rather than pairing them again.
 `;
 
 export function parseCliOptions(argv: string[]): CliOptions {

@@ -13,6 +13,7 @@ Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h
 ```bash
 bento repos add ../api --project Checkout --setup "npm ci" --test "npm test"
 bento agents edit Reviewer --model claude-sonnet-5
+bento agents export team-agents.yaml
 bento pipeline export team-pipeline.yaml
 ```
 
@@ -29,6 +30,7 @@ bento pipeline export team-pipeline.yaml
 | Connect and remove repositories | Yes | Yes | Yes |
 | Set a repository's setup and test commands | Yes | `bento repos set` | No |
 | Export and import a pipeline as YAML | Yes | `bento pipeline` | No |
+| Export and import agents as YAML | Yes | `bento agents export` / `import` | No |
 | Add a card | Yes | No | Yes |
 | Add, edit and remove agents | Yes | Yes | Yes |
 | Assign an agent to a stage | Yes | Yes | Yes |

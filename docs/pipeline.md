@@ -50,6 +50,8 @@ Deleting an agent takes its recorded runs with it, transcripts and all, and the 
 
 **Skills** are the agent's operating instructions, sent with every prompt it runs. This is where you say what a stage's write-up must contain. The seeded agents ship with short ones; they are the first thing worth editing.
 
+Agents also read and write as a YAML file, from the buttons under **Agents** or **Settings, Config**. See [pipeline.md](./pipeline.md#the-agents-file).
+
 ## The pipeline file
 
 A pipeline is the part people tune for weeks. It reads and writes as one YAML file from the buttons under **Pipeline**, so it can live beside the code it describes and go through the same review as everything else in that repository.
@@ -84,6 +86,26 @@ repositories:
 Agents are referenced by name, not by id: an id means nothing in the install a file lands in. Importing matches stages by slug and updates them in place, so importing over a live board leaves cards where they are, and matches agents by name, so importing twice edits rather than duplicating. A stage the file leaves out is removed only when nothing is sitting in it; otherwise the import refuses whole and names the stage, because half an import leaves a board in a shape nobody chose. Repository commands are applied where a checkout of that name exists here, and the ones that do not match are reported rather than dropped silently.
 
 The terminal client has the same two operations: `bento pipeline export team-pipeline.yaml` and `bento pipeline import team-pipeline.yaml --project "New service"`.
+
+Both files are also on **Settings, Config**: the agents file (every named agent) and the pipeline file (pick a project, then export or import). The Agents panel has the agents file on its own, the same way Pipeline has this one.
+
+## The agents file
+
+Agents also read and write as their own YAML file, from **Agents** or **Settings, Config**. The pipeline file already carries the agents a board uses; this is the same list without the stages, so the pairings can move on their own:
+
+```yaml
+version: 1
+agents:
+  - name: Code Reviewer
+    tool: opencode
+    model: openrouter/openai/gpt-5.6-sol
+    skill: |
+      Review the changes on this branch against what the earlier stages asked for.
+```
+
+Importing matches by name, so importing twice edits rather than duplicating. Agents the file leaves out are left alone: deleting an agent takes its recorded runs with it, and a file is not a confirmation of that.
+
+The terminal client: `bento agents export team-agents.yaml` and `bento agents import team-agents.yaml`.
 
 ## Repository commands
 

@@ -3717,6 +3717,76 @@ test("an import that would delete an occupied stage is refused", { timeout: 90_0
 });
 
 /**
+ * Named agents move as a file of their own, without the stages. Matched
+ * by name, so importing twice edits rather than duplicating, and a
+ * pairing the form would refuse is refused here too.
+ */
+test("agents export to YAML and import updates by name", { timeout: 90_000 }, async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Yaml Reviewer",
+        cli: "fake",
+        model: "fake-1",
+        skill: "Review like a hawk.",
+      }),
+    }),
+  );
+
+  const exported = await app.request("/api/profiles/export");
+  assert.equal(exported.status, 200);
+  assert.match(exported.headers.get("content-type") ?? "", /yaml/);
+  const yaml = await exported.text();
+  assert.match(yaml, /name: Yaml Reviewer/);
+  assert.match(yaml, /Review like a hawk/);
+
+  const applied = await app.request("/api/profiles/import", {
+    method: "POST",
+    headers: { "content-type": "application/yaml" },
+    body: `version: 1
+agents:
+  - name: Yaml Reviewer
+    tool: fake
+    model: fake-1
+    skill: |
+      Review twice.
+  - name: Yaml Newcomer
+    tool: fake
+    model: fake-1
+    skill: Fresh pairing.
+`,
+  });
+  assert.equal(applied.status, 200);
+  const result = (await applied.json()) as { agents: number };
+  assert.equal(result.agents, 2);
+
+  const listed = await json<{ id: string; name: string; skill: string | null }[]>(await app.request("/api/profiles"));
+  const reviewer = listed.filter((p) => p.name === "Yaml Reviewer");
+  assert.equal(reviewer.length, 1, "importing twice must edit rather than duplicate");
+  assert.equal(reviewer[0]!.id, created.id);
+  assert.match(reviewer[0]!.skill ?? "", /Review twice/);
+  assert.ok(listed.some((p) => p.name === "Yaml Newcomer"));
+});
+
+test("an agents import with an impossible pairing is refused", { timeout: 60_000 }, async () => {
+  const refused = await app.request("/api/profiles/import", {
+    method: "POST",
+    headers: { "content-type": "application/yaml" },
+    body: `version: 1
+agents:
+  - name: Impossible Pair
+    tool: claude-code
+    model: composer-2.5
+`,
+  });
+  assert.equal(refused.status, 400);
+  const listed = await json<{ name: string }[]>(await app.request("/api/profiles"));
+  assert.ok(!listed.some((p) => p.name === "Impossible Pair"));
+});
+
+/**
  * A new project arrives ready to run. Six empty lanes and no agents was
  * six job titles to invent before anything could move.
  */

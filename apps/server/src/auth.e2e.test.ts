@@ -717,6 +717,24 @@ test("every entity route refuses a foreign tenant", async () => {
   const mine = profilesAfter.find((p) => p.id === profile.id);
   assert.equal(mine?.name, "m", "the intruder must not have renamed or removed the owner's agent");
 
+  const ownerAgents = await (await asOwner("/api/profiles/export")).text();
+  assert.match(ownerAgents, /name: m/);
+  const intruderAgents = await (await asIntruder("/api/profiles/export")).text();
+  assert.doesNotMatch(intruderAgents, /name: m/, "a foreign tenant's export must not include this agent's name");
+  const stealAgents = await asIntruder("/api/profiles/import", {
+    method: "POST",
+    headers: { "content-type": "application/yaml" },
+    body: "version: 1\nagents:\n  - name: m\n    tool: fake\n    model: fake-1\n    skill: stolen\n",
+  });
+  assert.ok(stealAgents.status === 200 || stealAgents.status === 400);
+  const profilesAfterImport = (await (await asOwner("/api/profiles")).json()) as {
+    id: string;
+    name: string;
+    skill: string | null;
+  }[];
+  const stillMine = profilesAfterImport.find((p) => p.id === profile.id);
+  assert.notEqual(stillMine?.skill, "stolen", "the intruder's import must not rewrite the owner's agent");
+
   // Refusal must not have mutated anything: not the stage's criteria,
   // and not the repository list either. A repository the intruder added
   // would be a path the owner's agents then check out.

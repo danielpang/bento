@@ -205,8 +205,9 @@ Those three are passed through only when set, so local mode is never handed an e
 | `apps/web/src/components/BottomBar.tsx` | Contact and the changelog |
 | `apps/web/src/changelog.ts` | What the `/changelog` page renders |
 | `apps/web/src/components/FeatureDrawer.tsx` | One card: actions, transcript, gate |
-| `apps/web/src/components/AgentsPanel.tsx` | Pairing a tool with a model |
-| `apps/web/src/components/StageConfig.tsx` | Per stage agent and gate criteria |
+| `apps/web/src/components/AgentsPanel.tsx` | Pairing a tool with a model, and the agents YAML file |
+| `apps/web/src/components/StageConfig.tsx` | Per stage agent and gate criteria, and the pipeline YAML file |
+| `apps/web/src/components/ConfigSettings.tsx` | Settings tab for both YAML files |
 | `apps/web/src/components/TeamPanel.tsx` | Organizations, members, credentials |
 | `apps/web/src/styles.css` | All of the styling, no framework |
 
