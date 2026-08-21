@@ -738,6 +738,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["PATCH", `/api/mcp/${mcpServer!.id}`, { body: JSON.stringify({ name: "stolen" }) }],
     ["POST", `/api/mcp/${mcpServer!.id}/api-key`, { body: JSON.stringify({ value: "sk-injected" }) }],
     ["DELETE", `/api/mcp/${mcpServer!.id}/credential`],
+    ["POST", `/api/mcp/${mcpServer!.id}/connect`],
+    ["DELETE", `/api/mcp/${mcpServer!.id}/user-credential`],
     ["DELETE", `/api/mcp/${mcpServer!.id}`],
     ["DELETE", `/api/features/${feature.id}`],
     // Last: a delete that went through would refuse everything after it
