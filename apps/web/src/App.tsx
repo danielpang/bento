@@ -48,6 +48,7 @@ const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then(
 const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m) => ({ default: m.FeatureDrawer })));
 const RepositoriesPanel = lazy(() => import("./components/RepositoriesPanel.js").then((m) => ({ default: m.RepositoriesPanel })));
 const ResetPassword = lazy(() => import("./components/ResetPassword.js").then((m) => ({ default: m.ResetPassword })));
+const ArtifactPage = lazy(() => import("./components/ArtifactViewer.js").then((m) => ({ default: m.ArtifactPage })));
 const SessionPage = lazy(() => import("./components/SessionPage.js").then((m) => ({ default: m.SessionPage })));
 const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) => ({ default: m.SessionsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
@@ -67,6 +68,7 @@ function RouteFallback() {
     return <CenteredPanelSkeleton />;
   }
   if (path.startsWith("/session/")) return <SessionPageSkeleton />;
+  if (path.startsWith("/artifact/")) return <PageSkeleton />;
   if (path === "/sessions") {
     return (
       <div className="app" aria-busy="true">
@@ -118,6 +120,9 @@ function Route() {
   // A card's conversation in its own tab; the SPA fallback serves it.
   const session = window.location.pathname.match(/^\/session\/([0-9a-f-]{36})$/);
   if (session) return <SessionPage client={client} featureId={session[1]!} />;
+  // An artifact in its own tab, from the viewer's pop-out control.
+  const artifact = window.location.pathname.match(/^\/artifact\/([0-9a-f-]{36})$/);
+  if (artifact) return <ArtifactPage client={client} artifactId={artifact[1]!} />;
   return <Console />;
 }
 

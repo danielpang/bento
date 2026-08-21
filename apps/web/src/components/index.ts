@@ -11,7 +11,7 @@
 export { AcceptInvitation } from "./AcceptInvitation.js";
 export { AccountSettings } from "./AccountSettings.js";
 export { AgentSession } from "./AgentSession.js";
-export { ArtifactViewer } from "./ArtifactViewer.js";
+export { ArtifactPage, ArtifactViewer } from "./ArtifactViewer.js";
 export { AgentsPanel } from "./AgentsPanel.js";
 export { AppearanceSettings } from "./AppearanceSettings.js";
 export { BillingCard } from "./BillingCard.js";

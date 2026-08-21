@@ -708,6 +708,14 @@ export class BentoClient {
   }
 
   /**
+   * One artifact's metadata, for a tab that opens the viewer by id
+   * rather than from a card's already-loaded list.
+   */
+  getArtifact(artifactId: string) {
+    return this.request<RunArtifact>(`/api/artifacts/${artifactId}`);
+  }
+
+  /**
    * Where an artifact's bytes are served. For <img> tags and download
    * links in the browser, which ride the session cookie; bearer-token
    * clients fetch through getArtifactText instead.

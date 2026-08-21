@@ -489,7 +489,7 @@ export function Board({
         rearrangement.
       */}
       <Lane
-        name="Done"
+        name="Completed"
         ordinal={String(stages.length + 1).padStart(2, "0")}
         count={finished.length}
         note="finished work"
@@ -688,9 +688,6 @@ const Card = memo(function Card({
           ) : (
             <span className="chip">PR #{feature.prNumber}</span>
           ))}
-        {/* Said rather than merely enforced: the card simply refusing to
-            lift reads as a broken drag. */}
-        {finished && <span className="muted">reopen to move</span>}
       </span>
       {/*
         The agent's own words while it works, and its last words when it
@@ -767,7 +764,7 @@ function stateLabel(state: CardState): string {
     case "gated":
       return "waiting at gate";
     case "done":
-      return "done";
+      return "completed";
     case "cancelled":
       return "cancelled";
     default:
