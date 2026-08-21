@@ -1,11 +1,13 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import {
   account,
   deviceCode,
   invitation,
+  mcpCredentials,
+  mcpRunGrants,
   member,
   organization as organizationTable,
   rateLimit,
@@ -274,6 +276,31 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
           // a card being charged for a team that no longer exists.
           async beforeDeleteOrganization({ organization: org }) {
             await hooks.onOrganizationDeleted?.(org.id);
+          },
+          // A removed member's own MCP connections should not linger.
+          // The gateway already re-reads live membership per request, so
+          // their tokens stopped serving the moment they left; this is
+          // the hygiene that deletes the rows and ends any live grant.
+          async afterRemoveMember({ user: removed, organization: org }) {
+            try {
+              await db
+                .delete(mcpCredentials)
+                .where(and(eq(mcpCredentials.organizationId, org.id), eq(mcpCredentials.userId, removed.id)));
+              await db
+                .update(mcpRunGrants)
+                .set({ revokedAt: new Date() })
+                .where(
+                  and(
+                    eq(mcpRunGrants.organizationId, org.id),
+                    eq(mcpRunGrants.actingUserId, removed.id),
+                    isNull(mcpRunGrants.revokedAt),
+                  ),
+                );
+            } catch (err) {
+              // Membership removal must not fail on cleanup; the live
+              // membership check is the real boundary.
+              console.error(`could not clean up MCP credentials for a removed member:`, err);
+            }
           },
         },
         organizationLimit: 10,

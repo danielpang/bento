@@ -3,7 +3,7 @@ import { mcpCredentials, mcpServers } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
 import type { AgentAdapter, McpRemoteServer } from "@bento/agents";
 import type { AppContext } from "../context.js";
-import { mintRunGrant } from "../mcp/grants.js";
+import { mintRunGrant, revokeRunGrant } from "../mcp/grants.js";
 
 /**
  * Attaches the organization's MCP servers to one run.
@@ -111,29 +111,53 @@ export async function prepareRunMcp(
       if (usable.note) await input.say(usable.note);
       continue;
     }
+    // An sse-transport server is reached at the gateway's /sse endpoint,
+    // where the endpoint event and message path live; a streamable-HTTP
+    // server is reached at the base path.
+    const gatewayPath =
+      server.transport === "sse"
+        ? `${gatewayBase}/api/mcp-gateway/${server.id}/sse`
+        : `${gatewayBase}/api/mcp-gateway/${server.id}`;
     attached.push({
       slug: server.slug,
-      url: `${gatewayBase}/api/mcp-gateway/${server.id}`,
+      url: gatewayPath,
       transport: server.transport,
       headers: {},
     });
+  }
+
+  // No server attached (all per-user with no credential, say): clear any
+  // stale config and mint no grant. The resume path keys the MCP flags
+  // off a live grant, so minting one here would make a resumed run add
+  // --mcp-config that the first run never had, and the session would
+  // diverge.
+  if (attached.length === 0) {
+    await writeConfigs(ctx, input.handle, capability.renderConfig([]));
+    return none;
   }
 
   const token = await mintRunGrant(ctx, {
     runId: input.runId,
     organizationId: input.organizationId,
     actingUserId: input.actingUserId,
-    serverIds: servers
-      .filter((s) => attached.some((a) => a.slug === s.slug))
-      .map((s) => s.id),
+    serverIds: servers.filter((s) => attached.some((a) => a.slug === s.slug)).map((s) => s.id),
     ttlMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 + GRANT_SLACK_MS,
   });
   for (const server of attached) {
     server.headers.Authorization = `Bearer ${token}`;
   }
 
-  await writeConfigs(ctx, input.handle, capability.renderConfig(attached));
-  if (attached.length === 0) return none;
+  // If the config could not be written, the agent has no file to read, so
+  // do not hand it the flags. Revoke the grant so a resume does not try
+  // to reattach MCP either.
+  const written = await writeConfigs(ctx, input.handle, capability.renderConfig(attached));
+  if (!written) {
+    await revokeRunGrant(ctx, input.runId);
+    await input.say(
+      `Could not write the MCP configuration into the sandbox, so ${input.adapter.cli}'s MCP servers are not attached to this run.`,
+    );
+    return none;
+  }
   return { extraArgs: capability.extraArgs?.() ?? [] };
 }
 
@@ -189,19 +213,25 @@ async function credentialUsable(
   return { ok: true };
 }
 
+/** Writes each config file into the sandbox. Returns false if any write failed. */
 async function writeConfigs(
   ctx: AppContext,
   handle: SandboxHandle,
   files: { path: string; content: string }[],
-): Promise<void> {
+): Promise<boolean> {
   for (const file of files) {
     const dir = file.path.replace(/\/[^/]+$/, "");
     const b64 = Buffer.from(file.content, "utf8").toString("base64");
     // The token rides the file content through argv, never opts.env:
     // the sprite driver leaks env into the exec URL, and files do not.
     const script = `mkdir -p ${shellQuote(dir)} && printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(file.path)} && chmod 600 ${shellQuote(file.path)}`;
-    await collectExec(ctx.driver.exec(handle, ["sh", "-c", script], { timeoutMs: EXEC_TIMEOUT_MS }));
+    const result = await collectExec(ctx.driver.exec(handle, ["sh", "-c", script], { timeoutMs: EXEC_TIMEOUT_MS }));
+    if (result.exitCode !== 0) {
+      console.error(`could not write ${file.path} into the sandbox (exit ${result.exitCode}): ${result.stderr.slice(0, 200)}`);
+      return false;
+    }
   }
+  return true;
 }
 
 /**

@@ -50,7 +50,11 @@ function takeToken(grantId: string): boolean {
     return false;
   }
   bucket.tokens -= 1;
-  buckets.set(grantId, bucket);
+  // A bucket that has refilled to full is indistinguishable from a fresh
+  // one, so drop it rather than retain an entry per grant that ever ran.
+  // Only a grant still under rate pressure (tokens below full) is kept.
+  if (bucket.tokens >= BUCKET_CAPACITY - 1) buckets.delete(grantId);
+  else buckets.set(grantId, bucket);
   return true;
 }
 
@@ -59,6 +63,8 @@ interface GatewayTarget {
   server: typeof mcpServers.$inferSelect;
   /** The stored credential row, or null for auth_type none. */
   credentialRow: typeof mcpCredentials.$inferSelect | null;
+  /** The decrypted secret actually attached, so a 401 refresh knows which token failed. */
+  attachedSecret: string | null;
   /** Header attached upstream, or null for auth_type none. */
   credential: { name: string; value: string } | null;
 }
@@ -92,7 +98,9 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     if (!server || !server.enabled) return null;
     if ((server.organizationId ?? null) !== (grant.organizationId ?? null)) return null;
 
-    if (server.authType === "none") return { grant, server, credentialRow: null, credential: null };
+    if (server.authType === "none") {
+      return { grant, server, credentialRow: null, attachedSecret: null, credential: null };
+    }
 
     const perUser = server.authType === "oauth" && server.credentialScope === "user";
     let row: typeof mcpCredentials.$inferSelect | undefined;
@@ -129,7 +137,16 @@ export function mcpGatewayRoutes(ctx: AppContext) {
       // here that is a 404 like any other missing credential.
       return null;
     }
-    return { grant, server, credentialRow: row, credential: headerFor(server, secret) };
+    // An OAuth access token already past its expiry is refreshed before
+    // the request goes out, so a long-lived SSE stream or a GET (which
+    // have no after-the-fact 401 retry) start with a live token. A
+    // refresh that cannot proceed leaves the stale token in place; the
+    // upstream's own 401 then surfaces honestly.
+    if (row.kind === "oauth" && row.expiresAt && row.expiresAt.getTime() <= Date.now()) {
+      const fresh = await refreshCredential(ctx, server, row.id, secret, c.req.raw.signal);
+      if (fresh) secret = fresh;
+    }
+    return { grant, server, credentialRow: row, attachedSecret: secret, credential: headerFor(server, secret) };
   }
 
   function headerFor(server: typeof mcpServers.$inferSelect, secret: string): { name: string; value: string } {
@@ -144,12 +161,12 @@ export function mcpGatewayRoutes(ctx: AppContext) {
    * refreshed target, or null when there is nothing to refresh or the
    * grant is dead (the 401 then passes through).
    */
-  async function refreshedTarget(target: GatewayTarget): Promise<GatewayTarget | null> {
+  async function refreshedTarget(c: Context, target: GatewayTarget): Promise<GatewayTarget | null> {
     const row = target.credentialRow;
-    if (!row || row.kind !== "oauth" || !row.encryptedRefreshToken) return null;
-    const fresh = await refreshCredential(ctx, target.server, row.id);
-    if (!fresh) return null;
-    return { ...target, credential: headerFor(target.server, fresh) };
+    if (!row || row.kind !== "oauth" || !row.encryptedRefreshToken || target.attachedSecret === null) return null;
+    const fresh = await refreshCredential(ctx, target.server, row.id, target.attachedSecret, c.req.raw.signal);
+    if (!fresh || fresh === target.attachedSecret) return null;
+    return { ...target, attachedSecret: fresh, credential: headerFor(target.server, fresh) };
   }
 
   function upstreamHeaders(c: Context, target: GatewayTarget): Record<string, string> {
@@ -199,7 +216,7 @@ export function mcpGatewayRoutes(ctx: AppContext) {
       // is safe. Anything but 401 (including a refreshed-then-still-401)
       // passes straight back.
       if (upstream.status === 401 && init.body !== undefined) {
-        const refreshed = await refreshedTarget(target);
+        const refreshed = await refreshedTarget(c, target);
         if (refreshed) {
           upstream.body?.cancel().catch(() => {});
           upstream = await fetchUpstream(c, refreshed, url, init);
@@ -212,13 +229,34 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     return passBack(c, upstream);
   }
 
-  /** Reads the JSON-RPC body, capped: a tool call is small. */
+  /**
+   * Reads the JSON-RPC body, capped while reading. A tool call is small,
+   * and content-length is attacker controlled: a chunked request carries
+   * none, so trusting it and only checking length after buffering would
+   * let an agent stream an unbounded body and OOM the shared process.
+   * The cap is enforced against the bytes as they arrive.
+   */
   async function readBody(c: Context): Promise<string | null> {
-    const declared = Number(c.req.header("content-length") ?? "0");
-    if (declared > BODY_LIMIT) return null;
-    const body = await c.req.text();
-    if (body.length > BODY_LIMIT) return null;
-    return body;
+    const body = c.req.raw.body;
+    if (!body) return "";
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > BODY_LIMIT) {
+          reader.cancel().catch(() => {});
+          return null;
+        }
+        chunks.push(value);
+      }
+    } catch {
+      return null;
+    }
+    return Buffer.concat(chunks).toString("utf8");
   }
 
   // Streamable HTTP: POST carries JSON-RPC, GET opens the
@@ -333,9 +371,9 @@ export function mcpGatewayRoutes(ctx: AppContext) {
 /**
  * Rewrites only the data of `endpoint` events; every other byte passes
  * through untouched. Emits a relative path so the client resolves it
- * against whichever host it reached the gateway on.
+ * against whichever host it reached the gateway on. Exported for tests.
  */
-function endpointRewriter(serverId: string, upstreamUrl: string): TransformStream<Uint8Array, Uint8Array> {
+export function endpointRewriter(serverId: string, upstreamUrl: string): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffered = "";
@@ -343,6 +381,16 @@ function endpointRewriter(serverId: string, upstreamUrl: string): TransformStrea
   const upstreamOrigin = new URL(upstreamUrl).origin;
 
   const rewriteLine = (line: string): string | null => {
+    // A blank line terminates an SSE event, after which the type resets
+    // to the default. Without this reset an endpoint event with no
+    // trailing type line would leave inEndpointEvent stuck on, and the
+    // next message frame's data (which defaults to a "message" event
+    // and carries no event: line) would be rewritten as if it were an
+    // endpoint, corrupting the stream.
+    if (line === "") {
+      inEndpointEvent = false;
+      return line;
+    }
     if (line.startsWith("event:")) {
       inEndpointEvent = line.slice("event:".length).trim() === "endpoint";
       return line;

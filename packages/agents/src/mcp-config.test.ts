@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { cursorAdapter } from "./cursor.js";
 import { opencodeAdapter } from "./opencode.js";
+import { codexAdapter } from "./codex.js";
 import type { McpRemoteServer } from "./adapter.js";
 
 const servers: McpRemoteServer[] = [
@@ -58,6 +59,23 @@ test("opencode marks servers remote and enabled", () => {
   assert.equal(parsed.mcp.issues!.headers.Authorization, "Bearer bmg_token");
 });
 
+test("codex renders TOML tables with a static Authorization header", () => {
+  const files = codexAdapter.mcp!.renderConfig(servers);
+  assert.equal(files[0]!.path, "/root/.codex/config.toml");
+  const toml = files[0]!.content;
+  assert.match(toml, /\[mcp_servers\.docs\]/);
+  assert.match(toml, /url = "https:\/\/bento\.test\/api\/mcp-gateway\/abc"/);
+  assert.match(toml, /http_headers = \{ "Authorization" = "Bearer bmg_token" \}/);
+  assert.match(toml, /\[mcp_servers\.issues\]/);
+});
+
+test("codex escapes a slug that is not a bare TOML key", () => {
+  const toml = codexAdapter.mcp!.renderConfig([
+    { slug: "has space", url: "https://x/y", transport: "http", headers: {} },
+  ])[0]!.content;
+  assert.match(toml, /\[mcp_servers\."has space"\]/);
+});
+
 test("an empty server set still renders a config, so a removed server is cleared", () => {
   for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter]) {
     const files = adapter.mcp!.renderConfig([]);
@@ -67,4 +85,6 @@ test("an empty server set still renders a config, so a removed server is cleared
     const bag = parsed.mcpServers ?? parsed.mcp ?? {};
     assert.equal(Object.keys(bag).length, 0, `${adapter.cli} must clear stale servers`);
   }
+  // Codex clears by writing an empty file.
+  assert.equal(codexAdapter.mcp!.renderConfig([])[0]!.content, "");
 });
