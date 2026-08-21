@@ -320,3 +320,114 @@ test("an auth-none server proxies with no credential header", async () => {
   assert.equal(seenAuth.at(-1), null, "an auth-none server sends no credential header");
   assert.equal(res.status, 401, "the upstream's own 401 passes back");
 });
+
+test("an upstream 401 triggers one refresh and a retry, and the rotated refresh token is persisted", async () => {
+  // An upstream that accepts only the current access token, and a token
+  // endpoint that rotates the refresh token on each call.
+  let currentAccess = "access-1";
+  let refreshCalls = 0;
+  const rotating = createServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${currentAccess}`) {
+      res.writeHead(401); res.end(JSON.stringify({ error: "expired_token" })); return;
+    }
+    let body = ""; req.on("data", (c) => (body += c));
+    req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } })); });
+  });
+  const tokenEndpoint = createServer((req, res) => {
+    refreshCalls += 1;
+    currentAccess = "access-2";
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ access_token: "access-2", refresh_token: "refresh-rotated", expires_in: 3600 }));
+  });
+  await new Promise<void>((r) => rotating.listen(0, "127.0.0.1", r));
+  await new Promise<void>((r) => tokenEndpoint.listen(0, "127.0.0.1", r));
+  const upstreamPort = (rotating.address() as { port: number }).port;
+  const tokenPort = (tokenEndpoint.address() as { port: number }).port;
+
+  try {
+    const [server] = await ctx.db.insert(mcpServers).values({
+      ownerId: ctx.userId, organizationId: null, name: "OAuth", slug: `gw-oauth-${seenAuth.length}`,
+      url: `http://127.0.0.1:${upstreamPort}/mcp`, transport: "http", authType: "oauth", credentialScope: "org",
+      clientId: "client-1", tokenEndpoint: `http://127.0.0.1:${tokenPort}/token`,
+      issuer: `http://127.0.0.1:${tokenPort}`, resource: `http://127.0.0.1:${upstreamPort}/mcp`,
+    }).returning();
+    const [cred] = await ctx.db.insert(mcpCredentials).values({
+      serverId: server!.id, organizationId: null, userId: null, kind: "oauth",
+      encryptedSecret: ctx.secretBox.encrypt("access-1"), // stale from the upstream's view after it rotates
+      encryptedRefreshToken: ctx.secretBox.encrypt("refresh-1"),
+      expiresAt: new Date(Date.now() - 1000), // already expired
+      tokenEndpointOrigin: `http://127.0.0.1:${tokenPort}`,
+    }).returning();
+    const token = await mintRunGrant(ctx, {
+      runId, organizationId: null, actingUserId: null, serverIds: [server!.id], ttlMs: 60_000,
+    });
+
+    // The stored access token is access-1, which the upstream accepts
+    // until the first refresh flips it to access-2. To force a 401 that
+    // triggers refresh, mark the upstream's accepted token as access-2
+    // up front so the first call with access-1 fails.
+    currentAccess = "access-2";
+    const res = await gatewayCall(server!.id, token, { jsonrpc: "2.0", id: 1, method: "tools/call" });
+    assert.equal(res.status, 200, "after refresh the retry succeeds");
+    assert.equal(refreshCalls, 1, "exactly one refresh happened");
+
+    const [after] = await ctx.db.select().from(mcpCredentials).where(eq(mcpCredentials.id, cred!.id));
+    assert.equal(ctx.secretBox.decrypt(after!.encryptedSecret), "access-2", "the new access token is stored");
+    assert.equal(ctx.secretBox.decrypt(after!.encryptedRefreshToken!), "refresh-rotated", "the rotated refresh token is stored");
+  } finally {
+    rotating.close();
+    tokenEndpoint.close();
+  }
+});
+
+test("two concurrent 401s do a single refresh (advisory lock)", async () => {
+  let currentAccess = "conc-2";
+  let refreshCalls = 0;
+  const rotating = createServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${currentAccess}`) { res.writeHead(401); res.end("{}"); return; }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
+  });
+  const tokenEndpoint = createServer((req, res) => {
+    refreshCalls += 1;
+    // A small delay so both requests contend for the lock.
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ access_token: "conc-2", refresh_token: "conc-refresh-2", expires_in: 3600 }));
+    }, 50);
+  });
+  await new Promise<void>((r) => rotating.listen(0, "127.0.0.1", r));
+  await new Promise<void>((r) => tokenEndpoint.listen(0, "127.0.0.1", r));
+  const upstreamPort = (rotating.address() as { port: number }).port;
+  const tokenPort = (tokenEndpoint.address() as { port: number }).port;
+
+  try {
+    const [server] = await ctx.db.insert(mcpServers).values({
+      ownerId: ctx.userId, organizationId: null, name: "OAuth2", slug: `gw-oauth2-${seenAuth.length}`,
+      url: `http://127.0.0.1:${upstreamPort}/mcp`, transport: "http", authType: "oauth", credentialScope: "org",
+      clientId: "client-2", tokenEndpoint: `http://127.0.0.1:${tokenPort}/token`,
+      issuer: `http://127.0.0.1:${tokenPort}`, resource: `http://127.0.0.1:${upstreamPort}/mcp`,
+    }).returning();
+    await ctx.db.insert(mcpCredentials).values({
+      serverId: server!.id, organizationId: null, userId: null, kind: "oauth",
+      encryptedSecret: ctx.secretBox.encrypt("conc-1"),
+      encryptedRefreshToken: ctx.secretBox.encrypt("conc-refresh-1"),
+      expiresAt: new Date(Date.now() - 1000),
+      tokenEndpointOrigin: `http://127.0.0.1:${tokenPort}`,
+    });
+    const token = await mintRunGrant(ctx, {
+      runId, organizationId: null, actingUserId: null, serverIds: [server!.id], ttlMs: 60_000,
+    });
+
+    const [a, b] = await Promise.all([
+      gatewayCall(server!.id, token, { id: 1 }),
+      gatewayCall(server!.id, token, { id: 2 }),
+    ]);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    assert.equal(refreshCalls, 1, "the advisory lock collapsed two 401s into one refresh");
+  } finally {
+    rotating.close();
+    tokenEndpoint.close();
+  }
+});

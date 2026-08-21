@@ -48,6 +48,8 @@ before(async () => {
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
+    // The OAuth flow tests below sign a state blob with this.
+    BENTO_SECRET_KEY: "mcp-test-state-signing-key-32-chars-min",
   } as NodeJS.ProcessEnv);
 
   const pool = createPool(testUrl);
@@ -261,4 +263,143 @@ test("deleting a server takes its credentials with it", async () => {
   assert.equal(del.status, 200);
   const rows = await ctx.db.select().from(mcpCredentials).where(eq(mcpCredentials.serverId, id));
   assert.equal(rows.length, 0, "the cascade must remove the credential");
+});
+
+// A fake authorization server: 401 challenge, protected resource
+// metadata, RFC 8414 metadata, dynamic registration, and a token
+// endpoint. Lets the OAuth flow run end to end with no real provider.
+let authServer: Server;
+let authBase: string;
+let issuedCode = "the-auth-code";
+
+before(async () => {
+  authServer = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", authBase);
+    const json = (obj: unknown, status = 200) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(obj));
+    };
+    switch (url.pathname) {
+      case "/oauth-mcp":
+        res.writeHead(401, {
+          "www-authenticate": `Bearer resource_metadata="${authBase}/.well-known/oauth-protected-resource/oauth-mcp"`,
+        });
+        res.end();
+        return;
+      case "/.well-known/oauth-protected-resource/oauth-mcp":
+        json({ resource: `${authBase}/oauth-mcp`, authorization_servers: [authBase] });
+        return;
+      case "/.well-known/oauth-authorization-server":
+        json({
+          issuer: authBase,
+          authorization_endpoint: `${authBase}/authorize`,
+          token_endpoint: `${authBase}/token`,
+          registration_endpoint: `${authBase}/register`,
+          code_challenge_methods_supported: ["S256"],
+          authorization_response_iss_parameter_supported: true,
+        });
+        return;
+      case "/register":
+        json({ client_id: "flow-client" }, 201);
+        return;
+      case "/token": {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          const form = new URLSearchParams(body);
+          if (form.get("code") !== issuedCode) return json({ error: "invalid_grant" }, 400);
+          json({ access_token: "flow-access", refresh_token: "flow-refresh", expires_in: 3600, scope: "read" });
+        });
+        return;
+      }
+      default:
+        res.writeHead(404);
+        res.end();
+    }
+  });
+  await new Promise<void>((r) => authServer.listen(0, "127.0.0.1", r));
+  authBase = `http://127.0.0.1:${(authServer.address() as { port: number }).port}`;
+});
+
+after(() => authServer?.close());
+
+let oauthSeq = 0;
+async function makeOAuthServer(scope: "org" | "user") {
+  oauthSeq += 1;
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "OAuth flow",
+    slug: `oauth-${scope}-${oauthSeq}`,
+    url: `${authBase}/oauth-mcp`,
+    authType: "oauth",
+    credentialScope: scope,
+  });
+  assert.equal(created.status, 201, "the oauth server must be created");
+  return ((await created.json()) as { id: string }).id;
+}
+
+test("connect discovers the authorization server and returns an authorize URL", async () => {
+  const id = await makeOAuthServer("org");
+  const res = await jsonRequest(`/api/mcp/${id}/connect`, "POST");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { url: string; authorizationHost: string };
+  const url = new URL(body.url);
+  assert.equal(url.origin + url.pathname, `${authBase}/authorize`);
+  assert.equal(url.searchParams.get("code_challenge_method"), "S256");
+  assert.equal(url.searchParams.get("client_id"), "flow-client");
+  assert.equal(url.searchParams.get("resource"), `${authBase}/oauth-mcp`);
+  assert.ok(url.searchParams.get("state"), "the authorize URL carries a signed state");
+
+  // The discovered endpoints and the registered client are cached.
+  const [server] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+  assert.equal(server!.tokenEndpoint, `${authBase}/token`);
+  assert.equal(server!.clientId, "flow-client");
+  assert.equal(server!.clientRegistration, "dynamic");
+});
+
+test("the callback exchanges the code and stores the tokens encrypted", async () => {
+  const id = await makeOAuthServer("user");
+  const connect = await jsonRequest(`/api/mcp/${id}/connect`, "POST");
+  const { url } = (await connect.json()) as { url: string };
+  const state = new URL(url).searchParams.get("state")!;
+
+  issuedCode = "the-auth-code";
+  const cb = await app.request(
+    `/api/mcp/callback/${id}?state=${encodeURIComponent(state)}&code=the-auth-code&iss=${encodeURIComponent(authBase)}`,
+  );
+  assert.equal(cb.status, 302);
+  assert.match(cb.headers.get("location") ?? "", /mcp=connected/);
+
+  const [cred] = await ctx.db.select().from(mcpCredentials).where(eq(mcpCredentials.serverId, id));
+  assert.ok(cred, "the credential row exists");
+  assert.equal(cred!.kind, "oauth");
+  assert.equal(cred!.userId, ctx.userId, "a per-user server stores the credential under the member");
+  assert.equal(ctx.secretBox.decrypt(cred!.encryptedSecret), "flow-access");
+  assert.equal(ctx.secretBox.decrypt(cred!.encryptedRefreshToken!), "flow-refresh");
+  assert.equal(cred!.tokenEndpointOrigin, authBase, "the credential is pinned to its token endpoint");
+
+  const status = (await (await app.request("/api/mcp/status")).json()) as unknown;
+  assert.ok(!JSON.stringify(status).includes("flow-access"), "no route returns the access token");
+});
+
+test("the callback rejects a tampered state, a wrong issuer, and a mismatched server id", async () => {
+  const id = await makeOAuthServer("org");
+  const connect = await jsonRequest(`/api/mcp/${id}/connect`, "POST");
+  const { url } = (await connect.json()) as { url: string };
+  const state = new URL(url).searchParams.get("state")!;
+
+  const tampered = await app.request(`/api/mcp/callback/${id}?state=${encodeURIComponent(state)}x&code=c`);
+  assert.match(tampered.headers.get("location") ?? "", /mcp=invalid/, "a tampered state is rejected");
+
+  const wrongIss = await app.request(
+    `/api/mcp/callback/${id}?state=${encodeURIComponent(state)}&code=the-auth-code&iss=https://evil.example.test`,
+  );
+  assert.match(wrongIss.headers.get("location") ?? "", /mcp=invalid/, "a mismatched issuer is rejected");
+
+  // The state was minted for `id`; arriving at another server's callback
+  // path must fail the serverId cross-check (mix-up defense).
+  const otherId = await makeOAuthServer("user");
+  const wrongPath = await app.request(
+    `/api/mcp/callback/${otherId}?state=${encodeURIComponent(state)}&code=the-auth-code&iss=${encodeURIComponent(authBase)}`,
+  );
+  assert.match(wrongPath.headers.get("location") ?? "", /mcp=invalid/, "a code cannot be redeemed via another server's callback");
 });

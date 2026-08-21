@@ -51,6 +51,11 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   // outcome is said here rather than only on the board.
   useGitHubOutcome();
 
+  // Per-user MCP servers each member must connect for themselves: the
+  // count drives a dot on the MCP tab so the prompt is visible without a
+  // banner on the board.
+  const [mcpToConnect, setMcpToConnect] = useState(0);
+
   useEffect(() => {
     void client
       .health()
@@ -62,6 +67,10 @@ export function SettingsPage({ client }: { client: BentoClient }) {
     void fetch("/api/billing/plan", { credentials: "include" })
       .then((res) => setHasBilling(res.ok))
       .catch(() => setHasBilling(false));
+    void client
+      .mcpStatus()
+      .then((s) => setMcpToConnect(s.userConnectionsNeeded))
+      .catch(() => setMcpToConnect(0));
   }, [client]);
 
   if (mode === "unknown" || (mode === "multi" && isPending)) return <SettingsPageSkeleton />;
@@ -108,6 +117,14 @@ export function SettingsPage({ client }: { client: BentoClient }) {
                   className={`tab${entry.id === active ? " tab-on" : ""}`}
                 >
                   {entry.label}
+                  {entry.id === "mcp" && mcpToConnect > 0 && (
+                    <span
+                      className="tab-dot"
+                      data-set
+                      style={{ display: "inline-block", marginLeft: 6, verticalAlign: "middle" }}
+                      aria-label={`${mcpToConnect} MCP servers to connect`}
+                    />
+                  )}
                 </Tabs.Trigger>
               ))}
             </Tabs.List>
