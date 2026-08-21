@@ -20,6 +20,7 @@ export { BoardSearch } from "./BoardSearch.js";
 export { BottomBar } from "./BottomBar.js";
 export { BrandLockup } from "./BrandLockup.js";
 export { ChangelogPage } from "./ChangelogPage.js";
+export { ConfigSettings } from "./ConfigSettings.js";
 export { ContactDialog } from "./ContactDialog.js";
 export { CreateTeam } from "./CreateTeam.js";
 export { GitHubTokenCard, ProviderKeysCard } from "./Credentials.js";

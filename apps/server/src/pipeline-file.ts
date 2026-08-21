@@ -1,6 +1,7 @@
-import { parse, stringify } from "yaml";
 import { z } from "zod";
-import { agentCli, gateCriteria, gateType } from "@bento/core";
+import { gateCriteria, gateType } from "@bento/core";
+import { agentEntry } from "./agent-file.js";
+import { firstZodProblem, parseYamlDocument, writeYamlDocument } from "./yaml-file.js";
 
 /**
  * A project's pipeline as a file.
@@ -33,14 +34,6 @@ const stageEntry = z.object({
   agent: z.string().max(200).nullish(),
 });
 
-const agentEntry = z.object({
-  name: z.string().min(1).max(200),
-  tool: agentCli,
-  model: z.string().min(1).max(200),
-  skill: z.string().max(20000).nullish(),
-  extraArgs: z.array(z.string()).default([]),
-});
-
 const repositoryEntry = z.object({
   name: z.string().min(1).max(64),
   setup: z.string().max(4000).nullish(),
@@ -71,21 +64,10 @@ export type PipelineFile = z.infer<typeof pipelineFile>;
 
 /** Parses and validates, with the first problem reported in words. */
 export function parsePipelineFile(text: string): { data: PipelineFile } | { error: string } {
-  let raw: unknown;
-  try {
-    raw = parse(text);
-  } catch (err) {
-    return { error: `that is not valid YAML: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  if (raw === null || typeof raw !== "object") {
-    return { error: "the file is empty, or is not a YAML document" };
-  }
-  const parsed = pipelineFile.safeParse(raw);
-  if (!parsed.success) {
-    const first = parsed.error.issues[0];
-    const where = first?.path.join(".") || "the file";
-    return { error: `${where}: ${first?.message ?? "is not valid"}` };
-  }
+  const raw = parseYamlDocument(text);
+  if ("error" in raw) return raw;
+  const parsed = pipelineFile.safeParse(raw.data);
+  if (!parsed.success) return { error: firstZodProblem(parsed.error.issues) };
   // Slugs identify stages during an import, so two of the same would
   // make the result depend on order.
   const slugs = new Set<string>();
@@ -106,12 +88,5 @@ export function parsePipelineFile(text: string): { data: PipelineFile } | { erro
 
 /** Serialises, with the long skills as readable block scalars. */
 export function writePipelineFile(data: PipelineFile): string {
-  return stringify(data, {
-    lineWidth: 0,
-    // Skills are paragraphs. Folded or quoted, they come out as one
-    // unreadable line, which is the thing a file format is for avoiding.
-    blockQuote: "literal",
-    defaultStringType: "PLAIN",
-    defaultKeyType: "PLAIN",
-  });
+  return writeYamlDocument(data);
 }

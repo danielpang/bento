@@ -6,6 +6,7 @@ import { useToast } from "./Toasts.js";
 import type { AgentProfile, BentoClient, Feature, Stage } from "@bento/api-client";
 import type { GateCriterion } from "@bento/core";
 import { ProviderMark } from "./ProviderMark.js";
+import { YamlFileActions, downloadYaml, pipelineImportSummary } from "./YamlFileActions.js";
 
 /**
  * The pipeline as a list of stage cards, each edited in its own modal.
@@ -111,20 +112,13 @@ export function StageConfig({
 
   /** What the last import did, so it is not a button that seems inert. */
   const [imported, setImported] = useState("");
-  const fileInput = useRef<HTMLInputElement>(null);
 
   async function exportFile() {
     await act(async () => {
       if (!projectId) return;
-      const yaml = await client.exportPipeline(projectId);
       // Downloaded rather than shown: the point of the file is to live
       // somewhere else, in a repository or another install.
-      const url = URL.createObjectURL(new Blob([yaml], { type: "application/yaml" }));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "bento-pipeline.yaml";
-      link.click();
-      URL.revokeObjectURL(url);
+      downloadYaml("bento-pipeline.yaml", await client.exportPipeline(projectId));
     });
   }
 
@@ -132,15 +126,7 @@ export function StageConfig({
     setImported("");
     const ok = await act(async () => {
       if (!projectId) return;
-      const result = await client.importPipeline(projectId, await file.text());
-      const parts = [`Imported ${result.stages} stages and ${result.agents} agents.`];
-      if (result.removedStages.length > 0) parts.push(`Removed: ${result.removedStages.join(", ")}.`);
-      if (result.skippedRepositories.length > 0) {
-        parts.push(
-          `No repository here is called ${result.skippedRepositories.join(" or ")}, so those commands were skipped.`,
-        );
-      }
-      setImported(parts.join(" "));
+      setImported(pipelineImportSummary(await client.importPipeline(projectId, await file.text())));
     });
     if (!ok) setImported("");
   }
@@ -305,29 +291,13 @@ export function StageConfig({
             The stages, their requirements, the agents behind them, and each repository's commands,
             as one YAML file. Import it into another project instead of building it again.
           </p>
-          <div className="actions">
-            <button className="btn" disabled={busy || !projectId} onClick={() => void exportFile()}>
-              Export YAML
-            </button>
-            <button className="btn" disabled={busy || !projectId} onClick={() => fileInput.current?.click()}>
-              Import YAML
-            </button>
-            <input
-              ref={fileInput}
-              type="file"
-              accept=".yaml,.yml,application/yaml,text/yaml"
-              hidden
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                // Cleared before the read, so choosing the same file
-                // twice fires again: the second import is usually the
-                // one after a fix.
-                e.target.value = "";
-                if (file) void importFile(file);
-              }}
-            />
-          </div>
-          {imported && <p className="muted">{imported}</p>}
+          <YamlFileActions
+            busy={busy}
+            disabled={!projectId}
+            imported={imported}
+            onExport={() => void exportFile()}
+            onImport={(file) => void importFile(file)}
+          />
         </section>
 
         {/* The count comes from the board rather than from the server's

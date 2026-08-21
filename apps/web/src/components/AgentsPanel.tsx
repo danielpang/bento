@@ -10,6 +10,7 @@ import { ConfirmDialog } from "./PromptDialog.js";
 import { ProviderKeysCard } from "./Credentials.js";
 import { ProviderMark } from "./ProviderMark.js";
 import { SecretField } from "./SecretField.js";
+import { YamlFileActions, downloadYaml } from "./YamlFileActions.js";
 import {
   MODEL_GUIDANCE,
   checkAgentPairing,
@@ -76,6 +77,8 @@ export function AgentsPanel({
     confirmLabel: string;
     run: () => Promise<unknown>;
   } | null>(null);
+  /** What the last import did, so it is not a button that seems inert. */
+  const [imported, setImported] = useState("");
 
   // Local mode only. A shared server has no machine logins to offer, so
   // the whole section is absent there rather than shown and inert.
@@ -186,11 +189,28 @@ export function AgentsPanel({
     try {
       await fn();
       onChanged();
+      return true;
     } catch (err) {
       toast.fail(err);
+      return false;
     } finally {
       setBusy(false);
     }
+  }
+
+  async function exportFile() {
+    await act(async () => {
+      downloadYaml("bento-agents.yaml", await client.exportAgents());
+    });
+  }
+
+  async function importFile(file: File) {
+    setImported("");
+    const ok = await act(async () => {
+      const result = await client.importAgents(await file.text());
+      setImported(`Imported ${result.agents} agent${result.agents === 1 ? "" : "s"}.`);
+    });
+    if (!ok) setImported("");
   }
 
   return (
@@ -250,6 +270,20 @@ export function AgentsPanel({
               </button>
             </div>
           ))}
+        </section>
+
+        <section className="section settings-card">
+          <h3 className="settings-title">Agents file</h3>
+          <p className="muted">
+            Every named agent as one YAML file: the tool, the model, and the skill. Import it into
+            another install instead of pairing them again.
+          </p>
+          <YamlFileActions
+            busy={busy}
+            imported={imported}
+            onExport={() => void exportFile()}
+            onImport={(file) => void importFile(file)}
+          />
         </section>
 
         {machine && (
@@ -507,7 +541,9 @@ export function AgentsPanel({
             confirmLabel={confirming.confirmLabel}
             destructive
             onClose={() => setConfirming(null)}
-            onConfirm={() => act(confirming.run)}
+            onConfirm={async () => {
+              await act(confirming.run);
+            }}
           />
         )}
       </div>

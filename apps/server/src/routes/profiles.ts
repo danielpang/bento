@@ -4,9 +4,12 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { MODEL_GUIDANCE, agentCli, checkAgentPairing, providerForProfile } from "@bento/core";
 import { agentProfiles, agentRuns, stages } from "@bento/db";
+import { getActiveOrganizationMembership } from "../access.js";
+import { agentFile, parseAgentFile, writeAgentFile } from "../agent-file.js";
 import type { AppContext } from "../context.js";
+import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
-import { actor } from "../middleware/actor.js";
+import { upsertAgentsFromFile } from "../upsert-agents.js";
 
 /**
  * The probe is a container start, so its answer is held briefly rather
@@ -137,6 +140,60 @@ export function profileRoutes(ctx: AppContext) {
           })
           .join("\n"),
       );
+    })
+    /**
+     * Every named agent as a file: tool, model, skill, extra flags.
+     *
+     * The pipeline file already carries the agents a board uses. This
+     * is the same list without the stages, so the pairings can move on
+     * their own.
+     */
+    .get("/export", async (c) => {
+      const rows = await db(c, ctx)
+        .select()
+        .from(agentProfiles)
+        .where(eq(agentProfiles.ownerId, actor(c)))
+        .orderBy(...byName);
+      const file = {
+        version: 1 as const,
+        agents: rows.map((agent) => ({
+          name: agent.name,
+          tool: agent.cli,
+          model: agent.model,
+          skill: agent.skill ?? null,
+          extraArgs: agent.extraArgs ?? [],
+        })),
+      };
+      const parsed = agentFile.safeParse(file);
+      if (!parsed.success) {
+        return c.json({ error: "these agents cannot be exported yet; please report it" }, 500);
+      }
+      return c.text(writeAgentFile(parsed.data), 200, {
+        "content-type": "application/yaml; charset=utf-8",
+        "content-disposition": 'attachment; filename="bento-agents.yaml"',
+      });
+    })
+    /**
+     * Applies an agents file to this user. Matched by name, so
+     * importing twice edits rather than duplicating. Agents the file
+     * leaves out are left alone: deleting one takes its recorded runs
+     * with it, and a file is not a confirmation of that.
+     */
+    .post("/import", async (c) => {
+      const membership = await getActiveOrganizationMembership(ctx, c);
+      if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
+        return c.json({ error: "not found" }, 404);
+      }
+
+      const parsed = parseAgentFile(await c.req.text());
+      if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+
+      const applied = await upsertAgentsFromFile(db(c, ctx), parsed.data.agents, {
+        ownerId: actor(c),
+        organizationId: membership?.organizationId ?? null,
+      });
+      if ("error" in applied) return c.json({ error: applied.error }, 400);
+      return c.json({ agents: parsed.data.agents.length });
     })
     /**
      * Refuses a pairing the tool cannot run.

@@ -12,6 +12,8 @@ Every stage of a pipeline runs one of these tools, paired with a model, as an ag
 
 Keys are stored encrypted, per organization in multi mode and locally in local mode, through the web console, `bento setup`, or the Mac app. To route Claude Code or Codex through OpenRouter, save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
 
+The named agents also read and write as a YAML file, from **Agents** or **Settings, Config**, and from `bento agents export` / `bento agents import`. Details: [pipeline.md](./pipeline.md#the-agents-file).
+
 ## Talking to a working agent
 
 You can always type into a card's composer, whatever the agent is doing. What happens next depends on the tool:

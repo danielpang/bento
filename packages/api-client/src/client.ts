@@ -287,6 +287,20 @@ export class BentoClient {
     });
   }
 
+  /** Every named agent as a YAML document: tool, model, skill. */
+  exportAgents() {
+    return this.requestText("/api/profiles/export");
+  }
+
+  /** Applies one. Agents are matched by name, so importing twice edits rather than duplicating. */
+  importAgents(yaml: string) {
+    return this.request<{ agents: number }>("/api/profiles/import", {
+      method: "POST",
+      headers: { "content-type": "application/yaml" },
+      body: yaml,
+    });
+  }
+
   health() {
     return this.request<{
       ok: boolean;

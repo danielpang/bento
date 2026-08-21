@@ -346,12 +346,14 @@ function skillColumn(skill: string | null | undefined): string {
 }
 
 /**
- * Lists, adds, edits and removes coding agents.
+ * Lists, adds, edits, removes, and reads and writes coding agents as a
+ * YAML file.
  *
  * Editing exists as its own verb because replacing an agent is not the
  * same thing: stages point at an agent by id, so deleting one and
  * adding another leaves every stage that used it pointing at nothing,
- * while editing carries them all along.
+ * while editing carries them all along. The file is the same write:
+ * matched by name, so importing twice edits rather than duplicating.
  */
 export async function runAgents(options: CliOptions): Promise<void> {
   const { BentoClient } = await import("@bento/api-client");
@@ -438,8 +440,26 @@ export async function runAgents(options: CliOptions): Promise<void> {
         console.log(`removed ${target.name}`);
         return;
       }
+      case "export": {
+        const { writeFile } = await import("node:fs/promises");
+        const yaml = await client.exportAgents();
+        if (subject) {
+          await writeFile(subject, yaml, "utf8");
+          console.error(`bento: wrote ${subject}`);
+        } else {
+          process.stdout.write(yaml);
+        }
+        return;
+      }
+      case "import": {
+        const { readFile } = await import("node:fs/promises");
+        if (!subject) throw new Error("agents import needs a file: bento agents import agents.yaml");
+        const result = await client.importAgents(await readFile(subject, "utf8"));
+        console.log(`${result.agents} agents`);
+        return;
+      }
       default:
-        throw new Error(`unknown agents action "${action}". Use list, add, edit, or remove.`);
+        throw new Error(`unknown agents action "${action}". Use list, add, edit, remove, export, or import.`);
     }
   } catch (err) {
     console.error(readableError(err));

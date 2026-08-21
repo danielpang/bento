@@ -6,6 +6,7 @@ import { AccountSettings } from "./AccountSettings.js";
 import { AppearanceSettings } from "./AppearanceSettings.js";
 import { BillingCard } from "./BillingCard.js";
 import { BrandLockup } from "./BrandLockup.js";
+import { ConfigSettings } from "./ConfigSettings.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
 import { GitHubAccountCard, useGitHubOutcome } from "./GitHubIdentity.js";
 import { LinearPanel } from "./LinearPanel.js";
@@ -22,13 +23,14 @@ import { SettingsPageSkeleton } from "./Skeleton.js";
  * billing are not board work, and stacking them into a side panel made
  * every section fight for one narrow column. A page has room, a URL
  * that can be linked and reloaded, and tabs that only exist where they
- * apply: local mode is Appearance alone, a self-hosted team adds Team,
- * and only a deployment with the billing module shows Billing.
+ * apply: local mode is Appearance, Projects, and Config, a self-hosted
+ * team adds Team, and only a deployment with the billing module shows
+ * Billing.
  */
-type Tab = "appearance" | "projects" | "github" | "linear" | "slack" | "team" | "billing" | "account";
+type Tab = "appearance" | "projects" | "config" | "github" | "linear" | "slack" | "team" | "billing" | "account";
 
 /** The tabs that exist in every mode, so a link to one always resolves. */
-const ALWAYS: Tab[] = ["appearance", "projects", "github", "linear", "slack"];
+const ALWAYS: Tab[] = ["appearance", "projects", "config", "github", "linear", "slack"];
 
 export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
@@ -64,6 +66,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   const tabs: { id: Tab; label: string }[] = [
     { id: "appearance", label: "Appearance" },
     { id: "projects", label: "Projects" },
+    { id: "config", label: "Config" },
     { id: "github", label: "GitHub" },
     { id: "linear", label: "Linear" },
     { id: "slack", label: "Slack" },
@@ -115,6 +118,9 @@ export function SettingsPage({ client }: { client: BentoClient }) {
           </Tabs.Content>
           <Tabs.Content value="projects" className="settings-body">
             <ProjectsSettings client={client} />
+          </Tabs.Content>
+          <Tabs.Content value="config" className="settings-body">
+            <ConfigSettings client={client} />
           </Tabs.Content>
           <Tabs.Content value="team" className="settings-body">
             <TeamSettings client={client} />
