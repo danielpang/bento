@@ -27,7 +27,7 @@ import { SecretBox } from "../secrets.js";
 import { ensureLocalUser, type AppContext } from "../context.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
-import { mintRunGrant } from "./grants.js";
+import { mintRunGrant, revokeRunGrant, runHasActiveMcp } from "./grants.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "mcp_gateway_test";
@@ -269,6 +269,66 @@ test("a server with no stored credential is refused", async () => {
   assert.equal(res.status, 404, "a missing credential is a 404, not a plaintext-less proxy");
 });
 
+test("an oversized chunked body is refused before it is buffered", async () => {
+  const server = await makeServer("none", null);
+  const token = await mintRunGrant(ctx, {
+    runId,
+    organizationId: null,
+    actingUserId: null,
+    serverIds: [server.id],
+    ttlMs: 60_000,
+  });
+  // A body with no content-length (a stream), larger than the 10 MB cap.
+  // The cap must trip while reading rather than trusting the header.
+  const chunk = new Uint8Array(1024 * 1024).fill(65);
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent >= 12) {
+        controller.close();
+        return;
+      }
+      sent += 1;
+      controller.enqueue(chunk);
+    },
+  });
+  const res = await app.request(`/api/mcp-gateway/${server.id}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+    body,
+    // @ts-expect-error duplex is required by Node fetch for a stream body
+    duplex: "half",
+  });
+  assert.equal(res.status, 413, "an oversized streamed body is refused");
+});
+
+test("runHasActiveMcp is true only for a live grant that pinned a server", async () => {
+  // No servers attached: no grant is what prepareRunMcp mints, but even a
+  // grant with an empty server set must not count.
+  const empty = await mintRunGrant(ctx, {
+    runId,
+    organizationId: null,
+    actingUserId: null,
+    serverIds: [],
+    ttlMs: 60_000,
+  });
+  assert.ok(empty);
+  assert.equal(await runHasActiveMcp(ctx, runId), false, "an empty grant does not count as attached");
+
+  const server = await makeServer("none", null);
+  await mintRunGrant(ctx, {
+    runId,
+    organizationId: null,
+    actingUserId: null,
+    serverIds: [server.id],
+    ttlMs: 60_000,
+  });
+  assert.equal(await runHasActiveMcp(ctx, runId), true, "a grant pinning a server counts as attached");
+
+  await revokeRunGrant(ctx, runId);
+  assert.equal(await runHasActiveMcp(ctx, runId), false, "a revoked grant does not count, so resume adds no MCP flags");
+});
+
 test("a per-user server with a null acting user is refused, even with an org row present", async () => {
   // A user-scoped server that also, wrongly, has an org credential row.
   // The gateway must never fall back to it: the isNull branch would
@@ -355,7 +415,10 @@ test("an upstream 401 triggers one refresh and a retry, and the rotated refresh 
       serverId: server!.id, organizationId: null, userId: null, kind: "oauth",
       encryptedSecret: ctx.secretBox.encrypt("access-1"), // stale from the upstream's view after it rotates
       encryptedRefreshToken: ctx.secretBox.encrypt("refresh-1"),
-      expiresAt: new Date(Date.now() - 1000), // already expired
+      // Not yet expired by our clock, so the gateway attaches it and
+      // learns it is stale only from the upstream's 401. This exercises
+      // the on-401 retry path specifically.
+      expiresAt: new Date(Date.now() + 3600_000),
       tokenEndpointOrigin: `http://127.0.0.1:${tokenPort}`,
     }).returning();
     const token = await mintRunGrant(ctx, {
@@ -412,6 +475,9 @@ test("two concurrent 401s do a single refresh (advisory lock)", async () => {
       serverId: server!.id, organizationId: null, userId: null, kind: "oauth",
       encryptedSecret: ctx.secretBox.encrypt("conc-1"),
       encryptedRefreshToken: ctx.secretBox.encrypt("conc-refresh-1"),
+      // Already expired, so both concurrent requests proactively refresh
+      // in resolveTarget: the in-process single flight must still collapse
+      // them to one token call.
       expiresAt: new Date(Date.now() - 1000),
       tokenEndpointOrigin: `http://127.0.0.1:${tokenPort}`,
     });

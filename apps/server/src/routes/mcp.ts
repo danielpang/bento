@@ -146,6 +146,35 @@ export function mcpRoutes(ctx: AppContext) {
     return c.json({ canManage: access.canManage, servers: rows, userConnectionsNeeded });
   });
 
+  /**
+   * Line format for the TUI and Mac app, which cannot import the typed
+   * client: mcp|<id>|<slug>|<authType>|<scope>|<enabled>|<connected>.
+   * connected reflects the org credential, or the caller's own for a
+   * per-user server. No route returns a secret; this is no exception.
+   */
+  routes.get("/plain", async (c) => {
+    const access = await requireAccess(ctx, c);
+    if (!access.ok) return c.text("");
+    const servers = await db(c, ctx).select().from(mcpServers).where(orgFilter(access.organizationId));
+    const credentials = await db(c, ctx)
+      .select({ serverId: mcpCredentials.serverId, userId: mcpCredentials.userId })
+      .from(mcpCredentials)
+      .where(
+        access.organizationId
+          ? eq(mcpCredentials.organizationId, access.organizationId)
+          : isNull(mcpCredentials.organizationId),
+      );
+    const me = actor(c);
+    const lines = servers.map((server) => {
+      const perUser = server.authType === "oauth" && server.credentialScope === "user";
+      const connected = perUser
+        ? credentials.some((r) => r.serverId === server.id && r.userId === me)
+        : credentials.some((r) => r.serverId === server.id && r.userId === null);
+      return `mcp|${server.id}|${server.slug}|${server.authType}|${server.credentialScope}|${server.enabled}|${connected}`;
+    });
+    return c.text(lines.join("\n"));
+  });
+
   routes.post("/", zValidator("json", createServer), async (c) => {
     const access = await requireAccess(ctx, c);
     if (!access.ok) return c.json({ error: "not found" }, 404);
@@ -347,6 +376,7 @@ export function mcpRoutes(ctx: AppContext) {
             registrationEndpoint,
             issuer,
             resource,
+            issParamSupported: discovered.issParameterSupported,
             metadataDiscoveredAt: new Date(),
             updatedAt: new Date(),
           })
@@ -449,11 +479,16 @@ export function mcpRoutes(ctx: AppContext) {
       return outcome(c, "invalid");
     }
 
-    // RFC 9207: when the authorization server returns an issuer on the
-    // response, it must be the one we discovered. Absent, the per-server
-    // callback path plus redirect_uri already pin the exchange.
+    // RFC 9207: an issuer on the response must match the one we
+    // discovered, and when the authorization server advertised that it
+    // returns one, a response that omits it is refused. The per-server
+    // callback path and redirect_uri pin the exchange on top of this.
     const iss = c.req.query("iss");
-    if (iss && server.issuer && iss !== server.issuer) return outcome(c, "invalid");
+    if (iss) {
+      if (server.issuer && iss !== server.issuer) return outcome(c, "invalid");
+    } else if (server.issParamSupported) {
+      return outcome(c, "invalid");
+    }
 
     if (c.req.query("error")) return outcome(c, "denied");
     const code = c.req.query("code");

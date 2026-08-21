@@ -1,0 +1,1 @@
+ALTER TABLE "mcp_servers" ADD COLUMN "iss_param_supported" boolean DEFAULT false NOT NULL;

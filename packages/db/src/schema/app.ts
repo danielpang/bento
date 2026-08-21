@@ -933,6 +933,12 @@ export const mcpServers = pgTable(
     tokenEndpoint: text("token_endpoint"),
     registrationEndpoint: text("registration_endpoint"),
     issuer: text("issuer"),
+    /**
+     * RFC 9207: the authorization server advertised that it returns an
+     * issuer on the authorization response. When true, the callback
+     * requires that issuer and refuses a response that omits it.
+     */
+    issParamSupported: boolean("iss_param_supported").notNull().default(false),
     /** RFC 8707 resource indicator; defaults to the server URL. */
     resource: text("resource"),
     scopes: text("scopes"),

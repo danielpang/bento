@@ -9,6 +9,7 @@ import {
   createPool,
   invitation,
   linearConnections,
+  mcpCredentials,
   mcpServers,
   member,
   projects,
@@ -930,6 +931,70 @@ test("members read the MCP registry and only admins manage it", async () => {
   });
   const after = (await survived.json()) as { servers: { id: string; name: string }[] };
   assert.equal(after.servers[0]?.name, "Docs", "the outsider must not have touched the org's MCP server");
+});
+
+/**
+ * Removing a member deletes their own MCP connections. The gateway
+ * already stops serving them the moment they leave (it re-reads live
+ * membership), so this is the hygiene that removes the rows.
+ */
+test("removing a member deletes their per-user MCP credentials", async () => {
+  const admin = await jsonPost("/api/auth/sign-up/email", {
+    email: "rm-admin@bento.test",
+    password: "correct-horse-battery",
+    name: "Admin",
+  });
+  const leaver = await jsonPost("/api/auth/sign-up/email", {
+    email: "rm-leaver@bento.test",
+    password: "correct-horse-battery",
+    name: "Leaver",
+  });
+  const adminToken = admin.headers.get("set-auth-token")!;
+  const leaverToken = leaver.headers.get("set-auth-token")!;
+
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Leaving", slug: "leaving-org" }, adminToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, adminToken);
+  const invite = (await (
+    await jsonPost(
+      "/api/auth/organization/invite-member",
+      { email: "rm-leaver@bento.test", role: "member", organizationId: org.id },
+      adminToken,
+    )
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/accept-invitation", { invitationId: invite.id }, leaverToken);
+
+  const server = (await (
+    await app.request("/api/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ name: "Notion", slug: "notion", url: "https://mcp.example.test/mcp", authType: "oauth", credentialScope: "user" }),
+    })
+  ).json()) as { id: string };
+
+  // The leaver's own connection, inserted directly (the OAuth round trip
+  // is covered elsewhere).
+  const [leaverRow] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "rm-leaver@bento.test"));
+  await ctx.db.insert(mcpCredentials).values({
+    serverId: server.id,
+    organizationId: org.id,
+    userId: leaverRow!.id,
+    kind: "oauth",
+    encryptedSecret: ctx.secretBox.encrypt("leaver-token"),
+  });
+
+  await jsonPost(
+    "/api/auth/organization/remove-member",
+    { memberIdOrEmail: "rm-leaver@bento.test", organizationId: org.id },
+    adminToken,
+  );
+
+  const remaining = await ctx.db
+    .select()
+    .from(mcpCredentials)
+    .where(and(eq(mcpCredentials.serverId, server.id), eq(mcpCredentials.userId, leaverRow!.id)));
+  assert.equal(remaining.length, 0, "the removed member's MCP credential must be deleted");
 });
 
 /**
