@@ -1143,6 +1143,11 @@ button {
   gap: 8px;
 }
 
+.card-meta .chip {
+  flex: none;
+  white-space: nowrap;
+}
+
 .status {
   display: inline-flex;
   align-items: center;

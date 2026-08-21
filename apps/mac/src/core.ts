@@ -2806,7 +2806,7 @@ export function gateEmptyText(model: Model): Uint8Array {
   }
   // Not "finished the pipeline": a card can be marked done from any
   // stage, so it may have finished none of them.
-  if (bytesEq(card.status, asciiBytes("done"))) return asciiBytes("This card is done.");
+  if (bytesEq(card.status, asciiBytes("done"))) return asciiBytes("This card is completed.");
   return asciiBytes("Nothing is blocking this card.");
 }
 

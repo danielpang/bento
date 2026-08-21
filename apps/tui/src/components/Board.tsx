@@ -93,7 +93,7 @@ export function Board({
  * still says what the gate is holding out for.
  */
 export function cardState(feature: Feature, runStatus: string | undefined): string {
-  if (feature.status === "done") return "done";
+  if (feature.status === "done") return "completed";
   if (runStatus === "queued" || runStatus === "starting" || runStatus === "running") return runStatus;
   if (feature.status === "gated") return "gated";
   if (!feature.currentStageId) return "backlog";

@@ -407,7 +407,7 @@ export function FeatureDrawer({
             */}
             {!finished && (
               <button className="btn" disabled={busy} onClick={() => act(() => client.finishFeature(feature.id))}>
-                Mark done
+                Mark completed
               </button>
             )}
             {stageAgent && feature.currentStageId && !finished && (
@@ -837,7 +837,7 @@ function describeEvent(event: FeatureEvent, stages: Stage[]): string {
       // that was never worked is the same wrong story in a new place.
       const last = stages[stages.length - 1];
       return last && event.fromStageId !== last.id
-        ? `Done from ${stageName(event.fromStageId, stages)}`
+        ? `Completed from ${stageName(event.fromStageId, stages)}`
         : `Finished ${stageName(event.fromStageId, stages)}`;
     }
     return `${stageName(event.fromStageId, stages)} to ${stageName(event.toStageId, stages)}`;
@@ -886,7 +886,7 @@ function statusWords(status: string): string {
     case "gated":
       return "waiting at gate";
     case "done":
-      return "done";
+      return "completed";
     case "cancelled":
       return "cancelled";
     default:

@@ -331,7 +331,7 @@ export function statusWords(status: Uint8Array): Uint8Array {
   if (bytesEq(status, asciiBytes("backlog"))) return asciiBytes("in the backlog");
   if (bytesEq(status, asciiBytes("active"))) return asciiBytes("in progress");
   if (bytesEq(status, asciiBytes("gated"))) return asciiBytes("waiting at gate");
-  if (bytesEq(status, asciiBytes("done"))) return asciiBytes("done");
+  if (bytesEq(status, asciiBytes("done"))) return asciiBytes("completed");
   if (bytesEq(status, asciiBytes("cancelled"))) return asciiBytes("cancelled");
   return status;
 }
