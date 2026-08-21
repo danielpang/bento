@@ -96,6 +96,56 @@ export interface SlackConnection {
   interactivityUrl?: string | null;
 }
 
+export interface McpServerStatus {
+  id: string;
+  name: string;
+  slug: string;
+  url: string;
+  transport: "http" | "sse";
+  authType: "none" | "api_key" | "oauth";
+  credentialScope: "org" | "user";
+  enabled: boolean;
+  apiKeyHeader: string;
+  oauthClientConfigured: boolean;
+  /** Masked hint only; no route returns a stored secret. */
+  orgCredential: { connected: boolean; hint: string; expiresAt: string | null } | null;
+  /** The caller's own connection, for per-user OAuth servers. */
+  userCredential: { connected: boolean } | null;
+}
+
+export interface McpStatus {
+  canManage: boolean;
+  servers: McpServerStatus[];
+  /** Enabled per-user servers the caller has not connected yet. */
+  userConnectionsNeeded: number;
+}
+
+export interface McpServerInput {
+  name: string;
+  slug: string;
+  url: string;
+  transport?: "http" | "sse";
+  authType: "none" | "api_key" | "oauth";
+  credentialScope?: "org" | "user";
+  apiKeyHeader?: string;
+  clientId?: string;
+  clientSecret?: string;
+  scopes?: string;
+}
+
+export interface McpServerPatch {
+  name?: string;
+  url?: string;
+  transport?: "http" | "sse";
+  authType?: "none" | "api_key" | "oauth";
+  credentialScope?: "org" | "user";
+  enabled?: boolean;
+  apiKeyHeader?: string;
+  clientId?: string | null;
+  clientSecret?: string | null;
+  scopes?: string | null;
+}
+
 export interface LinearTeamOption {
   id: string;
   key: string;
@@ -537,6 +587,39 @@ export class BentoClient {
 
   syncLinearNow() {
     return this.request<{ ok: boolean }>("/api/linear/sync", { method: "POST" });
+  }
+
+  mcpStatus() {
+    return this.request<McpStatus>("/api/mcp/status");
+  }
+
+  createMcpServer(input: McpServerInput) {
+    return this.request<{ id: string }>("/api/mcp", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateMcpServer(id: string, patch: McpServerPatch) {
+    return this.request<{ ok: boolean; reconnectRequired: boolean }>(`/api/mcp/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
+
+  deleteMcpServer(id: string) {
+    return this.request<{ ok: boolean }>(`/api/mcp/${id}`, { method: "DELETE" });
+  }
+
+  setMcpApiKey(id: string, value: string) {
+    return this.request<{ ok: boolean; hint: string }>(`/api/mcp/${id}/api-key`, {
+      method: "POST",
+      body: JSON.stringify({ value }),
+    });
+  }
+
+  disconnectMcpCredential(id: string) {
+    return this.request<{ ok: boolean }>(`/api/mcp/${id}/credential`, { method: "DELETE" });
   }
 
   slackStatus() {

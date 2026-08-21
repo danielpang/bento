@@ -16,6 +16,7 @@ export type SettingsTab =
   | "github"
   | "linear"
   | "slack"
+  | "mcp"
   | "team"
   | "billing"
   | "account";
@@ -27,6 +28,7 @@ const ALWAYS: { id: SettingsTab; label: string }[] = [
   { id: "github", label: "GitHub" },
   { id: "linear", label: "Linear" },
   { id: "slack", label: "Slack" },
+  { id: "mcp", label: "MCP" },
 ];
 
 export const KNOWN_SETTINGS_TABS: SettingsTab[] = [
