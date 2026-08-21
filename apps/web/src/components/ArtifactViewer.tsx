@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from "
 import { ApiError, type BentoClient, type RunArtifact } from "@bento/api-client";
 import { Markdown, MermaidDiagram } from "./Markdown.js";
 import { Modal } from "./Modal.js";
+import { Skeleton } from "./Skeleton.js";
 
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 4;
@@ -127,7 +128,7 @@ export function ArtifactPage({ client, artifactId }: { client: BentoClient; arti
           </div>
         </>
       ) : !artifact ? (
-        <div className="center" />
+        <ArtifactTextSkeleton />
       ) : (
         <>
           <div className="artifact-page-toolbar">
@@ -197,7 +198,7 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
       </ZoomPane>
     );
   } else if (needsText && text === null) {
-    body = <p className="muted">Loading...</p>;
+    body = <ArtifactTextSkeleton />;
   } else if (artifact.kind === "markdown") {
     body = <Markdown text={text!} />;
   } else if (artifact.kind === "mermaid") {
@@ -219,6 +220,18 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
   }
 
   return { body, sourceToggle };
+}
+
+function ArtifactTextSkeleton() {
+  return (
+    <div className="skeleton-stack" aria-busy="true">
+      <Skeleton height={12} width="88%" />
+      <Skeleton height={12} width="74%" />
+      <Skeleton height={12} width="81%" />
+      <Skeleton height={12} width="62%" />
+      <Skeleton height={12} width="70%" />
+    </div>
+  );
 }
 
 /**

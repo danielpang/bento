@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { AGENT_CREDENTIALS } from "@bento/core";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { SecretField } from "./SecretField.js";
+import { SettingsCardSkeleton, Skeleton } from "./Skeleton.js";
 import type { BentoClient } from "@bento/api-client";
 import { useToast } from "./Toasts.js";
 
@@ -82,7 +83,7 @@ function useScrollEdges() {
  * that was already there, and no route returns one to check against.
  */
 function useSecrets(client: BentoClient) {
-  const [secrets, setSecrets] = useState<Secret[]>([]);
+  const [secrets, setSecrets] = useState<Secret[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
 
   const reload = useCallback(async () => {
@@ -112,6 +113,20 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
 
   const active = PROVIDER_TABS.find((entry) => entry.id === tab) ?? PROVIDER_TABS[0];
   const tabs = useScrollEdges();
+
+  if (secrets === null) {
+    return loadFailed ? (
+      <section className="section settings-card">
+        <h3 className="settings-title">Model provider keys</h3>
+        <p className="error">
+          Could not load saved keys, so this cannot show which are set. Retry once the server is
+          reachable.
+        </p>
+      </section>
+    ) : (
+      <SettingsCardSkeleton rows={3} />
+    );
+  }
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -241,6 +256,19 @@ export function GitHubTokenCard({ client }: { client: BentoClient }) {
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState(false);
 
+  if (secrets === null) {
+    return loadFailed ? (
+      <section className="section settings-card">
+        <h3 className="settings-title">GitHub</h3>
+        <p className="error">
+          Could not load saved credentials, so this cannot say whether a token is set.
+        </p>
+      </section>
+    ) : (
+      <SettingsCardSkeleton rows={3} />
+    );
+  }
+
   const saved = secrets.find((secret) => secret.name === "GITHUB_TOKEN");
 
   async function act(fn: () => Promise<unknown>) {
@@ -320,6 +348,7 @@ function StageNotesSetting({ client }: { client: BentoClient }) {
   const toast = useToast();
   const [include, setInclude] = useState<boolean | null>(null);
   const [canManage, setCanManage] = useState(true);
+  const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -331,9 +360,17 @@ function StageNotesSetting({ client }: { client: BentoClient }) {
       })
       // An older server has no such route. Saying nothing beats showing
       // a switch that cannot be read or written.
-      .catch(() => setInclude(null));
+      .catch(() => setInclude(null))
+      .finally(() => setReady(true));
   }, [client]);
 
+  if (!ready) {
+    return (
+      <div className="field" aria-busy="true">
+        <Skeleton height={14} width="78%" />
+      </div>
+    );
+  }
   if (include === null) return null;
 
   async function choose(next: boolean) {
@@ -390,6 +427,7 @@ type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
 export function GitIdentityCard({ client }: { client: BentoClient }) {
   const toast = useToast();
   const [machine, setMachine] = useState<MachineSettings | null>(null);
+  const [ready, setReady] = useState(false);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
@@ -397,7 +435,10 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
   const load = useCallback(async () => {
     try {
       const settings = await client.getMachineSettings();
-      if (settings.mode !== "local") return setMachine(null);
+      if (settings.mode !== "local") {
+        setMachine(null);
+        return;
+      }
       setMachine(settings);
       setName(settings.gitAuthorName ?? "");
       setEmail(settings.gitAuthorEmail ?? "");
@@ -405,6 +446,8 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
       // An older server has no such route; say nothing rather than
       // showing a field that cannot be read or written.
       setMachine(null);
+    } finally {
+      setReady(true);
     }
   }, [client]);
 
@@ -412,6 +455,7 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
     void load();
   }, [load]);
 
+  if (!ready) return <SettingsCardSkeleton rows={3} />;
   if (!machine) return null;
 
   const pinned = machine.gitIdentityPinnedByEnv === true;

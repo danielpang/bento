@@ -13,6 +13,7 @@ import { SlackPanel } from "./SlackPanel.js";
 import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
+import { SettingsPageSkeleton } from "./Skeleton.js";
 
 /**
  * Settings as a page, not a drawer.
@@ -57,7 +58,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
       .catch(() => setHasBilling(false));
   }, [client]);
 
-  if (mode === "unknown" || (mode === "multi" && isPending)) return <div className="center" />;
+  if (mode === "unknown" || (mode === "multi" && isPending)) return <SettingsPageSkeleton />;
   if (mode === "multi" && !session) return <SignIn social={social} />;
 
   const tabs: { id: Tab; label: string }[] = [
@@ -119,9 +120,9 @@ export function SettingsPage({ client }: { client: BentoClient }) {
             <TeamSettings client={client} />
           </Tabs.Content>
           <Tabs.Content value="github" className="settings-body">
-            <GitHubAccountCard client={client} />
+            {mode === "multi" && <GitHubAccountCard client={client} />}
             <GitHubTokenCard client={client} />
-            <GitIdentityCard client={client} />
+            {mode === "local" && <GitIdentityCard client={client} />}
           </Tabs.Content>
           <Tabs.Content value="linear" className="settings-body">
             <LinearPanel client={client} />

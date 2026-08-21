@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import type { BentoClient, GitHubConnection, GitHubRepository } from "@bento/api-client";
 import { ConnectGitHubAccount } from "./GitHubIdentity.js";
 import { Modal } from "./Modal.js";
+import { ListRowsSkeleton } from "./Skeleton.js";
 
 /**
  * One field and a submit, the replacement for `window.prompt`.
@@ -322,7 +323,7 @@ export function NewProjectDialog({
           />
         </label>
         {!githubChecked ? (
-          <p className="muted">Loading repository access...</p>
+          <ListRowsSkeleton rows={4} />
         ) : hosted ? (
           <div className="field">
             <span className="label">GitHub repositories</span>

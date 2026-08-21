@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { authClient, useSession } from "../auth-client.js";
 import { teamDisplayName } from "../team-name.js";
 import { BrandLockup } from "./BrandLockup.js";
+import { CenteredPanelSkeleton, Skeleton } from "./Skeleton.js";
 import { SignIn } from "./SignIn.js";
 
 type Phase = "checking" | "ready" | "accepting" | "accepted" | "declined" | "error";
@@ -191,11 +192,11 @@ export function AcceptInvitation() {
     };
   }, [isPending, session, invitationId, phase]);
 
-  if (isPending && !sessionSettled) return <div className="center" />;
+  if (isPending && !sessionSettled) return <CenteredPanelSkeleton />;
 
   if (!session) {
     if (!invitationId) return <InvitationProblem message={MISSING_CODE_MESSAGE} />;
-    if (preview === "loading") return <div className="center" />;
+    if (preview === "loading") return <CenteredPanelSkeleton />;
     if (preview === "missing") return <InvitationProblem message={DEAD_INVITATION_MESSAGE} />;
     if (preview === "failed") {
       return <InvitationProblem message={LOOKUP_FAILED_MESSAGE} onRetry={() => setAttempt((n) => n + 1)} />;
@@ -282,7 +283,13 @@ export function AcceptInvitation() {
           <h1>Join {teamDisplayName(organizationName)}</h1>
         </div>
 
-        {phase === "checking" && <p className="muted">Checking the invitation...</p>}
+        {phase === "checking" && (
+          <div className="skeleton-stack" aria-busy="true">
+            <Skeleton height={12} width="90%" />
+            <Skeleton height={36} />
+            <Skeleton height={36} />
+          </div>
+        )}
 
         {(phase === "ready" || phase === "accepting") && (
           <>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./PromptDialog.js";
+import { ListRowsSkeleton, SettingsCardSkeleton } from "./Skeleton.js";
 import type { BentoClient } from "@bento/api-client";
 import { authClient, useActiveOrganization, useListOrganizations } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
@@ -42,9 +43,9 @@ const ROLES = [
  */
 export function TeamSettings({ client }: { client: BentoClient }) {
   const toast = useToast();
-  const { data: organizations } = useListOrganizations();
+  const { data: organizations, isPending: orgsPending } = useListOrganizations();
   const { data: active } = useActiveOrganization();
-  const [members, setMembers] = useState<Member[]>([]);
+  const [members, setMembers] = useState<Member[] | null>(null);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<string>("member");
@@ -63,7 +64,7 @@ export function TeamSettings({ client }: { client: BentoClient }) {
    * the last of them cannot be removed and the row says so rather than
    * offering a button the server will refuse.
    */
-  const owners = members.filter(isOwner);
+  const owners = (members ?? []).filter(isOwner);
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
   const [promoting, setPromoting] = useState<{ member: Member; role: string } | null>(null);
   /**
@@ -90,6 +91,7 @@ export function TeamSettings({ client }: { client: BentoClient }) {
 
   useEffect(() => {
     setMembersFailed(false);
+    setMembers(null);
     void loadMembers().catch(() => setMembersFailed(true));
   }, [activeId]);
 
@@ -157,7 +159,9 @@ export function TeamSettings({ client }: { client: BentoClient }) {
               bottom reported success off screen, and a refusal looked
               exactly like a success. */}
           {notice && <p className="muted">{notice}</p>}
-          {organizations && organizations.length > 0 ? (
+          {orgsPending ? (
+            <ListRowsSkeleton rows={2} />
+          ) : organizations && organizations.length > 0 ? (
             <label className="field">
               <span className="label">Current organization</span>
               <select
@@ -227,10 +231,12 @@ export function TeamSettings({ client }: { client: BentoClient }) {
               <h3 className="settings-title">Members</h3>
               {membersFailed ? (
                 <p className="error">Could not load the members of this organization. Retry once the server is reachable.</p>
+              ) : members === null ? (
+                <ListRowsSkeleton rows={3} />
               ) : (
                 members.length === 0 && <p className="muted">Just you so far.</p>
               )}
-              {members.map((m) => (
+              {(members ?? []).map((m) => (
                 <div key={m.id} className="gate-check">
                   <span className="gate-check-text">
                     <span className="gate-check-name">{m.user.name || m.user.email}</span>
@@ -450,15 +456,18 @@ export function TeamSettings({ client }: { client: BentoClient }) {
 function NetworkPolicyCard() {
   const toast = useToast();
   const [state, setState] = useState<{ restrictNetwork: boolean; canEdit: boolean; supported: boolean } | null>(null);
+  const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     void fetch("/api/team/policy", { credentials: "include" })
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => setState(body as typeof state))
-      .catch(() => setState(null));
+      .catch(() => setState(null))
+      .finally(() => setReady(true));
   }, []);
 
+  if (!ready) return <SettingsCardSkeleton rows={2} />;
   if (!state) return null;
 
   async function toggle(next: boolean) {

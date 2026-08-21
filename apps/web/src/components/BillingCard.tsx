@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Modal } from "./Modal.js";
 import { useToast } from "./Toasts.js";
+import { SettingsCardSkeleton } from "./Skeleton.js";
 import {
   monthlyTotal,
   money,
@@ -28,7 +29,8 @@ export function BillingCard() {
   const [plansOpen, setPlansOpen] = useState(false);
   const [allActivity, setAllActivity] = useState(false);
 
-  if (absent || !state) return null;
+  if (absent) return null;
+  if (!state) return <SettingsCardSkeleton rows={4} />;
 
   const current = state.catalog.find((offer) => offer.plan === state.plan);
 

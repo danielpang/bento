@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import type { AgentProfile, BentoClient, ProjectSession } from "@bento/api-client";
 import { runDot, runTime, runWords } from "./AgentSession.js";
 import { useToast } from "./Toasts.js";
+import { SessionPageSkeleton, SessionsListSkeleton } from "./Skeleton.js";
 
 // The same lazy chunk the /session route loads, so the split's right
 // pane and the standalone tab stay one piece of code arriving once.
@@ -185,7 +186,7 @@ export function SessionsPage({
       ref={screenRef}
     >
       <div className="sessions-pane">
-        {sessions === null && <div className="center" />}
+        {sessions === null && <SessionsListSkeleton />}
         {sessions?.length === 0 && (
           <p className="muted">No sessions yet. Start an agent from the board to begin a conversation.</p>
         )}
@@ -250,7 +251,7 @@ export function SessionsPage({
         // instead of showing the previous card's messages while the
         // next one loads.
         <div className="sessions-detail" key={selectedId}>
-          <Suspense fallback={<div className="center" />}>
+          <Suspense fallback={<SessionPageSkeleton />}>
             <SessionPage
               client={client}
               featureId={selectedId}

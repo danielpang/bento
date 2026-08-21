@@ -8,6 +8,15 @@ import { Board, matchesQuery, neighbourCardId, type CardPulse } from "./componen
 import { BoardSearch } from "./components/BoardSearch.js";
 import { BottomBar } from "./components/BottomBar.js";
 import { BrandLockup } from "./components/BrandLockup.js";
+import {
+  BoardSkeleton,
+  CenteredPanelSkeleton,
+  PageSkeleton,
+  SessionsListSkeleton,
+  SessionPageSkeleton,
+  SettingsPageSkeleton,
+  Skeleton,
+} from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { NavMenu, type NavAction } from "./components/NavMenu.js";
@@ -48,12 +57,39 @@ const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) =>
 /**
  * What a route shows while its code arrives.
  *
- * The same empty centred frame the settings page already uses while it
- * works out which mode it is in, so a slow chunk looks like the app
- * thinking rather than like a blank tab.
+ * Shaped like the page that is coming, so a slow chunk holds the
+ * layout rather than flashing a blank tab (or the empty-project copy
+ * the board used to show while its list was still in flight).
  */
 function RouteFallback() {
-  return <div className="center" />;
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/settings") return <SettingsPageSkeleton />;
+  if (path === "/device" || path === "/accept-invitation" || path === "/reset-password") {
+    return <CenteredPanelSkeleton />;
+  }
+  if (path.startsWith("/session/")) return <SessionPageSkeleton />;
+  if (path.startsWith("/artifact/")) return <PageSkeleton />;
+  if (path === "/sessions") {
+    return (
+      <div className="app" aria-busy="true">
+        <header className="topbar">
+          <BrandLockup />
+          <span className="topbar-spacer" />
+        </header>
+        <SessionsListSkeleton framed />
+      </div>
+    );
+  }
+  if (path === "/changelog") return <PageSkeleton />;
+  return (
+    <div className="app" aria-busy="true">
+      <header className="topbar">
+        <BrandLockup />
+        <span className="topbar-spacer" />
+      </header>
+      <BoardSkeleton />
+    </div>
+  );
 }
 
 
@@ -129,7 +165,7 @@ function Console() {
       .finally(() => setCheckedMode(true));
   }, [retry]);
 
-  if (!checkedMode || (isPending && !sessionSettled)) return <div className="center" />;
+  if (!checkedMode || (isPending && !sessionSettled)) return <PageSkeleton />;
   if (mode === "unreachable") {
     return (
       <div className="center">
@@ -161,7 +197,7 @@ function Console() {
 function FirstTeamGate({ userName }: { userName: string }) {
   const { data: organizations, isPending, error } = useListOrganizations();
   const [created, setCreated] = useState(false);
-  if (isPending && !created) return <div className="center" />;
+  if (isPending && !created) return <PageSkeleton />;
   /**
    * A failed lookup is not an account without a team. Reading it as one
    * showed the onboarding screen to an existing member, and creating a
@@ -274,7 +310,7 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
       </div>
     );
   }
-  if (invites === null) return <div className="center" />;
+  if (invites === null) return <CenteredPanelSkeleton />;
   return (
     <div className="center">
       <div className="card-panel card-panel-centered">
@@ -313,7 +349,12 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   // it with the board under a sessions address helped nobody.
   const screen: "board" | "sessions" =
     window.location.pathname.replace(/\/+$/, "") === "/sessions" ? "sessions" : "board";
-  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
+  /**
+   * Null until the list has answered. An empty array is a real answer
+   * ("no projects yet"); starting there showed that copy for a beat on
+   * every reload, then swapped in the board.
+   */
+  const [projects, setProjects] = useState<{ id: string; name: string }[] | null>(null);
   // Remembered across reloads: which board a user was last looking at.
   // The list effect below still re-checks the stored id against the
   // rows the current tenant can see, so a stale value from before an
@@ -329,6 +370,17 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [features, setFeatures] = useState<Feature[]>([]);
+  /**
+   * Which project's board has actually arrived. Undefined means still
+   * in flight; null means there is no project to load. Distinct from
+   * stages.length === 0, which is also the first paint of a board that
+   * has six stages on the way, and used to render as Backlog + Done.
+   */
+  const [loadedFor, setLoadedFor] = useState<string | null | undefined>(undefined);
+  const refreshSeq = useRef(0);
+  /** The project list, readable from refresh without putting it in that callback's deps. */
+  const projectsHeld = useRef(projects);
+  projectsHeld.current = projects;
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [runStatus, setRunStatus] = useState<Record<string, string | undefined>>({});
   const [runTicks, setRunTicks] = useState<Record<string, number>>({});
@@ -392,35 +444,48 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const refresh = useCallback(async () => {
     // A failed load must not masquerade as an empty board: "No projects
     // yet" on a network error invites recreating projects that exist.
+    const seq = ++refreshSeq.current;
+    const forProject = projectId;
     try {
-      setProfiles(await client.listProfiles());
-      if (!projectId) {
+      const profileRows = await client.listProfiles();
+      if (seq !== refreshSeq.current) return;
+      setProfiles(profileRows);
+      if (!forProject) {
         setStages([]);
         setFeatures([]);
+        setLoadedFor(null);
         return;
       }
       const [pipeline, featureRows, snapshot] = await Promise.all([
-        client.getPipeline(projectId),
-        client.listFeatures(projectId),
+        client.getPipeline(forProject),
+        client.listFeatures(forProject),
         // The run status behind every card's face. Seeding it here
         // rather than only from live board events: a run that started
         // before this page opened (or while its stream was down) never
         // emits into a fresh session, so the card used to read
         // "not started" while its agent worked.
-        client.getBoardSnapshot(projectId),
+        client.getBoardSnapshot(forProject),
       ]);
+      if (seq !== refreshSeq.current) return;
       setStages(pipeline.stages);
       setPipelineId(pipeline.id);
       setFeatures(featureRows);
       setRunStatus(snapshot.statuses);
       setLastOutput(snapshot.outputs);
-      setLoadError("");
+      setLoadedFor(forProject);
+      // A listProjects failure leaves `projects` null; clearing the
+      // error here would hide it under an infinite skeleton.
+      if (projectsHeld.current !== null) setLoadError("");
     } catch (err) {
+      if (seq !== refreshSeq.current) return;
+      // Mark this project attempted so the skeleton does not spin
+      // forever over a banner that already said the load failed.
+      setLoadedFor(forProject);
       setLoadError(err instanceof Error ? err.message : String(err));
     }
   }, [projectId]);
 
-  useEffect(() => {
+  const loadProjectList = useCallback(() => {
     const wantedFeature = new URLSearchParams(window.location.search).get("feature");
     void client
       .listProjects()
@@ -449,6 +514,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
   }, []);
 
+  useEffect(() => {
+    loadProjectList();
+  }, [loadProjectList]);
+
   // Persist the selection so a refresh lands on the same board. The
   // list effect above has already rejected ids this tenant cannot see,
   // so anything reaching here is one the session can open. Private
@@ -463,6 +532,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   }, [projectId]);
 
   useEffect(() => {
+    // Drop the previous project's cards immediately: leaving them up
+    // under the next project's name is the same class of lie as the
+    // empty-board flash, and the skeleton covers the gap.
+    setStages([]);
+    setFeatures([]);
+    setRunStatus({});
+    setLastOutput({});
+    setPulses({});
     void refresh();
   }, [refresh]);
 
@@ -690,6 +767,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     </span>
   );
 
+  const hasProjects = (projects?.length ?? 0) > 0;
+  /**
+   * The list has not answered, or this project's stages have not. Either
+   * way the board is not ready to claim it is empty.
+   */
+  const boardPending = projects === null || (projectId !== null && loadedFor !== projectId);
+
   /*
    * The board's tools, as one list.
    *
@@ -702,7 +786,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     { id: "board", label: "Board", href: "/", current: screen === "board" },
     { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
     { id: "agents", label: "Agents", onSelect: () => setPanel("agents") },
-    ...(projects.length > 0
+    ...(hasProjects
       ? [
           { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
           { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
@@ -718,6 +802,40 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       </Suspense>
     </>
   );
+
+  if (projects === null) {
+    return (
+      <div className="app" aria-busy={!loadError || undefined}>
+        <TopBar
+          showSignOut={showSignOut}
+          actions={actions}
+          meta={spend}
+          onContact={() => setContactOpen(true)}
+          picker={<Skeleton className="skeleton-picker" />}
+          search={screen === "board" ? <Skeleton className="skeleton-search" /> : undefined}
+          primary={screen === "board" ? <Skeleton className="skeleton-btn" /> : undefined}
+        />
+        {loadError && (
+          <div className="setup-prompt" role="alert">
+            <span>{loadError}</span>
+            <button
+              className="btn"
+              onClick={() => {
+                setLoadError("");
+                loadProjectList();
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {screen === "sessions" ? <SessionsListSkeleton framed /> : <BoardSkeleton />}
+        {panels}
+        {dialogs}
+        {bottom}
+      </div>
+    );
+  }
 
   if (projects.length === 0) {
     return (
@@ -783,7 +901,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           act on any advice below it either. */}
       <OutOfCompute onOpenBilling={() => window.location.assign("/settings")} />
 
-      {setupNeeded && (
+      {!boardPending && setupNeeded && (
         <div className="setup-prompt">
           <span>{setupNeeded.message}</span>
           <button className="btn btn-primary" onClick={() => setPanel(setupNeeded.panel)}>
@@ -794,7 +912,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       {loadError && (
         <div className="setup-prompt" role="alert">
           <span>{loadError}</span>
-          <button className="btn" onClick={() => { setLoadError(""); void refresh(); }}>
+          <button
+            className="btn"
+            onClick={() => {
+              setLoadError("");
+              setLoadedFor(undefined);
+              void refresh();
+            }}
+          >
             Retry
           </button>
         </div>
@@ -803,9 +928,11 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       {screen === "sessions" ? (
         // Its own boundary, like the panels and the drawer: without one
         // the chunk load suspends to the app root and blanks the chrome.
-        <Suspense fallback={<div className="center" />}>
+        <Suspense fallback={<SessionsListSkeleton framed />}>
           <SessionsPage client={client} projectId={projectId} profiles={profiles} />
         </Suspense>
+      ) : boardPending ? (
+        <BoardSkeleton />
       ) : (
       <Board
         drawerOpen={selected !== null}

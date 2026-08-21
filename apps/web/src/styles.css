@@ -49,6 +49,12 @@
   --text-faint: #8b867c;
 
   --brand: #ff8a3d;
+  /*
+   * Ambient wash at the top of the page. The entrance screens used to
+   * be the only place it appeared; it now lives on the page itself, at
+   * a strength you notice without being able to point at a gradient.
+   */
+  --glow: color-mix(in srgb, var(--brand) 9%, transparent);
   /* Text sitting on a brand or failed fill. Dark ink here; the light
      theme flips it to white because its fills are deeper. */
   --on-brand: #0e0d0b;
@@ -111,6 +117,9 @@
   --shadow-2: rgba(29, 26, 20, 0.22);
   --backdrop: rgba(29, 26, 20, 0.4);
   --logo-filter: grayscale(1);
+  /* The same wash, quieter: a deep burnt orange at 9% on a pale ground
+     reads as a stain rather than as light. */
+  --glow: color-mix(in srgb, var(--brand) 5%, transparent);
 }
 
 /*
@@ -183,6 +192,24 @@ body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
+  /* Own stacking, so the wash can sit behind the page without falling
+     through to the canvas and disappearing. */
+  isolation: isolate;
+}
+
+/*
+ * The brand wash, fixed to the viewport so a long settings page does
+ * not scroll it away. Pointer-events none, and behind every descendant:
+ * opaque lanes and cards keep their own fill, and anything transparent
+ * (the topbar, page padding, the entrance screens) lets it show.
+ */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(68rem 34rem at 50% -8%, var(--glow), transparent 68%);
 }
 
 button {
@@ -263,7 +290,9 @@ button {
   padding: 0 16px;
   height: 52px;
   border-bottom: 1px solid var(--line);
-  background: var(--bg);
+  /* Transparent so the page wash reads at the top, the way it does on
+     the entrance screens this bar used to cover. */
+  background: transparent;
   flex-shrink: 0;
 }
 
@@ -1895,35 +1924,15 @@ button {
 /*
  * The page an entrance sits on.
  *
- * One flat colour behind a single card is what made this feel like a
- * form on a wall. A wide, very low ambient wash in the brand hue,
- * thrown from above the card, gives the surface somewhere to sit
- * without introducing a second colour or anything that reads as
- * decoration. It is deliberately near the threshold of visible: at
- * this size a gradient you can point at is a gradient that dates.
+ * The brand wash now lives on the body, so this is only the layout:
+ * one card, centred. A second copy of the gradient here would stack
+ * with the page's and date itself.
  */
 .center {
   min-height: 100%;
   display: grid;
   place-items: center;
   padding: 24px;
-  background:
-    radial-gradient(
-      68rem 34rem at 50% -8%,
-      color-mix(in srgb, var(--brand) 9%, transparent),
-      transparent 68%
-    );
-}
-
-/* The light theme's brand is a deep burnt orange, so the same
-   proportion carries far more weight on a pale ground. */
-:root[data-theme="light"] .center {
-  background:
-    radial-gradient(
-      68rem 34rem at 50% -8%,
-      color-mix(in srgb, var(--brand) 5%, transparent),
-      transparent 68%
-    );
 }
 
 /*
@@ -2157,6 +2166,134 @@ button {
   align-items: center;
 }
 
+/*
+ * Loading bones. They take the space the real content will, so a fetch
+ * does not first render the empty state (a claim that nothing exists)
+ * and then swap it for the board. The shine is a sweep, gated by the
+ * reduced-motion rule further down this file.
+ */
+.skeleton {
+  display: block;
+  flex: none;
+  height: 0.7em;
+  width: 100%;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-faint) 22%, var(--panel));
+  position: relative;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--text) 11%, transparent) 50%,
+    transparent 100%
+  );
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  animation-delay: calc(var(--skeleton-i, 0) * 70ms);
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton-picker {
+  width: 168px;
+  height: 32px;
+  border-radius: var(--radius);
+}
+
+.skeleton-search {
+  width: 220px;
+  height: 32px;
+  border-radius: var(--radius);
+}
+
+.skeleton-btn {
+  width: 88px;
+  height: 32px;
+  border-radius: var(--radius);
+}
+
+.topbar .skeleton-picker,
+.topbar .skeleton-search,
+.topbar .skeleton-btn {
+  align-self: center;
+}
+
+.skeleton-avatar {
+  width: 38px;
+  height: 38px;
+}
+
+.skeleton-card {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-bright);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skeleton-slot {
+  min-height: 56px;
+  background: color-mix(in srgb, var(--text-faint) 8%, transparent);
+}
+
+.skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.skeleton-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 12rem;
+  width: min(88%, 28rem);
+}
+
+.chat-skeleton-tall {
+  flex: 1;
+  max-height: none;
+}
+
+.page-skeleton {
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  display: flex;
+}
+
+.page-skeleton-block {
+  flex: 1;
+  height: auto;
+  min-height: 12rem;
+  border-radius: var(--radius);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -2257,7 +2394,8 @@ button {
     flex: 1 1 100%;
   }
 
-  .search {
+  .search,
+  .skeleton-search {
     /* No fixed width down here: it takes whatever the picker leaves. */
     flex: 1 1 auto;
     width: auto;

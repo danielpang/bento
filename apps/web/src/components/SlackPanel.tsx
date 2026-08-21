@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { BentoClient, Project, SlackConnection } from "@bento/api-client";
 import { ConfirmDialog } from "./PromptDialog.js";
+import { SettingsCardSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
 
 /**
@@ -61,7 +62,7 @@ export function SlackPanel({ client }: { client: BentoClient }) {
       </section>
     );
   }
-  if (!status) return <div className="center" />;
+  if (!status) return <SettingsCardSkeleton rows={2} />;
 
   if (!status.configured) {
     return (
