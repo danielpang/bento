@@ -9,6 +9,16 @@ import { tenantDb as db } from "../middleware/tenant.js";
 import { maskSecret } from "../secrets.js";
 import { pingMcpServer } from "../mcp/client.js";
 import { safeFetchPolicy } from "../mcp/safe-fetch.js";
+import { discoverOAuth, registerClient, DiscoveryError } from "../mcp/discovery.js";
+import {
+  buildAuthorizeUrl,
+  exchangeCode,
+  makePkce,
+  signState,
+  stateExpiry,
+  verifyState,
+  OAuthError,
+} from "../mcp/oauth.js";
 
 /**
  * Org-defined MCP servers, the registry every agent harness draws from.
@@ -293,7 +303,267 @@ export function mcpRoutes(ctx: AppContext) {
     return c.json({ ok: true });
   });
 
+  /**
+   * Begins an OAuth connection. An org-scoped server is an admin action;
+   * a per-user server any member connects for themselves. Discovers and
+   * caches the authorization server, registers a client if the server
+   * offers dynamic registration, and returns the authorization URL plus
+   * the host it points at (so the UI can show where it is sending
+   * someone before it redirects).
+   */
+  routes.post("/:id/connect", async (c) => {
+    const access = await requireAccess(ctx, c);
+    if (!access.ok) return c.json({ error: "not found" }, 404);
+    const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
+    if (!server) return c.json({ error: "not found" }, 404);
+    if (server.authType !== "oauth") return c.json({ error: "this server does not use OAuth" }, 400);
+    const perUser = server.credentialScope === "user";
+    if (!perUser && !access.canManage) return c.json({ error: "organization admin required" }, 403);
+
+    const secret = stateSecret(ctx);
+    if (!secret) return c.json({ error: "this server has no signing key configured" }, 503);
+    const policy = safeFetchPolicy(ctx.env);
+    const redirectUri = callbackUrl(ctx, server.id);
+
+    // Discover the endpoints if they are not cached yet.
+    let authorizationEndpoint = server.authorizationEndpoint;
+    let tokenEndpoint = server.tokenEndpoint;
+    let issuer = server.issuer;
+    let resource = server.resource ?? server.url;
+    let registrationEndpoint = server.registrationEndpoint;
+    if (!authorizationEndpoint || !tokenEndpoint) {
+      try {
+        const discovered = await discoverOAuth(server.url, policy);
+        authorizationEndpoint = discovered.authorizationEndpoint;
+        tokenEndpoint = discovered.tokenEndpoint;
+        issuer = discovered.issuer;
+        resource = discovered.resource;
+        registrationEndpoint = discovered.registrationEndpoint;
+        await db(c, ctx)
+          .update(mcpServers)
+          .set({
+            authorizationEndpoint,
+            tokenEndpoint,
+            registrationEndpoint,
+            issuer,
+            resource,
+            metadataDiscoveredAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(mcpServers.id, server.id));
+      } catch (err) {
+        if (err instanceof DiscoveryError) return c.json({ error: err.message }, 502);
+        throw err;
+      }
+    }
+
+    // Register a client if there is no manually entered one and the
+    // authorization server offers dynamic registration.
+    let clientId = server.clientId;
+    if (!clientId) {
+      if (!registrationEndpoint) {
+        return c.json(
+          { error: "this server needs a client id and secret; enter them and try again", needsManualClient: true },
+          409,
+        );
+      }
+      try {
+        const registered = await registerClient(registrationEndpoint, redirectUri, policy);
+        clientId = registered.clientId;
+        await db(c, ctx)
+          .update(mcpServers)
+          .set({
+            clientId: registered.clientId,
+            encryptedClientSecret: registered.clientSecret
+              ? ctx.secretBox.encrypt(registered.clientSecret)
+              : null,
+            clientRegistration: "dynamic",
+            updatedAt: new Date(),
+          })
+          .where(eq(mcpServers.id, server.id));
+      } catch (err) {
+        if (err instanceof DiscoveryError) {
+          return c.json({ error: err.message, needsManualClient: true }, 409);
+        }
+        throw err;
+      }
+    }
+
+    const pkce = makePkce();
+    const state = signState(
+      {
+        userId: actor(c),
+        organizationId: access.organizationId,
+        serverId: server.id,
+        scope: perUser ? "user" : "org",
+        verifierEnc: ctx.secretBox.encrypt(pkce.verifier),
+        expiresAt: stateExpiry(),
+      },
+      secret,
+    );
+    const url = buildAuthorizeUrl({
+      authorizationEndpoint: authorizationEndpoint!,
+      clientId: clientId!,
+      redirectUri,
+      state,
+      codeChallenge: pkce.challenge,
+      resource,
+      scope: server.scopes,
+    });
+    return c.json({ url, authorizationHost: new URL(authorizationEndpoint!).host });
+  });
+
+  /**
+   * The OAuth redirect target, one path per server. The server id in the
+   * path must match the id the state was minted for, so a code issued by
+   * one server's authorization server can never be redeemed through
+   * another's callback: that, with the per-server redirect_uri each
+   * server registers, is the mix-up defense.
+   */
+  routes.get("/callback/:serverId", async (c) => {
+    const secret = stateSecret(ctx);
+    if (!secret) return outcome(c, "unconfigured");
+    const state = verifyState(c.req.query("state"), secret);
+    const pathServerId = c.req.param("serverId");
+    if (!state || state.expiresAt < Date.now() || state.serverId !== pathServerId) {
+      return outcome(c, "invalid");
+    }
+    if (state.userId !== actor(c)) return outcome(c, "invalid");
+    if ((activeOrg(c) ?? null) !== state.organizationId) return outcome(c, "organization");
+
+    // Live membership re-check, minutes after connect began.
+    if (state.organizationId) {
+      const [row] = await db(c, ctx)
+        .select({ role: member.role })
+        .from(member)
+        .where(and(eq(member.organizationId, state.organizationId), eq(member.userId, actor(c))))
+        .limit(1);
+      if (!row) return outcome(c, "denied");
+      if (state.scope === "org" && row.role !== "owner" && row.role !== "admin") return outcome(c, "denied");
+    } else if (ctx.env.BENTO_MODE === "multi") {
+      return outcome(c, "denied");
+    }
+
+    const server = await serverFor(ctx, c, state.organizationId, state.serverId);
+    if (!server || server.authType !== "oauth" || !server.tokenEndpoint || !server.clientId) {
+      return outcome(c, "invalid");
+    }
+
+    // RFC 9207: when the authorization server returns an issuer on the
+    // response, it must be the one we discovered. Absent, the per-server
+    // callback path plus redirect_uri already pin the exchange.
+    const iss = c.req.query("iss");
+    if (iss && server.issuer && iss !== server.issuer) return outcome(c, "invalid");
+
+    if (c.req.query("error")) return outcome(c, "denied");
+    const code = c.req.query("code");
+    if (!code) return outcome(c, "invalid");
+
+    let verifier: string;
+    try {
+      verifier = ctx.secretBox.decrypt(state.verifierEnc);
+    } catch {
+      return outcome(c, "invalid");
+    }
+
+    let tokens;
+    try {
+      tokens = await exchangeCode(
+        {
+          tokenEndpoint: server.tokenEndpoint,
+          clientId: server.clientId,
+          clientSecret: server.encryptedClientSecret
+            ? ctx.secretBox.decrypt(server.encryptedClientSecret)
+            : null,
+          redirectUri: callbackUrl(ctx, server.id),
+          code,
+          codeVerifier: verifier,
+          resource: server.resource ?? server.url,
+        },
+        safeFetchPolicy(ctx.env),
+      );
+    } catch (err) {
+      if (err instanceof OAuthError) return outcome(c, "failed");
+      throw err;
+    }
+
+    const userId = state.scope === "user" ? actor(c) : null;
+    const values = {
+      serverId: server.id,
+      organizationId: state.organizationId,
+      userId,
+      kind: "oauth" as const,
+      encryptedSecret: ctx.secretBox.encrypt(tokens.accessToken),
+      encryptedRefreshToken: tokens.refreshToken ? ctx.secretBox.encrypt(tokens.refreshToken) : null,
+      expiresAt: tokens.expiresAt,
+      scope: tokens.scope,
+      tokenEndpointOrigin: new URL(server.tokenEndpoint).origin,
+      hint: "",
+    };
+    // Null user id is distinct in the composite index, so an org
+    // credential targets the partial index (secrets.ts pattern).
+    if (userId) {
+      await db(c, ctx)
+        .insert(mcpCredentials)
+        .values(values)
+        .onConflictDoUpdate({ target: [mcpCredentials.serverId, mcpCredentials.userId], set: refreshableSet(values) });
+    } else {
+      await db(c, ctx)
+        .insert(mcpCredentials)
+        .values(values)
+        .onConflictDoUpdate({
+          target: mcpCredentials.serverId,
+          targetWhere: isNull(mcpCredentials.userId),
+          set: refreshableSet(values),
+        });
+    }
+    return outcome(c, "connected");
+  });
+
+  /** A member removes their own connection to a per-user server. */
+  routes.delete("/:id/user-credential", async (c) => {
+    const access = await requireAccess(ctx, c);
+    if (!access.ok) return c.json({ error: "not found" }, 404);
+    const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
+    if (!server) return c.json({ error: "not found" }, 404);
+    await db(c, ctx)
+      .delete(mcpCredentials)
+      .where(and(eq(mcpCredentials.serverId, server.id), eq(mcpCredentials.userId, actor(c))));
+    return c.json({ ok: true });
+  });
+
   return routes;
+}
+
+/** The columns an upsert replaces when a credential is reconnected. */
+function refreshableSet(values: {
+  encryptedSecret: string;
+  encryptedRefreshToken: string | null;
+  expiresAt: Date | null;
+  scope: string | null;
+  tokenEndpointOrigin: string;
+}) {
+  return {
+    encryptedSecret: values.encryptedSecret,
+    encryptedRefreshToken: values.encryptedRefreshToken,
+    expiresAt: values.expiresAt,
+    scope: values.scope,
+    tokenEndpointOrigin: values.tokenEndpointOrigin,
+    kind: "oauth" as const,
+    updatedAt: new Date(),
+  };
+}
+
+function stateSecret(ctx: AppContext): string | undefined {
+  return ctx.env.BENTO_SECRET_KEY ?? ctx.env.BETTER_AUTH_SECRET;
+}
+
+function callbackUrl(ctx: AppContext, serverId: string): string {
+  return `${ctx.env.BETTER_AUTH_URL.replace(/\/$/, "")}/api/mcp/callback/${serverId}`;
+}
+
+function outcome(c: Parameters<typeof actor>[0], result: string) {
+  return c.redirect(`/settings?tab=mcp&mcp=${result}`);
 }
 
 function orgFilter(organizationId: string | null) {
