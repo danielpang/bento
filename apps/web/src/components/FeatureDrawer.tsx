@@ -1,8 +1,9 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
 import { AgentSession } from "./AgentSession.js";
 import { criterionName, useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import { ConfirmDialog, PromptDialog } from "./PromptDialog.js";
+import { ApiError } from "@bento/api-client";
 import type {
   AgentProfile,
   AgentRun,
@@ -23,6 +24,7 @@ const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
 import { actorDisplayName, historyTriggerLabel, spendCoverageNote, type AgentEvent } from "@bento/core";
+import { deleteConsequences } from "./delete-consequences.js";
 
 interface DrawerProps {
   client: BentoClient;
@@ -33,6 +35,14 @@ interface DrawerProps {
   runsVersion: number;
   onClose: () => void;
   onChanged: () => void;
+  /**
+   * A delete is going out for this card. Said before the request,
+   * because the board stream carries the removal back to this tab
+   * before the response does.
+   */
+  onDeleting: (featureId: string | null) => void;
+  /** The card is gone: drop the selection, refresh, and place focus. */
+  onDeleted: (featureId: string) => void;
   onEvent: (featureId: string, event: AgentEvent) => void;
 }
 
@@ -62,10 +72,21 @@ function CardSpend({ runs }: { runs: AgentRun[] }) {
 
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
 
-export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, onClose, onChanged, onEvent }: DrawerProps) {
+export function FeatureDrawer({
+  client,
+  feature,
+  stages,
+  profiles,
+  runsVersion,
+  onClose,
+  onChanged,
+  onDeleting,
+  onDeleted,
+  onEvent,
+}: DrawerProps) {
   const toast = useToast();
   const [runs, setRuns] = useState<AgentRun[]>([]);
-  const [dialog, setDialog] = useState<"none" | "rollback" | "reject">("none");
+  const [dialog, setDialog] = useState<"none" | "rollback" | "reject" | "delete">("none");
   const [gate, setGate] = useState<GateState | null>(null);
   const [history, setHistory] = useState<FeatureEvent[]>([]);
   const [changes, setChanges] = useState<FeatureChanges | null>(null);
@@ -80,6 +101,13 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
   /** The card's open pull requests, one per repository it was published to. */
   const [pullRequests, setPullRequests] = useState<FeaturePullRequest[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
+  /**
+   * Which card's detail has actually arrived. The delete confirmation
+   * is worded from the runs list, the branch and the pull requests, so
+   * until they are here it cannot tell "nothing else goes with it"
+   * from a sentence naming three runs and twelve dollars.
+   */
+  const [loadedId, setLoadedId] = useState<string | null>(null);
   const [showAllHistory, setShowAllHistory] = useState(false);
   /**
    * Whether anything can actually open a pull request. Offering an
@@ -113,6 +141,7 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
         setChanges(committed);
         setArtifacts(produced);
         setCanPublish(github ? github.canPublish : null);
+        setLoadedId(feature.id);
         setLoadFailed(false);
       } catch {
         // Empty sections would read as "nothing has happened", which is
@@ -182,6 +211,41 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
     }
   }
 
+  /**
+   * Deleted directly rather than through `act`, because the outcomes
+   * differ by status: a refusal while an agent works reads as its own
+   * sentence, and a card that was already gone still has to leave the
+   * board. Nothing is removed optimistically: a card that vanishes and
+   * comes back is a worse failure than one that takes 200ms to leave.
+   */
+  async function deleteCard() {
+    setBusy(true);
+    onDeleting(feature.id);
+    try {
+      await client.deleteFeature(feature.id);
+      toast.note(`Deleted “${clipTitle(feature.title)}”.`);
+      onDeleted(feature.id);
+    } catch (err) {
+      // Deleted a moment ago in another tab, or never this tenant's.
+      // One sentence for both: telling them apart would be telling a
+      // stranger which ids exist. The card leaves either way, which is
+      // what the person wanted.
+      if (err instanceof ApiError && err.status === 404) {
+        toast.fail("That card was already deleted.");
+        onDeleted(feature.id);
+        return;
+      }
+      // A 409 already carries the server's delete sentence, and every
+      // other failure leaves the card exactly where it is. The claim
+      // goes with it: the card is still deletable by somebody else,
+      // and this tab should hear about it when they do.
+      onDeleting(null);
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // The server sends artifacts newest first; a path captured by several
   // runs shows once, as its latest capture. Older ones stay reachable
   // through nothing yet, which is deliberate: the list is for review,
@@ -204,6 +268,22 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
   // Approving mid-run would advance the card out from under the working
   // agent; the button says why it is waiting instead of failing later.
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
+  /**
+   * Why Delete cannot be pressed, in the words the button carries.
+   *
+   * The run sentence is the one Approve already uses: two sentences
+   * for one condition read as two different conditions. The load
+   * failure has its own, because without the runs list the dialog
+   * cannot tell "nothing else goes with it" from a sentence naming
+   * three runs and twelve dollars, and a destructive dialog that
+   * guesses is a dialog that lies.
+   */
+  const deleteBlocked = runActive
+    ? "An agent is working this card. Stop it or wait for it to finish."
+    : loadFailed
+      ? "Reopen the card first. This cannot be done while its details are missing."
+      : null;
+  const deleteReasonId = useId();
 
   return (
     <aside className="drawer" role="dialog" aria-label={feature.title} ref={panel}>
@@ -389,6 +469,26 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
           )}
           <CardSpend runs={runs} />
 
+          {/* The one action that ends the card, so it is in the same
+              room as the others and not in the same row: below a rule,
+              and quiet until it is reached for. */}
+          <div className="danger-row">
+            <button
+              className="btn btn-ghost btn-danger-quiet"
+              disabled={busy || loadedId !== feature.id || deleteBlocked !== null}
+              {...(deleteBlocked ? { title: deleteBlocked, "aria-describedby": deleteReasonId } : {})}
+              onClick={() => setDialog("delete")}
+            >
+              Delete card
+            </button>
+            {/* A title on a disabled button reaches neither a keyboard
+                nor a screen reader, so the reason is also said here. */}
+            {deleteBlocked && (
+              <span id={deleteReasonId} className="visually-hidden">
+                {deleteBlocked}
+              </span>
+            )}
+          </div>
 
           {dialog === "reject" && (
             <PromptDialog
@@ -410,6 +510,16 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
               destructive
               onClose={() => setDialog("none")}
               onConfirm={() => act(() => client.rollbackRun(latestRun.id))}
+            />
+          )}
+          {dialog === "delete" && (
+            <ConfirmDialog
+              title={`Delete “${clipTitle(feature.title)}”?`}
+              description={deleteConsequences(feature, runs, pullRequests)}
+              confirmLabel="Delete this card"
+              destructive
+              onClose={() => setDialog("none")}
+              onConfirm={deleteCard}
             />
           )}
         </section>
@@ -611,6 +721,14 @@ export function FeatureDrawer({ client, feature, stages, profiles, runsVersion, 
       </div>
     </aside>
   );
+}
+
+/**
+ * A card title inside a sentence: whole, or cut at a word and marked.
+ * The full title is still at the top of the drawer behind the dialog.
+ */
+function clipTitle(title: string): string {
+  return title.length > 60 ? `${title.slice(0, 60).replace(/\s+\S*$/, "")}…` : title;
 }
 
 /** A unified diff with the lines told apart, not syntax highlighting. */

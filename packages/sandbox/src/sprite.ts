@@ -804,14 +804,39 @@ export class SpriteDriver implements SandboxDriver {
     // Nothing to do: the platform suspends idle sprites automatically.
   }
 
+  /**
+   * A sprite is a billed machine, so a failure to delete one has to
+   * reach the caller. This swallowed every error, which meant a Fly
+   * API refusal read as a machine destroyed while it kept running.
+   * Only "it is already gone" is tolerated, which is the Docker
+   * driver's rule too.
+   */
   async destroy(handle: SandboxHandle): Promise<void> {
-    await this.client.deleteSprite(handle.externalId).catch(() => {});
+    try {
+      await this.client.deleteSprite(handle.externalId);
+    } catch (err) {
+      if (!isSpriteNotFound(err)) throw err;
+    }
   }
 
   /** See spriteExists: a failed lookup is not a clean bill of health. */
   async exists(handle: SandboxHandle): Promise<boolean> {
     return spriteExists(this.client, handle.externalId);
   }
+}
+
+/**
+ * Whether a delete failed because the sprite was not there.
+ *
+ * Both shapes the SDK can throw: an APIError carrying the status, and
+ * the plain Error it falls back to, which has the status only in the
+ * sentence it wrote. Anything unrecognised counts as a real failure,
+ * which is the safe direction here: a machine reported destroyed while
+ * it goes on billing is the outcome this check exists to prevent.
+ */
+export function isSpriteNotFound(err: unknown): boolean {
+  if (err instanceof APIError) return err.statusCode === 404;
+  return err instanceof Error && /\(status 404\)/.test(err.message);
 }
 
 /**

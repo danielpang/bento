@@ -24,6 +24,13 @@ export const ACTIVE_RUN_STATUSES = ["queued", "starting", "running"] as const;
 export const CARD_BUSY = "an agent is already working this card; wait for it to finish or cancel it first";
 
 /**
+ * The same condition, said to somebody deleting the card. CARD_BUSY
+ * offers "wait for it to finish", which is advice about starting a
+ * second run: waiting does not delete a card.
+ */
+export const CARD_BUSY_DELETE = "An agent is working this card. Stop it first, then delete.";
+
+/**
  * Inserts a run only when the feature has no run queued or working.
  *
  * One card, one agent: a double click on Start, a drag during a run, or
@@ -37,6 +44,11 @@ export const CARD_BUSY = "an agent is already working this card; wait for it to 
  * lives at the doors instead gets forgotten at the next one somebody
  * adds. A deployment without entitlements has no allowance and this
  * costs it one skipped branch.
+ *
+ * The lock is also what a delete takes, so a start racing a delete
+ * waits for it and then finds no row. "gone" rather than an insert that
+ * dies on its foreign key: every caller has something better to say
+ * about a card that is not there than a 500.
  */
 export async function startRunIfIdle(
   db: Db,
@@ -54,7 +66,7 @@ export async function startRunIfIdle(
    * pool, where the transaction below really commits, and omit this.
    */
   defer?: (task: () => void) => void,
-): Promise<AgentRun | "busy" | OutOfCompute> {
+): Promise<AgentRun | "busy" | "gone" | OutOfCompute> {
   const result = await db.transaction(async (tx) => {
     /**
      * The lock also answers whose organization this is. Callers do not
@@ -65,6 +77,7 @@ export async function startRunIfIdle(
     const locked = await tx.execute(
       sql`select organization_id from features where id = ${values.featureId} for update`,
     );
+    if (locked.rows.length === 0) return "gone" as const;
     const organizationId =
       (locked.rows[0] as { organization_id: string | null } | undefined)?.organization_id ?? null;
 
@@ -87,7 +100,7 @@ export async function startRunIfIdle(
     return run;
   });
 
-  if (result !== "busy" && !("outOfCompute" in result)) {
+  if (result !== "busy" && result !== "gone" && !("outOfCompute" in result)) {
     // The insert trigger derived organization_id from the feature, and
     // RETURNING reads the row after BEFORE triggers ran, so the row
     // carries the tenant without another query.

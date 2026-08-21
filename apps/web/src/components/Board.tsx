@@ -310,6 +310,33 @@ function useExpectedArrivals(
  */
 const DONE_LANE = "done";
 
+/* Which lane a card is in, written once. The delete's focus rule walks
+   the same order the board draws, and two copies of these predicates
+   would be two orders the moment one of them changed. */
+const inBacklog = (feature: Feature) => !feature.currentStageId && !isFinished(feature);
+const inLane = (feature: Feature, stageId: string) => feature.currentStageId === stageId && !isFinished(feature);
+
+/**
+ * Where focus goes when a card is deleted: the card that took its
+ * place in the board's order, or the one before it when it was last.
+ * Null means the board has no cards left, and the caller falls back to
+ * the lane's own control.
+ *
+ * Modal restores focus to whatever opened the dialog, and after a
+ * delete that button no longer exists, so without this a keyboard user
+ * lands on <body> and loses their place on the board.
+ */
+export function neighbourCardId(features: Feature[], stages: Stage[], deletedId: string): string | null {
+  const order = [
+    ...features.filter(inBacklog),
+    ...stages.flatMap((stage) => features.filter((f) => inLane(f, stage.id))),
+    ...features.filter(isFinished),
+  ].map((f) => f.id);
+  const index = order.indexOf(deletedId);
+  if (index < 0) return null;
+  return order[index + 1] ?? order[index - 1] ?? null;
+}
+
 export function Board({
   stages,
   features,
@@ -339,7 +366,7 @@ export function Board({
    * five-card Review lane where four were finished read as a queue.
    */
   const finished = shown.filter(isFinished);
-  const backlog = shown.filter((f) => !f.currentStageId && !isFinished(f));
+  const backlog = shown.filter(inBacklog);
   /**
    * The lane a drag is hovering, so it can say it accepts the drop.
    * Board state rather than lane state: the highlight has to move OFF
@@ -416,8 +443,12 @@ export function Board({
           searching ? (
             nothingFound
           ) : (
+            /* "Add your first card" to somebody who has made five and
+               deleted one is a lie. It is true again on a board with
+               nothing in any lane, which is a screen indistinguishable
+               from a fresh install. */
             <button className="lane-cta" onClick={onNewCard}>
-              Add your first card
+              {features.length === 0 ? "Add your first card" : "Add a card"}
             </button>
           )
         }
@@ -427,7 +458,7 @@ export function Board({
       </Lane>
 
       {stages.map((stage, i) => {
-        const inStage = shown.filter((f) => f.currentStageId === stage.id && !isFinished(f));
+        const inStage = shown.filter((f) => inLane(f, stage.id));
         const agent = profiles.find((p) => p.id === stage.defaultAgentProfileId);
         return (
           <Lane

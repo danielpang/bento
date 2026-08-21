@@ -614,7 +614,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           prompt: runRow.prompt,
           executor: runRow.executor,
         }, ctx.entitlements, ctx.analytics);
-        if (next !== "busy" && !("outOfCompute" in next)) {
+        if (next !== "busy" && next !== "gone" && !("outOfCompute" in next)) {
           ctx.bus.emitBoardEvent({
             type: "run_updated",
             projectId: feature.projectId,
@@ -1025,6 +1025,9 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     await requeueMessages(ctx.db, ids);
     return;
   }
+  // The card was deleted between the read and the insert, so there is
+  // nothing to deliver the message to and nowhere to park it.
+  if (next === "gone") return;
   if ("outOfCompute" in next) {
     // Out of compute: back to queued rather than lost to a limit the
     // sender may not even have hit yet. The stranded sweep retries once

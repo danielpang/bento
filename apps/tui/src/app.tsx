@@ -363,8 +363,30 @@ function Console({
   }, [options.mode, screen, baseUrl]);
 
   const ordered = orderFeatures(stages, features);
-  const selected = Math.max(0, selectedFeatureId ? ordered.findIndex((f) => f.id === selectedFeatureId) : 0);
+  const found = selectedFeatureId ? ordered.findIndex((f) => f.id === selectedFeatureId) : 0;
+  /**
+   * Where the selection sat while it still resolved.
+   *
+   * A card deleted in the web console leaves this terminal holding an
+   * id that matches nothing. Falling back to index 0 put the highlight
+   * on the first backlog card while selectedFeatureId kept the dead id,
+   * so every per-card fetch went on 404ing into a swallowed catch and
+   * the board answered nothing until somebody pressed j or k. The card
+   * that took the deleted one's place is at the same index, and the one
+   * before it when the deleted card was last.
+   */
+  const lastIndex = useRef(0);
+  if (found >= 0) lastIndex.current = found;
+  const selected = found >= 0 ? found : Math.max(0, Math.min(lastIndex.current, ordered.length - 1));
   const current = ordered[selected];
+
+  // Said out loud, and the id written back, so the selection is a card
+  // that exists rather than one the board is quietly pretending about.
+  useEffect(() => {
+    if (!selectedFeatureId || features.some((f) => f.id === selectedFeatureId)) return;
+    setSelectedFeatureId(current?.id ?? null);
+    setNotice("That card was deleted.");
+  }, [features, selectedFeatureId, current?.id]);
 
   /**
    * What the card has cost so far, and how much of it is known. Codex,

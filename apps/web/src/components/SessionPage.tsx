@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ApiError } from "@bento/api-client";
 import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges, Stage } from "@bento/api-client";
 import { AgentSession } from "./AgentSession.js";
 import { DiffReview, type LineQuote } from "./DiffReview.js";
@@ -37,6 +38,13 @@ export function SessionPage({
   const [feature, setFeature] = useState<(Feature & { runs: AgentRun[] }) | null>(null);
   /** Whether the load failed, so the page says so instead of sitting blank. */
   const [loadFailed, setLoadFailed] = useState(false);
+  /**
+   * The card is gone rather than unreachable. Its own state, because
+   * "check that the server is reachable" sends somebody to check a
+   * connection that is fine, and this tab is often the last thing left
+   * open on a card deleted from the board behind it.
+   */
+  const [deleted, setDeleted] = useState(false);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [stages, setStages] = useState<Stage[]>([]);
   const [changes, setChanges] = useState<FeatureChanges | null>(null);
@@ -61,6 +69,12 @@ export function SessionPage({
       setStages(pipeline?.stages ?? []);
       setLoadFailed(false);
     } catch (err) {
+      // A 404 is the card being gone, or never this tenant's; the
+      // server answers both the same way on purpose, and so does this.
+      if (err instanceof ApiError && err.status === 404) {
+        setDeleted(true);
+        return;
+      }
       // Both: the toast carries what went wrong, and the flag keeps the
       // page from rendering as a blank screen that explains nothing.
       toast.fail(err);
@@ -122,6 +136,18 @@ export function SessionPage({
     </a>
   );
 
+  if (deleted) {
+    return (
+      <div className="session-page">
+        <header className="session-head">
+          <h1>Conversation</h1>
+          {exit}
+        </header>
+        <p className="error">This card was deleted.</p>
+        <p className="muted">It is no longer on the board, and its transcript went with it.</p>
+      </div>
+    );
+  }
   if (loadFailed) {
     return (
       <div className="session-page">

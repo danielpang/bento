@@ -8,7 +8,13 @@ export interface RunEventEnvelope {
 }
 
 export interface BoardEvent {
-  type: "feature_updated" | "run_updated" | "run_output";
+  /**
+   * feature_deleted is not an update: a client seeing it has to drop
+   * the card rather than refetch and re-render it, and a viewer with
+   * that card open has to be told, not left holding a drawer whose
+   * every action now answers 404.
+   */
+  type: "feature_updated" | "run_updated" | "run_output" | "feature_deleted";
   projectId: string;
   featureId: string;
   runId?: string;
