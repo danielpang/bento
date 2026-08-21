@@ -88,6 +88,40 @@ export interface SessionRecovery {
   persistedIds(event: AgentEvent): string[];
 }
 
+/**
+ * One MCP server as a harness config sees it: the Bento gateway URL for
+ * that server plus the run-scoped bearer token. Adapters never see the
+ * upstream URL or any real credential; the gateway attaches those on
+ * the server.
+ */
+export interface McpRemoteServer {
+  slug: string;
+  url: string;
+  transport: "http" | "sse";
+  headers: Record<string, string>;
+}
+
+/** A file to write into the sandbox, absolute path. */
+export interface McpFile {
+  path: string;
+  content: string;
+}
+
+/**
+ * How a harness consumes remote MCP servers. Feature-detected like
+ * every other capability: a tool without it simply runs with no MCP
+ * servers, and the transcript says so. renderConfig is called with an
+ * empty list too, so a run after the last server was removed overwrites
+ * yesterday's config instead of leaving it behind; sandboxes are per
+ * feature and outlive runs.
+ */
+export interface McpCapability {
+  /** Files written into the sandbox before the agent starts, every run. */
+  renderConfig(servers: McpRemoteServer[]): McpFile[];
+  /** argv appended after profile extraArgs when at least one server attached. */
+  extraArgs?(): string[];
+}
+
 export interface AgentAdapter {
   cli: AgentCli;
   /** Env var names that must be present in the sandbox for this CLI. */
@@ -123,6 +157,8 @@ export interface AgentAdapter {
    * died inside the tool with a generic server error.
    */
   requiredEnvFor?(model: string): string[];
+  /** Present when the tool can consume remote MCP servers. */
+  mcp?: McpCapability;
   /** Present when the tool can hold a live stdin conversation. */
   live?: LiveSession;
   /** Present when the tool's session storage can be read back. */

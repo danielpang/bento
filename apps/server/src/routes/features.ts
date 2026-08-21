@@ -447,7 +447,7 @@ export function featureRoutes(ctx: AppContext) {
        * queue, and messages could vanish after their sender was told
        * "queued".
        */
-      const messageId = await enqueueMessage(db(c, ctx), feature.id, text);
+      const messageId = await enqueueMessage(db(c, ctx), feature.id, text, actor(c));
 
       if (latest.status === "queued" || latest.status === "starting" || latest.status === "running") {
         // A live session hears the message now; the tool decides

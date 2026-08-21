@@ -26,6 +26,18 @@ export const cursorAdapter: AgentAdapter = {
   requiredEnv: ["CURSOR_API_KEY"],
   configPaths: [".cursor"],
 
+  // cursor-agent reads the global ~/.cursor/mcp.json; the sandbox's
+  // home is Bento's to write, and the orchestrator skips this adapter
+  // when local mode has the real ~/.cursor mounted read-only over it.
+  mcp: {
+    renderConfig(servers) {
+      const mcpServers = Object.fromEntries(
+        servers.map((s) => [s.slug, { url: s.url, headers: s.headers }]),
+      );
+      return [{ path: "/root/.cursor/mcp.json", content: JSON.stringify({ mcpServers }, null, 2) }];
+    },
+  },
+
   buildCommand(input: BuildCommandInput): string[] {
     const cmd = [
       "cursor-agent",

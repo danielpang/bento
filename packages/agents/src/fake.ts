@@ -23,6 +23,14 @@ export const fakeAdapter: AgentAdapter = {
   cli: "fake",
   requiredEnv: [],
 
+  // Exists so orchestrator tests can assert the config write and argv
+  // wiring without a real CLI in the sandbox.
+  mcp: {
+    renderConfig(servers) {
+      return [{ path: "/tmp/bento-mcp.json", content: JSON.stringify({ servers }, null, 2) }];
+    },
+  },
+
   buildCommand(input: BuildCommandInput): string[] {
     // Resume against a conversation the sandbox lost: an instant error
     // result naming the session, no init, exit 1, like claude-code.
