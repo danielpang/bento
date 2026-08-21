@@ -26,6 +26,7 @@ import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
 import { slackRoutes } from "./routes/slack.js";
 import { mcpRoutes } from "./routes/mcp.js";
+import { mcpGatewayRoutes } from "./routes/mcp-gateway.js";
 import { contactRoutes } from "./routes/contact.js";
 
 export interface AppExtras {
@@ -230,6 +231,12 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
 
   // Webhooks authenticate by signature, not by session.
   app.route("/api/webhooks", webhookRoutes(ctx));
+
+  // The MCP gateway authenticates by a run-scoped grant token, not a
+  // session: the caller is an agent process inside a sandbox. Like the
+  // webhooks and the SSE streams, it sits outside the tenant middleware
+  // and holds no database connection across its proxied streams.
+  app.route("/api/mcp-gateway", mcpGatewayRoutes(ctx));
 
   // The model catalog is the same for everyone and carries no tenant
   // data, so it sits outside the authenticated routes.

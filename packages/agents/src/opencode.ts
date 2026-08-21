@@ -54,6 +54,23 @@ export const opencodeAdapter: AgentAdapter = {
   optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"],
   configPaths: [".config/opencode", ".local/share/opencode"],
 
+  // The sandbox home carries no opencode config of its own, so the
+  // whole file is Bento's to overwrite each run. The orchestrator skips
+  // this adapter when local mode has the real config mounted over it.
+  mcp: {
+    renderConfig(servers) {
+      const mcp = Object.fromEntries(
+        servers.map((s) => [s.slug, { type: "remote", url: s.url, headers: s.headers, enabled: true }]),
+      );
+      return [
+        {
+          path: "/root/.config/opencode/opencode.json",
+          content: JSON.stringify({ $schema: "https://opencode.ai/config.json", mcp }, null, 2),
+        },
+      ];
+    },
+  },
+
   buildCommand(input: BuildCommandInput): string[] {
     const cmd = [
       "opencode",

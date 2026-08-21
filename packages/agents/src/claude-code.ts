@@ -57,6 +57,24 @@ export const claudeCodeAdapter: AgentAdapter = {
   authAlternatives: ["CLAUDE_CODE_OAUTH_TOKEN"],
   configPaths: [".claude", ".claude.json"],
 
+  /**
+   * Servers arrive as an explicit config file outside the workspace, so
+   * an agent cannot commit its own gateway token, plus --strict-mcp-config
+   * so a .mcp.json a repository carries cannot add servers the
+   * organization never approved.
+   */
+  mcp: {
+    renderConfig(servers) {
+      const mcpServers = Object.fromEntries(
+        servers.map((s) => [s.slug, { type: s.transport, url: s.url, headers: s.headers }]),
+      );
+      return [{ path: "/opt/bento/mcp/claude.json", content: JSON.stringify({ mcpServers }, null, 2) }];
+    },
+    extraArgs() {
+      return ["--mcp-config", "/opt/bento/mcp/claude.json", "--strict-mcp-config"];
+    },
+  },
+
   buildCommand(input: BuildCommandInput): string[] {
     return ["claude", "-p", input.prompt, ...sharedFlags(input)];
   },

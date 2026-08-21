@@ -20,11 +20,21 @@ import { featureMessages, type Db } from "@bento/db";
 export interface ClaimedMessage {
   id: string;
   text: string;
+  /** Who wrote it, so a continuation run acts with their MCP connections. */
+  userId: string | null;
 }
 
 /** Parks a message on the card. The row is the message's identity. */
-export async function enqueueMessage(db: Db, featureId: string, text: string): Promise<string> {
-  const [row] = await db.insert(featureMessages).values({ featureId, text }).returning({ id: featureMessages.id });
+export async function enqueueMessage(
+  db: Db,
+  featureId: string,
+  text: string,
+  userId: string | null = null,
+): Promise<string> {
+  const [row] = await db
+    .insert(featureMessages)
+    .values({ featureId, text, userId })
+    .returning({ id: featureMessages.id });
   if (!row) throw new Error("message insert returned no row");
   return row.id;
 }
@@ -44,13 +54,15 @@ export async function claimQueuedMessages(db: Db, featureId: string): Promise<Cl
       where feature_id = ${featureId} and status = 'queued'
       for update skip locked
     )
-    returning id, text, created_at
+    returning id, text, user_id, created_at
   `);
   const rows =
-    (result as unknown as { rows?: { id: string; text: string; created_at: string | Date }[] }).rows ?? [];
+    (result as unknown as {
+      rows?: { id: string; text: string; user_id: string | null; created_at: string | Date }[];
+    }).rows ?? [];
   return rows
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-    .map((row) => ({ id: row.id, text: row.text }));
+    .map((row) => ({ id: row.id, text: row.text, userId: row.user_id }));
 }
 
 /**
