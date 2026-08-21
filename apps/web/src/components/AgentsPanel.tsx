@@ -194,7 +194,7 @@ export function AgentsPanel({
   }
 
   return (
-    <aside className="drawer" role="dialog" aria-label="Agents" ref={panel}>
+    <aside className="drawer drawer-wide" role="dialog" aria-label="Agents" ref={panel}>
       <header className="drawer-head">
         <div className="drawer-title-row">
           <h2 className="drawer-title">Agents</h2>
@@ -345,6 +345,7 @@ export function AgentsPanel({
                 ? "Every stage using this agent follows the change. Nothing needs reassigning."
                 : "Pair a coding tool with a model. Assign it to a stage afterwards under Pipeline."
             }
+            large
             onClose={closeForm}
             actions={
               <>

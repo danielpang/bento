@@ -41,6 +41,7 @@ export function Modal({
   children,
   actions,
   wide,
+  large,
   expanded,
   headerActions,
 }: {
@@ -51,6 +52,11 @@ export function Modal({
   actions: ReactNode;
   /** For content, not forms: the artifact viewer's page-shaped panel. */
   wide?: boolean;
+  /**
+   * For long forms: the agent and stage editors, which stack more
+   * fields than a confirm dialog and need the room on a desktop.
+   */
+  large?: boolean;
   /** Fill the viewport. The artifact viewer uses this as "larger view". */
   expanded?: boolean;
   /** Icon controls on the title row, top right. */
@@ -92,7 +98,7 @@ export function Modal({
             without also dismissing the drawer that opened it. */}
         <Dialog.Overlay className="modal-backdrop" data-portal-layer="">
           <Dialog.Content
-            className={["modal", wide && "modal-wide", expanded && "modal-expanded"].filter(Boolean).join(" ")}
+            className={["modal", wide && "modal-wide", large && "modal-large", expanded && "modal-expanded"].filter(Boolean).join(" ")}
             ref={panel}
             // The panel itself, so the focus trap still has focus
             // inside it: preventing this without moving focus leaves it

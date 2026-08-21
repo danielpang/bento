@@ -1265,6 +1265,17 @@ button {
   z-index: 20;
 }
 
+/*
+ * Agents and Pipeline stack more than a card does: skills, providers,
+ * every stage's gate. On a desktop they take extra width so those
+ * fields can be read; below 721px they are already a full-width sheet.
+ */
+@media (min-width: 721px) {
+  .drawer-wide {
+    width: min(720px, 100vw);
+  }
+}
+
 @keyframes slide-in {
   from {
     transform: translateX(24px);
@@ -2533,8 +2544,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  /* Agent and stage forms hold long model ids and shell commands.
-     Keep those wrapping inside the dialog instead of widening it. */
+  /* Long model ids and shell commands wrap inside the dialog instead
+     of stretching it past the viewport. Large editors get more width;
+     this is the backstop when they still overflow. */
   overflow-x: hidden;
   animation: modal-rise 140ms ease-out;
 }
@@ -4460,6 +4472,20 @@ button.session-expand[aria-pressed="true"] {
 /* Page-shaped content wants a page-shaped panel; forms do not. */
 .modal-wide {
   width: min(920px, 100%);
+}
+
+/* The agent and stage editors: more fields than a confirm, less than a
+   document. Wide enough for model ids and the skill to be readable. */
+.modal-large {
+  width: min(680px, 100%);
+}
+
+.modal.modal-large {
+  max-height: min(92vh, 980px);
+}
+
+.modal-large .skill-input {
+  min-height: 200px;
 }
 
 .modal-backdrop:has(.modal-expanded) {

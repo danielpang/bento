@@ -160,7 +160,7 @@ export function StageConfig({
   }
 
   return (
-    <aside className="drawer" role="dialog" aria-label="Stage configuration" ref={panel}>
+    <aside className="drawer drawer-wide" role="dialog" aria-label="Stage configuration" ref={panel}>
       <header className="drawer-head">
         <div className="drawer-title-row">
           <h2 className="drawer-title">Pipeline</h2>
@@ -448,6 +448,7 @@ function StageEditor({
           ? "Changes apply when you save. Cards already in the stage keep going."
           : "The stage joins the end of the pipeline, waiting for your approval until you say otherwise."
       }
+      large
       onClose={onClose}
       actions={
         <>
