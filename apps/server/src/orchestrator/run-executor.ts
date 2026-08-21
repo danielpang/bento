@@ -31,6 +31,8 @@ import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
+import { prepareRunMcp } from "./mcp-run.js";
+import { extendRunGrant, revokeRunGrant, runGrantExists, sweepExpiredGrants } from "../mcp/grants.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
@@ -163,6 +165,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Named out here because publishing needs it again once the run ends.
   const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
   const publisher = await githubConnectionFor(ctx, feature.organizationId);
+  // Hoisted above provisioning because both the provision guard and the
+  // MCP attach after it read this.
+  const restrictNetwork = await organizationRestrictsNetwork(ctx, feature.organizationId);
   try {
     prepared = ctx.driver.provider === "sprite"
       ? repoRows.map((r) => ({ name: r.name, localPath: r.localPath, worktreePath: "" }))
@@ -214,7 +219,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
      * would turn a security setting into a decoration, so the run
      * fails with the reason instead.
      */
-    const restrictNetwork = await organizationRestrictsNetwork(ctx, feature.organizationId);
     if (restrictNetwork && !ctx.driver.supportsRestrictedNetwork) {
       throw new Error(
         "This organization requires agents to run without network access, and this deployment has no restricted network configured. Set BENTO_SANDBOX_RESTRICTED_NETWORK, or turn the setting off under Team.",
@@ -294,6 +298,20 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
+  // MCP servers are attached before the command is built, so the
+  // gateway flags can join the argv. Never fails the run: an
+  // unattachable server is left out with a transcript note.
+  const { extraArgs: mcpArgs } = await prepareRunMcp(ctx, {
+    runId,
+    organizationId: feature.organizationId,
+    actingUserId: run.startedBy,
+    adapter,
+    handle,
+    restrictNetwork,
+    mountedConfigPaths: authMounts.map((m) => m.containerPath),
+    say: saySystem,
+  });
+
   const { argv, live, liveChannel, workdir, toolEnv } = await buildRunCommand(ctx, {
     run,
     feature,
@@ -304,6 +322,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     prepared,
     handle,
     sendInitialPrompt: true,
+    mcpArgs,
   });
 
   // Credentials come from the owning organization, never from the
@@ -908,6 +927,8 @@ async function buildRunCommand(
     prepared: PreparedRepository[];
     handle: SandboxHandle;
     sendInitialPrompt: boolean;
+    /** Gateway flags for the org's MCP servers, after the profile args. */
+    mcpArgs?: string[];
   },
 ): Promise<{
   argv: string[];
@@ -963,12 +984,15 @@ async function buildRunCommand(
     kind: run.kind,
   });
 
+  // The org's MCP gateway flags follow the profile's own extra args, so
+  // a profile cannot shadow them and they read as one list to the CLI.
+  const combinedArgs = [...profile.extraArgs, ...(input.mcpArgs ?? [])];
   const commandInput = {
     prompt,
     model: profile.model,
     cwd: workdir,
     ...(run.cliSessionId ? { resumeSessionId: run.cliSessionId } : {}),
-    ...(profile.extraArgs.length ? { extraArgs: profile.extraArgs } : {}),
+    ...(combinedArgs.length ? { extraArgs: combinedArgs } : {}),
   };
   /**
    * Live mode: the tool holds a conversation over stdin, so a message
@@ -1035,6 +1059,9 @@ async function finishRun(
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id });
   if (!closed) return;
+  // The run is over, so its gateway token is too. Behind the CAS, so it
+  // fires exactly once; a failure here never fails the close.
+  await revokeRunGrant(ctx, runId);
   await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed");
 
   /**
@@ -1145,6 +1172,16 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
   const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
+  // The continuation acts as whoever wrote these messages, not whoever
+  // started the run they follow: a per-user MCP server must serve
+  // member B's own connection when B sends the follow-up on A's card.
+  // The messages are one delivery, so the newest author wins; falling
+  // back to the prior conversation run's starter when the column is
+  // null. Read off the run row, not the follow-up source, which is a
+  // projection of which agent and session answer, not of who acts.
+  const author = claimed.map((m) => m.userId).filter((id): id is string => id !== null).at(-1);
+  const priorStarter = (conversation ?? run).startedBy;
+
   const next = await startRunIfIdle(ctx.db, {
     featureId: feature.id,
     stageId: source.stageId,
@@ -1152,6 +1189,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     prompt: claimed.map((m) => m.text).join("\n"),
     cliSessionId: source.cliSessionId,
     executor: source.executor,
+    startedBy: author ?? priorStarter,
   }, ctx.entitlements, ctx.analytics);
   if (next === "busy") {
     // Another run started in the gap; the messages wait for its end.
@@ -1336,6 +1374,7 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id });
   if (!closed) return;
+  await revokeRunGrant(ctx, runId);
   await announceRunFinished(ctx, runId, "cancelled");
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
@@ -1445,6 +1484,9 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
     .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
     .returning({ id: agentRuns.id });
   if (!closed) return;
+  // The third terminal path: an orphan the restart could not resume.
+  // Without this its grant would outlive it until the TTL.
+  await revokeRunGrant(ctx, run.id);
 
   // Behind the compare-and-set on purpose: only the path that actually
   // closed the run announces it. A resumed run is still working, and
@@ -1535,6 +1577,16 @@ async function resumeInterruptedRun(
     worktreePath: "",
   }));
 
+  // The sandbox still holds the config files and their gateway token
+  // from the run's first life; nothing is re-provisioned. So the flags
+  // are reproduced from whether a grant exists (never re-minted, or the
+  // token in the sandbox would stop matching), and the grant is
+  // extended to cover the rest of the budget. A grant revoked or
+  // expired during the outage stays dead, and the run's tools answer
+  // 404, which is honest.
+  const hasGrant = adapter.mcp ? await runGrantExists(ctx, run.id) : false;
+  const mcpArgs = hasGrant ? adapter.mcp?.extraArgs?.() ?? [] : [];
+
   const { argv, live, liveChannel } = await buildRunCommand(ctx, {
     run,
     feature,
@@ -1547,6 +1599,7 @@ async function resumeInterruptedRun(
     // The process consumed its prompt in its first life; re-sending it
     // would replay the whole task as a new user turn.
     sendInitialPrompt: false,
+    mcpArgs,
   });
 
   // What is left of the run's budget, not a fresh one: the agent has
@@ -1556,6 +1609,7 @@ async function resumeInterruptedRun(
     60_000,
     ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - (run.startedAt ? Date.now() - run.startedAt.getTime() : 0),
   );
+  if (hasGrant) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
 
   // Attach before touching shared state or the transcript, so a failed
   // attach leaves no misleading "reattached" line and no stale abort
@@ -1858,6 +1912,12 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
      */
     await sweepStrandedMessages(ctx).catch((err: unknown) => {
       console.warn("the stranded message sweep did not finish:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
+    });
+    // Expired MCP grants are audit noise after a week. Revocation on the
+    // run's terminal paths already ended them; this only reclaims rows.
+    await sweepExpiredGrants(ctx).catch((err: unknown) => {
+      console.warn("the expired MCP grant sweep did not finish:", err);
       ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
     });
   }));

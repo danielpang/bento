@@ -4,6 +4,9 @@ import type { ExecChunk, ExecOptions, ProvisionSpec, SandboxDriver, SandboxHandl
 
 const DEFAULT_IMAGE = "bento-sandbox:dev";
 
+/** Maps host.docker.internal to the host, so a sandbox can reach the gateway. */
+export const HOST_GATEWAY_ALIAS = "host.docker.internal:host-gateway";
+
 /**
  * One container per feature. The feature's git worktree is bind-mounted at
  * /workspace. The container runs as a long-lived sleep process; each agent
@@ -49,7 +52,12 @@ export class DockerDriver implements SandboxDriver {
     const existing = this.docker.getContainer(name);
     try {
       const info = await existing.inspect();
-      if (sameBinds(info.HostConfig?.Binds ?? [], binds)) {
+      // A container built before the gateway host alias existed cannot
+      // reach the MCP gateway, and HostConfig is immutable after create,
+      // so a stale one is rebuilt rather than reused. Binds are the
+      // durable state; recreation already happens on a bind change.
+      const hasGatewayHost = (info.HostConfig?.ExtraHosts ?? []).includes(HOST_GATEWAY_ALIAS);
+      if (hasGatewayHost && sameBinds(info.HostConfig?.Binds ?? [], binds)) {
         if (!info.State.Running) await existing.start();
         return { externalId: info.Id, provider: "docker", workdir: "/workspace" };
       }
@@ -75,6 +83,11 @@ export class DockerDriver implements SandboxDriver {
       WorkingDir: "/workspace",
       HostConfig: {
         Binds: binds,
+        // Lets a sandbox reach the MCP gateway when it runs on the host
+        // loopback. It maps only host.docker.internal, which the
+        // orchestrator points at the gateway URL; it does not widen what
+        // else the sandbox can dial beyond what the network already allows.
+        ExtraHosts: [HOST_GATEWAY_ALIAS],
         // Modest defaults; agent profiles can raise these later.
         Memory: 4 * 1024 * 1024 * 1024,
         NanoCpus: 2_000_000_000,
