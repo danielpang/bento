@@ -26,7 +26,7 @@ import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
-import { extendRunGrant, revokeRunGrant, runGrantExists, sweepExpiredGrants } from "../mcp/grants.js";
+import { extendRunGrant, revokeRunGrant, runHasActiveMcp, sweepExpiredGrants } from "../mcp/grants.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { appendRunEvent } from "./transcript.js";
@@ -1448,7 +1448,7 @@ async function resumeInterruptedRun(
   // extended to cover the rest of the budget. A grant revoked or
   // expired during the outage stays dead, and the run's tools answer
   // 404, which is honest.
-  const hasGrant = adapter.mcp ? await runGrantExists(ctx, run.id) : false;
+  const hasGrant = adapter.mcp ? await runHasActiveMcp(ctx, run.id) : false;
   const mcpArgs = hasGrant ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
   const { argv, live, liveChannel } = await buildRunCommand(ctx, {

@@ -134,7 +134,11 @@ export interface RefreshInput {
 }
 
 /** Refresh token for a new access token; the endpoint may rotate the refresh token. */
-export async function refreshTokens(input: RefreshInput, policy: SafeFetchPolicy): Promise<TokenResponse> {
+export async function refreshTokens(
+  input: RefreshInput,
+  policy: SafeFetchPolicy,
+  signal?: AbortSignal,
+): Promise<TokenResponse> {
   const form = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: input.refreshToken,
@@ -142,7 +146,7 @@ export async function refreshTokens(input: RefreshInput, policy: SafeFetchPolicy
     resource: input.resource,
   });
   if (input.clientSecret) form.set("client_secret", input.clientSecret);
-  return postToken(input.tokenEndpoint, form, policy);
+  return postToken(input.tokenEndpoint, form, policy, signal);
 }
 
 export class OAuthError extends Error {
@@ -155,7 +159,12 @@ export class OAuthError extends Error {
   }
 }
 
-async function postToken(endpoint: string, form: URLSearchParams, policy: SafeFetchPolicy): Promise<TokenResponse> {
+async function postToken(
+  endpoint: string,
+  form: URLSearchParams,
+  policy: SafeFetchPolicy,
+  signal?: AbortSignal,
+): Promise<TokenResponse> {
   let response;
   try {
     response = await safeFetch(
@@ -164,6 +173,7 @@ async function postToken(endpoint: string, form: URLSearchParams, policy: SafeFe
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
         body: form.toString(),
+        ...(signal ? { signal } : {}),
         headersTimeoutMs: TOKEN_TIMEOUT_MS,
       },
       policy,
