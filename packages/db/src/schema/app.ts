@@ -549,6 +549,13 @@ export const featureMessages = pgTable(
      */
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
+    /**
+     * Who wrote it. A continuation run started by this message acts with
+     * the author's per-user MCP connections, so attribution here is what
+     * keeps member B's follow-up from using member A's tokens. Null for
+     * messages that predate the column.
+     */
+    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
     status: text("status", { enum: ["queued", "sent", "delivered"] })
       .notNull()
       .default("queued"),
@@ -866,6 +873,142 @@ export const slackPendingMentions = pgTable(
   (t) => [
     index("slack_pending_mentions_expires_idx").on(t.expiresAt),
     uniqueIndex("slack_pending_mentions_thread_idx").on(t.slackTeamId, t.slackChannelId, t.slackThreadTs),
+  ],
+);
+
+/**
+ * Remote MCP servers an organization defines once for every agent
+ * harness. Agents never see this row's URL directly: runs are handed a
+ * gateway URL plus a run-scoped token, and the gateway attaches the
+ * real credential server side. organizationId is null in local mode.
+ */
+export const mcpServers = pgTable(
+  "mcp_servers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** The creator. Kept for attribution; access is decided by the org. */
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /** Stable key the harness configs use; [a-z0-9-]. */
+    slug: text("slug").notNull(),
+    url: text("url").notNull(),
+    transport: text("transport", { enum: ["http", "sse"] }).notNull().default("http"),
+    authType: text("auth_type", { enum: ["none", "api_key", "oauth"] }).notNull(),
+    /**
+     * Whose credential the gateway attaches: the organization's shared
+     * one, or each member's own. Only meaningful for oauth servers; API
+     * keys are always organization wide.
+     */
+    credentialScope: text("credential_scope", { enum: ["org", "user"] }).notNull().default("org"),
+    enabled: boolean("enabled").notNull().default(true),
+    /**
+     * Header carrying an API key upstream. "Authorization" sends
+     * "Bearer <key>"; any other name sends the raw key. Validated at
+     * write time against a denylist so it cannot shadow proxied headers.
+     */
+    apiKeyHeader: text("api_key_header").notNull().default("Authorization"),
+    // OAuth client (manual entry or RFC 7591 dynamic registration) and
+    // the discovery cache (RFC 9728 resource metadata, then RFC 8414).
+    // Cleared whenever the URL origin, auth type, or credential scope
+    // changes: credentials must never outlive the endpoints they were
+    // minted against, or an admin could repoint the URL and harvest them.
+    clientId: text("client_id"),
+    encryptedClientSecret: text("encrypted_client_secret"),
+    clientRegistration: text("client_registration", { enum: ["manual", "dynamic"] }),
+    authorizationEndpoint: text("authorization_endpoint"),
+    tokenEndpoint: text("token_endpoint"),
+    registrationEndpoint: text("registration_endpoint"),
+    issuer: text("issuer"),
+    /** RFC 8707 resource indicator; defaults to the server URL. */
+    resource: text("resource"),
+    scopes: text("scopes"),
+    metadataDiscoveredAt: timestamp("metadata_discovered_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("mcp_servers_org_slug_idx").on(t.organizationId, t.slug),
+    uniqueIndex("mcp_servers_local_slug_idx").on(t.slug).where(sql`${t.organizationId} is null`),
+  ],
+);
+
+/**
+ * A credential for one MCP server, encrypted at rest. userId null is
+ * the organization's shared credential (an API key or an org-wide OAuth
+ * grant); a non-null userId is one member's personal connection. The
+ * gateway never falls back from one to the other: a per-user server
+ * with no row for the acting user simply is not attached to the run.
+ */
+export const mcpCredentials = pgTable(
+  "mcp_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    /** Filled by the inherit trigger from the parent server row. */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["api_key", "oauth"] }).notNull(),
+    /** SecretBox ciphertext: the API key, or the OAuth access token. */
+    encryptedSecret: text("encrypted_secret").notNull(),
+    encryptedRefreshToken: text("encrypted_refresh_token"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    /** OAuth scopes actually granted. */
+    scope: text("scope"),
+    /**
+     * Origin of the token endpoint this credential was minted against.
+     * Refresh refuses on mismatch, so repointing a server's discovery
+     * cannot ship the refresh token somewhere new.
+     */
+    tokenEndpointOrigin: text("token_endpoint_origin"),
+    /** Masked tail for API keys, so the UI can show which key is stored. */
+    hint: text("hint").notNull().default(""),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("mcp_credentials_server_user_idx").on(t.serverId, t.userId),
+    uniqueIndex("mcp_credentials_server_org_idx").on(t.serverId).where(sql`${t.userId} is null`),
+  ],
+);
+
+/**
+ * The run-scoped token a sandbox holds instead of any real credential.
+ * Only the sha256 of the token is stored; the raw value is written into
+ * the sandbox's harness configs and dies when the run settles. Rows are
+ * minted, extended, revoked, and swept exclusively by orchestrator code
+ * on the owner pool, so bento_user gets no DML on this table.
+ */
+export const mcpRunGrants = pgTable(
+  "mcp_run_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "cascade" }),
+    /** Filled by the inherit trigger from the parent run row. */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /**
+     * The member whose per-user connections this run may use, from
+     * agent_runs.started_by at mint. Null means auto-started: per-user
+     * servers are then never attached, and the gateway refuses them.
+     */
+    actingUserId: text("acting_user_id").references(() => user.id, { onDelete: "set null" }),
+    tokenHash: text("token_hash").notNull(),
+    /** Servers pinned at mint; the gateway refuses ids outside this set. */
+    serverIds: jsonb("server_ids").$type<string[]>().notNull().default([]),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    requestCount: integer("request_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_run_grants_run_idx").on(t.runId),
+    uniqueIndex("mcp_run_grants_token_idx").on(t.tokenHash),
+    index("mcp_run_grants_expires_idx").on(t.expiresAt),
   ],
 );
 
