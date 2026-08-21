@@ -41,6 +41,8 @@ export function Modal({
   children,
   actions,
   wide,
+  expanded,
+  headerActions,
 }: {
   title: string;
   description?: string;
@@ -49,6 +51,10 @@ export function Modal({
   actions: ReactNode;
   /** For content, not forms: the artifact viewer's page-shaped panel. */
   wide?: boolean;
+  /** Fill the viewport. The artifact viewer uses this as "larger view". */
+  expanded?: boolean;
+  /** Icon controls on the title row, top right. */
+  headerActions?: ReactNode;
 }) {
   /**
    * Put the cursor back where it came from.
@@ -86,7 +92,7 @@ export function Modal({
             without also dismissing the drawer that opened it. */}
         <Dialog.Overlay className="modal-backdrop" data-portal-layer="">
           <Dialog.Content
-            className={wide ? "modal modal-wide" : "modal"}
+            className={["modal", wide && "modal-wide", expanded && "modal-expanded"].filter(Boolean).join(" ")}
             ref={panel}
             // The panel itself, so the focus trap still has focus
             // inside it: preventing this without moving focus leaves it
@@ -102,8 +108,22 @@ export function Modal({
             // through a screen reader twice.
             {...(description ? {} : { "aria-describedby": undefined })}
           >
-            <Dialog.Title className="modal-title">{title}</Dialog.Title>
-            {description && <Dialog.Description className="muted">{description}</Dialog.Description>}
+            {headerActions ? (
+              <div className="modal-head">
+                <div className="modal-head-copy">
+                  <Dialog.Title className="modal-title" title={title}>
+                    {title}
+                  </Dialog.Title>
+                  {description && <Dialog.Description className="muted">{description}</Dialog.Description>}
+                </div>
+                <div className="modal-head-actions">{headerActions}</div>
+              </div>
+            ) : (
+              <>
+                <Dialog.Title className="modal-title">{title}</Dialog.Title>
+                {description && <Dialog.Description className="muted">{description}</Dialog.Description>}
+              </>
+            )}
             {children}
             <div className="modal-actions">{actions}</div>
           </Dialog.Content>
