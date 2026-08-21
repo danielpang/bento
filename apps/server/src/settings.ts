@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { eq } from "drizzle-orm";
+import type { PipelineSeed } from "@bento/core";
 import { organizationPolicies } from "@bento/db";
 import type { AppContext } from "./context.js";
 
@@ -37,9 +38,23 @@ export interface MachineSettings {
    * organization, in organization_policies.
    */
   includeStageNotesInPr: boolean;
+  /**
+   * Whether first-run setup has been taken or skipped. Local mode has
+   * no organization_policies row to hang that on.
+   */
+  setupCompleted: boolean;
+  /** The pipeline chosen during setup, applied to every new project. */
+  pipelineSeed: PipelineSeed | null;
 }
 
-const DEFAULTS: MachineSettings = { shareAgentAuth: false, gitAuthorName: "", gitAuthorEmail: "", includeStageNotesInPr: false };
+const DEFAULTS: MachineSettings = {
+  shareAgentAuth: false,
+  gitAuthorName: "",
+  gitAuthorEmail: "",
+  includeStageNotesInPr: false,
+  setupCompleted: false,
+  pipelineSeed: null,
+};
 
 function settingsPath(ctx: AppContext): string {
   return path.join(ctx.env.BENTO_DATA_DIR, "settings.json");
@@ -54,6 +69,8 @@ export async function readSettings(ctx: AppContext): Promise<MachineSettings> {
       gitAuthorName: typeof parsed.gitAuthorName === "string" ? parsed.gitAuthorName : "",
       gitAuthorEmail: typeof parsed.gitAuthorEmail === "string" ? parsed.gitAuthorEmail : "",
       includeStageNotesInPr: parsed.includeStageNotesInPr === true,
+      setupCompleted: parsed.setupCompleted === true,
+      pipelineSeed: parsed.pipelineSeed && typeof parsed.pipelineSeed === "object" ? parsed.pipelineSeed : null,
     };
   } catch {
     // Absent or unreadable means never configured, which is the default.

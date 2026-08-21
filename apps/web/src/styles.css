@@ -4905,3 +4905,121 @@ button.session-expand[aria-pressed="true"] {
 .plan-rate {
   font-size: 12.5px;
 }
+
+/*
+ * Organization setup sits on the same entrance page as naming a team,
+ * but it has a list to show, so the card is allowed to be wider than a
+ * login form. Vertical alignment starts at the top: six stage editors
+ * centred in the viewport would hide the heading above the fold.
+ */
+.center:has(.card-panel-setup),
+.center:has(.card-panel-setup-wide) {
+  align-items: start;
+  justify-items: center;
+  padding-top: 40px;
+}
+
+.card-panel-setup {
+  max-width: 420px;
+}
+
+.card-panel-setup-wide {
+  max-width: 560px;
+}
+
+.onboard-preview {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboard-preview li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.onboard-preview-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.onboard-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboard-stages,
+.onboard-agents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboard-stage,
+.onboard-agent {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.onboard-stage:last-child,
+.onboard-agent:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.onboard-stage-row,
+.onboard-agent-row,
+.onboard-add,
+.onboard-nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.onboard-stage-row .input,
+.onboard-add .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.onboard-stage-row .select {
+  flex: 0 0 8.5rem;
+}
+
+.onboard-agent-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.onboard-stage-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.onboard-agent-stage {
+  margin: 0;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text-faint);
+}
+
+.onboard-nav {
+  justify-content: space-between;
+  padding-top: 8px;
+}
+
+.onboard-add {
+  padding-top: 4px;
+}

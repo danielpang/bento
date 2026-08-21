@@ -33,7 +33,7 @@ Under **Settings**, save a provider API key, or under **Agents** paste a Claude 
 
 ### 3. Look at the agents you already have
 
-A new project arrives with six stages and an agent on each, so it can run without you inventing six job titles first. Open **Agents** to see them.
+A new team walks through pipeline and agents after you name it. You can take Bento's defaults or change them there. A new project then arrives with those stages and an agent on each, so it can run without you inventing six job titles first. Open **Agents** to see them.
 
 Each is a coding tool paired with a model, plus a **skill**: the operating instructions sent with every prompt it runs, saying what its write-up must contain. The seeded ones are deliberately short, and editing them is the highest-leverage thing you can do, because a stage's value is what it hands the next stage.
 

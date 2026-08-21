@@ -1,3 +1,6 @@
+import { z } from "zod";
+import { gateType } from "./enums.js";
+import { MODEL_GUIDANCE } from "./credentials.js";
 import type { GateCriteria } from "./gates.js";
 
 export interface StageDefinition {
@@ -174,3 +177,175 @@ export function stageArtifactPath(stageSlug: string): string {
  * provisioning once failed.
  */
 export const WORKSPACE_ARTIFACT_DIR = "artifacts";
+
+/**
+ * A pipeline plus the agents that run it, as stored for an organization
+ * after setup and applied to every project created afterwards.
+ *
+ * Distinct from StageDefinition: a seed is what a person chose, not the
+ * catalog of gate criteria a live stage can carry. New stages start
+ * with an empty list, the same way a stage added from the board does.
+ */
+export interface PipelineSeedStage {
+  name: string;
+  slug: string;
+  description: string;
+  gateType: "manual" | "auto";
+}
+
+export interface PipelineSeedAgent {
+  name: string;
+  stageSlug: string;
+  skill: string;
+  cli: SetupAgentCli;
+  model: string;
+}
+
+export interface PipelineSeed {
+  stages: PipelineSeedStage[];
+  agents: PipelineSeedAgent[];
+}
+
+/** Tools the setup form offers. The fake agent is a test fixture. */
+export const setupAgentCli = z.enum(["claude-code", "codex", "cursor", "opencode", "pi"]);
+export type SetupAgentCli = z.infer<typeof setupAgentCli>;
+
+export const pipelineSeedStage = z.object({
+  name: z.string().min(1).max(80),
+  slug: z.string().min(1).max(48).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  description: z.string().max(500),
+  gateType,
+});
+
+export const pipelineSeedAgent = z.object({
+  name: z.string().min(1).max(80),
+  stageSlug: z.string().min(1).max(48),
+  skill: z.string().max(20000),
+  cli: setupAgentCli,
+  model: z.string().min(1).max(200),
+});
+
+export const pipelineSeed = z
+  .object({
+    stages: z.array(pipelineSeedStage).min(1).max(20),
+    agents: z.array(pipelineSeedAgent).min(1).max(20),
+  })
+  .superRefine((value, ctx) => {
+    const slugs = value.stages.map((stage) => stage.slug);
+    if (new Set(slugs).size !== slugs.length) {
+      ctx.addIssue({ code: "custom", message: "each stage needs its own slug", path: ["stages"] });
+    }
+    const names = value.agents.map((agent) => agent.name);
+    if (new Set(names).size !== names.length) {
+      ctx.addIssue({ code: "custom", message: "each agent needs its own name", path: ["agents"] });
+    }
+    const known = new Set(slugs);
+    const assigned = new Set(value.agents.map((agent) => agent.stageSlug));
+    for (const stage of value.stages) {
+      if (!assigned.has(stage.slug)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `stage "${stage.slug}" has no agent`,
+          path: ["agents"],
+        });
+      }
+    }
+    for (const [i, agent] of value.agents.entries()) {
+      if (!known.has(agent.stageSlug)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `agent "${agent.name}" points at a stage that is not in this pipeline`,
+          path: ["agents", i, "stageSlug"],
+        });
+      }
+    }
+  });
+
+/** The cheaper default, same one a seeded agent has always used. */
+export function defaultSeedCli(): SetupAgentCli {
+  return "claude-code";
+}
+
+export function defaultSeedModel(cli: SetupAgentCli = defaultSeedCli()): string {
+  return MODEL_GUIDANCE.find((tool) => tool.cli === cli)?.defaultModel ?? "claude-sonnet-5";
+}
+
+/**
+ * Bento's opinionated starting pipeline: six stages, all manual, Claude
+ * Code on the cheaper model, one agent per stage.
+ */
+export function defaultPipelineSeed(): PipelineSeed {
+  const cli = defaultSeedCli();
+  const model = defaultSeedModel(cli);
+  return {
+    stages: DEFAULT_STAGES.map(({ name, slug, description, gateType: mode }) => ({
+      name,
+      slug,
+      description,
+      gateType: mode,
+    })),
+    agents: DEFAULT_AGENTS.map((agent) => ({ ...agent, cli, model })),
+  };
+}
+
+/** stages_pipeline_slug_idx wants uniqueness; the name drives the slug. */
+export function stageSlugFromName(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/g, "-")
+      .replaceAll(/^-+|-+$/g, "")
+      .slice(0, 40) || "stage"
+  );
+}
+
+export function uniqueStageSlug(name: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  const base = stageSlugFromName(name);
+  let slug = base;
+  for (let n = 2; used.has(slug); n++) slug = `${base}-${n}`;
+  return slug;
+}
+
+/**
+ * An agent for every stage. Known slugs keep their seeded agent; a
+ * stage the catalog does not know gets a short skill of its own so
+ * the next stage still has something to read.
+ */
+export function agentsForStages(
+  stages: PipelineSeedStage[],
+  previous: PipelineSeedAgent[] = [],
+): PipelineSeedAgent[] {
+  const catalog = new Map(defaultPipelineSeed().agents.map((agent) => [agent.stageSlug, agent]));
+  const kept = new Map(previous.map((agent) => [agent.stageSlug, agent]));
+  const usedNames = new Set<string>();
+  return stages.map((stage) => {
+    const agent = kept.get(stage.slug) ?? catalog.get(stage.slug) ?? unnamedAgentFor(stage);
+    let name = agent.name;
+    if (usedNames.has(name)) name = uniqueAgentName(name, usedNames);
+    usedNames.add(name);
+    return { ...agent, name, stageSlug: stage.slug };
+  });
+}
+
+function unnamedAgentFor(stage: PipelineSeedStage): PipelineSeedAgent {
+  const cli = defaultSeedCli();
+  return {
+    name: stage.name,
+    stageSlug: stage.slug,
+    skill: [
+      "Do the work this stage is for.",
+      "",
+      "Write up what you did so the next stage can start from it. Say what you left out, and ask for the decision you need rather than guessing at it.",
+    ].join("\n"),
+    cli,
+    model: defaultSeedModel(cli),
+  };
+}
+
+function uniqueAgentName(name: string, taken: Set<string>): string {
+  for (let n = 2; ; n++) {
+    const next = `${name} ${n}`;
+    if (!taken.has(next)) return next;
+  }
+}

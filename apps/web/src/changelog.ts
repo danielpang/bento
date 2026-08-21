@@ -25,6 +25,21 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "org-setup",
+    date: "2026-08-21",
+    title: "Set up the pipeline when you create a team",
+    items: [
+      {
+        title: "A walkthrough after you name the team",
+        body: "A new organization used to land on an empty board, with six stages and six agents seeded in silence the first time you created a project. Creating a team now asks whether you want Bento's defaults or want to shape the pipeline and agents first.",
+      },
+      {
+        title: "Defaults you can still edit",
+        body: "The recommended path is the same six stages as before, all waiting for you, with Claude Code on the cheaper model. Customize to drop a stage, add one, or point an agent at a different tool. Later projects in the team inherit that choice.",
+      },
+    ],
+  },
+  {
     id: "finish-early",
     date: "2026-08-17",
     title: "Move a card to Done from anywhere",

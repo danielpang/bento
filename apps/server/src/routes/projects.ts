@@ -17,6 +17,7 @@ import {
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
 import type { AppContext } from "../context.js";
+import { readSettings } from "../settings.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { activeOrg } from "../middleware/actor.js";
@@ -270,11 +271,23 @@ export function projectRoutes(ctx: AppContext) {
 
       // With the owner, so the pipeline arrives with an agent on every
       // stage: a board that cannot run anything until six agents are
-      // invented is not a starting point.
-      await seedDefaultPipeline(db(c, ctx), project.id, {
-        ownerId: actor(c),
-        organizationId: membership?.organizationId ?? null,
-      });
+      // invented is not a starting point. An organization that finished
+      // setup has already chosen the stages; local mode stores that
+      // choice in machine settings, which seedDefaultPipeline cannot
+      // see, so it is passed in here.
+      const localSeed =
+        !membership?.organizationId && ctx.env.BENTO_MODE !== "multi"
+          ? (await readSettings(ctx)).pipelineSeed
+          : undefined;
+      await seedDefaultPipeline(
+        db(c, ctx),
+        project.id,
+        {
+          ownerId: actor(c),
+          organizationId: membership?.organizationId ?? null,
+        },
+        localSeed ?? undefined,
+      );
       return c.json(project, 201);
     })
     /** Repositories a project spans, in workspace order. */
