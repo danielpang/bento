@@ -4,6 +4,7 @@ import {
   contactMessage,
   deleteAccountMessage,
   invitationMessage,
+  noticeMessage,
   passwordResetMessage,
   verificationMessage,
   createMailer,
@@ -90,6 +91,7 @@ test("every email carries the header, the footer links, and the reason it arrive
       senderEmail: "sam@b.co",
       appUrl: APP_URL,
     }),
+    notice(),
   ];
 
   for (const message of messages) {
@@ -184,4 +186,50 @@ test("SMTP configuration selects the smtp transport", () => {
   } as NodeJS.ProcessEnv);
   const mailer = createMailer(env);
   assert.match(mailer.description, /smtp smtp\.example\.com:465/);
+});
+
+function notice(paragraphs?: string[]) {
+  return noticeMessage({
+    to: "owner@acme.example",
+    subject: "Bento: three quarters of your agent hours are used",
+    preheader: "A heads up with the rest of the period still to go.",
+    heading: "Three quarters of your agent hours are used",
+    paragraphs: paragraphs ?? [
+      "Your team has used 19 of 25 agent hours for this period.",
+      "Nothing has changed yet; this is so the rest of the period is not a surprise.",
+    ],
+    action: { label: "See your usage", url: `${APP_URL}/settings?tab=billing` },
+    footerNote: "You are receiving this because you are an owner or admin of this team on Bento.",
+    appUrl: APP_URL,
+  });
+}
+
+test("a notice arrives in the same envelope as the rest of the mail", () => {
+  const message = notice();
+  const body = message.html ?? "";
+
+  assert.match(body, /Three quarters of your agent hours are used/);
+  // The same header band and the same button as an invitation.
+  assert.match(body, />bento</);
+  assert.match(body, /href="https:\/\/bento\.example\.com\/settings\?tab=billing"/);
+  assert.match(body, /See your usage/);
+
+  // And the plain text half says the same thing, with the link.
+  assert.match(message.text, /Your team has used 19 of 25 agent hours/);
+  assert.match(message.text, /is not a surprise\./);
+  assert.match(message.text, /https:\/\/bento\.example\.com\/settings\?tab=billing/);
+});
+
+test("a notice separates its paragraphs in both halves", () => {
+  const message = notice(["First.", "Second."]);
+  assert.match(message.text, /First\.\n\nSecond\./);
+  assert.equal((message.html ?? "").match(/<p style="margin:0 0 14px/g)?.length, 2);
+});
+
+test("a notice carries copy, not markup", () => {
+  // The cloud module is on the other side of a duck typed seam, and
+  // what it sends is escaped here rather than trusted there.
+  const message = notice(["<script>alert(1)</script>"]);
+  assert.doesNotMatch(message.html ?? "", /<script>/);
+  assert.match(message.html ?? "", /&lt;script&gt;/);
 });
