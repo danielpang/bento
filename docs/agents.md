@@ -9,6 +9,7 @@ Every stage of a pipeline runs one of these tools, paired with a model, as an ag
 | Codex CLI | `gpt-5-codex` | `OPENAI_API_KEY` | Between runs: delivered when the run ends | No |
 | Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY`, whichever model it runs | Between runs: delivered when the run ends | No |
 | opencode | `anthropic/claude-sonnet-5` | Whichever provider key the model needs | Between runs: delivered when the run ends | No |
+| Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs: delivered when the run ends, as a new run | No |
 
 Keys are stored encrypted, per organization in multi mode and locally in local mode, through the web console, `bento setup`, or the Mac app. To route Claude Code or Codex through OpenRouter, save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
 
@@ -19,6 +20,7 @@ You can always type into a card's composer, whatever the agent is doing. What ha
 - **pi** holds a live session and *steers*: your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan first.
 - **Claude Code** holds a live session and *queues in conversation*: your message is read after the current step, in the same session, with everything the agent has already seen.
 - **Codex, Cursor, and opencode** take messages *between runs*: yours is delivered the moment the current run ends, as a resume of the same session, so no context is lost.
+- **pool** takes messages between runs too, but starts a fresh run rather than resuming: `pool exec` prints no run id, so there is nothing to resume by. The new run carries the whole stage prompt, so the agent is not working blind; it has not read the previous conversation. The composer says so on a pool card.
 
 The composer says which of these applies to the agent that is working, and Stop always ends the run immediately. A message that has to wait for the run to end stays on the card as a queued message until the agent picks it up.
 
@@ -67,3 +69,13 @@ Cursor's terminal agent. Bare model ids, subject to your Cursor plan. Credential
 
 The open source terminal agent from sst. Models are `provider/id`, with `openrouter/` prefixes supported. Same provider keys as pi. Messages are delivered between runs. Does not report cost.
 
+### Poolside (pool)
+
+Poolside's terminal agent, running Poolside's own Laguna models. Model ids carry the vendor prefix (`poolside/laguna-s-2.1`), which is what Poolside's inference API takes, and the picker offers the one id Poolside publishes; the others in the Laguna family can be typed in. Credential: `POOLSIDE_API_KEY`, a key from Poolside Platform, which is the same key `pool login` asks for in a terminal.
+
+Two details are specific to this tool:
+
+- **The model and the endpoint travel as environment variables.** `pool exec` has no `--model` flag, so Bento passes `POOLSIDE_STANDALONE_MODEL`, and with it the Poolside Platform base URL that the CLI needs before a key means anything. A local runner can override `POOLSIDE_STANDALONE_BASE_URL` in its environment. Hosted enterprise endpoint settings are outside v1.
+- **A card's later messages start new runs.** See above: the CLI keeps a run id but never prints one.
+
+To run Laguna weights through OpenRouter instead, which is a different endpoint and a different bill, choose pi or opencode with a model such as `openrouter/poolside/laguna-s-2.1`. That path is unchanged and needs only the OpenRouter key. Does not report cost.

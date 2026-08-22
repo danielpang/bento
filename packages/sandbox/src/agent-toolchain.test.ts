@@ -107,7 +107,7 @@ test("an installer that fails once is retried on the next provision, and the res
     assert.equal(first.status, 0, first.stderr);
     assert.deepEqual(toolchainMissing(first.stdout), ["opencode"]);
     assert.match(first.stderr, /opencode install failed/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi", "pool"]);
     // Not once and given up on: a blip passes within seconds. Both
     // routes get their three, the release first and the installer only
     // once that has failed.
@@ -125,7 +125,7 @@ test("an installer that fails once is retried on the next provision, and the res
     // missing, by the route that does not need the API.
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
 
     // Third provision, with everything in place: no network at all.
     const third = sandbox.run();
@@ -159,7 +159,7 @@ test("opencode comes from its release, never asking which version that is", () =
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
     assert.ok(
       sandbox.fetched().some((url) => url.includes("releases/latest/download/opencode-linux-")),
       `the release was never fetched: ${sandbox.fetched().join(" ")}`,
@@ -190,7 +190,7 @@ test("opencode falls back to its installer when the release download is gone", (
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
     assert.ok(sandbox.fetched().includes("https://opencode.ai/install"));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -226,7 +226,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.equal(bumped.status, 0, bumped.stderr);
     // A bump means the whole set, not only what is missing: the point
     // of bumping is that the CLIs already there may be too old.
-    for (const installer of ["claude", "codex", "opencode", "cursor"]) {
+    for (const installer of ["claude", "codex", "opencode", "cursor", "poolside"]) {
       assert.ok(
         sandbox.fetched().some((url) => url.includes(installer)),
         `a bump did not reinstall ${installer}: ${sandbox.fetched().join(" ")}`,
@@ -235,7 +235,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.deepEqual(toolchainMissing(bumped.stdout), ["opencode"]);
     // The four that did install are still usable. A bump that fails
     // halfway must not take the working CLIs down with it.
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi", "pool"]);
 
     // The provision after the bump. This is the assertion that would
     // have caught the original bug: the new marker is on disk, and it
@@ -247,7 +247,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.equal(after.status, 0);
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -275,7 +275,7 @@ test("a bump that cannot reach a CLI keeps the copy the machine already had", ()
     const bumped = sandbox.runAfterVersionBump();
     assert.equal(bumped.status, 0, bumped.stderr);
     assert.deepEqual(toolchainMissing(bumped.stdout), [], "the previously installed copy is still there");
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -308,7 +308,7 @@ test("opencode is reported missing when the release and the installer are both u
     assert.deepEqual(toolchainMissing(result.stdout), ["opencode"]);
     assert.match(result.stderr, /opencode release download failed/);
     // And the other four are unharmed.
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -382,6 +382,7 @@ case "$url" in
   *claude*) tool=claude ;;
   *codex*) tool=codex ;;
   *cursor*) tool=cursor-agent ;;
+  *poolside*) tool=pool ;;
   *) exit 22 ;;
 esac
 for broken in ${broken.join(" ")}; do
@@ -389,6 +390,14 @@ for broken in ${broken.join(" ")}; do
 done
 cat > "$out" <<EOF
 #!/bin/sh
+# pool's real installer refuses a headless run unless the EULA is
+# accepted in the environment, so the stub refuses too: every
+# assertion below that finds pool on the PATH is also an assertion
+# that the acceptance reached the installer's own process.
+if [ "$tool" = pool ] && ! env | grep -q POOL_INSTALL_ACCEPT_EULA=1; then
+  echo "interactive confirmation required" >&2
+  exit 1
+fi
 mkdir -p "$HOME/.local/bin"
 : > "$HOME/.local/bin/$tool"
 chmod +x "$HOME/.local/bin/$tool"
@@ -468,4 +477,25 @@ EOF
 test("the marker is versioned", () => {
   assert.match(TOOLCHAIN_MARKER, /^\/opt\/bento\/toolchain-v\d+$/);
   assert.ok(AGENT_TOOLCHAIN_SCRIPT.includes(`MARKER=${TOOLCHAIN_MARKER}`));
+});
+
+/**
+ * pool's installer will not run without a terminal unless the EULA is
+ * accepted in its environment, and the acceptance has to reach the
+ * installer's own process rather than the script that fetched it. The
+ * stub installer above refuses without it, so every assertion that
+ * finds pool on the PATH already proves this; asserted here as well
+ * because it is a term being accepted on the operator's behalf, and a
+ * silent removal should read as a deliberate change.
+ */
+test("pool's install accepts the EULA, and only pool's", () => {
+  const line = AGENT_TOOLCHAIN_SCRIPT.split("\n").find((candidate) => candidate.includes("install_from pool"));
+  assert.ok(line, "nothing installs pool");
+  assert.match(line, /POOL_INSTALL_ACCEPT_EULA=1 install_from pool/);
+  // Scoped to that command: nothing else in the script carries it, and
+  // it is never exported for the rest of the run.
+  const mentions = AGENT_TOOLCHAIN_SCRIPT.split("\n").filter(
+    (candidate) => candidate.includes("POOL_INSTALL_ACCEPT_EULA") && !candidate.trim().startsWith("#"),
+  );
+  assert.equal(mentions.length, 1);
 });

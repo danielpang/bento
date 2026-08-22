@@ -38,6 +38,7 @@ const PROVIDER_TABS = [
   { id: "openrouter", label: "OpenRouter", keys: ["OPENROUTER_API_KEY"] },
   { id: "cursor", label: "Cursor", keys: ["CURSOR_API_KEY"] },
   { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY"] },
+  { id: "poolside", label: "Poolside", keys: ["POOLSIDE_API_KEY"] },
 ] as const;
 
 /**

@@ -9,7 +9,7 @@
  * on whatever version happened to be baked in, and every Go project
  * start by fighting it.
  *
- * Four of the five CLIs ship standalone binaries, so they carry no
+ * Five of the six CLIs ship standalone binaries, so they carry no
  * runtime of their own. pi is published only on npm, so it gets a
  * private Node under /opt/bento that runs pi and nothing else: it is
  * never placed on the PATH an agent's shell sees, so `node` in a
@@ -17,7 +17,7 @@
  */
 
 /** Binaries this script is responsible for putting on the PATH. */
-export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "pi"] as const;
+export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"] as const;
 
 /**
  * Bumped whenever the script changes what it installs, or when the
@@ -38,7 +38,7 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "p
  * Bumping this is not free, and it is worth knowing why before you do.
  * Every warm sprite in the fleet reinstalls the whole set on its next
  * provision, so the next run of every card pays minutes it did not
- * expect, and four vendors' installers are all called at once from one
+ * expect, and five vendors' installers are all called at once from one
  * egress address. That is the condition that gets one of them
  * throttled, which means a bump is the change most likely to hit the
  * failure this version exists to fix: bumping to fix a rate limit feeds
@@ -51,7 +51,10 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "p
  * Which is also why fixing opencode did not need one. Since v3 the
  * retry decision comes from the binaries rather than the marker, so a
  * sandbox missing a CLI already reinstalls it on its next provision and
- * picks up whatever this script now does.
+ * picks up whatever this script now does. Adding pool did not need one
+ * either, and for the same reason: a warm sprite holding the v3 marker
+ * finds pool absent from the PATH, installs that one CLI, and leaves
+ * the five it already has alone.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -111,7 +114,7 @@ publish() {
 }
 
 # What a run can actually spawn decides the work, not the marker alone.
-# With the marker there this is five builtin lookups and no network,
+# With the marker there this is six builtin lookups and no network,
 # which is what makes the common case free; without it the whole set is
 # installed, because a version bump means the commands Bento builds now
 # want newer CLIs than the ones already here.
@@ -133,7 +136,7 @@ wanted() {
 # Base packages. git is the only one of these the project's own code
 # sees; the rest are what the CLI installers unpack themselves with, and
 # an installer that downloads its archive and cannot open it leaves
-# nothing behind but an exit code. bash, because three of the four
+# nothing behind but an exit code. bash, because three of the five
 # installers are bash scripts rather than sh ones.
 packages=""
 command -v git >/dev/null 2>&1 || packages="$packages git"
@@ -246,6 +249,15 @@ if wanted opencode; then
   fi
 fi
 if wanted cursor-agent; then install_from cursor https://cursor.com/install bash || true; fi
+
+# pool's installer refuses to run without a terminal unless the EULA is
+# accepted up front, so accepting it is what makes the install headless
+# at all. Note what that means: Bento accepts Poolside's terms inside
+# every sandbox it provisions, on the operator's behalf. Scoped to the
+# one command, which is also where the installer's child shell reads it.
+if wanted pool; then
+  POOL_INSTALL_ACCEPT_EULA=1 install_from pool https://downloads.poolside.ai/pool/install.sh sh || true
+fi
 
 # pi is npm only, so it gets its own Node. /opt/bento/node/bin is never
 # added to PATH: the shim below puts it there for pi's process alone, so

@@ -113,3 +113,17 @@ export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   pi: "steer",
   "claude-code": "queue",
 };
+
+/**
+ * Tools whose next run cannot continue the last one, so the composer
+ * must not promise that it will.
+ *
+ * Every other tool prints a session id that Bento stores and resumes,
+ * which is what makes "continuing the same conversation" true. pool
+ * prints none: `pool exec` keeps a run id on disk and resumes it with
+ * --continue, but nothing in its output says what that id is, so a
+ * message here starts a fresh run with the whole stage prompt instead.
+ */
+export const FORGETS_BETWEEN_RUNS: Record<string, true | undefined> = {
+  pool: true,
+};

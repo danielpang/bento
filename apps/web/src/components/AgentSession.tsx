@@ -4,7 +4,7 @@ import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-clie
 import type { AgentEvent } from "@bento/core";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
-import { LIVE_TOOLS } from "./ui.js";
+import { FORGETS_BETWEEN_RUNS, LIVE_TOOLS } from "./ui.js";
 
 /** Animation is decoration; a stilled frame carries the same meaning. */
 const REDUCED_MOTION =
@@ -203,6 +203,8 @@ export function AgentSession({
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
   /** How the latest agent's tool treats a mid-task message, if at all. */
   const liveKind = latestAgent ? LIVE_TOOLS[latestAgent.cli] : undefined;
+  /** Whether a new run can pick the conversation up where this left it. */
+  const resumes = !latestAgent || !FORGETS_BETWEEN_RUNS[latestAgent.cli];
 
   useEffect(() => {
     setViewedRunId(null);
@@ -644,7 +646,9 @@ export function AgentSession({
               anyway ("delivered when the run ends") described a run that
               had already finished. */}
           {!runActive
-            ? "Nothing is running. Your message starts a new run on this card, continuing the same conversation."
+            ? resumes
+              ? "Nothing is running. Your message starts a new run on this card, continuing the same conversation."
+              : "Nothing is running. Your message starts a new run on this card."
             : liveKind === "steer"
               ? `${latestAgent?.name ?? "This agent"} holds a live session: your message steers it while it works.`
               : liveKind === "queue"

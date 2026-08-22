@@ -6,6 +6,7 @@ import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
+import { poolAdapter } from "./pool.js";
 import { getAdapter, runAgent } from "./index.js";
 
 function parseAll(adapter: { parseEvent(l: string): AgentEvent | null }, lines: string[]): AgentEvent[] {
@@ -175,7 +176,7 @@ test("opencode builds a provider qualified model command", () => {
 });
 
 test("every declared cli resolves to an adapter", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "fake"] as const) {
     assert.equal(getAdapter(cli).cli, cli);
   }
 });
@@ -183,6 +184,7 @@ test("every declared cli resolves to an adapter", () => {
 test("adapters declare the env they need", () => {
   assert.deepEqual(codexAdapter.requiredEnv, ["OPENAI_API_KEY"]);
   assert.deepEqual(cursorAdapter.requiredEnv, ["CURSOR_API_KEY"]);
+  assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
 });
 
 /**
@@ -363,9 +365,13 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "fake"] as const) {
     const adapter = getAdapter(cli);
     for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
+      // Poolside's enterprise endpoint is a local environment override.
+      // Hosted v1 always targets Platform and deliberately offers no
+      // organization setting for a custom endpoint.
+      if (cli === "pool" && name === "POOLSIDE_STANDALONE_BASE_URL") continue;
       assert.ok(storable.has(name), `${cli} uses ${name}, which no one can store`);
     }
   }
@@ -434,4 +440,149 @@ test("provider agnostic tools require the key their model implies", () => {
   assert.deepEqual(providerKeyFor("mystery/model"), []);
   assert.deepEqual(opencodeAdapter.requiredEnvFor?.("openrouter/x/y"), ["OPENROUTER_API_KEY"]);
   assert.deepEqual(piAdapter.requiredEnvFor?.("openai/gpt-5"), ["OPENAI_API_KEY"]);
+});
+
+/**
+ * Every pool assertion below is written against output captured from
+ * pool 1.0.16 itself, run against Poolside-hosted inference and against
+ * a local OpenAI-compatible endpoint. The docs describe a `thought`
+ * event as the agent's message text; the CLI actually says
+ * `assistantMessage` for what the reader is told and keeps `thought`
+ * for the turn's thinking, which is why the mapping below looks
+ * different from the documented list.
+ */
+test("pool builds a headless exec command", () => {
+  const argv = poolAdapter.buildCommand({
+    prompt: "Add a dark theme",
+    model: "poolside/laguna-s-2.1",
+    cwd: "/workspace/app",
+  });
+  assert.deepEqual(argv, [
+    "pool",
+    "exec",
+    "-o",
+    "json",
+    "--unsafe-auto-allow",
+    "--sandbox",
+    "disabled",
+    "-d",
+    "/workspace/app",
+    "-p",
+    "Add a dark theme",
+  ]);
+  // argv[0] stays the binary: the "not installed" failure and the
+  // spawn-failure check both read it.
+  assert.equal(argv[0], "pool");
+  // No --model flag exists, so nothing may claim to pass one.
+  assert.ok(!argv.includes("--model"));
+});
+
+test("pool takes its model and endpoint as environment, not flags", () => {
+  const env = poolAdapter.env!({
+    prompt: "go",
+    model: "poolside/laguna-s-2.1",
+    cwd: "/workspace",
+  });
+  assert.deepEqual(env, {
+    POOLSIDE_STANDALONE_BASE_URL: "https://inference.poolside.ai/v1",
+    POOLSIDE_STANDALONE_MODEL: "poolside/laguna-s-2.1",
+  });
+  // Local runners can override the endpoint through their environment.
+  // Hosted v1 always uses the Platform default above.
+  assert.deepEqual(poolAdapter.optionalEnv, ["POOLSIDE_STANDALONE_BASE_URL"]);
+});
+
+test("pool resumes by run id, attached to the flag", () => {
+  const argv = poolAdapter.buildCommand({
+    prompt: "keep going",
+    model: "poolside/laguna-s-2.1",
+    cwd: "/workspace",
+    resumeSessionId: "01a02a49-33d8-7cba-aaec-4536bf2f7d66",
+  });
+  // Attached with =, because --continue is valid alone ("the last run
+  // in this sandbox") and a detached value would be read as the prompt.
+  assert.ok(argv.includes("--continue=01a02a49-33d8-7cba-aaec-4536bf2f7d66"));
+  assert.equal(argv.at(-2), "-p");
+});
+
+test("pool parses the records its json mode actually prints", () => {
+  const events = parseAll(poolAdapter, [
+    `{"message":"Let me look at the directory.","type":"assistantMessage"}`,
+    `{"args":{"cmd":"ls -1"},"name":"shell","type":"toolCall"}`,
+    `{"result":"exited with code 0","type":"toolCallResult"}`,
+    `{"thought":"The listing is enough to answer.","type":"thought"}`,
+    `{"args":{"success":true},"name":"exit","type":"toolCall"}`,
+  ]);
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["message", "tool", "tool", "message", "tool"],
+  );
+  const said = events[0];
+  assert.ok(said?.type === "message" && said.role === "assistant");
+  const call = events[1];
+  assert.ok(call?.type === "tool" && call.name === "shell" && call.phase === "start");
+  // The result record names no tool, so nothing pretends to know which
+  // call it closes.
+  const done = events[2];
+  assert.ok(done?.type === "tool" && done.phase === "end");
+  // Thinking is the agent's, not the reader's, so it is not the
+  // agent's voice in the transcript.
+  const thought = events[3];
+  assert.ok(thought?.type === "message" && thought.role === "system");
+  assert.equal(poolAdapter.extractOutcome(events, 0).ok, true);
+  // Nothing prints a run id, so none is invented: a session id here
+  // would make the next run resume a conversation pool cannot find.
+  assert.equal(poolAdapter.extractOutcome(events, 0).sessionId, undefined);
+});
+
+test("pool's reasoning records are consumed rather than streamed", () => {
+  // They arrive whole and the thought record repeats them, so there is
+  // nothing to forward. Consumed anyway, so a failing run's tail holds
+  // the reason instead of a page of reasoning JSON.
+  assert.deepEqual(poolAdapter.parseDelta!(`{"reasoning":"The user wants a listing.","type":"reasoning"}`), {
+    channel: "thinking",
+    text: "",
+  });
+  assert.equal(poolAdapter.parseDelta!(`{"message":"Done.","type":"assistantMessage"}`), null);
+  assert.equal(poolAdapter.parseDelta!("not json"), null);
+});
+
+test("pool's fatal record is a failure with the endpoint's own words", () => {
+  // Captured verbatim: a revoked Poolside Platform key.
+  const events = parseAll(poolAdapter, [
+    `{"error":"403 Forbidden: please check the api-key you provided: encountered unexpected error"}`,
+  ]);
+  const outcome = poolAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error ?? "", /check the api-key you provided/);
+});
+
+test("pool reports the last fatal record", () => {
+  const events = parseAll(poolAdapter, [
+    `{"error":"first failure"}`,
+    `{"error":"final failure"}`,
+  ]);
+  assert.equal(poolAdapter.extractOutcome(events, 1).error, "final failure");
+});
+
+test("pool wants no browser login in a sandbox", () => {
+  const event = poolAdapter.parseEvent(`{"type":"oauth_url","url":"https://platform.poolside.ai/oauth"}`);
+  assert.ok(event?.type === "result" && event.ok === false);
+  assert.match(event.error ?? "", /browser login, which a sandbox cannot do/);
+});
+
+/**
+ * pool documents its exit codes and honours them: 0 done, 4 the agent
+ * saying it could not do the task, anything else unexpected. So unlike
+ * Cursor the code is authoritative, and unlike opencode there is no
+ * terminal event to prefer over it.
+ */
+test("pool's exit code decides, and 4 is the agent giving up rather than a crash", () => {
+  assert.equal(poolAdapter.extractOutcome([], 0).ok, true);
+  const gaveUp = poolAdapter.extractOutcome([], 4);
+  assert.equal(gaveUp.ok, false);
+  assert.match(gaveUp.error ?? "", /reported the task as not completed/);
+  const died = poolAdapter.extractOutcome([], 1);
+  assert.equal(died.ok, false);
+  assert.match(died.error ?? "", /stopped before reporting a result/);
 });
