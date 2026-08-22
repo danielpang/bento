@@ -19,6 +19,7 @@ import {
   contactMessage,
   deleteAccountMessage,
   invitationMessage,
+  noticeMessage,
   passwordResetMessage,
   verificationMessage,
   type Message,
@@ -63,6 +64,29 @@ const samples: { name: string; message: Message }[] = [
       email: "someone@example.com",
       url: `${APP_URL}/api/auth/delete-user/callback?token=7c1e9a`,
       expiresInHours: 24,
+      appUrl: APP_URL,
+    }),
+  },
+  {
+    /**
+     * A notice from the cloud module. The copy for these lives in that
+     * repository, so this is a representative one: what it is here for
+     * is the envelope, which is this repository's.
+     */
+    name: "usage-notice",
+    message: noticeMessage({
+      to: "owner@acme.example",
+      subject: "Bento: more than 90% of your agent hours are used",
+      preheader: "Where you stand, with the rest of the period still to go.",
+      heading: "More than 90% of your agent hours are used",
+      paragraphs: [
+        "Your team has used 23.4 of 25 agent hours for this period.",
+        "Agents will stop when the allowance is used.",
+        "Business includes 500 agent hours a period, for the whole team.",
+      ],
+      action: { label: "Upgrade to Business", url: `${APP_URL}/settings?tab=billing` },
+      note: "You can also allow overage instead, so nothing stops and the difference is added to your next invoice.",
+      footerNote: "You are receiving this because you are an owner or admin of this team on Bento.",
       appUrl: APP_URL,
     }),
   },

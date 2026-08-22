@@ -290,3 +290,52 @@ export function deleteAccountMessage(input: LinkEmailInput): Message {
 
   return { to: input.email, subject, text, html: body };
 }
+
+export interface NoticeEmailInput {
+  to: string;
+  subject: string;
+  /** The line clients show beside the subject in the inbox list. */
+  preheader: string;
+  heading: string;
+  /** Plain copy, one string per paragraph. Escaped, never markup. */
+  paragraphs: string[];
+  action?: { label: string; url: string };
+  note?: string;
+  footerNote: string;
+  /** Base URL of the console, for the footer link. */
+  appUrl: string;
+}
+
+/**
+ * A notice from the deployment extension, in the same envelope as the
+ * rest of Bento's mail.
+ *
+ * The cloud module lives in another repository and knows nothing about
+ * the layout, so it hands over copy and this builds both halves of the
+ * message from it. Copy rather than markup on purpose: everything it
+ * passes is escaped on the way in, and the plain text is derived from
+ * the same paragraphs, so the two halves cannot drift apart.
+ */
+export function noticeMessage(input: NoticeEmailInput): Message {
+  const text = renderText({
+    lines: [
+      ...input.paragraphs.flatMap((paragraph, i) => (i === 0 ? [paragraph] : ["", paragraph])),
+      ...(input.action ? ["", `${input.action.label}:`, input.action.url] : []),
+      ...(input.note ? ["", input.note] : []),
+    ],
+    footerNote: input.footerNote,
+    appUrl: input.appUrl,
+  });
+
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: input.preheader,
+    heading: input.heading,
+    paragraphs: input.paragraphs.map((paragraph) => html`${paragraph}`),
+    ...(input.action ? { action: input.action } : {}),
+    ...(input.note ? { note: input.note } : {}),
+    footerNote: input.footerNote,
+  });
+
+  return { to: input.to, subject: input.subject, text, html: body };
+}

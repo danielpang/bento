@@ -9,7 +9,7 @@ import PgBoss from "pg-boss";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
 import { createAuth, type AuthHooks } from "./auth.js";
-import { createMailer } from "./mail.js";
+import { createMailer, noticeMessage, type NoticeEmailInput } from "./mail.js";
 import { SecretBox } from "./secrets.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -218,6 +218,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         registerCloud?: (host: {
           db: typeof db;
           mailer: typeof mailer;
+          notify(message: Omit<NoticeEmailInput, "appUrl">): Promise<void>;
           appUrl: string;
           rawEnv: Record<string, string | undefined>;
           identify(headers: Headers): Promise<{ userId: string; organizationId: string; role: string } | null>;
@@ -233,6 +234,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       const registered = await mod.registerCloud({
         db,
         mailer,
+        /**
+         * Mail in Bento's own envelope. The module supplies copy and
+         * this wraps it in the layout every other email uses, so a
+         * usage warning from the hosted plan does not arrive as a
+         * plain text message from a product whose other mail is not.
+         */
+        notify: (message) =>
+          mailer.send(noticeMessage({ ...message, appUrl: env.BETTER_AUTH_URL.replace(/\/$/, "") })),
         appUrl: env.BETTER_AUTH_URL,
         rawEnv,
         // Session and membership stay this server's job: the module gets
