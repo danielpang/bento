@@ -15,6 +15,7 @@ import {
   type SandboxDriver,
   type SandboxHandle,
 } from "./driver.js";
+import { holdSpriteAwake } from "./keep-awake.js";
 
 /**
  * The machine a feature's work happens on. Exported because a test that
@@ -321,7 +322,7 @@ export class SpriteDriver implements SandboxDriver {
    */
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
     const sprite = await this.client.getSprite(handle.externalId);
-    const session = this.openSession(handle, argv, opts);
+    const session = this.openSession(handle, argv, opts, sprite);
     session.adoptInitial(sprite);
     yield* session.stream();
   }
@@ -367,7 +368,7 @@ export class SpriteDriver implements SandboxDriver {
      * why the session is built eagerly here while exec builds it
      * lazily inside its generator.
      */
-    const session = this.openSession(handle, argv, opts);
+    const session = this.openSession(handle, argv, opts, sprite);
     session.adoptAttached(child, guard);
     return session.stream();
   }
@@ -379,9 +380,26 @@ export class SpriteDriver implements SandboxDriver {
    * that already exists. Everything arms at call time, not at first
    * iteration.
    */
-  private openSession(handle: SandboxHandle, argv: string[], opts?: ExecOptions): OpenSession {
+  private openSession(handle: SandboxHandle, argv: string[], opts: ExecOptions | undefined, sprite: Sprite): OpenSession {
     const [command, ...args] = argv;
     if (!command) throw new Error("empty argv");
+
+    /**
+     * A command that goes quiet is not an idle machine, but the
+     * platform cannot tell the difference, and a pause kills every
+     * process exec started. Held from here rather than around the
+     * agent's argv so the command the sandbox runs stays exactly what
+     * the caller asked for: the reattach below finds its session by
+     * that command's first word, and wrapping it in a shell would have
+     * every reattach hunting for `sh`. Released in stream()'s finally,
+     * with the task's own expiry as the backstop.
+     */
+    const awake = holdSpriteAwake(sprite, command);
+    /**
+     * When this stream began, so a sandbox that paused mid command can
+     * be told apart from one that never did. See reattach.
+     */
+    const startedAt = Date.now();
 
     const queue: ExecChunk[] = [];
     let notify: (() => void) | null = null;
@@ -485,9 +503,24 @@ export class SpriteDriver implements SandboxDriver {
           if (done || killed) return;
           const mine = newestSessionFor(sessions, command);
           if (!mine) {
+            /**
+             * Why the process is gone, when the sandbox can say so.
+             *
+             * A sandbox that went to sleep during the command reports a
+             * warming transition after this stream began, and sleep is
+             * the one cause the operator can act on: it means the
+             * keep-awake hold above never took, so every long quiet run
+             * on this machine is losing the same way. Left as the plain
+             * wording when the API does not carry the timestamps,
+             * because a guess here would send somebody after the wrong
+             * thing.
+             */
+            const pausedMidRun = (fresh.lastWarmingAt?.getTime() ?? 0) > startedAt;
             conclude(
               -1,
-              "the connection to the sandbox closed before the command reported an exit, and the process was gone when the driver tried to reattach",
+              pausedMidRun
+                ? "the connection to the sandbox closed before the command reported an exit: the sandbox went to sleep while the command was quiet, which ends a command started this way, so the process was gone when the driver tried to reattach"
+                : "the connection to the sandbox closed before the command reported an exit, and the process was gone when the driver tried to reattach",
             );
             return;
           }
@@ -692,6 +725,10 @@ export class SpriteDriver implements SandboxDriver {
         done = true;
         wakeStdin();
         stopKeepaliveGuard();
+        // The machine is free to pause again the moment this command
+        // is over; holding it awake past that is billed time nobody
+        // asked for.
+        awake.release();
         if (timeout) clearTimeout(timeout);
         if (reap) clearTimeout(reap);
         opts?.signal?.removeEventListener("abort", onAbort);
@@ -802,6 +839,9 @@ export class SpriteDriver implements SandboxDriver {
   /** Sprites hibernate on their own; this is here for symmetry. */
   async hibernate(): Promise<void> {
     // Nothing to do: the platform suspends idle sprites automatically.
+    // The one thing that defers that is a keep-awake task, which every
+    // command releases when it ends and which expires by itself if a
+    // dying server never got to.
   }
 
   /**
@@ -1020,6 +1060,14 @@ function runScript(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const child = sprite.spawn("sh", ["-c", script]);
   const stopKeepaliveGuard = defuseKeepalive(child);
+  /**
+   * Provisioning is the other place a command goes quiet for minutes:
+   * an installer downloading, a clone of a large repository. The
+   * sandbox pausing under one of those ends it the same way it ended
+   * agent runs, and here it would surface as a half installed toolchain
+   * rather than as a lost run.
+   */
+  const awake = holdSpriteAwake(sprite, "provision");
   feedStdin(child);
   return new Promise((resolve, reject) => {
     let stdout = "";
@@ -1029,6 +1077,7 @@ function runScript(
       if (settled) return;
       settled = true;
       stopKeepaliveGuard();
+      awake.release();
       clearTimeout(deadline);
       finish();
     };

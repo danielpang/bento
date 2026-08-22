@@ -3,6 +3,7 @@ import test from "node:test";
 import { SpritesClient } from "@fly/sprites";
 import { AGENT_BINARIES, TOOLCHAIN_MARKER } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
+import { taskRequest } from "./keep-awake.js";
 import { SpriteDriver, spriteExists, spriteName } from "./sprite.js";
 
 /**
@@ -369,6 +370,82 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     } finally {
       await shell(restore);
     }
+  });
+
+  /**
+   * The requests that hold a machine awake, against the real management
+   * socket.
+   *
+   * Every detail of their shape came from documentation: the socket
+   * path, the virtual host, the route, the body, the shorthand that
+   * wraps all four. A wrong one fails the way the platform's own
+   * behavior fails, which is silently. The hold is best effort by
+   * design, so a run whose registration 404s keeps going, finishes its
+   * quiet stretch, and dies to a pause exactly as if the fix had never
+   * been written. Nothing in the stub suite can catch that, because a
+   * stub answers whatever shape it is asked.
+   *
+   * So the production builder is run here, verbatim, and the machine is
+   * asked what it did with it.
+   */
+  await t.test("the management socket accepts the requests that hold a sandbox awake", { skip: needsSprite() }, async () => {
+    const name = "bento-e2e-probe";
+    const listed = async () => (await shell(taskRequest("GET", "/v1/tasks"))).out;
+
+    const registered = await shell(taskRequest("POST", "/v1/tasks", { name, expire: "5m" }));
+    assert.equal(
+      registered.exitCode,
+      0,
+      `the sandbox refused the registration that keeps it awake: ${registered.stderr || registered.out}`,
+    );
+    assert.match(await listed(), new RegExp(name), "the task was accepted but is not held");
+
+    // Renewal is what carries a hold past the platform's per task cap,
+    // so a run longer than that cap depends on this one answering.
+    const renewed = await shell(taskRequest("PUT", `/v1/tasks/${name}`, { expire: "5m" }));
+    assert.equal(renewed.exitCode, 0, `the sandbox refused a renewal: ${renewed.stderr || renewed.out}`);
+
+    // And release, which is the difference between a machine that
+    // pauses when the work is done and one that bills until it expires.
+    const released = await shell(taskRequest("DELETE", `/v1/tasks/${name}`));
+    assert.equal(released.exitCode, 0, `the sandbox refused to release the hold: ${released.stderr || released.out}`);
+    assert.doesNotMatch(await listed(), new RegExp(name), "the hold outlived the release that was supposed to drop it");
+  });
+
+  /**
+   * The bug itself, reproduced: a command that says nothing for longer
+   * than the sandbox's idle window.
+   *
+   * This is what an agent looks like while a model is thinking, and it
+   * is what killed the run this was written for. Without a hold the
+   * machine pauses under the silence, the pause ends the process, and
+   * the driver reports the exit it never got. The assertion is simply
+   * that the command lived: a quiet stretch is not a dead one.
+   *
+   * Long enough to be past any plausible idle window, because the
+   * window is the platform's to choose and a test tuned to today's
+   * number would pass on a machine that had already stopped protecting
+   * anything.
+   */
+  await t.test("a command that goes quiet outlives the sandbox's idle window", { skip: needsSprite() }, async () => {
+    const quiet = 150;
+    const started = Date.now();
+    const result = await collectExec(
+      driver.exec(handle, ["sh", "-c", `sleep ${quiet}; echo survived`], { timeoutMs: 5 * 60_000 }),
+    );
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    console.log(`  ${quiet}s of silence took ${elapsed}s and exited ${result.exitCode}`);
+
+    assert.equal(
+      result.exitCode,
+      0,
+      `a command that said nothing for ${quiet}s did not survive it: ${result.stderr.trim()}`,
+    );
+    assert.match(result.stdout, /survived/);
+    // The two ways the old failure showed itself. Either means the hold
+    // is not holding, whatever the exit code says.
+    assert.doesNotMatch(result.stderr, /went to sleep/);
+    assert.doesNotMatch(result.stderr, /closed before the command reported an exit/);
   });
 
   /**

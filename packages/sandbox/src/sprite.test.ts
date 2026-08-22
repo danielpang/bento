@@ -71,12 +71,34 @@ function fakeChild(): FakeChild {
   return child;
 }
 
-function stubClient(driver: SpriteDriver, sprite: unknown): void {
+/**
+ * Points the driver at a stub sprite, and gives that stub the one method
+ * every command now calls.
+ *
+ * The driver holds the machine awake through the Tasks API for the
+ * length of any command, which every stub below would otherwise have to
+ * know about. Supplying the default here keeps each stub about the thing
+ * its own test is checking, and the returned array lets a test that
+ * cares read the calls back. A stub that brings its own execFileHTTP
+ * keeps it.
+ */
+function stubClient(driver: SpriteDriver, sprite: unknown): { taskCalls: string[] } {
+  const target = sprite as {
+    execFileHTTP?: (file: string, args: string[]) => Promise<unknown>;
+  };
+  const taskCalls: string[] = [];
+  if (!target.execFileHTTP) {
+    target.execFileHTTP = async (_file: string, args: string[]) => {
+      taskCalls.push(args[1] ?? "");
+      return { stdout: "", stderr: "", exitCode: 0 };
+    };
+  }
   (driver as unknown as { client: { getSprite(name: string): Promise<unknown> } }).client = {
     async getSprite() {
       return sprite;
     },
   };
+  return { taskCalls };
 }
 
 test("Sprite provisioning transfers a credential-free repository bundle", async () => {
@@ -760,6 +782,282 @@ test("Sprite exec reattaches to the running command when the connection drops", 
 });
 
 /**
+ * The other half of surviving a quiet agent, and the one no amount of
+ * connection handling could have fixed.
+ *
+ * A sandbox pauses when it looks idle, and what it counts as activity
+ * is output: a process started through exec keeps the machine up only
+ * while it is writing. An agent waiting on a model turn writes nothing,
+ * so the machine pauses, and a pause ends the process. The reattach
+ * above then works exactly as designed and finds nothing, because there
+ * is nothing left to find. A task registered for the length of the
+ * command is what stops the pause.
+ */
+test("Sprite exec holds the sandbox awake for the length of the command", async () => {
+  const child = fakeChild();
+  const calls: string[] = [];
+  const sprite = {
+    name: "sprite",
+    spawn() {
+      return child;
+    },
+    async execFileHTTP(file: string, args: string[]) {
+      // A script, through a shell: the Tasks API lives on the machine's
+      // own management socket, so the only way to reach it is from
+      // inside the sandbox.
+      assert.equal(file, "sh");
+      assert.equal(args[0], "-c");
+      calls.push(args[1] ?? "");
+      return { stdout: "", stderr: "", exitCode: 0 };
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", "task"]),
+  );
+  await settle();
+  child.emit("spawn");
+  await settle();
+
+  // Registered before the command is left to be quiet, not after the
+  // first pause has already taken it.
+  assert.equal(calls.length, 1, `expected one registration, got ${calls.length}`);
+  assert.match(calls[0]!, /-X POST/);
+  assert.match(calls[0]!, /\/v1\/tasks/);
+  const taskName = calls[0]!.match(/"name":"(bento-claude-[0-9a-f]{8})"/)?.[1];
+  assert.ok(taskName, `the registration did not name a task: ${calls[0]}`);
+  // An expiry, so a server that dies mid run cannot pin a machine awake
+  // and billed forever.
+  assert.match(calls[0]!, /"expire":"\d+[smh]"/);
+
+  child.emit("exit", 0);
+  assert.equal((await collected).exitCode, 0);
+  await settle();
+
+  // And let go the moment the command is over, because a held machine
+  // is a billed one.
+  const last = calls.at(-1) ?? "";
+  assert.match(last, /-X DELETE/);
+  assert.match(last, new RegExp(`/v1/tasks/${taskName}`));
+});
+
+/**
+ * A hold has to outlive the run, and the platform caps a single task
+ * well below how long an agent can work, so the hold is renewed while
+ * the command runs. The renewal falls back to registering again, for
+ * the case renewals were failing long enough for the task to expire
+ * underneath them.
+ */
+test("Sprite exec keeps renewing its hold while the command runs", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const child = fakeChild();
+  const calls: string[] = [];
+  const sprite = {
+    name: "sprite",
+    spawn() {
+      return child;
+    },
+    async execFileHTTP(_file: string, args: string[]) {
+      calls.push(args[1] ?? "");
+      return { stdout: "", stderr: "", exitCode: 0 };
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+  );
+  await settle();
+  child.emit("spawn");
+  await settle();
+  assert.equal(calls.length, 1);
+
+  // Two quiet minutes: exactly the stretch that used to lose a run.
+  t.mock.timers.tick(60_000);
+  await settle();
+  t.mock.timers.tick(60_000);
+  await settle();
+
+  const renewals = calls.slice(1);
+  assert.equal(renewals.length, 2, `expected two renewals, got ${renewals.length}`);
+  for (const renewal of renewals) {
+    assert.match(renewal, /-X PUT/);
+    // The re-registration behind it, for a task that already expired.
+    assert.match(renewal, /\|\|.*-X POST/);
+  }
+
+  child.emit("exit", 0);
+  await collected;
+  await settle();
+  // The renewals stop with the command rather than running on.
+  const after = calls.length;
+  t.mock.timers.tick(120_000);
+  await settle();
+  assert.equal(calls.length, after, "the hold went on renewing after the command ended");
+});
+
+/**
+ * Keeping the machine awake is best effort, and it runs alongside real
+ * work: a sandbox whose Tasks API refuses, or whose image predates it,
+ * must still run the command. This is the old behavior, which is worse
+ * but is not nothing, rather than a run that fails outright over a hold
+ * it could not take.
+ */
+test("Sprite exec still runs the command when the sandbox refuses the hold", async () => {
+  const child = fakeChild();
+  const sprite = {
+    name: "sprite",
+    spawn() {
+      return child;
+    },
+    async execFileHTTP() {
+      throw new Error("404 page not found");
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+  );
+  await settle();
+  child.emit("spawn");
+  child.stdout.write("working\n");
+  await settle();
+  child.emit("exit", 0);
+
+  const result = await collected;
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /working/);
+  // The operator's problem, not the user's: a failed hold must not turn
+  // up in the transcript the agent's output becomes.
+  assert.doesNotMatch(result.stderr, /task|awake|404/i);
+});
+
+/**
+ * The message that cost an afternoon. "The process was gone" is true
+ * and says nothing about why, and the why is the one thing an operator
+ * can act on: a sandbox that paused mid command means the hold above
+ * never took, so every long quiet run on that machine is dying the same
+ * way. The sandbox knows when it last went to sleep, so it is asked.
+ */
+test("Sprite exec names the pause when the sandbox slept through the command", async () => {
+  const child = fakeChild();
+  const sprite = {
+    name: "sprite",
+    spawn() {
+      queueMicrotask(() => child.emit("exit", -1));
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    // Asleep since a moment ago, which is after this command began.
+    lastWarmingAt: new Date(Date.now() + 1_000),
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const result = await collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+  );
+  assert.equal(result.exitCode, -1);
+  assert.match(result.stderr, /went to sleep/);
+  assert.match(result.stderr, /gone when the driver tried to reattach/);
+  // This lands in the run's transcript and in the failure the card
+  // shows, so it is copy, and the copy rule holds: no dashes.
+  assert.doesNotMatch(result.stderr, /[—–]|\s-\s/);
+});
+
+/**
+ * And not blamed on a pause that did not happen. A sandbox last asleep
+ * before this command started is one that stayed up, so whatever killed
+ * the process was something else and the message must not send anybody
+ * after the wrong thing.
+ */
+test("Sprite exec does not blame a pause that predates the command", async () => {
+  const child = fakeChild();
+  const sprite = {
+    name: "sprite",
+    spawn() {
+      queueMicrotask(() => child.emit("exit", -1));
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    lastWarmingAt: new Date(Date.now() - 60 * 60_000),
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const result = await collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
+  );
+  assert.equal(result.exitCode, -1);
+  assert.doesNotMatch(result.stderr, /went to sleep/);
+  assert.match(result.stderr, /the process was gone when the driver tried to reattach/);
+});
+
+/**
+ * Provisioning goes quiet too: an installer downloading for minutes, a
+ * clone of a large repository. A pause there ends the script the same
+ * way it ended agent runs, and would surface as a half installed
+ * toolchain rather than as a lost run.
+ */
+test("Sprite provisioning holds the sandbox awake while its scripts run", async () => {
+  const calls: string[] = [];
+  const sprite = {
+    name: "sprite",
+    spawn() {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async execFileHTTP(_file: string, args: string[]) {
+      calls.push(args[1] ?? "");
+      return { stdout: "", stderr: "", exitCode: 0 };
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          return [];
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({ projectId: "p", featureId: "f", hostWorkspacePath: "/unused" });
+
+  const registered = calls.filter((call) => /-X POST/.test(call));
+  const released = calls.filter((call) => /-X DELETE/.test(call));
+  assert.ok(registered.length > 0, "provisioning never held the sandbox awake");
+  assert.ok(registered.every((call) => /"name":"bento-provision-[0-9a-f]{8}"/.test(call)));
+  // Every script lets go of its own hold, so a provision cannot leave
+  // the machine pinned awake behind it.
+  assert.equal(released.length, registered.length, `${registered.length} holds taken, ${released.length} released`);
+});
+
+/**
  * A stop is the one disconnect that must not reattach: the user asked
  * for the process to end, and following it back would resurrect the
  * run they cancelled. The stop itself is also delivered over HTTP,
@@ -1300,6 +1598,14 @@ test("the installed SDK still supports surviving a disconnect and reattaching", 
   // and a stop reaches the process over HTTP through killSession.
   assert.equal(typeof SpriteClass.prototype.listSessions, "function");
   assert.equal(typeof SpriteClass.prototype.killSession, "function");
+
+  /**
+   * The keep-awake hold rides execFileHTTP rather than a WebSocket, so
+   * a renewal is one request that cannot be lost with the socket the
+   * command is on. Pinned because losing it silently would give every
+   * quiet run its pause back.
+   */
+  assert.equal(typeof SpriteClass.prototype.execFileHTTP, "function");
 });
 
 /**
