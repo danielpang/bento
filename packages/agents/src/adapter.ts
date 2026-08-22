@@ -123,6 +123,18 @@ export interface AgentAdapter {
    * died inside the tool with a generic server error.
    */
   requiredEnvFor?(model: string): string[];
+  /**
+   * Per-run environment this tool needs, for CLIs that take their
+   * configuration as environment variables rather than flags. pool is
+   * the case: `pool exec` has no --model, so the model travels as
+   * POOLSIDE_STANDALONE_MODEL. Merged under the organization's stored
+   * credentials, so a value saved there wins over the default here.
+   *
+   * Not folded into argv as an `env VAR=x` prefix, because argv[0] is
+   * what names the binary in the "not installed" failure and in
+   * spawn-failure detection.
+   */
+  env?(input: BuildCommandInput): Record<string, string>;
   /** Present when the tool can hold a live stdin conversation. */
   live?: LiveSession;
   /** Present when the tool's session storage can be read back. */

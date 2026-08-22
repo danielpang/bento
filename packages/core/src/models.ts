@@ -21,10 +21,11 @@ export interface CatalogProvider {
  * Every provider Bento knows, refreshed ones first.
  *
  * The generated half comes from models.dev. The manual half is what that
- * snapshot cannot describe, currently Cursor's own Composer ids. Where
- * both halves name the same provider, generated models come first and
- * manual ids that the snapshot missed are appended, so Composer stays
- * listed even after models.dev grows a Cursor provider of its own.
+ * snapshot cannot describe, currently Cursor's own Composer ids and
+ * Poolside's own inference. Where both halves name the same provider,
+ * generated models come first and manual ids that the snapshot missed
+ * are appended, so Composer stays listed even after models.dev grows a
+ * Cursor provider of its own.
  */
 export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(GENERATED_CATALOG, MANUAL_CATALOG);
 
@@ -67,6 +68,12 @@ export function mergeCatalogs(
  * hand because that snapshot has no Cursor provider. Anthropic stays
  * first because Cursor's default model is a Claude one, which is the
  * fallback providerForProfile leans on.
+ *
+ * pool reaches one provider and one only: Poolside's own inference,
+ * whose ids carry the vendor prefix ("poolside/laguna-s-2.1"), which is
+ * both what the API takes and what makes the single chip in the picker
+ * worth drawing. Laguna weights through OpenRouter stay reachable the
+ * way they always were, with pi or opencode.
  */
 const BY_CLI: Record<string, readonly string[]> = {
   "claude-code": ["anthropic", "openrouter"],
@@ -74,6 +81,7 @@ const BY_CLI: Record<string, readonly string[]> = {
   cursor: ["anthropic", "openai", "google", "xai", "cursor"],
   opencode: ["anthropic", "openai", "google", "openrouter"],
   pi: ["anthropic", "openai", "google", "openrouter"],
+  pool: ["poolside"],
   fake: [],
 };
 

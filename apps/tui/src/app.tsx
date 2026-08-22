@@ -178,7 +178,7 @@ const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
  * changes an agent's course, waits a turn, or waits for the run to end,
  * depending only on which tool is working.
  */
-function takeoverTitle(cli: string | undefined, active: boolean, name: string): string {
+export function takeoverTitle(cli: string | undefined, active: boolean, name: string): string {
   if (!active) return `Nothing is running. Enter starts ${name} again with your instructions.`;
   switch (LIVE_TOOLS[cli ?? ""]) {
     case "steer":
@@ -186,7 +186,9 @@ function takeoverTitle(cli: string | undefined, active: boolean, name: string): 
     case "queue":
       return `${name} is working. Your message is read after the current step, in the same conversation.`;
     default:
-      return `${name} is working. Your message is delivered the moment this run ends, as a resume of the same session.`;
+      return cli === "pool"
+        ? `${name} is working. Your message is delivered the moment this run ends, as a new run.`
+        : `${name} is working. Your message is delivered the moment this run ends, as a resume of the same session.`;
   }
 }
 
