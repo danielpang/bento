@@ -19,6 +19,7 @@ import {
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
+import { CHANGELOG_URL } from "./changelog.js";
 import { NavMenu, type NavAction } from "./components/NavMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import { SignIn } from "./components/SignIn.js";
@@ -1077,7 +1078,7 @@ function TopBar({
   const entries: NavAction[] = [
     ...actions,
     { id: "contact", label: "Contact", onSelect: onContact },
-    { id: "changelog", label: "Changelog", href: "/changelog" },
+    { id: "changelog", label: "Changelog", href: CHANGELOG_URL, external: true },
     { id: "settings", label: "Settings", href: "/settings" },
     ...(showSignOut ? [{ id: "signout", label: "Sign out", onSelect: () => void signOut() }] : []),
   ];
@@ -1103,7 +1104,14 @@ function TopBar({
               {action.label}
             </button>
           ) : (
-            <a key={action.id} className="btn btn-ghost" href={action.href} aria-current={action.current ? "page" : undefined}>
+            <a
+              key={action.id}
+              className="btn btn-ghost"
+              href={action.href}
+              target={action.external ? "_blank" : undefined}
+              rel={action.external ? "noreferrer" : undefined}
+              aria-current={action.current ? "page" : undefined}
+            >
               {action.label}
             </a>
           ),
