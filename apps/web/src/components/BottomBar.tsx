@@ -1,3 +1,5 @@
+import { CHANGELOG_URL } from "../changelog.js";
+
 /**
  * The strip along the bottom of the console.
  *
@@ -16,23 +18,12 @@
  * somebody used both.
  */
 export function BottomBar({ onContact }: { onContact: () => void }) {
-  // Read once. This is a full page load per route, so the path cannot
-  // change under the component; a router would make this a subscription.
-  const here = window.location.pathname === "/changelog";
-
   return (
     <nav className="bottombar" aria-label="About Bento">
       <button type="button" className="bottombar-tab" onClick={onContact}>
         Contact
       </button>
-      <a
-        className="bottombar-tab"
-        href="/changelog"
-        data-on={here || undefined}
-        // The page you are already on is still a link (reloading it is
-        // a reasonable thing to want), but it says so.
-        aria-current={here ? "page" : undefined}
-      >
+      <a className="bottombar-tab" href={CHANGELOG_URL} target="_blank" rel="noreferrer">
         Changelog
       </a>
     </nav>
