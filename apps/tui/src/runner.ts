@@ -174,7 +174,7 @@ export class LocalRunner {
       stagePrompt,
       resume,
       compacted: claimed.compactedConversation ?? "",
-      kind: run.kind,
+      ...(run.kind ? { kind: run.kind } : {}),
     });
 
     const commandInput = {
