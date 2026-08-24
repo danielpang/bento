@@ -227,3 +227,43 @@ test("every pairing the pickers offer passes", () => {
     assert.notEqual(checkAgentPairing(tool.cli, tool.defaultModel).status, "impossible");
   }
 });
+
+/**
+ * pool reaches one provider, and the id it takes carries the vendor
+ * prefix, so the same string is both what the picker composes and what
+ * Poolside's inference API accepts.
+ */
+test("pool resolves Poolside's own prefixed ids", () => {
+  assert.equal(providerForProfile("pool", "poolside/laguna-s-2.1")?.id, "poolside");
+  assert.equal(modelStringFor("pool", "poolside", "poolside/laguna-s-2.1"), "poolside/laguna-s-2.1");
+  assert.equal(checkAgentPairing("pool", "poolside/laguna-s-2.1").status, "ok");
+  assert.match(checkAgentPairing("pool", "poolside/laguna-s-2.1").detail, /Runs on Poolside/);
+});
+
+test("pool cannot run another company's model, and an unlisted Laguna is unprovable", () => {
+  const verdict = checkAgentPairing("pool", "claude-sonnet-5");
+  assert.equal(verdict.status, "impossible");
+  assert.match(verdict.detail, /cannot run Anthropic models/);
+  assert.match(verdict.detail, /It reaches Poolside/);
+  // The Laguna ids Poolside has not published stay typeable: the
+  // catalog carries one because one is documented, not because the
+  // others are wrong.
+  assert.equal(checkAgentPairing("pool", "poolside/laguna-m.1").status, "ok");
+  assert.equal(checkAgentPairing("pool", "laguna-xl-9").status, "unknown");
+});
+
+/**
+ * The OpenRouter route to the same weights, which this feature does not
+ * replace: prefixed with openrouter/ it is that provider's model on a
+ * provider naming tool, and pool is not offered it.
+ */
+test("Laguna through OpenRouter still belongs to pi and opencode", () => {
+  assert.equal(checkAgentPairing("pi", "openrouter/poolside/laguna-s-2.1").status, "ok");
+  assert.equal(providerForProfile("opencode", "openrouter/poolside/laguna-s-2.1")?.id, "openrouter");
+  // Unprefixed, the same string is an OpenRouter id (that is how the
+  // snapshot lists these weights), so a provider naming tool is told
+  // OpenRouter rather than Poolside. Poolside's own endpoint is
+  // reachable through pool, and only through pool.
+  assert.equal(providerForProfile("pi", "poolside/laguna-s-2.1")?.id, "openrouter");
+  assert.equal(providersForCli("pool").map((p) => p.id).join(), "poolside");
+});

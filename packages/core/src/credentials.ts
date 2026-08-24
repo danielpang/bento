@@ -57,6 +57,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     secret: true,
   },
   {
+    name: "POOLSIDE_API_KEY",
+    label: "Poolside",
+    help: "Used by the Poolside CLI, whichever Laguna model it runs. Create one in Poolside Platform under API keys: it is the same key pool login asks you to paste, so a key you already use in a terminal works here.",
+    secret: true,
+  },
+  {
     name: "GITHUB_TOKEN",
     label: "GitHub token (pull requests)",
     help: "Lets stages with Create a pull request enabled push the feature branch and open the pull request, without installing the GitHub App. Use a fine grained personal access token with contents and pull request write access. It stays on the server and is never given to an agent.",
@@ -162,6 +168,17 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     binary: "pi",
     installUrl: "https://github.com/earendil-works/pi",
     installCommand: "npm install -g @earendil-works/pi-coding-agent",
+  },
+  {
+    cli: "pool",
+    label: "Poolside (pool)",
+    defaultModel: "poolside/laguna-s-2.1",
+    format:
+      "A model id served by Poolside Platform, vendor prefix included. Route through OpenRouter instead by choosing pi or opencode as the tool.",
+    examples: ["poolside/laguna-s-2.1"],
+    binary: "pool",
+    installUrl: "https://docs.poolside.ai/cli/install",
+    installCommand: "curl -fsSL https://downloads.poolside.ai/pool/install.sh | sh",
   },
   {
     cli: "fake",

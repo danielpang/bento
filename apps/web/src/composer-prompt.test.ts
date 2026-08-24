@@ -115,3 +115,19 @@ test("AgentSession names a waiting composer Queue a message", () => {
     assert.doesNotMatch(queued, /Message Staff Engineer/);
   });
 });
+
+test("AgentSession tells a running pool composer the follow-up is a new run", () => {
+  withStorage(() => {
+    const html = renderComposer("running", "pool");
+    assert.match(html, /as a new run/);
+    assert.doesNotMatch(html, /resume|same session|same conversation/);
+  });
+});
+
+test("AgentSession still describes a running resumable tool as continuing", () => {
+  withStorage(() => {
+    const html = renderComposer("running", "codex");
+    assert.match(html, /the moment the current run ends\./);
+    assert.doesNotMatch(html, /as a new run/);
+  });
+});

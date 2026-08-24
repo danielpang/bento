@@ -292,7 +292,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
-  const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, workdir, toolEnv } = await buildRunCommand(ctx, {
     run,
     feature,
     stage,
@@ -307,8 +307,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Credentials come from the owning organization, never from the
   // server's own environment: see resolveAgentEnv.
   const { env: agentEnv, missing } = await resolveAgentEnv(ctx, project.organizationId, adapter, profile.model);
-  // Commits land as the user rather than a placeholder.
-  const execEnv = { ...agentEnv, ...authEnv, ...(await gitIdentityEnv(ctx)) };
+  // Commits land as the user rather than a placeholder. The adapter's
+  // own variables go first, so anything the organization saved under
+  // the same name wins: pool's base URL defaults to Poolside Platform
+  // here and to an enterprise endpoint when one is stored.
+  const execEnv = mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx));
   // A shared login is a credential, whether it arrives as a mount or an
   // env var. Only when none of the three exists does the run stop here.
   if (missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
@@ -561,6 +564,59 @@ interface RunSettlement {
 }
 
 /**
+ * The two pool failures whose fix its own words cannot name.
+ *
+ * pool prints one JSON line for a fatal error, relaying the endpoint's
+ * status and message and nothing else. Captured from pool 1.0.16: a
+ * refused Poolside Platform key reads "403 Forbidden: please check the
+ * api-key you provided", the same thing from an OpenAI compatible
+ * endpoint reads "401 Unauthorized: Incorrect API key provided", and a
+ * model the endpoint does not serve reads "404 Not Found: The model
+ * `laguna-xl-9` does not exist". Each is accurate and none of them says
+ * which screen in Bento holds the thing that is wrong.
+ *
+ * Two answers rather than one, deliberately: "no key is configured" and
+ * "the key you configured is refused" have different fixes, and a
+ * single auth sentence hides the case where everything looks set up.
+ */
+export function poolFailureAdvice(error: string): string | null {
+  if (/no auth token provided|api-key you provided|incorrect api key|invalid_api_key/i.test(error)) {
+    return "Poolside rejected the saved key. Replace POOLSIDE_API_KEY under Model provider keys, then run again. Keys revoked in the Poolside console fail this way.";
+  }
+  if (/does not exist|model_not_found|unknown model|no such model/i.test(error)) {
+    const named = /model [`'"]?([\w./:-]+)/i.exec(error)?.[1];
+    return named
+      ? `pool could not run the model ${named}. Change the model on this agent under Agents, then run again.`
+      : "pool could not run this agent's model. Change it under Agents, then run again.";
+  }
+  return null;
+}
+
+/**
+ * Runner-executed failures skip settleAgentResult, so they never pick
+ * up poolFailureAdvice on their own. Same sentences, same place the
+ * hosted board reads the error from, for every runner client.
+ */
+export function runnerReportedError(cli: string | undefined, error: string | undefined): string | null {
+  const base = error ?? null;
+  if (!base) return null;
+  if (cli === "pool") {
+    const advice = poolFailureAdvice(base);
+    if (advice) return `${base} ${advice}`;
+  }
+  return base;
+}
+
+export function mergeAgentExecEnv(
+  toolEnv: Record<string, string>,
+  agentEnv: Record<string, string>,
+  authEnv: Record<string, string>,
+  identityEnv: Record<string, string>,
+): Record<string, string> {
+  return { ...toolEnv, ...agentEnv, ...authEnv, ...identityEnv };
+}
+
+/**
  * Everything that happens after the agent process ends: naming the
  * failure, publishing branches, and writing the terminal state. Shared
  * by executeRun and by resumeInterruptedRun, so a run that finished
@@ -647,6 +703,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      */
     const toolMissing =
       exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
+    const poolAdvice = profile.cli === "pool" ? poolFailureAdvice(outcome.error ?? "") : null;
     const enriched =
       authDead && profile.cli === "claude-code"
         ? {
@@ -658,7 +715,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
               ...outcome,
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
             }
-          : outcome;
+          : poolAdvice
+            ? { ...outcome, error: `${outcome.error} ${poolAdvice}` }
+            : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
@@ -783,6 +842,8 @@ async function buildRunCommand(
   live: LiveSession | null;
   liveChannel: LineChannel | null;
   workdir: string;
+  /** Environment this tool takes instead of flags, per run. */
+  toolEnv: Record<string, string>;
 }> {
   const { run, feature, stage, profile, adapter, repoRows, prepared, handle } = input;
   const allStages = await ctx.db
@@ -805,15 +866,15 @@ async function buildRunCommand(
   // workspace root so every checkout is visible; the prompt lists them.
   const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
 
-  const prompt = run.prompt
-    || buildStagePrompt(
-      feature,
-      stage,
-      allStages,
-      mounted,
-      { name: profile.name, skill: profile.skill },
-      `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
-    );
+  const stagePrompt = buildStagePrompt(
+    feature,
+    stage,
+    allStages,
+    mounted,
+    { name: profile.name, skill: profile.skill },
+    `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
+  );
+  const prompt = agentRunPrompt(profile.cli, run.prompt, stagePrompt);
 
   const commandInput = {
     prompt,
@@ -835,7 +896,13 @@ async function buildRunCommand(
   const liveChannel = live ? new LineChannel() : null;
   if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
   const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
-  return { argv, live, liveChannel, workdir };
+  return { argv, live, liveChannel, workdir, toolEnv: adapter.env?.(commandInput) ?? {} };
+}
+
+/** A non-resumable tool needs its instructions again on every follow-up. */
+export function agentRunPrompt(cli: string, followUp: string | null, stagePrompt: string): string {
+  if (!followUp) return stagePrompt;
+  return cli === "pool" ? `${stagePrompt}\n\nUser follow-up:\n${followUp}` : followUp;
 }
 
 /** Whether this organization has asked for sandboxes with no egress. */
@@ -978,8 +1045,9 @@ async function finishRun(
 /**
  * Delivers messages that arrived while the run was still going. A
  * headless CLI cannot hear mid-flight, so they waited as rows on the
- * card; now that the run is over they become one resume run in the
- * same session, oldest first. Cancel counts as an ending too: someone
+ * card; now that the run is over they become one follow-up run, oldest
+ * first. Resumable tools continue the same session; pool receives the
+ * stage context again. Cancel counts as an ending too: someone
  * who stops the agent and types a redirect means the redirect. Claims
  * lock rows, so two terminal paths racing deliver each message once.
  */

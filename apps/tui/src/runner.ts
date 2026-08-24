@@ -158,20 +158,27 @@ export class LocalRunner {
     }
 
     const mounted = repositories.map((r) => ({ name: r.name, mountPath: repositoryPathIn(handle.workdir, r.name) }));
-    const prompt = run.prompt || withRepositories(claimed.stagePrompt, mounted);
+    const stagePrompt = withRepositories(claimed.stagePrompt, mounted);
+    const prompt = run.prompt && agent.cli === "pool"
+      ? `${stagePrompt}\n\nUser follow-up:\n${run.prompt}`
+      : run.prompt || stagePrompt;
 
-    const argv = adapter.buildCommand({
+    const commandInput = {
       prompt,
       model: agent.model,
       cwd: workdir,
       ...(run.resumeSessionId ? { resumeSessionId: run.resumeSessionId } : {}),
       ...(agent.extraArgs.length ? { extraArgs: agent.extraArgs } : {}),
-    });
+    };
+    const argv = adapter.buildCommand(commandInput);
 
     // Credentials come from this machine's environment and never reach
-    // the server, which is the point of running agents locally.
-    const env: Record<string, string> = {};
-    for (const name of adapter.requiredEnv) {
+    // the server, which is the point of running agents locally. The
+    // adapter's own variables go under them: pool's model travels this
+    // way, since `pool exec` has no flag for it, and an exported base
+    // URL still wins over the default.
+    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}) };
+    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
       const value = process.env[name];
       if (value) env[name] = value;
     }

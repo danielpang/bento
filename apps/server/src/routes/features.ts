@@ -480,7 +480,8 @@ export function featureRoutes(ctx: AppContext) {
         .limit(1);
       const resumeFrom = conversation ?? latest;
       // Everything parked rides along, oldest first: the card is idle,
-      // so this message and any it queued behind become one resume run.
+      // so this message and any it queued behind become one follow-up
+      // run. Tools with a session resume it; pool gets fresh context.
       const claimed = await claimQueuedMessages(db(c, ctx), feature.id);
       if (claimed.length === 0) {
         // A terminal path claimed it in the same instant; its run

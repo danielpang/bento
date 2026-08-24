@@ -9,7 +9,7 @@ import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { buildStagePrompt } from "../orchestrator/prompt.js";
 import { isUniqueViolation } from "../orchestrator/transcript.js";
-import { captureRunFinished, deliverQueuedMessage } from "../orchestrator/run-executor.js";
+import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
@@ -252,7 +252,11 @@ export function runnerRoutes(ctx: AppContext) {
       const body = c.req.valid("json");
       const authorized = await authorizeReport(ctx, c, runId, body.runnerId);
       if ("error" in authorized) return c.json({ error: authorized.error }, authorized.status);
-      const { feature } = authorized;
+      const { feature, run } = authorized;
+      const [profile] = await db(c, ctx)
+        .select({ cli: agentProfiles.cli })
+        .from(agentProfiles)
+        .where(eq(agentProfiles.id, run.agentProfileId));
 
       /**
        * Compare-and-set, the same one every other terminal writer
@@ -274,7 +278,7 @@ export function runnerRoutes(ctx: AppContext) {
           ...(body.sessionId !== undefined ? { cliSessionId: body.sessionId } : {}),
           costUsd: body.costUsd !== undefined ? String(body.costUsd) : null,
           numTurns: body.numTurns ?? null,
-          error: body.error ?? null,
+          error: body.ok ? (body.error ?? null) : runnerReportedError(profile?.cli, body.error),
         })
         .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
         .returning({ id: agentRuns.id });
