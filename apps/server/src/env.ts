@@ -31,6 +31,14 @@ const envSchema = z.object({
    * way they do on the hosted agent products.
    */
   BENTO_RUN_TIMEOUT_MIN: z.coerce.number().int().positive().default(120),
+  /**
+   * After a live agent (pi, Claude Code) finishes a turn on a manual
+   * stage, how long to keep the process open for another message, in
+   * seconds. 0 closes stdin as soon as the queue is empty, which is
+   * the old one-shot behaviour. Automatic stages and judge runs ignore
+   * this: their gate has to run when the turn ends.
+   */
+  BENTO_LIVE_IDLE_SEC: z.coerce.number().int().min(0).default(90),
 
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),

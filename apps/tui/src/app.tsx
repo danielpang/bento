@@ -187,7 +187,7 @@ export function takeoverTitle(cli: string | undefined, active: boolean, name: st
       return `${name} is working. Your message is read after the current step, in the same conversation.`;
     default:
       return cli === "pool"
-        ? `${name} is working. Your message is delivered the moment this run ends, as a new run.`
+        ? `${name} is working. Your message is delivered the moment this run ends, as a new run with a compacted transcript of this conversation.`
         : `${name} is working. Your message is delivered the moment this run ends, as a resume of the same session.`;
   }
 }

@@ -96,6 +96,7 @@ before(async () => {
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
+    BENTO_LIVE_IDLE_SEC: "0",
   } as NodeJS.ProcessEnv);
 
   const pool = createPool(testUrl);
@@ -572,6 +573,67 @@ test("a live session hears messages mid-run without a second run", { timeout: 12
   assert.match(transcript, /you> change of plan/, "the user's line is in the conversation");
   const turns = transcript.match(/\[done/g)?.length ?? 0;
   assert.equal(turns >= 2, true, "the second message produced a second turn in the same run");
+});
+
+/**
+ * After a live turn finishes on a manual stage with nothing queued,
+ * the process stays open for a short idle window so the next message
+ * is the same conversation rather than a new run.
+ */
+test("a live session stays open after a turn so a later message needs no second run", { timeout: 120_000 }, async () => {
+  const previousIdle = ctx.env.BENTO_LIVE_IDLE_SEC;
+  ctx.env.BENTO_LIVE_IDLE_SEC = 20;
+  try {
+    const { project } = await setupProject("Live idle hold");
+    const feature = await createFeature(project.id, "Idle card");
+    const profile = await fakeProfile("idle-fake");
+    await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+    const first = await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "LIVE hello" }),
+      }),
+    );
+
+    const deadline = Date.now() + 30_000;
+    let sawFirstTurn = false;
+    while (Date.now() < deadline) {
+      const current = await json<{ status: string }>(await app.request(`/api/runs/${first.id}`));
+      const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
+      if (current.status === "running" && /\[done/.test(transcript)) {
+        sawFirstTurn = true;
+        break;
+      }
+      if (TERMINAL_STATUSES.includes(current.status)) {
+        assert.fail(`the run ended (${current.status}) before the idle window could hold it`);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(sawFirstTurn, "the first turn finished while the run stayed open");
+
+    const sent = await json<{ queued: boolean; live?: boolean }>(
+      await app.request(`/api/features/${feature.id}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "keep going" }),
+      }),
+    );
+    assert.equal(sent.queued, false, "the waiting session heard the message now");
+    assert.equal(sent.live, true);
+
+    assert.equal(await waitForRun(first.id, 90_000), "succeeded");
+    const { runs } = await json<{ runs: unknown[] }>(await app.request(`/api/features/${feature.id}`));
+    assert.equal(runs.length, 1, "the later message stayed inside the same run");
+    const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
+    assert.match(transcript, /you> keep going/);
+    const turns = transcript.match(/\[done/g)?.length ?? 0;
+    assert.equal(turns >= 2, true, "the later message produced a second turn");
+    assert.match(transcript, /The agent is waiting/);
+  } finally {
+    ctx.env.BENTO_LIVE_IDLE_SEC = previousIdle;
+  }
 });
 
 /**

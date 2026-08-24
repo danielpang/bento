@@ -19,10 +19,12 @@ The named agents also read and write as a YAML file, from **Agents** or **Settin
 
 You can always type into a card's composer, whatever the agent is doing. What happens next depends on the tool:
 
-- **pi** holds a live session and *steers*: your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan first.
-- **Claude Code** holds a live session and *queues in conversation*: your message is read after the current step, in the same session, with everything the agent has already seen.
+- **pi** holds a live session and *steers*: your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan first. On a manual stage, the session stays open after a turn so you can keep talking without starting a new run.
+- **Claude Code** holds a live session and *queues in conversation*: your message is read after the current step, in the same session, with everything the agent has already seen. On a manual stage, the session stays open after a turn the same way.
 - **Codex, Cursor, and opencode** take messages *between runs*: yours is delivered the moment the current run ends, as a resume of the same session, so no context is lost.
-- **pool** takes messages between runs too, but starts a fresh run rather than resuming: `pool exec` prints no run id, so there is nothing to resume by. The new run carries the whole stage prompt, so the agent is not working blind; it has not read the previous conversation. The composer says so on a pool card.
+- **pool** takes messages between runs too, but starts a fresh run rather than resuming: `pool exec` prints no run id, so there is nothing to resume by. The new run carries the whole stage prompt and a compacted transcript of the previous conversation, so the agent is not working blind.
+
+If a resumed session is gone (the sandbox was recreated, or the CLI no longer holds that conversation), Bento starts a fresh run with the same instructions plus a compacted transcript of what was said, rather than looping on the dead session id.
 
 The composer says which of these applies to the agent that is working, and Stop always ends the run immediately. A message that has to wait for the run to end stays on the card as a queued message until the agent picks it up.
 

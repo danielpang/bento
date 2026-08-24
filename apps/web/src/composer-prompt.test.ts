@@ -120,7 +120,16 @@ test("AgentSession tells a running pool composer the follow-up is a new run", ()
   withStorage(() => {
     const html = renderComposer("running", "pool");
     assert.match(html, /as a new run/);
-    assert.doesNotMatch(html, /resume|same session|same conversation/);
+    assert.match(html, /compacted transcript/);
+    assert.doesNotMatch(html, /resume|same session/);
+  });
+});
+
+test("AgentSession tells an idle pool composer the next run carries a compacted transcript", () => {
+  withStorage(() => {
+    const html = renderComposer("succeeded", "pool");
+    assert.match(html, /compacted transcript of this conversation/);
+    assert.doesNotMatch(html, /continuing the same conversation/);
   });
 });
 
