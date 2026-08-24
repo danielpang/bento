@@ -653,7 +653,9 @@ export function AgentSession({
               ? `${latestAgent?.name ?? "This agent"} holds a live session: your message steers it while it works.`
               : liveKind === "queue"
                 ? `${latestAgent?.name ?? "This agent"} holds a live session: your message is read after the current step, in the same conversation.`
-                : "This tool takes messages between runs: yours is delivered the moment the current run ends."}
+                : resumes
+                  ? "This tool takes messages between runs: yours is delivered the moment the current run ends."
+                  : "This tool takes messages between runs: yours is delivered the moment the current run ends, as a new run."}
         </p>
       )}
 

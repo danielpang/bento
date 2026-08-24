@@ -592,6 +592,21 @@ export function poolFailureAdvice(error: string): string | null {
   return null;
 }
 
+/**
+ * Runner-executed failures skip settleAgentResult, so they never pick
+ * up poolFailureAdvice on their own. Same sentences, same place the
+ * hosted board reads the error from, for every runner client.
+ */
+export function runnerReportedError(cli: string | undefined, error: string | undefined): string | null {
+  const base = error ?? null;
+  if (!base) return null;
+  if (cli === "pool") {
+    const advice = poolFailureAdvice(base);
+    if (advice) return `${base} ${advice}`;
+  }
+  return base;
+}
+
 export function mergeAgentExecEnv(
   toolEnv: Record<string, string>,
   agentEnv: Record<string, string>,

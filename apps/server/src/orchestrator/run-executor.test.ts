@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentRunPrompt, mergeAgentExecEnv, poolFailureAdvice } from "./run-executor.js";
+import { agentRunPrompt, mergeAgentExecEnv, poolFailureAdvice, runnerReportedError } from "./run-executor.js";
 
 test("pool follow-ups retain stage context whether sent idle or queued", () => {
   for (const followUp of ["Please also add a test.", "Use the smaller implementation."]) {
@@ -77,4 +77,25 @@ test("a failure pool already explained is left alone", () => {
     "a missing binary has its own message, which must not be replaced by credentials advice",
   );
   assert.equal(poolFailureAdvice(""), null);
+});
+
+test("a runner-reported pool key failure gets the same advice as a server-executed one", () => {
+  const error = "403 Forbidden: please check the api-key you provided: encountered unexpected error";
+  const reported = runnerReportedError("pool", error);
+  assert.match(reported ?? "", /403 Forbidden/);
+  assert.match(reported ?? "", /Replace POOLSIDE_API_KEY under Model provider keys/);
+});
+
+test("a runner-reported pool failure that already explains itself is left alone", () => {
+  const error = "pool reported the task as not completed (exit code 4)";
+  assert.equal(runnerReportedError("pool", error), error);
+});
+
+test("a runner-reported failure from another tool is not given pool advice", () => {
+  const error = "403 Forbidden: please check the api-key you provided: encountered unexpected error";
+  assert.equal(runnerReportedError("codex", error), error);
+});
+
+test("a runner report with no error stays empty", () => {
+  assert.equal(runnerReportedError("pool", undefined), null);
 });

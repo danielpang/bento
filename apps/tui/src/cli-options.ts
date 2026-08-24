@@ -127,7 +127,7 @@ Options
   --skill <text>       The agent's operating instructions, sent with every
                        run. Define what its stage write-up must contain.
   --tool <cli>         Coding tool for an agent: claude-code, codex, cursor,
-                       opencode, pi.
+                       opencode, pi, pool.
   --model <model>      Model for an agent.
   --name <name>        New name, when editing an agent.
   --quiet              Drop the startup progress lines from repos and agents
