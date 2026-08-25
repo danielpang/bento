@@ -16,6 +16,12 @@ import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
 import { SettingsPageSkeleton } from "./Skeleton.js";
 import { TabScroll } from "./TabScroll.js";
+import {
+  KNOWN_SETTINGS_TABS,
+  resolveSettingsTab,
+  settingsSections,
+  type SettingsTab,
+} from "../settings-tabs.js";
 
 /**
  * Settings as a page, not a drawer.
@@ -28,10 +34,7 @@ import { TabScroll } from "./TabScroll.js";
  * team adds Team, and only a deployment with the billing module shows
  * Billing.
  */
-type Tab = "appearance" | "projects" | "config" | "github" | "linear" | "slack" | "team" | "billing" | "account";
-
-/** The tabs that exist in every mode, so a link to one always resolves. */
-const ALWAYS: Tab[] = ["appearance", "projects", "config", "github", "linear", "slack"];
+type Tab = SettingsTab;
 
 export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
@@ -40,8 +43,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   const [hasBilling, setHasBilling] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
     const wanted = new URLSearchParams(window.location.search).get("tab");
-    const known: Tab[] = [...ALWAYS, "team", "billing", "account"];
-    return known.find((id) => id === wanted) ?? "appearance";
+    return KNOWN_SETTINGS_TABS.find((id) => id === wanted) ?? "appearance";
   });
 
   // A GitHub connection started from this page comes back to it, so the
@@ -64,18 +66,8 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   if (mode === "unknown" || (mode === "multi" && isPending)) return <SettingsPageSkeleton />;
   if (mode === "multi" && !session) return <SignIn social={social} />;
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: "appearance", label: "Appearance" },
-    { id: "projects", label: "Projects" },
-    { id: "config", label: "Config" },
-    { id: "github", label: "GitHub" },
-    { id: "linear", label: "Linear" },
-    { id: "slack", label: "Slack" },
-    ...(mode === "multi" ? [{ id: "team" as const, label: "Team" }] : []),
-    ...(mode === "multi" && hasBilling ? [{ id: "billing" as const, label: "Billing" }] : []),
-    ...(mode === "multi" ? [{ id: "account" as const, label: "Account" }] : []),
-  ];
-  const active = tabs.some((t) => t.id === tab) ? tab : "appearance";
+  const tabs = settingsSections(mode, { hasBilling, requested: tab });
+  const active = resolveSettingsTab(tabs, tab);
 
   return (
     <div className="app">
@@ -111,6 +103,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
                 <Tabs.Trigger
                   key={entry.id}
                   value={entry.id}
+                  data-tab={entry.id}
                   className={`tab${entry.id === active ? " tab-on" : ""}`}
                 >
                   {entry.label}

@@ -58,24 +58,21 @@ function scrollRow(row: HTMLElement, direction: 1 | -1) {
   });
 }
 
-function revealTab(row: HTMLElement) {
+function revealTab(row: HTMLElement, active?: string) {
   const selected =
+    (active
+      ? row.querySelector<HTMLElement>(`[data-tab="${CSS.escape(active)}"]`)
+      : null) ??
     row.querySelector<HTMLElement>('[data-state="active"]') ??
     row.querySelector<HTMLElement>(".tab-on");
   if (!selected) return;
-  // Clear of the fade/chevron, so a deep link to Billing (or Slack)
-  // does not land with the live tab sitting under the cue, or off the
-  // right edge entirely.
-  const pad = 44;
+  // Center the live tab in the strip so a phone opening Billing sees
+  // the underlined label, not a sliver under the fade or nothing.
   const rowRect = row.getBoundingClientRect();
   const selRect = selected.getBoundingClientRect();
   const left = selRect.left - rowRect.left + row.scrollLeft;
-  const right = left + selRect.width;
-  if (left < row.scrollLeft + pad) {
-    row.scrollLeft = Math.max(0, left - pad);
-  } else if (right > row.scrollLeft + row.clientWidth - pad) {
-    row.scrollLeft = right - row.clientWidth + pad;
-  }
+  const target = left - (row.clientWidth - selRect.width) / 2;
+  row.scrollTo({ left: Math.max(0, target), behavior: "auto" });
 }
 
 /**
@@ -101,7 +98,7 @@ export function TabScroll({
   useLayoutEffect(() => {
     const row = wrap.current?.querySelector<HTMLElement>(".tab-row");
     if (!row || active === undefined) return;
-    const run = () => revealTab(row);
+    const run = () => revealTab(row, active);
     run();
     // Billing (and Account) can join the strip after mount, once the
     // plan endpoint answers. Reveal again when that happens, not only

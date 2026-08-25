@@ -135,6 +135,7 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
                 <Tabs.Trigger
                   key={entry.id}
                   value={entry.id}
+                  data-tab={entry.id}
                   className={`tab${entry.id === active.id ? " tab-on" : ""}`}
                 >
                   <span className="tab-dot" data-set={isSet || undefined} aria-hidden="true" />

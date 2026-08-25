@@ -899,8 +899,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       />
 
       {/* Ahead of the setup prompt: a team with no compute left cannot
-          act on any advice below it either. */}
-      <OutOfCompute onOpenBilling={() => window.location.assign("/settings")} />
+          act on any advice below it either. The address names Billing
+          so a phone does not land on Appearance with that tab off the
+          right edge of the strip. */}
+      <OutOfCompute onOpenBilling={() => window.location.assign("/settings?tab=billing")} />
 
       {!boardPending && setupNeeded && (
         <div className="setup-prompt">
