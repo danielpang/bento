@@ -1156,6 +1156,22 @@ button {
   white-space: nowrap;
 }
 
+.card-meta-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
+
+.card-spend {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .status {
   display: inline-flex;
   align-items: center;

@@ -1,36 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BentoClient, FeatureSpend, ProjectUsage } from "@bento/api-client";
+import type { BentoClient, ProjectUsage } from "@bento/api-client";
 import { spendReportingTools } from "@bento/core";
+import { compareFeatureSpend, formatFeatureSpend, type SpendSort } from "./spend-format.js";
 import { useToast } from "./Toasts.js";
 import { SpendPageSkeleton } from "./Skeleton.js";
-
-export type SpendSort = "spend-desc" | "spend-asc" | "title-asc" | "title-desc";
-
-/**
- * Highest measured first, unmeasured last. A null is a tool that
- * printed nothing, not a cheap card, so it must not sort as zero.
- */
-export function compareFeatureSpend(a: FeatureSpend, b: FeatureSpend, sort: SpendSort): number {
-  if (sort === "title-asc" || sort === "title-desc") {
-    const titles = a.title.localeCompare(b.title);
-    return sort === "title-desc" ? -titles : titles;
-  }
-  const aVal = a.costUsd;
-  const bVal = b.costUsd;
-  if (aVal === null && bVal === null) return a.title.localeCompare(b.title);
-  if (aVal === null) return 1;
-  if (bVal === null) return -1;
-  const diff = sort === "spend-desc" ? bVal - aVal : aVal - bVal;
-  return diff !== 0 ? diff : a.title.localeCompare(b.title);
-}
-
-/** What the spend column says, including how much of it is actually known. */
-export function formatFeatureSpend(row: FeatureSpend): string {
-  if (row.runs === 0) return "No runs";
-  if (row.costUsd === null) return "Not reported";
-  const figure = `$${row.costUsd.toFixed(2)}`;
-  return row.runsWithoutCost > 0 ? `${figure}+` : figure;
-}
 
 /**
  * The project's agent spend, one row per card.

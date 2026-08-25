@@ -1,5 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BentoClient, type AgentProfile, type Feature, type Stage } from "@bento/api-client";
+import {
+  BentoClient,
+  type AgentProfile,
+  type Feature,
+  type FeatureSpend,
+  type ProjectUsage,
+  type Stage,
+} from "@bento/api-client";
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { teamDisplayName } from "./team-name.js";
@@ -417,10 +424,15 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const [query, setQuery] = useState("");
   /** Opened from the bottom bar and from the menu; one dialog either way. */
   const [contactOpen, setContactOpen] = useState(false);
-  const [usage, setUsage] = useState<{ totalUsd: number; totalRuns: number; runsWithoutCost: number } | null>(null);
+  const [usage, setUsage] = useState<ProjectUsage | null>(null);
   // Called unconditionally: the chip below it is conditional, a hook
   // cannot be.
   const spendShown = useCountUp(usage?.totalUsd ?? 0);
+  const spendByFeature = useMemo(() => {
+    const map: Record<string, FeatureSpend> = {};
+    for (const row of usage?.byFeature ?? []) map[row.featureId] = row;
+    return map;
+  }, [usage]);
   /** A board-level load or action failure, shown under the topbar. */
   const [loadError, setLoadError] = useState("");
   const toast = useToast();
@@ -981,6 +993,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         runStatusByFeature={runStatus}
         lastOutputByFeature={lastOutput}
         pulses={pulses}
+        spendByFeature={spendByFeature}
         selectedId={selectedId}
         onSelect={setSelectedId}
         onNewCard={() => setDialog("feature")}

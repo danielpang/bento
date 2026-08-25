@@ -3,7 +3,8 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { FeatureSpend } from "@bento/api-client";
-import { compareFeatureSpend, formatFeatureSpend, SpendPage } from "./components/SpendPage.js";
+import { SpendPage } from "./components/SpendPage.js";
+import { compareFeatureSpend, formatCardSpend, formatFeatureSpend } from "./components/spend-format.js";
 
 function row(title: string, costUsd: number | null, extra: Partial<FeatureSpend> = {}): FeatureSpend {
   return { featureId: title, title, runs: extra.runs ?? 1, costUsd, runsWithoutCost: extra.runsWithoutCost ?? 0 };
@@ -41,6 +42,13 @@ test("a missing cost is not formatted as zero", () => {
   assert.equal(formatFeatureSpend(row("silent", null)), "Not reported");
   assert.equal(formatFeatureSpend(row("partial", 1.2, { runs: 3, runsWithoutCost: 1 })), "$1.20+");
   assert.equal(formatFeatureSpend(row("full", 0.4)), "$0.40");
+});
+
+test("a card face prints a figure only when one was reported", () => {
+  assert.equal(formatCardSpend(undefined), null);
+  assert.equal(formatCardSpend(row("silent", null)), null);
+  assert.equal(formatCardSpend(row("partial", 1.2, { runsWithoutCost: 1 })), "$1.20+");
+  assert.equal(formatCardSpend(row("full", 0.4)), "$0.40");
 });
 
 test("the spend page lists the tools that report a cost and the ones that do not", () => {
