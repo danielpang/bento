@@ -151,6 +151,34 @@ export function money(usd: number): string {
   return `$${usd % 1 === 0 ? usd.toFixed(0) : usd.toFixed(2)}`;
 }
 
+/**
+ * The comparison list people read, after dropping claims this product
+ * does not keep.
+ *
+ * Highlights arrive from the cloud module with the prices. A few of
+ * those lines still describe a concurrent-agent cap, a 30 day
+ * transcript window we never close, and Enterprise extras that are
+ * not on the contract. The console is what a person compares, so the
+ * rewrite lives here rather than waiting for the module.
+ */
+export function displayHighlights(highlights: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of highlights) {
+    const line = raw.replace(/,\s*negotiable\b/gi, "").trim();
+    if (!line) continue;
+    if (/agents? running at (a time|once)\b/i.test(line)) continue;
+    if (/^30[ -]day transcript history$/i.test(line)) continue;
+    if (/^custom sandbox images$/i.test(line)) continue;
+    if (/uptime commitment/i.test(line) || /\ba DPA\b/i.test(line)) continue;
+    if (/^unlimited members\b/i.test(line)) {
+      out.push("Billed per seat");
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 /** What a plan costs per seat, in words, including the plans that have no price. */
 export function seatPrice(pricing: PlanPricing): string {
   if (pricing.perSeatUsd === null) return "Talk to us";
