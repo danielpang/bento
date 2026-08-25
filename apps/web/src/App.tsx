@@ -11,6 +11,7 @@ import { spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { teamDisplayName } from "./team-name.js";
 import { useCountUp } from "./count-up.js";
+import { createRequestGate } from "./latest-request.js";
 import { Board, matchesQuery, neighbourCardId, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
 import { BottomBar } from "./components/BottomBar.js";
@@ -464,6 +465,8 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * message this feature was careful not to send.
    */
   const deletingRef = useRef<string | null>(null);
+  const usageGate = useRef(createRequestGate());
+  const usageProjectRef = useRef<string | null>(null);
 
   /**
    * Agents are not scoped to a project, so they load independently:
@@ -574,12 +577,34 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   // Spend is shown, never enforced: the figure comes from whatever the
   // agent CLI printed, and most print nothing, so it is not a number to
   // make decisions on behalf of anyone.
+  //
+  // Only the newest fetch may write. Board snapshots refetch this on
+  // every coalesced event, and a slower older reply used to overwrite
+  // a newer one, so a completed card dropped from $4.20 back to $1.10.
   useEffect(() => {
-    if (!projectId) return setUsage(null);
+    const gate = usageGate.current;
+    if (!projectId) {
+      gate.next();
+      usageProjectRef.current = null;
+      setUsage(null);
+      return;
+    }
+    if (usageProjectRef.current !== projectId) {
+      usageProjectRef.current = projectId;
+      setUsage(null);
+    }
+    const seq = gate.next();
     void client
       .getUsage(projectId)
-      .then(setUsage)
-      .catch(() => setUsage(null));
+      .then((next) => {
+        if (!gate.isCurrent(seq)) return;
+        setUsage(next);
+      })
+      .catch(() => {
+        if (!gate.isCurrent(seq)) return;
+        // Keep last-known figures for this project. A blip must not
+        // blank every completed card.
+      });
   }, [projectId, features]);
 
   // Board events tell us a card moved or a run changed state. Status

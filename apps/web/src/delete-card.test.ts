@@ -82,6 +82,14 @@ test("the spend clause names the figure, and is dropped when no run reported one
   assert.doesNotMatch(silent, /\$/);
 });
 
+test("a judge run is deleted with the card but does not change the spend drop", () => {
+  const judge = { ...finishedRun("99.00"), id: "judge", kind: "judge" as const };
+  const body = deleteConsequences(worked, [finishedRun("10.00"), judge], []);
+  assert.match(body, /Its 2 runs go with it/);
+  assert.match(body, /spend drops by \$10\.00/);
+  assert.doesNotMatch(body, /109/);
+});
+
 test("the branch is promised by name, and not promised when there is none", () => {
   const named = deleteConsequences(worked, [finishedRun(null)], []);
   assert.match(named, /The branch bento\/add-a-rate-limit is left alone, and any pull request stays open\./);

@@ -2860,6 +2860,75 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   assert.match(cost, /^\d+\.\d\d$/, `expected a cost field on the board line, got ${cost}`);
 });
 
+/**
+ * Spend is a bill of finished work. Judges are the gate talking to
+ * itself, and a run that is still queued has not printed a figure.
+ * Counting either made a fully measured card wear "$4.20+" and made
+ * the project total disagree with Sessions.
+ */
+test("usage ignores judge runs and in-flight runs", async () => {
+  const { project, stages: projectStages } = await setupProject("spend-filter");
+  const worker = await fakeProfile("spend-worker");
+  const judge = await fakeProfile("spend-judge");
+  const feature = await createFeature(project.id, "judged and running");
+  const idle = await createFeature(project.id, "never ran");
+  const stage = projectStages[0]!;
+
+  await ctx.db.insert(agentRuns).values([
+    {
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: worker.id,
+      prompt: "build it",
+      kind: "task",
+      status: "succeeded",
+      executor: "server",
+      costUsd: "4.20",
+    },
+    {
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: judge.id,
+      prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build".`,
+      kind: "judge",
+      status: "succeeded",
+      executor: "server",
+      costUsd: "9.99",
+    },
+    {
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: worker.id,
+      prompt: "still going",
+      kind: "task",
+      status: "running",
+      executor: "server",
+      costUsd: null,
+    },
+  ]);
+
+  const usage = await json<{
+    totalUsd: number;
+    totalRuns: number;
+    runsWithoutCost: number;
+    byFeature: { featureId: string; title: string; runs: number; costUsd: number | null; runsWithoutCost: number }[];
+  }>(await app.request(`/api/projects/${project.id}/usage`));
+
+  assert.equal(usage.totalRuns, 1, "only the finished task run is a spend run");
+  assert.equal(usage.totalUsd, 4.2);
+  assert.equal(usage.runsWithoutCost, 0, "an in-flight null is not silent coverage");
+
+  const billed = usage.byFeature.find((row) => row.featureId === feature.id);
+  assert.ok(billed);
+  assert.equal(billed.runs, 1);
+  assert.equal(billed.costUsd, 4.2);
+  assert.equal(billed.runsWithoutCost, 0);
+  const untouched = usage.byFeature.find((row) => row.featureId === idle.id);
+  assert.ok(untouched);
+  assert.equal(untouched.runs, 0);
+  assert.equal(untouched.costUsd, null);
+});
+
 test("webhooks are rejected without a valid signature", async () => {
   const res = await app.request("/api/webhooks/github", {
     method: "POST",
