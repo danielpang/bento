@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BentoClient, ProjectUsage } from "@bento/api-client";
+import type { BentoClient, FeatureSpend, ProjectUsage } from "@bento/api-client";
 import { spendReportingTools } from "@bento/core";
 import { compareFeatureSpend, formatFeatureSpend, type SpendSort } from "./spend-format.js";
 import { useToast } from "./Toasts.js";
