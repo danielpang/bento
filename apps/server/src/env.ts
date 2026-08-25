@@ -20,10 +20,16 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   CURSOR_API_KEY: z.string().optional(),
 
-  /** Max agent runs executing at once, across all features. */
+  /**
+   * How many agent runs this process drives at once. Not a plan limit:
+   * sprites (or containers) do the work, and this is how many exec
+   * sockets and keep-awake pings one Node process will hold. Local
+   * installs default to 4 so a laptop is not asked to run a fleet.
+   * Hosted Fly sets this higher in fly.toml.
+   */
+  BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(4),
   /** A runner-claimed run with no report for this long is requeued. */
   BENTO_RUNNER_CLAIM_TIMEOUT_MIN: z.coerce.number().int().positive().default(45),
-  BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().max(64).default(4),
   /**
    * How long one agent run may execute before it is stopped, in
    * minutes. A backstop against runaway processes, not a pace

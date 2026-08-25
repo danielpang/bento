@@ -1667,7 +1667,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * A batched worker would fetch N jobs and wait for all of them before
    * fetching more, so one thirty minute agent run would hold the other
    * slots idle. Independent single-job workers free each slot the moment
-   * its run finishes.
+   * its run finishes. The count is this process's capacity, not a plan
+   * limit: hosted Fly raises it, a laptop stays at the default of 4.
    */
   for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
     await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1 }, async (jobs) => {
