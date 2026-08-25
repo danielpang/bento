@@ -26,7 +26,7 @@ export interface PlanOffer {
   plan: string;
   name: string;
   pricing: PlanPricing;
-  limits: { members: number | null; concurrentRuns: number | null };
+  limits: { members: number | null };
   /** Seats this team would be billed for on this plan, given its headcount. */
   billableSeats: number;
   /** What this team would pay a month on this plan. */
@@ -37,7 +37,7 @@ export interface PlanState {
   plan: string;
   planName: string;
   status: string | null;
-  limits: { members: number | null; concurrentRuns: number | null };
+  limits: { members: number | null };
   usage: { members: number };
   /**
    * Sandbox time this period against what the plan includes. `cap` is
