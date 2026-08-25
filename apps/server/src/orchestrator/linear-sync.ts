@@ -468,7 +468,7 @@ export async function queueLinearIssueCreate(
   }
 }
 
-/** Called from recordFeatureEvent; a quick link check keeps the queue quiet. */
+/** Called from queueFeatureEventFollowUps; a quick link check keeps the queue quiet. */
 export async function queueLinearOutbound(
   ctx: AppContext,
   event: { featureId: string; toStatus?: string | null | undefined; toStageId?: string | null | undefined },

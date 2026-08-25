@@ -45,7 +45,7 @@ import {
 } from "./orchestrator/run-executor.js";
 import { reapSandbox } from "./orchestrator/reap-sandbox.js";
 import { appendRunEvent } from "./orchestrator/transcript.js";
-import { JUDGE_PROMPT_PREFIX, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
+import { JUDGE_PROMPT_PREFIX, advanceFeature, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
 import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
@@ -5026,6 +5026,27 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
     body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, stageId: stage.id }),
   });
   assert.equal(byHand.status, 201, "a person can always start it themselves");
+});
+
+test("a move that cannot be recorded does not happen", async () => {
+  const { project } = await setupProject("Atomic advance");
+  const feature = await createFeature(project.id, "Stay put");
+
+  /**
+   * actor_user_id is a foreign key, so a stranger's id fails the history
+   * insert while the stage update on its own would have succeeded. The
+   * two share a transaction, so neither lands: before they did, this
+   * left a card sitting on a stage with nothing saying how it got there.
+   */
+  await assert.rejects(() => advanceFeature(ctx, feature.id, "manual", "no-such-user", null));
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.currentStageId, null, "the card must still be in the backlog");
+  const history = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(eq(featureEvents.featureId, feature.id));
+  assert.deepEqual(history, [], "a move that did not happen writes no history");
 });
 
 async function runCount(featureId: string): Promise<number> {
