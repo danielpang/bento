@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BentoClient, FeatureSpend, ProjectUsage } from "@bento/api-client";
 import { spendReportingTools } from "@bento/core";
 import { compareFeatureSpend, formatFeatureSpend, type SpendSort } from "./spend-format.js";
+import { createRequestGate } from "../latest-request.js";
 import { useToast } from "./Toasts.js";
 import { SpendPageSkeleton } from "./Skeleton.js";
 
@@ -19,18 +20,18 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
   const [sort, setSort] = useState<SpendSort>("spend-desc");
   const toastRef = useRef(toast);
   toastRef.current = toast;
-  const requestSeq = useRef(0);
+  const usageGate = useRef(createRequestGate());
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
-    const seq = ++requestSeq.current;
+    const seq = usageGate.current.next();
     try {
       const next = await client.getUsage(projectId);
-      if (seq !== requestSeq.current) return;
+      if (!usageGate.current.isCurrent(seq)) return;
       setUsage(next);
       setLoadFailed(false);
     } catch (err) {
-      if (seq !== requestSeq.current) return;
+      if (!usageGate.current.isCurrent(seq)) return;
       toastRef.current.fail(err);
       setLoadFailed(true);
     }

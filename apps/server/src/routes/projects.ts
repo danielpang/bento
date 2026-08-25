@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { gateCriteria, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
+import { gateCriteria, TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -650,10 +650,16 @@ export function projectRoutes(ctx: AppContext) {
      * Agent spend for this project, by card, by stage, and by agent.
      * Cost is already captured per run; this is the rollup a spend
      * page, a bill, or a budget alert would be built from.
+     *
+     * Same membership as isSpendRun(): finished work, never a judge.
+     * A silent judge used to mark a fully measured Claude card as
+     * "$4.20+", and a still-running agent used to grow the chip's plus
+     * before it had printed anything.
      */
     .get("/:id/usage", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
       const rows = await db(c, ctx)
         .select({
           stageId: agentRuns.stageId,
@@ -663,7 +669,7 @@ export function projectRoutes(ctx: AppContext) {
         })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))
-        .where(eq(features.projectId, projectId))
+        .where(and(eq(features.projectId, projectId), spendRun))
         .groupBy(agentRuns.stageId, agentRuns.agentProfileId);
 
       // Runs that reported nothing are counted separately: a total is
@@ -673,7 +679,7 @@ export function projectRoutes(ctx: AppContext) {
         .select({ runs: count(agentRuns.id) })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))
-        .where(and(eq(features.projectId, projectId), isNull(agentRuns.costUsd)));
+        .where(and(eq(features.projectId, projectId), spendRun, isNull(agentRuns.costUsd)));
 
       /**
        * Every card, not only the ones that have run. A spend page that
@@ -693,7 +699,7 @@ export function projectRoutes(ctx: AppContext) {
           runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${isNull(agentRuns.costUsd)})`,
         })
         .from(features)
-        .leftJoin(agentRuns, eq(agentRuns.featureId, features.id))
+        .leftJoin(agentRuns, and(eq(agentRuns.featureId, features.id), spendRun))
         .where(eq(features.projectId, projectId))
         .groupBy(features.id, features.title);
 

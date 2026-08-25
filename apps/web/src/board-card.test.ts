@@ -79,3 +79,10 @@ test("a completed card with no reported cost does not invent a figure", () => {
   assert.doesNotMatch(html, /card-spend/);
   assert.doesNotMatch(html, /Not reported/);
 });
+
+test("spend sits in the existing meta row next to a PR chip", () => {
+  const html = render([{ ...feature("done"), prNumber: 12, prUrl: "https://example.com/pr/12" }], { f1: spend(4.2) });
+  assert.match(html, /class="card-meta-end"/);
+  assert.match(html, /class="card-spend"[^>]*>\$4\.20/);
+  assert.match(html, /PR #12/);
+});

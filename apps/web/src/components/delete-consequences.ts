@@ -1,6 +1,5 @@
 import type { AgentRun, Feature, FeaturePullRequest } from "@bento/api-client";
-
-const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
+import { isSpendRun } from "@bento/core";
 
 /**
  * What goes with the card, and what does not.
@@ -25,7 +24,7 @@ export function deleteConsequences(
     return "Nothing has run on this card, so nothing else goes with it. It leaves the board for everyone in this organization. There is no undo.";
   }
 
-  const finished = runs.filter((r) => TERMINAL_RUN.has(r.status));
+  const finished = runs.filter(isSpendRun);
   const measured = finished.filter((r) => r.costUsd !== null && r.costUsd !== undefined);
   const total = measured.reduce((sum, r) => sum + Number(r.costUsd), 0);
 

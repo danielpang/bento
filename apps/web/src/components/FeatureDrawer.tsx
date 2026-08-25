@@ -23,7 +23,7 @@ import type {
 const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
-import { actorDisplayName, historyTriggerLabel, spendCoverageNote, type AgentEvent } from "@bento/core";
+import { actorDisplayName, historyTriggerLabel, isSpendRun, spendCoverageNote, type AgentEvent } from "@bento/core";
 import { deleteConsequences } from "./delete-consequences.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
@@ -57,7 +57,7 @@ interface DrawerProps {
  * reported nothing are counted out loud.
  */
 function CardSpend({ runs }: { runs: AgentRun[] }) {
-  const finished = runs.filter((r) => TERMINAL_RUN.has(r.status));
+  const finished = runs.filter(isSpendRun);
   if (finished.length === 0) return null;
   const measured = finished.filter((r) => r.costUsd !== null && r.costUsd !== undefined);
   const total = measured.reduce((sum, r) => sum + Number(r.costUsd), 0);
