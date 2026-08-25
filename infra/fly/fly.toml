@@ -8,6 +8,10 @@ primary_region = "iad"
 
 [env]
   BENTO_MODE = "multi"
+  # Stamped onto every PostHog event, error, and log record. Set per
+  # app rather than baked into the shared image, so this app cannot
+  # report as another one.
+  BENTO_ENVIRONMENT = "production"
   BENTO_SANDBOX_DRIVER = "sprite"
   PORT = "8080"
   # How many agent runs this process drives at once. Sprites do the

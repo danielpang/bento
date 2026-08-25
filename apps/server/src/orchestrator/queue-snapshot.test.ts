@@ -75,3 +75,39 @@ test("a snapshot names the queued depth and this process's workers", async () =>
   assert.equal(captured[0]?.event, RUN_QUEUE_SNAPSHOT_EVENT);
   assert.deepEqual(captured[0]?.properties, { queued: 4, busy: 32, workers: 32 });
 });
+
+test("a snapshot names the machine and app when the platform says", async () => {
+  const captured: Array<{ event: string; properties?: Record<string, unknown> }> = [];
+  const analytics: Analytics = {
+    capture: (event) => captured.push(event),
+    captureException: () => {},
+    shutdown: async () => {},
+  };
+  await captureRunQueueDepth({
+    analytics,
+    db: {
+      select() {
+        return this;
+      },
+      from() {
+        return this;
+      },
+      where() {
+        return this;
+      },
+      groupBy: async () => [{ status: "queued", n: 1 }],
+    },
+    env: {
+      BENTO_MAX_CONCURRENT_RUNS: 32,
+      FLY_APP_NAME: "bento-production",
+      FLY_MACHINE_ID: "148e21eb4d1289",
+    },
+  } as unknown as AppContext);
+  assert.deepEqual(captured[0]?.properties, {
+    queued: 1,
+    busy: 0,
+    workers: 32,
+    app: "bento-production",
+    instance: "148e21eb4d1289",
+  });
+});

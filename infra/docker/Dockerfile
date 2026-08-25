@@ -19,9 +19,11 @@ RUN pnpm prune --prod
 FROM node:22-slim
 WORKDIR /app
 ENV NODE_ENV=production
-# Stamped onto every PostHog event, error, and log record; a deploy of
-# this image is production unless it says otherwise.
-ENV BENTO_ENVIRONMENT=production
+# BENTO_ENVIRONMENT is deliberately not set here. It is stamped onto
+# every PostHog event, error, and log record, and the deployment names
+# it instead (see infra/fly/*.toml). An image that claimed production
+# would label every app built from it production, development
+# included, which is exactly what it did.
 # The server makes the git worktrees agents work in, and it makes them
 # itself rather than inside the sandbox, so git has to exist here. The
 # slim image has none, and without it provisioning fails with a bare
