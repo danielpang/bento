@@ -63,9 +63,14 @@ function revealTab(row: HTMLElement) {
     row.querySelector<HTMLElement>('[data-state="active"]') ??
     row.querySelector<HTMLElement>(".tab-on");
   if (!selected) return;
-  const pad = 12;
-  const left = selected.offsetLeft;
-  const right = left + selected.offsetWidth;
+  // Clear of the fade/chevron, so a deep link to Billing (or Slack)
+  // does not land with the live tab sitting under the cue, or off the
+  // right edge entirely.
+  const pad = 44;
+  const rowRect = row.getBoundingClientRect();
+  const selRect = selected.getBoundingClientRect();
+  const left = selRect.left - rowRect.left + row.scrollLeft;
+  const right = left + selRect.width;
   if (left < row.scrollLeft + pad) {
     row.scrollLeft = Math.max(0, left - pad);
   } else if (right > row.scrollLeft + row.clientWidth - pad) {
@@ -96,7 +101,18 @@ export function TabScroll({
   useLayoutEffect(() => {
     const row = wrap.current?.querySelector<HTMLElement>(".tab-row");
     if (!row || active === undefined) return;
-    revealTab(row);
+    const run = () => revealTab(row);
+    run();
+    // Billing (and Account) can join the strip after mount, once the
+    // plan endpoint answers. Reveal again when that happens, not only
+    // when the active id changes.
+    const id = requestAnimationFrame(run);
+    const mutate = new MutationObserver(run);
+    mutate.observe(row, { childList: true });
+    return () => {
+      cancelAnimationFrame(id);
+      mutate.disconnect();
+    };
   }, [active]);
 
   function nudge(direction: 1 | -1) {

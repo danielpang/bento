@@ -3774,6 +3774,7 @@ button.session-expand[aria-pressed="true"] {
   letter-spacing: 0;
   cursor: pointer;
   transition: color 120ms ease;
+  scroll-margin-inline: 44px;
 }
 .tab:hover {
   color: var(--text-dim);
