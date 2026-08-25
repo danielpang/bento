@@ -647,9 +647,9 @@ export function projectRoutes(ctx: AppContext) {
       return c.text(lines.join("\n"));
     })
     /**
-     * Agent spend for this project, by stage and by agent. Cost is
-     * already captured per run; this is the rollup a bill or a budget
-     * alert would be built from.
+     * Agent spend for this project, by card, by stage, and by agent.
+     * Cost is already captured per run; this is the rollup a spend
+     * page, a bill, or a budget alert would be built from.
      */
     .get("/:id/usage", async (c) => {
       const projectId = c.req.param("id");
@@ -675,6 +675,28 @@ export function projectRoutes(ctx: AppContext) {
         .innerJoin(features, eq(features.id, agentRuns.featureId))
         .where(and(eq(features.projectId, projectId), isNull(agentRuns.costUsd)));
 
+      /**
+       * Every card, not only the ones that have run. A spend page that
+       * omitted idle cards would look like a filtered conversation
+       * list rather than a complete bill, and sorting by spend is
+       * how those idle rows sink without being dropped.
+       *
+       * count(id) FILTER (WHERE cost_usd IS NULL) is zero on a left
+       * join miss: the joined id is null, and count skips nulls.
+       */
+      const cards = await db(c, ctx)
+        .select({
+          featureId: features.id,
+          title: features.title,
+          runs: count(agentRuns.id),
+          costUsd: sum(agentRuns.costUsd),
+          runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${isNull(agentRuns.costUsd)})`,
+        })
+        .from(features)
+        .leftJoin(agentRuns, eq(agentRuns.featureId, features.id))
+        .where(eq(features.projectId, projectId))
+        .groupBy(features.id, features.title);
+
       const totalUsd = rows.reduce((sum, row) => sum + Number(row.costUsd ?? 0), 0);
       return c.json({
         totalUsd,
@@ -685,6 +707,15 @@ export function projectRoutes(ctx: AppContext) {
           agentProfileId: row.agentProfileId,
           runs: Number(row.runs),
           costUsd: Number(row.costUsd ?? 0),
+        })),
+        byFeature: cards.map((row) => ({
+          featureId: row.featureId,
+          title: row.title,
+          runs: Number(row.runs),
+          // sum() skips nulls, so this is null only when nothing on
+          // the card reported a figure, which is not the same as $0.
+          costUsd: row.costUsd === null ? null : Number(row.costUsd),
+          runsWithoutCost: Number(row.runsWithoutCost),
         })),
       });
     })

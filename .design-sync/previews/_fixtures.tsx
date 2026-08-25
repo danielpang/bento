@@ -173,7 +173,16 @@ const answers: Record<string, unknown> = {
   githubSettings: { includeStageNotesInPr: false, canManage: true },
   listGitHubRepositories: [],
   getMachineSettings: { mode: "local", shareAgentAuth: false, logins: [{ cli: "claude-code", signedIn: true }] },
-  getUsage: { totalUsd: 9.03, runsWithoutCost: 4, totalRuns: 14, byStage: [] },
+  getUsage: {
+    totalUsd: 9.03,
+    runsWithoutCost: 4,
+    totalRuns: 14,
+    byStage: [],
+    byFeature: [
+      { featureId: "f1", title: "Rate limit middleware", runs: 3, costUsd: 0.53, runsWithoutCost: 0 },
+      { featureId: "f2", title: "Login polish", runs: 2, costUsd: null, runsWithoutCost: 2 },
+    ],
+  },
 };
 
 /**

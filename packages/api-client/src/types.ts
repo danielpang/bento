@@ -111,6 +111,36 @@ export interface AgentRun {
 }
 
 /**
+ * Agent spend for one project. Cost is whatever the CLI printed;
+ * `runsWithoutCost` is how many runs that figure silently omitted.
+ */
+export interface ProjectUsage {
+  totalUsd: number;
+  totalRuns: number;
+  runsWithoutCost: number;
+  byStage: {
+    stageId: string;
+    agentProfileId: string;
+    runs: number;
+    costUsd: number;
+  }[];
+  /** Every card, including ones that have never run. */
+  byFeature: FeatureSpend[];
+}
+
+/**
+ * One card's contribution to project spend. `costUsd` is null when no
+ * run on the card reported a figure, which is not the same as zero.
+ */
+export interface FeatureSpend {
+  featureId: string;
+  title: string;
+  runs: number;
+  costUsd: number | null;
+  runsWithoutCost: number;
+}
+
+/**
  * One conversation on the sessions page: a card and its run history,
  * summarized by the newest run. Judge runs are not counted.
  */
