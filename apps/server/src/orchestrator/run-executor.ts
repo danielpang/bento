@@ -26,6 +26,7 @@ import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
+import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
@@ -1766,6 +1767,22 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
     });
   }));
+
+  /**
+   * A once-a-minute PostHog gauge of runs waiting for a `run.execute`
+   * worker. Skipped when analytics is off: the only consumer is the
+   * dashboard that decides whether to add workers.
+   */
+  if (ctx.analytics) {
+    await ctx.boss.createQueue("run.queue-snapshot");
+    await ctx.boss.schedule("run.queue-snapshot", "* * * * *");
+    await ctx.boss.work(
+      "run.queue-snapshot",
+      captureJobErrors(ctx.analytics, "run.queue-snapshot", async () => {
+        await captureRunQueueDepth(ctx);
+      }),
+    );
+  }
 
   await registerLinearJobs(ctx);
   await registerSlackJobs(ctx);
