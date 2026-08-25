@@ -6,6 +6,7 @@ import {
   displayHighlights,
   monthlyTotal,
   money,
+  overageCheckoutNote,
   resetsOn,
   seatPrice,
   useBillingPlan,
@@ -465,11 +466,7 @@ function ChoosePlan({
               Said before they pick, not discovered when it bites. A
               ceiling nobody was told about is worse than no ceiling.
             */}
-            <span className="muted">
-              {policy === "allow" && picked.monthlyTotalUsd !== null
-                ? `Agents stop if overage passes ${money(picked.monthlyTotalUsd)}, so your bill cannot more than double. Change or remove that under Billing whenever you like.`
-                : "You can change this later under Billing."}
-            </span>
+            <span className="muted">{overageCheckoutNote(policy, picked.monthlyTotalUsd)}</span>
           </footer>
         )}
       </aside>

@@ -913,6 +913,7 @@ button {
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
+  min-width: 0;
 }
 
 /* An empty lane is an open compartment: the dashed slot is the same
@@ -937,6 +938,10 @@ button {
   padding: 8px 10px;
   text-align: left;
   width: 100%;
+  min-width: 0;
+  /* Cards are buttons. The UA stylesheet sets those to nowrap, which
+     is why a URL title used to paint into the next lane. */
+  white-space: normal;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1132,8 +1137,11 @@ button {
   font-size: 13px;
   font-weight: 500;
   line-height: 1.35;
+  min-width: 0;
   /* No single-word last lines on a wrapped title. */
   text-wrap: pretty;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .card-meta {
