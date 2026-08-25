@@ -178,6 +178,7 @@ export function providerKeyFor(model: string): string[] {
     openai: "OPENAI_API_KEY",
     google: "GEMINI_API_KEY",
     gemini: "GEMINI_API_KEY",
+    deepseek: "DEEPSEEK_API_KEY",
   };
   const key = byProvider[model.split("/")[0] ?? ""];
   return key ? [key] : [];

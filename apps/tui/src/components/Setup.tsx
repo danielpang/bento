@@ -95,6 +95,8 @@ const PROVIDER_KEYS = [
   { label: "OpenRouter", name: "OPENROUTER_API_KEY" },
   { label: "Cursor", name: "CURSOR_API_KEY" },
   { label: "Gemini", name: "GEMINI_API_KEY" },
+  { label: "Poolside", name: "POOLSIDE_API_KEY" },
+  { label: "DeepSeek", name: "DEEPSEEK_API_KEY" },
 ] as const;
 
 export function Setup({
@@ -128,6 +130,7 @@ export function Setup({
   /** Needed to append a stage; a project has exactly one pipeline. */
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [secrets, setSecrets] = useState<{ id: string; name: string; hint: string }[]>([]);
+  const [canManageCredentials, setCanManageCredentials] = useState(false);
   const [machine, setMachine] = useState<MachineSettings | null>(null);
   /** Coding tools signed in wherever the agents actually run. */
   const [logins, setLogins] = useState<{ cli: string; label: string; signedIn: boolean }[]>([]);
@@ -164,7 +167,8 @@ export function Setup({
     ]);
     setProjects(projectRows);
     setProfiles(profileRows);
-    setSecrets(secretRows);
+    setSecrets(secretRows.secrets);
+    setCanManageCredentials(secretRows.canManage);
     setMachine(machineRow);
     setTools(toolRows);
     // In local mode the server is this process, so its report and this
@@ -462,6 +466,10 @@ export function Setup({
           return;
         }
         if (screen.name === "keys" || screen.name === "github") {
+          if (!canManageCredentials) {
+            setNotice("Only owners and admins can change credentials.");
+            return;
+          }
           const credential =
             screen.name === "github" ? GITHUB_CREDENTIAL : PROVIDER_CREDENTIALS[indexRef.current];
           const saved = credential && secrets.find((s) => s.name === credential.name);
@@ -691,11 +699,19 @@ export function Setup({
           go({ name: "hub" });
           return;
         }
+        if (!canManageCredentials) {
+          setNotice("Only owners and admins can change credentials.");
+          return;
+        }
         go({ name: "keyValue", credential: credential.name, from: "keys", value: "" });
         return;
       }
       case "github": {
         if (index === 0) {
+          if (!canManageCredentials) {
+            setNotice("Only owners and admins can change credentials.");
+            return;
+          }
           go({ name: "keyValue", credential: GITHUB_CREDENTIAL.name, from: "github", value: "" });
           return;
         }
@@ -1274,7 +1290,9 @@ export function Setup({
     return (
       <Frame
         title="Model provider keys"
-        hint="j/k move · Enter choose · d remove · Escape back"
+        hint={
+          canManageCredentials ? "j/k move · Enter choose · d remove · Escape back" : "j/k move · Escape back"
+        }
         notice={notice}
         error={error}
       >
@@ -1282,6 +1300,7 @@ export function Setup({
           Keys for the providers your agents' models run on. Stored encrypted. Nothing reads a key
           back, only a masked tail.
         </Text>
+        {!canManageCredentials && <Text color="gray">Only owners and admins can change credentials.</Text>}
         <Box flexDirection="column" marginTop={1}>
           {PROVIDER_CREDENTIALS.map((credential, i) => (
             <Row
@@ -1301,7 +1320,9 @@ export function Setup({
     return (
       <Frame
         title="GitHub (pull requests)"
-        hint="j/k move · Enter choose · d remove · Escape back"
+        hint={
+          canManageCredentials ? "j/k move · Enter choose · d remove · Escape back" : "j/k move · Escape back"
+        }
         notice={notice}
         error={error}
       >
@@ -1309,6 +1330,7 @@ export function Setup({
           A stage with a pull request turned on pushes the card's branch and opens the pull request.
           Without the GitHub App, that needs a token here.
         </Text>
+        {!canManageCredentials && <Text color="gray">Only owners and admins can change credentials.</Text>}
         <Box flexDirection="column" marginTop={1}>
           <Row
             selected={index === 0}

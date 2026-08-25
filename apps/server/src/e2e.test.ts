@@ -275,10 +275,13 @@ test("local mode can manage machine credentials", async () => {
       body: JSON.stringify({ name: "ANTHROPIC_API_KEY", value: "local-secret-value" }),
     }),
   );
-  const listed = await json<{ id: string; name: string; hint: string }[]>(await app.request("/api/secrets"));
-  assert.equal(listed.length, 1);
+  const listed = await json<{ secrets: { id: string; name: string; hint: string }[]; canManage: boolean }>(
+    await app.request("/api/secrets"),
+  );
+  assert.equal(listed.canManage, true);
+  assert.equal(listed.secrets.length, 1);
   assert.deepEqual(
-    { id: listed[0]?.id, name: listed[0]?.name, hint: listed[0]?.hint },
+    { id: listed.secrets[0]?.id, name: listed.secrets[0]?.name, hint: listed.secrets[0]?.hint },
     { id: created.id, name: "ANTHROPIC_API_KEY", hint: "••••••••alue" },
   );
 
@@ -291,11 +294,11 @@ test("local mode can manage machine credentials", async () => {
   );
   assert.equal(rotated.id, created.id, "rotation updates the local credential instead of inserting a duplicate");
   assert.equal(rotated.hint, "••••••••5678");
-  assert.equal((await json<unknown[]>(await app.request("/api/secrets"))).length, 1);
+  assert.equal((await json<{ secrets: unknown[] }>(await app.request("/api/secrets"))).secrets.length, 1);
 
   const removed = await app.request(`/api/secrets/${rotated.id}`, { method: "DELETE" });
   assert.equal(removed.status, 200);
-  assert.deepEqual(await json<unknown[]>(await app.request("/api/secrets")), []);
+  assert.deepEqual(await json(await app.request("/api/secrets")), { secrets: [], canManage: true });
 });
 
 /**

@@ -13,6 +13,8 @@ Every stage of a pipeline runs one of these tools, paired with a model, as an ag
 
 Keys are stored encrypted, per organization in multi mode and locally in local mode, through the web console, `bento setup`, or the Mac app. To route Claude Code or Codex through OpenRouter, save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
 
+**DeepSeek models.** Available today through pi or opencode. Save `DEEPSEEK_API_KEY` and choose the DeepSeek provider for a native key and a native bill, or keep using `openrouter/deepseek/...` if you would rather bill OpenRouter. DeepSeek Harness (`dsh`), the agent runtime, is a separate thing and is not a tool Bento can run yet. See [the investigation](./bento/product-investigation.md) for why.
+
 The named agents also read and write as a YAML file, from **Agents** or **Settings, Config**, and from `bento agents export` / `bento agents import`. Details: [pipeline.md](./pipeline.md#the-agents-file).
 
 ## Talking to a working agent
@@ -59,7 +61,7 @@ Anthropic's agent. Model ids are bare (`claude-sonnet-5`, `claude-opus-5`). Cred
 
 ### pi
 
-The open source, provider agnostic agent from earendil-works. Models are `provider/id` (`anthropic/claude-sonnet-5`, `openrouter/z-ai/glm-4.6`); it uses whichever of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `GEMINI_API_KEY` the chosen provider needs. Live sessions run over its RPC mode, and steering is pi's own first class concept. Reports cost.
+The open source, provider agnostic agent from earendil-works. Models are `provider/id` (`anthropic/claude-sonnet-5`, `deepseek/deepseek-v4-pro`, `openrouter/z-ai/glm-4.6`); it uses whichever of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, or `DEEPSEEK_API_KEY` the chosen provider needs. Live sessions run over its RPC mode, and steering is pi's own first class concept. Reports cost.
 
 ### Codex CLI
 

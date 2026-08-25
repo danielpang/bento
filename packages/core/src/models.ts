@@ -79,8 +79,8 @@ const BY_CLI: Record<string, readonly string[]> = {
   "claude-code": ["anthropic", "openrouter"],
   codex: ["openai", "openrouter"],
   cursor: ["anthropic", "openai", "google", "xai", "cursor"],
-  opencode: ["anthropic", "openai", "google", "openrouter"],
-  pi: ["anthropic", "openai", "google", "openrouter"],
+  opencode: ["anthropic", "openai", "google", "deepseek", "openrouter"],
+  pi: ["anthropic", "openai", "google", "deepseek", "openrouter"],
   pool: ["poolside"],
   fake: [],
 };

@@ -107,9 +107,9 @@ export function AgentsPanel({
   useEffect(() => {
     void client
       .listSecrets()
-      .then((rows) => {
-        setSecrets(rows);
-        const token = rows.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
+      .then((result) => {
+        setSecrets(result.secrets);
+        const token = result.secrets.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
         setTokenHint(token ? (token.hint ?? "saved") : null);
       })
       .catch(() => {
@@ -342,8 +342,8 @@ export function AgentsPanel({
               onSubmit={() =>
                 void act(async () => {
                   await client.createSecret({ name: "CLAUDE_CODE_OAUTH_TOKEN", value: tokenValue.trim() });
-                  const rows = await client.listSecrets();
-                  const token = rows.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
+                  const result = await client.listSecrets();
+                  const token = result.secrets.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
                   setTokenHint(token ? (token.hint ?? "saved") : "saved");
                   setTokenValue("");
                 })
@@ -587,4 +587,3 @@ export function AgentsPanel({
     </aside>
   );
 }
-

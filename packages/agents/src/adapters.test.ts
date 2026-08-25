@@ -437,6 +437,7 @@ test("provider agnostic tools require the key their model implies", () => {
   assert.deepEqual(providerKeyFor("openrouter/openai/gpt-5.6-sol"), ["OPENROUTER_API_KEY"]);
   assert.deepEqual(providerKeyFor("anthropic/claude-sonnet-5"), ["ANTHROPIC_API_KEY"]);
   assert.deepEqual(providerKeyFor("google/gemini-3.6-flash"), ["GEMINI_API_KEY"]);
+  assert.deepEqual(providerKeyFor("deepseek/deepseek-v4-pro"), ["DEEPSEEK_API_KEY"]);
   assert.deepEqual(providerKeyFor("mystery/model"), []);
   assert.deepEqual(opencodeAdapter.requiredEnvFor?.("openrouter/x/y"), ["OPENROUTER_API_KEY"]);
   assert.deepEqual(piAdapter.requiredEnvFor?.("openai/gpt-5"), ["OPENAI_API_KEY"]);

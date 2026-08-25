@@ -14,6 +14,19 @@ test("a prefixed model string names its own provider", () => {
   assert.equal(providerForProfile("pi", "google/gemini-3-pro")?.id, "google");
 });
 
+test("pi and opencode offer current native DeepSeek models", () => {
+  for (const cli of ["pi", "opencode"]) {
+    const deepseek = providersForCli(cli).find((provider) => provider.id === "deepseek");
+    assert.ok(deepseek, `${cli} does not offer DeepSeek`);
+    assert.deepEqual(deepseek.env, ["DEEPSEEK_API_KEY"]);
+    assert.notEqual(deepseek.logo, "", "DeepSeek needs a provider mark in the picker");
+    assert.deepEqual(deepseek.models.map((model) => model.id), ["deepseek-v4-pro", "deepseek-v4-flash"]);
+    assert.equal(providerForProfile(cli, "deepseek/deepseek-v4-pro")?.id, "deepseek");
+    assert.equal(checkAgentPairing(cli, "deepseek/deepseek-v4-pro").status, "ok");
+  }
+  assert.equal(providerForProfile("pi", "openrouter/deepseek/deepseek-v4-pro")?.id, "openrouter");
+});
+
 test("a bare model id is resolved against the tool's own providers", () => {
   assert.equal(providerForProfile("claude-code", "claude-sonnet-5")?.id, "anthropic");
 });

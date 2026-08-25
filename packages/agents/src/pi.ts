@@ -19,7 +19,7 @@ export const piAdapter: AgentAdapter = {
   requiredEnv: [],
   requiredEnvFor: providerKeyFor,
   // Whichever of these is present decides which provider pi can reach.
-  optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"],
+  optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
   configPaths: [".pi"],
 
   buildCommand(input: BuildCommandInput): string[] {

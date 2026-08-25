@@ -63,6 +63,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     secret: true,
   },
   {
+    name: "DEEPSEEK_API_KEY",
+    label: "DeepSeek",
+    help: "Used by opencode and pi when running DeepSeek models against DeepSeek's own API. Create one in the DeepSeek platform console.",
+    secret: true,
+  },
+  {
     name: "GITHUB_TOKEN",
     label: "GitHub token (pull requests)",
     help: "Lets stages with Create a pull request enabled push the feature branch and open the pull request, without installing the GitHub App. Use a fine grained personal access token with contents and pull request write access. It stays on the server and is never given to an agent.",

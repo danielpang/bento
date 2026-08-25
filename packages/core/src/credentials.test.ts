@@ -80,3 +80,10 @@ test("the Poolside key is storable", () => {
     "enterprise endpoints are outside the hosted v1 settings",
   );
 });
+
+test("the DeepSeek key is storable without promising an unsupported base URL", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "DEEPSEEK_API_KEY");
+  assert.ok(key, "DEEPSEEK_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  assert.equal(AGENT_CREDENTIALS.some((c) => c.name === "DEEPSEEK_BASE_URL"), false);
+});
