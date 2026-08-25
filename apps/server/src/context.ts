@@ -66,13 +66,6 @@ export interface Entitlements {
    */
   onRunFinished?(runId: string): Promise<void>;
   /**
-   * How many runs this organization may have working at once. Null is
-   * unlimited. This is fairness rather than a paywall: without it one
-   * tenant's queue occupies every worker on the instance and everybody
-   * else waits behind it.
-   */
-  concurrentRunLimit?(organizationId: string): Promise<number | null>;
-  /**
    * Told after the headcount changed: a member joined or left, or an
    * invitation was created, cancelled or rejected.
    *

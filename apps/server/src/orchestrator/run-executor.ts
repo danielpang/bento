@@ -54,18 +54,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   if (!run) throw new Error(`run ${runId} not found`);
   if (run.status !== "queued") return; // already picked up
 
-  /**
-   * Fairness before work.
-   *
-   * The worker pool bounds what one instance can run; it says nothing
-   * about who gets those slots, so a tenant with fifty queued cards
-   * would take every one and everyone else would wait behind them. A
-   * run over its organization's limit goes back on the queue instead,
-   * freeing this worker for somebody else's card.
-   */
-  if (await deferForConcurrency(ctx, run)) return;
-
-
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
   const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, run.agentProfileId));
@@ -927,34 +915,6 @@ async function organizationRestrictsNetwork(ctx: AppContext, organizationId: str
   return row?.restrictNetwork === true;
 }
 
-/**
- * True when this run must wait its turn. Requeued with a delay rather
- * than held, so the worker is free immediately and the run keeps its
- * place without spinning.
- */
-async function deferForConcurrency(ctx: AppContext, run: { id: string; featureId: string }): Promise<boolean> {
-  if (!ctx.entitlements?.concurrentRunLimit) return false;
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-  if (!feature?.organizationId) return false;
-  const limit = await ctx.entitlements.concurrentRunLimit(feature.organizationId);
-  if (limit === null || limit === undefined) return false;
-
-  const [{ working } = { working: 0 }] = await ctx.db
-    .select({ working: sql<number>`count(*)` })
-    .from(agentRuns)
-    .innerJoin(features, eq(agentRuns.featureId, features.id))
-    .where(
-      and(
-        eq(features.organizationId, feature.organizationId),
-        inArray(agentRuns.status, ["starting", "running"]),
-      ),
-    );
-  if (Number(working) < limit) return false;
-
-  await ctx.boss.send("run.execute", { runId: run.id }, { startAfter: 15 });
-  return true;
-}
-
 async function finishRun(
   ctx: AppContext,
   runId: string,
@@ -1707,7 +1667,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * A batched worker would fetch N jobs and wait for all of them before
    * fetching more, so one thirty minute agent run would hold the other
    * slots idle. Independent single-job workers free each slot the moment
-   * its run finishes.
+   * its run finishes. The count is this process's capacity, not a plan
+   * limit: hosted Fly raises it, a laptop stays at the default of 4.
    */
   for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
     await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1 }, async (jobs) => {
