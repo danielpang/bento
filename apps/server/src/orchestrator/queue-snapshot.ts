@@ -37,13 +37,10 @@ export function tallyServerRunCounts(
  * `queued` is the number to scale workers on. `busy` and `workers`
  * say whether this process is already saturated.
  *
- * `app` and `instance` name the reporting process where the platform
- * says (Fly), and are omitted where it does not. Every machine reports
- * the same database wide `queued`, so a dashboard must aggregate these
- * snapshots with an average or a max and never a sum. Without those
- * two properties there is no way to tell one machine from several, or
- * one app from another, which is how development spent a day reporting
- * as production.
+ * `app` and `instance` name the reporting process on Fly, and are
+ * omitted elsewhere. Every machine reports the same database wide
+ * `queued`, so a dashboard must average or max these snapshots, never
+ * sum them.
  */
 export async function captureRunQueueDepth(
   ctx: Pick<AppContext, "db" | "analytics" | "env">,

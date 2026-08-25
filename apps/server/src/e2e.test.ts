@@ -184,14 +184,11 @@ async function waitForStage(featureId: string, stageId: string, timeoutMs = 60_0
 /**
  * The last transition on a card, once it reads as `expected`.
  *
- * advanceFeature commits the stage move before it writes the history
- * row (gate-evaluator.ts), so a card can already be on its next stage a
- * moment before the transition that moved it exists. Reading once then
- * sees whatever came before, which for an auto-advanced card is the
- * manual advance that started it, and the wider the machine's load the
- * wider that window. Returns the last trigger seen either way, so a
- * timeout still fails the caller's assertion with the real value
- * rather than hiding it behind a throw.
+ * advanceFeature commits the stage move before writing the history row,
+ * so a card can reach its next stage a moment before the transition
+ * that moved it exists; reading once sees the previous one. Returns the
+ * last trigger seen on timeout, so a real regression fails on the real
+ * value rather than a throw.
  */
 async function waitForLastTransition(featureId: string, expected: string, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
