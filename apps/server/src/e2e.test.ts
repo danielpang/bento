@@ -181,6 +181,32 @@ async function waitForStage(featureId: string, stageId: string, timeoutMs = 60_0
   throw new Error(`feature ${featureId} stopped at stage ${last?.currentStageId} (status ${last?.status})`);
 }
 
+/**
+ * The last transition on a card, once it reads as `expected`.
+ *
+ * advanceFeature commits the stage move before it writes the history
+ * row (gate-evaluator.ts), so a card can already be on its next stage a
+ * moment before the transition that moved it exists. Reading once then
+ * sees whatever came before, which for an auto-advanced card is the
+ * manual advance that started it, and the wider the machine's load the
+ * wider that window. Returns the last trigger seen either way, so a
+ * timeout still fails the caller's assertion with the real value
+ * rather than hiding it behind a throw.
+ */
+async function waitForLastTransition(featureId: string, expected: string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last: string | undefined;
+  while (Date.now() < deadline) {
+    const transitions = await json<{ trigger: string; toStageId: string }[]>(
+      await app.request(`/api/features/${featureId}/transitions`),
+    );
+    last = transitions.at(-1)?.trigger;
+    if (last === expected) return last;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return last;
+}
+
 async function setupProject(name: string) {
   const project = await json<{ id: string }>(
     await app.request("/api/projects", {
@@ -2338,10 +2364,7 @@ test("command gate auto-advances the card when it passes", { timeout: 90_000 }, 
   const settled = await waitForStage(feature.id, stages[1]!.id);
   assert.equal(settled.status, "active");
 
-  const transitions = await json<{ trigger: string; toStageId: string }[]>(
-    await app.request(`/api/features/${feature.id}/transitions`),
-  );
-  assert.equal(transitions.at(-1)?.trigger, "gate_auto");
+  assert.equal(await waitForLastTransition(feature.id, "gate_auto"), "gate_auto");
 });
 
 test("failing command gate holds the card and recheck can clear it", { timeout: 90_000 }, async () => {
