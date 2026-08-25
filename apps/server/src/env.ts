@@ -194,9 +194,19 @@ const envSchema = z.object({
    * exception, and log record, so one project can hold both
    * environments without dev noise polluting production dashboards.
    * Defaults to development: production is a claim a deployment makes
-   * explicitly (the Docker image does), never one it drifts into.
+   * explicitly (each Fly config does), never one it drifts into. The
+   * shared image sets nothing, because when it claimed production the
+   * development app inherited that claim.
    */
   BENTO_ENVIRONMENT: z.enum(["development", "production"]).default("development"),
+
+  /**
+   * Fly sets both on every machine; absent anywhere else. Stamped onto
+   * the run queue snapshot so two snapshots a minute read as two
+   * machines rather than a doubled queue.
+   */
+  FLY_APP_NAME: z.string().optional(),
+  FLY_MACHINE_ID: z.string().optional(),
 
   /** GitHub App credentials. Without these, PR based gates stay pending. */
   GITHUB_APP_ID: z.string().optional(),

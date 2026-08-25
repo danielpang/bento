@@ -36,6 +36,11 @@ export function tallyServerRunCounts(
  *
  * `queued` is the number to scale workers on. `busy` and `workers`
  * say whether this process is already saturated.
+ *
+ * `app` and `instance` name the reporting process on Fly, and are
+ * omitted elsewhere. Every machine reports the same database wide
+ * `queued`, so a dashboard must average or max these snapshots, never
+ * sum them.
  */
 export async function captureRunQueueDepth(
   ctx: Pick<AppContext, "db" | "analytics" | "env">,
@@ -63,6 +68,8 @@ export async function captureRunQueueDepth(
       queued,
       busy,
       workers: ctx.env.BENTO_MAX_CONCURRENT_RUNS,
+      ...(ctx.env.FLY_APP_NAME ? { app: ctx.env.FLY_APP_NAME } : {}),
+      ...(ctx.env.FLY_MACHINE_ID ? { instance: ctx.env.FLY_MACHINE_ID } : {}),
     },
   });
 }

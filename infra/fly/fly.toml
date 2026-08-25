@@ -8,6 +8,7 @@ primary_region = "iad"
 
 [env]
   BENTO_MODE = "multi"
+  BENTO_ENVIRONMENT = "production"
   BENTO_SANDBOX_DRIVER = "sprite"
   PORT = "8080"
   # How many agent runs this process drives at once. Sprites do the
