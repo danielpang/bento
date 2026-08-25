@@ -3,6 +3,7 @@ import { Modal } from "./Modal.js";
 import { useToast } from "./Toasts.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
 import {
+  displayHighlights,
   monthlyTotal,
   money,
   resetsOn,
@@ -392,7 +393,7 @@ function ChoosePlan({
                   {paid && <p className="plan-option-total">{monthlyTotal(offer, heldSeats)}</p>}
                   <p className="muted">{offer.pricing.summary}</p>
                   <ul className="plan-option-list">
-                    {offer.pricing.highlights.map((line) => (
+                    {displayHighlights(offer.pricing.highlights).map((line) => (
                       <li key={line}>{line}</li>
                     ))}
                     <li>
@@ -591,7 +592,7 @@ function ContactSales({ onClose, onSent }: { onClose: () => void; onSent: () => 
   return (
     <Modal
       title="Talk to us about Enterprise"
-      description="Unlimited agents running at once, 2000 hours a period, and whatever else the contract needs. Tell us about your team and we reply by email."
+      description="SSO, SCIM, sandboxes in your own Fly organization, and 2000 hours a period. Tell us about your team and we reply by email."
       onClose={onClose}
       actions={
         <>
@@ -624,7 +625,7 @@ function ContactSales({ onClose, onSent }: { onClose: () => void; onSent: () => 
         <textarea
           className="input skill-input"
           rows={5}
-          placeholder="Team size, how many agents you expect to run at once, anything the standard plans do not cover."
+          placeholder="Team size, where you need code to run, anything the standard plans do not cover."
           value={message}
           onChange={(e) => setMessage(e.target.value)}
         />
