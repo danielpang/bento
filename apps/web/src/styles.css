@@ -3667,6 +3667,8 @@ button.session-expand[aria-pressed="true"] {
 .tab-scroll {
   position: relative;
   min-width: 0;
+  /* Settings sits on --bg; provider tabs sit on a --panel card. */
+  --tab-scroll-fade: var(--panel);
 }
 .tab-row {
   display: flex;
@@ -3684,6 +3686,7 @@ button.session-expand[aria-pressed="true"] {
    */
   box-shadow: inset 0 -1px 0 var(--line);
   scrollbar-width: none;
+  scroll-padding-inline: 28px;
 }
 .tab-row::-webkit-scrollbar {
   display: none;
@@ -3694,26 +3697,39 @@ button.session-expand[aria-pressed="true"] {
  * rather than as a strip you can slide.
  */
 .tab-scroll-cue {
+  appearance: none;
   position: absolute;
   top: 0;
   bottom: 0;
   width: 36px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  display: block;
   pointer-events: none;
   z-index: 1;
   opacity: 0;
   transition: opacity 120ms ease;
+  background: none;
 }
 .tab-scroll-cue-start {
   left: 0;
-  background: linear-gradient(to right, var(--panel), transparent);
+  background: linear-gradient(to right, var(--tab-scroll-fade), transparent);
 }
 .tab-scroll-cue-end {
   right: 0;
-  background: linear-gradient(to left, var(--panel), transparent);
+  background: linear-gradient(to left, var(--tab-scroll-fade), transparent);
 }
 .tab-scroll[data-fade-start] .tab-scroll-cue-start,
 .tab-scroll[data-fade-end] .tab-scroll-cue-end {
   opacity: 1;
+  pointer-events: auto;
+  cursor: pointer;
+}
+@media (pointer: coarse) {
+  .tab-scroll-cue {
+    width: 44px;
+  }
 }
 .tab-scroll-cue::after {
   content: "";
@@ -4010,11 +4026,18 @@ button.session-expand[aria-pressed="true"] {
 .settings-page {
   max-width: 720px;
   width: 100%;
+  min-width: 0;
   margin: 0 auto;
   padding: 28px 20px 60px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+.settings-page .tab-scroll {
+  --tab-scroll-fade: var(--bg);
+}
+.settings-page .settings-card .tab-scroll {
+  --tab-scroll-fade: var(--panel);
 }
 .settings-heading {
   margin: 0;

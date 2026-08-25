@@ -15,6 +15,7 @@ import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
 import { TeamSettings } from "./TeamSettings.js";
 import { SettingsPageSkeleton } from "./Skeleton.js";
+import { TabScroll } from "./TabScroll.js";
 
 /**
  * Settings as a page, not a drawer.
@@ -101,17 +102,22 @@ export function SettingsPage({ client }: { client: BentoClient }) {
             history.replaceState(null, "", next === "appearance" ? "/settings" : `/settings?tab=${next}`);
           }}
         >
-          <Tabs.List className="tab-row" aria-label="Settings sections">
-            {tabs.map((entry) => (
-              <Tabs.Trigger
-                key={entry.id}
-                value={entry.id}
-                className={`tab${entry.id === active ? " tab-on" : ""}`}
-              >
-                {entry.label}
-              </Tabs.Trigger>
-            ))}
-          </Tabs.List>
+          {/* Same overflow cue as the provider tabs: on a phone the
+              strip runs off the right edge, and a clipped label reads
+              as a truncated name rather than as a row you can slide. */}
+          <TabScroll active={active}>
+            <Tabs.List className="tab-row" aria-label="Settings sections">
+              {tabs.map((entry) => (
+                <Tabs.Trigger
+                  key={entry.id}
+                  value={entry.id}
+                  className={`tab${entry.id === active ? " tab-on" : ""}`}
+                >
+                  {entry.label}
+                </Tabs.Trigger>
+              ))}
+            </Tabs.List>
+          </TabScroll>
 
           <Tabs.Content value="appearance" className="settings-body">
             <AppearanceSettings />

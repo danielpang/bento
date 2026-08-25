@@ -1,10 +1,11 @@
 import * as Tabs from "@radix-ui/react-tabs";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AGENT_CREDENTIALS } from "@bento/core";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { SecretField } from "./SecretField.js";
 import { SettingsCardSkeleton, Skeleton } from "./Skeleton.js";
 import type { BentoClient } from "@bento/api-client";
+import { TabScroll } from "./TabScroll.js";
 import { useToast } from "./Toasts.js";
 
 /**
@@ -43,42 +44,6 @@ const PROVIDER_TABS = [
 ] as const;
 
 /**
- * Which edges of a tab strip have more labels past them.
- *
- * The row scrolls instead of wrapping, so a clipped name is easy to
- * read as a truncated label. These edges drive a fade and a chevron so
- * the strip reads as a scroller rather than as a cut-off.
- */
-function useScrollEdges() {
-  const ref = useRef<HTMLDivElement>(null);
-  const [edges, setEdges] = useState({ start: false, end: false });
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-
-    const update = () => {
-      const max = el.scrollWidth - el.clientWidth;
-      setEdges({
-        start: el.scrollLeft > 1,
-        end: max - el.scrollLeft > 1,
-      });
-    };
-
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const observer = new ResizeObserver(update);
-    observer.observe(el);
-    return () => {
-      el.removeEventListener("scroll", update);
-      observer.disconnect();
-    };
-  }, []);
-
-  return { ref, start: edges.start, end: edges.end };
-}
-
-/**
  * Saved credentials, with load failure kept distinct from emptiness.
  * A failed fetch rendered as "nothing saved" invited pasting a key
  * that was already there, and no route returns one to check against.
@@ -113,7 +78,6 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
   const [removing, setRemoving] = useState<{ name: string; id: string } | null>(null);
 
   const active = PROVIDER_TABS.find((entry) => entry.id === tab) ?? PROVIDER_TABS[0];
-  const tabs = useScrollEdges();
 
   if (secrets === null) {
     return loadFailed ? (
@@ -163,12 +127,8 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
         value={active.id}
         onValueChange={(next) => setTab(next as (typeof PROVIDER_TABS)[number]["id"])}
       >
-        <div
-          className="tab-scroll"
-          data-fade-start={tabs.start || undefined}
-          data-fade-end={tabs.end || undefined}
-        >
-          <Tabs.List ref={tabs.ref} className="tab-row" aria-label="Model providers">
+        <TabScroll active={active.id}>
+          <Tabs.List className="tab-row" aria-label="Model providers">
             {PROVIDER_TABS.map((entry) => {
               const isSet = secrets.some((secret) => secret.name === entry.keys[0]);
               return (
@@ -183,9 +143,7 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
               );
             })}
           </Tabs.List>
-          <span className="tab-scroll-cue tab-scroll-cue-start" aria-hidden="true" />
-          <span className="tab-scroll-cue tab-scroll-cue-end" aria-hidden="true" />
-        </div>
+        </TabScroll>
         <Tabs.Content value={active.id} className="section tab-panel">
           {active.keys.map((keyName) => {
         const credential = AGENT_CREDENTIALS.find((entry) => entry.name === keyName);
