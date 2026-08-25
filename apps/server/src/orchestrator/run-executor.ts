@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
-import { WORKSPACE_ARTIFACT_DIR, type RunOutcome } from "@bento/core";
+import { WORKSPACE_ARTIFACT_DIR, agentRunPrompt, forgetsBetweenRuns, type RunOutcome } from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
   agentProfiles,
@@ -29,6 +29,8 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
+import { compactedConversation } from "./conversation-history.js";
+import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
@@ -37,7 +39,6 @@ import {
   claimQueuedMessages,
   confirmDelivered,
   markMessagesDelivered,
-  markMessagesSent,
   requeueDanglingClaims,
   requeueMessages,
   requeueUndelivered,
@@ -404,38 +405,40 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   const controller = new AbortController();
   ctx.running.set(runId, controller);
 
+  let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
   if (live && liveChannel) {
+    const liveHold = attachLiveConversation({
+      ctx,
+      runId,
+      featureId: feature.id,
+      kind: run.kind,
+      gateType: stage.gateType,
+      idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
+      live,
+      liveChannel,
+      sayAsUser,
+      saySystem,
+    });
     // The message route delivers through this handle; seq stays a
     // single-writer counter because the insert happens here.
     ctx.liveInputs.set(runId, {
       delivery: live.delivery,
-      deliver: async (text: string) => {
-        const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
-        if (accepted) await sayAsUser(text);
-        return accepted;
-      },
+      deliver: liveHold.deliver,
     });
+    liveSession = liveHold;
   }
 
   /**
-   * A live conversation settles rather than exits: after each finished
-   * turn, messages that parked meanwhile are fed in, oldest first;
-   * with nothing waiting, stdin closes and the process ends the run.
+   * A live conversation can settle rather than exit: after each
+   * finished turn, messages that parked meanwhile are fed in, oldest
+   * first. On a manual stage with nothing waiting, the process stays
+   * open for BENTO_LIVE_IDLE_SEC so the user can keep talking without
+   * a second run. Automatic stages, failed turns, and judge runs still
+   * close stdin immediately, because their gate has to run.
    */
-  const onTurnFinished = async () => {
-    if (!live || !liveChannel) return;
-    const claimed = await claimQueuedMessages(ctx.db, feature.id);
-    if (claimed.length > 0) {
-      const joined = claimed.map((m) => m.text).join("\n");
-      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
-      if (accepted) {
-        await markMessagesSent(ctx.db, claimed.map((m) => m.id), runId);
-        await sayAsUser(joined);
-        return;
-      }
-      await requeueMessages(ctx.db, claimed.map((m) => m.id));
-    }
-    if (liveChannel.pending === 0) liveChannel.end();
+  const onTurnFinished = async (ok: boolean) => {
+    if (!liveSession) return;
+    await liveSession.onTurnFinished(ok);
   };
   // Two lines bracket the agent's launch. The first says the CLI is
   // being spawned; the second, on its first event, that it came up and
@@ -484,7 +487,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
           await confirmDelivered(ctx.db, runId);
-          await onTurnFinished();
+          await onTurnFinished(event.ok);
         }
         // The board shows what the agent last said, so a wall of
         // running cards reads as work rather than as spinners. Only
@@ -504,6 +507,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   } catch (err) {
     ctx.running.delete(runId);
     ctx.liveInputs.delete(runId);
+    liveSession?.dispose();
     liveChannel?.end();
     // A draining process does not end runs: the agent is still working
     // in the sandbox and the next boot reattaches to it. Whatever threw
@@ -522,6 +526,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   }
   ctx.running.delete(runId);
   ctx.liveInputs.delete(runId);
+  liveSession?.dispose();
   liveChannel?.end();
 
   if (ctx.draining) return;
@@ -874,7 +879,19 @@ async function buildRunCommand(
     { name: profile.name, skill: profile.skill },
     `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
   );
-  const prompt = agentRunPrompt(profile.cli, run.prompt, stagePrompt);
+  const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
+  const compacted =
+    run.prompt && run.kind !== "judge" && !resume
+      ? await compactedConversation(ctx.db, feature.id, run.id)
+      : "";
+  const prompt = agentRunPrompt({
+    cli: profile.cli,
+    followUp: run.prompt,
+    stagePrompt,
+    resume,
+    compacted,
+    kind: run.kind,
+  });
 
   const commandInput = {
     prompt,
@@ -887,7 +904,7 @@ async function buildRunCommand(
    * Live mode: the tool holds a conversation over stdin, so a message
    * sent while it works reaches the process instead of waiting for the
    * run to end. Needs both halves: an adapter that speaks it and a
-   * driver that can attach stdin (sprites cannot).
+   * driver that can attach stdin.
    */
   const live =
     adapter.live && ctx.driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
@@ -897,12 +914,6 @@ async function buildRunCommand(
   if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
   const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
   return { argv, live, liveChannel, workdir, toolEnv: adapter.env?.(commandInput) ?? {} };
-}
-
-/** A non-resumable tool needs its instructions again on every follow-up. */
-export function agentRunPrompt(cli: string, followUp: string | null, stagePrompt: string): string {
-  if (!followUp) return stagePrompt;
-  return cli === "pool" ? `${stagePrompt}\n\nUser follow-up:\n${followUp}` : followUp;
 }
 
 /** Whether this organization has asked for sandboxes with no egress. */
@@ -1548,30 +1559,28 @@ async function resumeInterruptedRun(
   const saySystem = (text: string) =>
     appendRunEvent(ctx, run.id, { type: "message", role: "system", text });
 
+  let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
   if (live && liveChannel) {
+    liveSession = attachLiveConversation({
+      ctx,
+      runId: run.id,
+      featureId: feature.id,
+      kind: run.kind,
+      gateType: stage.gateType,
+      idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
+      live,
+      liveChannel,
+      sayAsUser,
+      saySystem,
+    });
     ctx.liveInputs.set(run.id, {
       delivery: live.delivery,
-      deliver: async (text: string) => {
-        const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
-        if (accepted) await sayAsUser(text);
-        return accepted;
-      },
+      deliver: liveSession.deliver,
     });
   }
-  const onTurnFinished = async () => {
-    if (!live || !liveChannel) return;
-    const claimed = await claimQueuedMessages(ctx.db, feature.id);
-    if (claimed.length > 0) {
-      const joined = claimed.map((m) => m.text).join("\n");
-      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
-      if (accepted) {
-        await markMessagesSent(ctx.db, claimed.map((m) => m.id), run.id);
-        await sayAsUser(joined);
-        return;
-      }
-      await requeueMessages(ctx.db, claimed.map((m) => m.id));
-    }
-    if (liveChannel.pending === 0) liveChannel.end();
+  const onTurnFinished = async (ok: boolean) => {
+    if (!liveSession) return;
+    await liveSession.onTurnFinished(ok);
   };
 
   emitBoard("running");
@@ -1590,7 +1599,7 @@ async function resumeInterruptedRun(
         await appendRunEvent(ctx, run.id, event);
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);
-          await onTurnFinished();
+          await onTurnFinished(event.ok);
         }
         const spoken = runOutputPreview(event);
         if (spoken) {
@@ -1607,6 +1616,7 @@ async function resumeInterruptedRun(
   } catch (err) {
     ctx.running.delete(run.id);
     ctx.liveInputs.delete(run.id);
+    liveSession?.dispose();
     liveChannel?.end();
     // The next boot reattaches; this process just leaves quietly.
     if (ctx.draining) return;
@@ -1622,6 +1632,7 @@ async function resumeInterruptedRun(
   }
   ctx.running.delete(run.id);
   ctx.liveInputs.delete(run.id);
+  liveSession?.dispose();
   liveChannel?.end();
 
   if (ctx.draining) return;

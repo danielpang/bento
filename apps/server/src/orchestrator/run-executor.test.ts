@@ -1,15 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentRunPrompt, mergeAgentExecEnv, poolFailureAdvice, runnerReportedError } from "./run-executor.js";
+import { agentRunPrompt } from "@bento/core";
+import { mergeAgentExecEnv, poolFailureAdvice, runnerReportedError } from "./run-executor.js";
 
 test("pool follow-ups retain stage context whether sent idle or queued", () => {
   for (const followUp of ["Please also add a test.", "Use the smaller implementation."]) {
-    const prompt = agentRunPrompt("pool", followUp, "Implement the feature from the card.");
+    const prompt = agentRunPrompt({
+      cli: "pool",
+      followUp,
+      stagePrompt: "Implement the feature from the card.",
+      resume: true,
+    });
     assert.match(prompt, /^Implement the feature from the card\./);
     assert.match(prompt, new RegExp(`${followUp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
   }
-  assert.equal(agentRunPrompt("codex", "Please add a test.", "Stage context"), "Please add a test.");
-  assert.equal(agentRunPrompt("pool", null, "Stage context"), "Stage context");
+  assert.equal(
+    agentRunPrompt({ cli: "codex", followUp: "Please add a test.", stagePrompt: "Stage context", resume: true }),
+    "Please add a test.",
+  );
+  assert.equal(
+    agentRunPrompt({ cli: "pool", followUp: null, stagePrompt: "Stage context", resume: false }),
+    "Stage context",
+  );
 });
 
 test("adapter environment reaches the agent process with credential precedence", () => {

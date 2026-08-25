@@ -1,5 +1,5 @@
 import { getAdapter, runAgent } from "@bento/agents";
-import type { AgentEvent } from "@bento/core";
+import { agentRunPrompt, forgetsBetweenRuns, type AgentEvent } from "@bento/core";
 import {
   DockerDriver,
   LocalProcessDriver,
@@ -11,11 +11,19 @@ import {
 import type { TokenStore } from "@bento/api-client";
 
 interface ClaimedRun {
-  run: { id: string; featureId: string; stageId: string; prompt: string; resumeSessionId: string | null };
+  run: {
+    id: string;
+    featureId: string;
+    stageId: string;
+    prompt: string;
+    resumeSessionId: string | null;
+    kind?: string;
+  };
   feature: { id: string; title: string; branchName: string | null };
   agent: { cli: string; model: string; extraArgs: string[] };
   repositories: { name: string; localPath: string; defaultBranch: string }[];
   stagePrompt: string;
+  compactedConversation?: string;
 }
 
 export interface RunnerOptions {
@@ -159,9 +167,15 @@ export class LocalRunner {
 
     const mounted = repositories.map((r) => ({ name: r.name, mountPath: repositoryPathIn(handle.workdir, r.name) }));
     const stagePrompt = withRepositories(claimed.stagePrompt, mounted);
-    const prompt = run.prompt && agent.cli === "pool"
-      ? `${stagePrompt}\n\nUser follow-up:\n${run.prompt}`
-      : run.prompt || stagePrompt;
+    const resume = Boolean(run.resumeSessionId) && !forgetsBetweenRuns(agent.cli);
+    const prompt = agentRunPrompt({
+      cli: agent.cli,
+      followUp: run.prompt,
+      stagePrompt,
+      resume,
+      compacted: claimed.compactedConversation ?? "",
+      ...(run.kind ? { kind: run.kind } : {}),
+    });
 
     const commandInput = {
       prompt,

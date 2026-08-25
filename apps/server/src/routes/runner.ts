@@ -2,12 +2,13 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { agentEvent } from "@bento/core";
+import { agentEvent, forgetsBetweenRuns } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, repositories, runEvents, stages } from "@bento/db";
 import { canAccessProject, visibleProjectFilter } from "../access.js";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { buildStagePrompt } from "../orchestrator/prompt.js";
+import { compactedConversation } from "../orchestrator/conversation-history.js";
 import { isUniqueViolation } from "../orchestrator/transcript.js";
 import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
@@ -144,6 +145,12 @@ export function runnerRoutes(ctx: AppContext) {
         status: "starting",
       });
 
+      const resume = Boolean(candidate.run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
+      const compacted =
+        candidate.run.prompt && candidate.run.kind !== "judge" && !resume
+          ? await compactedConversation(db(c, ctx), candidate.feature.id, candidate.run.id)
+          : "";
+
       return c.json({
         run: {
           id: candidate.run.id,
@@ -151,6 +158,7 @@ export function runnerRoutes(ctx: AppContext) {
           stageId: stage.id,
           prompt: candidate.run.prompt,
           resumeSessionId: candidate.run.cliSessionId,
+          kind: candidate.run.kind,
         },
         feature: { id: candidate.feature.id, title: candidate.feature.title, branchName: candidate.feature.branchName },
         agent: { cli: profile.cli, model: profile.model, extraArgs: profile.extraArgs },
@@ -161,6 +169,12 @@ export function runnerRoutes(ctx: AppContext) {
         })),
         /** Used when the run carries no explicit prompt. */
         stagePrompt: buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill }),
+        /**
+         * Prior turns, compacted, for a follow-up that cannot resume a
+         * CLI session. Empty when the run resumes or there is nothing
+         * to carry.
+         */
+        compactedConversation: compacted,
       });
     })
 

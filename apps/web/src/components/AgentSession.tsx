@@ -648,14 +648,14 @@ export function AgentSession({
           {!runActive
             ? resumes
               ? "Nothing is running. Your message starts a new run on this card, continuing the same conversation."
-              : "Nothing is running. Your message starts a new run on this card."
+              : "Nothing is running. Your message starts a new run on this card, with a compacted transcript of this conversation."
             : liveKind === "steer"
               ? `${latestAgent?.name ?? "This agent"} holds a live session: your message steers it while it works.`
               : liveKind === "queue"
                 ? `${latestAgent?.name ?? "This agent"} holds a live session: your message is read after the current step, in the same conversation.`
                 : resumes
                   ? "This tool takes messages between runs: yours is delivered the moment the current run ends."
-                  : "This tool takes messages between runs: yours is delivered the moment the current run ends, as a new run."}
+                  : "This tool takes messages between runs: yours is delivered the moment the current run ends, as a new run with a compacted transcript of this conversation."}
         </p>
       )}
 
