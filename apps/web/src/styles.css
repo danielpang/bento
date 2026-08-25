@@ -939,6 +939,9 @@ button {
   text-align: left;
   width: 100%;
   min-width: 0;
+  /* Cards are buttons. The UA stylesheet sets those to nowrap, which
+     is why a URL title used to paint into the next lane. */
+  white-space: normal;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1137,9 +1140,6 @@ button {
   min-width: 0;
   /* No single-word last lines on a wrapped title. */
   text-wrap: pretty;
-  /* A title can be a URL or a Slack-style <url|url> with no spaces.
-     Without a wrap opportunity it paints past the card into the next
-     lane. */
   overflow-wrap: anywhere;
   word-break: break-word;
 }
