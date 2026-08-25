@@ -16,7 +16,7 @@ import { money, outOfCompute, resetsOn, useBillingPlan } from "./billing-plan.js
  * overage has an allowance and a rate rather than a ceiling, and an
  * install without billing has neither.
  */
-export function OutOfCompute({ onOpenBilling }: { onOpenBilling: () => void }) {
+export function OutOfCompute() {
   const { plan } = useBillingPlan();
   /**
    * The modal shows once and the banner stays. Somebody who has
@@ -74,9 +74,9 @@ export function OutOfCompute({ onOpenBilling }: { onOpenBilling: () => void }) {
             : `Ask an owner or admin to ${byCeiling ? "raise the ceiling" : byChoice ? "allow overage or upgrade" : "upgrade"}.`}
         </span>
         {canUpgrade && (
-          <button className="btn btn-primary" onClick={onOpenBilling}>
+          <a className="btn btn-primary" href={BILLING}>
             {byCeiling || byChoice ? "Billing settings" : "See plans"}
-          </button>
+          </a>
         )}
       </div>
 
@@ -91,15 +91,13 @@ export function OutOfCompute({ onOpenBilling }: { onOpenBilling: () => void }) {
                 {canUpgrade ? "Not now" : "Got it"}
               </button>
               {canUpgrade && (
-                <button
+                <a
                   className="btn btn-primary"
-                  onClick={() => {
-                    dismiss();
-                    onOpenBilling();
-                  }}
+                  href={BILLING}
+                  onClick={() => sessionStorage.setItem(SEEN, "1")}
                 >
                   {byCeiling || byChoice ? "Billing settings" : "See plans"}
-                </button>
+                </a>
               )}
             </>
           }
@@ -122,3 +120,6 @@ export function OutOfCompute({ onOpenBilling }: { onOpenBilling: () => void }) {
 
 /** Per tab, so a new session explains itself again. */
 const SEEN = "bento:out-of-compute-explained";
+
+/** Same deep link usage emails already send. */
+const BILLING = "/settings?tab=billing";
