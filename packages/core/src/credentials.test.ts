@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor, spendCoverageNote } from "./credentials.js";
+import {
+  AGENT_CREDENTIALS,
+  MODEL_GUIDANCE,
+  modelGuidanceFor,
+  spendCoverageNote,
+  spendReportingTools,
+} from "./credentials.js";
 
 test("every agent CLI has model guidance", () => {
   // A tool with no guidance leaves the model field unexplained, and the
@@ -39,6 +45,12 @@ test("the spend note names exactly the tools that report a cost", () => {
   assert.match(note, /floor rather than a full total/);
   // The fake agent reports a cost but is a test fixture, not a choice.
   assert.doesNotMatch(note, /Fake agent/);
+});
+
+test("the spend page's two lists match the coverage sentence", () => {
+  const { reporting, silent } = spendReportingTools();
+  assert.deepEqual(reporting, ["Claude Code", "pi"]);
+  assert.deepEqual(silent, ["Codex CLI", "Cursor CLI", "opencode", "Poolside (pool)"]);
 });
 
 /**

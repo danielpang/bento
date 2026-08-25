@@ -16,6 +16,7 @@ import {
   SessionPageSkeleton,
   SettingsPageSkeleton,
   Skeleton,
+  SpendPageSkeleton,
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
@@ -53,6 +54,7 @@ const ArtifactPage = lazy(() => import("./components/ArtifactViewer.js").then((m
 const SessionPage = lazy(() => import("./components/SessionPage.js").then((m) => ({ default: m.SessionPage })));
 const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) => ({ default: m.SessionsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
+const SpendPage = lazy(() => import("./components/SpendPage.js").then((m) => ({ default: m.SpendPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
 
 /**
@@ -78,6 +80,17 @@ function RouteFallback() {
           <span className="topbar-spacer" />
         </header>
         <SessionsListSkeleton framed />
+      </div>
+    );
+  }
+  if (path === "/spend") {
+    return (
+      <div className="app" aria-busy="true">
+        <header className="topbar">
+          <BrandLockup />
+          <span className="topbar-spacer" />
+        </header>
+        <SpendPageSkeleton />
       </div>
     );
   }
@@ -342,14 +355,16 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
 }
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
-  // Sessions is a sibling tab of the board inside the same chrome, so
-  // both addresses land here and only the slab between the topbar and
-  // the bottom bar differs. Navigation is full page loads, so reading
-  // the address once at render is the routing. Trailing slashes are
-  // tolerated: the SPA fallback serves "/sessions/" too, and answering
-  // it with the board under a sessions address helped nobody.
-  const screen: "board" | "sessions" =
-    window.location.pathname.replace(/\/+$/, "") === "/sessions" ? "sessions" : "board";
+  // Sessions and spend are sibling tabs of the board inside the same
+  // chrome, so those addresses land here and only the slab between the
+  // topbar and the bottom bar differs. Navigation is full page loads,
+  // so reading the address once at render is the routing. Trailing
+  // slashes are tolerated: the SPA fallback serves "/sessions/" too,
+  // and answering it with the board under a sessions address helped
+  // nobody.
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const screen: "board" | "sessions" | "spend" =
+    path === "/sessions" ? "sessions" : path === "/spend" ? "spend" : "board";
   /**
    * Null until the list has answered. An empty array is a real answer
    * ("no projects yet"); starting there showed that copy for a beat on
@@ -752,21 +767,31 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     </Suspense>
   );
 
-  const spend = usage && usage.totalRuns > 0 && (
-    <span
-      className="chip"
+  const spend = projectId ? (
+    <a
+      className="chip chip-link"
+      href="/spend"
+      aria-current={screen === "spend" ? "page" : undefined}
       // The tool list comes from the catalog, so it cannot drift
       // from which adapters actually report a figure.
       title={
-        usage.runsWithoutCost > 0
-          ? `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns - usage.runsWithoutCost} of ${usage.totalRuns} runs. ${spendCoverageNote()}`
-          : `Across ${usage.totalRuns} runs. ${spendCoverageNote()}`
+        usage && usage.totalRuns > 0
+          ? usage.runsWithoutCost > 0
+            ? `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns - usage.runsWithoutCost} of ${usage.totalRuns} runs. ${spendCoverageNote()}`
+            : `Across ${usage.totalRuns} runs. ${spendCoverageNote()}`
+          : spendCoverageNote()
       }
     >
-      spend $<span className="spend-figure">{spendShown.toFixed(2)}</span>
-      {usage.runsWithoutCost > 0 ? "+" : ""}
-    </span>
-  );
+      {usage && usage.totalRuns > 0 ? (
+        <>
+          spend $<span className="spend-figure">{spendShown.toFixed(2)}</span>
+          {usage.runsWithoutCost > 0 ? "+" : ""}
+        </>
+      ) : (
+        "spend"
+      )}
+    </a>
+  ) : null;
 
   const hasProjects = (projects?.length ?? 0) > 0;
   /**
@@ -830,7 +855,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             </button>
           </div>
         )}
-        {screen === "sessions" ? <SessionsListSkeleton framed /> : <BoardSkeleton />}
+        {screen === "sessions" ? (
+          <SessionsListSkeleton framed />
+        ) : screen === "spend" ? (
+          <SpendPageSkeleton />
+        ) : (
+          <BoardSkeleton />
+        )}
         {panels}
         {dialogs}
         {bottom}
@@ -933,6 +964,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         // the chunk load suspends to the app root and blanks the chrome.
         <Suspense fallback={<SessionsListSkeleton framed />}>
           <SessionsPage client={client} projectId={projectId} profiles={profiles} />
+        </Suspense>
+      ) : screen === "spend" ? (
+        <Suspense fallback={<SpendPageSkeleton />}>
+          <SpendPage client={client} projectId={projectId} />
         </Suspense>
       ) : boardPending ? (
         <BoardSkeleton />
@@ -1060,7 +1095,7 @@ function TopBar({
   primary?: React.ReactNode;
   picker?: React.ReactNode;
   search?: React.ReactNode;
-  /** The spend chip: read, not operated, so it never enters the menu. */
+  /** The spend chip. It stays out of the menu at every width. */
   meta?: React.ReactNode;
   onContact: () => void;
   showSignOut: boolean;

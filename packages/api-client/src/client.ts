@@ -11,6 +11,7 @@ import type {
   Pipeline,
   Project,
   ProjectSession,
+  ProjectUsage,
   Repository,
   RunArtifact,
   Stage,
@@ -811,12 +812,11 @@ export class BentoClient {
 
   /**
    * Agent spend for a project. `runsWithoutCost` matters: the total
-   * only covers tools that report one, and most do not.
+   * only covers tools that report one, and most do not. `byFeature`
+   * is every card, so a spend page can sort without a second fetch.
    */
   getUsage(projectId: string) {
-    return this.request<{ totalUsd: number; totalRuns: number; runsWithoutCost: number }>(
-      `/api/projects/${projectId}/usage`,
-    );
+    return this.request<ProjectUsage>(`/api/projects/${projectId}/usage`);
   }
 
   listProfiles() {

@@ -2831,13 +2831,26 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
   await waitForFeatureStatus(feature.id, ["gated"], 60_000);
 
-  const usage = await json<{ totalUsd: number; totalRuns: number; runsWithoutCost: number }>(
-    await app.request(`/api/projects/${project.id}/usage`),
-  );
+  const idle = await createFeature(project.id, "never ran");
+  const usage = await json<{
+    totalUsd: number;
+    totalRuns: number;
+    runsWithoutCost: number;
+    byFeature: { featureId: string; title: string; runs: number; costUsd: number | null; runsWithoutCost: number }[];
+  }>(await app.request(`/api/projects/${project.id}/usage`));
   assert.ok(usage.totalRuns >= 1, "the run should be counted");
   // The fake agent reports a cost, so this one is measured.
   assert.ok(usage.totalUsd > 0, "a reported cost should reach the total");
   assert.equal(typeof usage.runsWithoutCost, "number", "coverage is always stated, even when complete");
+
+  const billed = usage.byFeature.find((row) => row.featureId === feature.id);
+  assert.ok(billed, "the card that ran should appear on the spend rollup");
+  assert.ok((billed.costUsd ?? 0) > 0, "a reported cost should reach the card");
+  assert.ok(billed.runs >= 1);
+  const untouched = usage.byFeature.find((row) => row.featureId === idle.id);
+  assert.ok(untouched, "a card that never ran still belongs on the spend page");
+  assert.equal(untouched.runs, 0);
+  assert.equal(untouched.costUsd, null, "no runs is not the same as zero dollars");
 
   // The board carries the same figure, for the client that cannot parse
   // JSON. A dash means nothing reported, which is not zero.
