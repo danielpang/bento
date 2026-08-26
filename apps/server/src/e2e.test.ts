@@ -2507,6 +2507,13 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
   const log = await run("git", ["-C", worktree, "log", "--oneline"]);
   assert.match(log.stdout, /fake agent commit/);
 
+  // A manual stage waits for a person after the agent finishes. The
+  // evaluate job is queued, not inline, so reading the board now would
+  // race it: still active one moment, gated the next. Wait for the
+  // settled status. Left active, a card whose run succeeded looks done
+  // rather than like something that needs a person.
+  await waitForFeatureStatus(feature.id, ["gated"]);
+
   // Board plain endpoint shows the feature with its run status
   const board = await (await app.request(`/api/projects/${project.id}/board/plain`)).text();
   // Cost then the agent's latest line sit between the run id and the
@@ -2516,7 +2523,7 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
   assert.match(
     board,
     new RegExp(
-      `feature\\|${feature.id}\\|${advanced.currentStageId}\\|active\\|succeeded\\|${created.id}\\|[^|]*\\|-\\|Test feature`,
+      `feature\\|${feature.id}\\|${advanced.currentStageId}\\|gated\\|succeeded\\|${created.id}\\|[^|]*\\|-\\|Test feature`,
     ),
     board,
   );
