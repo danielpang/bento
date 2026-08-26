@@ -40,7 +40,9 @@ const SKILL_MAX_HEIGHT = 480;
  */
 function growSkill(el: HTMLTextAreaElement | null): void {
   if (!el) return;
-  el.style.height = "auto";
+  // Collapse first so scrollHeight is the content, not the last height
+  // we set. min-height still floors the used size after this.
+  el.style.height = "0px";
   const content = el.scrollHeight;
   el.style.height = `${Math.min(content, SKILL_MAX_HEIGHT)}px`;
   el.style.overflowY = content > SKILL_MAX_HEIGHT ? "auto" : "hidden";
@@ -555,7 +557,10 @@ export function AgentsPanel({
                 className="input skill-input"
                 placeholder={"How this agent should work, and what its stage write-up must contain.\nExample: You are a product investigator. Your write-up must have three sections: Problem, Evidence from the code, Recommendation with effort estimate."}
                 value={skill}
-                onChange={(e) => setSkill(e.target.value)}
+                onChange={(e) => {
+                  setSkill(e.target.value);
+                  growSkill(e.target);
+                }}
                 rows={5}
               />
               <span className="muted">
