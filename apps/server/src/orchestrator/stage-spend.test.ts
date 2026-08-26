@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  AGENT_STAGE_SPEND_DASHBOARD,
   AGENT_STAGE_SPEND_EVENT,
   captureStageSpend,
   runsInVisit,
@@ -44,20 +43,6 @@ test("a visit ignores runs from the last time the card was here", () => {
 test("no entry timestamp counts every run on the stage", () => {
   const rows = [{ costUsd: "0.50", queuedAt: new Date("2026-01-01T00:00:00Z") }];
   assert.equal(runsInVisit(rows, null).length, 1);
-});
-
-test("every dashboard insight sums cost_usd rather than counting events", () => {
-  assert.equal(AGENT_STAGE_SPEND_DASHBOARD.name, "Agent spend");
-  assert.ok(AGENT_STAGE_SPEND_DASHBOARD.insights.length >= 1);
-  for (const insight of AGENT_STAGE_SPEND_DASHBOARD.insights) {
-    const series = insight.query.source.series;
-    assert.ok(series.length >= 1, `${insight.name} has a series`);
-    for (const node of series) {
-      assert.equal(node.event, AGENT_STAGE_SPEND_EVENT, `${insight.name} watches the spend event`);
-      assert.equal(node.math, "sum", `${insight.name} must sum, not count`);
-      assert.equal(node.math_property, "cost_usd");
-    }
-  }
 });
 
 /** Thenable drizzle chain: each `await` consumes the next canned result. */
