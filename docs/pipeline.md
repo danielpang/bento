@@ -13,7 +13,7 @@ Each stage owns two decisions: which agent runs the step, and how a card leaves 
 
 New projects start with all six stages manual, so nothing runs away with your money before you have looked at it. Set a stage to automatic once you trust it to run unattended, and a card moves as soon as that stage's agent finishes.
 
-A stage with an assigned agent starts it automatically when a card arrives, so a fully configured pipeline runs end to end on its own.
+A stage with an assigned agent starts it automatically when a card arrives going forward, so a fully configured pipeline runs end to end on its own. Sending a card back stops the agent that was working it and waits: you start a conversation on the destination stage to say what to redo. Follow-ups then talk to that stage's agent, not the one that just ran QA.
 
 **Reordering.** Drag a stage card by its grip: the whole card travels with the cursor and the list rearranges underneath, so the gap it will land in is the gap it is already sitting in. The grip is focusable and the arrow keys move a stage too, because a pipeline that can only be arranged with a mouse cannot be arranged by everyone. Cards keep the stage they are in; what changes is what comes next for them.
 

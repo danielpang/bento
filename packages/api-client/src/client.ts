@@ -629,7 +629,8 @@ export class BentoClient {
 
   /**
    * Puts the card in any stage, or the backlog with null. Forward
-   * behaves like advance, backward like send-back; no approval is
+   * behaves like advance, backward like send-back (the previous agent
+   * stops, the destination waits for a conversation); no approval is
    * recorded either way.
    */
   moveFeature(featureId: string, stageId: string | null) {

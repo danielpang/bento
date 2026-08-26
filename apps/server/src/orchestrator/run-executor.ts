@@ -36,6 +36,7 @@ import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { resolveFollowUpRun } from "./stage-agent.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -1036,11 +1037,30 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   }
 
   /**
+   * A send-back moved the card onto a different stage while this run
+   * was ending. Parked messages wait for the person to start the
+   * destination conversation, rather than auto-starting the new stage's
+   * agent with no explanation of the redo. The composer claims them
+   * when that message is sent.
+   *
+   * Backlog is not a stage change in this sense: currentStageId is
+   * null, runs still carry the stage they ran on, and a follow-up
+   * keeps that conversation (see followUpSource). Treating null as a
+   * mismatch swallowed parked messages on every card that had never
+   * left the backlog.
+   */
+  if (feature.currentStageId && run.stageId !== feature.currentStageId) {
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
+
+  /**
    * A judge's end can be what frees the card, but the judge is not the
    * conversation: inheriting its profile and session had the reviewer
    * answering the user's follow-up inside the judging session. The
    * newest run that is not a judge run is whose agent and session the
-   * message continues.
+   * message continues, unless the card has moved stages: then the
+   * pipeline agent for the stage the card is in takes over.
    */
   const [conversation] = run.kind === "judge"
     ? await ctx.db
@@ -1050,7 +1070,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1)
     : [run];
-  const source = conversation ?? run;
+  const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   const next = await startRunIfIdle(ctx.db, {
     featureId: feature.id,

@@ -3304,6 +3304,18 @@ button {
   font-size: 11.5px;
 }
 
+/* After a send-back: the destination agent waits for a conversation. */
+.card-notice {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 /* The full-page session: the log gets the room it deserves. */
 /*
  * The session page is an app screen, not a document: the header and

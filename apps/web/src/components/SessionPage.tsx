@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@bento/api-client";
-import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges, Stage } from "@bento/api-client";
+import type { AgentProfile, AgentRun, BentoClient, Feature, FeatureChanges, FeatureEvent, Stage } from "@bento/api-client";
 import { AgentSession } from "./AgentSession.js";
 import { ChatSkeleton } from "./Skeleton.js";
 import { DiffReview, type LineQuote } from "./DiffReview.js";
 import { useToast } from "./Toasts.js";
+import { needsSendBackPrompt, SEND_BACK_NOTICE } from "@bento/core";
 
 /**
  * A card's agent conversation in its own tab, for when the drawer's
@@ -52,13 +53,15 @@ export function SessionPage({
   const [quote, setQuote] = useState<LineQuote | null>(null);
   /** Which pane a one-column screen shows; side by side ignores it. */
   const [pane, setPane] = useState<"chat" | "changes">("chat");
+  const [history, setHistory] = useState<FeatureEvent[]>([]);
 
   const refresh = useCallback(async () => {
     try {
-      const [detail, profileRows, committed] = await Promise.all([
+      const [detail, profileRows, committed, events] = await Promise.all([
         client.getFeature(featureId),
         client.listProfiles(),
         client.getChanges(featureId).catch(() => null),
+        client.getHistory(featureId).catch(() => [] as FeatureEvent[]),
       ]);
       // After the feature, not alongside it: the pipeline is keyed by
       // project, which is only known once the card has loaded. Absent
@@ -68,6 +71,7 @@ export function SessionPage({
       setProfiles(profileRows);
       setChanges(committed);
       setStages(pipeline?.stages ?? []);
+      setHistory(events);
       setLoadFailed(false);
     } catch (err) {
       // A 404 is the card being gone, or never this tenant's; the
@@ -186,6 +190,12 @@ export function SessionPage({
 
   const finished = feature.status === "done" || feature.status === "cancelled";
   const hasDiff = !!changes && changes.repositories.some((r) => r.diff.trim().length > 0);
+  const showSendBackNotice = needsSendBackPrompt({
+    status: feature.status,
+    currentStageId: feature.currentStageId,
+    history,
+    runs: feature.runs,
+  });
 
   return (
     <div className={hasDiff ? "session-page session-page-review" : "session-page"}>
@@ -196,6 +206,11 @@ export function SessionPage({
         </span>
         {exit}
       </header>
+      {showSendBackNotice && (
+        <p className="card-notice" role="status">
+          {SEND_BACK_NOTICE}
+        </p>
+      )}
       {hasDiff && (
         <div className="pane-toggle" role="group" aria-label="Pane">
           <button type="button" aria-pressed={pane === "chat"} onClick={() => setPane("chat")}>

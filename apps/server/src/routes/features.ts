@@ -45,6 +45,7 @@ import {
   markMessagesDelivered,
   requeueMessages,
 } from "../orchestrator/messages.js";
+import { resolveFollowUpRun } from "../orchestrator/stage-agent.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { githubConnectionFor } from "../github.js";
@@ -470,7 +471,10 @@ export function featureRoutes(ctx: AppContext) {
        * so "the newest run" was sometimes the reviewer, and the user's
        * message came back answered by the judge inside the judging
        * session. The newest run that is not a judge run is the one
-       * whose agent, stage, and session the message belongs to.
+       * whose agent, stage, and session the message belongs to, unless
+       * the card has moved: send-back puts it on a different stage,
+       * and that stage's pipeline agent takes over rather than the
+       * one that just ran.
        */
       const [conversation] = await db(c, ctx)
         .select()
@@ -478,7 +482,7 @@ export function featureRoutes(ctx: AppContext) {
         .where(and(eq(agentRuns.featureId, feature.id), ne(agentRuns.kind, "judge")))
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
-      const resumeFrom = conversation ?? latest;
+      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
       // Everything parked rides along, oldest first: the card is idle,
       // so this message and any it queued behind become one follow-up
       // run. Tools with a session resume it; pool gets fresh context.
@@ -676,7 +680,8 @@ export function featureRoutes(ctx: AppContext) {
     /**
      * Puts the card in any stage of its pipeline, or the backlog. This
      * is what dragging a card between lanes calls: forward behaves like
-     * advance, backward like send-back, and neither records an
+     * advance, backward like send-back (the previous agent stops, the
+     * destination waits for a conversation), and neither records an
      * approval, because rearranging the board is not a verdict.
      */
     .post(
