@@ -2025,8 +2025,8 @@ test("a redirected endpoint with only a token is missing the key", async () => {
 /**
  * Dragging a card between lanes. Forward keeps advance's meaning (the
  * stage's agent starts), backward keeps send-back's (verdicts are
- * discarded, the destination stage's agent starts), and neither
- * records an approval.
+ * discarded, the previous agent stops, the destination waits), and
+ * neither records an approval.
  */
 test("a card can be moved to any stage, and the move keeps its direction's meaning", { timeout: 120_000 }, async () => {
   const { project, stages: projectStages } = await setupProject("Dragging");
@@ -2070,14 +2070,24 @@ test("a card can be moved to any stage, and the move keeps its direction's meani
     "the move is in the history",
   );
 
-  // Backward two stages: verdicts of the stage being left are gone.
+  // Backward two stages: verdicts of the stage being left are gone,
+  // and the destination agent does not start, even when one is assigned.
   const first = projectStages[0]!;
+  await patchStage(first.id, { defaultAgentProfileId: profile.id });
+  const idsBeforeBack = (
+    await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`))
+  ).runs.map((r) => r.id);
   const back = await json<{ currentStageId: string }>(await move(first.id));
   assert.equal(back.currentStageId, first.id);
   const gate = await json<{ checks: unknown[] }>(await app.request(`/api/features/${feature.id}/gate`));
   assert.equal(gate.checks.length, 0, "a backward move leaves no stale verdicts behind");
-  const { runs } = await json<{ runs: unknown[] }>(await app.request(`/api/features/${feature.id}`));
-  assert.equal(runs.length, 1, "a backward move onto a stage with no agent starts nothing");
+  await new Promise((r) => setTimeout(r, 1500));
+  const afterBack = await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`));
+  assert.deepEqual(
+    afterBack.runs.map((r) => r.id),
+    idsBeforeBack,
+    "a backward move does not start the destination agent",
+  );
 
   // To the backlog, and a stage from another pipeline is refused.
   const toBacklog = await json<{ currentStageId: string | null }>(await move(null));
@@ -2089,52 +2099,176 @@ test("a card can be moved to any stage, and the move keeps its direction's meani
 /**
  * Send-back used to leave the previous stage's agent in place: the card
  * moved, but the next run (and any follow-up) still belonged to QA.
- * Arriving at a stage starts that stage's agent, the same as going
- * forward, including when the card skips stages on the way back.
+ * The previous agent must stop; the destination does not start on its
+ * own, because the person has not yet said why the card came back.
  */
-test("sending a card back starts the destination stage's agent", { timeout: 180_000 }, async () => {
-  const { project, stages } = await setupProject("Send-back agents");
-  const feature = await createFeature(project.id, "Rework me");
-  const implementer = await fakeProfile("sendback-impl");
-  const reviewer = await fakeProfile("sendback-review");
-  const qa = await fakeProfile("sendback-qa");
-  const impl = stages[0]!;
+test("sending a card back stops the current agent and starts nothing", { timeout: 60_000 }, async () => {
+  const { project, stages } = await setupProject("Send-back stop");
+  const reviewer = await fakeProfile("sendback-stop-review");
+  const qa = await fakeProfile("sendback-stop-qa");
   const review = stages[1]!;
   const quality = stages[2]!;
-
-  await patchStage(impl.id, { defaultAgentProfileId: implementer.id });
   await patchStage(review.id, { defaultAgentProfileId: reviewer.id });
   await patchStage(quality.id, { defaultAgentProfileId: qa.id });
 
-  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
-  const implRun = await runByProfile(feature.id, implementer.id);
-  await waitForRun(implRun.id);
-  await app.request(`/api/features/${feature.id}/approve`, { method: "POST" });
-  const reviewRun = await runByProfile(feature.id, reviewer.id);
-  await waitForRun(reviewRun.id);
-  await app.request(`/api/features/${feature.id}/approve`, { method: "POST" });
-  const qaRun = await runByProfile(feature.id, qa.id);
-  await waitForRun(qaRun.id);
+  for (const status of ["queued", "running"] as const) {
+    const feature = await createFeature(project.id, `Rework me ${status}`);
+    await ctx.db
+      .update(features)
+      .set({ currentStageId: quality.id, status: "active", updatedAt: new Date() })
+      .where(eq(features.id, feature.id));
+    const [live] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: quality.id,
+        agentProfileId: qa.id,
+        prompt: "verify the work",
+        status,
+        executor: "runner",
+      })
+      .returning({ id: agentRuns.id });
 
-  // One stage back: Quality engineering to Code review.
-  assert.equal((await app.request(`/api/features/${feature.id}/back`, { method: "POST" })).status, 200);
-  await waitForStage(feature.id, review.id);
-  const reviewAgain = await runByProfileAfter(feature.id, reviewer.id, reviewRun.id);
-  assert.equal(reviewAgain.stageId, review.id, "send-back starts the Code review agent, not QA");
-  await waitForRun(reviewAgain.id);
+    assert.equal((await app.request(`/api/features/${feature.id}/back`, { method: "POST" })).status, 200);
+    const detail = await json<{
+      currentStageId: string;
+      runs: { id: string; status: string; stageId: string; agentProfileId: string }[];
+    }>(await app.request(`/api/features/${feature.id}`));
+    assert.equal(detail.currentStageId, review.id);
+    const stopped = detail.runs.find((r) => r.id === live!.id);
+    assert.equal(stopped?.status, "cancelled", `a ${status} agent on the previous stage is stopped`);
+    assert.equal(detail.runs.length, 1, "send-back starts no destination run of its own");
+  }
+});
 
-  // A few stages back: Code review to Implementation, skipping nothing
-  // on this board but landing on a different agent than the last run.
-  const jumped = await app.request(`/api/features/${feature.id}/move`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stageId: impl.id }),
+/**
+ * An automatic destination whose previous visit already succeeded would
+ * walk the card forward again the moment anything evaluated it. Send-back
+ * must not start that stage's agent and must not ask the gate.
+ */
+test("sending a card back onto an automatic stage does not bounce it forward", { timeout: 30_000 }, async () => {
+  const { project, stages } = await setupProject("Send-back bounce");
+  const reviewer = await fakeProfile("sendback-bounce-review");
+  const qa = await fakeProfile("sendback-bounce-qa");
+  const review = stages[1]!;
+  const quality = stages[2]!;
+  await patchStage(review.id, {
+    defaultAgentProfileId: reviewer.id,
+    gateType: "auto",
+    gateCriteria: [],
   });
-  assert.equal(jumped.status, 200);
-  await waitForStage(feature.id, impl.id);
-  const implAgain = await runByProfileAfter(feature.id, implementer.id, implRun.id);
-  assert.equal(implAgain.stageId, impl.id, "a backward drag starts the Implementation agent");
-  await waitForRun(implAgain.id);
+  await patchStage(quality.id, { defaultAgentProfileId: qa.id });
+
+  const feature = await createFeature(project.id, "Bounce me");
+  await ctx.db
+    .update(features)
+    .set({ currentStageId: quality.id, status: "active", updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  await ctx.db.insert(agentRuns).values([
+    {
+      featureId: feature.id,
+      stageId: review.id,
+      agentProfileId: reviewer.id,
+      prompt: "earlier review",
+      status: "succeeded",
+      executor: "runner",
+    },
+    {
+      featureId: feature.id,
+      stageId: quality.id,
+      agentProfileId: qa.id,
+      prompt: "verify the work",
+      status: "succeeded",
+      executor: "runner",
+    },
+  ]);
+
+  assert.equal((await app.request(`/api/features/${feature.id}/back`, { method: "POST" })).status, 200);
+  const idsAtSendBack = (
+    await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`))
+  ).runs.map((r) => r.id);
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const detail = await json<{ currentStageId: string; runs: { id: string }[] }>(
+      await app.request(`/api/features/${feature.id}`),
+    );
+    assert.equal(detail.currentStageId, review.id, "an automatic destination must not walk the card forward again");
+    assert.deepEqual(
+      detail.runs.map((r) => r.id).sort(),
+      idsAtSendBack.slice().sort(),
+      "send-back must not start a run that would then pass the gate",
+    );
+    await new Promise((r) => setTimeout(r, 250));
+  }
+});
+
+/**
+ * A message parked on the previous stage's agent survives send-back and
+ * is carried by the destination agent once the person starts that
+ * conversation, not by an automatic follow-up of the stopped run.
+ */
+test("parked messages survive send-back and reach the new agent", { timeout: 60_000 }, async () => {
+  const { project, stages } = await setupProject("Send-back parked");
+  const reviewer = await fakeProfile("sendback-parked-review");
+  const qa = await fakeProfile("sendback-parked-qa");
+  const review = stages[1]!;
+  const quality = stages[2]!;
+  await patchStage(review.id, { defaultAgentProfileId: reviewer.id });
+  await patchStage(quality.id, { defaultAgentProfileId: qa.id });
+
+  const feature = await createFeature(project.id, "Parked after send-back");
+  await ctx.db
+    .update(features)
+    .set({ currentStageId: quality.id, status: "active", updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  const [live] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: quality.id,
+      agentProfileId: qa.id,
+      prompt: "verify the work",
+      status: "running",
+      executor: "runner",
+      cliSessionId: "qa-sess",
+    })
+    .returning({ id: agentRuns.id });
+  await ctx.db.insert(featureMessages).values({
+    featureId: feature.id,
+    text: "the tests fail on empty input",
+  });
+
+  assert.equal((await app.request(`/api/features/${feature.id}/back`, { method: "POST" })).status, 200);
+
+  const parked = await ctx.db.select().from(featureMessages).where(eq(featureMessages.featureId, feature.id));
+  assert.equal(parked.length, 1);
+  assert.equal(parked[0]?.status, "queued", "send-back leaves the parked message for the next conversation");
+
+  // The stopped run's terminal path must not auto-start the destination
+  // with that parked text: that would skip the person saying why.
+  await deliverQueuedMessage(ctx, live!.id);
+  const afterDeliver = await json<{
+    currentStageId: string;
+    runs: { id: string; status: string; agentProfileId: string; stageId: string }[];
+  }>(await app.request(`/api/features/${feature.id}`));
+  assert.equal(afterDeliver.runs.find((r) => r.id === live!.id)?.status, "cancelled");
+  assert.equal(afterDeliver.runs.length, 1, "ending the previous run does not start the destination agent");
+  assert.equal(afterDeliver.currentStageId, review.id);
+
+  const reply = await json<{ queued: boolean; run?: { id: string; prompt: string } }>(
+    await app.request(`/api/features/${feature.id}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "add a null check like the review asked" }),
+    }),
+  );
+  assert.ok(reply.run, "the person's next message starts the destination conversation");
+  const [started] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, reply.run!.id));
+  assert.equal(started?.agentProfileId, reviewer.id, "the Code review agent answers, not QA");
+  assert.equal(started?.stageId, review.id);
+  assert.equal(started?.cliSessionId, null, "a different agent starts a fresh session");
+  assert.match(started?.prompt ?? "", /the tests fail on empty input/);
+  assert.match(started?.prompt ?? "", /add a null check like the review asked/);
 });
 
 /**
@@ -2580,25 +2714,6 @@ async function runByProfile(featureId: string, profileId: string, timeoutMs = 45
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`no run by profile ${profileId} appeared within ${timeoutMs}ms`);
-}
-
-/** Like runByProfile, but ignores a run that already existed. */
-async function runByProfileAfter(
-  featureId: string,
-  profileId: string,
-  afterRunId: string,
-  timeoutMs = 45_000,
-) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const detail = await json<{ runs: { id: string; agentProfileId: string; stageId: string }[] }>(
-      await app.request(`/api/features/${featureId}`),
-    );
-    const found = detail.runs.find((r) => r.agentProfileId === profileId && r.id !== afterRunId);
-    if (found) return found;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(`no new run by profile ${profileId} appeared within ${timeoutMs}ms`);
 }
 
 test("a finished run can be resumed in the same CLI session", { timeout: 90_000 }, async () => {

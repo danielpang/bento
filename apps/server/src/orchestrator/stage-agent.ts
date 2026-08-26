@@ -72,13 +72,14 @@ export async function startAssignedStageAgent(
  * Stops agents still working a different stage of this card.
  *
  * Send-back has to actually switch: leaving the previous stage's agent
- * running keeps the card busy, so the destination agent never starts
- * and follow-ups still land in the old conversation. Runs already on
- * the stage being entered are left alone. Keep-stage null means the
- * backlog, so every working run stops.
+ * running keeps the card busy, so a follow-up still lands in the old
+ * conversation and the person cannot start the destination one. Runs
+ * already on the stage being entered are left alone. Keep-stage null
+ * means the backlog, so every working run stops.
  *
  * Does not deliver parked messages as a resume of the stopped agent.
- * Those wait for the destination stage's run, which is the point.
+ * Those wait for the person to start the destination conversation,
+ * which is how they say why the card came back.
  */
 export async function stopRunsOutsideStage(
   ctx: AppContext,
@@ -89,6 +90,12 @@ export async function stopRunsOutsideStage(
     .select()
     .from(agentRuns)
     .where(and(eq(agentRuns.featureId, feature.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+  /**
+   * Billing and analytics: the same announcement a person-stopped run
+   * gets. Imported here so this file does not close a cycle with
+   * run-executor, which already imports resolveFollowUpRun from here.
+   */
+  const { captureRunFinished } = active.length > 0 ? await import("./run-executor.js") : { captureRunFinished: null };
   for (const run of active) {
     if (keepStageId && run.stageId === keepStageId) continue;
     ctx.running.get(run.id)?.abort();
@@ -98,6 +105,13 @@ export async function stopRunsOutsideStage(
       .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
       .returning({ id: agentRuns.id });
     if (!closed) continue;
+    const announce = ctx.entitlements?.onRunFinished;
+    if (announce) {
+      void announce(run.id).catch((err: unknown) => {
+        console.warn(`could not record what run ${run.id} cost:`, err);
+      });
+    }
+    if (captureRunFinished) await captureRunFinished(ctx, run.id, "cancelled");
     ctx.bus.emitRunDone(run.id, "cancelled");
     ctx.bus.emitBoardEvent({
       type: "run_updated",

@@ -1037,6 +1037,17 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   }
 
   /**
+   * A send-back moved the card while this run was ending. Parked
+   * messages wait for the person to start the destination conversation,
+   * rather than auto-starting the new stage's agent with no explanation
+   * of the redo. The composer claims them when that message is sent.
+   */
+  if (run.stageId !== feature.currentStageId) {
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
+
+  /**
    * A judge's end can be what frees the card, but the judge is not the
    * conversation: inheriting its profile and session had the reviewer
    * answering the user's follow-up inside the judging session. The

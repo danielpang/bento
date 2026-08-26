@@ -680,9 +680,9 @@ export function featureRoutes(ctx: AppContext) {
     /**
      * Puts the card in any stage of its pipeline, or the backlog. This
      * is what dragging a card between lanes calls: forward behaves like
-     * advance, backward like send-back (the destination stage's agent
-     * starts), and neither records an approval, because rearranging
-     * the board is not a verdict.
+     * advance, backward like send-back (the previous agent stops, the
+     * destination waits for a conversation), and neither records an
+     * approval, because rearranging the board is not a verdict.
      */
     .post(
       "/:id/move",

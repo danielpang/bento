@@ -23,7 +23,15 @@ import type {
 const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
-import { actorDisplayName, historyTriggerLabel, isSpendRun, spendCoverageNote, type AgentEvent } from "@bento/core";
+import {
+  actorDisplayName,
+  historyTriggerLabel,
+  isSpendRun,
+  needsSendBackPrompt,
+  SEND_BACK_NOTICE,
+  spendCoverageNote,
+  type AgentEvent,
+} from "@bento/core";
 import { deleteConsequences } from "./delete-consequences.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
@@ -127,6 +135,14 @@ export function FeatureDrawer({
    * are still a guess.
    */
   const detailsPending = loadedId !== feature.id && !loadFailed;
+  const showSendBackNotice =
+    !detailsPending &&
+    needsSendBackPrompt({
+      status: feature.status,
+      currentStageId: feature.currentStageId,
+      history,
+      runs,
+    });
 
   useEffect(() => {
     setRuns([]);
@@ -338,6 +354,11 @@ export function FeatureDrawer({
         {loadFailed && (
           <p className="error" role="alert">
             Could not load this card's details. Check the connection and reopen the card.
+          </p>
+        )}
+        {showSendBackNotice && (
+          <p className="card-notice" role="status">
+            {SEND_BACK_NOTICE}
           </p>
         )}
         <section className="section">

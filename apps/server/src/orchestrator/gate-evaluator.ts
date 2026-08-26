@@ -438,9 +438,11 @@ export async function advanceFeature(
  *   Dropping a card in a lane and watching nothing happen would be the
  *   silent failure this board keeps fighting.
  * - Backward is what send-back means: the work is being redone, so the
- *   checks of the stage being left are discarded and that stage's
- *   agent starts, not the one that just ran. A drag is not an approval
- *   either way, so no approval is recorded.
+ *   checks of the stage being left are discarded and any agent still
+ *   working the previous stage is stopped. The destination agent does
+ *   not start on its own: the person starts a conversation to say why
+ *   the card came back. A drag is not an approval either way, so no
+ *   approval is recorded.
  *
  * Returns null when the card moved under the caller, or the target is
  * not a stage of this card's pipeline.
@@ -521,12 +523,13 @@ export async function moveFeatureTo(
     if (!forward) await stopRunsOutsideStage(ctx, feature, target.id);
     if (forward && !target.defaultAgentProfileId) {
       await ctx.boss.send("gate.evaluate", { featureId: feature.id });
-    } else {
-      // Arriving at a stage starts its agent, whether the card came
-      // forward or was sent back. A drag during a run on the same
-      // stage starts nothing extra: that run's finish queues the
-      // evaluation. A send-back stops the previous stage's agent
-      // first, so the destination is not left busy with the wrong one.
+    } else if (forward) {
+      // Forward arrives ready for the stage, so its agent starts, the
+      // same as advance. A drag during a run on the same stage starts
+      // nothing extra: that run's finish queues the evaluation.
+      // Backward stops the previous agent and waits: auto-starting
+      // here would bounce an automatic destination straight forward
+      // again, and would start work with no explanation of the redo.
       await startAssignedStageAgent(ctx, feature, target);
     }
   } else if (!forward) {
@@ -691,9 +694,11 @@ export async function reopenFeature(
  * Sends a card to the previous stage, or back to the backlog from the
  * first one.
  *
- * Gate checks for the stage being left are discarded, and the
- * destination stage's assigned agent starts: the work is being redone
- * by that stage's agent, not the one that just ran.
+ * Gate checks for the stage being left are discarded, and any agent
+ * still working a different stage is stopped. A person sending the
+ * card back starts nothing: they start a conversation to say why.
+ * A gate sending it back starts the previous stage's agent, which is
+ * the retry that gate is asking for.
  */
 export async function moveFeatureBack(
   ctx: AppContext,
@@ -748,7 +753,7 @@ export async function moveFeatureBack(
 
   if (previousStage) {
     await stopRunsOutsideStage(ctx, feature, previousStage.id);
-    await startAssignedStageAgent(ctx, feature, previousStage);
+    if (trigger === "gate_auto") await startAssignedStageAgent(ctx, feature, previousStage);
   } else {
     await stopRunsOutsideStage(ctx, feature, null);
   }
