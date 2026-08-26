@@ -68,7 +68,7 @@ createServer(async (request, response) => {
   }) + "\\n");
   response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
   if (Array.isArray(body.tools) && !hasToolResult) {
-    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "printf verified > /workspace/dsh-e2e-marker", description: "verify local tools" }) } }] }, finish_reason: null }] }) + "\\n\\n");
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo verified > /workspace/dsh-e2e-marker", description: "verify local tools" }) } }] }, finish_reason: null }] }) + "\\n\\n");
     response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }) + "\\n\\n");
   } else {
     const content = Array.isArray(body.tools) ? "sprite dsh complete" : "title";
@@ -235,12 +235,14 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.equal(ran.exitCode, 0, ran.stderr || ran.stdout);
     assert.equal(ran.out, "sprite dsh complete");
 
-    const evidence = await shell("cat /workspace/dsh-e2e-marker; cat /tmp/bento-dsh-requests");
-    assert.equal(evidence.exitCode, 0, evidence.stderr);
-    assert.match(evidence.out, /^verified$/m, "dsh did not execute its local bash tool");
-    assert.match(evidence.out, /\"authorization\":\"Bearer mock-key\"/);
-    assert.match(evidence.out, /\"model\":\"deepseek-v4-pro\"/);
-    assert.match(evidence.out, /\"hasToolResult\":true/);
+    const marker = await shell("cat /workspace/dsh-e2e-marker");
+    assert.equal(marker.exitCode, 0, marker.stderr);
+    assert.equal(marker.out, "verified", "dsh did not execute its local bash tool");
+    const requests = await shell("cat /tmp/bento-dsh-requests");
+    assert.equal(requests.exitCode, 0, requests.stderr);
+    assert.match(requests.out, /\"authorization\":\"Bearer mock-key\"/);
+    assert.match(requests.out, /\"model\":\"deepseek-v4-pro\"/);
+    assert.match(requests.out, /\"hasToolResult\":true/);
     await shell("rm -f /workspace/dsh-e2e-marker /tmp/bento-dsh-*");
   });
 
