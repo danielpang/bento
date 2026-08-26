@@ -65,7 +65,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "DEEPSEEK_API_KEY",
     label: "DeepSeek",
-    help: "Used by opencode and pi when running DeepSeek models against DeepSeek's own API. Create one in the DeepSeek platform console.",
+    help: "Used by DeepSeek Harness, opencode, and pi when running DeepSeek models against DeepSeek's own API. Create one in the DeepSeek platform console.",
     secret: true,
   },
   {
@@ -84,6 +84,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     name: "OPENAI_BASE_URL",
     label: "OpenAI base URL",
     help: "Point Codex somewhere else, for example https://openrouter.ai/api/v1.",
+    secret: false,
+  },
+  {
+    name: "DEEPSEEK_BASE_URL",
+    label: "DeepSeek base URL",
+    help: "Point DeepSeek Harness at a compatible DeepSeek endpoint instead of the default API.",
     secret: false,
   },
 ];
@@ -109,6 +115,8 @@ export interface ModelGuidance {
   format: string;
   /** Illustrative, not exhaustive. Confirm ids with your provider. */
   examples: readonly string[];
+  /** Whether the CLI takes the provider's bare model id. */
+  bareModelId: boolean;
   /**
    * The executable a sandbox needs for this tool. Used to tell someone
    * choosing a tool whether their machine can actually run it, which is
@@ -128,6 +136,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     defaultModel: "claude-sonnet-5",
     format: "A model id. Route through OpenRouter by also setting ANTHROPIC_BASE_URL.",
     examples: ["claude-sonnet-5", "claude-opus-5"],
+    bareModelId: true,
     binary: "claude",
     installUrl: "https://docs.claude.com/en/docs/claude-code/setup",
     installCommand: "curl -fsSL https://claude.ai/install.sh | bash",
@@ -138,6 +147,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     defaultModel: "gpt-5-codex",
     format: "A model id. Route through OpenRouter by also setting OPENAI_BASE_URL.",
     examples: ["gpt-5-codex", "gpt-5"],
+    bareModelId: true,
     binary: "codex",
     installUrl: "https://github.com/openai/codex",
     installCommand: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
@@ -149,6 +159,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     format:
       "A model id supported by your Cursor plan. Cursor bills all of them, so Composer and Grok need no key of their own.",
     examples: ["claude-sonnet-5", "composer-2.5", "grok-4.6", "auto"],
+    bareModelId: true,
     binary: "cursor-agent",
     installUrl: "https://cursor.com/cli",
     installCommand: "curl -fsS https://cursor.com/install | bash",
@@ -160,6 +171,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     format:
       "provider/model. Prefix with openrouter/ to route through OpenRouter, or use openrouter/openrouter/auto to let it pick per request.",
     examples: ["anthropic/claude-sonnet-5", "openrouter/z-ai/glm-4.6", "openrouter/openrouter/auto"],
+    bareModelId: false,
     binary: "opencode",
     installUrl: "https://opencode.ai/docs/",
     installCommand: "curl -fsSL https://opencode.ai/install | bash",
@@ -171,6 +183,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     format:
       "provider/model, optionally with :thinking. Prefix with openrouter/ for OpenRouter, or use openrouter/openrouter/auto to let it pick per request.",
     examples: ["anthropic/claude-sonnet-5", "openrouter/z-ai/glm-4.6", "openrouter/openrouter/auto"],
+    bareModelId: false,
     binary: "pi",
     installUrl: "https://github.com/earendil-works/pi",
     installCommand: "npm install -g @earendil-works/pi-coding-agent",
@@ -182,9 +195,21 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     format:
       "A model id served by Poolside Platform, vendor prefix included. Route through OpenRouter instead by choosing pi or opencode as the tool.",
     examples: ["poolside/laguna-s-2.1"],
+    bareModelId: true,
     binary: "pool",
     installUrl: "https://docs.poolside.ai/cli/install",
     installCommand: "curl -fsSL https://downloads.poolside.ai/pool/install.sh | sh",
+  },
+  {
+    cli: "dsh",
+    label: "DeepSeek Harness",
+    defaultModel: "deepseek-v4-pro",
+    format: "A bare DeepSeek model id, without a provider prefix.",
+    examples: ["deepseek-v4-pro", "deepseek-v4-flash"],
+    bareModelId: true,
+    binary: "dsh",
+    installUrl: "https://www.npmjs.com/package/@deepseek-ai/dsh",
+    installCommand: "npm install -g @deepseek-ai/dsh@0.1.1-rc.2",
   },
   {
     cli: "fake",
@@ -192,6 +217,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     defaultModel: "fake-1",
     format: "Any value; the fake agent ignores it.",
     examples: ["fake-1"],
+    bareModelId: true,
     binary: "sh",
     installUrl: "https://github.com/",
     installCommand: "true",

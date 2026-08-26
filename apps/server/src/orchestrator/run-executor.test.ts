@@ -1,18 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { agentRunPrompt } from "@bento/core";
-import { mergeAgentExecEnv, poolFailureAdvice, runnerReportedError } from "./run-executor.js";
+import { dshFailureAdvice, mergeAgentExecEnv, poolFailureAdvice, runnerReportedError } from "./run-executor.js";
 
-test("pool follow-ups retain stage context whether sent idle or queued", () => {
-  for (const followUp of ["Please also add a test.", "Use the smaller implementation."]) {
-    const prompt = agentRunPrompt({
-      cli: "pool",
-      followUp,
-      stagePrompt: "Implement the feature from the card.",
-      resume: true,
-    });
-    assert.match(prompt, /^Implement the feature from the card\./);
-    assert.match(prompt, new RegExp(`${followUp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+test("tools without session ids retain stage context whether sent idle or queued", () => {
+  for (const cli of ["pool", "dsh"]) {
+    for (const followUp of ["Please also add a test.", "Use the smaller implementation."]) {
+      const prompt = agentRunPrompt({
+        cli,
+        followUp,
+        stagePrompt: "Implement the feature from the card.",
+        resume: true,
+      });
+      assert.match(prompt, /^Implement the feature from the card\./);
+      assert.match(prompt, new RegExp(`${followUp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+    }
   }
   assert.equal(
     agentRunPrompt({ cli: "codex", followUp: "Please add a test.", stagePrompt: "Stage context", resume: true }),
@@ -110,4 +112,18 @@ test("a runner-reported failure from another tool is not given pool advice", () 
 
 test("a runner report with no error stays empty", () => {
   assert.equal(runnerReportedError("pool", undefined), null);
+});
+
+test("DeepSeek Harness failures name the setting that fixes them", () => {
+  assert.match(dshFailureAdvice("401 Unauthorized: invalid API key") ?? "", /Replace DEEPSEEK_API_KEY/);
+  assert.match(dshFailureAdvice("model `deepseek-v4-pro` not found") ?? "", /Change the model/);
+  assert.match(dshFailureAdvice("Node 22.14 is too old, requires Node 22.19") ?? "", /Node 22\.19/);
+  assert.match(dshFailureAdvice("EACCES: permission denied, open dsh-home") ?? "", /profile directory/);
+  assert.match(dshFailureAdvice("dsh finished without readable output") ?? "", /developer preview/);
+  assert.equal(dshFailureAdvice("the task failed for a project-specific reason"), null);
+});
+
+test("runner-reported dsh failures receive Harness advice", () => {
+  const reported = runnerReportedError("dsh", "401 Unauthorized: invalid API key");
+  assert.match(reported ?? "", /Replace DEEPSEEK_API_KEY/);
 });

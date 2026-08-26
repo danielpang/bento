@@ -2912,6 +2912,12 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   const wide = await post({ name: "gpt on opencode", cli: "opencode", model: "openai/gpt-5-pro" });
   assert.equal(wide.status, 201, "opencode names its provider, so it reaches OpenAI");
 
+  const harness = await post({ name: "DeepSeek harness", cli: "dsh", model: "deepseek-v4-pro" });
+  assert.equal(harness.status, 201, "DeepSeek Harness accepts its bare model id");
+  const prefixedHarness = await post({ name: "prefixed harness", cli: "dsh", model: "deepseek/deepseek-v4-pro" });
+  assert.equal(prefixedHarness.status, 400, "DeepSeek Harness cannot accept provider-prefixed model ids");
+  assert.match(((await prefixedHarness.json()) as { error: string }).error, /bare model id/);
+
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
   const unknown = await post({ name: "next week's model", cli: "claude-code", model: "claude-opus-9" });

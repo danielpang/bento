@@ -9,15 +9,15 @@
  * on whatever version happened to be baked in, and every Go project
  * start by fighting it.
  *
- * Five of the six CLIs ship standalone binaries, so they carry no
- * runtime of their own. pi is published only on npm, so it gets a
- * private Node under /opt/bento that runs pi and nothing else: it is
+ * Five of the seven CLIs ship standalone binaries, so they carry no
+ * runtime of their own. pi and dsh are published only on npm, so they get a
+ * private Node under /opt/bento that runs them and nothing else: it is
  * never placed on the PATH an agent's shell sees, so `node` in a
  * workspace still means "the one this repository installed".
  */
 
 /** Binaries this script is responsible for putting on the PATH. */
-export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"] as const;
+export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"] as const;
 
 /**
  * Bumped whenever the script changes what it installs, or when the
@@ -72,8 +72,9 @@ export const TOOLCHAIN_MARKER = `/opt/bento/toolchain-v${TOOLCHAIN_VERSION}`;
  */
 export const TOOLCHAIN_MISSING_PREFIX = "bento-toolchain-missing:";
 
-/** Node used only to run pi. Off the agent's PATH on purpose. */
-const NODE_VERSION = "22.14.0";
+/** Node used only to run npm-distributed agents. Off the agent's PATH on purpose. */
+const NODE_VERSION = "22.22.2";
+const DSH_VERSION = "0.1.1-rc.2";
 
 /**
  * Idempotent, and safe to run on every provision: a sandbox that already
@@ -114,7 +115,7 @@ publish() {
 }
 
 # What a run can actually spawn decides the work, not the marker alone.
-# With the marker there this is six builtin lookups and no network,
+# With the marker there this is seven builtin lookups and no network,
 # which is what makes the common case free; without it the whole set is
 # installed, because a version bump means the commands Bento builds now
 # want newer CLIs than the ones already here.
@@ -259,27 +260,66 @@ if wanted pool; then
   POOL_INSTALL_ACCEPT_EULA=1 install_from pool https://downloads.poolside.ai/pool/install.sh sh || true
 fi
 
-# pi is npm only, so it gets its own Node. /opt/bento/node/bin is never
-# added to PATH: the shim below puts it there for pi's process alone, so
-# a repository that wants Node still has to install one.
-if wanted pi; then
-  if [ ! -x /opt/bento/node/bin/node ]; then
-    arch=$(uname -m)
-    case "$arch" in
-      x86_64|amd64) node_arch=x64 ;;
-      aarch64|arm64) node_arch=arm64 ;;
-      *) node_arch="" ;;
-    esac
-    if [ -n "$node_arch" ]; then
-      tarball="node-v${NODE_VERSION}-linux-$node_arch.tar.xz"
-      if curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$tarball" -o /tmp/node.tar.xz; then
-        mkdir -p /opt/bento/node
-        tar -xJf /tmp/node.tar.xz -C /opt/bento/node --strip-components=1
-        rm -f /tmp/node.tar.xz
-      fi
+# pi and dsh are npm only, so they share a private Node. An exact version
+# check upgrades warm machines in place when a newly added npm CLI needs a
+# newer runtime. The old runtime stays usable if the download or unpack fails.
+ensure_node() {
+  if [ -x /opt/bento/node/bin/node ] &&
+     [ "$(/opt/bento/node/bin/node --version 2>/dev/null || true)" = "v${NODE_VERSION}" ]; then
+    return 0
+  fi
+  case "$(uname -m)" in
+    x86_64|amd64) node_arch=x64 ;;
+    aarch64|arm64) node_arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  tarball="node-v${NODE_VERSION}-linux-$node_arch.tar.xz"
+  rm -rf /opt/bento/node-next
+  if curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$tarball" -o /tmp/node.tar.xz; then
+    mkdir -p /opt/bento/node-next
+    if tar -xJf /tmp/node.tar.xz -C /opt/bento/node-next --strip-components=1; then
+      rm -rf /opt/bento/node
+      mv /opt/bento/node-next /opt/bento/node
     fi
   fi
-  if [ -x /opt/bento/node/bin/node ]; then
+  rm -rf /opt/bento/node-next
+  rm -f /tmp/node.tar.xz
+  [ -x /opt/bento/node/bin/node ] &&
+    [ "$(/opt/bento/node/bin/node --version 2>/dev/null || true)" = "v${NODE_VERSION}" ]
+}
+
+# /opt/bento/node/bin is never added to the workspace PATH. Each shim adds it
+# only to its agent process, so a repository that wants Node still installs one.
+if wanted dsh; then
+  if ensure_node; then
+    PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/dsh \\
+      @deepseek-ai/dsh@${DSH_VERSION} >/dev/null 2>&1 || echo "bento: dsh install failed" >&2
+    if [ -x /opt/bento/dsh/bin/dsh ]; then
+      mkdir -p /opt/bento/dsh-home
+      cat > /opt/bento/dsh-home/cordis.patch.yml <<'BENTO_DSH_PROFILE'
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: !!js process.env.DSH_MODEL
+- id: tool-web
+  disabled: true
+BENTO_DSH_PROFILE
+      printf '#!/bin/sh\\nPATH=/opt/bento/node/bin:$PATH\\nexport PATH\\nDSH_HOME=\${DSH_HOME:-/opt/bento/dsh-home}\\nexport DSH_HOME\\nexec /opt/bento/dsh/bin/dsh "$@"\\n' \\
+        > /usr/local/bin/dsh
+      chmod +x /usr/local/bin/dsh
+      if ! DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \\
+        /usr/local/bin/dsh --profile headless --dump-config >/dev/null 2>&1; then
+        rm -f /usr/local/bin/dsh
+        echo "bento: dsh profile initialization failed" >&2
+      fi
+    fi
+  else
+    echo "bento: dsh install failed, no private Node" >&2
+  fi
+fi
+
+if wanted pi; then
+  if ensure_node; then
     PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/pi \\
       @earendil-works/pi-coding-agent >/dev/null 2>&1 || echo "bento: pi install failed" >&2
     if [ -x /opt/bento/pi/bin/pi ]; then

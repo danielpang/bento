@@ -89,7 +89,7 @@ const GITHUB_CREDENTIAL = AGENT_CREDENTIALS.find((credential) => credential.name
 const REMOVABLE = new Set(["repos", "agents", "criteria", "keys", "github", "stages"]);
 
 /** The key whose presence means a provider is paid for, per provider. */
-const PROVIDER_KEYS = [
+export const PROVIDER_KEYS = [
   { label: "Anthropic", name: "ANTHROPIC_API_KEY" },
   { label: "OpenAI", name: "OPENAI_API_KEY" },
   { label: "OpenRouter", name: "OPENROUTER_API_KEY" },

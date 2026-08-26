@@ -10,10 +10,11 @@ Every stage of a pipeline runs one of these tools, paired with a model, as an ag
 | Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY`, whichever model it runs | Between runs: delivered when the run ends | No |
 | opencode | `anthropic/claude-sonnet-5` | Whichever provider key the model needs | Between runs: delivered when the run ends | No |
 | Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs: delivered when the run ends, as a new run | No |
+| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | Between runs: delivered when the run ends, as a new run | No |
 
 Keys are stored encrypted, per organization in multi mode and locally in local mode, through the web console, `bento setup`, or the Mac app. To route Claude Code or Codex through OpenRouter, save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
 
-**DeepSeek models.** Available today through pi or opencode. Save `DEEPSEEK_API_KEY` and choose the DeepSeek provider for a native key and a native bill, or keep using `openrouter/deepseek/...` if you would rather bill OpenRouter. DeepSeek Harness (`dsh`), the agent runtime, is a separate thing and is not a tool Bento can run yet. See [the investigation](./bento/product-investigation.md) for why.
+**DeepSeek models.** Use pi or opencode for streamed DeepSeek runs. Save `DEEPSEEK_API_KEY` and choose the DeepSeek provider for a native key and bill, or use `openrouter/deepseek/...` to bill OpenRouter. DeepSeek Harness (`dsh`) is also available as an experimental, one-shot tool with the limitations below.
 
 The named agents also read and write as a YAML file, from **Agents** or **Settings, Config**, and from `bento agents export` / `bento agents import`. Details: [pipeline.md](./pipeline.md#the-agents-file).
 
@@ -24,7 +25,7 @@ You can always type into a card's composer, whatever the agent is doing. What ha
 - **pi** holds a live session and *steers*: your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan first. On a manual stage, the session stays open after a turn so you can keep talking without starting a new run.
 - **Claude Code** holds a live session and *queues in conversation*: your message is read after the current step, in the same session, with everything the agent has already seen. On a manual stage, the session stays open after a turn the same way.
 - **Codex, Cursor, and opencode** take messages *between runs*: yours is delivered the moment the current run ends, as a resume of the same session, so no context is lost.
-- **pool** takes messages between runs too, but starts a fresh run rather than resuming: `pool exec` prints no run id, so there is nothing to resume by. The new run carries the whole stage prompt and a compacted transcript of the previous conversation, so the agent is not working blind.
+- **pool and DeepSeek Harness** take messages between runs too, but start fresh runs rather than resuming because neither prints a usable session id. The new run carries the whole stage prompt and a compacted transcript of the previous conversation, so the agent is not working blind.
 
 If a resumed session is gone (the sandbox was recreated, or the CLI no longer holds that conversation), Bento starts a fresh run with the same instructions plus a compacted transcript of what was said, rather than looping on the dead session id.
 
@@ -85,3 +86,9 @@ Two details are specific to this tool:
 - **A card's later messages start new runs.** See above: the CLI keeps a run id but never prints one.
 
 To run Laguna weights through OpenRouter instead, which is a different endpoint and a different bill, choose pi or opencode with a model such as `openrouter/poolside/laguna-s-2.1`. That path is unchanged and needs only the OpenRouter key. Does not report cost.
+
+### DeepSeek Harness (dsh)
+
+DeepSeek's developer-preview agent runtime. Bento pins `@deepseek-ai/dsh@0.1.1-rc.2`, runs its headless profile inside Bento's existing sandbox, and selects a bare model id such as `deepseek-v4-pro` per run. It uses `DEEPSEEK_API_KEY`; `DEEPSEEK_BASE_URL` can point it at a compatible endpoint.
+
+Headless Harness prints only its final assistant message. The card therefore shows an explicit quiet-run state and elapsed time until the process exits, then displays that final message as one bubble. There are no streamed tool or thinking events. It also exposes no session id, so later messages start new runs with a compacted transcript. Use **Files changed** as the primary evidence of what a Harness run did. These limits and upstream's unstable interface are why the tool is marked preview.

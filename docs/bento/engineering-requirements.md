@@ -50,6 +50,20 @@ follow up surface. The model comes from profile configuration
 (`cordis.patch.yml` layers, with a `--patch` overlay flag), not from a
 CLI flag. Package `@deepseek-ai/dsh` on npm, Node `^22.19 || >=24`.
 
+Implementation spike result (2026-08-26): S1 and S2 passed against the
+published `@deepseek-ai/dsh@0.1.1-rc.2` package and an OpenAI-compatible
+mock endpoint. A `cordis.patch.yml` layer selects `deepseek-official` and
+reads the per-run model from `DSH_MODEL`; `DEEPSEEK_API_KEY` and optional
+`DEEPSEEK_BASE_URL` are read by that provider. The headless bundle uses
+local subprocess, bash, and filesystem plugins and has no E2B dependency.
+`DSH_TOOLS_MODE=native` plus `DSH_PERMISSION_MODE=danger-full-access`
+turns off its nested confinement, making Bento's Docker or Sprite sandbox
+the sole boundary, which is the same trust model as the existing agents.
+The web-search plugin is disabled in the shipped overlay. A real keyed
+DeepSeek request was not possible in this environment, so model selection,
+HTTP shape, local tool execution, stdout, and exit behavior were verified
+against the mock rather than the production service.
+
 ---
 
 ## Part 1: DeepSeek as a provider (build now)

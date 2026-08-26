@@ -50,7 +50,7 @@ const runTag = process.env.GITHUB_RUN_ID
   : `local-${Date.now()}`;
 const featureId = `e2e-${runTag}`;
 
-/** Long: a cold sprite installs five CLIs and a private Node. */
+/** Long: a cold sprite installs seven CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
 
 test("a real sprite ends up with every agent CLI, and heals when one goes missing", { skip }, async (t) => {
@@ -123,7 +123,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * wherever it was expected to be.
    *
    * The first version listed the directories the installers use and
-   * deleted from those. It missed three of the five: the sprite's HOME
+    * deleted from those. It missed three of the original five: the sprite's HOME
    * is not /root, so the binaries publish() links from sit somewhere
    * the list never named, and that directory is on the PATH in its own
    * right, so deleting the symlink in /usr/local/bin left the CLI
@@ -339,7 +339,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    *
    * So the question is asked of the machine rather than of the source.
    * With that one host unreachable, and the CLIs and the marker gone,
-   * a provision must still put all five back. A failure here does not
+   * a provision must still put the full set back. A failure here does not
    * mean this repository broke something. It means the CLI it names is
    * one busy hour away from being uninstallable, and wants the same
    * treatment opencode got: fetch the release, do not ask which one.

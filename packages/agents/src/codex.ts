@@ -16,6 +16,7 @@ interface CodexLine {
  */
 export const codexAdapter: AgentAdapter = {
   cli: "codex",
+  stdoutMode: "events",
   requiredEnv: ["OPENAI_API_KEY"],
   optionalEnv: ["OPENAI_BASE_URL"],
   configPaths: [".codex"],

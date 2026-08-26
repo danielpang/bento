@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from "react";
+import { forgetsBetweenRuns, reportsCost } from "@bento/core";
 
 /**
  * Escape closes the drawer, matching the Modal's behavior. The drawers
@@ -114,17 +115,20 @@ export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   "claude-code": "queue",
 };
 
-/**
- * Tools whose next run cannot continue the last one, so the composer
- * must not promise that it will.
- *
- * Every other tool prints a session id that Bento stores and resumes,
- * which is what makes "continuing the same conversation" true. pool
- * prints none: `pool exec` keeps a run id on disk and resumes it with
- * --continue, but nothing in its output says what that id is, so a
- * message here starts a fresh run with the whole stage prompt and a
- * compacted transcript of the previous conversation instead.
- */
-export const FORGETS_BETWEEN_RUNS: Record<string, true | undefined> = {
-  pool: true,
-};
+/** Tools that produce only one final message after the process exits. */
+export const NO_LIVE_TRANSCRIPT: Record<string, true | undefined> = { dsh: true };
+
+/** Tools whose upstream interface is explicitly unstable. */
+export const PREVIEW_TOOLS: Record<string, true | undefined> = { dsh: true };
+
+export function toolCapability(cli: string): string {
+  const output = NO_LIVE_TRANSCRIPT[cli] ? "Prints nothing until the run ends." : "Streams as it works.";
+  const delivery = LIVE_TOOLS[cli]
+    ? LIVE_TOOLS[cli] === "steer"
+      ? "Messages steer it while it works."
+      : "Messages queue behind the current step, in the same conversation."
+    : forgetsBetweenRuns(cli)
+      ? "Messages are delivered when the run ends, as a new run."
+      : "Messages are delivered when the run ends, resuming the same session.";
+  return `${output} ${delivery} ${reportsCost(cli) ? "Reports what a run cost." : "Cost is not reported."}`;
+}

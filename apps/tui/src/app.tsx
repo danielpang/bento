@@ -10,7 +10,7 @@ import {
   type GateState,
   type Stage,
 } from "@bento/api-client";
-import { actorDisplayName, historyTriggerLabel } from "@bento/core";
+import { actorDisplayName, forgetsBetweenRuns, historyTriggerLabel } from "@bento/core";
 import { Board, orderFeatures, statusColor } from "./components/Board.js";
 import { describeCriterion } from "./criteria.js";
 import { Login } from "./components/Login.js";
@@ -186,7 +186,7 @@ export function takeoverTitle(cli: string | undefined, active: boolean, name: st
     case "queue":
       return `${name} is working. Your message is read after the current step, in the same conversation.`;
     default:
-      return cli === "pool"
+      return forgetsBetweenRuns(cli ?? "")
         ? `${name} is working. Your message is delivered the moment this run ends, as a new run with a compacted transcript of this conversation.`
         : `${name} is working. Your message is delivered the moment this run ends, as a resume of the same session.`;
   }

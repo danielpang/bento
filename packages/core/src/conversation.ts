@@ -35,7 +35,7 @@ export interface AgentRunPromptInput {
  * history rather than the user's latest line alone.
  */
 export function forgetsBetweenRuns(cli: string): boolean {
-  return cli === "pool";
+  return cli === "pool" || cli === "dsh";
 }
 
 /**

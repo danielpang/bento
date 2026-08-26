@@ -51,6 +51,7 @@ interface PoolLine {
  */
 export const poolAdapter: AgentAdapter = {
   cli: "pool",
+  stdoutMode: "events",
   requiredEnv: ["POOLSIDE_API_KEY"],
   // Any OpenAI-compatible endpoint: a self managed Poolside
   // deployment, a gateway, or another provider entirely. Unset means

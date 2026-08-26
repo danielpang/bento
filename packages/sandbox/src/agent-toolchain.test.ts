@@ -10,6 +10,7 @@ import {
   AGENT_BINARIES,
   AGENT_TOOLCHAIN_SCRIPT,
   TOOLCHAIN_MARKER,
+  TOOLCHAIN_VERSION,
   toolchainMissing,
 } from "./agent-toolchain.js";
 
@@ -52,6 +53,52 @@ test("the toolchain installs git and keeps its private Node off the PATH", () =>
     );
   }
   assert.doesNotMatch(AGENT_TOOLCHAIN_SCRIPT, /export PATH=.*opt\/bento\/node/);
+});
+
+test("dsh is pinned, configured, and initialized for headless sandbox use", async () => {
+  assert.equal(TOOLCHAIN_VERSION, 3, "adding dsh must not stampede warm machines with a version bump");
+  assert.match(AGENT_TOOLCHAIN_SCRIPT, /@deepseek-ai\/dsh@0\.1\.1-rc\.2/);
+
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-dsh-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.equal(
+      readFileSync(path.join(root, "opt/bento/dsh-home/cordis.patch.yml"), "utf8"),
+      `- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: !!js process.env.DSH_MODEL
+- id: tool-web
+  disabled: true
+`,
+    );
+    assert.match(readFileSync(path.join(root, "npm-installs"), "utf8"), /^@deepseek-ai\/dsh@0\.1\.1-rc\.2$/m);
+    assert.equal(
+      readFileSync(path.join(root, "dsh-runs"), "utf8").trim(),
+      "deepseek-v4-pro|danger-full-access|1|--profile headless --dump-config",
+    );
+
+    const image = await readFile(dockerfile, "utf8");
+    for (const required of [
+      "BENTO_NODE_VERSION=22.22.2",
+      "@deepseek-ai/dsh@0.1.1-rc.2",
+      "exec /opt/bento/dsh/bin/dsh",
+      "for tool in claude codex cursor-agent dsh opencode pi pool",
+      "model: !!js process.env.DSH_MODEL",
+      "provider: deepseek-official",
+      "DSH_PERMISSION_MODE=danger-full-access",
+      "DSH_TELEMETRY_DISABLED=1",
+      "dsh --profile headless --dump-config",
+    ]) {
+      assert.ok(image.includes(required), `the Docker image is missing ${required}`);
+    }
+    assert.doesNotMatch(image, /ENV PATH=.*\/opt\/bento\/node/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 /**
@@ -107,7 +154,7 @@ test("an installer that fails once is retried on the next provision, and the res
     assert.equal(first.status, 0, first.stderr);
     assert.deepEqual(toolchainMissing(first.stdout), ["opencode"]);
     assert.match(first.stderr, /opencode install failed/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
     // Not once and given up on: a blip passes within seconds. Both
     // routes get their three, the release first and the installer only
     // once that has failed.
@@ -125,12 +172,37 @@ test("an installer that fails once is retried on the next provision, and the res
     // missing, by the route that does not need the API.
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
 
     // Third provision, with everything in place: no network at all.
     const third = sandbox.run();
     assert.equal(third.status, 0, third.stderr);
     assert.deepEqual(sandbox.fetched(), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm machine upgrades an old private Node while installing only missing dsh", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-node-upgrade-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    rmSync(path.join(root, "opt/bento/dsh"), { recursive: true, force: true });
+    rmSync(path.join(root, "usr/local/bin/dsh"), { force: true });
+    const node = path.join(root, "opt/bento/node/bin/node");
+    writeFileSync(node, "#!/bin/sh\nprintf 'v22.14.0\\n'\n");
+    chmodSync(node, 0o755);
+
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.deepEqual(sandbox.fetched(), [
+      "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz",
+    ]);
+    assert.equal(spawnSync(node, ["--version"], { encoding: "utf8" }).stdout.trim(), "v22.22.2");
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -159,7 +231,7 @@ test("opencode comes from its release, never asking which version that is", () =
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
     assert.ok(
       sandbox.fetched().some((url) => url.includes("releases/latest/download/opencode-linux-")),
       `the release was never fetched: ${sandbox.fetched().join(" ")}`,
@@ -190,7 +262,7 @@ test("opencode falls back to its installer when the release download is gone", (
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
     assert.ok(sandbox.fetched().includes("https://opencode.ai/install"));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -235,7 +307,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.deepEqual(toolchainMissing(bumped.stdout), ["opencode"]);
     // The four that did install are still usable. A bump that fails
     // halfway must not take the working CLIs down with it.
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
 
     // The provision after the bump. This is the assertion that would
     // have caught the original bug: the new marker is on disk, and it
@@ -247,7 +319,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.equal(after.status, 0);
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -275,14 +347,14 @@ test("a bump that cannot reach a CLI keeps the copy the machine already had", ()
     const bumped = sandbox.runAfterVersionBump();
     assert.equal(bumped.status, 0, bumped.stderr);
     assert.deepEqual(toolchainMissing(bumped.stdout), [], "the previously installed copy is still there");
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
 /**
- * Adding a sixth CLI means adding something that installs it. Without
+ * Adding a seventh CLI means adding something that installs it. Without
  * this, a binary added to the list alone would leave every provision
  * installing nothing, reporting it missing, and trying again forever.
  */
@@ -308,7 +380,7 @@ test("opencode is reported missing when the release and the installer are both u
     assert.deepEqual(toolchainMissing(result.stdout), ["opencode"]);
     assert.match(result.stderr, /opencode release download failed/);
     // And the other four are unharmed.
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -345,15 +417,41 @@ class ToolchainSandbox {
     spawnSync("tar", ["-czf", path.join(fixtures, "opencode.tar.gz"), "-C", fixtures, "opencode"]);
     this.breaks();
 
-    // pi's private Node, already unpacked, so the npm stub is all the
+    // The shared private Node, already unpacked, so the npm stub is all the
     // rest of that branch needs.
     const nodeBin = path.join(root, "opt/bento/node/bin");
     mkdirSync(nodeBin, { recursive: true });
-    this.write(path.join(nodeBin, "node"), "#!/bin/sh\nexit 0\n");
+    this.write(path.join(nodeBin, "node"), "#!/bin/sh\nprintf 'v22.22.2\\n'\n");
     this.write(
       path.join(nodeBin, "npm"),
-      `#!/bin/sh\nmkdir -p ${root}/opt/bento/pi/bin\n: > ${root}/opt/bento/pi/bin/pi\nchmod +x ${root}/opt/bento/pi/bin/pi\n`,
+      `#!/bin/sh
+prefix=
+package=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --prefix ]; then prefix=$2; shift 2; continue; fi
+  package=$1
+  shift
+done
+case "$package" in
+  @deepseek-ai/dsh@*) binary=dsh ;;
+  @earendil-works/pi-coding-agent) binary=pi ;;
+  *) exit 1 ;;
+esac
+mkdir -p "$prefix/bin"
+cat > "$prefix/bin/$binary" <<'EOF'
+#!/bin/sh
+printf '%s\\n' "\${DSH_MODEL:-}|\${DSH_PERMISSION_MODE:-}|\${DSH_TELEMETRY_DISABLED:-}|\$*" >> ${root}/dsh-runs
+EOF
+chmod +x "$prefix/bin/$binary"
+printf '%s\\n' "$package" >> ${root}/npm-installs
+`,
     );
+
+    const nodeFixture = path.join(fixtures, "node-v22.22.2-linux-x64");
+    mkdirSync(path.join(nodeFixture, "bin"), { recursive: true });
+    this.write(path.join(nodeFixture, "bin/node"), "#!/bin/sh\nprintf 'v22.22.2\\n'\n");
+    this.write(path.join(nodeFixture, "bin/npm"), readFileSync(path.join(nodeBin, "npm"), "utf8"));
+    spawnSync("tar", ["-cJf", path.join(fixtures, "node.tar.xz"), "-C", fixtures, path.basename(nodeFixture)]);
   }
 
   /** Names the installers that answer with a failure rather than a script. */
@@ -369,6 +467,10 @@ class ToolchainSandbox {
 done
 echo "$url" >> ${this.root}/fetched
 case "$url" in
+  *nodejs.org/dist/*)
+    cp ${this.root}/fixtures/node.tar.xz "$out"
+    exit 0
+    ;;
   # The release tarball the opencode fallback fetches, which is a real
   # gzipped tar carrying a file called opencode, not an installer.
   *releases/latest/download/*)

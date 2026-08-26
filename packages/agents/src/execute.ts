@@ -47,6 +47,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   const events: AgentEvent[] = [];
   let buffer = "";
   let exitCode = -1;
+  const textOutput = createBoundedText(256 * 1024);
   /**
    * Whatever the process said outside the event stream: stderr, and
    * stdout lines that parse as nothing. Usually noise, but when a CLI
@@ -120,6 +121,11 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
       continue;
     }
 
+    if (adapter.stdoutMode === "text") {
+      textOutput.append(chunk.data ?? "");
+      continue;
+    }
+
     buffer += chunk.data ?? "";
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
@@ -129,7 +135,15 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
       newline = buffer.indexOf("\n");
     }
   }
-  if (buffer.trim()) await emit(buffer);
+  if (adapter.stdoutMode === "events" && buffer.trim()) await emit(buffer);
+  if (adapter.stdoutMode === "text") {
+    const text = textOutput.value().trim();
+    if (text) {
+      const event: AgentEvent = { type: "message", role: "assistant", text };
+      events.push(event);
+      await onEvent?.(event);
+    }
+  }
 
   const outcome = adapter.extractOutcome(events, exitCode);
   // Only when the agent never got to explain itself: an agent that
@@ -151,4 +165,29 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     return { events, exitCode, outcome: { ...outcome, error: `${outcome.error ?? "failed"}: ${tail}` } };
   }
   return { events, exitCode, outcome };
+}
+
+function createBoundedText(limit: number): { append(text: string): void; value(): string } {
+  const marker = "\n...[stdout truncated]...\n";
+  const headLimit = Math.floor(limit / 2);
+  const tailLimit = limit - headLimit;
+  let head = "";
+  let tail = "";
+  let length = 0;
+
+  return {
+    append(text: string) {
+      length += text.length;
+      if (head.length < headLimit) {
+        const needed = headLimit - head.length;
+        head += text.slice(0, needed);
+        text = text.slice(needed);
+      }
+      if (text) tail = (tail + text).slice(-tailLimit);
+    },
+    value() {
+      if (length <= limit) return head + tail;
+      return head + marker + tail.slice(-(limit - marker.length - head.length));
+    },
+  };
 }

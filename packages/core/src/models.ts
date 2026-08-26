@@ -82,6 +82,7 @@ const BY_CLI: Record<string, readonly string[]> = {
   opencode: ["anthropic", "openai", "google", "deepseek", "openrouter"],
   pi: ["anthropic", "openai", "google", "deepseek", "openrouter"],
   pool: ["poolside"],
+  dsh: ["deepseek"],
   fake: [],
 };
 
@@ -105,7 +106,10 @@ export function providerById(id: string): CatalogProvider | undefined {
  * ("microsoft/phi-4"), which is why the prefixed form nests.
  */
 export function modelStringFor(cli: string, providerId: string, modelId: string): string {
-  if (cli === "opencode" || cli === "pi") return `${providerId}/${modelId}`;
+  const guidance = MODEL_GUIDANCE.find((entry) => entry.cli === cli);
+  if (guidance && !guidance.bareModelId) {
+    return `${providerId}/${modelId}`;
+  }
   if (providerId === "openrouter") return modelId;
   return modelId;
 }
@@ -206,6 +210,12 @@ function providerOfModel(model: string): CatalogProvider | undefined {
  * reach, not two that can disagree.
  */
 export function checkAgentPairing(cli: string, model: string): AgentPairing {
+  if (cli === "dsh" && model.includes("/")) {
+    return {
+      status: "impossible",
+      detail: "DeepSeek Harness takes a bare model id, for example deepseek-v4-pro, without a provider prefix.",
+    };
+  }
   const allowed = providersForCli(cli);
   if (allowed.length === 0) {
     // The fake agent takes any model string: it calls nothing.

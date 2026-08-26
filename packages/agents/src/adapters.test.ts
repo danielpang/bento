@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
+import { dshAdapter } from "./dsh.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
 import { poolAdapter } from "./pool.js";
@@ -176,7 +177,7 @@ test("opencode builds a provider qualified model command", () => {
 });
 
 test("every declared cli resolves to an adapter", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"] as const) {
     assert.equal(getAdapter(cli).cli, cli);
   }
 });
@@ -185,6 +186,79 @@ test("adapters declare the env they need", () => {
   assert.deepEqual(codexAdapter.requiredEnv, ["OPENAI_API_KEY"]);
   assert.deepEqual(cursorAdapter.requiredEnv, ["CURSOR_API_KEY"]);
   assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
+  assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
+});
+
+test("dsh builds its headless command and isolated environment", () => {
+  const input = {
+    prompt: "Implement the card",
+    model: "deepseek-v4-pro",
+    cwd: "/workspace",
+  };
+  assert.deepEqual(dshAdapter.buildCommand(input), ["dsh", "--profile", "headless", "Implement the card"]);
+  assert.deepEqual(dshAdapter.optionalEnv, ["DEEPSEEK_BASE_URL"]);
+  assert.deepEqual(dshAdapter.env?.(input), {
+    DSH_HOME: "/opt/bento/dsh-home",
+    DSH_MODEL: "deepseek-v4-pro",
+    DSH_TOOLS_MODE: "native",
+    DSH_PERMISSION_MODE: "danger-full-access",
+    DSH_TELEMETRY_DISABLED: "1",
+  });
+  assert.equal(dshAdapter.stdoutMode, "text");
+});
+
+test("runAgent collects dsh stdout into one final assistant message", async () => {
+  async function* output(): AsyncIterable<{ kind: "stdout" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stdout", data: "Implemented " };
+    yield { kind: "stdout", data: "the card.\n" };
+    yield { kind: "exit", exitCode: 0 };
+  }
+  const seen: AgentEvent[] = [];
+  const result = await runAgent({
+    adapter: dshAdapter,
+    argv: ["dsh"],
+    exec: output,
+    onEvent: (event) => seen.push(event),
+  });
+  assert.deepEqual(result.events, [{ type: "message", role: "assistant", text: "Implemented the card." }]);
+  assert.deepEqual(seen, result.events);
+  assert.equal(result.outcome.ok, true);
+});
+
+test("runAgent emits no dsh message for empty output", async () => {
+  async function* empty(): AsyncIterable<{ kind: "stdout" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stdout", data: "\n  " };
+    yield { kind: "exit", exitCode: 0 };
+  }
+  const result = await runAgent({ adapter: dshAdapter, argv: ["dsh"], exec: empty });
+  assert.deepEqual(result.events, []);
+  assert.deepEqual(result.outcome, { ok: false, error: "dsh finished without readable output" });
+});
+
+test("runAgent bounds dsh stdout at 256 KiB and retains its head and tail", async () => {
+  async function* large(): AsyncIterable<{ kind: "stdout" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stdout", data: "A".repeat(200_000) };
+    yield { kind: "stdout", data: "Z".repeat(200_000) };
+    yield { kind: "exit", exitCode: 0 };
+  }
+  const result = await runAgent({ adapter: dshAdapter, argv: ["dsh"], exec: large });
+  const event = result.events[0];
+  assert.ok(event?.type === "message");
+  assert.equal(event.text.length, 256 * 1024);
+  assert.ok(event.text.startsWith("AAAA"));
+  assert.ok(event.text.endsWith("ZZZZ"));
+  assert.match(event.text, /stdout truncated/);
+});
+
+test("dsh failures retain stderr details", async () => {
+  async function* fails(): AsyncIterable<{ kind: "stderr" | "exit"; data?: string; exitCode?: number }> {
+    yield { kind: "stderr", data: "DeepSeek rejected the API key\n" };
+    yield { kind: "exit", exitCode: 1 };
+  }
+  const result = await runAgent({ adapter: dshAdapter, argv: ["dsh"], exec: fails });
+  assert.equal(result.outcome.ok, false);
+  assert.match(result.outcome.error ?? "", /dsh stopped before reporting a result/);
+  assert.match(result.outcome.error ?? "", /DeepSeek rejected the API key/);
 });
 
 /**
@@ -365,7 +439,7 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"] as const) {
     const adapter = getAdapter(cli);
     for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
       // Poolside's enterprise endpoint is a local environment override.

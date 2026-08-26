@@ -90,6 +90,8 @@ export interface SessionRecovery {
 
 export interface AgentAdapter {
   cli: AgentCli;
+  /** Whether stdout is structured events or one plain-text response. */
+  stdoutMode: "events" | "text";
   /** Env var names that must be present in the sandbox for this CLI. */
   /** Credentials the agent cannot run without. */
   requiredEnv: string[];

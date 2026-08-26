@@ -3455,6 +3455,13 @@ button {
   gap: 12px;
   min-height: 180px;
 }
+
+.quiet-run-copy {
+  display: grid;
+  max-width: 560px;
+  gap: 8px;
+  text-align: left;
+}
 .working-row {
   display: flex;
   align-items: center;

@@ -34,14 +34,14 @@ interface Secret {
  * One tab per model provider. The first key is the one whose presence
  * lights the tab; base URLs ride along on the provider they redirect.
  */
-const PROVIDER_TABS = [
+export const PROVIDER_TABS = [
   { id: "anthropic", label: "Anthropic", keys: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
   { id: "openai", label: "OpenAI", keys: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
   { id: "openrouter", label: "OpenRouter", keys: ["OPENROUTER_API_KEY"] },
   { id: "cursor", label: "Cursor", keys: ["CURSOR_API_KEY"] },
   { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY"] },
   { id: "poolside", label: "Poolside", keys: ["POOLSIDE_API_KEY"] },
-  { id: "deepseek", label: "DeepSeek", keys: ["DEEPSEEK_API_KEY"] },
+  { id: "deepseek", label: "DeepSeek", keys: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"] },
 ] as const;
 
 /**

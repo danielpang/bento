@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useDismissable } from "./ui.js";
+import { PREVIEW_TOOLS, toolCapability, useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import type { AgentProfile, AgentTool, BentoClient } from "@bento/api-client";
 
@@ -272,7 +272,8 @@ export function AgentsPanel({
             <div key={profile.id} className="gate-check">
               <ProviderMark cli={profile.cli} model={profile.model} />
               <span className="gate-check-text">
-                <span className="gate-check-name">{profile.name}</span>
+                <span className="gate-check-name">{profile.name}</span>{" "}
+                {PREVIEW_TOOLS[profile.cli] && <span className="chip chip-soft">preview</span>}
                 <br />
                 {profile.cli} · {profile.model}
               </span>
@@ -452,10 +453,18 @@ export function AgentsPanel({
               <select className="select" value={cli} onChange={(e) => pickCli(e.target.value as AgentCli)}>
                 {CLIS.map((option) => (
                   <option key={option.value} value={option.value}>
-                    {option.label}
+                    {option.label}{PREVIEW_TOOLS[option.value] ? " (preview)" : ""}
                   </option>
                 ))}
               </select>
+              <span className="muted">{toolCapability(cli)}</span>
+              {PREVIEW_TOOLS[cli] && (
+                <p className="warn">
+                  <strong>Developer preview.</strong> DeepSeek Harness is not finished, and its interfaces can change
+                  without warning. It prints nothing while it works, so the card stays quiet until the run ends. It
+                  cannot continue a previous conversation, so each message starts a fresh run with a compacted transcript.
+                </p>
+              )}
               {/* Said while the tool is being chosen, not when a run
                   fails half an hour later. Only when the answer is
                   known: an unanswerable probe stays quiet rather than
