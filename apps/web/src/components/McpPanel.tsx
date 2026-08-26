@@ -270,12 +270,14 @@ function McpServerCard({
  * spelling of those two columns is not something to make people learn.
  */
 const CONNECT_CHOICES = [
+  // Each member first: it is the default, and the common shape for the
+  // SaaS connectors people reach for (Notion, Linear, Drive).
   {
-    id: "api_key",
-    label: "The team shares an API key",
-    help: "You paste it once, it is stored encrypted, and every agent on the team uses it.",
-    authType: "api_key" as const,
-    credentialScope: "org" as const,
+    id: "oauth_user",
+    label: "Each member signs in",
+    help: "Everyone connects their own account, and a run uses whoever started it.",
+    authType: "oauth" as const,
+    credentialScope: "user" as const,
   },
   {
     id: "oauth_org",
@@ -285,11 +287,11 @@ const CONNECT_CHOICES = [
     credentialScope: "org" as const,
   },
   {
-    id: "oauth_user",
-    label: "Each member signs in",
-    help: "Everyone connects their own account, and a run uses whoever started it.",
-    authType: "oauth" as const,
-    credentialScope: "user" as const,
+    id: "api_key",
+    label: "The team shares an API key",
+    help: "You paste it once, it is stored encrypted, and every agent on the team uses it.",
+    authType: "api_key" as const,
+    credentialScope: "org" as const,
   },
   {
     id: "none",
@@ -311,7 +313,7 @@ function AddServerCard({
 }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
-  const [choice, setChoice] = useState("api_key");
+  const [choice, setChoice] = useState("oauth_user");
   const [slug, setSlug] = useState("");
   const [slugTouched, setSlugTouched] = useState(false);
   const [transport, setTransport] = useState<"http" | "sse">("http");
@@ -355,7 +357,7 @@ function AddServerCard({
             setSlug("");
             setSlugTouched(false);
             setUrl("");
-            setChoice("api_key");
+            setChoice("oauth_user");
             setTransport("http");
             setApiKeyHeader("Authorization");
           });
