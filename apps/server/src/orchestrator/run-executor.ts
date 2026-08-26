@@ -1037,12 +1037,19 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   }
 
   /**
-   * A send-back moved the card while this run was ending. Parked
-   * messages wait for the person to start the destination conversation,
-   * rather than auto-starting the new stage's agent with no explanation
-   * of the redo. The composer claims them when that message is sent.
+   * A send-back moved the card onto a different stage while this run
+   * was ending. Parked messages wait for the person to start the
+   * destination conversation, rather than auto-starting the new stage's
+   * agent with no explanation of the redo. The composer claims them
+   * when that message is sent.
+   *
+   * Backlog is not a stage change in this sense: currentStageId is
+   * null, runs still carry the stage they ran on, and a follow-up
+   * keeps that conversation (see followUpSource). Treating null as a
+   * mismatch swallowed parked messages on every card that had never
+   * left the backlog.
    */
-  if (run.stageId !== feature.currentStageId) {
+  if (feature.currentStageId && run.stageId !== feature.currentStageId) {
     await requeueMessages(ctx.db, ids);
     return;
   }

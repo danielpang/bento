@@ -2269,6 +2269,10 @@ test("parked messages survive send-back and reach the new agent", { timeout: 60_
   assert.equal(started?.cliSessionId, null, "a different agent starts a fresh session");
   assert.match(started?.prompt ?? "", /the tests fail on empty input/);
   assert.match(started?.prompt ?? "", /add a null check like the review asked/);
+  // Runner-executed so the prompt could be read without waiting on a
+  // worker. Cancel it so later tests that claim from the shared runner
+  // pool do not pick this run up.
+  await markCancelled(ctx, started!.id);
 });
 
 /**
