@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { followUpSource, type FollowUpWorkRun } from "./stage-agent.js";
+import { followUpSource, type FollowUpWorkRun } from "./follow-up-source.js";
 
 const qa: FollowUpWorkRun = {
   stageId: "stage-qa",
