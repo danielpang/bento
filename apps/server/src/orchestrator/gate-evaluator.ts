@@ -9,6 +9,7 @@ import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
+import { captureStageSpend } from "./stage-spend.js";
 
 type Feature = typeof features.$inferSelect;
 type Stage = typeof stages.$inferSelect;
@@ -371,6 +372,17 @@ export async function advanceFeature(
     trigger,
     actorUserId: actorUserId ?? null,
   });
+  // Spend is per visit, not per run: the dashboard sums these, and a
+  // run that never leaves its stage is still on `agent run finished`.
+  if (feature.currentStageId) {
+    await captureStageSpend(ctx, {
+      feature,
+      stageId: feature.currentStageId,
+      trigger,
+      actorUserId: actorUserId ?? null,
+      toStageId: nextStage ? nextStage.id : null,
+    });
+  }
   if (!nextStage) {
     await recordFeatureEvent(ctx, {
       featureId: feature.id,
@@ -512,6 +524,17 @@ export async function moveFeatureTo(
     trigger: forward ? "manual" : "manual_back",
     actorUserId: actorUserId ?? null,
   });
+  // Forward is a completion; backward is a redo and must not recount
+  // spend for work that is about to happen again.
+  if (forward && feature.currentStageId) {
+    await captureStageSpend(ctx, {
+      feature,
+      stageId: feature.currentStageId,
+      trigger: "manual",
+      actorUserId: actorUserId ?? null,
+      toStageId: targetStageId,
+    });
+  }
 
   ctx.bus.emitBoardEvent({
     type: "feature_updated",
@@ -607,6 +630,15 @@ export async function finishFeature(
     trigger: "manual",
     actorUserId: actorUserId ?? null,
   });
+  if (feature.currentStageId) {
+    await captureStageSpend(ctx, {
+      feature,
+      stageId: feature.currentStageId,
+      trigger: "manual",
+      actorUserId: actorUserId ?? null,
+      toStageId: null,
+    });
+  }
   await recordFeatureEvent(ctx, {
     featureId: feature.id,
     kind: "status_changed",
