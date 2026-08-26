@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import type { AgentProfile, AgentTool, BentoClient } from "@bento/api-client";
@@ -26,6 +26,25 @@ const CLIS = MODEL_GUIDANCE.map((tool) => ({
   label: tool.label,
   model: tool.defaultModel,
 }));
+
+/**
+ * How tall the skill editor may grow, in pixels, before it scrolls.
+ * Long enough for a real role description, short enough that the
+ * rest of the agent form still fits in the modal.
+ */
+const SKILL_MAX_HEIGHT = 480;
+
+/**
+ * Grows the skill box to fit what has been typed. Height is reset
+ * before it is measured, or the box could only ever grow.
+ */
+function growSkill(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  el.style.height = "auto";
+  const content = el.scrollHeight;
+  el.style.height = `${Math.min(content, SKILL_MAX_HEIGHT)}px`;
+  el.style.overflowY = content > SKILL_MAX_HEIGHT ? "auto" : "hidden";
+}
 
 /**
  * Agents are named pairings of a CLI and a model. Stages point at one of
@@ -64,6 +83,7 @@ export function AgentsPanel({
   const [machine, setMachine] = useState<MachineSettings | null>(null);
   const [tokenValue, setTokenValue] = useState("");
   const [skill, setSkill] = useState("");
+  const skillRef = useRef<HTMLTextAreaElement>(null);
   const [tokenHint, setTokenHint] = useState<string | null>(null);
   const [secrets, setSecrets] = useState<{ id: string; name: string; hint?: string | null }[]>([]);
   /**
@@ -183,6 +203,16 @@ export function AgentsPanel({
     resetForm();
     setFormOpen(true);
   }
+
+  /**
+   * Fit the skill to what is there, including a skill loaded for
+   * edit rather than typed in this sitting. The field is only
+   * mounted while the form is open.
+   */
+  useLayoutEffect(() => {
+    if (!formOpen) return;
+    growSkill(skillRef.current);
+  }, [skill, formOpen]);
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -521,6 +551,7 @@ export function AgentsPanel({
             <label className="field">
               <span className="label">Skill</span>
               <textarea
+                ref={skillRef}
                 className="input skill-input"
                 placeholder={"How this agent should work, and what its stage write-up must contain.\nExample: You are a product investigator. Your write-up must have three sections: Problem, Evidence from the code, Recommendation with effort estimate."}
                 value={skill}
