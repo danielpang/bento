@@ -760,7 +760,10 @@ export class BentoClient {
   }
 
   listSecrets() {
-    return this.request<{ id: string; name: string; hint: string }[]>("/api/secrets");
+    return this.request<{
+      secrets: { id: string; name: string; hint: string }[];
+      canManage: boolean;
+    }>("/api/secrets");
   }
 
   /** Values are write only: nothing reads a secret back. */

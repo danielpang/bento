@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const agentCli = z.enum(["claude-code", "codex", "cursor", "opencode", "pi", "pool", "fake"]);
+export const agentCli = z.enum(["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"]);
 export type AgentCli = z.infer<typeof agentCli>;
 
 export const featureStatus = z.enum(["backlog", "active", "gated", "done", "cancelled"]);

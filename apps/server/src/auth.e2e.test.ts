@@ -843,10 +843,11 @@ test("agent credentials are per organization and write only", async () => {
 
   const listed = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${token}` } })
-  ).json()) as { name: string; hint: string }[];
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0]?.name, "ANTHROPIC_API_KEY");
-  assert.equal(listed[0]?.hint, "••••••••1234");
+  ).json()) as { secrets: { name: string; hint: string }[]; canManage: boolean };
+  assert.equal(listed.canManage, true);
+  assert.equal(listed.secrets.length, 1);
+  assert.equal(listed.secrets[0]?.name, "ANTHROPIC_API_KEY");
+  assert.equal(listed.secrets[0]?.hint, "••••••••1234");
   assert.doesNotMatch(JSON.stringify(listed), /sk-ant-secret/, "no route may return the value");
 
   // A name outside the catalog would be stored but never forwarded.
@@ -862,8 +863,8 @@ test("agent credentials are per organization and write only", async () => {
   const outsiderToken = outsider.headers.get("set-auth-token")!;
   const theirs = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).json()) as unknown[];
-  assert.equal(theirs.length, 0, "secrets must not cross organizations");
+  ).json()) as { secrets: unknown[] };
+  assert.equal(theirs.secrets.length, 0, "secrets must not cross organizations");
 
   // The line form the Mac app reads is a second route over the same
   // rows, so it needs the same two assertions rather than inheriting
@@ -917,8 +918,9 @@ test("credential access follows current membership and mutation roles", async ()
 
   const visible = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${teammateToken}` } })
-  ).json()) as { id: string }[];
-  assert.deepEqual(visible.map((secret) => secret.id), [originalId], "members may use the organization's credentials");
+  ).json()) as { secrets: { id: string }[]; canManage: boolean };
+  assert.deepEqual(visible.secrets.map((secret) => secret.id), [originalId], "members may use the organization's credentials");
+  assert.equal(visible.canManage, false, "members must not be offered credential controls");
 
   const memberCreate = await jsonPost(
     "/api/secrets",
@@ -964,7 +966,7 @@ test("credential access follows current membership and mutation roles", async ()
   const staleList = await app.request("/api/secrets", {
     headers: { authorization: `Bearer ${teammateToken}` },
   });
-  assert.deepEqual(await staleList.json(), []);
+  assert.deepEqual(await staleList.json(), { secrets: [], canManage: false });
   const stalePlain = await app.request("/api/secrets/plain", {
     headers: { authorization: `Bearer ${teammateToken}` },
   });
@@ -987,8 +989,9 @@ test("credential access follows current membership and mutation roles", async ()
 
   const ownerStillSees = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${ownerToken}` } })
-  ).json()) as { id: string }[];
-  assert.deepEqual(ownerStillSees.map((secret) => secret.id), [adminSecretId], "stale requests must not mutate secrets");
+  ).json()) as { secrets: { id: string }[]; canManage: boolean };
+  assert.equal(ownerStillSees.canManage, true);
+  assert.deepEqual(ownerStillSees.secrets.map((secret) => secret.id), [adminSecretId], "stale requests must not mutate secrets");
 });
 
 test("a GitHub App installation is bound to the active organization", async () => {

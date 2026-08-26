@@ -34,13 +34,14 @@ interface Secret {
  * One tab per model provider. The first key is the one whose presence
  * lights the tab; base URLs ride along on the provider they redirect.
  */
-const PROVIDER_TABS = [
+export const PROVIDER_TABS = [
   { id: "anthropic", label: "Anthropic", keys: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
   { id: "openai", label: "OpenAI", keys: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
   { id: "openrouter", label: "OpenRouter", keys: ["OPENROUTER_API_KEY"] },
   { id: "cursor", label: "Cursor", keys: ["CURSOR_API_KEY"] },
   { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY"] },
   { id: "poolside", label: "Poolside", keys: ["POOLSIDE_API_KEY"] },
+  { id: "deepseek", label: "DeepSeek", keys: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"] },
 ] as const;
 
 /**
@@ -50,11 +51,14 @@ const PROVIDER_TABS = [
  */
 function useSecrets(client: BentoClient) {
   const [secrets, setSecrets] = useState<Secret[] | null>(null);
+  const [canManage, setCanManage] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
 
   const reload = useCallback(async () => {
     try {
-      setSecrets(await client.listSecrets());
+      const result = await client.listSecrets();
+      setSecrets(result.secrets);
+      setCanManage(result.canManage);
       setLoadFailed(false);
     } catch {
       setLoadFailed(true);
@@ -65,12 +69,12 @@ function useSecrets(client: BentoClient) {
     void reload();
   }, [reload]);
 
-  return { secrets, loadFailed, reload };
+  return { secrets, canManage, loadFailed, reload };
 }
 
 export function ProviderKeysCard({ client }: { client: BentoClient }) {
   const toast = useToast();
-  const { secrets, loadFailed, reload } = useSecrets(client);
+  const { secrets, canManage, loadFailed, reload } = useSecrets(client);
   const [tab, setTab] = useState<(typeof PROVIDER_TABS)[number]["id"]>("anthropic");
   /** Draft values per credential name, so switching tabs loses nothing. */
   const [inputs, setInputs] = useState<Record<string, string>>({});
@@ -160,34 +164,42 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
             {saved ? (
               <div className="criterion">
                 <span className="criterion-cmd">Saved {saved.hint ?? ""}</span>
-                <button
-                  className="btn btn-ghost"
-                  disabled={busy}
-                  onClick={() => setRemoving({ name: keyName, id: saved.id })}
-                >
-                  Remove
-                </button>
+                {canManage && (
+                  <button
+                    className="btn btn-ghost"
+                    disabled={busy}
+                    onClick={() => setRemoving({ name: keyName, id: saved.id })}
+                  >
+                    Remove
+                  </button>
+                )}
               </div>
             ) : (
               <p className="muted">
                 {isBaseUrl ? "Not set: requests go to the provider directly." : "Not set."}
               </p>
             )}
-            <SecretField
-              value={value}
-              onChange={(next) => setInputs((current) => ({ ...current, [keyName]: next }))}
-              onSubmit={() =>
-                void act(async () => {
-                  await client.createSecret({ name: keyName, value: value.trim() });
-                  setInputs((current) => ({ ...current, [keyName]: "" }));
-                })
-              }
-              label={keyName}
-              placeholder={isBaseUrl ? "https://openrouter.ai/api/v1" : "Paste the key"}
-              submitLabel={saved ? "Replace" : "Save"}
-              busy={busy}
-              secret={credential?.secret !== false}
-            />
+            {canManage ? (
+              <SecretField
+                value={value}
+                onChange={(next) => setInputs((current) => ({ ...current, [keyName]: next }))}
+                onSubmit={() =>
+                  void act(async () => {
+                    await client.createSecret({ name: keyName, value: value.trim() });
+                    setInputs((current) => ({ ...current, [keyName]: "" }));
+                  })
+                }
+                label={keyName}
+                placeholder={isBaseUrl ? "https://openrouter.ai/api/v1" : "Paste the key"}
+                submitLabel={saved ? "Replace" : "Save"}
+                busy={busy}
+                secret={credential?.secret !== false}
+              />
+            ) : (
+              <p className="muted">
+                Only owners and admins can change credentials. Ask an owner to save this key.
+              </p>
+            )}
             {credential && <p className="muted">{credential.help}</p>}
           </div>
             );
@@ -211,7 +223,7 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
 
 export function GitHubTokenCard({ client }: { client: BentoClient }) {
   const toast = useToast();
-  const { secrets, loadFailed, reload } = useSecrets(client);
+  const { secrets, canManage, loadFailed, reload } = useSecrets(client);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -257,27 +269,35 @@ export function GitHubTokenCard({ client }: { client: BentoClient }) {
       ) : saved ? (
         <div className="criterion">
           <span className="criterion-cmd">Token saved {saved.hint ?? ""}</span>
-          <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(true)}>
-            Remove
-          </button>
+          {canManage && (
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(true)}>
+              Remove
+            </button>
+          )}
         </div>
       ) : (
         <p className="muted">No token saved yet. Creating a pull request will refuse until one is here.</p>
       )}
-      <SecretField
-        value={value}
-        onChange={setValue}
-        onSubmit={() =>
-          void act(async () => {
-            await client.createSecret({ name: "GITHUB_TOKEN", value: value.trim() });
-            setValue("");
-          })
-        }
-        label="GitHub token"
-        placeholder="github_pat_..."
-        submitLabel={saved ? "Replace token" : "Save token"}
-        busy={busy}
-      />
+      {canManage ? (
+        <SecretField
+          value={value}
+          onChange={setValue}
+          onSubmit={() =>
+            void act(async () => {
+              await client.createSecret({ name: "GITHUB_TOKEN", value: value.trim() });
+              setValue("");
+            })
+          }
+          label="GitHub token"
+          placeholder="github_pat_..."
+          submitLabel={saved ? "Replace token" : "Save token"}
+          busy={busy}
+        />
+      ) : (
+        <p className="muted">
+          Only owners and admins can change credentials. Ask an owner to save this token.
+        </p>
+      )}
 
       <StageNotesSetting client={client} />
 

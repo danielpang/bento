@@ -35,7 +35,16 @@ export interface AgentRunPromptInput {
  * history rather than the user's latest line alone.
  */
 export function forgetsBetweenRuns(cli: string): boolean {
-  return cli === "pool";
+  return cli === "pool" || cli === "dsh";
+}
+
+/**
+ * Tools that print one final message after the process exits, and
+ * nothing before it. A live pane that shows "Waiting for output..."
+ * for these looks stalled for the length of the run.
+ */
+export function hasNoLiveTranscript(cli: string): boolean {
+  return cli === "dsh";
 }
 
 /**

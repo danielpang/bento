@@ -4,6 +4,7 @@ import {
   agentRunPrompt,
   compactTranscript,
   forgetsBetweenRuns,
+  hasNoLiveTranscript,
   shouldHoldLiveSession,
 } from "./conversation.js";
 
@@ -59,9 +60,13 @@ test("a cold follow-up carries the stage prompt, compacted history, and the new 
   assert.match(prompt, /User follow-up:\nAlso handle the empty case\.$/);
 });
 
-test("pool follow-ups stay cold even when a session id exists", () => {
+test("pool and dsh follow-ups stay cold even when a session id exists", () => {
   assert.equal(forgetsBetweenRuns("pool"), true);
+  assert.equal(forgetsBetweenRuns("dsh"), true);
   assert.equal(forgetsBetweenRuns("codex"), false);
+  assert.equal(hasNoLiveTranscript("dsh"), true);
+  assert.equal(hasNoLiveTranscript("pool"), false);
+  assert.equal(hasNoLiveTranscript("codex"), false);
   const prompt = agentRunPrompt({
     cli: "pool",
     followUp: "Please also add a test.",

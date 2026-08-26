@@ -275,10 +275,13 @@ test("local mode can manage machine credentials", async () => {
       body: JSON.stringify({ name: "ANTHROPIC_API_KEY", value: "local-secret-value" }),
     }),
   );
-  const listed = await json<{ id: string; name: string; hint: string }[]>(await app.request("/api/secrets"));
-  assert.equal(listed.length, 1);
+  const listed = await json<{ secrets: { id: string; name: string; hint: string }[]; canManage: boolean }>(
+    await app.request("/api/secrets"),
+  );
+  assert.equal(listed.canManage, true);
+  assert.equal(listed.secrets.length, 1);
   assert.deepEqual(
-    { id: listed[0]?.id, name: listed[0]?.name, hint: listed[0]?.hint },
+    { id: listed.secrets[0]?.id, name: listed.secrets[0]?.name, hint: listed.secrets[0]?.hint },
     { id: created.id, name: "ANTHROPIC_API_KEY", hint: "••••••••alue" },
   );
 
@@ -291,11 +294,11 @@ test("local mode can manage machine credentials", async () => {
   );
   assert.equal(rotated.id, created.id, "rotation updates the local credential instead of inserting a duplicate");
   assert.equal(rotated.hint, "••••••••5678");
-  assert.equal((await json<unknown[]>(await app.request("/api/secrets"))).length, 1);
+  assert.equal((await json<{ secrets: unknown[] }>(await app.request("/api/secrets"))).secrets.length, 1);
 
   const removed = await app.request(`/api/secrets/${rotated.id}`, { method: "DELETE" });
   assert.equal(removed.status, 200);
-  assert.deepEqual(await json<unknown[]>(await app.request("/api/secrets")), []);
+  assert.deepEqual(await json(await app.request("/api/secrets")), { secrets: [], canManage: true });
 });
 
 /**
@@ -2908,6 +2911,12 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   // Provider naming tools reach far more, which is the point of them.
   const wide = await post({ name: "gpt on opencode", cli: "opencode", model: "openai/gpt-5-pro" });
   assert.equal(wide.status, 201, "opencode names its provider, so it reaches OpenAI");
+
+  const harness = await post({ name: "DeepSeek harness", cli: "dsh", model: "deepseek-v4-pro" });
+  assert.equal(harness.status, 201, "DeepSeek Harness accepts its bare model id");
+  const prefixedHarness = await post({ name: "prefixed harness", cli: "dsh", model: "deepseek/deepseek-v4-pro" });
+  assert.equal(prefixedHarness.status, 400, "DeepSeek Harness cannot accept provider-prefixed model ids");
+  assert.match(((await prefixedHarness.json()) as { error: string }).error, /bare model id/);
 
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.

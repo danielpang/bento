@@ -51,7 +51,7 @@ export const opencodeAdapter: AgentAdapter = {
   // is forwarded, and the model string decides which one gets used.
   requiredEnv: [],
   requiredEnvFor: providerKeyFor,
-  optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"],
+  optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
   configPaths: [".config/opencode", ".local/share/opencode"],
 
   buildCommand(input: BuildCommandInput): string[] {

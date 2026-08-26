@@ -66,11 +66,11 @@ RUN set -eu; \
     fi; \
     rm -rf /tmp/oc
 
-# pi is published on npm only, so it gets a private Node that runs pi and
-# nothing else. /opt/bento/node/bin stays off PATH: `node` inside a
+# pi and dsh are published on npm only, so they get a private Node that runs
+# them and nothing else. /opt/bento/node/bin stays off PATH: `node` inside a
 # workspace has to mean the one that repository's setup command
 # installed, not this one.
-ENV BENTO_NODE_VERSION=22.14.0
+ENV BENTO_NODE_VERSION=22.22.2
 RUN arch="$(dpkg --print-architecture)" \
  && case "$arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; *) node_arch=x64 ;; esac \
  && mkdir -p /opt/bento/node \
@@ -80,9 +80,35 @@ RUN arch="$(dpkg --print-architecture)" \
  && rm /tmp/node.tar.xz \
  && PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/pi \
     @earendil-works/pi-coding-agent \
+ && PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/dsh \
+    @deepseek-ai/dsh@0.1.1-rc.2 \
  && printf '#!/bin/sh\nPATH=/opt/bento/node/bin:$PATH\nexport PATH\nexec /opt/bento/pi/bin/pi "$@"\n' \
     > /usr/local/bin/pi \
- && chmod +x /usr/local/bin/pi
+ && cat > /usr/local/bin/dsh <<'BENTO_DSH_SHIM'
+#!/bin/sh
+set -eu
+PATH=/opt/bento/node/bin:$PATH
+export PATH
+if [ -z "${DSH_HOME:-}" ]; then
+  mkdir -p /opt/bento/dsh-runs
+  DSH_HOME=$(mktemp -d /opt/bento/dsh-runs/XXXXXX)
+  cp -a /opt/bento/dsh-home/. "$DSH_HOME"/
+fi
+export DSH_HOME
+exec /opt/bento/dsh/bin/dsh "$@"
+BENTO_DSH_SHIM
+ && chmod +x /usr/local/bin/pi /usr/local/bin/dsh \
+ && mkdir -p /opt/bento/dsh-home \
+ && printf '%s\n' \
+    '- id: agent-default-model' \
+    '  config:' \
+    '    provider: deepseek-official' \
+    '    model: !!js process.env.DSH_MODEL' \
+    '- id: tool-web' \
+    '  disabled: true' \
+    > /opt/bento/dsh-home/cordis.patch.yml \
+ && DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \
+    /usr/local/bin/dsh --profile headless --dump-config >/dev/null
 
 # Installers drop binaries in their own directories, and an agent is
 # spawned directly rather than through a login shell, so every tool is
@@ -98,7 +124,7 @@ RUN for tool in claude codex cursor-agent opencode pool; do \
       done; \
     done; \
     status=0; \
-    for tool in claude codex cursor-agent opencode pi pool; do \
+    for tool in claude codex cursor-agent dsh opencode pi pool; do \
       command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is not on PATH"; status=1; }; \
     done; \
     exit $status

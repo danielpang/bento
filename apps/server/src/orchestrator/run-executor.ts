@@ -1,5 +1,11 @@
 import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
-import { WORKSPACE_ARTIFACT_DIR, agentRunPrompt, forgetsBetweenRuns, type RunOutcome } from "@bento/core";
+import {
+  WORKSPACE_ARTIFACT_DIR,
+  agentRunPrompt,
+  forgetsBetweenRuns,
+  modelGuidanceFor,
+  type RunOutcome,
+} from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
   agentProfiles,
@@ -312,19 +318,23 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // when sharing is already on but this machine has no login for the
     // tool, saying "turn on sharing" would point at a switch already
     // flipped.
-    const sharing = ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
+    const canShareLogin = Boolean(adapter.configPaths?.length);
+    const sharing = canShareLogin && ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
     const where =
       ctx.env.BENTO_MODE === "multi"
         ? "Add it under Team, then run again."
         : sharing
           ? `Login sharing is on, but this machine has no ${profile.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
-          : "Save it with bento setup in a terminal, or turn on this machine's agent logins under Agents. Then run again.";
+          : canShareLogin
+            ? "Save it with bento setup in a terminal, or turn on this machine's agent logins under Agents. Then run again."
+            : "Save it with bento setup in a terminal, then run again.";
+    const toolName = modelGuidanceFor(profile.cli)?.label ?? profile.cli;
     await finishRun(
       ctx,
       runId,
       {
         ok: false,
-        error: `No ${missing.join(", ")} is configured, so ${profile.cli} cannot start. ${where}`,
+        error: `No ${missing.join(", ")} is configured, so ${toolName} cannot start. ${where}`,
       },
       null,
     );
@@ -430,11 +440,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     if (!liveSession) return;
     await liveSession.onTurnFinished(ok);
   };
-  // Two lines bracket the agent's launch. The first says the CLI is
-  // being spawned; the second, on its first event, that it came up and
-  // is working. Between "running" and the agent's first message can be
-  // a long model turn, and these are what separate that wait from a
-  // CLI that never started.
+  // Two lines bracket a streamed agent's launch. The first says the CLI
+  // is being spawned; the second, on its first event, that it came up
+  // and is working. Between "running" and the agent's first message can
+  // be a long model turn, and these are what separate that wait from a
+  // CLI that never started. Text-mode adapters emit their only event at
+  // exit, so they skip the second line.
   await saySystem(`Starting ${profile.cli} in the sandbox.`);
   let agentReported = false;
   let sessionRecorded = false;
@@ -458,7 +469,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         if (ctx.draining) return;
         if (!agentReported) {
           agentReported = true;
-          await saySystem(`${profile.cli} started and is working on the task.`);
+          if (announcesLaunchOnFirstEvent(adapter)) {
+            await saySystem(`${profile.cli} started and is working on the task.`);
+          }
         }
         /**
          * The session id is known the moment the CLI announces itself,
@@ -588,17 +601,53 @@ export function poolFailureAdvice(error: string): string | null {
 }
 
 /**
+ * Text-mode adapters emit their only event when the process exits, so a
+ * "started and is working" line on that event reads as a stall that
+ * resolved instantly. Streamed CLIs still get the line on first output.
+ */
+export function announcesLaunchOnFirstEvent(adapter: { stdoutMode?: string }): boolean {
+  return adapter.stdoutMode !== "text";
+}
+
+/**
+ * Turns dsh's preview-grade failures into the next action in Bento.
+ *
+ * Auth and model matches require the `dsh:` prefix headless Harness
+ * prints (`dsh: ${code}: ${message}` or `dsh: ${error.message}`). A
+ * tool's own output mentioning 401 must not be blamed on the saved key.
+ */
+export function dshFailureAdvice(error: string): string | null {
+  if (/dsh:.*(?:401|unauthorized|invalid api key|authentication failed|rejected the api key)/i.test(error)) {
+    return "DeepSeek rejected the saved key. Replace DEEPSEEK_API_KEY under Model provider keys, then run again. Keys revoked in the DeepSeek console fail this way.";
+  }
+  if (/dsh:.*model.{0,80}(does not exist|not found|unavailable|unsupported)/i.test(error)) {
+    const named = /model\s+[`'"]?([\w./:-]+)/i.exec(error)?.[1];
+    return named
+      ? `DeepSeek Harness could not run the model ${named}. Change the model on this agent under Agents, then run again.`
+      : "DeepSeek Harness could not run this agent's model. Change it under Agents, then run again.";
+  }
+  if (/node.{0,80}(22\.19|unsupported|too old)|requires node/i.test(error)) {
+    return "DeepSeek Harness needs Node 22.19 or newer, and this sandbox has an older one, so it never started. A rebuilt sandbox installs the right one.";
+  }
+  if (/EACCES|permission denied|profile initialization|cordis\.patch|dsh-home/i.test(error)) {
+    return "DeepSeek Harness could not create its profile directory, so it never started. This is usually a read only home directory in the sandbox.";
+  }
+  if (/finished without readable output/i.test(error)) {
+    return "DeepSeek Harness finished, but Bento could not read what it printed. This tool is a developer preview and changes its output without notice. Update Bento, and report it if you are already current.";
+  }
+  return null;
+}
+
+/**
  * Runner-executed failures skip settleAgentResult, so they never pick
- * up poolFailureAdvice on their own. Same sentences, same place the
+ * up tool-specific advice on their own. Same sentences, same place the
  * hosted board reads the error from, for every runner client.
  */
 export function runnerReportedError(cli: string | undefined, error: string | undefined): string | null {
   const base = error ?? null;
   if (!base) return null;
-  if (cli === "pool") {
-    const advice = poolFailureAdvice(base);
-    if (advice) return `${base} ${advice}`;
-  }
+  const advice = cli === "pool" ? poolFailureAdvice(base) : cli === "dsh" ? dshFailureAdvice(base) : null;
+  if (advice) return `${base} ${advice}`;
   return base;
 }
 
@@ -698,7 +747,12 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      */
     const toolMissing =
       exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
-    const poolAdvice = profile.cli === "pool" ? poolFailureAdvice(outcome.error ?? "") : null;
+    const toolAdvice =
+      profile.cli === "pool"
+        ? poolFailureAdvice(outcome.error ?? "")
+        : profile.cli === "dsh"
+          ? dshFailureAdvice(outcome.error ?? "")
+          : null;
     const enriched =
       authDead && profile.cli === "claude-code"
         ? {
@@ -710,8 +764,8 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
               ...outcome,
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
             }
-          : poolAdvice
-            ? { ...outcome, error: `${outcome.error} ${poolAdvice}` }
+          : toolAdvice
+            ? { ...outcome, error: `${outcome.error} ${toolAdvice}` }
             : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");

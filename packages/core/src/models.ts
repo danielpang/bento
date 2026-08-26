@@ -1,4 +1,4 @@
-import { AGENT_CREDENTIALS, MODEL_GUIDANCE } from "./credentials.js";
+import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
 
@@ -79,9 +79,10 @@ const BY_CLI: Record<string, readonly string[]> = {
   "claude-code": ["anthropic", "openrouter"],
   codex: ["openai", "openrouter"],
   cursor: ["anthropic", "openai", "google", "xai", "cursor"],
-  opencode: ["anthropic", "openai", "google", "openrouter"],
-  pi: ["anthropic", "openai", "google", "openrouter"],
+  opencode: ["anthropic", "openai", "google", "deepseek", "openrouter"],
+  pi: ["anthropic", "openai", "google", "deepseek", "openrouter"],
   pool: ["poolside"],
+  dsh: ["deepseek"],
   fake: [],
 };
 
@@ -206,6 +207,14 @@ function providerOfModel(model: string): CatalogProvider | undefined {
  * reach, not two that can disagree.
  */
 export function checkAgentPairing(cli: string, model: string): AgentPairing {
+  const guidance = modelGuidanceFor(cli);
+  if (guidance?.bareModelId && model.includes("/")) {
+    const example = guidance.examples[0] ?? guidance.defaultModel;
+    return {
+      status: "impossible",
+      detail: `${guidance.label} takes a bare model id, for example ${example}, without a provider prefix.`,
+    };
+  }
   const allowed = providersForCli(cli);
   if (allowed.length === 0) {
     // The fake agent takes any model string: it calls nothing.
