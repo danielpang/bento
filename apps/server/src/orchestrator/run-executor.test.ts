@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { agentRunPrompt } from "@bento/core";
-import { dshFailureAdvice, mergeAgentExecEnv, poolFailureAdvice, runnerReportedError } from "./run-executor.js";
+import {
+  announcesLaunchOnFirstEvent,
+  dshFailureAdvice,
+  mergeAgentExecEnv,
+  poolFailureAdvice,
+  runnerReportedError,
+} from "./run-executor.js";
 
 test("tools without session ids retain stage context whether sent idle or queued", () => {
   for (const cli of ["pool", "dsh"]) {
@@ -115,15 +121,32 @@ test("a runner report with no error stays empty", () => {
 });
 
 test("DeepSeek Harness failures name the setting that fixes them", () => {
-  assert.match(dshFailureAdvice("401 Unauthorized: invalid API key") ?? "", /Replace DEEPSEEK_API_KEY/);
-  assert.match(dshFailureAdvice("model `deepseek-v4-pro` not found") ?? "", /Change the model/);
+  assert.match(
+    dshFailureAdvice("dsh stopped before reporting a result (exit code 1): dsh: 401: invalid API key") ?? "",
+    /Replace DEEPSEEK_API_KEY/,
+  );
+  assert.match(dshFailureAdvice("dsh: 404: model `deepseek-v4-pro` not found") ?? "", /Change the model/);
   assert.match(dshFailureAdvice("Node 22.14 is too old, requires Node 22.19") ?? "", /Node 22\.19/);
   assert.match(dshFailureAdvice("EACCES: permission denied, open dsh-home") ?? "", /profile directory/);
   assert.match(dshFailureAdvice("dsh finished without readable output") ?? "", /developer preview/);
   assert.equal(dshFailureAdvice("the task failed for a project-specific reason"), null);
 });
 
+test("a 401 inside tool output is not blamed on the saved DeepSeek key", () => {
+  assert.equal(dshFailureAdvice("bash: curl: 401 Unauthorized from the app under test"), null);
+  assert.equal(dshFailureAdvice("model `deepseek-v4-pro` not found"), null);
+});
+
 test("runner-reported dsh failures receive Harness advice", () => {
-  const reported = runnerReportedError("dsh", "401 Unauthorized: invalid API key");
+  const reported = runnerReportedError(
+    "dsh",
+    "dsh stopped before reporting a result (exit code 1): dsh: 401: invalid API key",
+  );
   assert.match(reported ?? "", /Replace DEEPSEEK_API_KEY/);
+});
+
+test("text-mode adapters do not announce launch on their first event", () => {
+  assert.equal(announcesLaunchOnFirstEvent({ stdoutMode: "text" }), false);
+  assert.equal(announcesLaunchOnFirstEvent({}), true);
+  assert.equal(announcesLaunchOnFirstEvent({ stdoutMode: undefined }), true);
 });

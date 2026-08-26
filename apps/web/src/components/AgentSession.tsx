@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
-import { forgetsBetweenRuns, type AgentEvent } from "@bento/core";
+import { forgetsBetweenRuns, hasNoLiveTranscript, modelGuidanceFor, type AgentEvent } from "@bento/core";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
-import { LIVE_TOOLS, NO_LIVE_TRANSCRIPT } from "./ui.js";
+import { LIVE_TOOLS } from "./ui.js";
 
 /** Animation is decoration; a stilled frame carries the same meaning. */
 const REDUCED_MOTION =
@@ -214,7 +214,8 @@ export function AgentSession({
   const liveKind = latestAgent ? LIVE_TOOLS[latestAgent.cli] : undefined;
   /** Whether a new run can pick the conversation up where this left it. */
   const resumes = !latestAgent || !forgetsBetweenRuns(latestAgent.cli);
-  const quietTool = Boolean(latestAgent && NO_LIVE_TRANSCRIPT[latestAgent.cli]);
+  const quietTool = Boolean(latestAgent && hasNoLiveTranscript(latestAgent.cli));
+  const quietLabel = latestAgent ? (modelGuidanceFor(latestAgent.cli)?.label ?? latestAgent.cli) : "";
 
   useEffect(() => {
     if (!runActive || !quietTool) return;
@@ -354,10 +355,14 @@ export function AgentSession({
         sourceRun &&
         TERMINAL_RUN.has(sourceRun.status) &&
         sourceAgent &&
-        NO_LIVE_TRANSCRIPT[sourceAgent.cli] &&
+        hasNoLiveTranscript(sourceAgent.cli) &&
         items.some((item) => item.kind === "message" && item.role === "assistant")
       ) {
-        return withNoLiveTranscriptNote(items, prefix);
+        return withNoLiveTranscriptNote(
+          items,
+          prefix,
+          modelGuidanceFor(sourceAgent.cli)?.label ?? sourceAgent.cli,
+        );
       }
       return items;
     };
@@ -555,7 +560,7 @@ export function AgentSession({
       )}
       {latestRun ? (
         !quietTool && !hasMessages && !draft && runActive && !viewedRunId ? (
-          <div className="chat orb-hero" aria-label={quietTool ? "No live output from this tool" : "The agent is starting"}>
+          <div className="chat orb-hero" aria-label="The agent is starting">
             <ThinkingOrb state="shaping" size={64} paused={REDUCED_MOTION} />
             <span className="muted">{workingName} is getting started...</span>
           </div>
@@ -580,7 +585,7 @@ export function AgentSession({
                 <div className="quiet-run-copy">
                   <strong>No live output from this tool</strong>
                   <span className="muted">
-                    DeepSeek Harness prints one final message when the run ends and nothing before it, so this card stays
+                    {quietLabel} prints one final message when the run ends and nothing before it, so this card stays
                     quiet until then. That is the tool, not a stall. The work still lands on the branch, and Stop ends the run now.
                   </span>
                   <span className="muted">Working for {runDuration(latestRun.startedAt, clock)}.</span>
@@ -989,7 +994,7 @@ export function isLongQuietRun(startedAt: string | null, now: number): boolean {
   return elapsedMs(startedAt, now) >= 30 * 60 * 1000;
 }
 
-export function withNoLiveTranscriptNote(items: ChatItem[], prefix: string): ChatItem[] {
+export function withNoLiveTranscriptNote(items: ChatItem[], prefix: string, toolLabel = "This tool"): ChatItem[] {
   const assistantIndex = items.findIndex((item) => item.kind === "message" && item.role === "assistant");
   if (assistantIndex < 0) return items;
   const noted = [...items];
@@ -998,7 +1003,7 @@ export function withNoLiveTranscriptNote(items: ChatItem[], prefix: string): Cha
     kind: "message",
     role: "system",
     speaker: "system",
-    text: "DeepSeek Harness printed its final message. There are no tool steps or thinking to show, because this tool does not print them while it works.",
+    text: `${toolLabel} printed its final message. There are no tool steps or thinking to show, because this tool does not print them while it works.`,
   });
   return noted;
 }

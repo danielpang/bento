@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -57,7 +57,10 @@ test("the toolchain installs git and keeps its private Node off the PATH", () =>
 
 test("dsh is pinned, configured, and initialized for headless sandbox use", async () => {
   assert.equal(TOOLCHAIN_VERSION, 3, "adding dsh must not stampede warm machines with a version bump");
-  assert.match(AGENT_TOOLCHAIN_SCRIPT, /@deepseek-ai\/dsh@0\.1\.1-rc\.2/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /@deepseek-ai\/dsh@0\.1\.1-rc\.2/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /version_below "\$ver" "1\.14\.24"/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /version_below "\$ver" "0\.70\.1"/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /\*0\.1\.1-rc\.2\*\) return 1/);
 
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-dsh-"));
   try {
@@ -80,6 +83,21 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
       readFileSync(path.join(root, "dsh-runs"), "utf8").trim(),
       "deepseek-v4-pro|danger-full-access|1|--profile headless --dump-config",
     );
+    const shim = readFileSync(path.join(root, "usr/local/bin/dsh"), "utf8");
+    assert.match(shim, /mktemp -d /);
+    assert.match(shim, /dsh-runs\/XXXXXX/);
+    assert.match(shim, /cp -a /);
+    const probe = spawnSync(path.join(root, "usr/local/bin/dsh"), ["hello"], {
+      encoding: "utf8",
+      env: { PATH: "/usr/bin:/bin", HOME: path.join(root, "home") },
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    const homes = readdirSync(path.join(root, "opt/bento/dsh-runs"));
+    assert.equal(homes.length, 1, `expected one per-run home, got ${homes.join(" ")}`);
+    assert.equal(
+      readFileSync(path.join(root, "opt/bento/dsh-runs", homes[0], "cordis.patch.yml"), "utf8"),
+      readFileSync(path.join(root, "opt/bento/dsh-home/cordis.patch.yml"), "utf8"),
+    );
 
     const image = await readFile(dockerfile, "utf8");
     for (const required of [
@@ -93,6 +111,15 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
       "DSH_TELEMETRY_DISABLED=1",
       "dsh --profile headless --dump-config",
     ]) {
+      assert.ok(image.includes(required), `the Docker image is missing ${required}`);
+    }
+    for (const required of [
+      "mkdir -p /opt/bento/dsh-runs",
+      "mktemp -d /opt/bento/dsh-runs/XXXXXX",
+      "cp -a /opt/bento/dsh-home/.",
+      "DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro",
+    ]) {
+      assert.ok(AGENT_TOOLCHAIN_SCRIPT.includes(required), `the Sprite script is missing ${required}`);
       assert.ok(image.includes(required), `the Docker image is missing ${required}`);
     }
     assert.doesNotMatch(image, /ENV PATH=.*\/opt\/bento\/node/);
@@ -230,6 +257,80 @@ test("a warm machine keeps a newer dsh-compatible private Node", () => {
   }
 });
 
+test("a warm machine reinstalls only opencode when it is too old for native DeepSeek", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-opencode-stale-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    writeCliVersion(path.join(root, "home/.opencode/bin/opencode"), "1.10.0");
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.equal(sandbox.fetched().length, 1);
+    assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
+    assert.equal(
+      spawnSync(path.join(root, "home/.opencode/bin/opencode"), ["--version"], { encoding: "utf8" }).stdout.trim(),
+      "99.0.0",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm machine reinstalls only pi when it is too old for native DeepSeek", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-pi-stale-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    writeCliVersion(path.join(root, "opt/bento/pi/bin/pi"), "0.50.0");
+    rmSync(path.join(root, "npm-installs"), { force: true });
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.deepEqual(sandbox.fetched(), []);
+    const installs = readFileSync(path.join(root, "npm-installs"), "utf8");
+    assert.match(installs, /@earendil-works\/pi-coding-agent/);
+    assert.doesNotMatch(installs, /dsh/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm machine reinstalls only dsh when the installed pin does not match", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-dsh-stale-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    writeCliVersion(path.join(root, "opt/bento/dsh/bin/dsh"), "0.1.0");
+    rmSync(path.join(root, "npm-installs"), { force: true });
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.deepEqual(sandbox.fetched(), []);
+    const installs = readFileSync(path.join(root, "npm-installs"), "utf8");
+    assert.match(installs, /@deepseek-ai\/dsh@0\.1\.1-rc\.2/);
+    assert.doesNotMatch(installs, /pi-coding-agent/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm machine with current opencode, pi, and dsh versions fetches nothing", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-current-clis-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(sandbox.fetched(), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * The failure that actually happened, twice, and the reason opencode no
  * longer goes through its installer at all.
@@ -354,10 +455,11 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
  *
  * Nothing breaks, and the sandbox stays usable, but the upgrade the
  * bump existed to deliver did not happen and the script cannot tell.
- * Catching that would mean knowing each CLI's version and how to ask
- * for it, which is a bigger thing than this script. What it does
- * guarantee is the part that matters for a run: a CLI is either there
- * or reported.
+ * Catching a stale binary used to mean knowing each CLI's version and
+ * how to ask for it. opencode, pi, and dsh now do that on a warm
+ * machine (DeepSeek floors and the dsh pin). A bump remains the way
+ * the other CLIs refresh. What this still guarantees for every tool
+ * is the part that matters for a run: a CLI is either there or reported.
  */
 test("a bump that cannot reach a CLI keeps the copy the machine already had", () => {
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-stale-"));
@@ -435,7 +537,7 @@ class ToolchainSandbox {
     // exercises the tar and the move rather than trusting them.
     const fixtures = path.join(root, "fixtures");
     mkdirSync(fixtures, { recursive: true });
-    writeFileSync(path.join(fixtures, "opencode"), "#!/bin/sh\n");
+    writeFileSync(path.join(fixtures, "opencode"), "#!/bin/sh\nprintf '99.0.0\\n'\n");
     spawnSync("tar", ["-czf", path.join(fixtures, "opencode.tar.gz"), "-C", fixtures, "opencode"]);
     this.breaks();
 
@@ -462,6 +564,16 @@ esac
 mkdir -p "$prefix/bin"
 cat > "$prefix/bin/$binary" <<'EOF'
 #!/bin/sh
+case "$1" in
+  --version|-V)
+    if [ "$(basename "$0")" = dsh ]; then
+      printf '%s\\n' '0.1.1-rc.2'
+    else
+      printf '%s\\n' '99.0.0'
+    fi
+    exit 0
+    ;;
+esac
 printf '%s\\n' "\${DSH_MODEL:-}|\${DSH_PERMISSION_MODE:-}|\${DSH_TELEMETRY_DISABLED:-}|\$*" >> ${root}/dsh-runs
 EOF
 chmod +x "$prefix/bin/$binary"
@@ -523,7 +635,12 @@ if [ "$tool" = pool ] && ! env | grep -q POOL_INSTALL_ACCEPT_EULA=1; then
   exit 1
 fi
 mkdir -p "$HOME/.local/bin"
-: > "$HOME/.local/bin/$tool"
+if [ "$tool" = opencode ]; then
+  echo '#!/bin/sh' > "$HOME/.local/bin/$tool"
+  echo 'echo 99.0.0' >> "$HOME/.local/bin/$tool"
+else
+  : > "$HOME/.local/bin/$tool"
+fi
 chmod +x "$HOME/.local/bin/$tool"
 EOF
 `,
@@ -595,6 +712,12 @@ EOF
     writeFileSync(file, body);
     chmodSync(file, 0o755);
   }
+}
+
+function writeCliVersion(file: string, version: string): void {
+  assert.ok(existsSync(file), `expected ${file} to exist before rewriting its version`);
+  writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${version}'\n`);
+  chmodSync(file, 0o755);
 }
 
 /** The marker names its version, so a bump reinstalls a warm sandbox. */

@@ -1,4 +1,4 @@
-import { AGENT_CREDENTIALS, MODEL_GUIDANCE } from "./credentials.js";
+import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
 
@@ -207,10 +207,12 @@ function providerOfModel(model: string): CatalogProvider | undefined {
  * reach, not two that can disagree.
  */
 export function checkAgentPairing(cli: string, model: string): AgentPairing {
-  if (MODEL_GUIDANCE.find((guidance) => guidance.cli === cli)?.bareModelId && model.includes("/")) {
+  const guidance = modelGuidanceFor(cli);
+  if (guidance?.bareModelId && model.includes("/")) {
+    const example = guidance.examples[0] ?? guidance.defaultModel;
     return {
       status: "impossible",
-      detail: "DeepSeek Harness takes a bare model id, for example deepseek-v4-pro, without a provider prefix.",
+      detail: `${guidance.label} takes a bare model id, for example ${example}, without a provider prefix.`,
     };
   }
   const allowed = providersForCli(cli);

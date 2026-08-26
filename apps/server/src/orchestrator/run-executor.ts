@@ -440,11 +440,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     if (!liveSession) return;
     await liveSession.onTurnFinished(ok);
   };
-  // Two lines bracket the agent's launch. The first says the CLI is
-  // being spawned; the second, on its first event, that it came up and
-  // is working. Between "running" and the agent's first message can be
-  // a long model turn, and these are what separate that wait from a
-  // CLI that never started.
+  // Two lines bracket a streamed agent's launch. The first says the CLI
+  // is being spawned; the second, on its first event, that it came up
+  // and is working. Between "running" and the agent's first message can
+  // be a long model turn, and these are what separate that wait from a
+  // CLI that never started. Text-mode adapters emit their only event at
+  // exit, so they skip the second line.
   await saySystem(`Starting ${profile.cli} in the sandbox.`);
   let agentReported = false;
   let sessionRecorded = false;
@@ -468,7 +469,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         if (ctx.draining) return;
         if (!agentReported) {
           agentReported = true;
-          await saySystem(`${profile.cli} started and is working on the task.`);
+          if (announcesLaunchOnFirstEvent(adapter)) {
+            await saySystem(`${profile.cli} started and is working on the task.`);
+          }
         }
         /**
          * The session id is known the moment the CLI announces itself,
@@ -597,12 +600,27 @@ export function poolFailureAdvice(error: string): string | null {
   return null;
 }
 
-/** Turns dsh's preview-grade failures into the next action in Bento. */
+/**
+ * Text-mode adapters emit their only event when the process exits, so a
+ * "started and is working" line on that event reads as a stall that
+ * resolved instantly. Streamed CLIs still get the line on first output.
+ */
+export function announcesLaunchOnFirstEvent(adapter: { stdoutMode?: string }): boolean {
+  return adapter.stdoutMode !== "text";
+}
+
+/**
+ * Turns dsh's preview-grade failures into the next action in Bento.
+ *
+ * Auth and model matches require the `dsh:` prefix headless Harness
+ * prints (`dsh: ${code}: ${message}` or `dsh: ${error.message}`). A
+ * tool's own output mentioning 401 must not be blamed on the saved key.
+ */
 export function dshFailureAdvice(error: string): string | null {
-  if (/401|unauthorized|invalid api key|authentication failed|rejected the api key/i.test(error)) {
+  if (/dsh:.*(?:401|unauthorized|invalid api key|authentication failed|rejected the api key)/i.test(error)) {
     return "DeepSeek rejected the saved key. Replace DEEPSEEK_API_KEY under Model provider keys, then run again. Keys revoked in the DeepSeek console fail this way.";
   }
-  if (/model.{0,80}(does not exist|not found|unavailable|unsupported)/i.test(error)) {
+  if (/dsh:.*model.{0,80}(does not exist|not found|unavailable|unsupported)/i.test(error)) {
     const named = /model\s+[`'"]?([\w./:-]+)/i.exec(error)?.[1];
     return named
       ? `DeepSeek Harness could not run the model ${named}. Change the model on this agent under Agents, then run again.`

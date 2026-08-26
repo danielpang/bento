@@ -39,6 +39,15 @@ export function forgetsBetweenRuns(cli: string): boolean {
 }
 
 /**
+ * Tools that print one final message after the process exits, and
+ * nothing before it. A live pane that shows "Waiting for output..."
+ * for these looks stalled for the length of the run.
+ */
+export function hasNoLiveTranscript(cli: string): boolean {
+  return cli === "dsh";
+}
+
+/**
  * Whether a live stdin session should stay open after a finished turn,
  * waiting for the user to keep talking.
  *

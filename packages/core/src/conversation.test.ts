@@ -4,6 +4,7 @@ import {
   agentRunPrompt,
   compactTranscript,
   forgetsBetweenRuns,
+  hasNoLiveTranscript,
   shouldHoldLiveSession,
 } from "./conversation.js";
 
@@ -63,6 +64,9 @@ test("pool and dsh follow-ups stay cold even when a session id exists", () => {
   assert.equal(forgetsBetweenRuns("pool"), true);
   assert.equal(forgetsBetweenRuns("dsh"), true);
   assert.equal(forgetsBetweenRuns("codex"), false);
+  assert.equal(hasNoLiveTranscript("dsh"), true);
+  assert.equal(hasNoLiveTranscript("pool"), false);
+  assert.equal(hasNoLiveTranscript("codex"), false);
   const prompt = agentRunPrompt({
     cli: "pool",
     followUp: "Please also add a test.",

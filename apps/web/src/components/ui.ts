@@ -1,5 +1,5 @@
 import { useEffect, useRef, type RefObject } from "react";
-import { forgetsBetweenRuns, reportsCost } from "@bento/core";
+import { forgetsBetweenRuns, hasNoLiveTranscript, reportsCost } from "@bento/core";
 
 /**
  * Escape closes the drawer, matching the Modal's behavior. The drawers
@@ -115,14 +115,11 @@ export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   "claude-code": "queue",
 };
 
-/** Tools that produce only one final message after the process exits. */
-export const NO_LIVE_TRANSCRIPT: Record<string, true | undefined> = { dsh: true };
-
 /** Tools whose upstream interface is explicitly unstable. */
 export const PREVIEW_TOOLS: Record<string, true | undefined> = { dsh: true };
 
 export function toolCapability(cli: string): string {
-  const output = NO_LIVE_TRANSCRIPT[cli] ? "Prints nothing until the run ends." : "Streams as it works.";
+  const output = hasNoLiveTranscript(cli) ? "Prints nothing until the run ends." : "Streams as it works.";
   const delivery = LIVE_TOOLS[cli]
     ? LIVE_TOOLS[cli] === "steer"
       ? "Messages steer it while it works."

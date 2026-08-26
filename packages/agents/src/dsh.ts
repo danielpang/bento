@@ -7,9 +7,14 @@ export const dshAdapter: AgentAdapter = {
   requiredEnv: ["DEEPSEEK_API_KEY"],
   optionalEnv: ["DEEPSEEK_BASE_URL"],
 
+  /**
+   * DSH_HOME is deliberately unset. The sandbox shim copies the
+   * initialized profile into a fresh directory per invocation so a
+   * long-lived card cannot leak prior-run plugin state into the next
+   * prompt. Setting it here would pin every run to the shared template.
+   */
   env(input: BuildCommandInput): Record<string, string> {
     return {
-      DSH_HOME: "/opt/bento/dsh-home",
       DSH_MODEL: input.model,
       DSH_TOOLS_MODE: "native",
       DSH_PERMISSION_MODE: "danger-full-access",

@@ -84,8 +84,19 @@ RUN arch="$(dpkg --print-architecture)" \
     @deepseek-ai/dsh@0.1.1-rc.2 \
  && printf '#!/bin/sh\nPATH=/opt/bento/node/bin:$PATH\nexport PATH\nexec /opt/bento/pi/bin/pi "$@"\n' \
     > /usr/local/bin/pi \
- && printf '#!/bin/sh\nPATH=/opt/bento/node/bin:$PATH\nexport PATH\nDSH_HOME=${DSH_HOME:-/opt/bento/dsh-home}\nexport DSH_HOME\nexec /opt/bento/dsh/bin/dsh "$@"\n' \
-    > /usr/local/bin/dsh \
+ && cat > /usr/local/bin/dsh <<'BENTO_DSH_SHIM'
+#!/bin/sh
+set -eu
+PATH=/opt/bento/node/bin:$PATH
+export PATH
+if [ -z "${DSH_HOME:-}" ]; then
+  mkdir -p /opt/bento/dsh-runs
+  DSH_HOME=$(mktemp -d /opt/bento/dsh-runs/XXXXXX)
+  cp -a /opt/bento/dsh-home/. "$DSH_HOME"/
+fi
+export DSH_HOME
+exec /opt/bento/dsh/bin/dsh "$@"
+BENTO_DSH_SHIM
  && chmod +x /usr/local/bin/pi /usr/local/bin/dsh \
  && mkdir -p /opt/bento/dsh-home \
  && printf '%s\n' \
@@ -96,7 +107,7 @@ RUN arch="$(dpkg --print-architecture)" \
     '- id: tool-web' \
     '  disabled: true' \
     > /opt/bento/dsh-home/cordis.patch.yml \
- && DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \
+ && DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \
     /usr/local/bin/dsh --profile headless --dump-config >/dev/null
 
 # Installers drop binaries in their own directories, and an agent is

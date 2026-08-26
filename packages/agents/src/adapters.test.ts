@@ -198,12 +198,12 @@ test("dsh builds its headless command and isolated environment", () => {
   assert.deepEqual(dshAdapter.buildCommand(input), ["dsh", "--profile", "headless", "Implement the card"]);
   assert.deepEqual(dshAdapter.optionalEnv, ["DEEPSEEK_BASE_URL"]);
   assert.deepEqual(dshAdapter.env?.(input), {
-    DSH_HOME: "/opt/bento/dsh-home",
     DSH_MODEL: "deepseek-v4-pro",
     DSH_TOOLS_MODE: "native",
     DSH_PERMISSION_MODE: "danger-full-access",
     DSH_TELEMETRY_DISABLED: "1",
   });
+  assert.equal(dshAdapter.env?.(input).DSH_HOME, undefined);
   assert.equal(dshAdapter.stdoutMode, "text");
 });
 

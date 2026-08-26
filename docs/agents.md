@@ -16,6 +16,8 @@ Keys are stored encrypted, per organization in multi mode and locally in local m
 
 **DeepSeek models.** Use pi or opencode for streamed DeepSeek runs. Save `DEEPSEEK_API_KEY` and choose the DeepSeek provider for a native key and bill, or use `openrouter/deepseek/...` to bill OpenRouter. DeepSeek Harness (`dsh`) is also available as an experimental, one-shot tool with the limitations below.
 
+Warm sandboxes already holding pi below 0.70.1 or opencode below 1.14.24 reinstall just those two on the next provision, which is what native DeepSeek needs. A later DeepSeek Harness pin is the same: the installed `--version` is compared to the pin, so bumping `@deepseek-ai/dsh` reinstalls dsh without a toolchain version stampede.
+
 The named agents also read and write as a YAML file, from **Agents** or **Settings, Config**, and from `bento agents export` / `bento agents import`. Details: [pipeline.md](./pipeline.md#the-agents-file).
 
 ## Talking to a working agent

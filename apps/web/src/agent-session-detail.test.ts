@@ -137,11 +137,13 @@ test("the Harness explanation sits immediately before its final answer", () => {
     { key: "result", kind: "result", ok: true },
     { key: "answer", kind: "message", role: "assistant", text: "Implemented", speaker: "Harness" },
   ];
-  const noted = withNoLiveTranscriptNote(items, "run");
+  const noted = withNoLiveTranscriptNote(items, "run", "DeepSeek Harness");
   assert.deepEqual(
     noted.map((item) => item.key),
     ["user", "result", "run-quiet-note", "answer"],
   );
-  assert.match(noted[2]?.kind === "message" ? noted[2].text : "", /printed its final message/);
+  assert.match(noted[2]?.kind === "message" ? noted[2].text : "", /DeepSeek Harness printed its final message/);
   assert.deepEqual(items.map((item) => item.key), ["user", "result", "answer"], "the source transcript is not mutated");
+  const unlabeled = withNoLiveTranscriptNote(items, "run");
+  assert.match(unlabeled[2]?.kind === "message" ? unlabeled[2].text : "", /This tool printed its final message/);
 });

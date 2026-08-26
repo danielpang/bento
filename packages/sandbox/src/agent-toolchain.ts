@@ -54,7 +54,10 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "dsh", "openco
  * picks up whatever this script now does. Adding pool did not need one
  * either, and for the same reason: a warm sprite holding the v3 marker
  * finds pool absent from the PATH, installs that one CLI, and leaves
- * the five it already has alone.
+ * the five it already has alone. Adding dsh is the same for a machine
+ * that never had it. Warm sprites that already have pi or opencode too
+ * old for native DeepSeek, or a dsh pin that has moved, are caught by
+ * the version check below rather than a bump.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -74,6 +77,14 @@ export const TOOLCHAIN_MISSING_PREFIX = "bento-toolchain-missing:";
 
 /** Node used only to run npm-distributed agents. Off the agent's PATH on purpose. */
 const NODE_VERSION = "22.22.2";
+/** Native DeepSeek on opencode needs this floor; warm sprites below it reinstall. */
+const OPENCODE_MIN_VERSION = "1.14.24";
+/** Native DeepSeek on pi needs this floor; warm sprites below it reinstall. */
+const PI_MIN_VERSION = "0.70.1";
+/**
+ * Pin bumps reinstall via the version check below, not a TOOLCHAIN_VERSION
+ * bump: warm sprites that already have dsh compare --version to this string.
+ */
 const DSH_VERSION = "0.1.1-rc.2";
 
 /**
@@ -114,15 +125,88 @@ publish() {
   return 1
 }
 
+# 0 if $1 is a lower major.minor.patch than $2. Digits are taken from the
+# first dotted triple so "opencode 1.14.24" still compares.
+version_below() {
+  current=$(printf '%s' "$1" | tr -cd '0-9.') || true
+  floor=$(printf '%s' "$2" | tr -cd '0-9.') || true
+  c1=\${current%%.*}
+  rest=\${current#"$c1"}
+  rest=\${rest#.}
+  c2=\${rest%%.*}
+  rest=\${rest#"$c2"}
+  rest=\${rest#.}
+  c3=\${rest%%.*}
+  f1=\${floor%%.*}
+  rest=\${floor#"$f1"}
+  rest=\${rest#.}
+  f2=\${rest%%.*}
+  rest=\${rest#"$f2"}
+  rest=\${rest#.}
+  f3=\${rest%%.*}
+  c1=\${c1%%[!0-9]*}
+  c2=\${c2%%[!0-9]*}
+  c3=\${c3%%[!0-9]*}
+  f1=\${f1%%[!0-9]*}
+  f2=\${f2%%[!0-9]*}
+  f3=\${f3%%[!0-9]*}
+  [ -n "$c1" ] || c1=0
+  [ -n "$c2" ] || c2=0
+  [ -n "$c3" ] || c3=0
+  [ -n "$f1" ] || f1=0
+  [ -n "$f2" ] || f2=0
+  [ -n "$f3" ] || f3=0
+  if [ "$c1" -lt "$f1" ]; then return 0; fi
+  if [ "$c1" -gt "$f1" ]; then return 1; fi
+  if [ "$c2" -lt "$f2" ]; then return 0; fi
+  if [ "$c2" -gt "$f2" ]; then return 1; fi
+  if [ "$c3" -lt "$f3" ]; then return 0; fi
+  return 1
+}
+
+# Present but too old for what Bento now builds. dsh is a string contains
+# against the pin, not semver, because the pin is 0.1.1-rc.2.
+# The inner dsh binary is asked directly so a version check does not copy
+# a per-run home.
+cli_stale() {
+  tool=$1
+  case "$tool" in
+    opencode)
+      ver=$(opencode --version 2>/dev/null | head -n 1) || true
+      [ -n "$ver" ] || return 0
+      version_below "$ver" "${OPENCODE_MIN_VERSION}"
+      ;;
+    pi)
+      ver=$(pi --version 2>/dev/null | head -n 1) || true
+      [ -n "$ver" ] || return 0
+      version_below "$ver" "${PI_MIN_VERSION}"
+      ;;
+    dsh)
+      ver=$(/opt/bento/dsh/bin/dsh --version 2>/dev/null || true)
+      [ -n "$ver" ] || ver=$(/opt/bento/dsh/bin/dsh -V 2>/dev/null || true)
+      case "$ver" in
+        *${DSH_VERSION}*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # What a run can actually spawn decides the work, not the marker alone.
 # With the marker there this is seven builtin lookups and no network,
 # which is what makes the common case free; without it the whole set is
 # installed, because a version bump means the commands Bento builds now
-# want newer CLIs than the ones already here.
+# want newer CLIs than the ones already here. A present CLI can still be
+# needed when it is below a floor this script now requires.
 needed=""
 if [ -f "$MARKER" ]; then
   for tool in $ALL; do
-    publish "$tool" || needed="$needed $tool"
+    if publish "$tool"; then
+      if cli_stale "$tool"; then needed="$needed $tool"; fi
+    else
+      needed="$needed $tool"
+    fi
   done
   if [ -z "$needed" ]; then exit 0; fi
 else
@@ -311,10 +395,21 @@ if wanted dsh; then
 - id: tool-web
   disabled: true
 BENTO_DSH_PROFILE
-      printf '#!/bin/sh\\nPATH=/opt/bento/node/bin:$PATH\\nexport PATH\\nDSH_HOME=\${DSH_HOME:-/opt/bento/dsh-home}\\nexport DSH_HOME\\nexec /opt/bento/dsh/bin/dsh "$@"\\n' \\
-        > /usr/local/bin/dsh
+      cat > /usr/local/bin/dsh <<'BENTO_DSH_SHIM'
+#!/bin/sh
+set -eu
+PATH=/opt/bento/node/bin:$PATH
+export PATH
+if [ -z "\${DSH_HOME:-}" ]; then
+  mkdir -p /opt/bento/dsh-runs
+  DSH_HOME=$(mktemp -d /opt/bento/dsh-runs/XXXXXX)
+  cp -a /opt/bento/dsh-home/. "$DSH_HOME"/
+fi
+export DSH_HOME
+exec /opt/bento/dsh/bin/dsh "$@"
+BENTO_DSH_SHIM
       chmod +x /usr/local/bin/dsh
-      if ! DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \\
+      if ! DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \\
         /usr/local/bin/dsh --profile headless --dump-config >/dev/null 2>&1; then
         rm -f /usr/local/bin/dsh
         echo "bento: dsh profile initialization failed" >&2

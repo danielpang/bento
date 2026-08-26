@@ -229,7 +229,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
         "trap 'kill $mock 2>/dev/null || true' EXIT",
         "for attempt in 1 2 3 4 5; do [ -f /tmp/bento-dsh-ready ] && break; sleep 1; done",
         "test -f /tmp/bento-dsh-ready",
-        "DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro DSH_TOOLS_MODE=native DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 DEEPSEEK_API_KEY=mock-key DEEPSEEK_BASE_URL=http://127.0.0.1:43123/v1 dsh --profile headless 'verify Bento integration'",
+        "DSH_MODEL=deepseek-v4-pro DSH_TOOLS_MODE=native DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 DEEPSEEK_API_KEY=mock-key DEEPSEEK_BASE_URL=http://127.0.0.1:43123/v1 dsh --profile headless 'verify Bento integration'",
       ].join("; "),
     );
     assert.equal(ran.exitCode, 0, ran.stderr || ran.stdout);

@@ -105,7 +105,7 @@ Members add keys under Team in the console. Supported today:
 | `GEMINI_API_KEY` | opencode or pi on Gemini models |
 | `CURSOR_API_KEY` | Cursor CLI |
 | `POOLSIDE_API_KEY` | Poolside CLI |
-| `DEEPSEEK_API_KEY` | opencode or pi on DeepSeek models |
+| `DEEPSEEK_API_KEY` | DeepSeek Harness, and opencode or pi on DeepSeek models |
 
 To bill Claude Code or Codex through OpenRouter, save the OpenRouter key
 and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to
