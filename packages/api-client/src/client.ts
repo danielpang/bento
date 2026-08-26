@@ -629,8 +629,8 @@ export class BentoClient {
 
   /**
    * Puts the card in any stage, or the backlog with null. Forward
-   * behaves like advance, backward like send-back; no approval is
-   * recorded either way.
+   * behaves like advance, backward like send-back (the destination
+   * stage's agent starts); no approval is recorded either way.
    */
   moveFeature(featureId: string, stageId: string | null) {
     return this.request<Feature>(`/api/features/${featureId}/move`, {

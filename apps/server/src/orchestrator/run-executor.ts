@@ -36,6 +36,7 @@ import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { resolveFollowUpRun } from "./stage-agent.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -1040,7 +1041,8 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * conversation: inheriting its profile and session had the reviewer
    * answering the user's follow-up inside the judging session. The
    * newest run that is not a judge run is whose agent and session the
-   * message continues.
+   * message continues, unless the card has moved stages: then the
+   * pipeline agent for the stage the card is in takes over.
    */
   const [conversation] = run.kind === "judge"
     ? await ctx.db
@@ -1050,7 +1052,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1)
     : [run];
-  const source = conversation ?? run;
+  const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   const next = await startRunIfIdle(ctx.db, {
     featureId: feature.id,
