@@ -6,8 +6,9 @@ export function Active() {
   return (
     <Surface>
       <form className="composer" onSubmit={(e) => e.preventDefault()}>
-        <input
+        <textarea
           className="input composer-input"
+          rows={1}
           defaultValue=""
           placeholder="Send a message..."
           aria-label="Send a message"
@@ -28,8 +29,9 @@ export function Disabled() {
   return (
     <Surface>
       <form className="composer" onSubmit={(e) => e.preventDefault()}>
-        <input
+        <textarea
           className="input composer-input"
+          rows={1}
           defaultValue=""
           placeholder="Send a message..."
           aria-label="Send a message"

@@ -133,6 +133,15 @@ test("AgentSession tells an idle pool composer the next run carries a compacted 
   });
 });
 
+test("AgentSession composer is a one-line textarea so a long line can grow it", () => {
+  withStorage(() => {
+    const html = renderComposer("succeeded", "claude-code");
+    assert.match(html, /<textarea[^>]*class="input composer-input"/);
+    assert.match(html, /rows="1"/);
+    assert.doesNotMatch(html, /<input[^>]*class="input composer-input"/);
+  });
+});
+
 test("AgentSession still describes a running resumable tool as continuing", () => {
   withStorage(() => {
     const html = renderComposer("running", "codex");

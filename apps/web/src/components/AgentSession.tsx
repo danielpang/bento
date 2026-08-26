@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
 import type { AgentEvent } from "@bento/core";
@@ -27,6 +27,13 @@ const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
  * reader is somewhere further up and is offered the way back down.
  */
 const AT_BOTTOM_SLACK = 120;
+
+/**
+ * How tall the composer may grow, in pixels, before it scrolls.
+ * Long enough to read a wrapped paragraph, short enough that it
+ * cannot eat the transcript above it.
+ */
+const COMPOSER_MAX_HEIGHT = 160;
 
 /**
  * The conversation is rendered from these, never from raw events: a
@@ -159,6 +166,7 @@ export function AgentSession({
     setDraft("");
   };
   const paneRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   /** Whether the pane is pinned to the newest row; reading history unpins it. */
   const stickToBottom = useRef(true);
   /**
@@ -415,6 +423,15 @@ export function AgentSession({
     return () => cancelAnimationFrame(frame);
   }, [sections, visiblePending.length, draft]);
 
+  /**
+   * Fit the composer to what is typed, including a long line that
+   * wrapped rather than a newline. Resetting height first is what
+   * lets it shrink again after send.
+   */
+  useLayoutEffect(() => {
+    growComposer(composerRef.current);
+  }, [say]);
+
   async function send() {
     const question = say.trim();
     if (!question) return;
@@ -608,13 +625,25 @@ export function AgentSession({
             void send();
           }}
         >
-          <input
+          <textarea
+            ref={composerRef}
             className="input composer-input"
+            rows={1}
             value={say}
             onChange={(e) => setSay(e.target.value)}
             disabled={busy}
             placeholder={composer.placeholder}
             aria-label={composer.ariaLabel}
+            // Enter sends, as it did when this was a single-line
+            // field. Shift+Enter is the newline; wrapping a long
+            // line grows the box on its own.
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
           />
           {runActive && (
             <StopButton
@@ -815,6 +844,21 @@ function toolSummary(event: Extract<AgentEvent, { type: "tool" }>): string | nul
   const text = pick("command", "file_path", "path", "pattern", "url", "query", "description", "prompt");
   if (!text) return null;
   return text.length > 80 ? `${text.slice(0, 79)}…` : text;
+}
+
+/**
+ * Grows the conversation composer to fit what has been typed.
+ *
+ * A long line used to vanish into a one-line field. Height is reset
+ * before it is measured, or the box could only ever grow; past the
+ * cap it scrolls rather than pushing the transcript off the screen.
+ */
+function growComposer(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  el.style.height = "auto";
+  const content = el.scrollHeight;
+  el.style.height = `${Math.min(content, COMPOSER_MAX_HEIGHT)}px`;
+  el.style.overflowY = content > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
 }
 
 /**
