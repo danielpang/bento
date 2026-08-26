@@ -102,12 +102,48 @@ export interface AgentRun {
   stageId: string;
   agentProfileId: string;
   status: RunStatus;
+  /**
+   * "judge" is the gate evaluator talking to itself. Omitted on older
+   * payloads and treated as work. Spend rollups skip judges.
+   */
+  kind?: "task" | "judge";
   cliSessionId: string | null;
   costUsd: string | null;
   error: string | null;
   queuedAt: string;
   startedAt: string | null;
   endedAt: string | null;
+}
+
+/**
+ * Agent spend for one project. Cost is whatever the CLI printed;
+ * `runsWithoutCost` is how many runs that figure silently omitted.
+ * Totals cover finished work only, never judges or in-flight runs.
+ */
+export interface ProjectUsage {
+  totalUsd: number;
+  totalRuns: number;
+  runsWithoutCost: number;
+  byStage: {
+    stageId: string;
+    agentProfileId: string;
+    runs: number;
+    costUsd: number;
+  }[];
+  /** Every card, including ones that have never run. */
+  byFeature: FeatureSpend[];
+}
+
+/**
+ * One card's contribution to project spend. `costUsd` is null when no
+ * run on the card reported a figure, which is not the same as zero.
+ */
+export interface FeatureSpend {
+  featureId: string;
+  title: string;
+  runs: number;
+  costUsd: number | null;
+  runsWithoutCost: number;
 }
 
 /**

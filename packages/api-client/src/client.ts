@@ -11,6 +11,7 @@ import type {
   Pipeline,
   Project,
   ProjectSession,
+  ProjectUsage,
   Repository,
   RunArtifact,
   Stage,
@@ -628,7 +629,8 @@ export class BentoClient {
 
   /**
    * Puts the card in any stage, or the backlog with null. Forward
-   * behaves like advance, backward like send-back; no approval is
+   * behaves like advance, backward like send-back (the previous agent
+   * stops, the destination waits for a conversation); no approval is
    * recorded either way.
    */
   moveFeature(featureId: string, stageId: string | null) {
@@ -811,12 +813,11 @@ export class BentoClient {
 
   /**
    * Agent spend for a project. `runsWithoutCost` matters: the total
-   * only covers tools that report one, and most do not.
+   * only covers tools that report one, and most do not. `byFeature`
+   * is every card, so a spend page can sort without a second fetch.
    */
   getUsage(projectId: string) {
-    return this.request<{ totalUsd: number; totalRuns: number; runsWithoutCost: number }>(
-      `/api/projects/${projectId}/usage`,
-    );
+    return this.request<ProjectUsage>(`/api/projects/${projectId}/usage`);
   }
 
   listProfiles() {

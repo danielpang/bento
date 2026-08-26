@@ -152,6 +152,26 @@ export function money(usd: number): string {
 }
 
 /**
+ * The note under the checkout overage choice.
+ *
+ * Each option's note has to describe that option. The old allow copy
+ * opened with "Agents stop if overage passes...", which is what a
+ * person who just picked "keep going" would take for the stop policy.
+ */
+export function overageCheckoutNote(
+  policy: "stop" | "allow" | null,
+  monthlyTotalUsd: number | null,
+): string {
+  if (policy === "stop") {
+    return "New agents will not start once the included hours are used. You can change this later under Billing.";
+  }
+  if (policy === "allow" && monthlyTotalUsd !== null) {
+    return `Overage is capped at ${money(monthlyTotalUsd)}, so your bill cannot more than double. Change or remove that under Billing whenever you like.`;
+  }
+  return "You can change this later under Billing.";
+}
+
+/**
  * The comparison list people read, after dropping claims this product
  * does not keep.
  *

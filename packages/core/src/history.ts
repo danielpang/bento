@@ -43,3 +43,44 @@ export function historyTriggerLabel(trigger: string, actor: string | null): stri
       return trigger;
   }
 }
+
+/**
+ * Shown in card details after a person sends a card back. The
+ * destination agent does not start on its own: the next message is
+ * how they say what to redo.
+ */
+export const SEND_BACK_NOTICE = "Card moved back, please tell the agent what to do next";
+
+/**
+ * True when the card is sitting on a stage a person just sent it back
+ * to, and nobody has started the next conversation there yet.
+ *
+ * A gate sending a card back starts the previous agent itself, so that
+ * is not this prompt. A work run on the destination after the move
+ * means they have already said what to do.
+ */
+export function needsSendBackPrompt(input: {
+  status: string;
+  currentStageId: string | null;
+  history: { kind: string; trigger: string; at: string | Date }[];
+  runs: { kind?: string | null; stageId: string; queuedAt: string | Date }[];
+}): boolean {
+  if (input.status === "done" || input.status === "cancelled") return false;
+
+  let latest: { trigger: string; at: number } | null = null;
+  for (const event of input.history) {
+    if (event.kind !== "stage_moved") continue;
+    const at = Date.parse(typeof event.at === "string" ? event.at : event.at.toISOString());
+    if (Number.isNaN(at)) continue;
+    if (!latest || at >= latest.at) latest = { trigger: event.trigger, at };
+  }
+  if (!latest || latest.trigger !== "manual_back") return false;
+  const movedAt = latest.at;
+
+  return !input.runs.some((run) => {
+    if (run.kind === "judge") return false;
+    if (input.currentStageId && run.stageId !== input.currentStageId) return false;
+    const queued = Date.parse(typeof run.queuedAt === "string" ? run.queuedAt : run.queuedAt.toISOString());
+    return !Number.isNaN(queued) && queued >= movedAt;
+  });
+}

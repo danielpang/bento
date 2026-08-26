@@ -1,6 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AgentProfile, Feature, Stage } from "@bento/api-client";
+import type { AgentProfile, Feature, FeatureSpend, Stage } from "@bento/api-client";
 import { ProviderMark } from "./ProviderMark.js";
+import { formatCardSpend } from "./spend-format.js";
 
 /** Read once: a page is not re-rendered when the setting changes. */
 const REDUCED_MOTION =
@@ -208,6 +209,11 @@ interface BoardProps {
   /** The drawer covers the right edge; the board makes room for it. */
   drawerOpen: boolean;
   /**
+   * Per-card spend from the same usage payload the topbar chip reads.
+   * Finished cards print the figure in their existing meta row.
+   */
+  spendByFeature?: Record<string, FeatureSpend>;
+  /**
    * What the topbar's search field holds. Empty shows every card.
    *
    * The board filters rather than the caller, so the unfiltered list
@@ -350,6 +356,7 @@ export function Board({
   onFinish,
   onNewCard,
   drawerOpen,
+  spendByFeature = {},
   query = "",
 }: BoardProps) {
   const searching = query.trim().length > 0;
@@ -424,6 +431,7 @@ export function Board({
       runStatus={runStatusByFeature[feature.id]}
       lastOutput={lastOutputByFeature[feature.id]}
       pulse={pulses[feature.id]}
+      spend={spendByFeature[feature.id]}
       selected={feature.id === selectedId}
       onSelect={onSelect}
     />
@@ -588,6 +596,7 @@ const Card = memo(function Card({
   runStatus,
   lastOutput,
   pulse,
+  spend,
   selected,
   onSelect,
 }: {
@@ -597,10 +606,12 @@ const Card = memo(function Card({
   runStatus: string | undefined;
   lastOutput: string | undefined;
   pulse: CardPulse | undefined;
+  spend: FeatureSpend | undefined;
   selected: boolean;
   onSelect: (id: string) => void;
 }) {
   const finished = feature.status === "done" || feature.status === "cancelled";
+  const spendLabel = finished ? formatCardSpend(spend) : null;
   const runActive = RUN_ACTIVE.has(runStatus ?? "");
   const self = useRef<HTMLButtonElement>(null);
   // A card in a right lane opens under the drawer; bring it out.
@@ -671,23 +682,42 @@ const Card = memo(function Card({
           <span className="dot" data-state={state} />
           {stateLabel(state)}
         </span>
-        {/* A pull request is worth reaching, not just counting. The
-            number alone left people with an identifier and no route to
-            it once the run's notes scrolled away. */}
-        {feature.prNumber &&
-          (feature.prUrl ? (
-            <a
-              className="chip chip-link"
-              href={feature.prUrl}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
-            >
-              PR #{feature.prNumber}
-            </a>
-          ) : (
-            <span className="chip">PR #{feature.prNumber}</span>
-          ))}
+        {/* Spend sits with the PR chip in the existing meta row, not
+            in a section of its own. Only a finished card prints it,
+            and only when a CLI actually reported a figure. */}
+        {(spendLabel || feature.prNumber) && (
+          <span className="card-meta-end">
+            {spendLabel && (
+              <span
+                className="card-spend"
+                title={
+                  spend && spend.runsWithoutCost > 0
+                    ? "Some runs reported no cost, so this is a floor."
+                    : undefined
+                }
+              >
+                {spendLabel}
+              </span>
+            )}
+            {/* A pull request is worth reaching, not just counting. The
+                number alone left people with an identifier and no route to
+                it once the run's notes scrolled away. */}
+            {feature.prNumber &&
+              (feature.prUrl ? (
+                <a
+                  className="chip chip-link"
+                  href={feature.prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  PR #{feature.prNumber}
+                </a>
+              ) : (
+                <span className="chip">PR #{feature.prNumber}</span>
+              ))}
+          </span>
+        )}
       </span>
       {/*
         The agent's own words while it works, and its last words when it

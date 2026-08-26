@@ -227,13 +227,21 @@ function joinNames(names: string[]): string {
 }
 
 /**
+ * The two lists the spend page prints, derived from the same catalog
+ * the coverage sentence uses, so a new tool cannot land in one and
+ * be missing from the other.
+ */
+export function spendReportingTools(): { reporting: string[]; silent: string[] } {
+  return { reporting: toolNames(true), silent: toolNames(false) };
+}
+
+/**
  * The sentence that has to accompany any spend figure Bento shows.
  * Most tools report nothing, so every total is a floor.
  */
 export function spendCoverageNote(): string {
-  const reporting = joinNames(toolNames(true));
-  const silent = joinNames(toolNames(false));
-  return `Only ${reporting} report what a run cost, and ${silent} report none. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
+  const { reporting, silent } = spendReportingTools();
+  return `Only ${joinNames(reporting)} report what a run cost, and ${joinNames(silent)} report none. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
 }
 
 export function modelGuidanceFor(cli: string): ModelGuidance | undefined {

@@ -23,7 +23,15 @@ import type {
 const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
-import { actorDisplayName, historyTriggerLabel, spendCoverageNote, type AgentEvent } from "@bento/core";
+import {
+  actorDisplayName,
+  historyTriggerLabel,
+  isSpendRun,
+  needsSendBackPrompt,
+  SEND_BACK_NOTICE,
+  spendCoverageNote,
+  type AgentEvent,
+} from "@bento/core";
 import { deleteConsequences } from "./delete-consequences.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
@@ -57,7 +65,7 @@ interface DrawerProps {
  * reported nothing are counted out loud.
  */
 function CardSpend({ runs }: { runs: AgentRun[] }) {
-  const finished = runs.filter((r) => TERMINAL_RUN.has(r.status));
+  const finished = runs.filter(isSpendRun);
   if (finished.length === 0) return null;
   const measured = finished.filter((r) => r.costUsd !== null && r.costUsd !== undefined);
   const total = measured.reduce((sum, r) => sum + Number(r.costUsd), 0);
@@ -127,6 +135,14 @@ export function FeatureDrawer({
    * are still a guess.
    */
   const detailsPending = loadedId !== feature.id && !loadFailed;
+  const showSendBackNotice =
+    !detailsPending &&
+    needsSendBackPrompt({
+      status: feature.status,
+      currentStageId: feature.currentStageId,
+      history,
+      runs,
+    });
 
   useEffect(() => {
     setRuns([]);
@@ -338,6 +354,11 @@ export function FeatureDrawer({
         {loadFailed && (
           <p className="error" role="alert">
             Could not load this card's details. Check the connection and reopen the card.
+          </p>
+        )}
+        {showSendBackNotice && (
+          <p className="card-notice" role="status">
+            {SEND_BACK_NOTICE}
           </p>
         )}
         <section className="section">
