@@ -135,7 +135,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
       newline = buffer.indexOf("\n");
     }
   }
-  if (adapter.stdoutMode === "events" && buffer.trim()) await emit(buffer);
+  if (adapter.stdoutMode !== "text" && buffer.trim()) await emit(buffer);
   if (adapter.stdoutMode === "text") {
     const text = textOutput.value().trim();
     if (text) {

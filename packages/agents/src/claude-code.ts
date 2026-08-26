@@ -48,7 +48,6 @@ interface ClaudeLine {
  */
 export const claudeCodeAdapter: AgentAdapter = {
   cli: "claude-code",
-  stdoutMode: "events",
   requiredEnv: ["ANTHROPIC_API_KEY"],
   optionalEnv: ["ANTHROPIC_BASE_URL"],
   // A subscription login token works in place of an API key. It is how

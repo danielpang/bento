@@ -208,6 +208,28 @@ test("a warm machine upgrades an old private Node while installing only missing 
   }
 });
 
+test("a warm machine keeps a newer dsh-compatible private Node", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-node-current-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    rmSync(path.join(root, "opt/bento/dsh"), { recursive: true, force: true });
+    rmSync(path.join(root, "usr/local/bin/dsh"), { force: true });
+    const node = path.join(root, "opt/bento/node/bin/node");
+    writeFileSync(node, "#!/bin/sh\nprintf 'v24.3.0\\n'\n");
+    chmodSync(node, 0o755);
+
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.deepEqual(sandbox.fetched(), []);
+    assert.equal(spawnSync(node, ["--version"], { encoding: "utf8" }).stdout.trim(), "v24.3.0");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * The failure that actually happened, twice, and the reason opencode no
  * longer goes through its installer at all.

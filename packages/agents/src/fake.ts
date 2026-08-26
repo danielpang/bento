@@ -21,7 +21,6 @@ import { lastResultEvent, type AgentAdapter, type BuildCommandInput } from "./ad
  */
 export const fakeAdapter: AgentAdapter = {
   cli: "fake",
-  stdoutMode: "events",
   requiredEnv: [],
 
   buildCommand(input: BuildCommandInput): string[] {

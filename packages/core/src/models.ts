@@ -106,10 +106,7 @@ export function providerById(id: string): CatalogProvider | undefined {
  * ("microsoft/phi-4"), which is why the prefixed form nests.
  */
 export function modelStringFor(cli: string, providerId: string, modelId: string): string {
-  const guidance = MODEL_GUIDANCE.find((entry) => entry.cli === cli);
-  if (guidance && !guidance.bareModelId) {
-    return `${providerId}/${modelId}`;
-  }
+  if (cli === "opencode" || cli === "pi") return `${providerId}/${modelId}`;
   if (providerId === "openrouter") return modelId;
   return modelId;
 }
@@ -210,7 +207,7 @@ function providerOfModel(model: string): CatalogProvider | undefined {
  * reach, not two that can disagree.
  */
 export function checkAgentPairing(cli: string, model: string): AgentPairing {
-  if (cli === "dsh" && model.includes("/")) {
+  if (MODEL_GUIDANCE.find((guidance) => guidance.cli === cli)?.bareModelId && model.includes("/")) {
     return {
       status: "impossible",
       detail: "DeepSeek Harness takes a bare model id, for example deepseek-v4-pro, without a provider prefix.",

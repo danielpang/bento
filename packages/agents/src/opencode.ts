@@ -45,7 +45,6 @@ interface OpencodeLine {
  */
 export const opencodeAdapter: AgentAdapter = {
   cli: "opencode",
-  stdoutMode: "events",
   // Auth is provider specific rather than opencode specific; the
   // orchestrator forwards whichever provider keys are configured.
   // Provider agnostic: whichever of these the organization has stored

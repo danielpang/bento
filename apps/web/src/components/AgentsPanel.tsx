@@ -21,7 +21,7 @@ import {
 } from "@bento/core";
 
 /** One catalog, shared with `bento setup`, so the two cannot drift. */
-const CLIS = MODEL_GUIDANCE.map((tool) => ({
+const CLIS = MODEL_GUIDANCE.filter((tool) => tool.cli !== "fake").map((tool) => ({
   value: tool.cli as AgentCli,
   label: tool.label,
   model: tool.defaultModel,
@@ -461,8 +461,9 @@ export function AgentsPanel({
               {PREVIEW_TOOLS[cli] && (
                 <p className="warn">
                   <strong>Developer preview.</strong> DeepSeek Harness is not finished, and its interfaces can change
-                  without warning. It prints nothing while it works, so the card stays quiet until the run ends. It
-                  cannot continue a previous conversation, so each message starts a fresh run with a compacted transcript.
+                  without warning. Two limits are worth knowing before you assign it to a stage. It prints nothing while
+                  it works, so the card stays quiet until the run ends. It cannot continue a previous conversation, so
+                  each message starts a fresh run with a compacted transcript.
                 </p>
               )}
               {/* Said while the tool is being chosen, not when a run

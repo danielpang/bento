@@ -1,5 +1,7 @@
 # Code review: DeepSeek support
 
+> Superseded for Part 2. This review covered the earlier provider-only commit. DeepSeek Harness was subsequently implemented and verified in `339c1f4` and the Part 2 completion commit; see [implementation.md](./implementation.md).
+
 ## Verdict
 
 No blocking code findings in the implemented scope. This branch safely delivers Part 1 of the engineering requirements, native DeepSeek models for pi and opencode. It does not add DeepSeek Harness (`dsh`). That omission is intentional and matches the S1/S2 gate in `engineering-requirements.md`; the feature card remains incomplete until those gates can be satisfied.

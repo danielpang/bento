@@ -260,14 +260,22 @@ if wanted pool; then
   POOL_INSTALL_ACCEPT_EULA=1 install_from pool https://downloads.poolside.ai/pool/install.sh sh || true
 fi
 
-# pi and dsh are npm only, so they share a private Node. An exact version
-# check upgrades warm machines in place when a newly added npm CLI needs a
-# newer runtime. The old runtime stays usable if the download or unpack fails.
+# pi and dsh are npm only, so they share a private Node. A compatibility
+# check upgrades warm machines below dsh's floor without replacing a newer
+# supported runtime. The old runtime stays usable if the download fails.
+node_supported() {
+  [ -x /opt/bento/node/bin/node ] || return 1
+  version=$(/opt/bento/node/bin/node --version 2>/dev/null) || return 1
+  version=\${version#v}
+  major=\${version%%.*}
+  rest=\${version#*.}
+  minor=\${rest%%.*}
+  case "$major:$minor" in *[!0-9:]*|:|*:) return 1 ;; esac
+  if [ "$major" -eq 22 ]; then [ "$minor" -ge 19 ]; else [ "$major" -ge 24 ]; fi
+}
+
 ensure_node() {
-  if [ -x /opt/bento/node/bin/node ] &&
-     [ "$(/opt/bento/node/bin/node --version 2>/dev/null || true)" = "v${NODE_VERSION}" ]; then
-    return 0
-  fi
+  node_supported && return 0
   case "$(uname -m)" in
     x86_64|amd64) node_arch=x64 ;;
     aarch64|arm64) node_arch=arm64 ;;
@@ -284,8 +292,7 @@ ensure_node() {
   fi
   rm -rf /opt/bento/node-next
   rm -f /tmp/node.tar.xz
-  [ -x /opt/bento/node/bin/node ] &&
-    [ "$(/opt/bento/node/bin/node --version 2>/dev/null || true)" = "v${NODE_VERSION}" ]
+  node_supported
 }
 
 # /opt/bento/node/bin is never added to the workspace PATH. Each shim adds it

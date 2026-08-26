@@ -3,7 +3,13 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { BentoClient } from "@bento/api-client";
-import { AgentSession } from "./components/AgentSession.js";
+import {
+  AgentSession,
+  isLongQuietRun,
+  runDuration,
+  withNoLiveTranscriptNote,
+  type ChatItem,
+} from "./components/AgentSession.js";
 
 const client = {} as unknown as BentoClient;
 const originalStorage = (globalThis as { localStorage?: Storage }).localStorage;
@@ -115,4 +121,27 @@ test("AgentSession showDetail overrides a saved preference for durable previews"
     );
     assert.match(html, /aria-pressed="true"/);
   });
+});
+
+test("the quiet-run clock crosses its warning threshold at 30 minutes", () => {
+  const startedAt = "2026-08-26T00:00:00.000Z";
+  const start = new Date(startedAt).getTime();
+  assert.equal(runDuration(startedAt, start + 4 * 60_000 + 12_000), "4m 12s");
+  assert.equal(isLongQuietRun(startedAt, start + 30 * 60_000 - 1), false);
+  assert.equal(isLongQuietRun(startedAt, start + 30 * 60_000), true);
+});
+
+test("the Harness explanation sits immediately before its final answer", () => {
+  const items: ChatItem[] = [
+    { key: "user", kind: "message", role: "user", text: "Implement it", speaker: "you" },
+    { key: "result", kind: "result", ok: true },
+    { key: "answer", kind: "message", role: "assistant", text: "Implemented", speaker: "Harness" },
+  ];
+  const noted = withNoLiveTranscriptNote(items, "run");
+  assert.deepEqual(
+    noted.map((item) => item.key),
+    ["user", "result", "run-quiet-note", "answer"],
+  );
+  assert.match(noted[2]?.kind === "message" ? noted[2].text : "", /printed its final message/);
+  assert.deepEqual(items.map((item) => item.key), ["user", "result", "answer"], "the source transcript is not mutated");
 });

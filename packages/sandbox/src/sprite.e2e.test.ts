@@ -53,6 +53,32 @@ const featureId = `e2e-${runTag}`;
 /** Long: a cold sprite installs seven CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
 
+const DSH_MOCK_SERVER = `import { appendFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+createServer(async (request, response) => {
+  let raw = "";
+  for await (const chunk of request) raw += chunk;
+  const body = JSON.parse(raw);
+  const hasToolResult = body.messages.some((message) => message.role === "tool");
+  appendFileSync("/tmp/bento-dsh-requests", JSON.stringify({
+    authorization: request.headers.authorization,
+    model: body.model,
+    hasTools: Array.isArray(body.tools),
+    hasToolResult,
+  }) + "\\n");
+  response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+  if (Array.isArray(body.tools) && !hasToolResult) {
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "printf verified > /workspace/dsh-e2e-marker", description: "verify local tools" }) } }] }, finish_reason: null }] }) + "\\n\\n");
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }) + "\\n\\n");
+  } else {
+    const content = Array.isArray(body.tools) ? "sprite dsh complete" : "title";
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: null }] }) + "\\n\\n");
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) + "\\n\\n");
+  }
+  response.end("data: [DONE]\\n\\n");
+}).listen(43123, "127.0.0.1", () => writeFileSync("/tmp/bento-dsh-ready", "ready"));
+`;
+
 test("a real sprite ends up with every agent CLI, and heals when one goes missing", { skip }, async (t) => {
   const driver = new SpriteDriver({ token: token!, timeoutMs: PROVISION_TIMEOUT_MS });
   const handle: SandboxHandle = {
@@ -185,6 +211,37 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
       if (exitCode !== 0) broken.push(`${binary} (exit ${exitCode}: ${(stderr || stdout).trim().slice(0, 200)})`);
     }
     assert.deepEqual(broken, [], `installed but not runnable: ${broken.join(", ")}`);
+  });
+
+  await t.test("dsh runs Bento's exact headless profile with local tools", { skip: needsSprite() }, async () => {
+    const encoded = Buffer.from(DSH_MOCK_SERVER).toString("base64");
+    const staged = await shell(
+      [
+        "rm -f /tmp/bento-dsh-ready /tmp/bento-dsh-requests /workspace/dsh-e2e-marker",
+        `printf '%s' '${encoded}' | base64 -d > /tmp/bento-dsh-mock.mjs`,
+      ].join(" && "),
+    );
+    assert.equal(staged.exitCode, 0, staged.stderr);
+
+    const ran = await shell(
+      [
+        "/opt/bento/node/bin/node /tmp/bento-dsh-mock.mjs >/tmp/bento-dsh-mock.log 2>&1 & mock=$!",
+        "trap 'kill $mock 2>/dev/null || true' EXIT",
+        "for attempt in 1 2 3 4 5; do [ -f /tmp/bento-dsh-ready ] && break; sleep 1; done",
+        "test -f /tmp/bento-dsh-ready",
+        "DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro DSH_TOOLS_MODE=native DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 DEEPSEEK_API_KEY=mock-key DEEPSEEK_BASE_URL=http://127.0.0.1:43123/v1 dsh --profile headless 'verify Bento integration'",
+      ].join("; "),
+    );
+    assert.equal(ran.exitCode, 0, ran.stderr || ran.stdout);
+    assert.equal(ran.out, "sprite dsh complete");
+
+    const evidence = await shell("cat /workspace/dsh-e2e-marker; cat /tmp/bento-dsh-requests");
+    assert.equal(evidence.exitCode, 0, evidence.stderr);
+    assert.match(evidence.out, /^verified$/m, "dsh did not execute its local bash tool");
+    assert.match(evidence.out, /\"authorization\":\"Bearer mock-key\"/);
+    assert.match(evidence.out, /\"model\":\"deepseek-v4-pro\"/);
+    assert.match(evidence.out, /\"hasToolResult\":true/);
+    await shell("rm -f /workspace/dsh-e2e-marker /tmp/bento-dsh-*");
   });
 
   /**

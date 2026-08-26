@@ -23,7 +23,6 @@ interface CursorLine {
  */
 export const cursorAdapter: AgentAdapter = {
   cli: "cursor",
-  stdoutMode: "events",
   requiredEnv: ["CURSOR_API_KEY"],
   configPaths: [".cursor"],
 

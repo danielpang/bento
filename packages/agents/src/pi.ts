@@ -16,7 +16,6 @@ import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandIn
  */
 export const piAdapter: AgentAdapter = {
   cli: "pi",
-  stdoutMode: "events",
   requiredEnv: [],
   requiredEnvFor: providerKeyFor,
   // Whichever of these is present decides which provider pi can reach.

@@ -40,7 +40,7 @@ const COMPOSER_MAX_HEIGHT = 160;
  * run's event list is folded into rows first, so tool bursts collapse
  * and the pane reads as an exchange between people.
  */
-type ChatItem =
+export type ChatItem =
   | { key: string; kind: "message"; role: "assistant" | "user" | "system"; text: string; speaker: string }
   | { key: string; kind: "tools"; calls: ToolCall[] }
   | { key: string; kind: "result"; ok: boolean; costUsd?: number | undefined; error?: string | undefined };
@@ -357,14 +357,7 @@ export function AgentSession({
         NO_LIVE_TRANSCRIPT[sourceAgent.cli] &&
         items.some((item) => item.kind === "message" && item.role === "assistant")
       ) {
-        const assistantIndex = items.findIndex((item) => item.kind === "message" && item.role === "assistant");
-        items.splice(assistantIndex, 0, {
-          key: `${prefix}-quiet-note`,
-          kind: "message",
-          role: "system",
-          speaker: "system",
-          text: "DeepSeek Harness printed its final message. There are no tool steps or thinking to show, because this tool does not print them while it works.",
-        });
+        return withNoLiveTranscriptNote(items, prefix);
       }
       return items;
     };
@@ -591,9 +584,10 @@ export function AgentSession({
                     quiet until then. That is the tool, not a stall. The work still lands on the branch, and Stop ends the run now.
                   </span>
                   <span className="muted">Working for {runDuration(latestRun.startedAt, clock)}.</span>
-                  {elapsedMs(latestRun.startedAt, clock) >= 30 * 60 * 1000 && (
+                  {isLongQuietRun(latestRun.startedAt, clock) && (
                     <span className="warn">
-                      Still working after 30 minutes, with nothing printed. Stop it if this looks wrong.
+                      Still working after 30 minutes, with nothing printed. Nothing on this card can tell whether it is
+                      progressing, because the tool prints nothing until it ends. Stop it if this looks wrong.
                     </span>
                   )}
                 </div>
@@ -989,6 +983,24 @@ export function runDuration(startedAt: string | null, now: number): string {
   const seconds = Math.floor(elapsedMs(startedAt, now) / 1000);
   const minutes = Math.floor(seconds / 60);
   return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
+
+export function isLongQuietRun(startedAt: string | null, now: number): boolean {
+  return elapsedMs(startedAt, now) >= 30 * 60 * 1000;
+}
+
+export function withNoLiveTranscriptNote(items: ChatItem[], prefix: string): ChatItem[] {
+  const assistantIndex = items.findIndex((item) => item.kind === "message" && item.role === "assistant");
+  if (assistantIndex < 0) return items;
+  const noted = [...items];
+  noted.splice(assistantIndex, 0, {
+    key: `${prefix}-quiet-note`,
+    kind: "message",
+    role: "system",
+    speaker: "system",
+    text: "DeepSeek Harness printed its final message. There are no tool steps or thinking to show, because this tool does not print them while it works.",
+  });
+  return noted;
 }
 
 /**
