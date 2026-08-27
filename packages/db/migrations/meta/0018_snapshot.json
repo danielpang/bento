@@ -1,5 +1,5 @@
 {
-  "id": "e18a9c20-7b44-4d81-9e02-a1b2c3d4e5f6",
+  "id": "1c376550-7cda-47fb-af55-ac2ace15ed5e",
   "prevId": "d69e4d12-3b13-4fec-a4a2-ca10f1bd5f19",
   "version": "7",
   "dialect": "postgresql",
@@ -1560,6 +1560,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "head_sha": {
+          "name": "head_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2513,18 +2519,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
-        },
-        "pipeline_seed": {
-          "name": "pipeline_seed",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "setup_completed_at": {
-          "name": "setup_completed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",

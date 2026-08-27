@@ -9,15 +9,15 @@
  * on whatever version happened to be baked in, and every Go project
  * start by fighting it.
  *
- * Four of the five CLIs ship standalone binaries, so they carry no
- * runtime of their own. pi is published only on npm, so it gets a
- * private Node under /opt/bento that runs pi and nothing else: it is
+ * Five of the seven CLIs ship standalone binaries, so they carry no
+ * runtime of their own. pi and dsh are published only on npm, so they get a
+ * private Node under /opt/bento that runs them and nothing else: it is
  * never placed on the PATH an agent's shell sees, so `node` in a
  * workspace still means "the one this repository installed".
  */
 
 /** Binaries this script is responsible for putting on the PATH. */
-export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "pi"] as const;
+export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"] as const;
 
 /**
  * Bumped whenever the script changes what it installs, or when the
@@ -38,7 +38,7 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "p
  * Bumping this is not free, and it is worth knowing why before you do.
  * Every warm sprite in the fleet reinstalls the whole set on its next
  * provision, so the next run of every card pays minutes it did not
- * expect, and four vendors' installers are all called at once from one
+ * expect, and five vendors' installers are all called at once from one
  * egress address. That is the condition that gets one of them
  * throttled, which means a bump is the change most likely to hit the
  * failure this version exists to fix: bumping to fix a rate limit feeds
@@ -51,7 +51,13 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "opencode", "p
  * Which is also why fixing opencode did not need one. Since v3 the
  * retry decision comes from the binaries rather than the marker, so a
  * sandbox missing a CLI already reinstalls it on its next provision and
- * picks up whatever this script now does.
+ * picks up whatever this script now does. Adding pool did not need one
+ * either, and for the same reason: a warm sprite holding the v3 marker
+ * finds pool absent from the PATH, installs that one CLI, and leaves
+ * the five it already has alone. Adding dsh is the same for a machine
+ * that never had it. Warm sprites that already have pi or opencode too
+ * old for native DeepSeek, or a dsh pin that has moved, are caught by
+ * the version check below rather than a bump.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -69,8 +75,17 @@ export const TOOLCHAIN_MARKER = `/opt/bento/toolchain-v${TOOLCHAIN_VERSION}`;
  */
 export const TOOLCHAIN_MISSING_PREFIX = "bento-toolchain-missing:";
 
-/** Node used only to run pi. Off the agent's PATH on purpose. */
-const NODE_VERSION = "22.14.0";
+/** Node used only to run npm-distributed agents. Off the agent's PATH on purpose. */
+const NODE_VERSION = "22.22.2";
+/** Native DeepSeek on opencode needs this floor; warm sprites below it reinstall. */
+const OPENCODE_MIN_VERSION = "1.14.24";
+/** Native DeepSeek on pi needs this floor; warm sprites below it reinstall. */
+const PI_MIN_VERSION = "0.70.1";
+/**
+ * Pin bumps reinstall via the version check below, not a TOOLCHAIN_VERSION
+ * bump: warm sprites that already have dsh compare --version to this string.
+ */
+const DSH_VERSION = "0.1.1-rc.2";
 
 /**
  * Idempotent, and safe to run on every provision: a sandbox that already
@@ -110,15 +125,88 @@ publish() {
   return 1
 }
 
+# 0 if $1 is a lower major.minor.patch than $2. Digits are taken from the
+# first dotted triple so "opencode 1.14.24" still compares.
+version_below() {
+  current=$(printf '%s' "$1" | tr -cd '0-9.') || true
+  floor=$(printf '%s' "$2" | tr -cd '0-9.') || true
+  c1=\${current%%.*}
+  rest=\${current#"$c1"}
+  rest=\${rest#.}
+  c2=\${rest%%.*}
+  rest=\${rest#"$c2"}
+  rest=\${rest#.}
+  c3=\${rest%%.*}
+  f1=\${floor%%.*}
+  rest=\${floor#"$f1"}
+  rest=\${rest#.}
+  f2=\${rest%%.*}
+  rest=\${rest#"$f2"}
+  rest=\${rest#.}
+  f3=\${rest%%.*}
+  c1=\${c1%%[!0-9]*}
+  c2=\${c2%%[!0-9]*}
+  c3=\${c3%%[!0-9]*}
+  f1=\${f1%%[!0-9]*}
+  f2=\${f2%%[!0-9]*}
+  f3=\${f3%%[!0-9]*}
+  [ -n "$c1" ] || c1=0
+  [ -n "$c2" ] || c2=0
+  [ -n "$c3" ] || c3=0
+  [ -n "$f1" ] || f1=0
+  [ -n "$f2" ] || f2=0
+  [ -n "$f3" ] || f3=0
+  if [ "$c1" -lt "$f1" ]; then return 0; fi
+  if [ "$c1" -gt "$f1" ]; then return 1; fi
+  if [ "$c2" -lt "$f2" ]; then return 0; fi
+  if [ "$c2" -gt "$f2" ]; then return 1; fi
+  if [ "$c3" -lt "$f3" ]; then return 0; fi
+  return 1
+}
+
+# Present but too old for what Bento now builds. dsh is a string contains
+# against the pin, not semver, because the pin is 0.1.1-rc.2.
+# The inner dsh binary is asked directly so a version check does not copy
+# a per-run home.
+cli_stale() {
+  tool=$1
+  case "$tool" in
+    opencode)
+      ver=$(opencode --version 2>/dev/null | head -n 1) || true
+      [ -n "$ver" ] || return 0
+      version_below "$ver" "${OPENCODE_MIN_VERSION}"
+      ;;
+    pi)
+      ver=$(pi --version 2>/dev/null | head -n 1) || true
+      [ -n "$ver" ] || return 0
+      version_below "$ver" "${PI_MIN_VERSION}"
+      ;;
+    dsh)
+      ver=$(/opt/bento/dsh/bin/dsh --version 2>/dev/null || true)
+      [ -n "$ver" ] || ver=$(/opt/bento/dsh/bin/dsh -V 2>/dev/null || true)
+      case "$ver" in
+        *${DSH_VERSION}*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # What a run can actually spawn decides the work, not the marker alone.
-# With the marker there this is five builtin lookups and no network,
+# With the marker there this is seven builtin lookups and no network,
 # which is what makes the common case free; without it the whole set is
 # installed, because a version bump means the commands Bento builds now
-# want newer CLIs than the ones already here.
+# want newer CLIs than the ones already here. A present CLI can still be
+# needed when it is below a floor this script now requires.
 needed=""
 if [ -f "$MARKER" ]; then
   for tool in $ALL; do
-    publish "$tool" || needed="$needed $tool"
+    if publish "$tool"; then
+      if cli_stale "$tool"; then needed="$needed $tool"; fi
+    else
+      needed="$needed $tool"
+    fi
   done
   if [ -z "$needed" ]; then exit 0; fi
 else
@@ -133,7 +221,7 @@ wanted() {
 # Base packages. git is the only one of these the project's own code
 # sees; the rest are what the CLI installers unpack themselves with, and
 # an installer that downloads its archive and cannot open it leaves
-# nothing behind but an exit code. bash, because three of the four
+# nothing behind but an exit code. bash, because three of the five
 # installers are bash scripts rather than sh ones.
 packages=""
 command -v git >/dev/null 2>&1 || packages="$packages git"
@@ -247,27 +335,93 @@ if wanted opencode; then
 fi
 if wanted cursor-agent; then install_from cursor https://cursor.com/install bash || true; fi
 
-# pi is npm only, so it gets its own Node. /opt/bento/node/bin is never
-# added to PATH: the shim below puts it there for pi's process alone, so
-# a repository that wants Node still has to install one.
-if wanted pi; then
-  if [ ! -x /opt/bento/node/bin/node ]; then
-    arch=$(uname -m)
-    case "$arch" in
-      x86_64|amd64) node_arch=x64 ;;
-      aarch64|arm64) node_arch=arm64 ;;
-      *) node_arch="" ;;
-    esac
-    if [ -n "$node_arch" ]; then
-      tarball="node-v${NODE_VERSION}-linux-$node_arch.tar.xz"
-      if curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$tarball" -o /tmp/node.tar.xz; then
-        mkdir -p /opt/bento/node
-        tar -xJf /tmp/node.tar.xz -C /opt/bento/node --strip-components=1
-        rm -f /tmp/node.tar.xz
-      fi
+# pool's installer refuses to run without a terminal unless the EULA is
+# accepted up front, so accepting it is what makes the install headless
+# at all. Note what that means: Bento accepts Poolside's terms inside
+# every sandbox it provisions, on the operator's behalf. Scoped to the
+# one command, which is also where the installer's child shell reads it.
+if wanted pool; then
+  POOL_INSTALL_ACCEPT_EULA=1 install_from pool https://downloads.poolside.ai/pool/install.sh sh || true
+fi
+
+# pi and dsh are npm only, so they share a private Node. A compatibility
+# check upgrades warm machines below dsh's floor without replacing a newer
+# supported runtime. The old runtime stays usable if the download fails.
+node_supported() {
+  [ -x /opt/bento/node/bin/node ] || return 1
+  version=$(/opt/bento/node/bin/node --version 2>/dev/null) || return 1
+  version=\${version#v}
+  major=\${version%%.*}
+  rest=\${version#*.}
+  minor=\${rest%%.*}
+  case "$major:$minor" in *[!0-9:]*|:|*:) return 1 ;; esac
+  if [ "$major" -eq 22 ]; then [ "$minor" -ge 19 ]; else [ "$major" -ge 24 ]; fi
+}
+
+ensure_node() {
+  node_supported && return 0
+  case "$(uname -m)" in
+    x86_64|amd64) node_arch=x64 ;;
+    aarch64|arm64) node_arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  tarball="node-v${NODE_VERSION}-linux-$node_arch.tar.xz"
+  rm -rf /opt/bento/node-next
+  if curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/$tarball" -o /tmp/node.tar.xz; then
+    mkdir -p /opt/bento/node-next
+    if tar -xJf /tmp/node.tar.xz -C /opt/bento/node-next --strip-components=1; then
+      rm -rf /opt/bento/node
+      mv /opt/bento/node-next /opt/bento/node
     fi
   fi
-  if [ -x /opt/bento/node/bin/node ]; then
+  rm -rf /opt/bento/node-next
+  rm -f /tmp/node.tar.xz
+  node_supported
+}
+
+# /opt/bento/node/bin is never added to the workspace PATH. Each shim adds it
+# only to its agent process, so a repository that wants Node still installs one.
+if wanted dsh; then
+  if ensure_node; then
+    PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/dsh \\
+      @deepseek-ai/dsh@${DSH_VERSION} >/dev/null 2>&1 || echo "bento: dsh install failed" >&2
+    if [ -x /opt/bento/dsh/bin/dsh ]; then
+      mkdir -p /opt/bento/dsh-home
+      cat > /opt/bento/dsh-home/cordis.patch.yml <<'BENTO_DSH_PROFILE'
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: !!js process.env.DSH_MODEL
+- id: tool-web
+  disabled: true
+BENTO_DSH_PROFILE
+      cat > /usr/local/bin/dsh <<'BENTO_DSH_SHIM'
+#!/bin/sh
+set -eu
+PATH=/opt/bento/node/bin:$PATH
+export PATH
+if [ -z "\${DSH_HOME:-}" ]; then
+  mkdir -p /opt/bento/dsh-runs
+  DSH_HOME=$(mktemp -d /opt/bento/dsh-runs/XXXXXX)
+  cp -a /opt/bento/dsh-home/. "$DSH_HOME"/
+fi
+export DSH_HOME
+exec /opt/bento/dsh/bin/dsh "$@"
+BENTO_DSH_SHIM
+      chmod +x /usr/local/bin/dsh
+      if ! DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \\
+        /usr/local/bin/dsh --profile headless --dump-config >/dev/null 2>&1; then
+        rm -f /usr/local/bin/dsh
+        echo "bento: dsh profile initialization failed" >&2
+      fi
+    fi
+  else
+    echo "bento: dsh install failed, no private Node" >&2
+  fi
+fi
+
+if wanted pi; then
+  if ensure_node; then
     PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/pi \\
       @earendil-works/pi-coding-agent >/dev/null 2>&1 || echo "bento: pi install failed" >&2
     if [ -x /opt/bento/pi/bin/pi ]; then

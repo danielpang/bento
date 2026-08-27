@@ -115,6 +115,21 @@ anything its sandbox can, so one prompt injection would exfiltrate the
 operator's key. Local mode uses the process environment because there is
 one trusted user and no tenant boundary.
 
+## New product features go behind the beta testers flag
+
+Unfinished UI and new endpoints that are not ready for every signed-in
+user go behind `beta-testers`, a permanent PostHog flag. Add people by
+putting their email on that flag's release conditions. Local mode is
+always on.
+
+- Server: `ctx.featureFlags.isBetaTester(userId, { email })`. A beta
+  endpoint that a non-tester must not learn about answers 404 via
+  `getBetaTester`, the same convention as the access helpers.
+- Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
+  `useBetaTesters()` is the boolean for lighter checks.
+
+Do not mint a second flag for "show this to testers". This is that flag.
+
 ## Verify against something real before calling it done
 
 Type checks and green tests have repeatedly agreed with each other while
@@ -148,3 +163,63 @@ the TUI against a live server, read the rows back out of Postgres.
 No em dashes or en dashes in user-facing text, and no hyphen-as-pause.
 Use separate sentences, commas, colons, or parentheses. This applies to
 UI strings, error messages, and documentation.
+
+## Cursor Cloud specific instructions
+
+The development workflow is the "from source, with hot reload" path in
+[docs/web-app.md](./docs/web-app.md). The update script runs `pnpm
+install` on startup, so only the notes below are non-obvious.
+
+Postgres is installed on the VM (a Postgres 16 cluster listening on port
+5439, which matches the `DATABASE_URL` default in `apps/server/src/env.ts`
+and the docker-compose port the test suites fall back to). It does not
+start on boot in this environment, so start it once per session before
+running the server or tests:
+
+```bash
+sudo pg_ctlcluster 16 main start   # or: sudo service postgresql start
+```
+
+The role is `postgres`/`postgres` and the database is `app`. Schema
+migrations are already applied to that database; run `pnpm db:migrate`
+after pulling new migration files.
+
+Run the app with `pnpm dev` (turbo). The API serves on 4400, the web
+console on 4401 (open 4401), and the TUI in a third pane. The TUI pane
+fails with a Docker error because its embedded mode runs Postgres and
+sandboxes in Docker, which is not installed here. That failure is
+expected and does not affect the server or the console.
+
+Docker is not installed, so `BENTO_SANDBOX_DRIVER` stays at its `docker`
+default and starting an agent run cannot complete (a run needs a sandbox
+and agent API credentials, neither of which is present). Turbo runs the
+`dev` task in strict env mode and does not pass shell variables through
+to it, so exporting `BENTO_SANDBOX_DRIVER` before `pnpm dev` has no
+effect. Everything that does not spawn an agent (projects, cards, stages,
+the board, SSE updates) works without Docker or credentials.
+
+Creating a project through the console in local mode requires a
+repository path that points at a git checkout on disk. The dialog's
+Create button stays disabled until both the name and a path are filled,
+which is by design, not a hang. Use an on-disk repo path such as
+`/workspace`.
+
+Tests need `DATABASE_URL` because turbo passes only that variable through
+to the `test` task:
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5439/app pnpm test
+```
+
+The `mac` package tests need Node 22.15 or newer (the Native SDK refuses
+older), while the default `node` on this VM is 22.14, so those four tests
+fail with a version error and every other package passes. For a fully
+green suite including `mac`, put the nvm-managed Node first on PATH:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" \
+  DATABASE_URL=postgres://postgres:postgres@localhost:5439/app pnpm test
+```
+
+`pnpm lint` is a no-op: no package defines a `lint` script. `pnpm
+typecheck` is the static check that runs.

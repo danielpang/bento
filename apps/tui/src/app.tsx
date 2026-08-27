@@ -10,7 +10,7 @@ import {
   type GateState,
   type Stage,
 } from "@bento/api-client";
-import { actorDisplayName, historyTriggerLabel } from "@bento/core";
+import { actorDisplayName, forgetsBetweenRuns, hasNoLiveTranscript, historyTriggerLabel } from "@bento/core";
 import { Board, orderFeatures, statusColor } from "./components/Board.js";
 import { describeCriterion } from "./criteria.js";
 import { Login } from "./components/Login.js";
@@ -178,7 +178,7 @@ const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
  * changes an agent's course, waits a turn, or waits for the run to end,
  * depending only on which tool is working.
  */
-function takeoverTitle(cli: string | undefined, active: boolean, name: string): string {
+export function takeoverTitle(cli: string | undefined, active: boolean, name: string): string {
   if (!active) return `Nothing is running. Enter starts ${name} again with your instructions.`;
   switch (LIVE_TOOLS[cli ?? ""]) {
     case "steer":
@@ -186,8 +186,20 @@ function takeoverTitle(cli: string | undefined, active: boolean, name: string): 
     case "queue":
       return `${name} is working. Your message is read after the current step, in the same conversation.`;
     default:
-      return `${name} is working. Your message is delivered the moment this run ends, as a resume of the same session.`;
+      return forgetsBetweenRuns(cli ?? "")
+        ? `${name} is working. Your message is delivered the moment this run ends, as a new run with a compacted transcript of this conversation.`
+        : `${name} is working. Your message is delivered the moment this run ends, as a resume of the same session.`;
   }
+}
+
+/**
+ * The live log line for a tool that prints nothing until it exits.
+ * Shared with the web quiet-run copy so the two clients cannot drift
+ * the way FORGETS_BETWEEN_RUNS used to.
+ */
+export function quietRunStatus(cli: string | undefined, active: boolean): string | null {
+  if (!active || !cli || !hasNoLiveTranscript(cli)) return null;
+  return "No live output from this tool. It prints one final message when the run ends. That is the tool, not a stall.";
 }
 
 /** The requirements standing between this card and the next stage. */
@@ -406,6 +418,7 @@ function Console({
   /** The agent on the newest run, which decides what a message does to it. */
   const cardAgent = profiles.find((profile) => profile.id === cardRuns[0]?.agentProfileId);
   const runActive = Boolean(latestRunStatus) && !["succeeded", "failed", "cancelled"].includes(latestRunStatus);
+  const quietLine = quietRunStatus(cardAgent?.cli, runActive);
 
   // Follow the selected card's newest run.
   useEffect(() => {
@@ -842,7 +855,10 @@ function Console({
                 // and bounced the panels below it on every flush.
                 <Text>{`${cardAgent?.name ?? "agent"}> ${draft}`.replaceAll(/\s+/g, " ").slice(-100)}</Text>
               )}
-              {transcript.length === 0 && draft === "" && <Text color="gray">No output yet.</Text>}
+              {quietLine && draft === "" && <Text color="gray">{quietLine}</Text>}
+              {!quietLine && transcript.length === 0 && draft === "" && (
+                <Text color="gray">No output yet.</Text>
+              )}
             </>
           )}
         </Box>

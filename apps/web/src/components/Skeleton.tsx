@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import { BrandLockup } from "./BrandLockup.js";
+import { TabScroll } from "./TabScroll.js";
 
 /**
  * Placeholder shapes that hold layout while a fetch is in flight.
@@ -127,6 +128,60 @@ export function SessionsListSkeleton({
   return <div className="sessions-screen">{list}</div>;
 }
 
+/** Table rows for the spend page, without the intro (the intro is data-free). */
+export function SpendPageSkeleton({
+  rows = 6,
+  framed = true,
+}: {
+  rows?: number;
+  framed?: boolean;
+}) {
+  const table = (
+    <>
+      <LoadingStatus label="Loading spend" />
+      <table className="spend-table" aria-hidden="true">
+        <thead>
+          <tr>
+            <th scope="col">Card</th>
+            <th scope="col" className="spend-col">
+              Spend
+            </th>
+            <th scope="col" className="spend-col">
+              Runs
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: rows }, (_, i) => (
+            <tr key={i}>
+              <td>
+                <Skeleton height={14} width={`${52 + ((i * 11) % 28)}%`} />
+              </td>
+              <td className="spend-col">
+                <Skeleton height={14} width="3.2rem" />
+              </td>
+              <td className="spend-col">
+                <Skeleton height={14} width="1.4rem" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+  if (!framed) return table;
+  return (
+    <div className="spend-screen" aria-busy="true">
+      <header className="spend-intro" aria-hidden="true">
+        <Skeleton height={22} width="6rem" />
+        <Skeleton height={13} width="72%" />
+        <Skeleton height={13} width="48%" />
+      </header>
+      {table}
+    </div>
+  );
+}
+
 /** A card's conversation tab, before the transcript has arrived. */
 export function SessionPageSkeleton() {
   return (
@@ -198,11 +253,13 @@ export function SettingsPageSkeleton() {
       </header>
       <div className="settings-page">
         <Skeleton height={22} width="7rem" />
-        <div className="tab-row" aria-hidden="true">
-          {["5.2rem", "4.4rem", "3.6rem", "3.8rem", "3.6rem", "3.2rem"].map((w) => (
-            <Skeleton key={w} height={11} width={w} />
-          ))}
-        </div>
+        <TabScroll>
+          <div className="tab-row" aria-hidden="true">
+            {["5.2rem", "4.4rem", "3.6rem", "3.8rem", "3.6rem", "3.2rem"].map((w) => (
+              <Skeleton key={w} height={11} width={w} />
+            ))}
+          </div>
+        </TabScroll>
         <SettingsBodySkeleton />
       </div>
     </div>

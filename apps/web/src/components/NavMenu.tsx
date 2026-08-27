@@ -13,8 +13,8 @@ export type NavAction =
   // `current` belongs to the address entries alone: only the anchor
   // renderings emit aria-current, so allowing it on a panel action
   // would type-check and then silently do nothing.
-  | { id: string; label: string; onSelect: () => void; href?: never; current?: never }
-  | { id: string; label: string; href: string; onSelect?: never; current?: boolean };
+  | { id: string; label: string; onSelect: () => void; href?: never; current?: never; external?: never }
+  | { id: string; label: string; href: string; onSelect?: never; current?: boolean; external?: boolean };
 
 /**
  * The navigation, collapsed.
@@ -50,7 +50,12 @@ export function NavMenu({ actions }: { actions: NavAction[] }) {
                  with an onSelect that assigns location does none of
                  those, and the address is the point of these two. */
               <Menu.Item key={action.id} className="picker-item" asChild>
-                <a href={action.href} aria-current={action.current ? "page" : undefined}>
+                <a
+                  href={action.href}
+                  target={action.external ? "_blank" : undefined}
+                  rel={action.external ? "noreferrer" : undefined}
+                  aria-current={action.current ? "page" : undefined}
+                >
                   <span className="picker-item-name">{action.label}</span>
                 </a>
               </Menu.Item>

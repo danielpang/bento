@@ -3,15 +3,19 @@ import type { AgentAdapter } from "./adapter.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
+import { dshAdapter } from "./dsh.js";
 import { fakeAdapter } from "./fake.js";
 import { piAdapter } from "./pi.js";
+import { poolAdapter } from "./pool.js";
 import { opencodeAdapter } from "./opencode.js";
 
 export * from "./adapter.js";
 export { claudeCodeAdapter } from "./claude-code.js";
 export { codexAdapter } from "./codex.js";
 export { cursorAdapter } from "./cursor.js";
+export { dshAdapter } from "./dsh.js";
 export { piAdapter } from "./pi.js";
+export { poolAdapter } from "./pool.js";
 export { opencodeAdapter } from "./opencode.js";
 export { fakeAdapter } from "./fake.js";
 
@@ -21,6 +25,8 @@ const adapters: Record<AgentCli, AgentAdapter> = {
   cursor: cursorAdapter,
   opencode: opencodeAdapter,
   pi: piAdapter,
+  pool: poolAdapter,
+  dsh: dshAdapter,
   fake: fakeAdapter,
 };
 
@@ -38,6 +44,9 @@ export const DEFAULT_MODELS: Record<AgentCli, string> = {
   opencode: "anthropic/claude-sonnet-5",
   // Provider prefixed, which is how pi selects which provider to use.
   pi: "anthropic/claude-sonnet-5",
+  // Vendor prefixed, which is the id Poolside's own inference takes.
+  pool: "poolside/laguna-s-2.1",
+  dsh: "deepseek-v4-pro",
   fake: "fake-1",
 };
 export { runAgent, type RunAgentInput, type RunAgentResult, type ExecChunk } from "./execute.js";

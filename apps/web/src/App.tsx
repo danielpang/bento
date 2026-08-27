@@ -1,9 +1,17 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BentoClient, type AgentProfile, type Feature, type Stage } from "@bento/api-client";
+import {
+  BentoClient,
+  type AgentProfile,
+  type Feature,
+  type FeatureSpend,
+  type ProjectUsage,
+  type Stage,
+} from "@bento/api-client";
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { teamDisplayName } from "./team-name.js";
 import { useCountUp } from "./count-up.js";
+import { createRequestGate } from "./latest-request.js";
 import { Board, matchesQuery, neighbourCardId, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
 import { BottomBar } from "./components/BottomBar.js";
@@ -16,9 +24,12 @@ import {
   SessionPageSkeleton,
   SettingsPageSkeleton,
   Skeleton,
+  SpendPageSkeleton,
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
+import { CHANGELOG_URL } from "./changelog.js";
+import { BetaTestersProvider } from "./beta.js";
 import { NavMenu, type NavAction } from "./components/NavMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import { SignIn } from "./components/SignIn.js";
@@ -53,6 +64,7 @@ const ArtifactPage = lazy(() => import("./components/ArtifactViewer.js").then((m
 const SessionPage = lazy(() => import("./components/SessionPage.js").then((m) => ({ default: m.SessionPage })));
 const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) => ({ default: m.SessionsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
+const SpendPage = lazy(() => import("./components/SpendPage.js").then((m) => ({ default: m.SpendPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
 
 /**
@@ -81,6 +93,17 @@ function RouteFallback() {
       </div>
     );
   }
+  if (path === "/spend") {
+    return (
+      <div className="app" aria-busy="true">
+        <header className="topbar">
+          <BrandLockup />
+          <span className="topbar-spacer" />
+        </header>
+        <SpendPageSkeleton />
+      </div>
+    );
+  }
   if (path === "/changelog") return <PageSkeleton />;
   return (
     <div className="app" aria-busy="true">
@@ -99,10 +122,13 @@ const client = new BentoClient({ baseUrl: window.location.origin });
 const PROJECT_KEY = "bento:projectId";
 
 export function App() {
+  const { data: session } = useSession();
   return (
-    <Suspense fallback={<RouteFallback />}>
-      <Route />
-    </Suspense>
+    <BetaTestersProvider client={client} userId={session?.user.id}>
+      <Suspense fallback={<RouteFallback />}>
+        <Route />
+      </Suspense>
+    </BetaTestersProvider>
   );
 }
 
@@ -343,14 +369,16 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
 }
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
-  // Sessions is a sibling tab of the board inside the same chrome, so
-  // both addresses land here and only the slab between the topbar and
-  // the bottom bar differs. Navigation is full page loads, so reading
-  // the address once at render is the routing. Trailing slashes are
-  // tolerated: the SPA fallback serves "/sessions/" too, and answering
-  // it with the board under a sessions address helped nobody.
-  const screen: "board" | "sessions" =
-    window.location.pathname.replace(/\/+$/, "") === "/sessions" ? "sessions" : "board";
+  // Sessions and spend are sibling tabs of the board inside the same
+  // chrome, so those addresses land here and only the slab between the
+  // topbar and the bottom bar differs. Navigation is full page loads,
+  // so reading the address once at render is the routing. Trailing
+  // slashes are tolerated: the SPA fallback serves "/sessions/" too,
+  // and answering it with the board under a sessions address helped
+  // nobody.
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const screen: "board" | "sessions" | "spend" =
+    path === "/sessions" ? "sessions" : path === "/spend" ? "spend" : "board";
   /**
    * Null until the list has answered. An empty array is a real answer
    * ("no projects yet"); starting there showed that copy for a beat on
@@ -403,10 +431,15 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const [query, setQuery] = useState("");
   /** Opened from the bottom bar and from the menu; one dialog either way. */
   const [contactOpen, setContactOpen] = useState(false);
-  const [usage, setUsage] = useState<{ totalUsd: number; totalRuns: number; runsWithoutCost: number } | null>(null);
+  const [usage, setUsage] = useState<ProjectUsage | null>(null);
   // Called unconditionally: the chip below it is conditional, a hook
   // cannot be.
   const spendShown = useCountUp(usage?.totalUsd ?? 0);
+  const spendByFeature = useMemo(() => {
+    const map: Record<string, FeatureSpend> = {};
+    for (const row of usage?.byFeature ?? []) map[row.featureId] = row;
+    return map;
+  }, [usage]);
   /** A board-level load or action failure, shown under the topbar. */
   const [loadError, setLoadError] = useState("");
   /**
@@ -447,6 +480,8 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * message this feature was careful not to send.
    */
   const deletingRef = useRef<string | null>(null);
+  const usageGate = useRef(createRequestGate());
+  const usageProjectRef = useRef<string | null>(null);
 
   /**
    * Agents are not scoped to a project, so they load independently:
@@ -564,12 +599,34 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   // Spend is shown, never enforced: the figure comes from whatever the
   // agent CLI printed, and most print nothing, so it is not a number to
   // make decisions on behalf of anyone.
+  //
+  // Only the newest fetch may write. Board snapshots refetch this on
+  // every coalesced event, and a slower older reply used to overwrite
+  // a newer one, so a completed card dropped from $4.20 back to $1.10.
   useEffect(() => {
-    if (!projectId) return setUsage(null);
+    const gate = usageGate.current;
+    if (!projectId) {
+      gate.next();
+      usageProjectRef.current = null;
+      setUsage(null);
+      return;
+    }
+    if (usageProjectRef.current !== projectId) {
+      usageProjectRef.current = projectId;
+      setUsage(null);
+    }
+    const seq = gate.next();
     void client
       .getUsage(projectId)
-      .then(setUsage)
-      .catch(() => setUsage(null));
+      .then((next) => {
+        if (!gate.isCurrent(seq)) return;
+        setUsage(next);
+      })
+      .catch(() => {
+        if (!gate.isCurrent(seq)) return;
+        // Keep last-known figures for this project. A blip must not
+        // blank every completed card.
+      });
   }, [projectId, features]);
 
   // Board events tell us a card moved or a run changed state. Status
@@ -769,21 +826,31 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     </Suspense>
   );
 
-  const spend = usage && usage.totalRuns > 0 && (
-    <span
-      className="chip"
+  const spend = projectId ? (
+    <a
+      className="chip chip-link"
+      href="/spend"
+      aria-current={screen === "spend" ? "page" : undefined}
       // The tool list comes from the catalog, so it cannot drift
       // from which adapters actually report a figure.
       title={
-        usage.runsWithoutCost > 0
-          ? `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns - usage.runsWithoutCost} of ${usage.totalRuns} runs. ${spendCoverageNote()}`
-          : `Across ${usage.totalRuns} runs. ${spendCoverageNote()}`
+        usage && usage.totalRuns > 0
+          ? usage.runsWithoutCost > 0
+            ? `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns - usage.runsWithoutCost} of ${usage.totalRuns} runs. ${spendCoverageNote()}`
+            : `Across ${usage.totalRuns} runs. ${spendCoverageNote()}`
+          : spendCoverageNote()
       }
     >
-      spend $<span className="spend-figure">{spendShown.toFixed(2)}</span>
-      {usage.runsWithoutCost > 0 ? "+" : ""}
-    </span>
-  );
+      {usage && usage.totalRuns > 0 ? (
+        <>
+          spend $<span className="spend-figure">{spendShown.toFixed(2)}</span>
+          {usage.runsWithoutCost > 0 ? "+" : ""}
+        </>
+      ) : (
+        "spend"
+      )}
+    </a>
+  ) : null;
 
   const hasProjects = (projects?.length ?? 0) > 0;
   /**
@@ -860,7 +927,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             </button>
           </div>
         )}
-        {screen === "sessions" ? <SessionsListSkeleton framed /> : <BoardSkeleton />}
+        {screen === "sessions" ? (
+          <SessionsListSkeleton framed />
+        ) : screen === "spend" ? (
+          <SpendPageSkeleton />
+        ) : (
+          <BoardSkeleton />
+        )}
         {panels}
         {dialogs}
         {bottom}
@@ -929,8 +1002,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       />
 
       {/* Ahead of the setup prompt: a team with no compute left cannot
-          act on any advice below it either. */}
-      <OutOfCompute onOpenBilling={() => window.location.assign("/settings")} />
+          act on any advice below it either. The banner links to
+          Settings, Billing, so a phone does not land on Appearance
+          with that tab off the right edge of the strip. */}
+      <OutOfCompute />
 
       {!boardPending && setupNeeded && (
         <div className="setup-prompt">
@@ -962,6 +1037,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         <Suspense fallback={<SessionsListSkeleton framed />}>
           <SessionsPage client={client} projectId={projectId} profiles={profiles} />
         </Suspense>
+      ) : screen === "spend" ? (
+        <Suspense fallback={<SpendPageSkeleton />}>
+          <SpendPage client={client} projectId={projectId} />
+        </Suspense>
       ) : boardPending ? (
         <BoardSkeleton />
       ) : (
@@ -974,6 +1053,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         runStatusByFeature={runStatus}
         lastOutputByFeature={lastOutput}
         pulses={pulses}
+        spendByFeature={spendByFeature}
         selectedId={selectedId}
         onSelect={setSelectedId}
         onNewCard={() => setDialog("feature")}
@@ -1088,7 +1168,7 @@ function TopBar({
   primary?: React.ReactNode;
   picker?: React.ReactNode;
   search?: React.ReactNode;
-  /** The spend chip: read, not operated, so it never enters the menu. */
+  /** The spend chip. It stays out of the menu at every width. */
   meta?: React.ReactNode;
   onContact: () => void;
   showSignOut: boolean;
@@ -1108,7 +1188,7 @@ function TopBar({
   const entries: NavAction[] = [
     ...actions,
     { id: "contact", label: "Contact", onSelect: onContact },
-    { id: "changelog", label: "Changelog", href: "/changelog" },
+    { id: "changelog", label: "Changelog", href: CHANGELOG_URL, external: true },
     { id: "settings", label: "Settings", href: "/settings" },
     ...(showSignOut ? [{ id: "signout", label: "Sign out", onSelect: () => void signOut() }] : []),
   ];
@@ -1134,7 +1214,14 @@ function TopBar({
               {action.label}
             </button>
           ) : (
-            <a key={action.id} className="btn btn-ghost" href={action.href} aria-current={action.current ? "page" : undefined}>
+            <a
+              key={action.id}
+              className="btn btn-ghost"
+              href={action.href}
+              target={action.external ? "_blank" : undefined}
+              rel={action.external ? "noreferrer" : undefined}
+              aria-current={action.current ? "page" : undefined}
+            >
               {action.label}
             </a>
           ),

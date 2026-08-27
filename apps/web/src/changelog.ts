@@ -11,7 +11,12 @@
  * `id` is the address of the entry: /changelog#<id>. Once an id is
  * published it is a permanent link that somebody may have pasted into
  * an issue, so rename the heading freely and leave the id alone.
+ *
+ * The console's footer and menu send people to the marketing changelog,
+ * not this page. This file still feeds `/changelog` for old bookmarks.
  */
+export const CHANGELOG_URL = "https://usebento.dev/changelog";
+
 export interface ChangelogEntry {
   /** The anchor this entry answers to. Never change a published one. */
   id: string;

@@ -13,6 +13,10 @@ name: Sandbox e2e
 #                 every warm sprite reinstall at once, so it is the
 #                 change most likely to hit a rate limit and the one
 #                 that most needs a real machine to have agreed first
+#   driver PR     any change to how the driver talks to a sandbox. The
+#                 failures that live there (a socket that drops, a
+#                 machine that pauses under a quiet command) are ones a
+#                 stub agrees with and only a real machine disputes
 #   by hand       after an installer outage, to confirm it is over
 #
 # Needs the SPRITES_TOKEN secret. Without it the job says so and stops,
@@ -25,6 +29,7 @@ on:
     paths:
       - packages/sandbox/src/agent-toolchain.ts
       - packages/sandbox/src/sprite.ts
+      - packages/sandbox/src/keep-awake.ts
       - packages/sandbox/src/sprite.e2e.test.ts
       - .github/workflows/sandbox-e2e.yml
   workflow_dispatch:

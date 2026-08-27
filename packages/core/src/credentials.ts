@@ -57,6 +57,18 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     secret: true,
   },
   {
+    name: "POOLSIDE_API_KEY",
+    label: "Poolside",
+    help: "Used by the Poolside CLI, whichever Laguna model it runs. Create one in Poolside Platform under API keys: it is the same key pool login asks you to paste, so a key you already use in a terminal works here.",
+    secret: true,
+  },
+  {
+    name: "DEEPSEEK_API_KEY",
+    label: "DeepSeek",
+    help: "Used by DeepSeek Harness, opencode, and pi when running DeepSeek models against DeepSeek's own API. Create one in the DeepSeek platform console.",
+    secret: true,
+  },
+  {
     name: "GITHUB_TOKEN",
     label: "GitHub token (pull requests)",
     help: "Lets stages with Create a pull request enabled push the feature branch and open the pull request, without installing the GitHub App. Use a fine grained personal access token with contents and pull request write access. It stays on the server and is never given to an agent.",
@@ -72,6 +84,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     name: "OPENAI_BASE_URL",
     label: "OpenAI base URL",
     help: "Point Codex somewhere else, for example https://openrouter.ai/api/v1.",
+    secret: false,
+  },
+  {
+    name: "DEEPSEEK_BASE_URL",
+    label: "DeepSeek base URL",
+    help: "Point DeepSeek Harness at a compatible DeepSeek endpoint instead of the default API.",
     secret: false,
   },
 ];
@@ -97,6 +115,8 @@ export interface ModelGuidance {
   format: string;
   /** Illustrative, not exhaustive. Confirm ids with your provider. */
   examples: readonly string[];
+  /** Refuse provider-prefixed values for tools whose CLI cannot take them. */
+  bareModelId?: boolean;
   /**
    * The executable a sandbox needs for this tool. Used to tell someone
    * choosing a tool whether their machine can actually run it, which is
@@ -164,6 +184,28 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     installCommand: "npm install -g @earendil-works/pi-coding-agent",
   },
   {
+    cli: "pool",
+    label: "Poolside (pool)",
+    defaultModel: "poolside/laguna-s-2.1",
+    format:
+      "A model id served by Poolside Platform, vendor prefix included. Route through OpenRouter instead by choosing pi or opencode as the tool.",
+    examples: ["poolside/laguna-s-2.1"],
+    binary: "pool",
+    installUrl: "https://docs.poolside.ai/cli/install",
+    installCommand: "curl -fsSL https://downloads.poolside.ai/pool/install.sh | sh",
+  },
+  {
+    cli: "dsh",
+    label: "DeepSeek Harness",
+    defaultModel: "deepseek-v4-pro",
+    format: "A bare DeepSeek model id, without a provider prefix.",
+    examples: ["deepseek-v4-pro", "deepseek-v4-flash"],
+    bareModelId: true,
+    binary: "dsh",
+    installUrl: "https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless",
+    installCommand: "npm install -g @deepseek-ai/dsh@0.1.1-rc.2",
+  },
+  {
     cli: "fake",
     label: "Fake agent (for testing)",
     defaultModel: "fake-1",
@@ -210,13 +252,21 @@ function joinNames(names: string[]): string {
 }
 
 /**
+ * The two lists the spend page prints, derived from the same catalog
+ * the coverage sentence uses, so a new tool cannot land in one and
+ * be missing from the other.
+ */
+export function spendReportingTools(): { reporting: string[]; silent: string[] } {
+  return { reporting: toolNames(true), silent: toolNames(false) };
+}
+
+/**
  * The sentence that has to accompany any spend figure Bento shows.
  * Most tools report nothing, so every total is a floor.
  */
 export function spendCoverageNote(): string {
-  const reporting = joinNames(toolNames(true));
-  const silent = joinNames(toolNames(false));
-  return `Only ${reporting} report what a run cost, and ${silent} report none. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
+  const { reporting, silent } = spendReportingTools();
+  return `Only ${joinNames(reporting)} report what a run cost, and ${joinNames(silent)} report none. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
 }
 
 export function modelGuidanceFor(cli: string): ModelGuidance | undefined {

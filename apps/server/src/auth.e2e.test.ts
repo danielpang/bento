@@ -29,6 +29,7 @@ import { createAuth } from "./auth.js";
 import type { AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
+import { createFeatureFlags, FeatureFlags } from "./feature-flags.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { agentAuthEnv } from "./orchestrator/agent-auth.js";
 import { shouldShareAgentAuth } from "./settings.js";
@@ -82,6 +83,7 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId: "",
+    featureFlags: createFeatureFlags(env),
   };
   const auth = createAuth(env, db);
   assert.ok(auth, "multi mode must construct an auth instance");
@@ -108,6 +110,41 @@ function jsonPost(path: string, body: unknown, token?: string) {
 test("the API refuses unauthenticated requests in multi mode", async () => {
   const res = await app.request("/api/projects");
   assert.equal(res.status, 401);
+});
+
+test("feature flags refuse an anonymous caller and follow the beta testers allowlist", async () => {
+  const anonymous = await app.request("/api/flags");
+  assert.equal(anonymous.status, 401);
+
+  const signUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "flags-user@bento.test",
+    password: "correct-horse-battery",
+    name: "Flags",
+  });
+  assert.equal(signUp.status, 200);
+  const token = signUp.headers.get("set-auth-token")!;
+
+  const off = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(off.status, 200);
+  assert.deepEqual(await off.json(), { betaTesters: false });
+
+  const previous = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(
+    {
+      async evaluateFlags(_id, opts) {
+        return { isEnabled: () => opts?.personProperties?.email === "flags-user@bento.test" };
+      },
+      async shutdown() {},
+    },
+    false,
+  );
+  try {
+    const on = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(on.status, 200);
+    assert.deepEqual(await on.json(), { betaTesters: true });
+  } finally {
+    ctx.featureFlags = previous;
+  }
 });
 
 test("sign up returns a bearer token that authenticates API calls", async () => {
@@ -608,6 +645,7 @@ test("every entity route refuses a foreign tenant", async () => {
       { body: "version: 1\npipeline:\n  stages:\n    - name: Mine\n      slug: mine\n" },
     ],
     ["GET", `/api/projects/${project.id}/sessions`],
+    ["GET", `/api/projects/${project.id}/usage`],
     ["GET", `/api/projects/${project.id}/board/plain`],
     ["GET", `/api/projects/${project.id}/pipeline/plain`],
     ["GET", `/api/projects/${project.id}/repositories`],
@@ -646,6 +684,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", "/api/setup"],
     ["POST", "/api/setup", { body: JSON.stringify({ mode: "skip" }) }],
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
+    ["GET", `/api/features/${feature.id}/merge-status`],
+    ["POST", `/api/features/${feature.id}/resolve-conflicts`],
     ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
     ["GET", `/api/features/${feature.id}/history`],
@@ -844,10 +884,11 @@ test("agent credentials are per organization and write only", async () => {
 
   const listed = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${token}` } })
-  ).json()) as { name: string; hint: string }[];
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0]?.name, "ANTHROPIC_API_KEY");
-  assert.equal(listed[0]?.hint, "••••••••1234");
+  ).json()) as { secrets: { name: string; hint: string }[]; canManage: boolean };
+  assert.equal(listed.canManage, true);
+  assert.equal(listed.secrets.length, 1);
+  assert.equal(listed.secrets[0]?.name, "ANTHROPIC_API_KEY");
+  assert.equal(listed.secrets[0]?.hint, "••••••••1234");
   assert.doesNotMatch(JSON.stringify(listed), /sk-ant-secret/, "no route may return the value");
 
   // A name outside the catalog would be stored but never forwarded.
@@ -863,8 +904,8 @@ test("agent credentials are per organization and write only", async () => {
   const outsiderToken = outsider.headers.get("set-auth-token")!;
   const theirs = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).json()) as unknown[];
-  assert.equal(theirs.length, 0, "secrets must not cross organizations");
+  ).json()) as { secrets: unknown[] };
+  assert.equal(theirs.secrets.length, 0, "secrets must not cross organizations");
 
   // The line form the Mac app reads is a second route over the same
   // rows, so it needs the same two assertions rather than inheriting
@@ -918,8 +959,9 @@ test("credential access follows current membership and mutation roles", async ()
 
   const visible = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${teammateToken}` } })
-  ).json()) as { id: string }[];
-  assert.deepEqual(visible.map((secret) => secret.id), [originalId], "members may use the organization's credentials");
+  ).json()) as { secrets: { id: string }[]; canManage: boolean };
+  assert.deepEqual(visible.secrets.map((secret) => secret.id), [originalId], "members may use the organization's credentials");
+  assert.equal(visible.canManage, false, "members must not be offered credential controls");
 
   const memberCreate = await jsonPost(
     "/api/secrets",
@@ -965,7 +1007,7 @@ test("credential access follows current membership and mutation roles", async ()
   const staleList = await app.request("/api/secrets", {
     headers: { authorization: `Bearer ${teammateToken}` },
   });
-  assert.deepEqual(await staleList.json(), []);
+  assert.deepEqual(await staleList.json(), { secrets: [], canManage: false });
   const stalePlain = await app.request("/api/secrets/plain", {
     headers: { authorization: `Bearer ${teammateToken}` },
   });
@@ -988,8 +1030,9 @@ test("credential access follows current membership and mutation roles", async ()
 
   const ownerStillSees = (await (
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${ownerToken}` } })
-  ).json()) as { id: string }[];
-  assert.deepEqual(ownerStillSees.map((secret) => secret.id), [adminSecretId], "stale requests must not mutate secrets");
+  ).json()) as { secrets: { id: string }[]; canManage: boolean };
+  assert.equal(ownerStillSees.canManage, true);
+  assert.deepEqual(ownerStillSees.secrets.map((secret) => secret.id), [adminSecretId], "stale requests must not mutate secrets");
 });
 
 test("a GitHub App installation is bound to the active organization", async () => {

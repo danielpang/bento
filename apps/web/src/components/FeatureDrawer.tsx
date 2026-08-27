@@ -11,6 +11,7 @@ import type {
   Feature,
   FeatureChanges,
   FeatureEvent,
+  FeatureMergeStatus,
   FeaturePullRequest,
   GateState,
   RunArtifact,
@@ -23,7 +24,15 @@ import type {
 const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
-import { actorDisplayName, historyTriggerLabel, spendCoverageNote, type AgentEvent } from "@bento/core";
+import {
+  actorDisplayName,
+  historyTriggerLabel,
+  isSpendRun,
+  needsSendBackPrompt,
+  SEND_BACK_NOTICE,
+  spendCoverageNote,
+  type AgentEvent,
+} from "@bento/core";
 import { deleteConsequences } from "./delete-consequences.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
@@ -57,7 +66,7 @@ interface DrawerProps {
  * reported nothing are counted out loud.
  */
 function CardSpend({ runs }: { runs: AgentRun[] }) {
-  const finished = runs.filter((r) => TERMINAL_RUN.has(r.status));
+  const finished = runs.filter(isSpendRun);
   if (finished.length === 0) return null;
   const measured = finished.filter((r) => r.costUsd !== null && r.costUsd !== undefined);
   const total = measured.reduce((sum, r) => sum + Number(r.costUsd), 0);
@@ -101,6 +110,12 @@ export function FeatureDrawer({
   const [publishing, setPublishing] = useState(false);
   /** The card's open pull requests, one per repository it was published to. */
   const [pullRequests, setPullRequests] = useState<FeaturePullRequest[]>([]);
+  /**
+   * What GitHub says about each pull request's merge, fetched after the
+   * card's own detail so the drawer never waits on GitHub to render.
+   * Only "conflicted" changes anything on screen.
+   */
+  const [mergeStates, setMergeStates] = useState<FeatureMergeStatus[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
   /**
    * Which card's detail has actually arrived. The delete confirmation
@@ -127,6 +142,14 @@ export function FeatureDrawer({
    * are still a guess.
    */
   const detailsPending = loadedId !== feature.id && !loadFailed;
+  const showSendBackNotice =
+    !detailsPending &&
+    needsSendBackPrompt({
+      status: feature.status,
+      currentStageId: feature.currentStageId,
+      history,
+      runs,
+    });
 
   useEffect(() => {
     setRuns([]);
@@ -135,6 +158,7 @@ export function FeatureDrawer({
     setChanges(null);
     setArtifacts([]);
     setPullRequests([]);
+    setMergeStates([]);
     setLoadedId(null);
     setLoadFailed(false);
     setPublishNotes([]);
@@ -175,6 +199,32 @@ export function FeatureDrawer({
     // the API, an auto-start) must surface here, or the drawer offers
     // Stop for a run that is over and hides it for one that is going.
   }, [client, feature.id, feature.status, feature.currentStageId, runsVersion]);
+
+  /**
+   * Merge state on its own cadence: once the card's pull requests are
+   * known, and again when a run settles, the only moment a push can
+   * have changed GitHub's answer. Keyed on runsVersion this refetched
+   * on every status tick of a running agent, a GitHub round trip per
+   * pull request each time; and without the clear below, a refetch
+   * that failed left the previous state's conflict chips on screen.
+   */
+  const hasPullRequests = pullRequests.length > 0;
+  const latestSettledRunId = latestRun && TERMINAL_RUN.has(latestRun.status) ? latestRun.id : null;
+  useEffect(() => {
+    if (!hasPullRequests) return;
+    let cancelled = false;
+    setMergeStates([]);
+    void client
+      .getMergeStatus(feature.id)
+      .then((states) => {
+        if (!cancelled) setMergeStates(states);
+      })
+      // Failure means "unknown", which shows nothing rather than lying.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, feature.id, hasPullRequests, latestSettledRunId]);
 
 
   async function act(fn: () => Promise<unknown>) {
@@ -227,6 +277,25 @@ export function FeatureDrawer({
     } finally {
       setBusy(false);
       setPublishing(false);
+    }
+  }
+
+  /**
+   * Starts the stage agent on the merge conflicts GitHub reported. The
+   * run rebases the branch in the card's sandbox; the server force
+   * pushes the result with lease protection, so the pull request
+   * updates without anybody handing the agent a credential.
+   */
+  async function resolveConflictsNow() {
+    setBusy(true);
+    try {
+      await client.resolveConflicts(feature.id);
+      toast.note("Resolving conflicts. The stage agent rebases the branch, and the pull request updates when it finishes.");
+      onChanged();
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -288,6 +357,21 @@ export function FeatureDrawer({
   // agent; the button says why it is waiting instead of failing later.
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
   /**
+   * The pull requests GitHub says cannot merge, keyed by URL so each
+   * row below can wear its own warning. "unknown" and "clean" both stay
+   * silent: only a conflict asks the user for anything.
+   */
+  const conflictedUrls = new Set(
+    mergeStates.filter((s) => s.state === "conflicted").map((s) => s.url),
+  );
+  const hasConflicts = conflictedUrls.size > 0;
+  /**
+   * One guard for the warning and the button both: a finished card
+   * cannot resolve (the server refuses with "reopen it first"), and a
+   * warning pointing at a button that is not on screen is a dead end.
+   */
+  const canResolve = hasConflicts && !finished;
+  /**
    * Why Delete cannot be pressed, in the words the button carries.
    *
    * The run sentence is the one Approve already uses: two sentences
@@ -338,6 +422,11 @@ export function FeatureDrawer({
         {loadFailed && (
           <p className="error" role="alert">
             Could not load this card's details. Check the connection and reopen the card.
+          </p>
+        )}
+        {showSendBackNotice && (
+          <p className="card-notice" role="status">
+            {SEND_BACK_NOTICE}
           </p>
         )}
         <section className="section">
@@ -444,15 +533,36 @@ export function FeatureDrawer({
                 /* Made, so the door becomes the destination. The Pull
                     requests section lists every repository's; this leads
                     to the first, mirroring the card's own pr_number. */
-                <a
-                  className="btn"
-                  href={pullRequests[0]!.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={`Open pull request #${pullRequests[0]!.number} in ${pullRequests[0]!.name} on GitHub`}
-                >
-                  Open PR #{pullRequests[0]!.number} <ExternalMark />
-                </a>
+                <>
+                  <a
+                    className="btn"
+                    href={pullRequests[0]!.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={`Open pull request #${pullRequests[0]!.number} in ${pullRequests[0]!.name} on GitHub`}
+                  >
+                    Open PR #{pullRequests[0]!.number} <ExternalMark />
+                  </a>
+                  {/* Only when GitHub reports a conflict: a rebase
+                      nothing needs is churn, and the server refuses it
+                      anyway. The stage's agent resolves in the card's
+                      own conversation; the server force pushes with
+                      lease when it finishes. */}
+                  {canResolve && (
+                    <button
+                      className="btn"
+                      disabled={busy || runActive}
+                      title={
+                        runActive
+                          ? "An agent is working this card. Resolve conflicts when it finishes."
+                          : "The stage agent rebases the branch onto the latest base branch and resolves the conflicts."
+                      }
+                      onClick={() => void resolveConflictsNow()}
+                    >
+                      Resolve conflicts
+                    </button>
+                  )}
+                </>
               ) : (
                 <button
                   className="btn"
@@ -550,6 +660,15 @@ export function FeatureDrawer({
         {pullRequests.length > 0 && (
           <section className="section">
             <span className="label">Pull requests</span>
+            {/* Said above the rows, not only as a chip: the chip names
+                which repository, this says what to do about it. */}
+            {canResolve && (
+              <p className="warn">
+                GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
+                the base branch has moved and the changes collide. Resolve conflicts (under Actions) has the stage agent
+                rebase the branch and update the pull request.
+              </p>
+            )}
             {pullRequests.map((pr) => (
               <a
                 key={pr.url}
@@ -561,6 +680,11 @@ export function FeatureDrawer({
               >
                 <span className="pr-repo">{pr.name}</span>
                 <span className="pr-number">#{pr.number}</span>
+                {conflictedUrls.has(pr.url) && (
+                  <span className="chip" data-status="conflict">
+                    Merge conflict
+                  </span>
+                )}
                 <ExternalMark />
               </a>
             ))}

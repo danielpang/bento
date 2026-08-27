@@ -8,8 +8,12 @@ primary_region = "iad"
 
 [env]
   BENTO_MODE = "multi"
+  BENTO_ENVIRONMENT = "production"
   BENTO_SANDBOX_DRIVER = "sprite"
   PORT = "8080"
+  # How many agent runs this process drives at once. Sprites do the
+  # heavy work; this is sockets and keep-awake on the orchestrator.
+  BENTO_MAX_CONCURRENT_RUNS = "32"
   # The console is served from this same app, so the browser sees one
   # origin: session cookies, OAuth callbacks, the /device page and the
   # /accept-invitation link all work without CORS.

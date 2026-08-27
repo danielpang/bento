@@ -3,6 +3,7 @@ import test from "node:test";
 import { SpritesClient } from "@fly/sprites";
 import { AGENT_BINARIES, TOOLCHAIN_MARKER } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
+import { taskRequest } from "./keep-awake.js";
 import { SpriteDriver, spriteExists, spriteName } from "./sprite.js";
 
 /**
@@ -49,8 +50,34 @@ const runTag = process.env.GITHUB_RUN_ID
   : `local-${Date.now()}`;
 const featureId = `e2e-${runTag}`;
 
-/** Long: a cold sprite installs five CLIs and a private Node. */
+/** Long: a cold sprite installs seven CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
+
+const DSH_MOCK_SERVER = `import { appendFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+createServer(async (request, response) => {
+  let raw = "";
+  for await (const chunk of request) raw += chunk;
+  const body = JSON.parse(raw);
+  const hasToolResult = body.messages.some((message) => message.role === "tool");
+  appendFileSync("/tmp/bento-dsh-requests", JSON.stringify({
+    authorization: request.headers.authorization,
+    model: body.model,
+    hasTools: Array.isArray(body.tools),
+    hasToolResult,
+  }) + "\\n");
+  response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+  if (Array.isArray(body.tools) && !hasToolResult) {
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo verified > /workspace/dsh-e2e-marker", description: "verify local tools" }) } }] }, finish_reason: null }] }) + "\\n\\n");
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }) + "\\n\\n");
+  } else {
+    const content = Array.isArray(body.tools) ? "sprite dsh complete" : "title";
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: null }] }) + "\\n\\n");
+    response.write("data: " + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) + "\\n\\n");
+  }
+  response.end("data: [DONE]\\n\\n");
+}).listen(43123, "127.0.0.1", () => writeFileSync("/tmp/bento-dsh-ready", "ready"));
+`;
 
 test("a real sprite ends up with every agent CLI, and heals when one goes missing", { skip }, async (t) => {
   const driver = new SpriteDriver({ token: token!, timeoutMs: PROVISION_TIMEOUT_MS });
@@ -122,7 +149,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * wherever it was expected to be.
    *
    * The first version listed the directories the installers use and
-   * deleted from those. It missed three of the five: the sprite's HOME
+    * deleted from those. It missed three of the original five: the sprite's HOME
    * is not /root, so the binaries publish() links from sit somewhere
    * the list never named, and that directory is on the PATH in its own
    * right, so deleting the symlink in /usr/local/bin left the CLI
@@ -184,6 +211,39 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
       if (exitCode !== 0) broken.push(`${binary} (exit ${exitCode}: ${(stderr || stdout).trim().slice(0, 200)})`);
     }
     assert.deepEqual(broken, [], `installed but not runnable: ${broken.join(", ")}`);
+  });
+
+  await t.test("dsh runs Bento's exact headless profile with local tools", { skip: needsSprite() }, async () => {
+    const encoded = Buffer.from(DSH_MOCK_SERVER).toString("base64");
+    const staged = await shell(
+      [
+        "rm -f /tmp/bento-dsh-ready /tmp/bento-dsh-requests /workspace/dsh-e2e-marker",
+        `printf '%s' '${encoded}' | base64 -d > /tmp/bento-dsh-mock.mjs`,
+      ].join(" && "),
+    );
+    assert.equal(staged.exitCode, 0, staged.stderr);
+
+    const ran = await shell(
+      [
+        "/opt/bento/node/bin/node /tmp/bento-dsh-mock.mjs >/tmp/bento-dsh-mock.log 2>&1 & mock=$!",
+        "trap 'kill $mock 2>/dev/null || true' EXIT",
+        "for attempt in 1 2 3 4 5; do [ -f /tmp/bento-dsh-ready ] && break; sleep 1; done",
+        "test -f /tmp/bento-dsh-ready",
+        "DSH_MODEL=deepseek-v4-pro DSH_TOOLS_MODE=native DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 DEEPSEEK_API_KEY=mock-key DEEPSEEK_BASE_URL=http://127.0.0.1:43123/v1 dsh --profile headless 'verify Bento integration'",
+      ].join("; "),
+    );
+    assert.equal(ran.exitCode, 0, ran.stderr || ran.stdout);
+    assert.equal(ran.out, "sprite dsh complete");
+
+    const marker = await shell("cat /workspace/dsh-e2e-marker");
+    assert.equal(marker.exitCode, 0, marker.stderr);
+    assert.equal(marker.out, "verified", "dsh did not execute its local bash tool");
+    const requests = await shell("cat /tmp/bento-dsh-requests");
+    assert.equal(requests.exitCode, 0, requests.stderr);
+    assert.match(requests.out, /\"authorization\":\"Bearer mock-key\"/);
+    assert.match(requests.out, /\"model\":\"deepseek-v4-pro\"/);
+    assert.match(requests.out, /\"hasToolResult\":true/);
+    await shell("rm -f /workspace/dsh-e2e-marker /tmp/bento-dsh-*");
   });
 
   /**
@@ -338,7 +398,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    *
    * So the question is asked of the machine rather than of the source.
    * With that one host unreachable, and the CLIs and the marker gone,
-   * a provision must still put all five back. A failure here does not
+   * a provision must still put the full set back. A failure here does not
    * mean this repository broke something. It means the CLI it names is
    * one busy hour away from being uninstallable, and wants the same
    * treatment opencode got: fetch the release, do not ask which one.
@@ -369,6 +429,82 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     } finally {
       await shell(restore);
     }
+  });
+
+  /**
+   * The requests that hold a machine awake, against the real management
+   * socket.
+   *
+   * Every detail of their shape came from documentation: the socket
+   * path, the virtual host, the route, the body, the shorthand that
+   * wraps all four. A wrong one fails the way the platform's own
+   * behavior fails, which is silently. The hold is best effort by
+   * design, so a run whose registration 404s keeps going, finishes its
+   * quiet stretch, and dies to a pause exactly as if the fix had never
+   * been written. Nothing in the stub suite can catch that, because a
+   * stub answers whatever shape it is asked.
+   *
+   * So the production builder is run here, verbatim, and the machine is
+   * asked what it did with it.
+   */
+  await t.test("the management socket accepts the requests that hold a sandbox awake", { skip: needsSprite() }, async () => {
+    const name = "bento-e2e-probe";
+    const listed = async () => (await shell(taskRequest("GET", "/v1/tasks"))).out;
+
+    const registered = await shell(taskRequest("POST", "/v1/tasks", { name, expire: "5m" }));
+    assert.equal(
+      registered.exitCode,
+      0,
+      `the sandbox refused the registration that keeps it awake: ${registered.stderr || registered.out}`,
+    );
+    assert.match(await listed(), new RegExp(name), "the task was accepted but is not held");
+
+    // Renewal is what carries a hold past the platform's per task cap,
+    // so a run longer than that cap depends on this one answering.
+    const renewed = await shell(taskRequest("PUT", `/v1/tasks/${name}`, { expire: "5m" }));
+    assert.equal(renewed.exitCode, 0, `the sandbox refused a renewal: ${renewed.stderr || renewed.out}`);
+
+    // And release, which is the difference between a machine that
+    // pauses when the work is done and one that bills until it expires.
+    const released = await shell(taskRequest("DELETE", `/v1/tasks/${name}`));
+    assert.equal(released.exitCode, 0, `the sandbox refused to release the hold: ${released.stderr || released.out}`);
+    assert.doesNotMatch(await listed(), new RegExp(name), "the hold outlived the release that was supposed to drop it");
+  });
+
+  /**
+   * The bug itself, reproduced: a command that says nothing for longer
+   * than the sandbox's idle window.
+   *
+   * This is what an agent looks like while a model is thinking, and it
+   * is what killed the run this was written for. Without a hold the
+   * machine pauses under the silence, the pause ends the process, and
+   * the driver reports the exit it never got. The assertion is simply
+   * that the command lived: a quiet stretch is not a dead one.
+   *
+   * Long enough to be past any plausible idle window, because the
+   * window is the platform's to choose and a test tuned to today's
+   * number would pass on a machine that had already stopped protecting
+   * anything.
+   */
+  await t.test("a command that goes quiet outlives the sandbox's idle window", { skip: needsSprite() }, async () => {
+    const quiet = 150;
+    const started = Date.now();
+    const result = await collectExec(
+      driver.exec(handle, ["sh", "-c", `sleep ${quiet}; echo survived`], { timeoutMs: 5 * 60_000 }),
+    );
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    console.log(`  ${quiet}s of silence took ${elapsed}s and exited ${result.exitCode}`);
+
+    assert.equal(
+      result.exitCode,
+      0,
+      `a command that said nothing for ${quiet}s did not survive it: ${result.stderr.trim()}`,
+    );
+    assert.match(result.stdout, /survived/);
+    // The two ways the old failure showed itself. Either means the hold
+    // is not holding, whatever the exit code says.
+    assert.doesNotMatch(result.stderr, /went to sleep/);
+    assert.doesNotMatch(result.stderr, /closed before the command reported an exit/);
   });
 
   /**

@@ -5,6 +5,7 @@ import { DockerDriver, LocalProcessDriver, SpriteDriver, WorktreeManager, type S
 import type PgBoss from "pg-boss";
 import type pg from "pg";
 import type { Analytics } from "./analytics.js";
+import type { FeatureFlags } from "./feature-flags.js";
 import type { ArtifactStore } from "./artifact-store.js";
 import type { Auth } from "./auth.js";
 import type { SecretBox } from "./secrets.js";
@@ -66,13 +67,6 @@ export interface Entitlements {
    */
   onRunFinished?(runId: string): Promise<void>;
   /**
-   * How many runs this organization may have working at once. Null is
-   * unlimited. This is fairness rather than a paywall: without it one
-   * tenant's queue occupies every worker on the instance and everybody
-   * else waits behind it.
-   */
-  concurrentRunLimit?(organizationId: string): Promise<number | null>;
-  /**
    * Told after the headcount changed: a member joined or left, or an
    * invitation was created, cancelled or rejected.
    *
@@ -102,6 +96,12 @@ export interface AppContext {
   entitlements?: Entitlements;
   /** PostHog, when a key is configured; absent means nothing is sent. */
   analytics?: Analytics;
+  /**
+   * Permanent feature flags (the beta-testers allowlist). Always
+   * constructed: local mode is on, multi mode without a key is off.
+   * Absent only in tests that never touch flags.
+   */
+  featureFlags?: FeatureFlags;
   /** Encrypts organization secrets at rest. */
   secretBox: SecretBox;
   /**

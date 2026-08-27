@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
-import type { AgentEvent } from "@bento/core";
+import { forgetsBetweenRuns, hasNoLiveTranscript, modelGuidanceFor, type AgentEvent } from "@bento/core";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
@@ -29,11 +29,18 @@ const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
 const AT_BOTTOM_SLACK = 120;
 
 /**
+ * How tall the composer may grow, in pixels, before it scrolls.
+ * Long enough to read a wrapped paragraph, short enough that it
+ * cannot eat the transcript above it.
+ */
+const COMPOSER_MAX_HEIGHT = 160;
+
+/**
  * The conversation is rendered from these, never from raw events: a
  * run's event list is folded into rows first, so tool bursts collapse
  * and the pane reads as an exchange between people.
  */
-type ChatItem =
+export type ChatItem =
   | { key: string; kind: "message"; role: "assistant" | "user" | "system"; text: string; speaker: string }
   | { key: string; kind: "tools"; calls: ToolCall[] }
   | { key: string; kind: "result"; ok: boolean; costUsd?: number | undefined; error?: string | undefined };
@@ -159,6 +166,7 @@ export function AgentSession({
     setDraft("");
   };
   const paneRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   /** Whether the pane is pinned to the newest row; reading history unpins it. */
   const stickToBottom = useRef(true);
   /**
@@ -167,6 +175,7 @@ export function AgentSession({
    * renders, so it has to be state.
    */
   const [scrolledUp, setScrolledUp] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
 
   /**
    * Read the pane's position once and let both halves follow from it,
@@ -203,6 +212,17 @@ export function AgentSession({
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
   /** How the latest agent's tool treats a mid-task message, if at all. */
   const liveKind = latestAgent ? LIVE_TOOLS[latestAgent.cli] : undefined;
+  /** Whether a new run can pick the conversation up where this left it. */
+  const resumes = !latestAgent || !forgetsBetweenRuns(latestAgent.cli);
+  const quietTool = Boolean(latestAgent && hasNoLiveTranscript(latestAgent.cli));
+  const quietLabel = latestAgent ? (modelGuidanceFor(latestAgent.cli)?.label ?? latestAgent.cli) : "";
+
+  useEffect(() => {
+    if (!runActive || !quietTool) return;
+    setClock(Date.now());
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [latestRun?.id, quietTool, runActive]);
 
   useEffect(() => {
     setViewedRunId(null);
@@ -327,6 +347,25 @@ export function AgentSession({
    */
   const sections = useMemo(() => {
     const out: { key: string; runId: string; agentName: string; when: string; status: string; items: ChatItem[] }[] = [];
+    const itemsFor = (runId: string, runEvents: AgentEvent[], agentName: string, prefix: string): ChatItem[] => {
+      const items = toChatItems(runEvents, agentName, prefix);
+      const sourceRun = runs.find((run) => run.id === runId);
+      const sourceAgent = profiles.find((profile) => profile.id === sourceRun?.agentProfileId);
+      if (
+        sourceRun &&
+        TERMINAL_RUN.has(sourceRun.status) &&
+        sourceAgent &&
+        hasNoLiveTranscript(sourceAgent.cli) &&
+        items.some((item) => item.kind === "message" && item.role === "assistant")
+      ) {
+        return withNoLiveTranscriptNote(
+          items,
+          prefix,
+          modelGuidanceFor(sourceAgent.cli)?.label ?? sourceAgent.cli,
+        );
+      }
+      return items;
+    };
     if (viewedRunId) {
       if (viewedRun) {
         out.push({
@@ -335,7 +374,7 @@ export function AgentSession({
           agentName: viewedAgent?.name ?? "agent",
           when: runTime(viewedRun.queuedAt),
           status: runWords(viewedRun.status),
-          items: toChatItems(events, viewedAgent?.name ?? "agent", `v-${viewedRun.id}`),
+          items: itemsFor(viewedRun.id, events, viewedAgent?.name ?? "agent", `v-${viewedRun.id}`),
         });
       }
       return out;
@@ -348,7 +387,7 @@ export function AgentSession({
         agentName: block.agentName,
         when: runTime(block.queuedAt),
         status: runWords(block.status),
-        items: toChatItems(block.events, block.agentName, block.runId),
+        items: itemsFor(block.runId, block.events, block.agentName, block.runId),
       });
     }
     if (latestRun && !inBlocks.has(latestRun.id)) {
@@ -358,11 +397,11 @@ export function AgentSession({
         agentName: latestAgent?.name ?? "agent",
         when: runTime(latestRun.queuedAt),
         status: runActive ? "working" : runWords(latestRun.status),
-        items: toChatItems(events, latestAgent?.name ?? "agent", latestRun.id),
+        items: itemsFor(latestRun.id, events, latestAgent?.name ?? "agent", latestRun.id),
       });
     }
     return out;
-  }, [events, blocks, viewedRunId, viewedRun, latestRun, runActive, viewedAgent?.name, latestAgent?.name]);
+  }, [events, blocks, viewedRunId, viewedRun, latestRun, runActive, viewedAgent?.name, latestAgent?.name, profiles, runs]);
 
   /**
    * Pendings that have not been echoed by the transcript, counting
@@ -412,6 +451,15 @@ export function AgentSession({
     });
     return () => cancelAnimationFrame(frame);
   }, [sections, visiblePending.length, draft]);
+
+  /**
+   * Fit the composer to what is typed, including a long line that
+   * wrapped rather than a newline. Resetting height first is what
+   * lets it shrink again after send.
+   */
+  useLayoutEffect(() => {
+    growComposer(composerRef.current);
+  }, [say]);
 
   async function send() {
     const question = say.trim();
@@ -511,14 +559,14 @@ export function AgentSession({
         </div>
       )}
       {latestRun ? (
-        !hasMessages && !draft && runActive && !viewedRunId ? (
+        !quietTool && !hasMessages && !draft && runActive && !viewedRunId ? (
           <div className="chat orb-hero" aria-label="The agent is starting">
             <ThinkingOrb state="shaping" size={64} paused={REDUCED_MOTION} />
             <span className="muted">{workingName} is getting started...</span>
           </div>
         ) : (
           <div className="chat" ref={paneRef} onScroll={readPosition}>
-            {sections.length === 0 && !hasMessages && !draft && <p className="muted">Waiting for output...</p>}
+            {sections.length === 0 && !hasMessages && !draft && !quietTool && <p className="muted">Waiting for output...</p>}
             {sections.map((section) => (
               <div className="chat-section" key={section.key}>
                 <div className="chat-run">
@@ -531,6 +579,25 @@ export function AgentSession({
                 ))}
               </div>
             ))}
+            {quietTool && runActive && !viewedRunId && (
+              <div className="chat-row chat-row-system" role="status" aria-label="No live output from this tool">
+                <ThinkingOrb state="shaping" size={20} paused={REDUCED_MOTION} />
+                <div className="quiet-run-copy">
+                  <strong>No live output from this tool</strong>
+                  <span className="muted">
+                    {quietLabel} prints one final message when the run ends and nothing before it, so this card stays
+                    quiet until then. That is the tool, not a stall. The work still lands on the branch, and Stop ends the run now.
+                  </span>
+                  <span className="muted">Working for {runDuration(latestRun.startedAt, clock)}.</span>
+                  {isLongQuietRun(latestRun.startedAt, clock) && (
+                    <span className="warn">
+                      Still working after 30 minutes, with nothing printed. Nothing on this card can tell whether it is
+                      progressing, because the tool prints nothing until it ends. Stop it if this looks wrong.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
             {/*
               The message being typed, in the agent's own bubble: the
               fragments preview what the finished message will say, and
@@ -606,13 +673,25 @@ export function AgentSession({
             void send();
           }}
         >
-          <input
+          <textarea
+            ref={composerRef}
             className="input composer-input"
+            rows={1}
             value={say}
             onChange={(e) => setSay(e.target.value)}
             disabled={busy}
             placeholder={composer.placeholder}
             aria-label={composer.ariaLabel}
+            // Enter sends, as it did when this was a single-line
+            // field. Shift+Enter is the newline; wrapping a long
+            // line grows the box on its own.
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
           />
           {runActive && (
             <StopButton
@@ -644,12 +723,16 @@ export function AgentSession({
               anyway ("delivered when the run ends") described a run that
               had already finished. */}
           {!runActive
-            ? "Nothing is running. Your message starts a new run on this card, continuing the same conversation."
+            ? resumes
+              ? "Nothing is running. Your message starts a new run on this card, continuing the same conversation."
+              : "Nothing is running. Your message starts a new run on this card, with a compacted transcript of this conversation."
             : liveKind === "steer"
               ? `${latestAgent?.name ?? "This agent"} holds a live session: your message steers it while it works.`
               : liveKind === "queue"
                 ? `${latestAgent?.name ?? "This agent"} holds a live session: your message is read after the current step, in the same conversation.`
-                : "This tool takes messages between runs: yours is delivered the moment the current run ends."}
+                : resumes
+                  ? "This tool takes messages between runs: yours is delivered the moment the current run ends."
+                  : "This tool takes messages between runs: yours is delivered the moment the current run ends, as a new run with a compacted transcript of this conversation."}
         </p>
       )}
 
@@ -812,6 +895,21 @@ function toolSummary(event: Extract<AgentEvent, { type: "tool" }>): string | nul
 }
 
 /**
+ * Grows the conversation composer to fit what has been typed.
+ *
+ * A long line used to vanish into a one-line field. Height is reset
+ * before it is measured, or the box could only ever grow; past the
+ * cap it scrolls rather than pushing the transcript off the screen.
+ */
+function growComposer(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  el.style.height = "auto";
+  const content = el.scrollHeight;
+  el.style.height = `${Math.min(content, COMPOSER_MAX_HEIGHT)}px`;
+  el.style.overflowY = content > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
+}
+
+/**
  * What the composer field says. Naming the agent ("Message Claude")
  * made the box look like a DM, and hid whether the words go now or
  * wait. Send vs queue is the distinction the box needs to make: idle
@@ -880,6 +978,34 @@ function SendMark() {
 /** "Jul 29, 11:42 PM": enough to tell runs apart without a full ISO stamp. */
 export function runTime(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function elapsedMs(startedAt: string | null, now: number): number {
+  return startedAt ? Math.max(0, now - new Date(startedAt).getTime()) : 0;
+}
+
+export function runDuration(startedAt: string | null, now: number): string {
+  const seconds = Math.floor(elapsedMs(startedAt, now) / 1000);
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
+
+export function isLongQuietRun(startedAt: string | null, now: number): boolean {
+  return elapsedMs(startedAt, now) >= 30 * 60 * 1000;
+}
+
+export function withNoLiveTranscriptNote(items: ChatItem[], prefix: string, toolLabel = "This tool"): ChatItem[] {
+  const assistantIndex = items.findIndex((item) => item.kind === "message" && item.role === "assistant");
+  if (assistantIndex < 0) return items;
+  const noted = [...items];
+  noted.splice(assistantIndex, 0, {
+    key: `${prefix}-quiet-note`,
+    kind: "message",
+    role: "system",
+    speaker: "system",
+    text: `${toolLabel} printed its final message. There are no tool steps or thinking to show, because this tool does not print them while it works.`,
+  });
+  return noted;
 }
 
 /**

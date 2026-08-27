@@ -20,10 +20,16 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   CURSOR_API_KEY: z.string().optional(),
 
-  /** Max agent runs executing at once, across all features. */
+  /**
+   * How many agent runs this process drives at once. Not a plan limit:
+   * sprites (or containers) do the work, and this is how many exec
+   * sockets and keep-awake pings one Node process will hold. Local
+   * installs default to 4 so a laptop is not asked to run a fleet.
+   * Hosted Fly sets this higher in fly.toml.
+   */
+  BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(4),
   /** A runner-claimed run with no report for this long is requeued. */
   BENTO_RUNNER_CLAIM_TIMEOUT_MIN: z.coerce.number().int().positive().default(45),
-  BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().max(64).default(4),
   /**
    * How long one agent run may execute before it is stopped, in
    * minutes. A backstop against runaway processes, not a pace
@@ -31,6 +37,14 @@ const envSchema = z.object({
    * way they do on the hosted agent products.
    */
   BENTO_RUN_TIMEOUT_MIN: z.coerce.number().int().positive().default(120),
+  /**
+   * After a live agent (pi, Claude Code) finishes a turn on a manual
+   * stage, how long to keep the process open for another message, in
+   * seconds. 0 closes stdin as soon as the queue is empty, which is
+   * the old one-shot behaviour. Automatic stages and judge runs ignore
+   * this: their gate has to run when the turn ends.
+   */
+  BENTO_LIVE_IDLE_SEC: z.coerce.number().int().min(0).default(90),
 
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),
@@ -168,10 +182,12 @@ const envSchema = z.object({
   AWS_REGION: z.string().optional(),
 
   /**
-   * PostHog: product analytics, error tracking, and log export. All
-   * three read the same project token. Without a key nothing is sent
-   * and nothing breaks; in multi mode the server says so once at boot,
-   * because events silently missed are worse than a line of noise.
+   * PostHog: product analytics, error tracking, log export, and the
+   * beta-testers feature flag. All four read the same project token.
+   * Without a key nothing is sent and nothing breaks; in multi mode
+   * the server says so once at boot, because events silently missed
+   * are worse than a line of noise. New product that is not ready
+   * for every signed-in user is gated on `beta-testers`.
    */
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),
@@ -180,9 +196,19 @@ const envSchema = z.object({
    * exception, and log record, so one project can hold both
    * environments without dev noise polluting production dashboards.
    * Defaults to development: production is a claim a deployment makes
-   * explicitly (the Docker image does), never one it drifts into.
+   * explicitly (each Fly config does), never one it drifts into. The
+   * shared image sets nothing, because when it claimed production the
+   * development app inherited that claim.
    */
   BENTO_ENVIRONMENT: z.enum(["development", "production"]).default("development"),
+
+  /**
+   * Fly sets both on every machine; absent anywhere else. Stamped onto
+   * the run queue snapshot so two snapshots a minute read as two
+   * machines rather than a doubled queue.
+   */
+  FLY_APP_NAME: z.string().optional(),
+  FLY_MACHINE_ID: z.string().optional(),
 
   /** GitHub App credentials. Without these, PR based gates stay pending. */
   GITHUB_APP_ID: z.string().optional(),

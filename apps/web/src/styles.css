@@ -913,6 +913,7 @@ button {
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
+  min-width: 0;
 }
 
 /* An empty lane is an open compartment: the dashed slot is the same
@@ -937,6 +938,10 @@ button {
   padding: 8px 10px;
   text-align: left;
   width: 100%;
+  min-width: 0;
+  /* Cards are buttons. The UA stylesheet sets those to nowrap, which
+     is why a URL title used to paint into the next lane. */
+  white-space: normal;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1132,8 +1137,11 @@ button {
   font-size: 13px;
   font-weight: 500;
   line-height: 1.35;
+  min-width: 0;
   /* No single-word last lines on a wrapped title. */
   text-wrap: pretty;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .card-meta {
@@ -1145,6 +1153,22 @@ button {
 
 .card-meta .chip {
   flex: none;
+  white-space: nowrap;
+}
+
+.card-meta-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
+
+.card-spend {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
   white-space: nowrap;
 }
 
@@ -2736,6 +2760,11 @@ button {
   color: var(--succeeded);
   border-color: var(--succeeded);
 }
+/* A pull request GitHub cannot merge wears its warning on the row. */
+.chip[data-status="conflict"] {
+  color: var(--failed);
+  border-color: var(--failed);
+}
 
 /* Card actions as an even grid rather than free-wrapping rows. */
 /*
@@ -2883,6 +2912,127 @@ button {
 }
 .nav-menu a[aria-current="page"] .picker-item-name {
   font-weight: 650;
+}
+
+/*
+ * Project spend: a page, not a tooltip. Same slab as Sessions (between
+ * the topbar and the bottom bar), a short coverage note, then one row
+ * per card so a long board can be ranked by what it actually cost.
+ */
+.spend-screen {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 20px 16px 40px;
+  box-sizing: border-box;
+}
+.spend-intro {
+  margin: 0 0 24px;
+}
+.spend-title {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+.spend-lede {
+  margin: 8px 0 0;
+  max-width: 62ch;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.spend-total {
+  margin: 12px 0 0;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.spend-coverage {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 24px;
+  margin: 16px 0 0;
+}
+.spend-coverage dt {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.spend-coverage dd {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.spend-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.spend-table th,
+.spend-table td {
+  padding: 10px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  font-size: 13.5px;
+}
+.spend-table th {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  border-bottom-color: var(--line-bright);
+}
+.spend-table tbody tr:hover {
+  background: var(--panel-raised);
+}
+.spend-col {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  width: 1%;
+}
+.spend-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.spend-sort:hover {
+  color: var(--text);
+}
+.spend-sort-mark {
+  fill: currentColor;
+  flex: none;
+}
+.spend-card-link {
+  color: inherit;
+  text-decoration: none;
+  font-weight: 600;
+}
+.spend-card-link:hover {
+  text-decoration: underline;
+}
+@media (max-width: 640px) {
+  .spend-coverage {
+    grid-template-columns: 1fr;
+  }
 }
 .sessions-list {
   display: flex;
@@ -3053,13 +3203,17 @@ button {
 /* The skill editor: prose-sized, since roles are written in sentences. */
 .skill-input {
   min-height: 110px;
-  resize: vertical;
+  resize: none;
   font-family: var(--sans);
   line-height: 1.5;
   overflow-wrap: anywhere;
+  overflow-y: hidden;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
+  /* Height is also set from script as the text wraps; this is the
+     ceiling, past which the field scrolls rather than eating the form. */
+  max-height: 480px;
 }
 
 /* The agent form is the tallest modal; it scrolls inside itself
@@ -3074,24 +3228,40 @@ button {
   display: flex;
   gap: 8px;
   margin-top: 8px;
-  align-items: stretch;
+  /* Buttons sit on the last line so a wrapped message does not
+     stretch Stop and Send into a tall column beside it. */
+  align-items: flex-end;
+  flex-shrink: 0;
 }
 .composer-input {
   flex: 1;
   min-width: 0;
+  resize: none;
+  overflow-y: hidden;
+  line-height: 1.4;
+  min-height: 34px;
+  /* A long token (a URL, a path) wraps instead of sliding out of
+     the field, which is what grows the height in the first place. */
+  overflow-wrap: anywhere;
+  /* Height is also set from script as the text wraps; this is the
+     ceiling, past which the field scrolls rather than eating the
+     transcript. */
+  max-height: 160px;
 }
 .composer-stop {
   color: var(--failed);
   border-color: var(--failed);
   flex-shrink: 0;
 }
-/* A square the height of the input, all of it arrow. */
+/* A square the height of a one-line field, all of it arrow. */
 .composer-send {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 6px 10px;
+  height: 34px;
+  box-sizing: border-box;
 }
 .stop-square {
   width: 9px;
@@ -3102,7 +3272,7 @@ button {
 /*
  * Topbar icon controls keep `.btn` padding so Sign out matches the
  * gear beside it. Compact sizing belongs only to the composer, where
- * Stop is stretched to the input height and should not grow wider.
+ * Stop matches a one-line field and should not grow wider.
  */
 .icon-button::after {
   inset: -7px -5px;
@@ -3110,14 +3280,26 @@ button {
 .composer .icon-button {
   width: 34px;
   min-width: 34px;
+  height: 34px;
   padding: 0;
 }
 /*
- * The composer stretches Stop to the input height. Keep the free
- * upward hit growth, and stop the downward growth before the hint.
+ * Stop stays the height of a one-line field even when the composer
+ * grows. Keep the free upward hit growth, and stop the downward
+ * growth before the hint.
  */
 .composer .icon-button::after {
   inset: -7px -5px -4px;
+}
+
+@media (pointer: coarse) {
+  .composer-input {
+    min-height: 44px;
+  }
+  .composer-send,
+  .composer .icon-button {
+    height: 44px;
+  }
 }
 .signout-mark {
   fill: none;
@@ -3157,6 +3339,18 @@ button {
 .composer-hint {
   margin: 4px 0 10px;
   font-size: 11.5px;
+}
+
+/* After a send-back: the destination agent waits for a conversation. */
+.card-notice {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 /* The full-page session: the log gets the room it deserves. */
@@ -3265,6 +3459,13 @@ button {
   justify-content: center;
   gap: 12px;
   min-height: 180px;
+}
+
+.quiet-run-copy {
+  display: grid;
+  max-width: 560px;
+  gap: 8px;
+  text-align: left;
 }
 .working-row {
   display: flex;
@@ -3667,6 +3868,8 @@ button.session-expand[aria-pressed="true"] {
 .tab-scroll {
   position: relative;
   min-width: 0;
+  /* Settings sits on --bg; provider tabs sit on a --panel card. */
+  --tab-scroll-fade: var(--panel);
 }
 .tab-row {
   display: flex;
@@ -3684,6 +3887,7 @@ button.session-expand[aria-pressed="true"] {
    */
   box-shadow: inset 0 -1px 0 var(--line);
   scrollbar-width: none;
+  scroll-padding-inline: 28px;
 }
 .tab-row::-webkit-scrollbar {
   display: none;
@@ -3694,26 +3898,39 @@ button.session-expand[aria-pressed="true"] {
  * rather than as a strip you can slide.
  */
 .tab-scroll-cue {
+  appearance: none;
   position: absolute;
   top: 0;
   bottom: 0;
   width: 36px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  display: block;
   pointer-events: none;
   z-index: 1;
   opacity: 0;
   transition: opacity 120ms ease;
+  background: none;
 }
 .tab-scroll-cue-start {
   left: 0;
-  background: linear-gradient(to right, var(--panel), transparent);
+  background: linear-gradient(to right, var(--tab-scroll-fade), transparent);
 }
 .tab-scroll-cue-end {
   right: 0;
-  background: linear-gradient(to left, var(--panel), transparent);
+  background: linear-gradient(to left, var(--tab-scroll-fade), transparent);
 }
 .tab-scroll[data-fade-start] .tab-scroll-cue-start,
 .tab-scroll[data-fade-end] .tab-scroll-cue-end {
   opacity: 1;
+  pointer-events: auto;
+  cursor: pointer;
+}
+@media (pointer: coarse) {
+  .tab-scroll-cue {
+    width: 44px;
+  }
 }
 .tab-scroll-cue::after {
   content: "";
@@ -3758,6 +3975,7 @@ button.session-expand[aria-pressed="true"] {
   letter-spacing: 0;
   cursor: pointer;
   transition: color 120ms ease;
+  scroll-margin-inline: 44px;
 }
 .tab:hover {
   color: var(--text-dim);
@@ -3807,6 +4025,10 @@ button.session-expand[aria-pressed="true"] {
 .chip-link:hover {
   text-decoration: underline;
   color: var(--text);
+}
+.chip-link[aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
 }
 /* Finished cards stay dimmer than working ones: the board's attention
    belongs on what is moving. */
@@ -4010,11 +4232,18 @@ button.session-expand[aria-pressed="true"] {
 .settings-page {
   max-width: 720px;
   width: 100%;
+  min-width: 0;
   margin: 0 auto;
   padding: 28px 20px 60px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+.settings-page .tab-scroll {
+  --tab-scroll-fade: var(--bg);
+}
+.settings-page .settings-card .tab-scroll {
+  --tab-scroll-fade: var(--panel);
 }
 .settings-heading {
   margin: 0;
@@ -4486,6 +4715,7 @@ button.session-expand[aria-pressed="true"] {
 
 .modal-large .skill-input {
   min-height: 200px;
+  max-height: 480px;
 }
 
 .modal-backdrop:has(.modal-expanded) {

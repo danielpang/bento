@@ -1,14 +1,17 @@
-import { and, asc, desc, eq, gte, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, ne } from "drizzle-orm";
 import { gateCriteria, type GateCriterion } from "@bento/core";
-import { agentProfiles, agentRuns, featureEvents, featurePullRequests, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
+import { agentProfiles, agentRuns, featureEvents, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
 import { evaluateGate, type GateContext, type GateResult } from "@bento/gates";
 import { parseRepoUrl } from "@bento/github";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
+import { featurePullRequestTargets } from "../feature-prs.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
+import { captureStageSpend } from "./stage-spend.js";
+import { startAssignedStageAgent, stopRunsOutsideStage } from "./stage-agent.js";
 
 type Feature = typeof features.$inferSelect;
 type Stage = typeof stages.$inferSelect;
@@ -50,10 +53,22 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
    */
   const criteria: GateCriterion[] = declared.length > 0 ? declared : [{ type: "run_succeeded" }];
 
+  /**
+   * Rebase runs are excluded: they maintain the pull request, they are
+   * not the stage's work. Without the filter, a successful conflict
+   * resolution satisfied run_succeeded and advanced the card, and a
+   * failed one marked a finished stage "the agent failed".
+   */
   const [lastRun] = await ctx.db
     .select()
     .from(agentRuns)
-    .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.stageId, stage.id)))
+    .where(
+      and(
+        eq(agentRuns.featureId, feature.id),
+        eq(agentRuns.stageId, stage.id),
+        ne(agentRuns.kind, "rebase"),
+      ),
+    )
     .orderBy(desc(agentRuns.queuedAt))
     .limit(1);
 
@@ -99,27 +114,13 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
   const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
   const github = await githubConnectionFor(ctx, project?.organizationId ?? null);
   if (github) {
-    const linked = await ctx.db
-      .select()
-      .from(featurePullRequests)
-      .where(eq(featurePullRequests.featureId, feature.id));
-
-    // Rows come from publishing, one per repository the agent committed
-    // in. The project's own repoUrl with the feature's mirrored number
-    // is the fallback for a pull request someone linked by hand, from
-    // before there were rows, or without a GitHub App to open one.
-    const refs =
-      linked.length > 0
-        ? linked.flatMap((row) => {
-            const parsed = parseRepoUrl(row.repoUrl);
-            return parsed ? [{ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }] : [];
-          })
-        : project?.repoUrl && feature.prNumber
-          ? (() => {
-              const parsed = parseRepoUrl(project.repoUrl);
-              return parsed ? [{ owner: parsed.owner, repo: parsed.repo, prNumber: feature.prNumber }] : [];
-            })()
-          : [];
+    // The same list the merge-status and resolve-conflicts routes read,
+    // hand-linked fallback included; see featurePullRequestTargets.
+    const targets = await featurePullRequestTargets(ctx.db, feature);
+    const refs = targets.flatMap((target) => {
+      const parsed = parseRepoUrl(target.repoUrl);
+      return parsed ? [{ owner: parsed.owner, repo: parsed.repo, prNumber: target.number }] : [];
+    });
 
     if (refs.length > 0) {
       gateCtx.github = github;
@@ -371,6 +372,17 @@ export async function advanceFeature(
     trigger,
     actorUserId: actorUserId ?? null,
   });
+  // Spend is per visit, not per run: the dashboard sums these, and a
+  // run that never leaves its stage is still on `agent run finished`.
+  if (feature.currentStageId) {
+    await captureStageSpend(ctx, {
+      feature,
+      stageId: feature.currentStageId,
+      trigger,
+      actorUserId: actorUserId ?? null,
+      toStageId: nextStage ? nextStage.id : null,
+    });
+  }
   if (!nextStage) {
     await recordFeatureEvent(ctx, {
       featureId: feature.id,
@@ -408,39 +420,11 @@ export async function advanceFeature(
   // Hand off to the next stage's agent when one is configured. If a run
   // is somehow still working this card, nothing new starts: that run's
   // finish queues an evaluation, which is what will look at this stage.
-  if (nextStage?.defaultAgentProfileId && !(await stageIsLooping(ctx, feature.id, nextStage.id))) {
-    const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
-    const executor = project?.executor ?? "server";
-    const run = await startRunIfIdle(ctx.db, {
-      featureId: feature.id,
-      stageId: nextStage.id,
-      agentProfileId: nextStage.defaultAgentProfileId,
-      prompt: "",
-      executor,
-    }, ctx.entitlements, ctx.analytics);
-    // Runner-executed runs wait to be claimed by a machine. A card that
-    // ran the team out of compute stops here, on its new stage, with no
-    // agent working it: the same shape as a stage nobody assigned an
-    // agent to, and the console says why from the plan it reads. A card
-    // deleted mid advance starts nothing, quietly: there is nobody
-    // left to tell.
-    if (run !== "busy" && run !== "gone" && !("outOfCompute" in run) && executor === "server") {
-      await ctx.boss.send("run.execute", { runId: run.id });
-    }
-  }
+  if (nextStage) await startAssignedStageAgent(ctx, feature, nextStage);
 
   return { status: updated?.status ?? "unknown", currentStageId: updated?.currentStageId ?? null };
 }
 
-/**
- * Sends a card to the previous stage, or back to the backlog from the
- * first one.
- *
- * Gate checks for the stage being left are discarded: an approval given
- * for work that is now being redone would otherwise let the card walk
- * straight forward again. The same stage guard the forward path uses
- * keeps a double click from skipping two stages back.
- */
 /**
  * Puts a card in any stage of its pipeline, or back in the backlog.
  *
@@ -453,9 +437,11 @@ export async function advanceFeature(
  *   Dropping a card in a lane and watching nothing happen would be the
  *   silent failure this board keeps fighting.
  * - Backward is what send-back means: the work is being redone, so the
- *   checks of the stage being left are discarded and nothing starts on
- *   its own. A drag is not an approval either way, so no approval is
- *   recorded.
+ *   checks of the stage being left are discarded and any agent still
+ *   working the previous stage is stopped. The destination agent does
+ *   not start on its own: the person starts a conversation to say why
+ *   the card came back. A drag is not an approval either way, so no
+ *   approval is recorded.
  *
  * Returns null when the card moved under the caller, or the target is
  * not a stage of this card's pipeline.
@@ -512,6 +498,17 @@ export async function moveFeatureTo(
     trigger: forward ? "manual" : "manual_back",
     actorUserId: actorUserId ?? null,
   });
+  // Forward is a completion; backward is a redo and must not recount
+  // spend for work that is about to happen again.
+  if (forward && feature.currentStageId) {
+    await captureStageSpend(ctx, {
+      feature,
+      stageId: feature.currentStageId,
+      trigger: "manual",
+      actorUserId: actorUserId ?? null,
+      toStageId: targetStageId,
+    });
+  }
 
   ctx.bus.emitBoardEvent({
     type: "feature_updated",
@@ -521,28 +518,21 @@ export async function moveFeatureTo(
     currentStageId: targetStageId,
   });
 
-  if (forward && target) {
-    if (!target.defaultAgentProfileId) {
+  if (target) {
+    if (!forward) await stopRunsOutsideStage(ctx, feature, target.id);
+    if (forward && !target.defaultAgentProfileId) {
       await ctx.boss.send("gate.evaluate", { featureId: feature.id });
-    } else if (await stageIsLooping(ctx, feature.id, target.id)) {
-      // Somebody moved the card here by hand, so the card moves. What
-      // stops is the automatic start, which is the part going round.
-    } else {
-      const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
-      const executor = project?.executor ?? "server";
-      // A drag during a run starts nothing extra: the working run's
-      // finish queues the evaluation that will look at this stage.
-      const run = await startRunIfIdle(ctx.db, {
-        featureId: feature.id,
-        stageId: target.id,
-        agentProfileId: target.defaultAgentProfileId,
-        prompt: "",
-        executor,
-      }, ctx.entitlements, ctx.analytics);
-      if (run !== "busy" && run !== "gone" && !("outOfCompute" in run) && executor === "server") {
-        await ctx.boss.send("run.execute", { runId: run.id });
-      }
+    } else if (forward) {
+      // Forward arrives ready for the stage, so its agent starts, the
+      // same as advance. A drag during a run on the same stage starts
+      // nothing extra: that run's finish queues the evaluation.
+      // Backward stops the previous agent and waits: auto-starting
+      // here would bounce an automatic destination straight forward
+      // again, and would start work with no explanation of the redo.
+      await startAssignedStageAgent(ctx, feature, target);
     }
+  } else if (!forward) {
+    await stopRunsOutsideStage(ctx, feature, null);
   }
 
   return { status: "active", currentStageId: targetStageId };
@@ -607,6 +597,15 @@ export async function finishFeature(
     trigger: "manual",
     actorUserId: actorUserId ?? null,
   });
+  if (feature.currentStageId) {
+    await captureStageSpend(ctx, {
+      feature,
+      stageId: feature.currentStageId,
+      trigger: "manual",
+      actorUserId: actorUserId ?? null,
+      toStageId: null,
+    });
+  }
   await recordFeatureEvent(ctx, {
     featureId: feature.id,
     kind: "status_changed",
@@ -690,6 +689,16 @@ export async function reopenFeature(
   return { status: "active", currentStageId: feature.currentStageId };
 }
 
+/**
+ * Sends a card to the previous stage, or back to the backlog from the
+ * first one.
+ *
+ * Gate checks for the stage being left are discarded, and any agent
+ * still working a different stage is stopped. A person sending the
+ * card back starts nothing: they start a conversation to say why.
+ * A gate sending it back starts the previous stage's agent, which is
+ * the retry that gate is asking for.
+ */
 export async function moveFeatureBack(
   ctx: AppContext,
   featureId: string,
@@ -740,6 +749,13 @@ export async function moveFeatureBack(
     status: updated.status,
     currentStageId: updated.currentStageId,
   });
+
+  if (previousStage) {
+    await stopRunsOutsideStage(ctx, feature, previousStage.id);
+    if (trigger === "gate_auto") await startAssignedStageAgent(ctx, feature, previousStage);
+  } else {
+    await stopRunsOutsideStage(ctx, feature, null);
+  }
 
   return { status: updated.status, currentStageId: updated.currentStageId };
 }
@@ -989,7 +1005,10 @@ async function judgeStageWork(
   const isJudgeRun = (run: (typeof runs)[number]) =>
     run.agentProfileId === criterion.agentProfileId && run.kind === "judge";
   const latestJudge = runs.find(isJudgeRun);
-  const latestWork = runs.find((run) => !isJudgeRun(run));
+  // A rebase run is maintenance on the pull request, not new stage
+  // work: counting it here made a completed verdict look stale and
+  // spawned a fresh paid judge run over unchanged work.
+  const latestWork = runs.find((run) => !isJudgeRun(run) && run.kind !== "rebase");
 
   // The stage's own agent has not run yet and is coming: let the work
   // happen before anyone judges it.
@@ -1074,56 +1093,3 @@ function slugify(title: string): string {
       .slice(0, 40) || "feature"
   );
 }
-
-/**
- * Whether this card has been round this stage too many times already.
- *
- * The specific runaway: a gate that never passes sends the card back,
- * the evaluator hands it to the same agent, the agent fails the same
- * way, and nobody is in the loop while the meter runs. A person
- * starting a run by hand is unaffected, which is the point: the guard
- * is on the automatic door, not on the card.
- *
- * Counted within the current period rather than for all time, so a
- * long lived card that legitimately revisits a stage over months is
- * not held against its own history.
- */
-async function stageIsLooping(ctx: AppContext, featureId: string, stageId: string): Promise<boolean> {
-  const since = new Date(Date.now() - LOOP_WINDOW_MS);
-  /**
-   * Only the runs the evaluator itself started. The count used to take
-   * every run on the stage, so three chat messages in an afternoon,
-   * each of which resumes as its own run, silently disabled automatic
-   * hand-off into that stage, the exact opposite of the promise below
-   * that a person is unaffected. Evaluator starts carry no started_by,
-   * and the judge, which also carries none, is excluded by its prompt
-   * prefix: judging is the gate examining work, not the loop this
-   * guard exists to catch.
-   */
-  const [row] = await ctx.db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(agentRuns)
-    .where(
-      and(
-        eq(agentRuns.featureId, featureId),
-        eq(agentRuns.stageId, stageId),
-        gte(agentRuns.queuedAt, since),
-        isNull(agentRuns.startedBy),
-        ne(agentRuns.kind, "judge"),
-      ),
-    );
-  const started = row?.count ?? 0;
-  if (started < MAX_AUTO_STARTS_PER_STAGE) return false;
-  console.warn(
-    `feature ${featureId} has been handed to stage ${stageId} ${started} times in the last day; not starting it again automatically`,
-  );
-  return true;
-}
-
-/**
- * Three automatic starts on one stage. Enough for a stage that
- * legitimately retries, few enough that a loop is caught in hours
- * rather than in an invoice.
- */
-const MAX_AUTO_STARTS_PER_STAGE = 3;
-const LOOP_WINDOW_MS = 24 * 60 * 60 * 1000;

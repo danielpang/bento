@@ -1,5 +1,11 @@
 import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
-import { WORKSPACE_ARTIFACT_DIR, type RunOutcome } from "@bento/core";
+import {
+  WORKSPACE_ARTIFACT_DIR,
+  agentRunPrompt,
+  forgetsBetweenRuns,
+  modelGuidanceFor,
+  type RunOutcome,
+} from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
 import {
   agentProfiles,
@@ -26,18 +32,21 @@ import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
+import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
+import { compactedConversation } from "./conversation-history.js";
+import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
   markMessagesDelivered,
-  markMessagesSent,
   requeueDanglingClaims,
   requeueMessages,
   requeueUndelivered,
@@ -52,18 +61,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
   if (!run) throw new Error(`run ${runId} not found`);
   if (run.status !== "queued") return; // already picked up
-
-  /**
-   * Fairness before work.
-   *
-   * The worker pool bounds what one instance can run; it says nothing
-   * about who gets those slots, so a tenant with fifty queued cards
-   * would take every one and everyone else would wait behind them. A
-   * run over its organization's limit goes back on the queue instead,
-   * freeing this worker for somebody else's card.
-   */
-  if (await deferForConcurrency(ctx, run)) return;
-
 
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
@@ -153,8 +150,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // The prompt the user typed is their own line in the conversation,
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
-  // judge's would read as a message nobody sent.
-  if (run.prompt && run.kind !== "judge") await sayAsUser(run.prompt);
+  // judge's and the rebase run's would read as messages nobody sent.
+  if (run.prompt && run.kind === "task") await sayAsUser(run.prompt);
+  if (run.kind === "rebase") {
+    await saySystem(
+      "Resolving merge conflicts: the agent rebases the branch onto the latest base branch, and the server force pushes it with lease protection when the run finishes.",
+    );
+  }
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
@@ -292,7 +294,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
-  const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, workdir, toolEnv } = await buildRunCommand(ctx, {
     run,
     feature,
     stage,
@@ -307,8 +309,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Credentials come from the owning organization, never from the
   // server's own environment: see resolveAgentEnv.
   const { env: agentEnv, missing } = await resolveAgentEnv(ctx, project.organizationId, adapter, profile.model);
-  // Commits land as the user rather than a placeholder.
-  const execEnv = { ...agentEnv, ...authEnv, ...(await gitIdentityEnv(ctx)) };
+  // Commits land as the user rather than a placeholder. The adapter's
+  // own variables go first, so anything the organization saved under
+  // the same name wins: pool's base URL defaults to Poolside Platform
+  // here and to an enterprise endpoint when one is stored.
+  const execEnv = mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx));
   // A shared login is a credential, whether it arrives as a mount or an
   // env var. Only when none of the three exists does the run stop here.
   if (missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
@@ -318,19 +323,23 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // when sharing is already on but this machine has no login for the
     // tool, saying "turn on sharing" would point at a switch already
     // flipped.
-    const sharing = ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
+    const canShareLogin = Boolean(adapter.configPaths?.length);
+    const sharing = canShareLogin && ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
     const where =
       ctx.env.BENTO_MODE === "multi"
         ? "Add it under Team, then run again."
         : sharing
           ? `Login sharing is on, but this machine has no ${profile.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
-          : "Save it with bento setup in a terminal, or turn on this machine's agent logins under Agents. Then run again.";
+          : canShareLogin
+            ? "Save it with bento setup in a terminal, or turn on this machine's agent logins under Agents. Then run again."
+            : "Save it with bento setup in a terminal, then run again.";
+    const toolName = modelGuidanceFor(profile.cli)?.label ?? profile.cli;
     await finishRun(
       ctx,
       runId,
       {
         ok: false,
-        error: `No ${missing.join(", ")} is configured, so ${profile.cli} cannot start. ${where}`,
+        error: `No ${missing.join(", ")} is configured, so ${toolName} cannot start. ${where}`,
       },
       null,
     );
@@ -401,44 +410,47 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   const controller = new AbortController();
   ctx.running.set(runId, controller);
 
+  let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
   if (live && liveChannel) {
+    const liveHold = attachLiveConversation({
+      ctx,
+      runId,
+      featureId: feature.id,
+      kind: run.kind,
+      gateType: stage.gateType,
+      idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
+      live,
+      liveChannel,
+      sayAsUser,
+      saySystem,
+    });
     // The message route delivers through this handle; seq stays a
     // single-writer counter because the insert happens here.
     ctx.liveInputs.set(runId, {
       delivery: live.delivery,
-      deliver: async (text: string) => {
-        const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
-        if (accepted) await sayAsUser(text);
-        return accepted;
-      },
+      deliver: liveHold.deliver,
     });
+    liveSession = liveHold;
   }
 
   /**
-   * A live conversation settles rather than exits: after each finished
-   * turn, messages that parked meanwhile are fed in, oldest first;
-   * with nothing waiting, stdin closes and the process ends the run.
+   * A live conversation can settle rather than exit: after each
+   * finished turn, messages that parked meanwhile are fed in, oldest
+   * first. On a manual stage with nothing waiting, the process stays
+   * open for BENTO_LIVE_IDLE_SEC so the user can keep talking without
+   * a second run. Automatic stages, failed turns, and judge runs still
+   * close stdin immediately, because their gate has to run.
    */
-  const onTurnFinished = async () => {
-    if (!live || !liveChannel) return;
-    const claimed = await claimQueuedMessages(ctx.db, feature.id);
-    if (claimed.length > 0) {
-      const joined = claimed.map((m) => m.text).join("\n");
-      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
-      if (accepted) {
-        await markMessagesSent(ctx.db, claimed.map((m) => m.id), runId);
-        await sayAsUser(joined);
-        return;
-      }
-      await requeueMessages(ctx.db, claimed.map((m) => m.id));
-    }
-    if (liveChannel.pending === 0) liveChannel.end();
+  const onTurnFinished = async (ok: boolean) => {
+    if (!liveSession) return;
+    await liveSession.onTurnFinished(ok);
   };
-  // Two lines bracket the agent's launch. The first says the CLI is
-  // being spawned; the second, on its first event, that it came up and
-  // is working. Between "running" and the agent's first message can be
-  // a long model turn, and these are what separate that wait from a
-  // CLI that never started.
+  // Two lines bracket a streamed agent's launch. The first says the CLI
+  // is being spawned; the second, on its first event, that it came up
+  // and is working. Between "running" and the agent's first message can
+  // be a long model turn, and these are what separate that wait from a
+  // CLI that never started. Text-mode adapters emit their only event at
+  // exit, so they skip the second line.
   await saySystem(`Starting ${profile.cli} in the sandbox.`);
   let agentReported = false;
   let sessionRecorded = false;
@@ -462,7 +474,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         if (ctx.draining) return;
         if (!agentReported) {
           agentReported = true;
-          await saySystem(`${profile.cli} started and is working on the task.`);
+          if (announcesLaunchOnFirstEvent(adapter)) {
+            await saySystem(`${profile.cli} started and is working on the task.`);
+          }
         }
         /**
          * The session id is known the moment the CLI announces itself,
@@ -481,7 +495,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
           await confirmDelivered(ctx.db, runId);
-          await onTurnFinished();
+          await onTurnFinished(event.ok);
         }
         // The board shows what the agent last said, so a wall of
         // running cards reads as work rather than as spinners. Only
@@ -501,6 +515,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   } catch (err) {
     ctx.running.delete(runId);
     ctx.liveInputs.delete(runId);
+    liveSession?.dispose();
     liveChannel?.end();
     // A draining process does not end runs: the agent is still working
     // in the sandbox and the next boot reattaches to it. Whatever threw
@@ -519,6 +534,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   }
   ctx.running.delete(runId);
   ctx.liveInputs.delete(runId);
+  liveSession?.dispose();
   liveChannel?.end();
 
   if (ctx.draining) return;
@@ -530,6 +546,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   await settleAgentResult(ctx, {
     runId,
+    runKind: run.kind,
     feature,
     stage,
     profile,
@@ -547,6 +564,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 /** The rows a run settlement needs, shared by first runs and resumes. */
 interface RunSettlement {
   runId: string;
+  /** A "rebase" run publishes on finish whatever the stage says. */
+  runKind: (typeof agentRuns.$inferSelect)["kind"];
   feature: typeof features.$inferSelect;
   stage: typeof stages.$inferSelect;
   profile: typeof agentProfiles.$inferSelect;
@@ -561,6 +580,95 @@ interface RunSettlement {
 }
 
 /**
+ * The two pool failures whose fix its own words cannot name.
+ *
+ * pool prints one JSON line for a fatal error, relaying the endpoint's
+ * status and message and nothing else. Captured from pool 1.0.16: a
+ * refused Poolside Platform key reads "403 Forbidden: please check the
+ * api-key you provided", the same thing from an OpenAI compatible
+ * endpoint reads "401 Unauthorized: Incorrect API key provided", and a
+ * model the endpoint does not serve reads "404 Not Found: The model
+ * `laguna-xl-9` does not exist". Each is accurate and none of them says
+ * which screen in Bento holds the thing that is wrong.
+ *
+ * Two answers rather than one, deliberately: "no key is configured" and
+ * "the key you configured is refused" have different fixes, and a
+ * single auth sentence hides the case where everything looks set up.
+ */
+export function poolFailureAdvice(error: string): string | null {
+  if (/no auth token provided|api-key you provided|incorrect api key|invalid_api_key/i.test(error)) {
+    return "Poolside rejected the saved key. Replace POOLSIDE_API_KEY under Model provider keys, then run again. Keys revoked in the Poolside console fail this way.";
+  }
+  if (/does not exist|model_not_found|unknown model|no such model/i.test(error)) {
+    const named = /model [`'"]?([\w./:-]+)/i.exec(error)?.[1];
+    return named
+      ? `pool could not run the model ${named}. Change the model on this agent under Agents, then run again.`
+      : "pool could not run this agent's model. Change it under Agents, then run again.";
+  }
+  return null;
+}
+
+/**
+ * Text-mode adapters emit their only event when the process exits, so a
+ * "started and is working" line on that event reads as a stall that
+ * resolved instantly. Streamed CLIs still get the line on first output.
+ */
+export function announcesLaunchOnFirstEvent(adapter: { stdoutMode?: string }): boolean {
+  return adapter.stdoutMode !== "text";
+}
+
+/**
+ * Turns dsh's preview-grade failures into the next action in Bento.
+ *
+ * Auth and model matches require the `dsh:` prefix headless Harness
+ * prints (`dsh: ${code}: ${message}` or `dsh: ${error.message}`). A
+ * tool's own output mentioning 401 must not be blamed on the saved key.
+ */
+export function dshFailureAdvice(error: string): string | null {
+  if (/dsh:.*(?:401|unauthorized|invalid api key|authentication failed|rejected the api key)/i.test(error)) {
+    return "DeepSeek rejected the saved key. Replace DEEPSEEK_API_KEY under Model provider keys, then run again. Keys revoked in the DeepSeek console fail this way.";
+  }
+  if (/dsh:.*model.{0,80}(does not exist|not found|unavailable|unsupported)/i.test(error)) {
+    const named = /model\s+[`'"]?([\w./:-]+)/i.exec(error)?.[1];
+    return named
+      ? `DeepSeek Harness could not run the model ${named}. Change the model on this agent under Agents, then run again.`
+      : "DeepSeek Harness could not run this agent's model. Change it under Agents, then run again.";
+  }
+  if (/node.{0,80}(22\.19|unsupported|too old)|requires node/i.test(error)) {
+    return "DeepSeek Harness needs Node 22.19 or newer, and this sandbox has an older one, so it never started. A rebuilt sandbox installs the right one.";
+  }
+  if (/EACCES|permission denied|profile initialization|cordis\.patch|dsh-home/i.test(error)) {
+    return "DeepSeek Harness could not create its profile directory, so it never started. This is usually a read only home directory in the sandbox.";
+  }
+  if (/finished without readable output/i.test(error)) {
+    return "DeepSeek Harness finished, but Bento could not read what it printed. This tool is a developer preview and changes its output without notice. Update Bento, and report it if you are already current.";
+  }
+  return null;
+}
+
+/**
+ * Runner-executed failures skip settleAgentResult, so they never pick
+ * up tool-specific advice on their own. Same sentences, same place the
+ * hosted board reads the error from, for every runner client.
+ */
+export function runnerReportedError(cli: string | undefined, error: string | undefined): string | null {
+  const base = error ?? null;
+  if (!base) return null;
+  const advice = cli === "pool" ? poolFailureAdvice(base) : cli === "dsh" ? dshFailureAdvice(base) : null;
+  if (advice) return `${base} ${advice}`;
+  return base;
+}
+
+export function mergeAgentExecEnv(
+  toolEnv: Record<string, string>,
+  agentEnv: Record<string, string>,
+  authEnv: Record<string, string>,
+  identityEnv: Record<string, string>,
+): Record<string, string> {
+  return { ...toolEnv, ...agentEnv, ...authEnv, ...identityEnv };
+}
+
+/**
  * Everything that happens after the agent process ends: naming the
  * failure, publishing branches, and writing the terminal state. Shared
  * by executeRun and by resumeInterruptedRun, so a run that finished
@@ -568,7 +676,7 @@ interface RunSettlement {
  * exactly the way a normal run does.
  */
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
-  const { runId, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
+  const { runId, runKind, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
     settlement;
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
@@ -647,6 +755,12 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      */
     const toolMissing =
       exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
+    const toolAdvice =
+      profile.cli === "pool"
+        ? poolFailureAdvice(outcome.error ?? "")
+        : profile.cli === "dsh"
+          ? dshFailureAdvice(outcome.error ?? "")
+          : null;
     const enriched =
       authDead && profile.cli === "claude-code"
         ? {
@@ -658,7 +772,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
               ...outcome,
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
             }
-          : outcome;
+          : toolAdvice
+            ? { ...outcome, error: `${outcome.error} ${toolAdvice}` }
+            : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
@@ -690,13 +806,30 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // evaluated means a checks_pass or pr_comments_resolved criterion has
   // pull requests to read on the very first evaluation rather than
   // failing once and passing on a later sweep.
+  // A rebase run publishes whatever the stage says: the whole point of
+  // resolving conflicts is putting the rebased branch back on the pull
+  // request, and the resolve route already confirmed one exists. The
+  // wording is picked once here so the two notes below cannot drift
+  // apart and describe two different runs.
+  const mustPublish = stage.createPr || runKind === "rebase";
+  const wording =
+    runKind === "rebase"
+      ? {
+          noConnection:
+            "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish.",
+          noCommits: "The rebase left the branch with no commits beyond the base branch, so there was nothing to push.",
+        }
+      : {
+          noConnection:
+            "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
+          noCommits:
+            "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
+        };
   const publishNotes: string[] = [];
-  if (stage.createPr && !publisher) {
-    publishNotes.push(
-      "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
-    );
+  if (mustPublish && !publisher) {
+    publishNotes.push(wording.noConnection);
   }
-  if (stage.createPr && publisher) {
+  if (mustPublish && publisher) {
     const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
     const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
       featureId: feature.id,
@@ -726,9 +859,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       ...failures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
     );
     if (published.length === 0 && failures.length === 0) {
-      publishNotes.push(
-        "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
-      );
+      publishNotes.push(wording.noCommits);
     }
   }
   // Written into the transcript so the outcome is visible where the
@@ -783,6 +914,8 @@ async function buildRunCommand(
   live: LiveSession | null;
   liveChannel: LineChannel | null;
   workdir: string;
+  /** Environment this tool takes instead of flags, per run. */
+  toolEnv: Record<string, string>;
 }> {
   const { run, feature, stage, profile, adapter, repoRows, prepared, handle } = input;
   const allStages = await ctx.db
@@ -805,15 +938,30 @@ async function buildRunCommand(
   // workspace root so every checkout is visible; the prompt lists them.
   const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
 
-  const prompt = run.prompt
-    || buildStagePrompt(
-      feature,
-      stage,
-      allStages,
-      mounted,
-      { name: profile.name, skill: profile.skill },
-      `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
-    );
+  const stagePrompt = buildStagePrompt(
+    feature,
+    stage,
+    allStages,
+    mounted,
+    { name: profile.name, skill: profile.skill },
+    `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
+  );
+  const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
+  // Only ordinary work compacts: judge and rebase prompts are complete
+  // instructions on their own, and agentRunPrompt ignores a compacted
+  // history for both, so computing one would be work thrown away.
+  const compacted =
+    run.prompt && run.kind === "task" && !resume
+      ? await compactedConversation(ctx.db, feature.id, run.id)
+      : "";
+  const prompt = agentRunPrompt({
+    cli: profile.cli,
+    followUp: run.prompt,
+    stagePrompt,
+    resume,
+    compacted,
+    kind: run.kind,
+  });
 
   const commandInput = {
     prompt,
@@ -826,7 +974,7 @@ async function buildRunCommand(
    * Live mode: the tool holds a conversation over stdin, so a message
    * sent while it works reaches the process instead of waiting for the
    * run to end. Needs both halves: an adapter that speaks it and a
-   * driver that can attach stdin (sprites cannot).
+   * driver that can attach stdin.
    */
   const live =
     adapter.live && ctx.driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
@@ -835,7 +983,7 @@ async function buildRunCommand(
   const liveChannel = live ? new LineChannel() : null;
   if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
   const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
-  return { argv, live, liveChannel, workdir };
+  return { argv, live, liveChannel, workdir, toolEnv: adapter.env?.(commandInput) ?? {} };
 }
 
 /** Whether this organization has asked for sandboxes with no egress. */
@@ -847,34 +995,6 @@ async function organizationRestrictsNetwork(ctx: AppContext, organizationId: str
     .where(eq(organizationPolicies.organizationId, organizationId))
     .limit(1);
   return row?.restrictNetwork === true;
-}
-
-/**
- * True when this run must wait its turn. Requeued with a delay rather
- * than held, so the worker is free immediately and the run keeps its
- * place without spinning.
- */
-async function deferForConcurrency(ctx: AppContext, run: { id: string; featureId: string }): Promise<boolean> {
-  if (!ctx.entitlements?.concurrentRunLimit) return false;
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-  if (!feature?.organizationId) return false;
-  const limit = await ctx.entitlements.concurrentRunLimit(feature.organizationId);
-  if (limit === null || limit === undefined) return false;
-
-  const [{ working } = { working: 0 }] = await ctx.db
-    .select({ working: sql<number>`count(*)` })
-    .from(agentRuns)
-    .innerJoin(features, eq(agentRuns.featureId, features.id))
-    .where(
-      and(
-        eq(features.organizationId, feature.organizationId),
-        inArray(agentRuns.status, ["starting", "running"]),
-      ),
-    );
-  if (Number(working) < limit) return false;
-
-  await ctx.boss.send("run.execute", { runId: run.id }, { startAfter: 15 });
-  return true;
 }
 
 async function finishRun(
@@ -978,8 +1098,9 @@ async function finishRun(
 /**
  * Delivers messages that arrived while the run was still going. A
  * headless CLI cannot hear mid-flight, so they waited as rows on the
- * card; now that the run is over they become one resume run in the
- * same session, oldest first. Cancel counts as an ending too: someone
+ * card; now that the run is over they become one follow-up run, oldest
+ * first. Resumable tools continue the same session; pool receives the
+ * stage context again. Cancel counts as an ending too: someone
  * who stops the agent and types a redirect means the redirect. Claims
  * lock rows, so two terminal paths racing deliver each message once.
  */
@@ -996,21 +1117,33 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   }
 
   /**
+   * A send-back moved the card onto a different stage while this run
+   * was ending. Parked messages wait for the person to start the
+   * destination conversation, rather than auto-starting the new stage's
+   * agent with no explanation of the redo. The composer claims them
+   * when that message is sent.
+   *
+   * Backlog is not a stage change in this sense: currentStageId is
+   * null, runs still carry the stage they ran on, and a follow-up
+   * keeps that conversation (see followUpSource). Treating null as a
+   * mismatch swallowed parked messages on every card that had never
+   * left the backlog.
+   */
+  if (feature.currentStageId && run.stageId !== feature.currentStageId) {
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
+
+  /**
    * A judge's end can be what frees the card, but the judge is not the
    * conversation: inheriting its profile and session had the reviewer
    * answering the user's follow-up inside the judging session. The
    * newest run that is not a judge run is whose agent and session the
-   * message continues.
+   * message continues, unless the card has moved stages: then the
+   * pipeline agent for the stage the card is in takes over.
    */
-  const [conversation] = run.kind === "judge"
-    ? await ctx.db
-        .select()
-        .from(agentRuns)
-        .where(and(eq(agentRuns.featureId, run.featureId), ne(agentRuns.kind, "judge")))
-        .orderBy(desc(agentRuns.queuedAt))
-        .limit(1)
-    : [run];
-  const source = conversation ?? run;
+  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
+  const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   const next = await startRunIfIdle(ctx.db, {
     featureId: feature.id,
@@ -1480,30 +1613,28 @@ async function resumeInterruptedRun(
   const saySystem = (text: string) =>
     appendRunEvent(ctx, run.id, { type: "message", role: "system", text });
 
+  let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
   if (live && liveChannel) {
+    liveSession = attachLiveConversation({
+      ctx,
+      runId: run.id,
+      featureId: feature.id,
+      kind: run.kind,
+      gateType: stage.gateType,
+      idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
+      live,
+      liveChannel,
+      sayAsUser,
+      saySystem,
+    });
     ctx.liveInputs.set(run.id, {
       delivery: live.delivery,
-      deliver: async (text: string) => {
-        const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
-        if (accepted) await sayAsUser(text);
-        return accepted;
-      },
+      deliver: liveSession.deliver,
     });
   }
-  const onTurnFinished = async () => {
-    if (!live || !liveChannel) return;
-    const claimed = await claimQueuedMessages(ctx.db, feature.id);
-    if (claimed.length > 0) {
-      const joined = claimed.map((m) => m.text).join("\n");
-      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
-      if (accepted) {
-        await markMessagesSent(ctx.db, claimed.map((m) => m.id), run.id);
-        await sayAsUser(joined);
-        return;
-      }
-      await requeueMessages(ctx.db, claimed.map((m) => m.id));
-    }
-    if (liveChannel.pending === 0) liveChannel.end();
+  const onTurnFinished = async (ok: boolean) => {
+    if (!liveSession) return;
+    await liveSession.onTurnFinished(ok);
   };
 
   emitBoard("running");
@@ -1522,7 +1653,7 @@ async function resumeInterruptedRun(
         await appendRunEvent(ctx, run.id, event);
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);
-          await onTurnFinished();
+          await onTurnFinished(event.ok);
         }
         const spoken = runOutputPreview(event);
         if (spoken) {
@@ -1539,6 +1670,7 @@ async function resumeInterruptedRun(
   } catch (err) {
     ctx.running.delete(run.id);
     ctx.liveInputs.delete(run.id);
+    liveSession?.dispose();
     liveChannel?.end();
     // The next boot reattaches; this process just leaves quietly.
     if (ctx.draining) return;
@@ -1554,6 +1686,7 @@ async function resumeInterruptedRun(
   }
   ctx.running.delete(run.id);
   ctx.liveInputs.delete(run.id);
+  liveSession?.dispose();
   liveChannel?.end();
 
   if (ctx.draining) return;
@@ -1565,6 +1698,7 @@ async function resumeInterruptedRun(
 
   await settleAgentResult(ctx, {
     runId: run.id,
+    runKind: run.kind,
     feature,
     stage,
     profile,
@@ -1628,7 +1762,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * A batched worker would fetch N jobs and wait for all of them before
    * fetching more, so one thirty minute agent run would hold the other
    * slots idle. Independent single-job workers free each slot the moment
-   * its run finishes.
+   * its run finishes. The count is this process's capacity, not a plan
+   * limit: hosted Fly raises it, a laptop stays at the default of 4.
    */
   for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
     await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1 }, async (jobs) => {
@@ -1726,6 +1861,22 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
     });
   }));
+
+  /**
+   * A once-a-minute PostHog gauge of runs waiting for a `run.execute`
+   * worker. Skipped when analytics is off: the only consumer is the
+   * dashboard that decides whether to add workers.
+   */
+  if (ctx.analytics) {
+    await ctx.boss.createQueue("run.queue-snapshot");
+    await ctx.boss.schedule("run.queue-snapshot", "* * * * *");
+    await ctx.boss.work(
+      "run.queue-snapshot",
+      captureJobErrors(ctx.analytics, "run.queue-snapshot", async () => {
+        await captureRunQueueDepth(ctx);
+      }),
+    );
+  }
 
   await registerLinearJobs(ctx);
   await registerSlackJobs(ctx);

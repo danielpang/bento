@@ -1,7 +1,8 @@
 import { serve } from "@hono/node-server";
-import { createDb, createPool, runMigrations, runEvents } from "@bento/db";
+import { createDb, createPool, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
+import { createFeatureFlags } from "./feature-flags.js";
 import { startLogExport } from "./log-export.js";
 import { attachPgBus } from "./pg-bus.js";
 import { WorktreeManager } from "@bento/sandbox";
@@ -9,7 +10,7 @@ import PgBoss from "pg-boss";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
 import { createAuth, type AuthHooks } from "./auth.js";
-import { createMailer } from "./mail.js";
+import { createMailer, noticeMessage, type NoticeEmailInput } from "./mail.js";
 import { SecretBox } from "./secrets.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -65,6 +66,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // starts the more of the boot story PostHog gets to keep.
   const logExport = startLogExport(env);
   const analytics = createAnalytics(env);
+  const featureFlags = createFeatureFlags(env);
 
   /**
    * Everything below can throw: pg-boss on an unreachable database,
@@ -74,10 +76,17 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
    * throw must take those installs back out on its way up.
    */
   try {
-    const pool = createPool(env.DATABASE_URL);
+    const poolMax = poolMaxForRuns(env.BENTO_MAX_CONCURRENT_RUNS);
+    const pool = createPool(env.DATABASE_URL, { max: poolMax });
     const db = createDb(pool);
 
-    const boss = new PgBoss({ connectionString: env.DATABASE_URL, schema: "pgboss" });
+    const boss = new PgBoss({
+      connectionString: env.DATABASE_URL,
+      schema: "pgboss",
+      // Polling does not need one connection per worker. Enough that a
+      // burst of completions is not queued behind the default 10.
+      max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
+    });
     boss.on("error", (err) => console.error("pg-boss error:", err));
     await boss.start();
 
@@ -171,6 +180,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     if (githubApp) ctx.githubApp = githubApp;
     if (auth) ctx.auth = auth;
     if (analytics) ctx.analytics = analytics;
+    ctx.featureFlags = featureFlags;
 
     await registerJobs(ctx);
 
@@ -218,6 +228,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         registerCloud?: (host: {
           db: typeof db;
           mailer: typeof mailer;
+          notify(message: Omit<NoticeEmailInput, "appUrl">): Promise<void>;
           appUrl: string;
           rawEnv: Record<string, string | undefined>;
           identify(headers: Headers): Promise<{ userId: string; organizationId: string; role: string } | null>;
@@ -233,6 +244,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       const registered = await mod.registerCloud({
         db,
         mailer,
+        /**
+         * Mail in Bento's own envelope. The module supplies copy and
+         * this wraps it in the layout every other email uses, so a
+         * usage warning from the hosted plan does not arrive as a
+         * plain text message from a product whose other mail is not.
+         */
+        notify: (message) =>
+          mailer.send(noticeMessage({ ...message, appUrl: env.BETTER_AUTH_URL.replace(/\/$/, "") })),
         appUrl: env.BETTER_AUTH_URL,
         rawEnv,
         // Session and membership stay this server's job: the module gets
@@ -277,7 +296,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
 
     if (!options.quiet) {
       console.log(
-        `bento server listening on http://${hostname}:${server.port} (${env.BENTO_MODE} mode, ${env.BENTO_SANDBOX_DRIVER} sandboxes)`,
+        `bento server listening on http://${hostname}:${server.port} (${env.BENTO_MODE} mode, ${env.BENTO_SANDBOX_DRIVER} sandboxes, ${env.BENTO_MAX_CONCURRENT_RUNS} run workers)`,
       );
       if (env.BENTO_MODE === "multi") console.log(`invitation mail: ${mailer.description}`);
     }
@@ -313,12 +332,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         // Flush before the pool closes: capture is fire and forget, so
         // whatever queued in the last seconds is only on this machine.
         await analytics?.shutdown().catch(() => {});
+        await featureFlags.shutdown().catch(() => {});
         await logExport?.stop().catch(() => {});
         await pool.end().catch(() => {});
       },
     };
   } catch (err) {
     await analytics?.shutdown().catch(() => {});
+    await featureFlags.shutdown().catch(() => {});
     await logExport?.stop().catch(() => {});
     throw err;
   }

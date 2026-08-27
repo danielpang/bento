@@ -26,7 +26,7 @@ export interface PlanOffer {
   plan: string;
   name: string;
   pricing: PlanPricing;
-  limits: { members: number | null; concurrentRuns: number | null };
+  limits: { members: number | null };
   /** Seats this team would be billed for on this plan, given its headcount. */
   billableSeats: number;
   /** What this team would pay a month on this plan. */
@@ -37,7 +37,7 @@ export interface PlanState {
   plan: string;
   planName: string;
   status: string | null;
-  limits: { members: number | null; concurrentRuns: number | null };
+  limits: { members: number | null };
   usage: { members: number };
   /**
    * Sandbox time this period against what the plan includes. `cap` is
@@ -149,6 +149,54 @@ export function resetsOn(state: PlanState): string {
 /** Whole dollars, because every price on the ladder is one. */
 export function money(usd: number): string {
   return `$${usd % 1 === 0 ? usd.toFixed(0) : usd.toFixed(2)}`;
+}
+
+/**
+ * The note under the checkout overage choice.
+ *
+ * Each option's note has to describe that option. The old allow copy
+ * opened with "Agents stop if overage passes...", which is what a
+ * person who just picked "keep going" would take for the stop policy.
+ */
+export function overageCheckoutNote(
+  policy: "stop" | "allow" | null,
+  monthlyTotalUsd: number | null,
+): string {
+  if (policy === "stop") {
+    return "New agents will not start once the included hours are used. You can change this later under Billing.";
+  }
+  if (policy === "allow" && monthlyTotalUsd !== null) {
+    return `Overage is capped at ${money(monthlyTotalUsd)}, so your bill cannot more than double. Change or remove that under Billing whenever you like.`;
+  }
+  return "You can change this later under Billing.";
+}
+
+/**
+ * The comparison list people read, after dropping claims this product
+ * does not keep.
+ *
+ * Highlights arrive from the cloud module with the prices. A few of
+ * those lines still describe a concurrent-agent cap, a 30 day
+ * transcript window we never close, and Enterprise extras that are
+ * not on the contract. The console is what a person compares, so the
+ * rewrite lives here rather than waiting for the module.
+ */
+export function displayHighlights(highlights: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of highlights) {
+    const line = raw.replace(/,\s*negotiable\b/gi, "").trim();
+    if (!line) continue;
+    if (/agents? running at (a time|once)\b/i.test(line)) continue;
+    if (/^30[ -]day transcript history$/i.test(line)) continue;
+    if (/^custom sandbox images$/i.test(line)) continue;
+    if (/uptime commitment/i.test(line) || /\ba DPA\b/i.test(line)) continue;
+    if (/^unlimited members\b/i.test(line)) {
+      out.push("Billed per seat");
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
 }
 
 /** What a plan costs per seat, in words, including the plans that have no price. */

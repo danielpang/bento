@@ -90,6 +90,8 @@ export interface SessionRecovery {
 
 export interface AgentAdapter {
   cli: AgentCli;
+  /** Plain text is buffered into one message; absent means newline-delimited events. */
+  stdoutMode?: "text";
   /** Env var names that must be present in the sandbox for this CLI. */
   /** Credentials the agent cannot run without. */
   requiredEnv: string[];
@@ -123,6 +125,18 @@ export interface AgentAdapter {
    * died inside the tool with a generic server error.
    */
   requiredEnvFor?(model: string): string[];
+  /**
+   * Per-run environment this tool needs, for CLIs that take their
+   * configuration as environment variables rather than flags. pool is
+   * the case: `pool exec` has no --model, so the model travels as
+   * POOLSIDE_STANDALONE_MODEL. Merged under the organization's stored
+   * credentials, so a value saved there wins over the default here.
+   *
+   * Not folded into argv as an `env VAR=x` prefix, because argv[0] is
+   * what names the binary in the "not installed" failure and in
+   * spawn-failure detection.
+   */
+  env?(input: BuildCommandInput): Record<string, string>;
   /** Present when the tool can hold a live stdin conversation. */
   live?: LiveSession;
   /** Present when the tool's session storage can be read back. */
@@ -166,6 +180,7 @@ export function providerKeyFor(model: string): string[] {
     openai: "OPENAI_API_KEY",
     google: "GEMINI_API_KEY",
     gemini: "GEMINI_API_KEY",
+    deepseek: "DEEPSEEK_API_KEY",
   };
   const key = byProvider[model.split("/")[0] ?? ""];
   return key ? [key] : [];

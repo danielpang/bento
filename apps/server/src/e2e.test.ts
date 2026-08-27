@@ -37,6 +37,7 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
+import { createFeatureFlags } from "./feature-flags.js";
 import {
   deliverQueuedMessage,
   markCancelled,
@@ -96,6 +97,7 @@ before(async () => {
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
+    BENTO_LIVE_IDLE_SEC: "0",
   } as NodeJS.ProcessEnv);
 
   const pool = createPool(testUrl);
@@ -119,6 +121,7 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
+    featureFlags: createFeatureFlags(env),
   };
   await registerJobs(ctx);
   app = createApp(ctx);
@@ -178,6 +181,29 @@ async function waitForStage(featureId: string, stageId: string, timeoutMs = 60_0
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`feature ${featureId} stopped at stage ${last?.currentStageId} (status ${last?.status})`);
+}
+
+/**
+ * The last transition on a card, once it reads as `expected`.
+ *
+ * advanceFeature commits the stage move before writing the history row,
+ * so a card can reach its next stage a moment before the transition
+ * that moved it exists; reading once sees the previous one. Returns the
+ * last trigger seen on timeout, so a real regression fails on the real
+ * value rather than a throw.
+ */
+async function waitForLastTransition(featureId: string, expected: string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last: string | undefined;
+  while (Date.now() < deadline) {
+    const transitions = await json<{ trigger: string; toStageId: string }[]>(
+      await app.request(`/api/features/${featureId}/transitions`),
+    );
+    last = transitions.at(-1)?.trigger;
+    if (last === expected) return last;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return last;
 }
 
 async function setupProject(name: string) {
@@ -243,6 +269,12 @@ async function patchStage(stageId: string, patch: Record<string, unknown>) {
   );
 }
 
+test("local mode reports the acting user as a beta tester", async () => {
+  const res = await app.request("/api/flags");
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { betaTesters: true });
+});
+
 test("local mode can manage machine credentials", async () => {
   const created = await json<{ id: string }>(
     await app.request("/api/secrets", {
@@ -251,10 +283,13 @@ test("local mode can manage machine credentials", async () => {
       body: JSON.stringify({ name: "ANTHROPIC_API_KEY", value: "local-secret-value" }),
     }),
   );
-  const listed = await json<{ id: string; name: string; hint: string }[]>(await app.request("/api/secrets"));
-  assert.equal(listed.length, 1);
+  const listed = await json<{ secrets: { id: string; name: string; hint: string }[]; canManage: boolean }>(
+    await app.request("/api/secrets"),
+  );
+  assert.equal(listed.canManage, true);
+  assert.equal(listed.secrets.length, 1);
   assert.deepEqual(
-    { id: listed[0]?.id, name: listed[0]?.name, hint: listed[0]?.hint },
+    { id: listed.secrets[0]?.id, name: listed.secrets[0]?.name, hint: listed.secrets[0]?.hint },
     { id: created.id, name: "ANTHROPIC_API_KEY", hint: "••••••••alue" },
   );
 
@@ -267,11 +302,11 @@ test("local mode can manage machine credentials", async () => {
   );
   assert.equal(rotated.id, created.id, "rotation updates the local credential instead of inserting a duplicate");
   assert.equal(rotated.hint, "••••••••5678");
-  assert.equal((await json<unknown[]>(await app.request("/api/secrets"))).length, 1);
+  assert.equal((await json<{ secrets: unknown[] }>(await app.request("/api/secrets"))).secrets.length, 1);
 
   const removed = await app.request(`/api/secrets/${rotated.id}`, { method: "DELETE" });
   assert.equal(removed.status, 200);
-  assert.deepEqual(await json<unknown[]>(await app.request("/api/secrets")), []);
+  assert.deepEqual(await json(await app.request("/api/secrets")), { secrets: [], canManage: true });
 });
 
 /**
@@ -572,6 +607,67 @@ test("a live session hears messages mid-run without a second run", { timeout: 12
   assert.match(transcript, /you> change of plan/, "the user's line is in the conversation");
   const turns = transcript.match(/\[done/g)?.length ?? 0;
   assert.equal(turns >= 2, true, "the second message produced a second turn in the same run");
+});
+
+/**
+ * After a live turn finishes on a manual stage with nothing queued,
+ * the process stays open for a short idle window so the next message
+ * is the same conversation rather than a new run.
+ */
+test("a live session stays open after a turn so a later message needs no second run", { timeout: 120_000 }, async () => {
+  const previousIdle = ctx.env.BENTO_LIVE_IDLE_SEC;
+  ctx.env.BENTO_LIVE_IDLE_SEC = 20;
+  try {
+    const { project } = await setupProject("Live idle hold");
+    const feature = await createFeature(project.id, "Idle card");
+    const profile = await fakeProfile("idle-fake");
+    await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+    const first = await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "LIVE hello" }),
+      }),
+    );
+
+    const deadline = Date.now() + 30_000;
+    let sawFirstTurn = false;
+    while (Date.now() < deadline) {
+      const current = await json<{ status: string }>(await app.request(`/api/runs/${first.id}`));
+      const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
+      if (current.status === "running" && /\[done/.test(transcript)) {
+        sawFirstTurn = true;
+        break;
+      }
+      if (TERMINAL_STATUSES.includes(current.status)) {
+        assert.fail(`the run ended (${current.status}) before the idle window could hold it`);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(sawFirstTurn, "the first turn finished while the run stayed open");
+
+    const sent = await json<{ queued: boolean; live?: boolean }>(
+      await app.request(`/api/features/${feature.id}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "keep going" }),
+      }),
+    );
+    assert.equal(sent.queued, false, "the waiting session heard the message now");
+    assert.equal(sent.live, true);
+
+    assert.equal(await waitForRun(first.id, 90_000), "succeeded");
+    const { runs } = await json<{ runs: unknown[] }>(await app.request(`/api/features/${feature.id}`));
+    assert.equal(runs.length, 1, "the later message stayed inside the same run");
+    const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
+    assert.match(transcript, /you> keep going/);
+    const turns = transcript.match(/\[done/g)?.length ?? 0;
+    assert.equal(turns >= 2, true, "the later message produced a second turn");
+    assert.match(transcript, /The agent is waiting/);
+  } finally {
+    ctx.env.BENTO_LIVE_IDLE_SEC = previousIdle;
+  }
 });
 
 /**
@@ -1551,6 +1647,49 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
 });
 
 /**
+ * After a send-back the last work run is still the agent that just ran
+ * (QA). A follow-up that inherited its profile and session kept talking
+ * to QA on a card that now sat in Implementation.
+ */
+test("a follow-up after a send-back talks to the current stage's agent", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Send-back follow-up");
+  const feature = await createFeature(project.id, "Sent back card");
+  const implementer = await fakeProfile("followup-impl");
+  const qa = await fakeProfile("followup-qa");
+  const impl = projectStages[0]!;
+  const quality = projectStages[2]!;
+
+  await patchStage(impl.id, { defaultAgentProfileId: implementer.id });
+  await ctx.db
+    .update(features)
+    .set({ currentStageId: impl.id, status: "active", updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: quality.id,
+    agentProfileId: qa.id,
+    prompt: "verify the work",
+    status: "succeeded",
+    executor: "server",
+    cliSessionId: "qa-sess",
+  });
+
+  const reply = await json<{ queued: boolean; run?: { id: string } }>(
+    await app.request(`/api/features/${feature.id}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "fix the empty case" }),
+    }),
+  );
+  assert.ok(reply.run, "an idle card answers a message with a new run");
+  const [resumed] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, reply.run!.id));
+  assert.equal(resumed?.agentProfileId, implementer.id, "the Implementation agent answers, not QA");
+  assert.equal(resumed?.stageId, impl.id);
+  assert.equal(resumed?.cliSessionId, null, "a different agent starts a fresh session");
+  await waitForRun(reply.run!.id);
+});
+
+/**
  * A message handed to a run that never confirmed a turn is not
  * delivered, whatever the transcript shows: the run's ending puts it
  * back and the next run carries it. This is the loss the old
@@ -1897,7 +2036,8 @@ test("a redirected endpoint with only a token is missing the key", async () => {
 /**
  * Dragging a card between lanes. Forward keeps advance's meaning (the
  * stage's agent starts), backward keeps send-back's (verdicts are
- * discarded, nothing starts), and neither records an approval.
+ * discarded, the previous agent stops, the destination waits), and
+ * neither records an approval.
  */
 test("a card can be moved to any stage, and the move keeps its direction's meaning", { timeout: 120_000 }, async () => {
   const { project, stages: projectStages } = await setupProject("Dragging");
@@ -1941,20 +2081,209 @@ test("a card can be moved to any stage, and the move keeps its direction's meani
     "the move is in the history",
   );
 
-  // Backward two stages: verdicts of the stage being left are gone.
+  // Backward two stages: verdicts of the stage being left are gone,
+  // and the destination agent does not start, even when one is assigned.
   const first = projectStages[0]!;
+  await patchStage(first.id, { defaultAgentProfileId: profile.id });
+  const idsBeforeBack = (
+    await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`))
+  ).runs.map((r) => r.id);
   const back = await json<{ currentStageId: string }>(await move(first.id));
   assert.equal(back.currentStageId, first.id);
   const gate = await json<{ checks: unknown[] }>(await app.request(`/api/features/${feature.id}/gate`));
   assert.equal(gate.checks.length, 0, "a backward move leaves no stale verdicts behind");
-  const { runs } = await json<{ runs: unknown[] }>(await app.request(`/api/features/${feature.id}`));
-  assert.equal(runs.length, 1, "a backward move starts nothing");
+  await new Promise((r) => setTimeout(r, 1500));
+  const afterBack = await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`));
+  assert.deepEqual(
+    afterBack.runs.map((r) => r.id),
+    idsBeforeBack,
+    "a backward move does not start the destination agent",
+  );
 
   // To the backlog, and a stage from another pipeline is refused.
   const toBacklog = await json<{ currentStageId: string | null }>(await move(null));
   assert.equal(toBacklog.currentStageId, null);
   const foreign = await move("00000000-0000-0000-0000-000000000000");
   assert.equal(foreign.status, 400, "a stage outside this pipeline is refused");
+});
+
+/**
+ * Send-back used to leave the previous stage's agent in place: the card
+ * moved, but the next run (and any follow-up) still belonged to QA.
+ * The previous agent must stop; the destination does not start on its
+ * own, because the person has not yet said why the card came back.
+ */
+test("sending a card back stops the current agent and starts nothing", { timeout: 60_000 }, async () => {
+  const { project, stages } = await setupProject("Send-back stop");
+  const reviewer = await fakeProfile("sendback-stop-review");
+  const qa = await fakeProfile("sendback-stop-qa");
+  const review = stages[1]!;
+  const quality = stages[2]!;
+  await patchStage(review.id, { defaultAgentProfileId: reviewer.id });
+  await patchStage(quality.id, { defaultAgentProfileId: qa.id });
+
+  for (const status of ["queued", "running"] as const) {
+    const feature = await createFeature(project.id, `Rework me ${status}`);
+    await ctx.db
+      .update(features)
+      .set({ currentStageId: quality.id, status: "active", updatedAt: new Date() })
+      .where(eq(features.id, feature.id));
+    const [live] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: quality.id,
+        agentProfileId: qa.id,
+        prompt: "verify the work",
+        status,
+        executor: "runner",
+      })
+      .returning({ id: agentRuns.id });
+
+    assert.equal((await app.request(`/api/features/${feature.id}/back`, { method: "POST" })).status, 200);
+    const detail = await json<{
+      currentStageId: string;
+      runs: { id: string; status: string; stageId: string; agentProfileId: string }[];
+    }>(await app.request(`/api/features/${feature.id}`));
+    assert.equal(detail.currentStageId, review.id);
+    const stopped = detail.runs.find((r) => r.id === live!.id);
+    assert.equal(stopped?.status, "cancelled", `a ${status} agent on the previous stage is stopped`);
+    assert.equal(detail.runs.length, 1, "send-back starts no destination run of its own");
+  }
+});
+
+/**
+ * An automatic destination whose previous visit already succeeded would
+ * walk the card forward again the moment anything evaluated it. Send-back
+ * must not start that stage's agent and must not ask the gate.
+ */
+test("sending a card back onto an automatic stage does not bounce it forward", { timeout: 30_000 }, async () => {
+  const { project, stages } = await setupProject("Send-back bounce");
+  const reviewer = await fakeProfile("sendback-bounce-review");
+  const qa = await fakeProfile("sendback-bounce-qa");
+  const review = stages[1]!;
+  const quality = stages[2]!;
+  await patchStage(review.id, {
+    defaultAgentProfileId: reviewer.id,
+    gateType: "auto",
+    gateCriteria: [],
+  });
+  await patchStage(quality.id, { defaultAgentProfileId: qa.id });
+
+  const feature = await createFeature(project.id, "Bounce me");
+  await ctx.db
+    .update(features)
+    .set({ currentStageId: quality.id, status: "active", updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  await ctx.db.insert(agentRuns).values([
+    {
+      featureId: feature.id,
+      stageId: review.id,
+      agentProfileId: reviewer.id,
+      prompt: "earlier review",
+      status: "succeeded",
+      executor: "runner",
+    },
+    {
+      featureId: feature.id,
+      stageId: quality.id,
+      agentProfileId: qa.id,
+      prompt: "verify the work",
+      status: "succeeded",
+      executor: "runner",
+    },
+  ]);
+
+  assert.equal((await app.request(`/api/features/${feature.id}/back`, { method: "POST" })).status, 200);
+  const idsAtSendBack = (
+    await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`))
+  ).runs.map((r) => r.id);
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const detail = await json<{ currentStageId: string; runs: { id: string }[] }>(
+      await app.request(`/api/features/${feature.id}`),
+    );
+    assert.equal(detail.currentStageId, review.id, "an automatic destination must not walk the card forward again");
+    assert.deepEqual(
+      detail.runs.map((r) => r.id).sort(),
+      idsAtSendBack.slice().sort(),
+      "send-back must not start a run that would then pass the gate",
+    );
+    await new Promise((r) => setTimeout(r, 250));
+  }
+});
+
+/**
+ * A message parked on the previous stage's agent survives send-back and
+ * is carried by the destination agent once the person starts that
+ * conversation, not by an automatic follow-up of the stopped run.
+ */
+test("parked messages survive send-back and reach the new agent", { timeout: 60_000 }, async () => {
+  const { project, stages } = await setupProject("Send-back parked");
+  const reviewer = await fakeProfile("sendback-parked-review");
+  const qa = await fakeProfile("sendback-parked-qa");
+  const review = stages[1]!;
+  const quality = stages[2]!;
+  await patchStage(review.id, { defaultAgentProfileId: reviewer.id });
+  await patchStage(quality.id, { defaultAgentProfileId: qa.id });
+
+  const feature = await createFeature(project.id, "Parked after send-back");
+  await ctx.db
+    .update(features)
+    .set({ currentStageId: quality.id, status: "active", updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  const [live] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: quality.id,
+      agentProfileId: qa.id,
+      prompt: "verify the work",
+      status: "running",
+      executor: "runner",
+      cliSessionId: "qa-sess",
+    })
+    .returning({ id: agentRuns.id });
+  await ctx.db.insert(featureMessages).values({
+    featureId: feature.id,
+    text: "the tests fail on empty input",
+  });
+
+  assert.equal((await app.request(`/api/features/${feature.id}/back`, { method: "POST" })).status, 200);
+
+  const parked = await ctx.db.select().from(featureMessages).where(eq(featureMessages.featureId, feature.id));
+  assert.equal(parked.length, 1);
+  assert.equal(parked[0]?.status, "queued", "send-back leaves the parked message for the next conversation");
+
+  // The stopped run's terminal path must not auto-start the destination
+  // with that parked text: that would skip the person saying why.
+  await deliverQueuedMessage(ctx, live!.id);
+  const afterDeliver = await json<{
+    currentStageId: string;
+    runs: { id: string; status: string; agentProfileId: string; stageId: string }[];
+  }>(await app.request(`/api/features/${feature.id}`));
+  assert.equal(afterDeliver.runs.find((r) => r.id === live!.id)?.status, "cancelled");
+  assert.equal(afterDeliver.runs.length, 1, "ending the previous run does not start the destination agent");
+  assert.equal(afterDeliver.currentStageId, review.id);
+
+  const reply = await json<{ queued: boolean; run?: { id: string; prompt: string } }>(
+    await app.request(`/api/features/${feature.id}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "add a null check like the review asked" }),
+    }),
+  );
+  assert.ok(reply.run, "the person's next message starts the destination conversation");
+  const [started] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, reply.run!.id));
+  assert.equal(started?.agentProfileId, reviewer.id, "the Code review agent answers, not QA");
+  assert.equal(started?.stageId, review.id);
+  assert.equal(started?.cliSessionId, null, "a different agent starts a fresh session");
+  assert.match(started?.prompt ?? "", /the tests fail on empty input/);
+  assert.match(started?.prompt ?? "", /add a null check like the review asked/);
+  // Runner-executed so the prompt could be read without waiting on a
+  // worker. Cancel it so later tests that claim from the shared runner
+  // pool do not pick this run up.
+  await markCancelled(ctx, started!.id);
 });
 
 /**
@@ -2189,6 +2518,13 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
   const log = await run("git", ["-C", worktree, "log", "--oneline"]);
   assert.match(log.stdout, /fake agent commit/);
 
+  // A manual stage waits for a person after the agent finishes. The
+  // evaluate job is queued, not inline, so reading the board now would
+  // race it: still active one moment, gated the next. Wait for the
+  // settled status. Left active, a card whose run succeeded looks done
+  // rather than like something that needs a person.
+  await waitForFeatureStatus(feature.id, ["gated"]);
+
   // Board plain endpoint shows the feature with its run status
   const board = await (await app.request(`/api/projects/${project.id}/board/plain`)).text();
   // Cost then the agent's latest line sit between the run id and the
@@ -2198,7 +2534,7 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
   assert.match(
     board,
     new RegExp(
-      `feature\\|${feature.id}\\|${advanced.currentStageId}\\|active\\|succeeded\\|${created.id}\\|[^|]*\\|-\\|Test feature`,
+      `feature\\|${feature.id}\\|${advanced.currentStageId}\\|gated\\|succeeded\\|${created.id}\\|[^|]*\\|-\\|Test feature`,
     ),
     board,
   );
@@ -2276,10 +2612,7 @@ test("command gate auto-advances the card when it passes", { timeout: 90_000 }, 
   const settled = await waitForStage(feature.id, stages[1]!.id);
   assert.equal(settled.status, "active");
 
-  const transitions = await json<{ trigger: string; toStageId: string }[]>(
-    await app.request(`/api/features/${feature.id}/transitions`),
-  );
-  assert.equal(transitions.at(-1)?.trigger, "gate_auto");
+  assert.equal(await waitForLastTransition(feature.id, "gate_auto"), "gate_auto");
 });
 
 test("failing command gate holds the card and recheck can clear it", { timeout: 90_000 }, async () => {
@@ -2587,6 +2920,12 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   const wide = await post({ name: "gpt on opencode", cli: "opencode", model: "openai/gpt-5-pro" });
   assert.equal(wide.status, 201, "opencode names its provider, so it reaches OpenAI");
 
+  const harness = await post({ name: "DeepSeek harness", cli: "dsh", model: "deepseek-v4-pro" });
+  assert.equal(harness.status, 201, "DeepSeek Harness accepts its bare model id");
+  const prefixedHarness = await post({ name: "prefixed harness", cli: "dsh", model: "deepseek/deepseek-v4-pro" });
+  assert.equal(prefixedHarness.status, 400, "DeepSeek Harness cannot accept provider-prefixed model ids");
+  assert.match(((await prefixedHarness.json()) as { error: string }).error, /bare model id/);
+
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
   const unknown = await post({ name: "next week's model", cli: "claude-code", model: "claude-opus-9" });
@@ -2749,13 +3088,26 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
   await waitForFeatureStatus(feature.id, ["gated"], 60_000);
 
-  const usage = await json<{ totalUsd: number; totalRuns: number; runsWithoutCost: number }>(
-    await app.request(`/api/projects/${project.id}/usage`),
-  );
+  const idle = await createFeature(project.id, "never ran");
+  const usage = await json<{
+    totalUsd: number;
+    totalRuns: number;
+    runsWithoutCost: number;
+    byFeature: { featureId: string; title: string; runs: number; costUsd: number | null; runsWithoutCost: number }[];
+  }>(await app.request(`/api/projects/${project.id}/usage`));
   assert.ok(usage.totalRuns >= 1, "the run should be counted");
   // The fake agent reports a cost, so this one is measured.
   assert.ok(usage.totalUsd > 0, "a reported cost should reach the total");
   assert.equal(typeof usage.runsWithoutCost, "number", "coverage is always stated, even when complete");
+
+  const billed = usage.byFeature.find((row) => row.featureId === feature.id);
+  assert.ok(billed, "the card that ran should appear on the spend rollup");
+  assert.ok((billed.costUsd ?? 0) > 0, "a reported cost should reach the card");
+  assert.ok(billed.runs >= 1);
+  const untouched = usage.byFeature.find((row) => row.featureId === idle.id);
+  assert.ok(untouched, "a card that never ran still belongs on the spend page");
+  assert.equal(untouched.runs, 0);
+  assert.equal(untouched.costUsd, null, "no runs is not the same as zero dollars");
 
   // The board carries the same figure, for the client that cannot parse
   // JSON. A dash means nothing reported, which is not zero.
@@ -2763,6 +3115,75 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   const line = board.split("\n").find((l) => l.startsWith(`feature|${feature.id}|`))!;
   const cost = line.split("|")[6]!;
   assert.match(cost, /^\d+\.\d\d$/, `expected a cost field on the board line, got ${cost}`);
+});
+
+/**
+ * Spend is a bill of finished work. Judges are the gate talking to
+ * itself, and a run that is still queued has not printed a figure.
+ * Counting either made a fully measured card wear "$4.20+" and made
+ * the project total disagree with Sessions.
+ */
+test("usage ignores judge runs and in-flight runs", async () => {
+  const { project, stages: projectStages } = await setupProject("spend-filter");
+  const worker = await fakeProfile("spend-worker");
+  const judge = await fakeProfile("spend-judge");
+  const feature = await createFeature(project.id, "judged and running");
+  const idle = await createFeature(project.id, "never ran");
+  const stage = projectStages[0]!;
+
+  await ctx.db.insert(agentRuns).values([
+    {
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: worker.id,
+      prompt: "build it",
+      kind: "task",
+      status: "succeeded",
+      executor: "server",
+      costUsd: "4.20",
+    },
+    {
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: judge.id,
+      prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build".`,
+      kind: "judge",
+      status: "succeeded",
+      executor: "server",
+      costUsd: "9.99",
+    },
+    {
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: worker.id,
+      prompt: "still going",
+      kind: "task",
+      status: "running",
+      executor: "server",
+      costUsd: null,
+    },
+  ]);
+
+  const usage = await json<{
+    totalUsd: number;
+    totalRuns: number;
+    runsWithoutCost: number;
+    byFeature: { featureId: string; title: string; runs: number; costUsd: number | null; runsWithoutCost: number }[];
+  }>(await app.request(`/api/projects/${project.id}/usage`));
+
+  assert.equal(usage.totalRuns, 1, "only the finished task run is a spend run");
+  assert.equal(usage.totalUsd, 4.2);
+  assert.equal(usage.runsWithoutCost, 0, "an in-flight null is not silent coverage");
+
+  const billed = usage.byFeature.find((row) => row.featureId === feature.id);
+  assert.ok(billed);
+  assert.equal(billed.runs, 1);
+  assert.equal(billed.costUsd, 4.2);
+  assert.equal(billed.runsWithoutCost, 0);
+  const untouched = usage.byFeature.find((row) => row.featureId === idle.id);
+  assert.ok(untouched);
+  assert.equal(untouched.runs, 0);
+  assert.equal(untouched.costUsd, null);
 });
 
 test("webhooks are rejected without a valid signature", async () => {
@@ -3025,6 +3446,179 @@ test("publication transcript events arrive before a successful run is done", { t
     if (previousGitHubApp) ctx.githubApp = previousGitHubApp;
     else delete ctx.githubApp;
     allowPublication();
+  }
+});
+
+/**
+ * The resolve-conflicts button end to end, minus GitHub itself: the
+ * server re-reads merge state rather than trusting the button, starts
+ * the card's own agent in the work conversation, marks the run
+ * "rebase" so its finish republishes the branch, and refuses when
+ * nothing conflicts or nothing has run.
+ */
+test("resolve-conflicts starts the work agent on a conflicted pull request", { timeout: 60_000 }, async () => {
+  const source = await fixtureRepo("resolve-conflicts");
+  const previousGitHubApp = ctx.githubApp;
+  let mergeAnswer: "clean" | "conflicted" | "unknown" = "conflicted";
+  const asked: { owner: string; repo: string; prNumber: number }[] = [];
+  const github = {
+    async mergeState(ref: { owner: string; repo: string; prNumber: number }) {
+      asked.push(ref);
+      return { state: mergeAnswer };
+    },
+  };
+  try {
+    const project = await json<{ id: string }>(
+      await app.request("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Resolve conflicts",
+          repositories: [
+            {
+              name: "resolve-conflicts",
+              localPath: source,
+              repoUrl: "https://github.com/acme/resolve-conflicts",
+              defaultBranch: "main",
+            },
+          ],
+        }),
+      }),
+    );
+    await unassignStages(project.id);
+    // The same organization scaffolding the publication test builds:
+    // githubConnectionFor only consults the App for a feature that
+    // belongs to an organization with an installation.
+    await ctx.db.insert(organization).values({
+      id: "resolve-conflicts-org",
+      name: "Resolve Conflicts",
+      slug: "resolve-conflicts",
+    });
+    await ctx.db.update(projects).set({ organizationId: "resolve-conflicts-org" }).where(eq(projects.id, project.id));
+    const projectPipelines = await ctx.db
+      .select({ id: pipelines.id })
+      .from(pipelines)
+      .where(eq(pipelines.projectId, project.id));
+    await ctx.db
+      .update(pipelines)
+      .set({ organizationId: "resolve-conflicts-org" })
+      .where(eq(pipelines.projectId, project.id));
+    for (const p of projectPipelines) {
+      await ctx.db.update(stages).set({ organizationId: "resolve-conflicts-org" }).where(eq(stages.pipelineId, p.id));
+    }
+    await ctx.db.insert(githubInstallations).values({
+      organizationId: "resolve-conflicts-org",
+      installationId: "resolve-conflicts-installation",
+      accountLogin: "acme",
+      accountType: "Organization",
+      installedBy: ctx.userId,
+    });
+    ctx.githubApp = {
+      forInstallation() {
+        return github;
+      },
+    } as unknown as NonNullable<AppContext["githubApp"]>;
+
+    const feature = await createFeature(project.id, "Conflicted card");
+    const worker = await fakeProfile("resolve-conflicts-agent");
+    await ctx.db
+      .update(agentProfiles)
+      .set({ organizationId: "resolve-conflicts-org" })
+      .where(eq(agentProfiles.id, worker.id));
+
+    // Nothing published yet: there is no pull request to resolve.
+    const early = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(early.status, 409);
+
+    await ctx.db.update(features).set({ branchName: "feature/conflicted" }).where(eq(features.id, feature.id));
+    const [repoRow] = await ctx.db.select().from(repositories).where(eq(repositories.projectId, project.id));
+    await ctx.db.insert(featurePullRequests).values({
+      featureId: feature.id,
+      repositoryId: repoRow!.id,
+      repoUrl: "https://github.com/acme/resolve-conflicts",
+      number: 41,
+      url: "https://github.com/acme/resolve-conflicts/pull/41",
+    });
+
+    // The drawer's question: which pull requests cannot merge.
+    const status = await json<{ name: string; number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/merge-status`),
+    );
+    assert.equal(status.length, 1);
+    assert.equal(status[0]?.number, 41);
+    assert.equal(status[0]?.state, "conflicted");
+
+    // A conflict with no conversation: there is no agent to hand it to.
+    const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(noRun.status, 400);
+
+    // The card's work run, first on a runner: the server cannot push a
+    // branch it never sees, so the button refuses rather than burning a
+    // run whose resolution goes nowhere.
+    const pipeline = await json<{ stages: { id: string }[] }>(await app.request(`/api/projects/${project.id}/pipeline`));
+    const [planted] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: pipeline.stages[0]!.id,
+        agentProfileId: worker.id,
+        prompt: "build the thing",
+        status: "succeeded",
+        executor: "runner",
+        cliSessionId: "conflict-sess",
+      })
+      .returning();
+    const onRunner = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(onRunner.status, 409);
+    assert.match(((await onRunner.json()) as { error: string }).error, /runner/);
+
+    await ctx.db.update(agentRuns).set({ executor: "server" }).where(eq(agentRuns.id, planted!.id));
+    const started = await json<{ id: string; kind: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
+      await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" }),
+    );
+    assert.equal(started.kind, "rebase");
+    assert.equal(started.agentProfileId, worker.id, "the card's own agent resolves");
+    assert.equal(started.cliSessionId, "conflict-sess", "inside the work conversation, where the intent lives");
+    assert.match(started.prompt, /rebase/i);
+    assert.match(started.prompt, /#41/);
+    assert.match(started.prompt, /git fetch origin main/, "the fetch step is a runnable command");
+    assert.deepEqual(asked.at(-1), { owner: "acme", repo: "resolve-conflicts", prNumber: 41 });
+
+    // One card, one agent: the queued rebase run holds the lock.
+    const busy = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(busy.status, 409);
+    await app.request(`/api/runs/${started.id}/cancel`, { method: "POST" });
+    await waitForRun(started.id);
+
+    // A stale drawer cannot start a rebase nothing needs: the server
+    // asks GitHub again, and a clean pull request refuses.
+    mergeAnswer = "clean";
+    const clean = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(clean.status, 409);
+    assert.match(((await clean.json()) as { error: string }).error, /no merge conflicts/);
+
+    // "unknown" is not "clean": GitHub may still be computing, and the
+    // refusal must not put words in its mouth.
+    mergeAnswer = "unknown";
+    const unknown = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(unknown.status, 409);
+    assert.match(((await unknown.json()) as { error: string }).error, /not finished computing/);
+
+    // A pull request linked by hand writes only features.pr_number, and
+    // it must still be visible here: the fallback reads the project's
+    // repository with the mirrored number.
+    mergeAnswer = "conflicted";
+    await ctx.db.delete(featurePullRequests).where(eq(featurePullRequests.featureId, feature.id));
+    await ctx.db.update(features).set({ prNumber: 41 }).where(eq(features.id, feature.id));
+    const linked = await json<{ number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/merge-status`),
+    );
+    assert.equal(linked.length, 1, "a hand-linked pull request still answers merge-status");
+    assert.equal(linked[0]?.number, 41);
+    assert.equal(linked[0]?.state, "conflicted");
+  } finally {
+    if (previousGitHubApp) ctx.githubApp = previousGitHubApp;
+    else delete ctx.githubApp;
   }
 });
 

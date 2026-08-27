@@ -1,6 +1,6 @@
 # Email
 
-Bento sends five emails. Four of them exist only in multi mode, since local mode has one auto-provisioned user and no sign in; the contact form is the exception and works in either mode, as long as `BENTO_CONTACT_EMAIL` is set.
+Bento sends five emails of its own, and addresses a sixth for the deployment extension. Four of the five exist only in multi mode, since local mode has one auto-provisioned user and no sign in; the contact form is the exception and works in either mode, as long as `BENTO_CONTACT_EMAIL` is set.
 
 | Email | Sent when | Built in |
 |---|---|---|
@@ -9,10 +9,19 @@ Bento sends five emails. Four of them exist only in multi mode, since local mode
 | Password reset | A reset is requested | `mail.ts` `passwordResetMessage` |
 | Delete account | Account deletion is requested | `mail.ts` `deleteAccountMessage` |
 | Contact | The in-app contact form is submitted | `mail.ts` `contactMessage` |
+| Notice | The cloud module warns a team about its usage | `mail.ts` `noticeMessage`, with the copy from the cloud module |
 
 They all go through the layout in `apps/server/src/email-layout.ts`: a dark header band carrying the mark and the wordmark, a white card, a centred action button, and a centred footer with one link back and a line saying why the mail arrived.
 
 ![The invitation email](email/invitation.png)
+
+## Mail from the cloud module
+
+Plans and billing live in a separate repository, and the usage warnings it sends are the only mail a customer gets that Bento did not write. The layout still belongs here: it is built from the console's own colour tokens, and a second copy of the table markup over there would be a second copy to keep in step.
+
+So the seam carries copy, not markup. `server.ts` hands the module a `notify` function, the module supplies a subject, a heading, paragraphs, and one action, and `noticeMessage` puts them in the same envelope as everything above. Every value is escaped on the way in, and the plain text half is built from the same paragraphs, so the two halves cannot drift apart.
+
+`notify` is optional on the module's side of the seam, since nothing type checks across two repositories. A host too old to have it still gets the warning, as plain text.
 
 ## Previewing
 

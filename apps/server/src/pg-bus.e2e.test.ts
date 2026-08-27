@@ -51,6 +51,7 @@ async function makeContext(): Promise<AppContext> {
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
+    BENTO_LIVE_IDLE_SEC: "0",
   } as NodeJS.ProcessEnv);
   const pool = createPool(testUrl);
   const db = createDb(pool);

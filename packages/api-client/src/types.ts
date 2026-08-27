@@ -48,6 +48,19 @@ export interface FeaturePullRequest {
 }
 
 /**
+ * Where one of the card's pull requests stands against its base branch.
+ * "unknown" covers every unreadable case (no GitHub connection, GitHub
+ * still computing, a closed pull request) and is treated as "not known
+ * to conflict"; only "conflicted" asks for anything.
+ */
+export interface FeatureMergeStatus {
+  name: string;
+  number: number;
+  url: string;
+  state: "clean" | "conflicted" | "unknown";
+}
+
+/**
  * A coding agent, and whether this deployment can run it. `installed`
  * is null when the question could not be answered (no sandbox image
  * built, no daemon), which must not be shown as "missing".
@@ -102,12 +115,49 @@ export interface AgentRun {
   stageId: string;
   agentProfileId: string;
   status: RunStatus;
+  /**
+   * "judge" is the gate evaluator talking to itself; "rebase" is a
+   * resolve-conflicts run. Omitted on older payloads and treated as
+   * work. Spend rollups skip judges.
+   */
+  kind?: "task" | "judge" | "rebase";
   cliSessionId: string | null;
   costUsd: string | null;
   error: string | null;
   queuedAt: string;
   startedAt: string | null;
   endedAt: string | null;
+}
+
+/**
+ * Agent spend for one project. Cost is whatever the CLI printed;
+ * `runsWithoutCost` is how many runs that figure silently omitted.
+ * Totals cover finished work only, never judges or in-flight runs.
+ */
+export interface ProjectUsage {
+  totalUsd: number;
+  totalRuns: number;
+  runsWithoutCost: number;
+  byStage: {
+    stageId: string;
+    agentProfileId: string;
+    runs: number;
+    costUsd: number;
+  }[];
+  /** Every card, including ones that have never run. */
+  byFeature: FeatureSpend[];
+}
+
+/**
+ * One card's contribution to project spend. `costUsd` is null when no
+ * run on the card reported a figure, which is not the same as zero.
+ */
+export interface FeatureSpend {
+  featureId: string;
+  title: string;
+  runs: number;
+  costUsd: number | null;
+  runsWithoutCost: number;
 }
 
 /**
@@ -192,6 +242,11 @@ export interface RunArtifact {
   mime: string;
   size: number;
   createdAt: string;
+}
+
+export interface FlagSnapshot {
+  /** Whether this user is on the permanent beta-testers allowlist. */
+  betaTesters: boolean;
 }
 
 export interface FeatureEvent {

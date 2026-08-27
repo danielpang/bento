@@ -5,6 +5,7 @@ import type {
   GitHubClient,
   GitHubPublisher,
   GitHubRepository,
+  MergeStateSummary,
   OpenPullRequest,
   PullRequestInput,
   PullRequestRef,
@@ -120,6 +121,30 @@ export async function checksVia(octokit: Octokit, ref: PullRequestRef): Promise<
   return summarizeChecks(runs.data.check_runs);
 }
 
+export async function mergeStateVia(octokit: Octokit, ref: PullRequestRef): Promise<MergeStateSummary> {
+  const read = () =>
+    octokit.pulls.get({
+      owner: ref.owner,
+      repo: ref.repo,
+      pull_number: ref.prNumber,
+    });
+  let pr = await read();
+  // GitHub computes mergeability lazily, and the read itself is what
+  // starts the computation, so the first answer after a push is
+  // reliably null. One short re-read is GitHub's own documented
+  // pattern; anything still null after that stays "unknown" and the
+  // caller asks again later.
+  if (pr.data.state === "open" && !pr.data.merged && pr.data.mergeable === null) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    pr = await read();
+  }
+  return summarizeMergeState({
+    state: pr.data.state,
+    merged: pr.data.merged,
+    mergeable: pr.data.mergeable,
+  });
+}
+
 export async function ensurePullRequestVia(octokit: Octokit, input: PullRequestInput): Promise<OpenPullRequest> {
   // Every stage of a card commits to the same branch, so this runs
   // once per stage and must find the pull request the first one
@@ -167,6 +192,10 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
 
   checks(ref: PullRequestRef): Promise<CheckSummary> {
     return checksVia(this.octokit, ref);
+  }
+
+  mergeState(ref: PullRequestRef): Promise<MergeStateSummary> {
+    return mergeStateVia(this.octokit, ref);
   }
 
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest> {
@@ -225,9 +254,27 @@ export function summarizeChecks(runs: CheckRunLike[]): CheckSummary {
   return { total: runs.length, pending, failed };
 }
 
+export interface PullRequestMergeLike {
+  state: string;
+  merged: boolean;
+  /** GitHub computes this lazily; null means it has not finished yet. */
+  mergeable: boolean | null;
+}
+
+/** Exported for testing: maps GitHub's lazy mergeable flag onto an answer. */
+export function summarizeMergeState(pr: PullRequestMergeLike): MergeStateSummary {
+  // Closed and merged pull requests have nothing left to resolve, so
+  // they can never answer "conflicted".
+  if (pr.state !== "open" || pr.merged) return { state: "unknown" };
+  if (pr.mergeable === null) return { state: "unknown" };
+  return { state: pr.mergeable ? "clean" : "conflicted" };
+}
+
 /** Parses "owner/repo" out of the common GitHub remote URL shapes. */
 export function parseRepoUrl(url: string): { owner: string; repo: string } | null {
-  const match = url.match(/github\.com[/:]([^/]+)\/([^/.]+)(?:\.git)?\/?$/);
+  // The repo group allows dots (acme/design.system is a real name);
+  // only a literal trailing ".git" is stripped, non-greedily.
+  const match = url.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
   if (!match || !match[1] || !match[2]) return null;
   return { owner: match[1], repo: match[2] };
 }

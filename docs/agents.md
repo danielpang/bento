@@ -9,8 +9,14 @@ Every stage of a pipeline runs one of these tools, paired with a model, as an ag
 | Codex CLI | `gpt-5-codex` | `OPENAI_API_KEY` | Between runs: delivered when the run ends | No |
 | Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY`, whichever model it runs | Between runs: delivered when the run ends | No |
 | opencode | `anthropic/claude-sonnet-5` | Whichever provider key the model needs | Between runs: delivered when the run ends | No |
+| Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs: delivered when the run ends, as a new run | No |
+| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | Between runs: delivered when the run ends, as a new run | No |
 
 Keys are stored encrypted, per organization in multi mode and locally in local mode, through the web console, `bento setup`, or the Mac app. To route Claude Code or Codex through OpenRouter, save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
+
+**DeepSeek models.** Use pi or opencode for streamed DeepSeek runs. Save `DEEPSEEK_API_KEY` and choose the DeepSeek provider for a native key and bill, or use `openrouter/deepseek/...` to bill OpenRouter. DeepSeek Harness (`dsh`) is also available as an experimental, one-shot tool with the limitations below.
+
+Warm sandboxes already holding pi below 0.70.1 or opencode below 1.14.24 reinstall just those two on the next provision, which is what native DeepSeek needs. A later DeepSeek Harness pin is the same: the installed `--version` is compared to the pin, so bumping `@deepseek-ai/dsh` reinstalls dsh without a toolchain version stampede.
 
 The named agents also read and write as a YAML file, from **Agents** or **Settings, Config**, and from `bento agents export` / `bento agents import`. Details: [pipeline.md](./pipeline.md#the-agents-file).
 
@@ -18,9 +24,12 @@ The named agents also read and write as a YAML file, from **Agents** or **Settin
 
 You can always type into a card's composer, whatever the agent is doing. What happens next depends on the tool:
 
-- **pi** holds a live session and *steers*: your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan first.
-- **Claude Code** holds a live session and *queues in conversation*: your message is read after the current step, in the same session, with everything the agent has already seen.
+- **pi** holds a live session and *steers*: your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan first. On a manual stage, the session stays open after a turn so you can keep talking without starting a new run.
+- **Claude Code** holds a live session and *queues in conversation*: your message is read after the current step, in the same session, with everything the agent has already seen. On a manual stage, the session stays open after a turn the same way.
 - **Codex, Cursor, and opencode** take messages *between runs*: yours is delivered the moment the current run ends, as a resume of the same session, so no context is lost.
+- **pool and DeepSeek Harness** take messages between runs too, but start fresh runs rather than resuming because neither prints a usable session id. The new run carries the whole stage prompt and a compacted transcript of the previous conversation, so the agent is not working blind.
+
+If a resumed session is gone (the sandbox was recreated, or the CLI no longer holds that conversation), Bento starts a fresh run with the same instructions plus a compacted transcript of what was said, rather than looping on the dead session id.
 
 The composer says which of these applies to the agent that is working, and Stop always ends the run immediately. A message that has to wait for the run to end stays on the card as a queued message until the agent picks it up.
 
@@ -55,7 +64,7 @@ Anthropic's agent. Model ids are bare (`claude-sonnet-5`, `claude-opus-5`). Cred
 
 ### pi
 
-The open source, provider agnostic agent from earendil-works. Models are `provider/id` (`anthropic/claude-sonnet-5`, `openrouter/z-ai/glm-4.6`); it uses whichever of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `GEMINI_API_KEY` the chosen provider needs. Live sessions run over its RPC mode, and steering is pi's own first class concept. Reports cost.
+The open source, provider agnostic agent from earendil-works. Models are `provider/id` (`anthropic/claude-sonnet-5`, `deepseek/deepseek-v4-pro`, `openrouter/z-ai/glm-4.6`); it uses whichever of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, or `DEEPSEEK_API_KEY` the chosen provider needs. Live sessions run over its RPC mode, and steering is pi's own first class concept. Reports cost.
 
 ### Codex CLI
 
@@ -69,3 +78,19 @@ Cursor's terminal agent. Bare model ids, subject to your Cursor plan. Credential
 
 The open source terminal agent from sst. Models are `provider/id`, with `openrouter/` prefixes supported. Same provider keys as pi. Messages are delivered between runs. Does not report cost.
 
+### Poolside (pool)
+
+Poolside's terminal agent, running Poolside's own Laguna models. Model ids carry the vendor prefix (`poolside/laguna-s-2.1`), which is what Poolside's inference API takes, and the picker offers the one id Poolside publishes; the others in the Laguna family can be typed in. Credential: `POOLSIDE_API_KEY`, a key from Poolside Platform, which is the same key `pool login` asks for in a terminal.
+
+Two details are specific to this tool:
+
+- **The model and the endpoint travel as environment variables.** `pool exec` has no `--model` flag, so Bento passes `POOLSIDE_STANDALONE_MODEL`, and with it the Poolside Platform base URL that the CLI needs before a key means anything. A local runner can override `POOLSIDE_STANDALONE_BASE_URL` in its environment. Hosted enterprise endpoint settings are outside v1.
+- **A card's later messages start new runs.** See above: the CLI keeps a run id but never prints one.
+
+To run Laguna weights through OpenRouter instead, which is a different endpoint and a different bill, choose pi or opencode with a model such as `openrouter/poolside/laguna-s-2.1`. That path is unchanged and needs only the OpenRouter key. Does not report cost.
+
+### DeepSeek Harness (dsh)
+
+DeepSeek's developer-preview agent runtime. Bento pins `@deepseek-ai/dsh@0.1.1-rc.2`, runs its headless profile inside Bento's existing sandbox, and selects a bare model id such as `deepseek-v4-pro` per run. It uses `DEEPSEEK_API_KEY`; `DEEPSEEK_BASE_URL` can point it at a compatible endpoint.
+
+Headless Harness prints only its final assistant message. The card therefore shows an explicit quiet-run state and elapsed time until the process exits, then displays that final message as one bubble. There are no streamed tool or thinking events. It also exposes no session id, so later messages start new runs with a compacted transcript. Use **Files changed** as the primary evidence of what a Harness run did. These limits and upstream's unstable interface are why the tool is marked preview.
