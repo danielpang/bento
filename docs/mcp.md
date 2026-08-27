@@ -6,15 +6,26 @@ An organization defines its remote MCP servers once, and every agent Bento runs 
 
 Nothing about the real server. At run start Bento writes each harness's MCP config pointing every enabled server at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway authenticates that token, attaches the organization's (or the acting member's) real credential, and proxies the traffic upstream. When the run settles the token is revoked. So a prompt injection that reads the config out of the sandbox gets a token that dies with the run and never leaves the gateway, not an API key or an OAuth token.
 
-## Defining a server
+## Team servers and personal servers
 
 Settings, then MCP. Remote servers only: a URL the sandbox can reach over the gateway, streamable HTTP or SSE. The slug is the tool name agents see (lowercase letters, digits, dashes).
+
+A server is either the team's or a member's own:
+
+- **Team servers** are the shared registry. An owner or admin defines them, and every agent the team runs gets them. This is where a shared docs or search server, or an internal company MCP server, belongs.
+- **Personal servers** are one member's own. Any member may add one from the "Your servers and sign-ins" section; only runs that member starts get it, and only their own credential is ever attached. A teammate never sees another member's personal server. An admin can see one (named by its owner) and turn it off or remove it as governance, but cannot read or store its credentials.
+
+If a personal server's slug matches a team server's, the team server wins for that run and the transcript says so.
+
+## Authenticating a server
 
 Authentication is one of:
 
 - **No auth.** The server needs no credential.
-- **API key.** An admin pastes a key. Bento validates it against the server with an MCP initialize handshake before storing it, then keeps it encrypted and shows only a masked tail. The key is the organization's; every run uses it.
-- **Sign in (OAuth).** Either one sign in for the whole organization (an admin connects once), or one per member (each person connects their own account, and a run uses whichever member started it). A member who has not connected a per-user server sees it listed with a prompt, and their runs simply run without it.
+- **API key.** For a team server an admin pastes the shared key; for a personal server the member pastes their own. Bento validates it against the server with an MCP initialize handshake before storing it, then keeps it encrypted and shows only a masked tail.
+- **Sign in (OAuth).** For a team server, either one sign in for the whole organization (an admin connects once) or one per member (each person connects their own account, and a run uses whichever member started it). A personal server's OAuth is always the owner's own sign in. A member who has not connected a server that needs their sign in sees it listed with a prompt, and their runs simply run without it.
+
+Auto-started runs (a gate evaluator, a judge, auto-start pipeline) have no acting member, so they get the team servers only.
 
 ## How OAuth discovery works
 
