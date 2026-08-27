@@ -9,6 +9,7 @@ import {
   createPool,
   invitation,
   linearConnections,
+  mcpServers,
   member,
   projects,
   runArtifacts,
@@ -628,6 +629,25 @@ test("every entity route refuses a foreign tenant", async () => {
     .returning({ id: runArtifacts.id });
   assert.ok(artifact?.id, "the owner's artifact must exist for the artifact routes to be probed");
 
+  // Inserted directly: the matrix users have no organization, and the
+  // MCP routes refuse org-less callers in multi mode outright. The row
+  // gives the probes a real id to aim at; the org-scoped refusal is
+  // exercised in "members read the MCP registry and only admins manage
+  // it" below, where organizations exist.
+  const [ownerRow] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "matrix-owner@bento.test"));
+  const [mcpServer] = await ctx.db
+    .insert(mcpServers)
+    .values({
+      ownerId: ownerRow!.id,
+      organizationId: null,
+      name: "Matrix MCP",
+      slug: "matrix-mcp",
+      url: "https://mcp.example.test/mcp",
+      authType: "api_key",
+    })
+    .returning({ id: mcpServers.id });
+  assert.ok(mcpServer!.id, "the owner's MCP server must exist for the MCP routes to be probed");
+
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
     ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ name: "Stolen" }) }],
@@ -715,6 +735,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", "/api/linear/projects?teamId=team-x"],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
     ["PATCH", "/api/slack/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
+    ["PATCH", `/api/mcp/${mcpServer!.id}`, { body: JSON.stringify({ name: "stolen" }) }],
+    ["POST", `/api/mcp/${mcpServer!.id}/api-key`, { body: JSON.stringify({ value: "sk-injected" }) }],
+    ["DELETE", `/api/mcp/${mcpServer!.id}/credential`],
+    ["DELETE", `/api/mcp/${mcpServer!.id}`],
     ["DELETE", `/api/features/${feature.id}`],
     // Last: a delete that went through would refuse everything after it
     // for the wrong reason. The project last, because it would take the
@@ -736,6 +760,14 @@ test("every entity route refuses a foreign tenant", async () => {
   // cannot show.
   const stillThere = await asOwner(`/api/features/${feature.id}`);
   assert.equal(stillThere.status, 200, "the intruder's DELETE must not have removed the owner's card");
+
+  // The MCP server row survived, under its own name. Read through
+  // ctx.db because the org-less owner cannot use the routes either.
+  const [mcpAfter] = await ctx.db
+    .select({ name: mcpServers.name })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, mcpServer!.id));
+  assert.equal(mcpAfter?.name, "Matrix MCP", "the intruder must not have renamed or deleted the MCP server");
 
   // The project is still there, under its own name.
   const projectAfter = await asOwner(`/api/projects/${project.id}`);
@@ -796,6 +828,106 @@ test("every entity route refuses a foreign tenant", async () => {
     !stage.gateCriteria.some((criterion) => criterion.type === "command"),
     "the intruder's gateCriteria write must not land",
   );
+});
+
+/**
+ * MCP servers are org infrastructure: every member sees the registry
+ * (their runs use it, and per-user servers ask them to connect), but
+ * only owners and admins may define servers or hold the org credential.
+ */
+test("members read the MCP registry and only admins manage it", async () => {
+  const admin = await jsonPost("/api/auth/sign-up/email", {
+    email: "mcp-admin@bento.test",
+    password: "correct-horse-battery",
+    name: "Admin",
+  });
+  const memberUser = await jsonPost("/api/auth/sign-up/email", {
+    email: "mcp-member@bento.test",
+    password: "correct-horse-battery",
+    name: "Member",
+  });
+  const adminToken = admin.headers.get("set-auth-token")!;
+  const memberToken = memberUser.headers.get("set-auth-token")!;
+
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "MCP Org", slug: "mcp-org" }, adminToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, adminToken);
+  const invite = (await (
+    await jsonPost(
+      "/api/auth/organization/invite-member",
+      { email: "mcp-member@bento.test", role: "member", organizationId: org.id },
+      adminToken,
+    )
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/accept-invitation", { invitationId: invite.id }, memberToken);
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, memberToken);
+
+  const created = await jsonPost(
+    "/api/mcp",
+    { name: "Docs", slug: "docs", url: "https://mcp.example.test/mcp", authType: "api_key" },
+    adminToken,
+  );
+  assert.equal(created.status, 201);
+  const server = (await created.json()) as { id: string };
+
+  const asMember = (path: string, init: RequestInit = {}) =>
+    app.request(path, {
+      ...init,
+      headers: { "content-type": "application/json", authorization: `Bearer ${memberToken}`, ...(init.headers ?? {}) },
+    });
+
+  const status = await asMember("/api/mcp/status");
+  assert.equal(status.status, 200);
+  const body = (await status.json()) as { canManage: boolean; servers: { id: string }[] };
+  assert.equal(body.canManage, false, "a member must see the registry without manage rights");
+  assert.equal(body.servers.length, 1, "a member must see the org's servers");
+
+  const refusals = [
+    await asMember("/api/mcp", {
+      method: "POST",
+      body: JSON.stringify({ name: "X", slug: "x", url: "https://x.test/mcp", authType: "none" }),
+    }),
+    await asMember(`/api/mcp/${server.id}`, { method: "PATCH", body: JSON.stringify({ name: "stolen" }) }),
+    await asMember(`/api/mcp/${server.id}/api-key`, { method: "POST", body: JSON.stringify({ value: "sk-x" }) }),
+    await asMember(`/api/mcp/${server.id}/credential`, { method: "DELETE" }),
+    await asMember(`/api/mcp/${server.id}`, { method: "DELETE" }),
+  ];
+  for (const res of refusals) {
+    assert.equal(res.status, 403, "a member must not manage MCP servers");
+  }
+
+  // A user from another organization aiming at the same id must land on
+  // 404, indistinguishable from the id not existing.
+  const outsider = await jsonPost("/api/auth/sign-up/email", {
+    email: "mcp-outsider@bento.test",
+    password: "correct-horse-battery",
+    name: "Outsider",
+  });
+  const outsiderToken = outsider.headers.get("set-auth-token")!;
+  const foreignOrg = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Foreign", slug: "mcp-foreign" }, outsiderToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: foreignOrg.id }, outsiderToken);
+  const asOutsider = (path: string, init: RequestInit = {}) =>
+    app.request(path, {
+      ...init,
+      headers: { "content-type": "application/json", authorization: `Bearer ${outsiderToken}`, ...(init.headers ?? {}) },
+    });
+  const foreignAttempts = [
+    await asOutsider(`/api/mcp/${server.id}`, { method: "PATCH", body: JSON.stringify({ name: "stolen" }) }),
+    await asOutsider(`/api/mcp/${server.id}/api-key`, { method: "POST", body: JSON.stringify({ value: "sk-x" }) }),
+    await asOutsider(`/api/mcp/${server.id}/credential`, { method: "DELETE" }),
+    await asOutsider(`/api/mcp/${server.id}`, { method: "DELETE" }),
+  ];
+  for (const res of foreignAttempts) {
+    assert.equal(res.status, 404, "a foreign tenant must see nothing but 404 for another org's MCP server");
+  }
+  const survived = await app.request("/api/mcp/status", {
+    headers: { authorization: `Bearer ${adminToken}` },
+  });
+  const after = (await survived.json()) as { servers: { id: string; name: string }[] };
+  assert.equal(after.servers[0]?.name, "Docs", "the outsider must not have touched the org's MCP server");
 });
 
 /**

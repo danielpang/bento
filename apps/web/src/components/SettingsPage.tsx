@@ -10,6 +10,7 @@ import { ConfigSettings } from "./ConfigSettings.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
 import { GitHubAccountCard, useGitHubOutcome } from "./GitHubIdentity.js";
 import { LinearPanel } from "./LinearPanel.js";
+import { McpPanel } from "./McpPanel.js";
 import { SlackPanel } from "./SlackPanel.js";
 import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
@@ -134,6 +135,9 @@ export function SettingsPage({ client }: { client: BentoClient }) {
           </Tabs.Content>
           <Tabs.Content value="slack" className="settings-body">
             <SlackPanel client={client} />
+          </Tabs.Content>
+          <Tabs.Content value="mcp" className="settings-body">
+            <McpPanel client={client} />
           </Tabs.Content>
           <Tabs.Content value="account" className="settings-body">
             <AccountSettings />

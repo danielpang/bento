@@ -40,6 +40,9 @@ const TENANT_TABLES = [
   "slack_user_settings",
   "slack_thread_links",
   "slack_pending_mentions",
+  "mcp_servers",
+  "mcp_credentials",
+  "mcp_run_grants",
 ];
 
 let pool: pg.Pool;
@@ -366,4 +369,93 @@ test("a Slack thread link inherits its organization from the card", async () => 
     client.query("select count(*)::int as n from slack_thread_links"),
   );
   assert.equal(foreign.rows[0].n, 0, "another organization must not read a Slack thread link");
+});
+
+test("MCP server slugs are unique locally and within each organization", async () => {
+  await pool.query(
+    `insert into mcp_servers (owner_id,organization_id,name,slug,url,auth_type)
+     values ('u1',null,'Local','context7','https://a.test/mcp','none'),
+            ('u1','org-a','A','context7','https://a.test/mcp','none'),
+            ('u1','org-b','B','context7','https://a.test/mcp','none')`,
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into mcp_servers (owner_id,organization_id,name,slug,url,auth_type)
+       values ('u1',null,'Local dup','context7','https://a.test/mcp','none')`,
+    ),
+    /mcp_servers_local_slug_idx/,
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into mcp_servers (owner_id,organization_id,name,slug,url,auth_type)
+       values ('u1','org-a','A dup','context7','https://a.test/mcp','none')`,
+    ),
+    /mcp_servers_org_slug_idx/,
+  );
+});
+
+test("an MCP credential inherits its organization and stays unique per scope", async () => {
+  const { rows: [server] } = await pool.query(
+    `insert into mcp_servers (owner_id,organization_id,name,slug,url,auth_type)
+     values ('u1','org-a','Notion','notion','https://n.test/mcp','oauth') returning id`,
+  );
+
+  // The org credential (user_id null) inherits the server's organization.
+  // asOrg rolls back, so this checks the trigger and leaves no row.
+  const inserted = await asOrg("org-a", (client) =>
+    client.query(
+      `insert into mcp_credentials (server_id,kind,encrypted_secret)
+       values ($1,'oauth','ct') returning organization_id`,
+      [server.id],
+    ),
+  );
+  assert.equal(inserted.rows[0].organization_id, "org-a");
+
+  // At most one org credential per server, and one row per member.
+  await pool.query(
+    `insert into mcp_credentials (server_id,kind,encrypted_secret)
+     values ($1,'oauth','ct')`,
+    [server.id],
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into mcp_credentials (server_id,kind,encrypted_secret)
+       values ($1,'oauth','ct2')`,
+      [server.id],
+    ),
+    /mcp_credentials_server_org_idx/,
+  );
+  await pool.query(
+    `insert into mcp_credentials (server_id,user_id,kind,encrypted_secret)
+     values ($1,'u1','oauth','ct')`,
+    [server.id],
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into mcp_credentials (server_id,user_id,kind,encrypted_secret)
+       values ($1,'u1','oauth','ct2')`,
+      [server.id],
+    ),
+    /mcp_credentials_server_user_idx/,
+  );
+
+  const foreign = await asOrg("org-b", (client) =>
+    client.query("select count(*)::int as n from mcp_credentials"),
+  );
+  assert.equal(foreign.rows[0].n, 0, "another organization must not read an MCP credential");
+});
+
+test("the tenant role cannot write MCP run grants", async () => {
+  const denied = await asOrg("org-a", async (client) => {
+    try {
+      await client.query(
+        `insert into mcp_run_grants (run_id,token_hash,expires_at)
+         values ('00000000-0000-0000-0000-000000000000','h',now())`,
+      );
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  });
+  assert.match(denied?.message ?? "", /permission denied/);
 });

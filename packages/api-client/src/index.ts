@@ -16,5 +16,9 @@ export {
   type LinearIssuePage,
   type TokenStore,
   type SlackConnection,
+  type McpStatus,
+  type McpServerStatus,
+  type McpServerInput,
+  type McpServerPatch,
 } from "./client.js";
 export { DeviceFlow, type DeviceCodeResponse, type DeviceFlowOptions } from "./device-flow.js";
