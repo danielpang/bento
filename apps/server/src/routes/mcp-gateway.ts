@@ -98,28 +98,42 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     if (!server || !server.enabled) return null;
     if ((server.organizationId ?? null) !== (grant.organizationId ?? null)) return null;
 
+    // A personal server belongs to one member: only their runs may
+    // reach it, and only their own credential is ever attached. The
+    // grant's acting user must be that owner.
+    if (server.userId) {
+      if (server.userId !== grant.actingUserId) return null;
+    }
+
     if (server.authType === "none") {
       return { grant, server, credentialRow: null, attachedSecret: null, credential: null };
     }
 
-    const perUser = server.authType === "oauth" && server.credentialScope === "user";
+    // Whose credential rides upstream: the owner of a personal server,
+    // the acting member for a per-user team server, or the org's shared
+    // row. A server that needs a member's credential never falls back to
+    // the org row: that would serve org authority where an identity was
+    // required.
+    const requiresUser =
+      server.userId !== null || (server.authType === "oauth" && server.credentialScope === "user");
+    const credentialUserId = server.userId ?? grant.actingUserId;
+    if (requiresUser && !credentialUserId) return null;
     let row: typeof mcpCredentials.$inferSelect | undefined;
-    if (perUser) {
-      if (!grant.actingUserId) return null;
+    if (requiresUser && credentialUserId) {
       // Removal from the organization ends the member's credentials
       // serving runs immediately, the same live re-read every route does.
       if (grant.organizationId) {
         const [membership] = await ctx.db
           .select({ id: member.id })
           .from(member)
-          .where(and(eq(member.organizationId, grant.organizationId), eq(member.userId, grant.actingUserId)))
+          .where(and(eq(member.organizationId, grant.organizationId), eq(member.userId, credentialUserId)))
           .limit(1);
         if (!membership) return null;
       }
       [row] = await ctx.db
         .select()
         .from(mcpCredentials)
-        .where(and(eq(mcpCredentials.serverId, server.id), eq(mcpCredentials.userId, grant.actingUserId)))
+        .where(and(eq(mcpCredentials.serverId, server.id), eq(mcpCredentials.userId, credentialUserId)))
         .limit(1);
     } else {
       [row] = await ctx.db

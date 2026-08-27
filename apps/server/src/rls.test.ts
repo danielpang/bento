@@ -394,6 +394,27 @@ test("MCP server slugs are unique locally and within each organization", async (
   );
 });
 
+test("a personal MCP server may share a slug with a team server, but not with the same member's own", async () => {
+  // A member's personal server can reuse a team slug (the run pipeline
+  // resolves that in the team's favor), and different members may each
+  // have a personal server on the same slug.
+  await pool.query(`insert into identity."user" (id,name,email) values ('u2','U2','u2@x.test')`);
+  await pool.query(
+    `insert into mcp_servers (owner_id,organization_id,user_id,name,slug,url,auth_type)
+     values ('u1','org-a',null,'Team docs','docs','https://t.test/mcp','none'),
+            ('u1','org-a','u1','My docs','docs','https://m.test/mcp','none'),
+            ('u2','org-a','u2','U2 docs','docs','https://m2.test/mcp','none')`,
+  );
+  // But one member cannot have two personal servers on the same slug.
+  await assert.rejects(
+    pool.query(
+      `insert into mcp_servers (owner_id,organization_id,user_id,name,slug,url,auth_type)
+       values ('u1','org-a','u1','My docs 2','docs','https://m.test/mcp','none')`,
+    ),
+    /mcp_servers_org_user_slug_idx/,
+  );
+});
+
 test("an MCP credential inherits its organization and stays unique per scope", async () => {
   const { rows: [server] } = await pool.query(
     `insert into mcp_servers (owner_id,organization_id,name,slug,url,auth_type)

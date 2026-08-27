@@ -1,8 +1,8 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
-import { mcpCredentials, mcpServers, member } from "@bento/db";
+import { mcpCredentials, mcpServers, member, user } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
@@ -74,6 +74,8 @@ const createServer = z.object({
   transport: z.enum(["http", "sse"]).default("http"),
   authType: z.enum(["none", "api_key", "oauth"]),
   credentialScope: z.enum(["org", "user"]).default("org"),
+  /** A member's own server: only their runs get it, any member may add one. */
+  personal: z.boolean().default(false),
   apiKeyHeader: apiKeyHeaderField.default("Authorization"),
   clientId: z.string().min(1).max(512).optional(),
   clientSecret: z.string().min(1).max(2048).optional(),
@@ -119,9 +121,22 @@ export function mcpRoutes(ctx: AppContext) {
       );
 
     const me = actor(c);
-    const rows = servers.map((server) => {
+    // A member sees the team's servers and their own personal ones;
+    // admins additionally see every member's personal servers, named,
+    // because governance over what agents can reach is theirs.
+    const visible = servers.filter(
+      (server) => !server.userId || server.userId === me || access.canManage,
+    );
+    const ownerIds = [...new Set(visible.map((s) => s.userId).filter((id): id is string => id !== null))];
+    const owners = ownerIds.length
+      ? await db(c, ctx).select({ id: user.id, name: user.name }).from(user).where(inArray(user.id, ownerIds))
+      : [];
+
+    const rows = visible.map((server) => {
+      const personal = server.userId !== null;
+      const mineServer = server.userId === me;
       const org = credentials.find((row) => row.serverId === server.id && row.userId === null) ?? null;
-      const mine = credentials.some((row) => row.serverId === server.id && row.userId === me);
+      const myRow = credentials.find((row) => row.serverId === server.id && row.userId === me) ?? null;
       const perUser = server.authType === "oauth" && server.credentialScope === "user";
       return {
         id: server.id,
@@ -131,13 +146,21 @@ export function mcpRoutes(ctx: AppContext) {
         transport: server.transport,
         authType: server.authType,
         credentialScope: server.credentialScope,
+        personal,
+        mine: mineServer,
+        ownerName: personal ? (owners.find((o) => o.id === server.userId)?.name ?? null) : null,
         enabled: server.enabled,
         apiKeyHeader: server.apiKeyHeader,
         oauthClientConfigured: Boolean(server.clientId),
-        orgCredential: perUser
-          ? null
-          : org && { connected: true, hint: org.hint, expiresAt: org.expiresAt },
-        userCredential: perUser ? { connected: mine } : null,
+        orgCredential:
+          perUser || personal ? null : org && { connected: true, hint: org.hint, expiresAt: org.expiresAt },
+        userCredential:
+          personal && mineServer
+            ? // A personal server with no auth has nothing to connect.
+              { connected: server.authType === "none" || Boolean(myRow), hint: myRow?.hint ?? null }
+            : perUser && !personal
+              ? { connected: Boolean(myRow), hint: null }
+              : null,
       };
     });
     const userConnectionsNeeded = rows.filter(
@@ -165,33 +188,49 @@ export function mcpRoutes(ctx: AppContext) {
           : isNull(mcpCredentials.organizationId),
       );
     const me = actor(c);
-    const lines = servers.map((server) => {
-      const perUser = server.authType === "oauth" && server.credentialScope === "user";
-      const connected = perUser
-        ? credentials.some((r) => r.serverId === server.id && r.userId === me)
-        : credentials.some((r) => r.serverId === server.id && r.userId === null);
-      return `mcp|${server.id}|${server.slug}|${server.authType}|${server.credentialScope}|${server.enabled}|${connected}`;
-    });
+    const lines = servers
+      .filter((server) => !server.userId || server.userId === me)
+      .map((server) => {
+        const personal = server.userId !== null;
+        const perUser = personal || (server.authType === "oauth" && server.credentialScope === "user");
+        const connected =
+          server.authType === "none"
+            ? true
+            : perUser
+              ? credentials.some((r) => r.serverId === server.id && r.userId === me)
+              : credentials.some((r) => r.serverId === server.id && r.userId === null);
+        const scope = personal ? "personal" : server.credentialScope;
+        return `mcp|${server.id}|${server.slug}|${server.authType}|${scope}|${server.enabled}|${connected}`;
+      });
     return c.text(lines.join("\n"));
   });
 
   routes.post("/", zValidator("json", createServer), async (c) => {
     const access = await requireAccess(ctx, c);
     if (!access.ok) return c.json({ error: "not found" }, 404);
-    if (!access.canManage) return c.json({ error: "organization admin required" }, 403);
     const body = c.req.valid("json");
+    // A team server is org infrastructure and stays admin gated. A
+    // personal server is the member's own: any member may add one, it
+    // reaches only runs they start, and only their own credential ever
+    // rides through the gateway for it.
+    if (!body.personal && !access.canManage) {
+      return c.json({ error: "organization admin required" }, 403);
+    }
     try {
       const [row] = await db(c, ctx)
         .insert(mcpServers)
         .values({
           ownerId: actor(c),
           organizationId: access.organizationId,
+          userId: body.personal ? actor(c) : null,
           name: body.name,
           slug: body.slug,
           url: body.url,
           transport: body.transport,
           authType: body.authType,
-          credentialScope: body.authType === "oauth" ? body.credentialScope : "org",
+          // A personal oauth server is always the owner's own sign in.
+          credentialScope:
+            body.authType === "oauth" ? (body.personal ? "user" : body.credentialScope) : "org",
           apiKeyHeader: body.apiKeyHeader,
           clientId: body.clientId ?? null,
           encryptedClientSecret: body.clientSecret ? ctx.secretBox.encrypt(body.clientSecret) : null,
@@ -208,10 +247,22 @@ export function mcpRoutes(ctx: AppContext) {
   routes.patch("/:id", zValidator("json", patchServer), async (c) => {
     const access = await requireAccess(ctx, c);
     if (!access.ok) return c.json({ error: "not found" }, 404);
-    if (!access.canManage) return c.json({ error: "organization admin required" }, 403);
     const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
     if (!server) return c.json({ error: "not found" }, 404);
     const body = c.req.valid("json");
+    const right = personalRight(server, actor(c), access.canManage);
+    if (right === "none") return c.json({ error: "not found" }, 404);
+    if (right === "team" && !access.canManage) {
+      return c.json({ error: "organization admin required" }, 403);
+    }
+    // An admin can switch another member's personal server off (or back
+    // on), which is governance; its shape stays the owner's to edit.
+    if (right === "admin") {
+      const touched = Object.entries(body).filter(([, v]) => v !== undefined).map(([k]) => k);
+      if (touched.some((key) => key !== "enabled")) {
+        return c.json({ error: "only the owner can edit a personal server" }, 403);
+      }
+    }
 
     // Repointing a server must not carry its credentials along: the
     // gateway attaches secrets to whatever URL the row holds, so a
@@ -262,9 +313,15 @@ export function mcpRoutes(ctx: AppContext) {
   routes.delete("/:id", async (c) => {
     const access = await requireAccess(ctx, c);
     if (!access.ok) return c.json({ error: "not found" }, 404);
-    if (!access.canManage) return c.json({ error: "organization admin required" }, 403);
     const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
     if (!server) return c.json({ error: "not found" }, 404);
+    const right = personalRight(server, actor(c), access.canManage);
+    if (right === "none") return c.json({ error: "not found" }, 404);
+    // A personal server can be removed by its owner or, as governance,
+    // by an admin; a team server stays admin only.
+    if (right === "team" && !access.canManage) {
+      return c.json({ error: "organization admin required" }, 403);
+    }
     await db(c, ctx).delete(mcpServers).where(eq(mcpServers.id, server.id));
     return c.json({ ok: true });
   });
@@ -275,9 +332,18 @@ export function mcpRoutes(ctx: AppContext) {
     async (c) => {
       const access = await requireAccess(ctx, c);
       if (!access.ok) return c.json({ error: "not found" }, 404);
-      if (!access.canManage) return c.json({ error: "organization admin required" }, 403);
       const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
       if (!server) return c.json({ error: "not found" }, 404);
+      const right = personalRight(server, actor(c), access.canManage);
+      if (right === "none") return c.json({ error: "not found" }, 404);
+      if (right === "team" && !access.canManage) {
+        return c.json({ error: "organization admin required" }, 403);
+      }
+      // A personal server's key is the owner's own; not even an admin
+      // stores one on their behalf.
+      if (right === "admin") {
+        return c.json({ error: "only the owner can store a key for a personal server" }, 403);
+      }
       if (server.authType !== "api_key") {
         return c.json({ error: "this server does not use an API key" }, 400);
       }
@@ -292,30 +358,41 @@ export function mcpRoutes(ctx: AppContext) {
       );
       if (!ping.ok) return c.json({ error: ping.error }, 400);
 
+      // A team server's key is the org row (user_id null); a personal
+      // server's key belongs to its owner.
+      const credentialUserId = server.userId ? actor(c) : null;
       const values = {
         serverId: server.id,
         organizationId: access.organizationId,
-        userId: null,
+        userId: credentialUserId,
         kind: "api_key" as const,
         encryptedSecret: ctx.secretBox.encrypt(value),
         hint: maskSecret(value),
       };
-      // The org credential row has a null user_id, so the upsert must
+      const set = {
+        encryptedSecret: values.encryptedSecret,
+        hint: values.hint,
+        kind: values.kind,
+        updatedAt: new Date(),
+      };
+      // The org credential row has a null user_id, so its upsert must
       // target the partial index, not the composite one: PostgreSQL
       // treats nulls as distinct in a composite unique index.
-      await db(c, ctx)
-        .insert(mcpCredentials)
-        .values(values)
-        .onConflictDoUpdate({
-          target: mcpCredentials.serverId,
-          targetWhere: isNull(mcpCredentials.userId),
-          set: {
-            encryptedSecret: values.encryptedSecret,
-            hint: values.hint,
-            kind: values.kind,
-            updatedAt: new Date(),
-          },
-        });
+      if (credentialUserId) {
+        await db(c, ctx)
+          .insert(mcpCredentials)
+          .values(values)
+          .onConflictDoUpdate({ target: [mcpCredentials.serverId, mcpCredentials.userId], set });
+      } else {
+        await db(c, ctx)
+          .insert(mcpCredentials)
+          .values(values)
+          .onConflictDoUpdate({
+            target: mcpCredentials.serverId,
+            targetWhere: isNull(mcpCredentials.userId),
+            set,
+          });
+      }
       return c.json({ ok: true, hint: values.hint }, 201);
     },
   );
@@ -323,12 +400,24 @@ export function mcpRoutes(ctx: AppContext) {
   routes.delete("/:id/credential", async (c) => {
     const access = await requireAccess(ctx, c);
     if (!access.ok) return c.json({ error: "not found" }, 404);
-    if (!access.canManage) return c.json({ error: "organization admin required" }, 403);
     const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
     if (!server) return c.json({ error: "not found" }, 404);
+    const right = personalRight(server, actor(c), access.canManage);
+    if (right === "none") return c.json({ error: "not found" }, 404);
+    if (right === "team" && !access.canManage) {
+      return c.json({ error: "organization admin required" }, 403);
+    }
+    if (right === "admin") {
+      return c.json({ error: "only the owner can disconnect a personal server" }, 403);
+    }
     await db(c, ctx)
       .delete(mcpCredentials)
-      .where(and(eq(mcpCredentials.serverId, server.id), isNull(mcpCredentials.userId)));
+      .where(
+        and(
+          eq(mcpCredentials.serverId, server.id),
+          server.userId ? eq(mcpCredentials.userId, server.userId) : isNull(mcpCredentials.userId),
+        ),
+      );
     return c.json({ ok: true });
   });
 
@@ -346,8 +435,19 @@ export function mcpRoutes(ctx: AppContext) {
     const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
     if (!server) return c.json({ error: "not found" }, 404);
     if (server.authType !== "oauth") return c.json({ error: "this server does not use OAuth" }, 400);
+    // A personal server: only its owner ever connects it. Everyone else,
+    // admin or not, sees a 404 or is refused.
+    if (server.userId) {
+      const right = personalRight(server, actor(c), access.canManage);
+      if (right === "none") return c.json({ error: "not found" }, 404);
+      if (right === "admin") {
+        return c.json({ error: "only the owner can connect a personal server" }, 403);
+      }
+    }
     const perUser = server.credentialScope === "user";
-    if (!perUser && !access.canManage) return c.json({ error: "organization admin required" }, 403);
+    if (!server.userId && !perUser && !access.canManage) {
+      return c.json({ error: "organization admin required" }, 403);
+    }
 
     const secret = stateSecret(ctx);
     if (!secret) return c.json({ error: "this server has no signing key configured" }, 503);
@@ -478,6 +578,9 @@ export function mcpRoutes(ctx: AppContext) {
     if (!server || server.authType !== "oauth" || !server.tokenEndpoint || !server.clientId) {
       return outcome(c, "invalid");
     }
+    // A personal server's connection lands only on its owner, whatever
+    // the state claims: the row's user id is the authority.
+    if (server.userId && server.userId !== actor(c)) return outcome(c, "denied");
 
     // RFC 9207: an issuer on the response must match the one we
     // discovered, and when the authorization server advertised that it
@@ -561,6 +664,11 @@ export function mcpRoutes(ctx: AppContext) {
     if (!access.ok) return c.json({ error: "not found" }, 404);
     const server = await serverFor(ctx, c, access.organizationId, c.req.param("id"));
     if (!server) return c.json({ error: "not found" }, 404);
+    // Another member's personal server does not exist as far as this
+    // caller can tell; a 200 here would say otherwise.
+    if (personalRight(server, actor(c), access.canManage) === "none") {
+      return c.json({ error: "not found" }, 404);
+    }
     await db(c, ctx)
       .delete(mcpCredentials)
       .where(and(eq(mcpCredentials.serverId, server.id), eq(mcpCredentials.userId, actor(c))));
@@ -568,6 +676,24 @@ export function mcpRoutes(ctx: AppContext) {
   });
 
   return routes;
+}
+
+/**
+ * What the caller may do with a server, given who owns it. A team
+ * server (no user id) answers "team" and the route applies its own
+ * admin gate; a personal server answers owner, admin (governance:
+ * disable and delete only), or none, and none must read as 404 so a
+ * member cannot learn what personal servers their teammates run.
+ */
+function personalRight(
+  server: { userId: string | null },
+  me: string,
+  canManage: boolean,
+): "team" | "owner" | "admin" | "none" {
+  if (!server.userId) return "team";
+  if (server.userId === me) return "owner";
+  if (canManage) return "admin";
+  return "none";
 }
 
 /** The columns an upsert replaces when a credential is reconnected. */

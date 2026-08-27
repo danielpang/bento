@@ -277,6 +277,34 @@ test("deleting a server takes its credentials with it", async () => {
   assert.equal(rows.length, 0, "the cascade must remove the credential");
 });
 
+test("a personal server is owned by its creator and its key is stored under them", async () => {
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "My docs",
+    slug: "my-docs",
+    url: upstreamUrl,
+    authType: "api_key",
+    personal: true,
+  });
+  assert.equal(created.status, 201);
+  const { id } = (await created.json()) as { id: string };
+
+  const [server] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+  assert.equal(server!.userId, ctx.userId, "a personal server records its owner");
+
+  const keyRes = await jsonRequest(`/api/mcp/${id}/api-key`, "POST", { value: GOOD_KEY });
+  assert.equal(keyRes.status, 201);
+  const [cred] = await ctx.db.select().from(mcpCredentials).where(eq(mcpCredentials.serverId, id));
+  assert.equal(cred!.userId, ctx.userId, "a personal server's key is the owner's own credential row");
+
+  const status = (await (await app.request("/api/mcp/status")).json()) as {
+    servers: { id: string; personal: boolean; mine: boolean; userCredential: { connected: boolean } | null }[];
+  };
+  const row = status.servers.find((s) => s.id === id)!;
+  assert.equal(row.personal, true);
+  assert.equal(row.mine, true);
+  assert.equal(row.userCredential?.connected, true, "the owner sees their personal server as connected");
+});
+
 // A fake authorization server: 401 challenge, protected resource
 // metadata, RFC 8414 metadata, dynamic registration, and a token
 // endpoint. Lets the OAuth flow run end to end with no real provider.

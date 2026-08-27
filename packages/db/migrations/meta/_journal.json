@@ -148,6 +148,13 @@
       "when": 1787868597652,
       "tag": "0020_mcp_iss_param",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1787868618076,
+      "tag": "0021_mcp_personal_servers",
+      "breakpoints": true
     }
   ]
 }

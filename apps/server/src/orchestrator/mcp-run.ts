@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 import { mcpCredentials, mcpServers } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
 import type { AgentAdapter, McpRemoteServer } from "@bento/agents";
@@ -43,10 +43,13 @@ export async function prepareRunMcp(
 ): Promise<{ extraArgs: string[] }> {
   const none = { extraArgs: [] as string[] };
   const capability = input.adapter.mcp;
+  // Whether this run has any server to attach at all: team servers, plus
+  // the acting member's own. Decides only whether a skip is worth a note.
+  const hasServers = () => hasEnabledServers(ctx, input.organizationId, input.actingUserId);
   if (!capability) {
-    // No note for tools nobody expected to support MCP, only when the
-    // org actually has servers this tool will silently lack.
-    if (await orgHasEnabledServers(ctx, input.organizationId)) {
+    // No note for tools nobody expected to support MCP, only when there
+    // actually are servers this tool will silently lack.
+    if (await hasServers()) {
       await input.say(
         `${input.adapter.cli} does not support remote MCP servers yet, so this organization's MCP servers are not attached to this run.`,
       );
@@ -54,7 +57,7 @@ export async function prepareRunMcp(
     return none;
   }
   if (ctx.driver.provider === "local-process") {
-    if (await orgHasEnabledServers(ctx, input.organizationId)) {
+    if (await hasServers()) {
       await input.say(
         "MCP servers are not attached when agents run as a local process, because their config would overwrite your own. Use the Docker driver to attach them.",
       );
@@ -62,7 +65,7 @@ export async function prepareRunMcp(
     return none;
   }
   if (input.restrictNetwork) {
-    if (await orgHasEnabledServers(ctx, input.organizationId)) {
+    if (await hasServers()) {
       await input.say(
         "This organization restricts sandbox network access, so its MCP servers are not attached to this run.",
       );
@@ -72,7 +75,7 @@ export async function prepareRunMcp(
 
   const gatewayBase = resolveGatewayBase(ctx);
   if (!gatewayBase) {
-    if (await orgHasEnabledServers(ctx, input.organizationId)) {
+    if (await hasServers()) {
       await input.say(
         "MCP servers are configured, but this deployment has no gateway URL a sandbox can reach. Set BENTO_MCP_GATEWAY_URL.",
       );
@@ -85,7 +88,7 @@ export async function prepareRunMcp(
   const renderPaths = capability.renderConfig([]).map((f) => f.path);
   const collision = renderPaths.find((path) => input.mountedConfigPaths.some((m) => pathWithin(path, m)));
   if (collision) {
-    if (await orgHasEnabledServers(ctx, input.organizationId)) {
+    if (await hasServers()) {
       await input.say(
         `MCP servers are not attached: ${input.adapter.cli}'s config path is mounted read-only from your machine on this run.`,
       );
@@ -93,10 +96,21 @@ export async function prepareRunMcp(
     return none;
   }
 
+  // The run draws from the team registry plus the acting member's own
+  // personal servers. An auto-started run has no acting member, so it
+  // gets team servers only.
   const servers = await ctx.db
     .select()
     .from(mcpServers)
-    .where(and(orgFilter(input.organizationId), eq(mcpServers.enabled, true)));
+    .where(
+      and(
+        orgFilter(input.organizationId),
+        eq(mcpServers.enabled, true),
+        input.actingUserId
+          ? or(isNull(mcpServers.userId), eq(mcpServers.userId, input.actingUserId))
+          : isNull(mcpServers.userId),
+      ),
+    );
   if (servers.length === 0) {
     // Overwrite any config a previous run left in this (per-feature,
     // reused) sandbox, so a removed server does not linger.
@@ -104,8 +118,20 @@ export async function prepareRunMcp(
     return none;
   }
 
+  // A personal slug may equal a team slug, and one slug is one tool
+  // name to the harness. The team's server wins: the registry is what
+  // admins govern, and a member's runs saying so in the transcript
+  // beats their config silently shadowing it.
+  const teamSlugs = new Set(servers.filter((s) => !s.userId).map((s) => s.slug));
   const attached: McpRemoteServer[] = [];
+  const attachedIds: string[] = [];
   for (const server of servers) {
+    if (server.userId && teamSlugs.has(server.slug)) {
+      await input.say(
+        `Your personal server ${server.name} shares its tool name with a team server, so the team's is used.`,
+      );
+      continue;
+    }
     const usable = await credentialUsable(ctx, server, input.actingUserId);
     if (!usable.ok) {
       if (usable.note) await input.say(usable.note);
@@ -124,6 +150,7 @@ export async function prepareRunMcp(
       transport: server.transport,
       headers: {},
     });
+    attachedIds.push(server.id);
   }
 
   // No server attached (all per-user with no credential, say): clear any
@@ -140,7 +167,7 @@ export async function prepareRunMcp(
     runId: input.runId,
     organizationId: input.organizationId,
     actingUserId: input.actingUserId,
-    serverIds: servers.filter((s) => attached.some((a) => a.slug === s.slug)).map((s) => s.id),
+    serverIds: attachedIds,
     ttlMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 + GRANT_SLACK_MS,
   });
   for (const server of attached) {
@@ -161,12 +188,24 @@ export async function prepareRunMcp(
   return { extraArgs: capability.extraArgs?.() ?? [] };
 }
 
-/** Whether the org has any enabled server, for deciding to explain a skip. */
-async function orgHasEnabledServers(ctx: AppContext, organizationId: string | null): Promise<boolean> {
+/** Whether this run has any enabled server: the team's, plus the acting member's own. */
+async function hasEnabledServers(
+  ctx: AppContext,
+  organizationId: string | null,
+  actingUserId: string | null,
+): Promise<boolean> {
   const [row] = await ctx.db
     .select({ id: mcpServers.id })
     .from(mcpServers)
-    .where(and(orgFilter(organizationId), eq(mcpServers.enabled, true)))
+    .where(
+      and(
+        orgFilter(organizationId),
+        eq(mcpServers.enabled, true),
+        actingUserId
+          ? or(isNull(mcpServers.userId), eq(mcpServers.userId, actingUserId))
+          : isNull(mcpServers.userId),
+      ),
+    )
     .limit(1);
   return Boolean(row);
 }
@@ -180,7 +219,11 @@ async function credentialUsable(
 ): Promise<CredentialCheck> {
   if (server.authType === "none") return { ok: true };
 
-  const perUser = server.authType === "oauth" && server.credentialScope === "user";
+  // A personal server's credential is always its owner's own row, and
+  // the query above only returns personal servers owned by the acting
+  // user, so the per-user branch covers both shapes.
+  const perUser =
+    server.userId !== null || (server.authType === "oauth" && server.credentialScope === "user");
   if (perUser) {
     if (!actingUserId) {
       // Auto-started runs (a gate evaluator, a judge) have no person to

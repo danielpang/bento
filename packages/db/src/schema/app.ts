@@ -902,6 +902,14 @@ export const mcpServers = pgTable(
       .notNull()
       .references(() => user.id),
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /**
+     * Null is a team server, the registry every run draws from. Set, it
+     * is one member's personal server: only runs that member starts get
+     * it, only their own credential is ever attached, and the team's
+     * admins can see and remove it but a run started by anyone else
+     * never sees it at all.
+     */
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     /** Stable key the harness configs use; [a-z0-9-]. */
     slug: text("slug").notNull(),
@@ -946,8 +954,19 @@ export const mcpServers = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex("mcp_servers_org_slug_idx").on(t.organizationId, t.slug),
-    uniqueIndex("mcp_servers_local_slug_idx").on(t.slug).where(sql`${t.organizationId} is null`),
+    // Slugs are unique among team servers, and separately per member
+    // among their personal ones. A personal slug may equal a team slug;
+    // the run pipeline resolves that collision in the team's favor.
+    uniqueIndex("mcp_servers_org_slug_idx").on(t.organizationId, t.slug).where(sql`${t.userId} is null`),
+    uniqueIndex("mcp_servers_local_slug_idx")
+      .on(t.slug)
+      .where(sql`${t.organizationId} is null and ${t.userId} is null`),
+    uniqueIndex("mcp_servers_org_user_slug_idx")
+      .on(t.organizationId, t.userId, t.slug)
+      .where(sql`${t.userId} is not null`),
+    uniqueIndex("mcp_servers_local_user_slug_idx")
+      .on(t.userId, t.slug)
+      .where(sql`${t.organizationId} is null and ${t.userId} is not null`),
   ],
 );
 

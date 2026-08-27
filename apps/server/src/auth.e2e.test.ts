@@ -934,6 +934,88 @@ test("members read the MCP registry and only admins manage it", async () => {
 });
 
 /**
+ * A personal MCP server is one member's own. Any member may add one, a
+ * teammate never sees it, and an admin may only turn it off or remove
+ * it, never read or store its credentials.
+ */
+test("a personal MCP server is invisible to teammates and governance-only to admins", async () => {
+  const admin = await jsonPost("/api/auth/sign-up/email", {
+    email: "pers-admin@bento.test",
+    password: "correct-horse-battery",
+    name: "Admin",
+  });
+  const alice = await jsonPost("/api/auth/sign-up/email", {
+    email: "pers-alice@bento.test",
+    password: "correct-horse-battery",
+    name: "Alice",
+  });
+  const bob = await jsonPost("/api/auth/sign-up/email", {
+    email: "pers-bob@bento.test",
+    password: "correct-horse-battery",
+    name: "Bob",
+  });
+  const adminToken = admin.headers.get("set-auth-token")!;
+  const aliceToken = alice.headers.get("set-auth-token")!;
+  const bobToken = bob.headers.get("set-auth-token")!;
+
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Personal Org", slug: "personal-org" }, adminToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, adminToken);
+  for (const [email, token] of [["pers-alice@bento.test", aliceToken], ["pers-bob@bento.test", bobToken]] as const) {
+    const invite = (await (
+      await jsonPost(
+        "/api/auth/organization/invite-member",
+        { email, role: "member", organizationId: org.id },
+        adminToken,
+      )
+    ).json()) as { id: string };
+    await jsonPost("/api/auth/organization/accept-invitation", { invitationId: invite.id }, token);
+    await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  }
+
+  const as = (token: string) => (path: string, init: RequestInit = {}) =>
+    app.request(path, {
+      ...init,
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+    });
+
+  // A member, not an admin, may add a personal server.
+  const created = await as(aliceToken)("/api/mcp", {
+    method: "POST",
+    body: JSON.stringify({ name: "Alice notes", slug: "notes", url: "https://mcp.example.test/mcp", authType: "none", personal: true }),
+  });
+  assert.equal(created.status, 201, "a member can add a personal server");
+  const server = (await created.json()) as { id: string };
+
+  // Bob cannot see it, and cannot act on it (404, not 403, so he cannot
+  // even learn it exists).
+  const bobStatus = (await (await as(bobToken)("/api/mcp/status")).json()) as { servers: { id: string }[] };
+  assert.ok(!bobStatus.servers.some((s) => s.id === server.id), "a teammate does not see a personal server");
+  const bobPatch = await as(bobToken)(`/api/mcp/${server.id}`, { method: "PATCH", body: JSON.stringify({ name: "x" }) });
+  assert.equal(bobPatch.status, 404, "a teammate cannot touch a personal server");
+  const bobDelete = await as(bobToken)(`/api/mcp/${server.id}`, { method: "DELETE" });
+  assert.equal(bobDelete.status, 404);
+
+  // The admin sees it, named by owner, and may disable it, but cannot
+  // rename it or store a credential for it.
+  const adminStatus = (await (await as(adminToken)("/api/mcp/status")).json()) as {
+    servers: { id: string; personal: boolean; ownerName: string | null }[];
+  };
+  const seen = adminStatus.servers.find((s) => s.id === server.id);
+  assert.ok(seen?.personal, "an admin sees a teammate's personal server");
+  assert.equal(seen?.ownerName, "Alice", "named by its owner");
+  const adminDisable = await as(adminToken)(`/api/mcp/${server.id}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+  assert.equal(adminDisable.status, 200, "an admin may disable a personal server");
+  const adminRename = await as(adminToken)(`/api/mcp/${server.id}`, { method: "PATCH", body: JSON.stringify({ name: "renamed" }) });
+  assert.equal(adminRename.status, 403, "an admin may not edit a personal server's shape");
+
+  // The owner may remove it.
+  const aliceDelete = await as(aliceToken)(`/api/mcp/${server.id}`, { method: "DELETE" });
+  assert.equal(aliceDelete.status, 200, "the owner may remove their own personal server");
+});
+
+/**
  * Removing a member deletes their own MCP connections. The gateway
  * already stops serving them the moment they leave (it re-reads live
  * membership), so this is the hygiene that removes the rows.
