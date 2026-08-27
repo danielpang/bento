@@ -16,6 +16,7 @@ import type {
   Repository,
   RunArtifact,
   Stage,
+  FlagSnapshot,
 } from "./types.js";
 
 export interface TokenStore {
@@ -311,6 +312,14 @@ export class BentoClient {
       /** Which social logins the server is configured for (multi mode). */
       social?: { github: boolean; google: boolean };
     }>("/api/health");
+  }
+
+  /**
+   * Permanent feature flags for the signed-in user. New product that
+   * is not ready for everyone is gated on `betaTesters`.
+   */
+  flags() {
+    return this.request<FlagSnapshot>("/api/flags");
   }
 
   listProjects() {

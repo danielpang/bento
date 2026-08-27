@@ -115,6 +115,21 @@ anything its sandbox can, so one prompt injection would exfiltrate the
 operator's key. Local mode uses the process environment because there is
 one trusted user and no tenant boundary.
 
+## New product features go behind the beta testers flag
+
+Unfinished UI and new endpoints that are not ready for every signed-in
+user go behind `beta-testers`, a permanent PostHog flag. Add people by
+putting their email on that flag's release conditions. Local mode is
+always on.
+
+- Server: `ctx.featureFlags.isBetaTester(userId, { email })`. A beta
+  endpoint that a non-tester must not learn about answers 404 via
+  `getBetaTester`, the same convention as the access helpers.
+- Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
+  `useBetaTesters()` is the boolean for lighter checks.
+
+Do not mint a second flag for "show this to testers". This is that flag.
+
 ## Verify against something real before calling it done
 
 Type checks and green tests have repeatedly agreed with each other while

@@ -26,6 +26,7 @@ import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
 import { slackRoutes } from "./routes/slack.js";
 import { contactRoutes } from "./routes/contact.js";
+import { flagRoutes } from "./routes/flags.js";
 
 export interface AppExtras {
   /**
@@ -240,6 +241,14 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // mode so the page's contract holds everywhere: local mode has no
   // invitation rows, so every id answers 404 there.
   app.route("/api/invitation-preview", invitationPreviewRoutes(ctx));
+
+  /**
+   * Permanent feature flags. Evaluation waits on PostHog, so this sits
+   * outside the tenant transaction: holding a pooled connection for
+   * that round trip is the same class of problem the SSE streams are
+   * excluded for. Actor is the whole check; there is no tenant row.
+   */
+  app.route("/api/flags", flagRoutes(ctx));
 
   const api = new Hono()
     .use("*", actorMiddleware(ctx))
