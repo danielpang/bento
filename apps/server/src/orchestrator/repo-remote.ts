@@ -59,6 +59,34 @@ function gitEnv(): NodeJS.ProcessEnv {
   return { ...process.env, GIT_TERMINAL_PROMPT: "0" };
 }
 
+/**
+ * Best-effort refresh of origin/<base> in host checkouts, before a
+ * conflict-resolution run on a worktree driver.
+ *
+ * Sprites re-seed the base branch on every provision, but the docker
+ * and local drivers share the host repository's .git, whose
+ * origin/<base> is only as fresh as the last time somebody fetched.
+ * The agent is told to fetch too; this covers the sandbox that cannot
+ * (no credentials, restricted network) by fetching on the trusted
+ * host, where the operator's own git configuration answers. Failures
+ * are swallowed: a repository that cannot be fetched here could not be
+ * fetched by the run either, and the prompt tells the agent to say so.
+ */
+export async function refreshBaseBranches(
+  repos: { localPath: string; defaultBranch: string }[],
+): Promise<void> {
+  for (const repo of repos) {
+    try {
+      await run("git", ["-C", repo.localPath, "fetch", "origin", repo.defaultBranch], {
+        env: gitEnv(),
+        timeout: 30_000,
+      });
+    } catch {
+      // Stale is survivable; hanging the button press is not.
+    }
+  }
+}
+
 interface LinkableRepository {
   id: string;
   localPath: string;

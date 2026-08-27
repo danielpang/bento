@@ -5,6 +5,7 @@ import type {
   AgentTool,
   Feature,
   FeatureChanges,
+  FeatureMergeStatus,
   FeaturePullRequest,
   FeatureEvent,
   GateState,
@@ -15,6 +16,7 @@ import type {
   Repository,
   RunArtifact,
   Stage,
+  FlagSnapshot,
 } from "./types.js";
 
 export interface TokenStore {
@@ -310,6 +312,14 @@ export class BentoClient {
       /** Which social logins the server is configured for (multi mode). */
       social?: { github: boolean; google: boolean };
     }>("/api/health");
+  }
+
+  /**
+   * Permanent feature flags for the signed-in user. New product that
+   * is not ready for everyone is gated on `betaTesters`.
+   */
+  flags() {
+    return this.request<FlagSnapshot>("/api/flags");
   }
 
   listProjects() {
@@ -752,6 +762,22 @@ export class BentoClient {
     return this.request<Feature>(`/api/features/${featureId}/recheck`, { method: "POST" });
   }
 
+  /** Asks GitHub whether each of the card's pull requests merges cleanly. */
+  getMergeStatus(featureId: string) {
+    return this.request<FeatureMergeStatus[]>(`/api/features/${featureId}/merge-status`);
+  }
+
+  /**
+   * Starts a run that rebases the card's branch onto the latest base
+   * branch and resolves the conflicts GitHub is reporting; the server
+   * force pushes the result with lease protection when the run
+   * finishes. Refused with 409 when nothing conflicts or an agent is
+   * already working the card.
+   */
+  resolveConflicts(featureId: string) {
+    return this.request<AgentRun>(`/api/features/${featureId}/resolve-conflicts`, { method: "POST" });
+  }
+
   linkPullRequest(featureId: string, prNumber: number) {
     return this.request<Feature>(`/api/features/${featureId}/link-pr`, {
       method: "POST",
@@ -760,7 +786,10 @@ export class BentoClient {
   }
 
   listSecrets() {
-    return this.request<{ id: string; name: string; hint: string }[]>("/api/secrets");
+    return this.request<{
+      secrets: { id: string; name: string; hint: string }[];
+      canManage: boolean;
+    }>("/api/secrets");
   }
 
   /** Values are write only: nothing reads a secret back. */

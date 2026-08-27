@@ -35,16 +35,27 @@ export interface AgentRunPromptInput {
  * history rather than the user's latest line alone.
  */
 export function forgetsBetweenRuns(cli: string): boolean {
-  return cli === "pool";
+  return cli === "pool" || cli === "dsh";
+}
+
+/**
+ * Tools that print one final message after the process exits, and
+ * nothing before it. A live pane that shows "Waiting for output..."
+ * for these looks stalled for the length of the run.
+ */
+export function hasNoLiveTranscript(cli: string): boolean {
+  return cli === "dsh";
 }
 
 /**
  * Whether a live stdin session should stay open after a finished turn,
  * waiting for the user to keep talking.
  *
- * Only a successful turn on a manual stage: automatic stages must
- * finish so their gate can run, a failed turn has nothing left to wait
- * for, and a judge is not a conversation. idleSec 0 disables the hold.
+ * Only a successful turn on a manual stage, and only ordinary work:
+ * automatic stages must finish so their gate can run, a failed turn has
+ * nothing left to wait for, a judge is not a conversation, and a rebase
+ * run's finish is what triggers the push, so holding it open would
+ * delay the publish it exists for. idleSec 0 disables the hold.
  */
 export function shouldHoldLiveSession(input: {
   ok: boolean;
@@ -52,7 +63,7 @@ export function shouldHoldLiveSession(input: {
   gateType: string;
   idleSec: number;
 }): boolean {
-  return input.ok && input.kind !== "judge" && input.gateType === "manual" && input.idleSec > 0;
+  return input.ok && input.kind === "task" && input.gateType === "manual" && input.idleSec > 0;
 }
 
 /**
@@ -67,7 +78,11 @@ export function shouldHoldLiveSession(input: {
 export function agentRunPrompt(input: AgentRunPromptInput): string {
   const followUp = input.followUp?.trim() ? input.followUp : null;
   if (!followUp) return input.stagePrompt;
-  if (input.kind === "judge") return followUp;
+  // Judge and rebase prompts are complete instructions of their own.
+  // Prepending the stage prompt would tell the agent to do the stage's
+  // work again, and a cold-session rebase run that obeyed would push a
+  // stage's worth of new code onto a pull request nobody asked to grow.
+  if (input.kind === "judge" || input.kind === "rebase") return followUp;
   if (input.resume && !forgetsBetweenRuns(input.cli)) return followUp;
 
   const parts = [input.stagePrompt];

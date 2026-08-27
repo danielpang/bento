@@ -47,16 +47,17 @@ export function secretRoutes(ctx: AppContext) {
   return new Hono()
     .get("/", async (c) => {
       const resolved = await scope(c);
-      if (!resolved) return c.json([]);
+      if (!resolved) return c.json({ secrets: [], canManage: false });
       const rows = await db(c, ctx).select().from(secrets).where(resolved.where);
-      return c.json(
-        rows.map((row) => ({
+      return c.json({
+        secrets: rows.map((row) => ({
           id: row.id,
           name: row.name,
           hint: row.hint,
           createdAt: row.createdAt,
         })),
-      );
+        canManage: resolved.role === "owner" || resolved.role === "admin",
+      });
     })
     /**
      * Line format: secret|<id>|<name>|<hint>

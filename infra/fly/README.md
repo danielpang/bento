@@ -99,11 +99,13 @@ Members add keys under Team in the console. Supported today:
 
 | Credential | Used by |
 |---|---|
-| `ANTHROPIC_API_KEY` | Claude Code, and opencode on Claude models |
-| `OPENAI_API_KEY` | Codex CLI, and opencode on OpenAI models |
-| `OPENROUTER_API_KEY` | opencode directly |
-| `GEMINI_API_KEY` | opencode on Gemini models |
+| `ANTHROPIC_API_KEY` | Claude Code, and opencode or pi on Claude models |
+| `OPENAI_API_KEY` | Codex CLI, and opencode or pi on OpenAI models |
+| `OPENROUTER_API_KEY` | opencode or pi directly |
+| `GEMINI_API_KEY` | opencode or pi on Gemini models |
 | `CURSOR_API_KEY` | Cursor CLI |
+| `POOLSIDE_API_KEY` | Poolside CLI |
+| `DEEPSEEK_API_KEY` | DeepSeek Harness, and opencode or pi on DeepSeek models |
 
 To bill Claude Code or Codex through OpenRouter, save the OpenRouter key
 and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to

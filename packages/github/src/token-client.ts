@@ -1,9 +1,10 @@
 import { Octokit } from "@octokit/rest";
-import { checksVia, ensurePullRequestVia, reviewThreadsVia } from "./app-client.js";
+import { checksVia, ensurePullRequestVia, mergeStateVia, reviewThreadsVia } from "./app-client.js";
 import type {
   CheckSummary,
   GitHubClient,
   GitHubPublisher,
+  MergeStateSummary,
   OpenPullRequest,
   PullRequestInput,
   PullRequestRef,
@@ -34,6 +35,10 @@ export class GitHubTokenClient implements GitHubClient, GitHubPublisher {
 
   checks(ref: PullRequestRef): Promise<CheckSummary> {
     return checksVia(this.octokit, ref);
+  }
+
+  mergeState(ref: PullRequestRef): Promise<MergeStateSummary> {
+    return mergeStateVia(this.octokit, ref);
   }
 
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest> {

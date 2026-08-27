@@ -6,6 +6,7 @@ import { useToast } from "./Toasts.js";
 import type { AgentProfile, BentoClient, Feature, Stage } from "@bento/api-client";
 import type { GateCriterion } from "@bento/core";
 import { ProviderMark } from "./ProviderMark.js";
+import { PREVIEW_TOOLS } from "./ui.js";
 import { YamlFileActions, downloadYaml, pipelineImportSummary } from "./YamlFileActions.js";
 
 /**
@@ -266,6 +267,7 @@ export function StageConfig({
                 ) : (
                   <span className="chip chip-empty">no agent</span>
                 )}
+                {assigned && PREVIEW_TOOLS[assigned.cli] && <span className="chip chip-soft">preview</span>}
                 <span className="muted">
                   {stage.gateType === "manual" ? "waits for your approval" : "advances on its requirements"}
                 </span>

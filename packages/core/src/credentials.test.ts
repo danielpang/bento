@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   AGENT_CREDENTIALS,
   MODEL_GUIDANCE,
@@ -7,16 +10,21 @@ import {
   spendCoverageNote,
   spendReportingTools,
 } from "./credentials.js";
+import { agentCli } from "./enums.js";
+
+test("dsh is a registered agent CLI", () => {
+  assert.equal(agentCli.parse("dsh"), "dsh");
+});
 
 test("every agent CLI has model guidance", () => {
   // A tool with no guidance leaves the model field unexplained, and the
   // formats genuinely differ between tools.
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "fake"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"]) {
     const guidance = modelGuidanceFor(cli);
     assert.ok(guidance, `${cli} has no model guidance`);
     assert.ok(guidance.examples.length > 0, `${cli} offers no example model`);
   }
-  assert.equal(MODEL_GUIDANCE.length, 7);
+  assert.equal(MODEL_GUIDANCE.length, 8);
 });
 
 test("the provider agnostic tools show how to reach OpenRouter", () => {
@@ -38,7 +46,7 @@ test("the provider agnostic tools show how to reach OpenRouter", () => {
 test("the spend note names exactly the tools that report a cost", () => {
   const note = spendCoverageNote();
   assert.match(note, /Only Claude Code and pi report/);
-  assert.match(note, /Codex CLI, Cursor CLI, opencode and Poolside \(pool\) report none/);
+  assert.match(note, /Codex CLI, Cursor CLI, opencode, Poolside \(pool\) and DeepSeek Harness report none/);
   // The commoner reason a figure is missing, and the one the tool list
   // alone would misattribute.
   assert.match(note, /fails before finishing reports nothing/);
@@ -50,7 +58,7 @@ test("the spend note names exactly the tools that report a cost", () => {
 test("the spend page's two lists match the coverage sentence", () => {
   const { reporting, silent } = spendReportingTools();
   assert.deepEqual(reporting, ["Claude Code", "pi"]);
-  assert.deepEqual(silent, ["Codex CLI", "Cursor CLI", "opencode", "Poolside (pool)"]);
+  assert.deepEqual(silent, ["Codex CLI", "Cursor CLI", "opencode", "Poolside (pool)", "DeepSeek Harness"]);
 });
 
 /**
@@ -79,4 +87,55 @@ test("the Poolside key is storable", () => {
     false,
     "enterprise endpoints are outside the hosted v1 settings",
   );
+});
+
+test("the DeepSeek key and Harness base URL are storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "DEEPSEEK_API_KEY");
+  assert.ok(key, "DEEPSEEK_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  const baseUrl = AGENT_CREDENTIALS.find((c) => c.name === "DEEPSEEK_BASE_URL");
+  assert.ok(baseUrl, "DEEPSEEK_BASE_URL cannot be stored");
+  assert.equal(baseUrl.secret, false);
+  assert.match(key.help, /DeepSeek Harness/);
+});
+
+test("dsh guidance uses bare DeepSeek ids and the pinned installer", () => {
+  const guidance = modelGuidanceFor("dsh")!;
+  assert.equal(guidance.defaultModel, "deepseek-v4-pro");
+  assert.equal(guidance.bareModelId, true);
+  assert.equal(guidance.installCommand, "npm install -g @deepseek-ai/dsh@0.1.1-rc.2");
+  assert.equal(MODEL_GUIDANCE.at(-2)?.cli, "dsh");
+  assert.equal(MODEL_GUIDANCE.at(-1)?.cli, "fake");
+});
+
+/**
+ * The catalog is the list; two deployment surfaces repeat it by hand.
+ *
+ * A credential the catalog can store but a deployment cannot supply is
+ * a key nobody can use: local mode reads the process environment, and
+ * the Compose stack only forwards what its `environment:` block names.
+ * Poolside shipped missing from both, and was noticed only because
+ * DeepSeek was added next to it. Nothing was checking.
+ *
+ * Base URLs are excluded on purpose: they point a tool somewhere else
+ * from the console, rather than being keys an operator seeds a
+ * deployment with.
+ */
+test("every storable key can be supplied through a deployment's environment", async () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  const envExample = await readFile(path.join(root, ".env.example"), "utf8");
+  const compose = await readFile(path.join(root, "docker-compose.yml"), "utf8");
+
+  for (const credential of AGENT_CREDENTIALS.filter((c) => c.secret)) {
+    assert.match(
+      envExample,
+      new RegExp(`^${credential.name}=`, "m"),
+      `${credential.name} is storable but absent from .env.example, so nobody is told it exists`,
+    );
+    assert.match(
+      compose,
+      new RegExp(`^\\s+- ${credential.name}=`, "m"),
+      `${credential.name} is storable but the Compose server never receives it`,
+    );
+  }
 });

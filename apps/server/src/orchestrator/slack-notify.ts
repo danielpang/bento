@@ -80,6 +80,8 @@ export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Pr
  * Thread reply for a work run that ended. Judge runs are silent here:
  * their verdict shows up as a gate event (moved, or waiting with the
  * reason), and posting "the judge finished" would bury the work.
+ * Rebase runs do post, deliberately: a person pressed Resolve
+ * conflicts and is waiting to hear whether the pull request updated.
  */
 export async function queueRunFinishedSlack(ctx: AppContext, runId: string): Promise<void> {
   const [run] = await ctx.db

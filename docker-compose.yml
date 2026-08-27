@@ -112,6 +112,8 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - CURSOR_API_KEY=${CURSOR_API_KEY:-}
+      - POOLSIDE_API_KEY=${POOLSIDE_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       # Lets stages with "Create a pull request" enabled push and open
       # pull requests without the GitHub App. Stays on the server; it is
       # never part of an agent's environment.

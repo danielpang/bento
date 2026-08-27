@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useDismissable } from "./ui.js";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { PREVIEW_TOOLS, toolCapability, useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import type { AgentProfile, AgentTool, BentoClient } from "@bento/api-client";
 
@@ -21,11 +21,32 @@ import {
 } from "@bento/core";
 
 /** One catalog, shared with `bento setup`, so the two cannot drift. */
-const CLIS = MODEL_GUIDANCE.map((tool) => ({
+const CLIS = MODEL_GUIDANCE.filter((tool) => tool.cli !== "fake").map((tool) => ({
   value: tool.cli as AgentCli,
   label: tool.label,
   model: tool.defaultModel,
 }));
+
+/**
+ * How tall the skill editor may grow, in pixels, before it scrolls.
+ * Long enough for a real role description, short enough that the
+ * rest of the agent form still fits in the modal.
+ */
+const SKILL_MAX_HEIGHT = 480;
+
+/**
+ * Grows the skill box to fit what has been typed. Height is reset
+ * before it is measured, or the box could only ever grow.
+ */
+function growSkill(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  // Collapse first so scrollHeight is the content, not the last height
+  // we set. min-height still floors the used size after this.
+  el.style.height = "0px";
+  const content = el.scrollHeight;
+  el.style.height = `${Math.min(content, SKILL_MAX_HEIGHT)}px`;
+  el.style.overflowY = content > SKILL_MAX_HEIGHT ? "auto" : "hidden";
+}
 
 /**
  * Agents are named pairings of a CLI and a model. Stages point at one of
@@ -64,6 +85,7 @@ export function AgentsPanel({
   const [machine, setMachine] = useState<MachineSettings | null>(null);
   const [tokenValue, setTokenValue] = useState("");
   const [skill, setSkill] = useState("");
+  const skillRef = useRef<HTMLTextAreaElement>(null);
   const [tokenHint, setTokenHint] = useState<string | null>(null);
   const [secrets, setSecrets] = useState<{ id: string; name: string; hint?: string | null }[]>([]);
   /**
@@ -85,9 +107,9 @@ export function AgentsPanel({
   useEffect(() => {
     void client
       .listSecrets()
-      .then((rows) => {
-        setSecrets(rows);
-        const token = rows.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
+      .then((result) => {
+        setSecrets(result.secrets);
+        const token = result.secrets.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
         setTokenHint(token ? (token.hint ?? "saved") : null);
       })
       .catch(() => {
@@ -184,6 +206,16 @@ export function AgentsPanel({
     setFormOpen(true);
   }
 
+  /**
+   * Fit the skill to what is there, including a skill loaded for
+   * edit rather than typed in this sitting. The field is only
+   * mounted while the form is open.
+   */
+  useLayoutEffect(() => {
+    if (!formOpen) return;
+    growSkill(skillRef.current);
+  }, [skill, formOpen]);
+
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
     try {
@@ -240,7 +272,8 @@ export function AgentsPanel({
             <div key={profile.id} className="gate-check">
               <ProviderMark cli={profile.cli} model={profile.model} />
               <span className="gate-check-text">
-                <span className="gate-check-name">{profile.name}</span>
+                <span className="gate-check-name">{profile.name}</span>{" "}
+                {PREVIEW_TOOLS[profile.cli] && <span className="chip chip-soft">preview</span>}
                 <br />
                 {profile.cli} · {profile.model}
               </span>
@@ -310,8 +343,8 @@ export function AgentsPanel({
               onSubmit={() =>
                 void act(async () => {
                   await client.createSecret({ name: "CLAUDE_CODE_OAUTH_TOKEN", value: tokenValue.trim() });
-                  const rows = await client.listSecrets();
-                  const token = rows.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
+                  const result = await client.listSecrets();
+                  const token = result.secrets.find((r) => r.name === "CLAUDE_CODE_OAUTH_TOKEN");
                   setTokenHint(token ? (token.hint ?? "saved") : "saved");
                   setTokenValue("");
                 })
@@ -420,10 +453,19 @@ export function AgentsPanel({
               <select className="select" value={cli} onChange={(e) => pickCli(e.target.value as AgentCli)}>
                 {CLIS.map((option) => (
                   <option key={option.value} value={option.value}>
-                    {option.label}
+                    {option.label}{PREVIEW_TOOLS[option.value] ? " (preview)" : ""}
                   </option>
                 ))}
               </select>
+              <span className="muted">{toolCapability(cli)}</span>
+              {PREVIEW_TOOLS[cli] && (
+                <p className="warn">
+                  <strong>Developer preview.</strong> DeepSeek Harness is not finished, and its interfaces can change
+                  without warning. Two limits are worth knowing before you assign it to a stage. It prints nothing while
+                  it works, so the card stays quiet until the run ends. It cannot continue a previous conversation, so
+                  each message starts a fresh run with a compacted transcript.
+                </p>
+              )}
               {/* Said while the tool is being chosen, not when a run
                   fails half an hour later. Only when the answer is
                   known: an unanswerable probe stays quiet rather than
@@ -521,10 +563,14 @@ export function AgentsPanel({
             <label className="field">
               <span className="label">Skill</span>
               <textarea
+                ref={skillRef}
                 className="input skill-input"
                 placeholder={"How this agent should work, and what its stage write-up must contain.\nExample: You are a product investigator. Your write-up must have three sections: Problem, Evidence from the code, Recommendation with effort estimate."}
                 value={skill}
-                onChange={(e) => setSkill(e.target.value)}
+                onChange={(e) => {
+                  setSkill(e.target.value);
+                  growSkill(e.target);
+                }}
                 rows={5}
               />
               <span className="muted">
@@ -551,4 +597,3 @@ export function AgentsPanel({
     </aside>
   );
 }
-

@@ -126,10 +126,13 @@ const answers: Record<string, unknown> = {
   listRepositories: repositories,
   listProfiles: profiles,
   listFeatures: features,
-  listSecrets: [
-    { id: "sec1", name: "ANTHROPIC_API_KEY", hint: "••••••4f2a" },
-    { id: "sec2", name: "GITHUB_TOKEN", hint: "••••••b17c" },
-  ],
+  listSecrets: {
+    secrets: [
+      { id: "sec1", name: "ANTHROPIC_API_KEY", hint: "••••••4f2a" },
+      { id: "sec2", name: "GITHUB_TOKEN", hint: "••••••b17c" },
+    ],
+    canManage: true,
+  },
   listAgentTools: [
     { cli: "claude-code", label: "Claude Code", binary: "claude", installed: true, installUrl: "https://docs.claude.com/en/docs/claude-code/setup", installCommand: "curl -fsSL https://claude.ai/install.sh | bash" },
     { cli: "codex", label: "Codex CLI", binary: "codex", installed: true, installUrl: "https://github.com/openai/codex", installCommand: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },

@@ -37,6 +37,7 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
+import { createFeatureFlags } from "./feature-flags.js";
 import {
   deliverQueuedMessage,
   markCancelled,
@@ -120,6 +121,7 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
+    featureFlags: createFeatureFlags(env),
   };
   await registerJobs(ctx);
   app = createApp(ctx);
@@ -267,6 +269,12 @@ async function patchStage(stageId: string, patch: Record<string, unknown>) {
   );
 }
 
+test("local mode reports the acting user as a beta tester", async () => {
+  const res = await app.request("/api/flags");
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { betaTesters: true });
+});
+
 test("local mode can manage machine credentials", async () => {
   const created = await json<{ id: string }>(
     await app.request("/api/secrets", {
@@ -275,10 +283,13 @@ test("local mode can manage machine credentials", async () => {
       body: JSON.stringify({ name: "ANTHROPIC_API_KEY", value: "local-secret-value" }),
     }),
   );
-  const listed = await json<{ id: string; name: string; hint: string }[]>(await app.request("/api/secrets"));
-  assert.equal(listed.length, 1);
+  const listed = await json<{ secrets: { id: string; name: string; hint: string }[]; canManage: boolean }>(
+    await app.request("/api/secrets"),
+  );
+  assert.equal(listed.canManage, true);
+  assert.equal(listed.secrets.length, 1);
   assert.deepEqual(
-    { id: listed[0]?.id, name: listed[0]?.name, hint: listed[0]?.hint },
+    { id: listed.secrets[0]?.id, name: listed.secrets[0]?.name, hint: listed.secrets[0]?.hint },
     { id: created.id, name: "ANTHROPIC_API_KEY", hint: "••••••••alue" },
   );
 
@@ -291,11 +302,11 @@ test("local mode can manage machine credentials", async () => {
   );
   assert.equal(rotated.id, created.id, "rotation updates the local credential instead of inserting a duplicate");
   assert.equal(rotated.hint, "••••••••5678");
-  assert.equal((await json<unknown[]>(await app.request("/api/secrets"))).length, 1);
+  assert.equal((await json<{ secrets: unknown[] }>(await app.request("/api/secrets"))).secrets.length, 1);
 
   const removed = await app.request(`/api/secrets/${rotated.id}`, { method: "DELETE" });
   assert.equal(removed.status, 200);
-  assert.deepEqual(await json<unknown[]>(await app.request("/api/secrets")), []);
+  assert.deepEqual(await json(await app.request("/api/secrets")), { secrets: [], canManage: true });
 });
 
 /**
@@ -2507,6 +2518,13 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
   const log = await run("git", ["-C", worktree, "log", "--oneline"]);
   assert.match(log.stdout, /fake agent commit/);
 
+  // A manual stage waits for a person after the agent finishes. The
+  // evaluate job is queued, not inline, so reading the board now would
+  // race it: still active one moment, gated the next. Wait for the
+  // settled status. Left active, a card whose run succeeded looks done
+  // rather than like something that needs a person.
+  await waitForFeatureStatus(feature.id, ["gated"]);
+
   // Board plain endpoint shows the feature with its run status
   const board = await (await app.request(`/api/projects/${project.id}/board/plain`)).text();
   // Cost then the agent's latest line sit between the run id and the
@@ -2516,7 +2534,7 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
   assert.match(
     board,
     new RegExp(
-      `feature\\|${feature.id}\\|${advanced.currentStageId}\\|active\\|succeeded\\|${created.id}\\|[^|]*\\|-\\|Test feature`,
+      `feature\\|${feature.id}\\|${advanced.currentStageId}\\|gated\\|succeeded\\|${created.id}\\|[^|]*\\|-\\|Test feature`,
     ),
     board,
   );
@@ -2901,6 +2919,12 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   // Provider naming tools reach far more, which is the point of them.
   const wide = await post({ name: "gpt on opencode", cli: "opencode", model: "openai/gpt-5-pro" });
   assert.equal(wide.status, 201, "opencode names its provider, so it reaches OpenAI");
+
+  const harness = await post({ name: "DeepSeek harness", cli: "dsh", model: "deepseek-v4-pro" });
+  assert.equal(harness.status, 201, "DeepSeek Harness accepts its bare model id");
+  const prefixedHarness = await post({ name: "prefixed harness", cli: "dsh", model: "deepseek/deepseek-v4-pro" });
+  assert.equal(prefixedHarness.status, 400, "DeepSeek Harness cannot accept provider-prefixed model ids");
+  assert.match(((await prefixedHarness.json()) as { error: string }).error, /bare model id/);
 
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
@@ -3422,6 +3446,179 @@ test("publication transcript events arrive before a successful run is done", { t
     if (previousGitHubApp) ctx.githubApp = previousGitHubApp;
     else delete ctx.githubApp;
     allowPublication();
+  }
+});
+
+/**
+ * The resolve-conflicts button end to end, minus GitHub itself: the
+ * server re-reads merge state rather than trusting the button, starts
+ * the card's own agent in the work conversation, marks the run
+ * "rebase" so its finish republishes the branch, and refuses when
+ * nothing conflicts or nothing has run.
+ */
+test("resolve-conflicts starts the work agent on a conflicted pull request", { timeout: 60_000 }, async () => {
+  const source = await fixtureRepo("resolve-conflicts");
+  const previousGitHubApp = ctx.githubApp;
+  let mergeAnswer: "clean" | "conflicted" | "unknown" = "conflicted";
+  const asked: { owner: string; repo: string; prNumber: number }[] = [];
+  const github = {
+    async mergeState(ref: { owner: string; repo: string; prNumber: number }) {
+      asked.push(ref);
+      return { state: mergeAnswer };
+    },
+  };
+  try {
+    const project = await json<{ id: string }>(
+      await app.request("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Resolve conflicts",
+          repositories: [
+            {
+              name: "resolve-conflicts",
+              localPath: source,
+              repoUrl: "https://github.com/acme/resolve-conflicts",
+              defaultBranch: "main",
+            },
+          ],
+        }),
+      }),
+    );
+    await unassignStages(project.id);
+    // The same organization scaffolding the publication test builds:
+    // githubConnectionFor only consults the App for a feature that
+    // belongs to an organization with an installation.
+    await ctx.db.insert(organization).values({
+      id: "resolve-conflicts-org",
+      name: "Resolve Conflicts",
+      slug: "resolve-conflicts",
+    });
+    await ctx.db.update(projects).set({ organizationId: "resolve-conflicts-org" }).where(eq(projects.id, project.id));
+    const projectPipelines = await ctx.db
+      .select({ id: pipelines.id })
+      .from(pipelines)
+      .where(eq(pipelines.projectId, project.id));
+    await ctx.db
+      .update(pipelines)
+      .set({ organizationId: "resolve-conflicts-org" })
+      .where(eq(pipelines.projectId, project.id));
+    for (const p of projectPipelines) {
+      await ctx.db.update(stages).set({ organizationId: "resolve-conflicts-org" }).where(eq(stages.pipelineId, p.id));
+    }
+    await ctx.db.insert(githubInstallations).values({
+      organizationId: "resolve-conflicts-org",
+      installationId: "resolve-conflicts-installation",
+      accountLogin: "acme",
+      accountType: "Organization",
+      installedBy: ctx.userId,
+    });
+    ctx.githubApp = {
+      forInstallation() {
+        return github;
+      },
+    } as unknown as NonNullable<AppContext["githubApp"]>;
+
+    const feature = await createFeature(project.id, "Conflicted card");
+    const worker = await fakeProfile("resolve-conflicts-agent");
+    await ctx.db
+      .update(agentProfiles)
+      .set({ organizationId: "resolve-conflicts-org" })
+      .where(eq(agentProfiles.id, worker.id));
+
+    // Nothing published yet: there is no pull request to resolve.
+    const early = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(early.status, 409);
+
+    await ctx.db.update(features).set({ branchName: "feature/conflicted" }).where(eq(features.id, feature.id));
+    const [repoRow] = await ctx.db.select().from(repositories).where(eq(repositories.projectId, project.id));
+    await ctx.db.insert(featurePullRequests).values({
+      featureId: feature.id,
+      repositoryId: repoRow!.id,
+      repoUrl: "https://github.com/acme/resolve-conflicts",
+      number: 41,
+      url: "https://github.com/acme/resolve-conflicts/pull/41",
+    });
+
+    // The drawer's question: which pull requests cannot merge.
+    const status = await json<{ name: string; number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/merge-status`),
+    );
+    assert.equal(status.length, 1);
+    assert.equal(status[0]?.number, 41);
+    assert.equal(status[0]?.state, "conflicted");
+
+    // A conflict with no conversation: there is no agent to hand it to.
+    const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(noRun.status, 400);
+
+    // The card's work run, first on a runner: the server cannot push a
+    // branch it never sees, so the button refuses rather than burning a
+    // run whose resolution goes nowhere.
+    const pipeline = await json<{ stages: { id: string }[] }>(await app.request(`/api/projects/${project.id}/pipeline`));
+    const [planted] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: pipeline.stages[0]!.id,
+        agentProfileId: worker.id,
+        prompt: "build the thing",
+        status: "succeeded",
+        executor: "runner",
+        cliSessionId: "conflict-sess",
+      })
+      .returning();
+    const onRunner = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(onRunner.status, 409);
+    assert.match(((await onRunner.json()) as { error: string }).error, /runner/);
+
+    await ctx.db.update(agentRuns).set({ executor: "server" }).where(eq(agentRuns.id, planted!.id));
+    const started = await json<{ id: string; kind: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
+      await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" }),
+    );
+    assert.equal(started.kind, "rebase");
+    assert.equal(started.agentProfileId, worker.id, "the card's own agent resolves");
+    assert.equal(started.cliSessionId, "conflict-sess", "inside the work conversation, where the intent lives");
+    assert.match(started.prompt, /rebase/i);
+    assert.match(started.prompt, /#41/);
+    assert.match(started.prompt, /git fetch origin main/, "the fetch step is a runnable command");
+    assert.deepEqual(asked.at(-1), { owner: "acme", repo: "resolve-conflicts", prNumber: 41 });
+
+    // One card, one agent: the queued rebase run holds the lock.
+    const busy = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(busy.status, 409);
+    await app.request(`/api/runs/${started.id}/cancel`, { method: "POST" });
+    await waitForRun(started.id);
+
+    // A stale drawer cannot start a rebase nothing needs: the server
+    // asks GitHub again, and a clean pull request refuses.
+    mergeAnswer = "clean";
+    const clean = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(clean.status, 409);
+    assert.match(((await clean.json()) as { error: string }).error, /no merge conflicts/);
+
+    // "unknown" is not "clean": GitHub may still be computing, and the
+    // refusal must not put words in its mouth.
+    mergeAnswer = "unknown";
+    const unknown = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(unknown.status, 409);
+    assert.match(((await unknown.json()) as { error: string }).error, /not finished computing/);
+
+    // A pull request linked by hand writes only features.pr_number, and
+    // it must still be visible here: the fallback reads the project's
+    // repository with the mirrored number.
+    mergeAnswer = "conflicted";
+    await ctx.db.delete(featurePullRequests).where(eq(featurePullRequests.featureId, feature.id));
+    await ctx.db.update(features).set({ prNumber: 41 }).where(eq(features.id, feature.id));
+    const linked = await json<{ number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/merge-status`),
+    );
+    assert.equal(linked.length, 1, "a hand-linked pull request still answers merge-status");
+    assert.equal(linked[0]?.number, 41);
+    assert.equal(linked[0]?.state, "conflicted");
+  } finally {
+    if (previousGitHubApp) ctx.githubApp = previousGitHubApp;
+    else delete ctx.githubApp;
   }
 });
 

@@ -2760,6 +2760,11 @@ button {
   color: var(--succeeded);
   border-color: var(--succeeded);
 }
+/* A pull request GitHub cannot merge wears its warning on the row. */
+.chip[data-status="conflict"] {
+  color: var(--failed);
+  border-color: var(--failed);
+}
 
 /* Card actions as an even grid rather than free-wrapping rows. */
 /*
@@ -3198,13 +3203,17 @@ button {
 /* The skill editor: prose-sized, since roles are written in sentences. */
 .skill-input {
   min-height: 110px;
-  resize: vertical;
+  resize: none;
   font-family: var(--sans);
   line-height: 1.5;
   overflow-wrap: anywhere;
+  overflow-y: hidden;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
+  /* Height is also set from script as the text wraps; this is the
+     ceiling, past which the field scrolls rather than eating the form. */
+  max-height: 480px;
 }
 
 /* The agent form is the tallest modal; it scrolls inside itself
@@ -3219,24 +3228,40 @@ button {
   display: flex;
   gap: 8px;
   margin-top: 8px;
-  align-items: stretch;
+  /* Buttons sit on the last line so a wrapped message does not
+     stretch Stop and Send into a tall column beside it. */
+  align-items: flex-end;
+  flex-shrink: 0;
 }
 .composer-input {
   flex: 1;
   min-width: 0;
+  resize: none;
+  overflow-y: hidden;
+  line-height: 1.4;
+  min-height: 34px;
+  /* A long token (a URL, a path) wraps instead of sliding out of
+     the field, which is what grows the height in the first place. */
+  overflow-wrap: anywhere;
+  /* Height is also set from script as the text wraps; this is the
+     ceiling, past which the field scrolls rather than eating the
+     transcript. */
+  max-height: 160px;
 }
 .composer-stop {
   color: var(--failed);
   border-color: var(--failed);
   flex-shrink: 0;
 }
-/* A square the height of the input, all of it arrow. */
+/* A square the height of a one-line field, all of it arrow. */
 .composer-send {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 6px 10px;
+  height: 34px;
+  box-sizing: border-box;
 }
 .stop-square {
   width: 9px;
@@ -3247,7 +3272,7 @@ button {
 /*
  * Topbar icon controls keep `.btn` padding so Sign out matches the
  * gear beside it. Compact sizing belongs only to the composer, where
- * Stop is stretched to the input height and should not grow wider.
+ * Stop matches a one-line field and should not grow wider.
  */
 .icon-button::after {
   inset: -7px -5px;
@@ -3255,14 +3280,26 @@ button {
 .composer .icon-button {
   width: 34px;
   min-width: 34px;
+  height: 34px;
   padding: 0;
 }
 /*
- * The composer stretches Stop to the input height. Keep the free
- * upward hit growth, and stop the downward growth before the hint.
+ * Stop stays the height of a one-line field even when the composer
+ * grows. Keep the free upward hit growth, and stop the downward
+ * growth before the hint.
  */
 .composer .icon-button::after {
   inset: -7px -5px -4px;
+}
+
+@media (pointer: coarse) {
+  .composer-input {
+    min-height: 44px;
+  }
+  .composer-send,
+  .composer .icon-button {
+    height: 44px;
+  }
 }
 .signout-mark {
   fill: none;
@@ -3422,6 +3459,13 @@ button {
   justify-content: center;
   gap: 12px;
   min-height: 180px;
+}
+
+.quiet-run-copy {
+  display: grid;
+  max-width: 560px;
+  gap: 8px;
+  text-align: left;
 }
 .working-row {
   display: flex;
@@ -4671,6 +4715,7 @@ button.session-expand[aria-pressed="true"] {
 
 .modal-large .skill-input {
   min-height: 200px;
+  max-height: 480px;
 }
 
 .modal-backdrop:has(.modal-expanded) {

@@ -3,10 +3,12 @@ export {
   GitHubApp,
   GitHubAppClient,
   summarizeChecks,
+  summarizeMergeState,
   parseRepoUrl,
   type AppConfig,
   type GitHubAppConfig,
   type CheckRunLike,
+  type PullRequestMergeLike,
 } from "./app-client.js";
 export { GitHubTokenClient } from "./token-client.js";
 export { verifyWebhookSignature, webhookTarget, type WebhookTarget } from "./webhook.js";
