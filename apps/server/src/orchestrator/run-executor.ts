@@ -42,7 +42,7 @@ import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
-import { resolveFollowUpRun } from "./stage-agent.js";
+import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -150,8 +150,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // The prompt the user typed is their own line in the conversation,
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
-  // judge's would read as a message nobody sent.
-  if (run.prompt && run.kind !== "judge") await sayAsUser(run.prompt);
+  // judge's and the rebase run's would read as messages nobody sent.
+  if (run.prompt && run.kind === "task") await sayAsUser(run.prompt);
+  if (run.kind === "rebase") {
+    await saySystem(
+      "Resolving merge conflicts: the agent rebases the branch onto the latest base branch, and the server force pushes it with lease protection when the run finishes.",
+    );
+  }
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
@@ -541,6 +546,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   await settleAgentResult(ctx, {
     runId,
+    runKind: run.kind,
     feature,
     stage,
     profile,
@@ -558,6 +564,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 /** The rows a run settlement needs, shared by first runs and resumes. */
 interface RunSettlement {
   runId: string;
+  /** A "rebase" run publishes on finish whatever the stage says. */
+  runKind: (typeof agentRuns.$inferSelect)["kind"];
   feature: typeof features.$inferSelect;
   stage: typeof stages.$inferSelect;
   profile: typeof agentProfiles.$inferSelect;
@@ -668,7 +676,7 @@ export function mergeAgentExecEnv(
  * exactly the way a normal run does.
  */
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
-  const { runId, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
+  const { runId, runKind, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
     settlement;
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
@@ -798,13 +806,30 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // evaluated means a checks_pass or pr_comments_resolved criterion has
   // pull requests to read on the very first evaluation rather than
   // failing once and passing on a later sweep.
+  // A rebase run publishes whatever the stage says: the whole point of
+  // resolving conflicts is putting the rebased branch back on the pull
+  // request, and the resolve route already confirmed one exists. The
+  // wording is picked once here so the two notes below cannot drift
+  // apart and describe two different runs.
+  const mustPublish = stage.createPr || runKind === "rebase";
+  const wording =
+    runKind === "rebase"
+      ? {
+          noConnection:
+            "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish.",
+          noCommits: "The rebase left the branch with no commits beyond the base branch, so there was nothing to push.",
+        }
+      : {
+          noConnection:
+            "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
+          noCommits:
+            "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
+        };
   const publishNotes: string[] = [];
-  if (stage.createPr && !publisher) {
-    publishNotes.push(
-      "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
-    );
+  if (mustPublish && !publisher) {
+    publishNotes.push(wording.noConnection);
   }
-  if (stage.createPr && publisher) {
+  if (mustPublish && publisher) {
     const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
     const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
       featureId: feature.id,
@@ -834,9 +859,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       ...failures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
     );
     if (published.length === 0 && failures.length === 0) {
-      publishNotes.push(
-        "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
-      );
+      publishNotes.push(wording.noCommits);
     }
   }
   // Written into the transcript so the outcome is visible where the
@@ -924,8 +947,11 @@ async function buildRunCommand(
     `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
   );
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
+  // Only ordinary work compacts: judge and rebase prompts are complete
+  // instructions on their own, and agentRunPrompt ignores a compacted
+  // history for both, so computing one would be work thrown away.
   const compacted =
-    run.prompt && run.kind !== "judge" && !resume
+    run.prompt && run.kind === "task" && !resume
       ? await compactedConversation(ctx.db, feature.id, run.id)
       : "";
   const prompt = agentRunPrompt({
@@ -1116,14 +1142,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * message continues, unless the card has moved stages: then the
    * pipeline agent for the stage the card is in takes over.
    */
-  const [conversation] = run.kind === "judge"
-    ? await ctx.db
-        .select()
-        .from(agentRuns)
-        .where(and(eq(agentRuns.featureId, run.featureId), ne(agentRuns.kind, "judge")))
-        .orderBy(desc(agentRuns.queuedAt))
-        .limit(1)
-    : [run];
+  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
   const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   const next = await startRunIfIdle(ctx.db, {
@@ -1679,6 +1698,7 @@ async function resumeInterruptedRun(
 
   await settleAgentResult(ctx, {
     runId: run.id,
+    runKind: run.kind,
     feature,
     stage,
     profile,

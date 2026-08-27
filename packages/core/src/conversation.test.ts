@@ -45,6 +45,26 @@ test("a judge keeps its own prompt even without a session", () => {
   );
 });
 
+/**
+ * A rebase prompt is a complete instruction. Prepended stage context
+ * told a cold-session agent to do the stage's work again, and the
+ * force push after the run carried that extra work onto the pull
+ * request nobody asked to grow.
+ */
+test("a rebase run keeps its own prompt even without a session", () => {
+  assert.equal(
+    agentRunPrompt({
+      cli: "pool",
+      followUp: "GitHub reports merge conflicts. Rebase and resolve.",
+      stagePrompt: "Implement the feature from the card.",
+      resume: false,
+      compacted: "you: please ship it",
+      kind: "rebase",
+    }),
+    "GitHub reports merge conflicts. Rebase and resolve.",
+  );
+});
+
 test("a cold follow-up carries the stage prompt, compacted history, and the new message", () => {
   const prompt = agentRunPrompt({
     cli: "codex",
@@ -116,5 +136,8 @@ test("a live session holds only a successful turn on a manual stage", () => {
   assert.equal(shouldHoldLiveSession({ ok: true, kind: "task", gateType: "auto", idleSec: 90 }), false);
   assert.equal(shouldHoldLiveSession({ ok: false, kind: "task", gateType: "manual", idleSec: 90 }), false);
   assert.equal(shouldHoldLiveSession({ ok: true, kind: "judge", gateType: "manual", idleSec: 90 }), false);
+  // A rebase run's finish is what triggers the force push; holding the
+  // session open would delay the publish it exists for.
+  assert.equal(shouldHoldLiveSession({ ok: true, kind: "rebase", gateType: "manual", idleSec: 90 }), false);
   assert.equal(shouldHoldLiveSession({ ok: true, kind: "task", gateType: "manual", idleSec: 0 }), false);
 });

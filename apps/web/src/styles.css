@@ -2760,6 +2760,11 @@ button {
   color: var(--succeeded);
   border-color: var(--succeeded);
 }
+/* A pull request GitHub cannot merge wears its warning on the row. */
+.chip[data-status="conflict"] {
+  color: var(--failed);
+  border-color: var(--failed);
+}
 
 /* Card actions as an even grid rather than free-wrapping rows. */
 /*

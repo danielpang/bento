@@ -299,6 +299,15 @@ export const featurePullRequests = pgTable(
     repoUrl: text("repo_url").notNull(),
     number: integer("number").notNull(),
     url: text("url").notNull(),
+    /**
+     * The commit Bento last pushed to the branch, which is the lease
+     * the next force push holds. Read at push time, the remote's head
+     * can only ever agree with itself; read from here, a commit a
+     * reviewer pushed in between fails the lease instead of being
+     * silently rewritten away. Null before the first recorded push,
+     * which falls back to the read-at-push behavior.
+     */
+    headSha: text("head_sha"),
     ...timestamps,
   },
   (t) => [uniqueIndex("feature_pull_requests_feature_repo_idx").on(t.featureId, t.repoUrl)],
@@ -472,13 +481,15 @@ export const agentRuns = pgTable(
   prompt: text("prompt").notNull(),
   /**
    * What this run is, structurally. "judge" is the gate evaluator's
-   * completion check; everything else is work someone can talk to.
+   * completion check; "rebase" is the resolve-conflicts button, a work
+   * run whose finish must republish the branch whatever the stage's
+   * publish setting says; everything else is work someone can talk to.
    * A column rather than a prompt-prefix test, because the prompt is
    * user-reachable text: a chat message that happened to open with the
    * judge sentence used to make its run drop out of every "not a
    * judge" query in the server.
    */
-  kind: text("kind", { enum: ["task", "judge"] }).notNull().default("task"),
+  kind: text("kind", { enum: ["task", "judge", "rebase"] }).notNull().default("task"),
   /** Copied from the project when the run is created. */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /** Sandbox snapshot taken before this run, for rolling it back. */

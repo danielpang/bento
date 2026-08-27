@@ -77,6 +77,20 @@ test("a judge run on the destination does not count as telling the agent", () =>
   );
 });
 
+test("a rebase run on the destination does not count as telling the agent", () => {
+  assert.equal(
+    needsSendBackPrompt({
+      status: "active",
+      currentStageId: "review",
+      history: [moved("manual_back", "2026-01-01T11:00:00.000Z")],
+      // Resolving merge conflicts fixed the pull request, not the
+      // reason the card came back.
+      runs: [run("review", "2026-01-01T11:01:00.000Z", "rebase")],
+    }),
+    true,
+  );
+});
+
 test("a gate sending a card back does not ask the person to start a conversation", () => {
   assert.equal(
     needsSendBackPrompt({

@@ -645,6 +645,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", "/api/team/policy"],
     ["PATCH", "/api/team/policy", { body: JSON.stringify({ restrictNetwork: false }) }],
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
+    ["GET", `/api/features/${feature.id}/merge-status`],
+    ["POST", `/api/features/${feature.id}/resolve-conflicts`],
     ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
     ["GET", `/api/features/${feature.id}/history`],

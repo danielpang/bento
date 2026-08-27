@@ -5,6 +5,7 @@ import type {
   AgentTool,
   Feature,
   FeatureChanges,
+  FeatureMergeStatus,
   FeaturePullRequest,
   FeatureEvent,
   GateState,
@@ -750,6 +751,22 @@ export class BentoClient {
 
   recheckGate(featureId: string) {
     return this.request<Feature>(`/api/features/${featureId}/recheck`, { method: "POST" });
+  }
+
+  /** Asks GitHub whether each of the card's pull requests merges cleanly. */
+  getMergeStatus(featureId: string) {
+    return this.request<FeatureMergeStatus[]>(`/api/features/${featureId}/merge-status`);
+  }
+
+  /**
+   * Starts a run that rebases the card's branch onto the latest base
+   * branch and resolves the conflicts GitHub is reporting; the server
+   * force pushes the result with lease protection when the run
+   * finishes. Refused with 409 when nothing conflicts or an agent is
+   * already working the card.
+   */
+  resolveConflicts(featureId: string) {
+    return this.request<AgentRun>(`/api/features/${featureId}/resolve-conflicts`, { method: "POST" });
   }
 
   linkPullRequest(featureId: string, prNumber: number) {

@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentRuns, projects, stages, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
@@ -6,6 +6,26 @@ import { requeueUndelivered } from "./messages.js";
 import { followUpSource, type FollowUpWorkRun } from "./follow-up-source.js";
 
 export { followUpSource, type FollowUpWorkRun };
+
+/**
+ * The card's newest run that is a conversation someone can continue:
+ * everything except a judge run, whose session belongs to the gate.
+ * Every follow-up door (the message route, resolve-conflicts, queued
+ * message delivery) asks this same question; copying the query let the
+ * copies drift.
+ */
+export async function latestConversationRun(
+  db: Db,
+  featureId: string,
+): Promise<typeof agentRuns.$inferSelect | null> {
+  const [run] = await db
+    .select()
+    .from(agentRuns)
+    .where(and(eq(agentRuns.featureId, featureId), ne(agentRuns.kind, "judge")))
+    .orderBy(desc(agentRuns.queuedAt))
+    .limit(1);
+  return run ?? null;
+}
 
 /**
  * Loads the current stage's assigned agent and decides who a follow-up
