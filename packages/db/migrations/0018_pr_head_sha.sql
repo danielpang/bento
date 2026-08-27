@@ -1,0 +1,1 @@
+ALTER TABLE "feature_pull_requests" ADD COLUMN "head_sha" text;

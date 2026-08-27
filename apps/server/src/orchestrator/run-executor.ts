@@ -42,7 +42,7 @@ import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
-import { resolveFollowUpRun } from "./stage-agent.js";
+import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -808,15 +808,26 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // failing once and passing on a later sweep.
   // A rebase run publishes whatever the stage says: the whole point of
   // resolving conflicts is putting the rebased branch back on the pull
-  // request, and the resolve route already confirmed one exists.
+  // request, and the resolve route already confirmed one exists. The
+  // wording is picked once here so the two notes below cannot drift
+  // apart and describe two different runs.
   const mustPublish = stage.createPr || runKind === "rebase";
+  const wording =
+    runKind === "rebase"
+      ? {
+          noConnection:
+            "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish.",
+          noCommits: "The rebase left the branch with no commits beyond the base branch, so there was nothing to push.",
+        }
+      : {
+          noConnection:
+            "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
+          noCommits:
+            "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
+        };
   const publishNotes: string[] = [];
   if (mustPublish && !publisher) {
-    publishNotes.push(
-      runKind === "rebase"
-        ? "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish."
-        : "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
-    );
+    publishNotes.push(wording.noConnection);
   }
   if (mustPublish && publisher) {
     const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
@@ -848,11 +859,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       ...failures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
     );
     if (published.length === 0 && failures.length === 0) {
-      publishNotes.push(
-        runKind === "rebase"
-          ? "The rebase left the branch with no commits beyond the base branch, so there was nothing to push."
-          : "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
-      );
+      publishNotes.push(wording.noCommits);
     }
   }
   // Written into the transcript so the outcome is visible where the
@@ -940,8 +947,11 @@ async function buildRunCommand(
     `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
   );
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
+  // Only ordinary work compacts: judge and rebase prompts are complete
+  // instructions on their own, and agentRunPrompt ignores a compacted
+  // history for both, so computing one would be work thrown away.
   const compacted =
-    run.prompt && run.kind !== "judge" && !resume
+    run.prompt && run.kind === "task" && !resume
       ? await compactedConversation(ctx.db, feature.id, run.id)
       : "";
   const prompt = agentRunPrompt({
@@ -1132,14 +1142,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * message continues, unless the card has moved stages: then the
    * pipeline agent for the stage the card is in takes over.
    */
-  const [conversation] = run.kind === "judge"
-    ? await ctx.db
-        .select()
-        .from(agentRuns)
-        .where(and(eq(agentRuns.featureId, run.featureId), ne(agentRuns.kind, "judge")))
-        .orderBy(desc(agentRuns.queuedAt))
-        .limit(1)
-    : [run];
+  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
   const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   const next = await startRunIfIdle(ctx.db, {

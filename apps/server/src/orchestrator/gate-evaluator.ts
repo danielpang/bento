@@ -1,10 +1,11 @@
 import { and, asc, desc, eq, isNull, ne } from "drizzle-orm";
 import { gateCriteria, type GateCriterion } from "@bento/core";
-import { agentProfiles, agentRuns, featureEvents, featurePullRequests, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
+import { agentProfiles, agentRuns, featureEvents, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
 import { evaluateGate, type GateContext, type GateResult } from "@bento/gates";
 import { parseRepoUrl } from "@bento/github";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
+import { featurePullRequestTargets } from "../feature-prs.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
@@ -52,10 +53,22 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
    */
   const criteria: GateCriterion[] = declared.length > 0 ? declared : [{ type: "run_succeeded" }];
 
+  /**
+   * Rebase runs are excluded: they maintain the pull request, they are
+   * not the stage's work. Without the filter, a successful conflict
+   * resolution satisfied run_succeeded and advanced the card, and a
+   * failed one marked a finished stage "the agent failed".
+   */
   const [lastRun] = await ctx.db
     .select()
     .from(agentRuns)
-    .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.stageId, stage.id)))
+    .where(
+      and(
+        eq(agentRuns.featureId, feature.id),
+        eq(agentRuns.stageId, stage.id),
+        ne(agentRuns.kind, "rebase"),
+      ),
+    )
     .orderBy(desc(agentRuns.queuedAt))
     .limit(1);
 
@@ -101,27 +114,13 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
   const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
   const github = await githubConnectionFor(ctx, project?.organizationId ?? null);
   if (github) {
-    const linked = await ctx.db
-      .select()
-      .from(featurePullRequests)
-      .where(eq(featurePullRequests.featureId, feature.id));
-
-    // Rows come from publishing, one per repository the agent committed
-    // in. The project's own repoUrl with the feature's mirrored number
-    // is the fallback for a pull request someone linked by hand, from
-    // before there were rows, or without a GitHub App to open one.
-    const refs =
-      linked.length > 0
-        ? linked.flatMap((row) => {
-            const parsed = parseRepoUrl(row.repoUrl);
-            return parsed ? [{ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }] : [];
-          })
-        : project?.repoUrl && feature.prNumber
-          ? (() => {
-              const parsed = parseRepoUrl(project.repoUrl);
-              return parsed ? [{ owner: parsed.owner, repo: parsed.repo, prNumber: feature.prNumber }] : [];
-            })()
-          : [];
+    // The same list the merge-status and resolve-conflicts routes read,
+    // hand-linked fallback included; see featurePullRequestTargets.
+    const targets = await featurePullRequestTargets(ctx.db, feature);
+    const refs = targets.flatMap((target) => {
+      const parsed = parseRepoUrl(target.repoUrl);
+      return parsed ? [{ owner: parsed.owner, repo: parsed.repo, prNumber: target.number }] : [];
+    });
 
     if (refs.length > 0) {
       gateCtx.github = github;
@@ -1006,7 +1005,10 @@ async function judgeStageWork(
   const isJudgeRun = (run: (typeof runs)[number]) =>
     run.agentProfileId === criterion.agentProfileId && run.kind === "judge";
   const latestJudge = runs.find(isJudgeRun);
-  const latestWork = runs.find((run) => !isJudgeRun(run));
+  // A rebase run is maintenance on the pull request, not new stage
+  // work: counting it here made a completed verdict look stale and
+  // spawned a fresh paid judge run over unchanged work.
+  const latestWork = runs.find((run) => !isJudgeRun(run) && run.kind !== "rebase");
 
   // The stage's own agent has not run yet and is coming: let the work
   // happen before anyone judges it.

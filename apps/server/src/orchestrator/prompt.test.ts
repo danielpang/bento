@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { features, stages } from "@bento/db";
-import { buildStagePrompt } from "./prompt.js";
+import { buildConflictResolutionPrompt, buildStagePrompt } from "./prompt.js";
 
 type Feature = typeof features.$inferSelect;
 type Stage = typeof stages.$inferSelect;
@@ -48,4 +48,30 @@ test("a repository whose check is only whitespace is treated as having none", ()
     { name: "api", mountPath: "/workspace/api", testCommand: "   " },
   ]);
   assert.doesNotMatch(prompt, /Check your work/);
+});
+
+/**
+ * The fetch step is a literal command the agent runs. Two repositories
+ * with different base branches must produce valid refspecs, not prose:
+ * "git fetch origin main and develop" fails on the word "and".
+ */
+test("the conflict prompt names every base branch as a refspec", () => {
+  const prompt = buildConflictResolutionPrompt("feature/x", [
+    { name: "acme/web", number: 7, defaultBranch: "main" },
+    { name: "acme/api", number: 9, defaultBranch: "develop" },
+  ]);
+  assert.match(prompt, /git fetch origin main develop/);
+  assert.doesNotMatch(prompt, /main and develop/);
+  assert.match(prompt, /#7/);
+  assert.match(prompt, /#9/);
+});
+
+test("the conflict prompt forbids pushing and repeats no base branch", () => {
+  const prompt = buildConflictResolutionPrompt("feature/x", [
+    { name: "acme/web", number: 7, defaultBranch: "main" },
+    { name: "acme/api", number: 9, defaultBranch: "main" },
+  ]);
+  assert.match(prompt, /git fetch origin main\./);
+  assert.match(prompt, /Do not push/);
+  assert.match(prompt, /rebase/);
 });

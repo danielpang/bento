@@ -122,11 +122,22 @@ export async function checksVia(octokit: Octokit, ref: PullRequestRef): Promise<
 }
 
 export async function mergeStateVia(octokit: Octokit, ref: PullRequestRef): Promise<MergeStateSummary> {
-  const pr = await octokit.pulls.get({
-    owner: ref.owner,
-    repo: ref.repo,
-    pull_number: ref.prNumber,
-  });
+  const read = () =>
+    octokit.pulls.get({
+      owner: ref.owner,
+      repo: ref.repo,
+      pull_number: ref.prNumber,
+    });
+  let pr = await read();
+  // GitHub computes mergeability lazily, and the read itself is what
+  // starts the computation, so the first answer after a push is
+  // reliably null. One short re-read is GitHub's own documented
+  // pattern; anything still null after that stays "unknown" and the
+  // caller asks again later.
+  if (pr.data.state === "open" && !pr.data.merged && pr.data.mergeable === null) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    pr = await read();
+  }
   return summarizeMergeState({
     state: pr.data.state,
     merged: pr.data.merged,
@@ -252,15 +263,18 @@ export interface PullRequestMergeLike {
 
 /** Exported for testing: maps GitHub's lazy mergeable flag onto an answer. */
 export function summarizeMergeState(pr: PullRequestMergeLike): MergeStateSummary {
-  const open = pr.state === "open" && !pr.merged;
-  if (!open) return { state: "unknown", open: false };
-  if (pr.mergeable === null) return { state: "unknown", open };
-  return { state: pr.mergeable ? "clean" : "conflicted", open };
+  // Closed and merged pull requests have nothing left to resolve, so
+  // they can never answer "conflicted".
+  if (pr.state !== "open" || pr.merged) return { state: "unknown" };
+  if (pr.mergeable === null) return { state: "unknown" };
+  return { state: pr.mergeable ? "clean" : "conflicted" };
 }
 
 /** Parses "owner/repo" out of the common GitHub remote URL shapes. */
 export function parseRepoUrl(url: string): { owner: string; repo: string } | null {
-  const match = url.match(/github\.com[/:]([^/]+)\/([^/.]+)(?:\.git)?\/?$/);
+  // The repo group allows dots (acme/design.system is a real name);
+  // only a literal trailing ".git" is stripped, non-greedily.
+  const match = url.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
   if (!match || !match[1] || !match[2]) return null;
   return { owner: match[1], repo: match[2] };
 }

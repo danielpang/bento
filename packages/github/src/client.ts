@@ -20,13 +20,13 @@ export interface PullRequestRef {
  *
  * "unknown" is a real answer, not a failure: GitHub computes
  * mergeability lazily, so the first read after a push can come back
- * before the computation finishes. Callers treat it as "not known to
- * conflict" and ask again later rather than blocking on it.
+ * before the computation finishes. It also covers closed and merged
+ * pull requests, which have nothing left to resolve. Callers treat it
+ * as "not known to conflict" and ask again later rather than blocking
+ * on it.
  */
 export interface MergeStateSummary {
   state: "clean" | "conflicted" | "unknown";
-  /** Closed and merged pull requests have nothing left to resolve. */
-  open: boolean;
 }
 
 /**

@@ -1,16 +1,25 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { githubInstallations, secrets } from "@bento/db";
+import { githubInstallations, secrets, type Db } from "@bento/db";
 import { GitHubTokenClient, type GitHubClient, type GitHubPublisher } from "@bento/github";
 import type { GitHubAppClient } from "@bento/github";
 import type { AppContext } from "./context.js";
 
-/** Resolves the server-owned GitHub client for one tenant. */
+/**
+ * Resolves the server-owned GitHub client for one tenant.
+ *
+ * `db` is the connection the lookups run on. HTTP routes pass their
+ * request's `db(c, ctx)`: in multi mode that is the tenant transaction,
+ * which already holds a pooled connection, and a nested `ctx.db` read
+ * from inside it would check out a second one per request, halving the
+ * pool. Workers outside a request omit it and use the owner pool.
+ */
 export async function githubForOrganization(
   ctx: AppContext,
   organizationId: string | null,
+  db: Db = ctx.db,
 ): Promise<GitHubAppClient | undefined> {
   if (!ctx.githubApp || !organizationId) return undefined;
-  const [row] = await ctx.db
+  const [row] = await db
     .select({ installationId: githubInstallations.installationId })
     .from(githubInstallations)
     .where(eq(githubInstallations.organizationId, organizationId))
@@ -30,11 +39,12 @@ export async function githubForOrganization(
 export async function githubConnectionFor(
   ctx: AppContext,
   organizationId: string | null,
+  db: Db = ctx.db,
 ): Promise<(GitHubClient & GitHubPublisher) | undefined> {
-  const app = await githubForOrganization(ctx, organizationId);
+  const app = await githubForOrganization(ctx, organizationId, db);
   if (app) return app;
 
-  const [row] = await ctx.db
+  const [row] = await db
     .select({ ciphertext: secrets.ciphertext })
     .from(secrets)
     .where(

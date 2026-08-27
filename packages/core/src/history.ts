@@ -78,7 +78,10 @@ export function needsSendBackPrompt(input: {
   const movedAt = latest.at;
 
   return !input.runs.some((run) => {
-    if (run.kind === "judge") return false;
+    // Only real work answers the prompt: a judge is the gate's own, and
+    // a rebase run fixed the pull request, not the reason the card came
+    // back. Older payloads omit kind entirely and are work.
+    if (run.kind === "judge" || run.kind === "rebase") return false;
     if (input.currentStageId && run.stageId !== input.currentStageId) return false;
     const queued = Date.parse(typeof run.queuedAt === "string" ? run.queuedAt : run.queuedAt.toISOString());
     return !Number.isNaN(queued) && queued >= movedAt;

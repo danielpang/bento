@@ -117,3 +117,40 @@ export function buildStagePrompt(
   );
   return lines.join("\n");
 }
+
+export interface ConflictedPullRequest {
+  /** The repository's display name, "acme/api" when it left the project. */
+  name: string;
+  number: number;
+  defaultBranch: string;
+}
+
+/**
+ * What a resolve-conflicts run asks its agent to do. Lives here with
+ * the other prompt builders because it encodes sandbox and publishing
+ * invariants the route layer does not own: what origin/<base> holds
+ * when the run starts, and that the server, not the agent, pushes.
+ *
+ * The agent is told not to push because it cannot and must not: the
+ * push credential stays on the server, which force pushes with lease
+ * protection when the run finishes.
+ */
+export function buildConflictResolutionPrompt(branch: string, conflicted: ConflictedPullRequest[]): string {
+  // Distinct bases as separate refspecs: git fetch takes several, and
+  // prose joiners ("and") would be parsed as a ref and fail the fetch.
+  const bases = [...new Set(conflicted.map((pr) => pr.defaultBranch))];
+  return [
+    "GitHub reports merge conflicts on this card's pull requests:",
+    ...conflicted.map(
+      (pr) =>
+        `- ${pr.name}: pull request #${pr.number} cannot merge because branch ${branch} conflicts with ${pr.defaultBranch}.`,
+    ),
+    "",
+    "In each repository named above, rebase the feature branch onto the newest base branch commit and resolve every conflict:",
+    `1. Bring the base branch up to date: git fetch origin ${bases.join(" ")}. If the fetch fails (this sandbox may have no credentials for the remote), continue with origin/<base branch> as it is and say so in your summary; it may be behind the real base branch.`,
+    `2. On branch ${branch}, run: git rebase origin/<base branch>.`,
+    "3. Resolve each conflict so the result keeps both the base branch's changes and this card's intent. Read the surrounding code rather than picking a side mechanically.",
+    "4. Stage each resolved file and run git rebase --continue until the rebase completes. If the project has a quick build or test command, run it to confirm the resolution holds together.",
+    "5. Do not push and do not open pull requests. The server force pushes the rebased branch with lease protection when this run finishes, which updates the existing pull requests.",
+  ].join("\n");
+}

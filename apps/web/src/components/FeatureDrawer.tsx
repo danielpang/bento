@@ -186,17 +186,6 @@ export function FeatureDrawer({
         setCanPublish(github ? github.canPublish : null);
         setLoadedId(feature.id);
         setLoadFailed(false);
-        // After the drawer has rendered, not as part of it: this is a
-        // GitHub round trip per pull request, and a card with none has
-        // nothing to ask. Failure means "unknown", which shows nothing.
-        if ((detail.pullRequests ?? []).length > 0) {
-          void client
-            .getMergeStatus(feature.id)
-            .then((states) => {
-              if (!cancelled) setMergeStates(states);
-            })
-            .catch(() => {});
-        }
       } catch {
         // Empty sections would read as "nothing has happened", which is
         // a claim, not a shrug. Say the load failed instead.
@@ -210,6 +199,32 @@ export function FeatureDrawer({
     // the API, an auto-start) must surface here, or the drawer offers
     // Stop for a run that is over and hides it for one that is going.
   }, [client, feature.id, feature.status, feature.currentStageId, runsVersion]);
+
+  /**
+   * Merge state on its own cadence: once the card's pull requests are
+   * known, and again when a run settles, the only moment a push can
+   * have changed GitHub's answer. Keyed on runsVersion this refetched
+   * on every status tick of a running agent, a GitHub round trip per
+   * pull request each time; and without the clear below, a refetch
+   * that failed left the previous state's conflict chips on screen.
+   */
+  const hasPullRequests = pullRequests.length > 0;
+  const latestSettledRunId = latestRun && TERMINAL_RUN.has(latestRun.status) ? latestRun.id : null;
+  useEffect(() => {
+    if (!hasPullRequests) return;
+    let cancelled = false;
+    setMergeStates([]);
+    void client
+      .getMergeStatus(feature.id)
+      .then((states) => {
+        if (!cancelled) setMergeStates(states);
+      })
+      // Failure means "unknown", which shows nothing rather than lying.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, feature.id, hasPullRequests, latestSettledRunId]);
 
 
   async function act(fn: () => Promise<unknown>) {
@@ -350,6 +365,12 @@ export function FeatureDrawer({
     mergeStates.filter((s) => s.state === "conflicted").map((s) => s.url),
   );
   const hasConflicts = conflictedUrls.size > 0;
+  /**
+   * One guard for the warning and the button both: a finished card
+   * cannot resolve (the server refuses with "reopen it first"), and a
+   * warning pointing at a button that is not on screen is a dead end.
+   */
+  const canResolve = hasConflicts && !finished;
   /**
    * Why Delete cannot be pressed, in the words the button carries.
    *
@@ -527,7 +548,7 @@ export function FeatureDrawer({
                       anyway. The stage's agent resolves in the card's
                       own conversation; the server force pushes with
                       lease when it finishes. */}
-                  {hasConflicts && !finished && (
+                  {canResolve && (
                     <button
                       className="btn"
                       disabled={busy || runActive}
@@ -641,7 +662,7 @@ export function FeatureDrawer({
             <span className="label">Pull requests</span>
             {/* Said above the rows, not only as a chip: the chip names
                 which repository, this says what to do about it. */}
-            {hasConflicts && (
+            {canResolve && (
               <p className="warn">
                 GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
                 the base branch has moved and the changes collide. Resolve conflicts (under Actions) has the stage agent

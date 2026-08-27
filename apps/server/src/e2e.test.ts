@@ -3451,12 +3451,12 @@ test("publication transcript events arrive before a successful run is done", { t
 test("resolve-conflicts starts the work agent on a conflicted pull request", { timeout: 60_000 }, async () => {
   const source = await fixtureRepo("resolve-conflicts");
   const previousGitHubApp = ctx.githubApp;
-  let mergeAnswer: "clean" | "conflicted" = "conflicted";
+  let mergeAnswer: "clean" | "conflicted" | "unknown" = "conflicted";
   const asked: { owner: string; repo: string; prNumber: number }[] = [];
   const github = {
     async mergeState(ref: { owner: string; repo: string; prNumber: number }) {
       asked.push(ref);
-      return { state: mergeAnswer, open: true };
+      return { state: mergeAnswer };
     },
   };
   try {
@@ -3544,19 +3544,27 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
     assert.equal(noRun.status, 400);
 
-    // The card's work run. Runner executor keeps the queued run parked,
-    // so this test never spawns an agent.
+    // The card's work run, first on a runner: the server cannot push a
+    // branch it never sees, so the button refuses rather than burning a
+    // run whose resolution goes nowhere.
     const pipeline = await json<{ stages: { id: string }[] }>(await app.request(`/api/projects/${project.id}/pipeline`));
-    await ctx.db.insert(agentRuns).values({
-      featureId: feature.id,
-      stageId: pipeline.stages[0]!.id,
-      agentProfileId: worker.id,
-      prompt: "build the thing",
-      status: "succeeded",
-      executor: "runner",
-      cliSessionId: "conflict-sess",
-    });
+    const [planted] = await ctx.db
+      .insert(agentRuns)
+      .values({
+        featureId: feature.id,
+        stageId: pipeline.stages[0]!.id,
+        agentProfileId: worker.id,
+        prompt: "build the thing",
+        status: "succeeded",
+        executor: "runner",
+        cliSessionId: "conflict-sess",
+      })
+      .returning();
+    const onRunner = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(onRunner.status, 409);
+    assert.match(((await onRunner.json()) as { error: string }).error, /runner/);
 
+    await ctx.db.update(agentRuns).set({ executor: "server" }).where(eq(agentRuns.id, planted!.id));
     const started = await json<{ id: string; kind: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
       await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" }),
     );
@@ -3565,18 +3573,41 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.equal(started.cliSessionId, "conflict-sess", "inside the work conversation, where the intent lives");
     assert.match(started.prompt, /rebase/i);
     assert.match(started.prompt, /#41/);
+    assert.match(started.prompt, /git fetch origin main/, "the fetch step is a runnable command");
     assert.deepEqual(asked.at(-1), { owner: "acme", repo: "resolve-conflicts", prNumber: 41 });
 
     // One card, one agent: the queued rebase run holds the lock.
     const busy = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
     assert.equal(busy.status, 409);
+    await app.request(`/api/runs/${started.id}/cancel`, { method: "POST" });
+    await waitForRun(started.id);
 
     // A stale drawer cannot start a rebase nothing needs: the server
     // asks GitHub again, and a clean pull request refuses.
-    await ctx.db.delete(agentRuns).where(eq(agentRuns.id, started.id));
     mergeAnswer = "clean";
     const clean = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
     assert.equal(clean.status, 409);
+    assert.match(((await clean.json()) as { error: string }).error, /no merge conflicts/);
+
+    // "unknown" is not "clean": GitHub may still be computing, and the
+    // refusal must not put words in its mouth.
+    mergeAnswer = "unknown";
+    const unknown = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(unknown.status, 409);
+    assert.match(((await unknown.json()) as { error: string }).error, /not finished computing/);
+
+    // A pull request linked by hand writes only features.pr_number, and
+    // it must still be visible here: the fallback reads the project's
+    // repository with the mirrored number.
+    mergeAnswer = "conflicted";
+    await ctx.db.delete(featurePullRequests).where(eq(featurePullRequests.featureId, feature.id));
+    await ctx.db.update(features).set({ prNumber: 41 }).where(eq(features.id, feature.id));
+    const linked = await json<{ number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/merge-status`),
+    );
+    assert.equal(linked.length, 1, "a hand-linked pull request still answers merge-status");
+    assert.equal(linked[0]?.number, 41);
+    assert.equal(linked[0]?.state, "conflicted");
   } finally {
     if (previousGitHubApp) ctx.githubApp = previousGitHubApp;
     else delete ctx.githubApp;

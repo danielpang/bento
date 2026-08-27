@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { featurePullRequests, features } from "@bento/db";
 import { STAGE_ARTIFACT_DIR } from "@bento/core";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
@@ -206,8 +206,22 @@ export async function publishFeatureBranches(
       // redirect this credential to a server it controls.
       const remote = options.remoteUrl?.(parsed.owner, parsed.repo)
         ?? `https://github.com/${parsed.owner}/${parsed.repo}.git`;
-      await pushBundle(bundle, remote, repo.defaultBranch, args.branch, token, {
+      /**
+       * The lease this push holds: the commit Bento itself last pushed
+       * to the branch. A lease read from the remote at push time can
+       * only ever agree with the remote, so it protected nothing; a
+       * commit somebody pushed in between must fail the push, not be
+       * rewritten away. Null (rows from before this column, or a first
+       * push) falls back to the read-at-push behavior.
+       */
+      const [known] = await db
+        .select({ headSha: featurePullRequests.headSha })
+        .from(featurePullRequests)
+        .where(and(eq(featurePullRequests.featureId, args.featureId), eq(featurePullRequests.repoUrl, repo.repoUrl)))
+        .limit(1);
+      const pushedHead = await pushBundle(bundle, remote, repo.defaultBranch, args.branch, token, {
         includeStageNotes: options.includeStageNotes === true,
+        expectedRemoteHead: known?.headSha ?? null,
       });
 
       const pr = await publisher.ensurePullRequest({
@@ -227,10 +241,11 @@ export async function publishFeatureBranches(
           repoUrl: repo.repoUrl,
           number: pr.prNumber,
           url: pr.url,
+          headSha: pushedHead,
         })
         .onConflictDoUpdate({
           target: [featurePullRequests.featureId, featurePullRequests.repoUrl],
-          set: { number: pr.prNumber, url: pr.url, updatedAt: new Date() },
+          set: { number: pr.prNumber, url: pr.url, headSha: pushedHead, updatedAt: new Date() },
         });
 
       published.push({ name: repo.name, repoUrl: repo.repoUrl, prNumber: pr.prNumber, url: pr.url });
@@ -256,8 +271,12 @@ async function pushBundle(
   baseBranch: string,
   branch: string,
   token: string,
-  options: { includeStageNotes: boolean },
-): Promise<void> {
+  options: {
+    includeStageNotes: boolean;
+    /** The commit Bento last pushed, when one is recorded; the lease to hold. */
+    expectedRemoteHead?: string | null;
+  },
+): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
   const checkout = path.join(root, "checkout");
   const home = path.join(root, "home");
@@ -298,7 +317,20 @@ async function pushBundle(
       ? bundle.headSha
       : await withoutStageNotes(checkout, bundle.headSha, path.join(root, "strip.index"), env);
 
-    const expected = remoteRef.trim().split(/\s+/)[0] ?? "";
+    const actual = remoteRef.trim().split(/\s+/)[0] ?? "";
+    /**
+     * The real lease check happens here, against the commit Bento
+     * itself last pushed, because a lease read from the remote a
+     * moment before pushing can never disagree with the remote. A
+     * mismatch means a person or a bot pushed to the branch since:
+     * force pushing over that, rebased history especially, would
+     * silently delete their commits.
+     */
+    if (options.expectedRemoteHead && actual && actual !== options.expectedRemoteHead) {
+      throw new Error(
+        `the branch moved on GitHub since Bento last pushed it (someone pushed commits to ${branch}). Pull those commits into the card's branch, or push manually, then try again.`,
+      );
+    }
     await run(
       "git",
       [
@@ -306,12 +338,13 @@ async function pushBundle(
         checkout,
         ...credentialArgs,
         "push",
-        `--force-with-lease=refs/heads/${branch}:${expected}`,
+        `--force-with-lease=refs/heads/${branch}:${actual}`,
         remote,
         `${head}:refs/heads/${branch}`,
       ],
       { env },
     );
+    return head;
   } finally {
     await rm(root, { recursive: true, force: true });
   }

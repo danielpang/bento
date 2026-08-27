@@ -299,6 +299,15 @@ export const featurePullRequests = pgTable(
     repoUrl: text("repo_url").notNull(),
     number: integer("number").notNull(),
     url: text("url").notNull(),
+    /**
+     * The commit Bento last pushed to the branch, which is the lease
+     * the next force push holds. Read at push time, the remote's head
+     * can only ever agree with itself; read from here, a commit a
+     * reviewer pushed in between fails the lease instead of being
+     * silently rewritten away. Null before the first recorded push,
+     * which falls back to the read-at-push behavior.
+     */
+    headSha: text("head_sha"),
     ...timestamps,
   },
   (t) => [uniqueIndex("feature_pull_requests_feature_repo_idx").on(t.featureId, t.repoUrl)],

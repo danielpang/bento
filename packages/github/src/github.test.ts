@@ -21,28 +21,13 @@ test("summarizeChecks treats no checks as passing", () => {
 });
 
 test("summarizeMergeState answers clean, conflicted, and not-yet-computed", () => {
-  assert.deepEqual(summarizeMergeState({ state: "open", merged: false, mergeable: true }), {
-    state: "clean",
-    open: true,
-  });
-  assert.deepEqual(summarizeMergeState({ state: "open", merged: false, mergeable: false }), {
-    state: "conflicted",
-    open: true,
-  });
+  assert.deepEqual(summarizeMergeState({ state: "open", merged: false, mergeable: true }), { state: "clean" });
+  assert.deepEqual(summarizeMergeState({ state: "open", merged: false, mergeable: false }), { state: "conflicted" });
   // GitHub computes mergeability lazily; null is "ask again", never a conflict.
-  assert.deepEqual(summarizeMergeState({ state: "open", merged: false, mergeable: null }), {
-    state: "unknown",
-    open: true,
-  });
+  assert.deepEqual(summarizeMergeState({ state: "open", merged: false, mergeable: null }), { state: "unknown" });
   // Closed and merged pull requests have nothing left to resolve.
-  assert.deepEqual(summarizeMergeState({ state: "closed", merged: false, mergeable: false }), {
-    state: "unknown",
-    open: false,
-  });
-  assert.deepEqual(summarizeMergeState({ state: "closed", merged: true, mergeable: null }), {
-    state: "unknown",
-    open: false,
-  });
+  assert.deepEqual(summarizeMergeState({ state: "closed", merged: false, mergeable: false }), { state: "unknown" });
+  assert.deepEqual(summarizeMergeState({ state: "closed", merged: true, mergeable: null }), { state: "unknown" });
 });
 
 test("parseRepoUrl handles https, ssh, and .git suffixes", () => {
@@ -50,6 +35,12 @@ test("parseRepoUrl handles https, ssh, and .git suffixes", () => {
   assert.deepEqual(parseRepoUrl("git@github.com:acme/widgets.git"), { owner: "acme", repo: "widgets" });
   assert.deepEqual(parseRepoUrl("https://github.com/acme/widgets"), { owner: "acme", repo: "widgets" });
   assert.equal(parseRepoUrl("https://gitlab.com/acme/widgets"), null);
+});
+
+test("parseRepoUrl keeps dots in repository names", () => {
+  assert.deepEqual(parseRepoUrl("https://github.com/acme/design.system"), { owner: "acme", repo: "design.system" });
+  assert.deepEqual(parseRepoUrl("git@github.com:acme/foo.bar.git"), { owner: "acme", repo: "foo.bar" });
+  assert.deepEqual(parseRepoUrl("https://github.com/acme/docs.github.io/"), { owner: "acme", repo: "docs.github.io" });
 });
 
 test("webhook signature verification accepts valid and rejects tampered", () => {
