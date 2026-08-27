@@ -17,6 +17,7 @@ import {
   projects,
   runMigrations,
   stages,
+  user,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
@@ -267,6 +268,59 @@ test("a server with no stored credential is refused", async () => {
   });
   const res = await gatewayCall(server.id, token, { id: 1 });
   assert.equal(res.status, 404, "a missing credential is a 404, not a plaintext-less proxy");
+});
+
+test("a personal server serves only its owner's run, with the owner's own credential", async () => {
+  // A second member, and a personal server owned by ctx.userId with the
+  // owner's own key. Its credential row is keyed to the owner.
+  await ctx.db.insert(user).values({ id: "gw-other", name: "Other", email: "gw-other@x.test" }).onConflictDoNothing();
+  const [server] = await ctx.db
+    .insert(mcpServers)
+    .values({
+      ownerId: ctx.userId,
+      organizationId: null,
+      userId: ctx.userId,
+      name: "Personal",
+      slug: `gw-personal-${seenAuth.length}`,
+      url: upstreamUrl,
+      transport: "http",
+      authType: "api_key",
+      apiKeyHeader: "Authorization",
+    })
+    .returning();
+  await ctx.db.insert(mcpCredentials).values({
+    serverId: server!.id,
+    organizationId: null,
+    userId: ctx.userId,
+    kind: "api_key",
+    encryptedSecret: ctx.secretBox.encrypt(SECRET),
+    hint: "••••",
+  });
+
+  // The owner's own run reaches it with the owner's key attached.
+  seenAuth = [];
+  const ownGrant = await mintRunGrant(ctx, {
+    runId,
+    organizationId: null,
+    actingUserId: ctx.userId,
+    serverIds: [server!.id],
+    ttlMs: 60_000,
+  });
+  const ok = await gatewayCall(server!.id, ownGrant, { id: 1 });
+  assert.equal(ok.status, 200, "the owner's run reaches their personal server");
+  assert.equal(seenAuth.at(-1), `Bearer ${SECRET}`, "with the owner's own credential");
+
+  // A run acting as someone else is refused, even though the grant is
+  // for the same org: a personal server is not theirs to reach.
+  const otherGrant = await mintRunGrant(ctx, {
+    runId,
+    organizationId: null,
+    actingUserId: "gw-other",
+    serverIds: [server!.id],
+    ttlMs: 60_000,
+  });
+  const denied = await gatewayCall(server!.id, otherGrant, { id: 1 });
+  assert.equal(denied.status, 404, "a personal server does not serve another member's run");
 });
 
 test("an oversized chunked body is refused before it is buffered", async () => {

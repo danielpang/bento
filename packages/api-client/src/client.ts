@@ -104,13 +104,19 @@ export interface McpServerStatus {
   transport: "http" | "sse";
   authType: "none" | "api_key" | "oauth";
   credentialScope: "org" | "user";
+  /** A member's own server: only their runs get it. */
+  personal: boolean;
+  /** True when this personal server belongs to the caller. */
+  mine: boolean;
+  /** For a teammate's personal server an admin can see, who owns it. */
+  ownerName: string | null;
   enabled: boolean;
   apiKeyHeader: string;
   oauthClientConfigured: boolean;
   /** Masked hint only; no route returns a stored secret. */
   orgCredential: { connected: boolean; hint: string; expiresAt: string | null } | null;
-  /** The caller's own connection, for per-user OAuth servers. */
-  userCredential: { connected: boolean } | null;
+  /** The caller's own connection, for per-user and personal servers. */
+  userCredential: { connected: boolean; hint: string | null } | null;
 }
 
 export interface McpStatus {
@@ -127,6 +133,8 @@ export interface McpServerInput {
   transport?: "http" | "sse";
   authType: "none" | "api_key" | "oauth";
   credentialScope?: "org" | "user";
+  /** A server only the creator's own runs get; any member may add one. */
+  personal?: boolean;
   apiKeyHeader?: string;
   clientId?: string;
   clientSecret?: string;

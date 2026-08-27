@@ -64,57 +64,38 @@ export function McpPanel({ client }: { client: BentoClient }) {
   }
   if (!status) return <SettingsCardSkeleton rows={2} />;
 
-  const personal = status.servers.filter((s) => s.enabled && s.userCredential !== null);
+  // Your side: the servers whose credential is yours to manage. Your own
+  // personal servers, plus per-member team servers you sign in to.
+  const yours = status.servers.filter(
+    (s) => (s.personal && s.mine) || (!s.personal && s.userCredential !== null),
+  );
+  // The team registry, and (for admins) teammates' personal servers,
+  // which are governance rather than something to connect.
+  const teamServers = status.servers.filter((s) => !s.personal);
+  const othersPersonal = status.servers.filter((s) => s.personal && !s.mine);
 
   return (
     <>
-      {personal.length > 0 && (
-        <section className="section settings-card">
-          <h3 className="settings-title">Your connections</h3>
-          <p className="muted">
-            These servers ask each person to sign in with their own account. Runs you start use
-            your connections; a server you have not connected simply is not available to them.
-          </p>
-          {personal.map((server) => (
-            <div className="criterion" key={server.id}>
-              <div className="criterion-cmd">
-                <strong>{server.name}</strong>
-                <p className={server.userCredential?.connected ? "muted" : "error"}>
-                  {server.userCredential?.connected ? "Connected." : "Not connected."}
-                </p>
-              </div>
-              <div className="actions">
-                {server.userCredential?.connected ? (
-                  <>
-                    <button
-                      className="btn"
-                      disabled={busy}
-                      onClick={() => void connectTo(client, act, server.id)}
-                    >
-                      Reconnect
-                    </button>
-                    <button
-                      className="btn btn-ghost"
-                      disabled={busy}
-                      onClick={() => void act(() => client.disconnectMcpUserCredential(server.id))}
-                    >
-                      Disconnect
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    className="btn btn-primary"
-                    disabled={busy}
-                    onClick={() => void connectTo(client, act, server.id)}
-                  >
-                    Connect
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
+      <section className="section settings-card">
+        <h3 className="settings-title">Your servers and sign-ins</h3>
+        <p className="muted">
+          Servers only your runs get, and the team servers that ask you to sign in with your own
+          account. A run you start uses your connections; nothing here is shared with the team.
+        </p>
+        {yours.length === 0 && <p className="muted">Nothing to connect yet.</p>}
+        {yours.map((server) => (
+          <McpServerCard
+            key={server.id}
+            server={server}
+            mode="mine"
+            canManage={status.canManage}
+            busy={busy}
+            act={act}
+            client={client}
+          />
+        ))}
+      </section>
+      <AddServerCard client={client} busy={busy} act={act} personal />
 
       <section className="section settings-card">
         <h3 className="settings-title">Team servers</h3>
@@ -123,17 +104,37 @@ export function McpPanel({ client }: { client: BentoClient }) {
           Agents connect through Bento with a token that lives only as long as the run: stored
           keys and sign-ins stay on the server, encrypted.
         </p>
-        {status.servers.length === 0 && <p className="muted">No MCP servers yet.</p>}
-        {status.servers.map((server) => (
+        {teamServers.length === 0 && <p className="muted">No team servers yet.</p>}
+        {teamServers.map((server) => (
           <McpServerCard
             key={server.id}
             server={server}
+            mode="team"
             canManage={status.canManage}
             busy={busy}
             act={act}
             client={client}
           />
         ))}
+        {status.canManage && othersPersonal.length > 0 && (
+          <>
+            <p className="muted" style={{ marginTop: 16 }}>
+              Personal servers your teammates added. You can turn one off or remove it, but only
+              its owner sees its credentials.
+            </p>
+            {othersPersonal.map((server) => (
+              <McpServerCard
+                key={server.id}
+                server={server}
+                mode="governance"
+                canManage={status.canManage}
+                busy={busy}
+                act={act}
+                client={client}
+              />
+            ))}
+          </>
+        )}
       </section>
       {status.canManage && <AddServerCard client={client} busy={busy} act={act} />}
     </>
@@ -154,18 +155,26 @@ async function connectTo(
 
 /** The scope in one glance: who a server's credential belongs to. */
 function ScopeChip({ server }: { server: McpServerStatus }) {
-  const perMember = server.authType === "oauth" && server.credentialScope === "user";
-  return <span className="chip chip-soft">{perMember ? "each member" : "team"}</span>;
+  const label = server.personal ? "personal" : server.credentialScope === "user" ? "each member" : "team";
+  return <span className="chip chip-soft">{label}</span>;
 }
 
+/**
+ * One server row, in the voice of the section it sits in. "mine" is the
+ * caller's own to connect and manage; "team" is a shared server admins
+ * manage; "governance" is a teammate's personal server an admin can
+ * only turn off or remove, never see the credentials of.
+ */
 function McpServerCard({
   server,
+  mode,
   canManage,
   busy,
   act,
   client,
 }: {
   server: McpServerStatus;
+  mode: "mine" | "team" | "governance";
   canManage: boolean;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<void>;
@@ -176,20 +185,34 @@ function McpServerCard({
   const [keyDraft, setKeyDraft] = useState("");
 
   const perMember = server.authType === "oauth" && server.credentialScope === "user";
-  const missing =
-    (server.authType === "api_key" && !server.orgCredential) ||
-    (server.authType === "oauth" && !perMember && !server.orgCredential?.connected);
-  const statusLine = perMember
-    ? "Each member signs in with their own account, under Your connections above."
-    : server.authType === "none"
-      ? "No sign in needed."
-      : server.authType === "api_key"
-        ? server.orgCredential
-          ? `Key stored for the team: ${server.orgCredential.hint}`
-          : "No key stored yet, so agents do not get this server."
-        : server.orgCredential?.connected
-          ? "Connected once for the whole team."
-          : "Not connected yet. An owner or admin signs in once for the team.";
+  // Whether I hold the credential controls for this row.
+  const iConnect = mode === "mine";
+  const cred = server.personal ? server.userCredential : perMember ? server.userCredential : server.orgCredential;
+  const connected = Boolean(cred?.connected);
+  const hint = server.personal ? server.userCredential?.hint ?? null : server.orgCredential?.hint ?? null;
+
+  const statusLine = (() => {
+    if (mode === "governance") return `Personal server${server.ownerName ? ` from ${server.ownerName}` : ""}.`;
+    if (server.authType === "none") return "No sign in needed.";
+    if (mode === "team" && !iConnect) {
+      // A team server, seen by someone who does not hold its credential.
+      if (perMember) return "Each member signs in, under Your servers and sign-ins above.";
+      if (server.authType === "api_key")
+        return server.orgCredential ? `Key stored for the team: ${server.orgCredential.hint}` : "No key stored yet.";
+      return server.orgCredential?.connected
+        ? "Connected once for the whole team."
+        : "Not connected yet. An owner or admin signs in for the team.";
+    }
+    // My own to connect (a personal server, or a per-member team server).
+    if (server.authType === "api_key")
+      return connected ? `Your key is stored: ${hint}` : "No key stored, so your runs do not get this server.";
+    return connected ? "Connected." : "Not connected, so your runs do not get this server.";
+  })();
+
+  const disconnect = () =>
+    server.personal ? client.disconnectMcpUserCredential(server.id) : perMember
+      ? client.disconnectMcpUserCredential(server.id)
+      : client.disconnectMcpCredential(server.id);
 
   return (
     <div className="criterion">
@@ -197,14 +220,16 @@ function McpServerCard({
         <strong>{server.name}</strong> <ScopeChip server={server} />
         {!server.enabled && <span className="chip chip-empty">off</span>}
         <p className="muted">{server.url}</p>
-        <p className={missing ? "error" : "muted"}>{statusLine}</p>
-        {canManage && server.authType === "api_key" && (
+        <p className={!connected && mode !== "governance" && server.authType !== "none" ? "error" : "muted"}>
+          {statusLine}
+        </p>
+        {iConnect && server.authType === "api_key" && (
           <SecretField
             value={keyDraft}
             onChange={setKeyDraft}
             label={`API key for ${server.name}`}
-            placeholder={server.orgCredential ? "Replace the stored key" : "Paste the API key"}
-            submitLabel={server.orgCredential ? "Replace" : "Save"}
+            placeholder={connected ? "Replace your stored key" : "Paste the API key"}
+            submitLabel={connected ? "Replace" : "Save"}
             busy={busy}
             onSubmit={() =>
               void act(async () => {
@@ -215,28 +240,26 @@ function McpServerCard({
             }
           />
         )}
-        {canManage && server.authType === "oauth" && !perMember && (
+        {iConnect && server.authType === "oauth" && (
           <div className="actions">
             <button
-              className={server.orgCredential?.connected ? "btn" : "btn btn-primary"}
+              className={connected ? "btn" : "btn btn-primary"}
               disabled={busy}
               onClick={() => void connectTo(client, act, server.id)}
             >
-              {server.orgCredential?.connected ? "Reconnect" : "Connect"}
+              {connected ? "Reconnect" : "Connect"}
             </button>
-            {server.orgCredential?.connected && (
-              <button
-                className="btn btn-ghost"
-                disabled={busy}
-                onClick={() => void act(() => client.disconnectMcpCredential(server.id))}
-              >
+            {connected && (
+              <button className="btn btn-ghost" disabled={busy} onClick={() => void act(disconnect)}>
                 Disconnect
               </button>
             )}
           </div>
         )}
       </div>
-      {canManage && (
+      {/* Who may enable/disable and remove: the owner of a personal
+          server, or an admin of a team or teammate's server. */}
+      {(iConnect || canManage) && (
         <div className="actions">
           <button
             className="btn"
@@ -302,18 +325,47 @@ const CONNECT_CHOICES = [
   },
 ];
 
+/** The choices for a personal server: always the member's own credential. */
+const PERSONAL_CHOICES = [
+  {
+    id: "oauth_user",
+    label: "You sign in",
+    help: "Connect your own account; only your runs get this server.",
+    authType: "oauth" as const,
+    credentialScope: "user" as const,
+  },
+  {
+    id: "api_key",
+    label: "You paste an API key",
+    help: "Stored encrypted for you, used only on your runs.",
+    authType: "api_key" as const,
+    credentialScope: "user" as const,
+  },
+  {
+    id: "none",
+    label: "No sign in",
+    help: "The server is open and needs no credential.",
+    authType: "none" as const,
+    credentialScope: "user" as const,
+  },
+];
+
 function AddServerCard({
   client,
   busy,
   act,
+  personal = false,
 }: {
   client: BentoClient;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<void>;
+  personal?: boolean;
 }) {
+  const choices = personal ? PERSONAL_CHOICES : CONNECT_CHOICES;
+  const [open, setOpen] = useState(!personal);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
-  const [choice, setChoice] = useState("oauth_user");
+  const [choice, setChoice] = useState(choices[0]!.id);
   const [slug, setSlug] = useState("");
   const [slugTouched, setSlugTouched] = useState(false);
   const [transport, setTransport] = useState<"http" | "sse">("http");
@@ -327,15 +379,28 @@ function AddServerCard({
       .slice(0, 64);
   }
 
-  const picked = CONNECT_CHOICES.find((c) => c.id === choice) ?? CONNECT_CHOICES[0]!;
+  const picked = choices.find((c) => c.id === choice) ?? choices[0]!;
   const ready = name.trim() && slug.trim() && url.trim();
+
+  // A personal add is offered as a quiet button until opened, so the
+  // member's own section does not lead with a form.
+  if (personal && !open) {
+    return (
+      <div className="actions" style={{ marginTop: -4, marginBottom: 12 }}>
+        <button className="btn" onClick={() => setOpen(true)}>
+          Add your own server
+        </button>
+      </div>
+    );
+  }
 
   return (
     <section className="section settings-card">
-      <h3 className="settings-title">Add a server</h3>
+      <h3 className="settings-title">{personal ? "Add your own server" : "Add a team server"}</h3>
       <p className="muted">
-        A name, the server's URL, and who connects. That is the whole setup; agents pick the
-        server up on their next run.
+        {personal
+          ? "A server only your runs get. A name, the URL, and how you connect."
+          : "A name, the server's URL, and who connects. That is the whole setup; agents pick the server up on their next run."}
       </p>
       <form
         onSubmit={(e) => {
@@ -349,6 +414,7 @@ function AddServerCard({
               transport,
               authType: picked.authType,
               credentialScope: picked.credentialScope,
+              personal,
               ...(apiKeyHeader.trim() && apiKeyHeader !== "Authorization"
                 ? { apiKeyHeader: apiKeyHeader.trim() }
                 : {}),
@@ -357,9 +423,10 @@ function AddServerCard({
             setSlug("");
             setSlugTouched(false);
             setUrl("");
-            setChoice("oauth_user");
+            setChoice(choices[0]!.id);
             setTransport("http");
             setApiKeyHeader("Authorization");
+            if (personal) setOpen(false);
           });
         }}
       >
@@ -383,12 +450,12 @@ function AddServerCard({
           />
         </div>
         <fieldset className="mcp-choices">
-          <legend className="muted">Who connects</legend>
-          {CONNECT_CHOICES.map((c) => (
+          <legend className="muted">{personal ? "How you connect" : "Who connects"}</legend>
+          {choices.map((c) => (
             <label key={c.id} className="mcp-choice">
               <input
                 type="radio"
-                name="mcp-connect"
+                name={personal ? "mcp-personal-connect" : "mcp-connect"}
                 checked={choice === c.id}
                 disabled={busy}
                 onChange={() => setChoice(c.id)}
