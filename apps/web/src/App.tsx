@@ -29,6 +29,7 @@ import {
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { CHANGELOG_URL } from "./changelog.js";
+import { BetaTestersProvider } from "./beta.js";
 import { NavMenu, type NavAction } from "./components/NavMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import { SignIn } from "./components/SignIn.js";
@@ -120,10 +121,13 @@ const client = new BentoClient({ baseUrl: window.location.origin });
 const PROJECT_KEY = "bento:projectId";
 
 export function App() {
+  const { data: session } = useSession();
   return (
-    <Suspense fallback={<RouteFallback />}>
-      <Route />
-    </Suspense>
+    <BetaTestersProvider client={client} userId={session?.user.id}>
+      <Suspense fallback={<RouteFallback />}>
+        <Route />
+      </Suspense>
+    </BetaTestersProvider>
   );
 }
 

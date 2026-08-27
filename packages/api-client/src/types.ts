@@ -244,6 +244,11 @@ export interface RunArtifact {
   createdAt: string;
 }
 
+export interface FlagSnapshot {
+  /** Whether this user is on the permanent beta-testers allowlist. */
+  betaTesters: boolean;
+}
+
 export interface FeatureEvent {
   id: string;
   kind: "stage_moved" | "status_changed";

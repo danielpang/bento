@@ -37,6 +37,7 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
+import { createFeatureFlags } from "./feature-flags.js";
 import {
   deliverQueuedMessage,
   markCancelled,
@@ -120,6 +121,7 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
+    featureFlags: createFeatureFlags(env),
   };
   await registerJobs(ctx);
   app = createApp(ctx);
@@ -266,6 +268,12 @@ async function patchStage(stageId: string, patch: Record<string, unknown>) {
     }),
   );
 }
+
+test("local mode reports the acting user as a beta tester", async () => {
+  const res = await app.request("/api/flags");
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { betaTesters: true });
+});
 
 test("local mode can manage machine credentials", async () => {
   const created = await json<{ id: string }>(

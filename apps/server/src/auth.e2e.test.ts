@@ -29,6 +29,7 @@ import { createAuth } from "./auth.js";
 import type { AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
+import { createFeatureFlags, FeatureFlags } from "./feature-flags.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { agentAuthEnv } from "./orchestrator/agent-auth.js";
 import { shouldShareAgentAuth } from "./settings.js";
@@ -82,6 +83,7 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId: "",
+    featureFlags: createFeatureFlags(env),
   };
   const auth = createAuth(env, db);
   assert.ok(auth, "multi mode must construct an auth instance");
@@ -108,6 +110,41 @@ function jsonPost(path: string, body: unknown, token?: string) {
 test("the API refuses unauthenticated requests in multi mode", async () => {
   const res = await app.request("/api/projects");
   assert.equal(res.status, 401);
+});
+
+test("feature flags refuse an anonymous caller and follow the beta testers allowlist", async () => {
+  const anonymous = await app.request("/api/flags");
+  assert.equal(anonymous.status, 401);
+
+  const signUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "flags-user@bento.test",
+    password: "correct-horse-battery",
+    name: "Flags",
+  });
+  assert.equal(signUp.status, 200);
+  const token = signUp.headers.get("set-auth-token")!;
+
+  const off = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(off.status, 200);
+  assert.deepEqual(await off.json(), { betaTesters: false });
+
+  const previous = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(
+    {
+      async evaluateFlags(_id, opts) {
+        return { isEnabled: () => opts?.personProperties?.email === "flags-user@bento.test" };
+      },
+      async shutdown() {},
+    },
+    false,
+  );
+  try {
+    const on = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(on.status, 200);
+    assert.deepEqual(await on.json(), { betaTesters: true });
+  } finally {
+    ctx.featureFlags = previous;
+  }
 });
 
 test("sign up returns a bearer token that authenticates API calls", async () => {
