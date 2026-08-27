@@ -1,21 +1,21 @@
-import { DEFAULT_AGENTS, DEFAULT_STAGES, MODEL_GUIDANCE } from "@bento/core";
+import { DEFAULT_STAGES, defaultPipelineSeed, type PipelineSeed, type PipelineSeedAgent } from "@bento/core";
 import { eq } from "drizzle-orm";
 import type { Db } from "./client.js";
-import { agentProfiles, pipelines, stages } from "./schema/index.js";
-
-/** The tool a seeded agent runs, and the model it runs on. */
-const SEED_CLI = "claude-code" as const;
-const SEED_MODEL = MODEL_GUIDANCE.find((tool) => tool.cli === SEED_CLI)?.defaultModel ?? "claude-sonnet-5";
+import { agentProfiles, organizationPolicies, pipelines, projects, stages } from "./schema/index.js";
 
 /**
- * Creates the default six stage pipeline for a project, with an agent
- * on each stage.
+ * Creates the default pipeline for a project, with an agent on each
+ * stage.
  *
  * The stages alone were never enough to run anything: a new board had
  * six lanes and nothing assigned, so the first thing anybody did was
  * invent six job titles from scratch before they could watch a card
  * move. Seeding the agents too means a fresh install can run its first
  * card immediately, and every part of it is editable afterwards.
+ *
+ * An organization that finished setup stores the pipeline it chose;
+ * that seed wins over the catalog defaults so the second project looks
+ * like the first. An explicit seed from the caller wins over both.
  *
  * Agents are seeded only for an owner who has none by those names. A
  * second project reuses the ones already there rather than making a
@@ -25,24 +25,39 @@ export async function seedDefaultPipeline(
   db: Db,
   projectId: string,
   owner?: { ownerId: string; organizationId: string | null },
+  seed?: PipelineSeed,
 ): Promise<string> {
+  const [project] = await db
+    .select({ organizationId: projects.organizationId, ownerId: projects.ownerId })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  const chosen = seed ?? (await pipelineSeedForOrg(db, project?.organizationId ?? null));
+  const stageDefs = chosen?.stages ?? DEFAULT_STAGES;
+  const agentDefs = chosen?.agents;
+
   const [pipeline] = await db
     .insert(pipelines)
     .values({ projectId, name: "Default", isDefault: true })
     .returning({ id: pipelines.id });
   if (!pipeline) throw new Error("failed to create default pipeline");
 
-  const agents = owner ? await ensureDefaultAgents(db, owner) : new Map<string, string>();
+  const agents = await ensureSeedAgents(
+    db,
+    owner ?? { ownerId: project?.ownerId ?? "", organizationId: project?.organizationId ?? null },
+    agentDefs,
+    { create: Boolean(owner) },
+  );
 
   await db.insert(stages).values(
-    DEFAULT_STAGES.map((stage, i) => ({
+    stageDefs.map((stage, i) => ({
       pipelineId: pipeline.id,
       position: i,
       name: stage.name,
       slug: stage.slug,
       description: stage.description,
       gateType: stage.gateType,
-      gateCriteria: stage.gateCriteria as unknown[],
+      gateCriteria: "gateCriteria" in stage ? (stage.gateCriteria as unknown[]) : [],
       ...(agents.has(stage.slug) ? { defaultAgentProfileId: agents.get(stage.slug)! } : {}),
     })),
   );
@@ -50,21 +65,39 @@ export async function seedDefaultPipeline(
   return pipeline.id;
 }
 
+async function pipelineSeedForOrg(db: Db, organizationId: string | null): Promise<PipelineSeed | undefined> {
+  if (!organizationId) return undefined;
+  const [row] = await db
+    .select({ pipelineSeed: organizationPolicies.pipelineSeed })
+    .from(organizationPolicies)
+    .where(eq(organizationPolicies.organizationId, organizationId))
+    .limit(1);
+  return (row?.pipelineSeed as PipelineSeed | null | undefined) ?? undefined;
+}
+
 /**
- * The default agents, keyed by the stage slug each one runs.
+ * The agents to put on a new pipeline, keyed by the stage slug each
+ * one runs.
  *
  * Matched on name rather than created blindly: somebody who already has
  * a "Code Reviewer" gets theirs assigned instead of a duplicate.
  */
-async function ensureDefaultAgents(
+export async function ensureSeedAgents(
   db: Db,
   owner: { ownerId: string; organizationId: string | null },
+  agents?: PipelineSeedAgent[],
+  opts?: { create?: boolean },
 ): Promise<Map<string, string>> {
-  const existing = await db.select().from(agentProfiles).where(eq(agentProfiles.ownerId, owner.ownerId));
+  const wanted = agents ?? defaultPipelineSeed().agents;
+  const existing = owner.organizationId
+    ? await db.select().from(agentProfiles).where(eq(agentProfiles.organizationId, owner.organizationId))
+    : owner.ownerId
+      ? await db.select().from(agentProfiles).where(eq(agentProfiles.ownerId, owner.ownerId))
+      : [];
   const byName = new Map(existing.map((profile) => [profile.name, profile.id]));
 
-  const missing = DEFAULT_AGENTS.filter((agent) => !byName.has(agent.name));
-  if (missing.length > 0) {
+  const missing = wanted.filter((agent) => !byName.has(agent.name));
+  if (opts?.create !== false && owner.ownerId && missing.length > 0) {
     const created = await db
       .insert(agentProfiles)
       .values(
@@ -72,8 +105,8 @@ async function ensureDefaultAgents(
           ownerId: owner.ownerId,
           organizationId: owner.organizationId,
           name: agent.name,
-          cli: SEED_CLI,
-          model: SEED_MODEL,
+          cli: agent.cli,
+          model: agent.model,
           skill: agent.skill,
         })),
       )
@@ -82,7 +115,7 @@ async function ensureDefaultAgents(
   }
 
   const bySlug = new Map<string, string>();
-  for (const agent of DEFAULT_AGENTS) {
+  for (const agent of wanted) {
     const id = byName.get(agent.name);
     if (id) bySlug.set(agent.stageSlug, id);
   }

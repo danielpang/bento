@@ -231,6 +231,18 @@ export const organizationPolicies = pgTable("organization_policies", {
    * reaches the next.
    */
   includeStageNotesInPr: boolean("include_stage_notes_in_pr").notNull().default(false),
+  /**
+   * The pipeline and agents chosen during organization setup. Applied
+   * to every project created afterwards. Null until setup runs, which
+   * is also how an existing team that never saw the wizard is read:
+   * new projects keep the catalog defaults.
+   */
+  pipelineSeed: jsonb("pipeline_seed").$type<{
+    stages: { name: string; slug: string; description: string; gateType: "manual" | "auto" }[];
+    agents: { name: string; stageSlug: string; skill: string; cli: string; model: string }[];
+  }>(),
+  /** Set once setup has been taken or skipped, so the wizard does not return. */
+  setupCompletedAt: timestamp("setup_completed_at", { withTimezone: true }),
   ...timestamps,
 });
 

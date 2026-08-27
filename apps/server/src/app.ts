@@ -26,6 +26,7 @@ import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
 import { slackRoutes } from "./routes/slack.js";
 import { contactRoutes } from "./routes/contact.js";
+import { setupRoutes } from "./routes/setup.js";
 import { flagRoutes } from "./routes/flags.js";
 
 export interface AppExtras {
@@ -266,6 +267,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/linear", linearRoutes(ctx))
     .route("/slack", slackRoutes(ctx))
     .route("/team", teamRoutes(ctx))
+    .route("/setup", setupRoutes(ctx))
     .route("/contact", contactRoutes(ctx))
     .route("/settings", settingsRoutes(ctx));
 

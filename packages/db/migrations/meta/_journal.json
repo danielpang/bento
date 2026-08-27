@@ -134,6 +134,13 @@
       "when": 1787837669516,
       "tag": "0018_pr_head_sha",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787869453949,
+      "tag": "0019_organization_setup",
+      "breakpoints": true
     }
   ]
 }

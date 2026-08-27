@@ -1,6 +1,6 @@
 # Pipelines
 
-A pipeline is the assembly line a feature moves along: an ordered set of stages, each with an agent that works it and a rule for when a card may leave. Everything here is edited under **Pipeline** in the console.
+A pipeline is the assembly line a feature moves along: an ordered set of stages, each with an agent that works it and a rule for when a card may leave. Everything here is edited under **Pipeline** in the console. Creating a team asks whether to start from Bento's six stage defaults or to shape the pipeline first; later projects in that team inherit the choice.
 
 ## Stages
 
@@ -11,7 +11,7 @@ Each stage owns two decisions: which agent runs the step, and how a card leaves 
 | Manual | A person approves or rejects it. Nothing else is consulted. |
 | Automatic | Every requirement passes. With none listed, that means its agent finished successfully. |
 
-New projects start with all six stages manual, so nothing runs away with your money before you have looked at it. Set a stage to automatic once you trust it to run unattended, and a card moves as soon as that stage's agent finishes.
+New projects start with every stage manual, so nothing runs away with your money before you have looked at it. Set a stage to automatic once you trust it to run unattended, and a card moves as soon as that stage's agent finishes.
 
 A stage with an assigned agent starts it automatically when a card arrives going forward, so a fully configured pipeline runs end to end on its own. Sending a card back stops the agent that was working it and waits: you start a conversation on the destination stage to say what to redo. Follow-ups then talk to that stage's agent, not the one that just ran QA.
 

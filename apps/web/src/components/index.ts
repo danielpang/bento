@@ -23,6 +23,7 @@ export { ChangelogPage } from "./ChangelogPage.js";
 export { ConfigSettings } from "./ConfigSettings.js";
 export { ContactDialog } from "./ContactDialog.js";
 export { CreateTeam } from "./CreateTeam.js";
+export { OrgSetup } from "./OrgSetup.js";
 export { GitHubTokenCard, ProviderKeysCard } from "./Credentials.js";
 export { DeviceApproval } from "./DeviceApproval.js";
 export { DiffReview } from "./DiffReview.js";

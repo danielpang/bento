@@ -55,6 +55,7 @@ const AgentsPanel = lazy(() => import("./components/AgentsPanel.js").then((m) =>
 const ChangelogPage = lazy(() => import("./components/ChangelogPage.js").then((m) => ({ default: m.ChangelogPage })));
 const ContactDialog = lazy(() => import("./components/ContactDialog.js").then((m) => ({ default: m.ContactDialog })));
 const CreateTeam = lazy(() => import("./components/CreateTeam.js").then((m) => ({ default: m.CreateTeam })));
+const OrgSetup = lazy(() => import("./components/OrgSetup.js").then((m) => ({ default: m.OrgSetup })));
 const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then((m) => ({ default: m.DeviceApproval })));
 const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m) => ({ default: m.FeatureDrawer })));
 const RepositoriesPanel = lazy(() => import("./components/RepositoriesPanel.js").then((m) => ({ default: m.RepositoriesPanel })));
@@ -285,6 +286,7 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
     // Warm the CreateTeam chunk while the invitations load, so the
     // common no-invitations answer does not then wait on a download.
     void import("./components/CreateTeam.js").catch(() => undefined);
+    void import("./components/OrgSetup.js").catch(() => undefined);
     setLookupFailed(false);
     void fetch("/api/team/invitations", { credentials: "include" })
       .then(async (res) => {
@@ -440,6 +442,15 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   }, [usage]);
   /** A board-level load or action failure, shown under the topbar. */
   const [loadError, setLoadError] = useState("");
+  /**
+   * Whether this team still needs the pipeline and agent walkthrough.
+   *
+   * Asked on its own rather than inferred from an empty project list:
+   * a failed projects fetch used to look like "no projects", and the
+   * same mistake here would show setup to a team that already has a
+   * board. "failed" falls through to the board.
+   */
+  const [setup, setSetup] = useState<{ needed: boolean } | "loading" | "failed">("loading");
   const toast = useToast();
   /**
    * Where focus goes once a deleted card has left the board, and which
@@ -552,6 +563,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   useEffect(() => {
     loadProjectList();
   }, [loadProjectList]);
+
+  useEffect(() => {
+    void client
+      .getSetup()
+      .then((row) => setSetup(row))
+      .catch(() => setSetup("failed"));
+  }, []);
 
   // Persist the selection so a refresh lands on the same board. The
   // list effect above has already rejected ids this tenant cannot see,
@@ -869,6 +887,19 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       </Suspense>
     </>
   );
+
+  if (setup === "loading") return <CenteredPanelSkeleton />;
+  if (setup !== "failed" && setup.needed) {
+    return (
+      <OrgSetup
+        client={client}
+        onDone={() => {
+          setSetup({ needed: false });
+          void refresh();
+        }}
+      />
+    );
+  }
 
   if (projects === null) {
     return (
