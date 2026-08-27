@@ -48,6 +48,7 @@ import {
 import { resolveFollowUpRun } from "../orchestrator/stage-agent.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
+import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
 import { githubConnectionFor } from "../github.js";
 import { shouldIncludeStageNotes } from "../settings.js";
 import { collectFeatureChanges } from "../feature-changes.js";
@@ -135,6 +136,103 @@ function repoNameFromUrl(repoUrl: string): string {
 }
 
 /**
+ * The card's pull requests with what the merge needs to know: the
+ * repository's display name and its base branch. Left-joined because a
+ * repository removed from the project leaves its pull request behind.
+ */
+function pullRequestTargets(c: Parameters<typeof db>[0], ctx: AppContext, featureId: string) {
+  return db(c, ctx)
+    .select({
+      repoUrl: featurePullRequests.repoUrl,
+      number: featurePullRequests.number,
+      url: featurePullRequests.url,
+      name: repositories.name,
+      defaultBranch: repositories.defaultBranch,
+    })
+    .from(featurePullRequests)
+    .leftJoin(repositories, eq(repositories.id, featurePullRequests.repositoryId))
+    .where(eq(featurePullRequests.featureId, featureId))
+    .orderBy(asc(featurePullRequests.createdAt));
+}
+
+interface PullRequestMergeRow {
+  name: string;
+  number: number;
+  url: string;
+  defaultBranch: string;
+  /**
+   * "conflicted" is the only state that asks for anything; it also
+   * implies the pull request is still open, because a closed or merged
+   * one answers "unknown". "unknown" covers everything that cannot be
+   * read: no GitHub connection, a non-GitHub remote, GitHub still
+   * computing mergeability, or the API refusing the read.
+   */
+  state: "clean" | "conflicted" | "unknown";
+}
+
+/**
+ * Asks GitHub where each pull request stands against its base. One
+ * failing read does not spoil the others: a card spanning several
+ * repositories still learns about the conflicts GitHub could report.
+ */
+async function readMergeStates(
+  connection: (GitHubClient & GitHubPublisher) | undefined,
+  rows: Awaited<ReturnType<typeof pullRequestTargets>>,
+): Promise<PullRequestMergeRow[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const base: Omit<PullRequestMergeRow, "state"> = {
+        name: row.name ?? repoNameFromUrl(row.repoUrl),
+        number: row.number,
+        url: row.url,
+        defaultBranch: row.defaultBranch ?? "main",
+      };
+      const parsed = parseRepoUrl(row.repoUrl);
+      if (!connection?.mergeState || !parsed) return { ...base, state: "unknown" };
+      try {
+        const summary = await connection.mergeState({
+          owner: parsed.owner,
+          repo: parsed.repo,
+          prNumber: row.number,
+        });
+        return { ...base, state: summary.state };
+      } catch {
+        return { ...base, state: "unknown" };
+      }
+    }),
+  );
+}
+
+/**
+ * What the resolve-conflicts run asks its agent to do. The agent
+ * rebases and resolves inside its sandbox; it is told not to push
+ * because it cannot and must not: the server holds the credential and
+ * force pushes with lease protection when the run finishes.
+ */
+function conflictResolutionPrompt(branch: string, conflicted: PullRequestMergeRow[]): string {
+  return [
+    "GitHub reports merge conflicts on this card's pull requests:",
+    ...conflicted.map(
+      (pr) =>
+        `- ${pr.name}: pull request #${pr.number} cannot merge because branch ${branch} conflicts with ${pr.defaultBranch}.`,
+    ),
+    "",
+    "In each repository named above, rebase the feature branch onto the newest base branch commit and resolve every conflict:",
+    `1. Bring the base branch up to date: git fetch origin ${describeBases(conflicted)}. If the fetch fails because the remote wants credentials, use origin/<base branch> as it already is: it was refreshed when this sandbox was prepared.`,
+    `2. On branch ${branch}, run: git rebase origin/<base branch>.`,
+    "3. Resolve each conflict so the result keeps both the base branch's changes and this card's intent. Read the surrounding code rather than picking a side mechanically.",
+    "4. Stage each resolved file and run git rebase --continue until the rebase completes. If the project has a quick build or test command, run it to confirm the resolution holds together.",
+    "5. Do not push and do not open pull requests. The server force pushes the rebased branch with lease protection when this run finishes, which updates the existing pull requests.",
+  ].join("\n");
+}
+
+/** "main" or "main and develop": the fetch step names the branches it means. */
+function describeBases(conflicted: PullRequestMergeRow[]): string {
+  const bases = [...new Set(conflicted.map((pr) => pr.defaultBranch))];
+  return bases.join(" and ");
+}
+
+/**
  * Carries a failed sandbox destroy out of the delete's transaction.
  *
  * Thrown rather than returned because the transaction has to roll back
@@ -206,17 +304,7 @@ export function featureRoutes(ctx: AppContext) {
        * feature's own prUrl is the first one, which is what the board's
        * single link uses.
        */
-      const pullRequests = await db(c, ctx)
-        .select({
-          repoUrl: featurePullRequests.repoUrl,
-          number: featurePullRequests.number,
-          url: featurePullRequests.url,
-          name: repositories.name,
-        })
-        .from(featurePullRequests)
-        .leftJoin(repositories, eq(repositories.id, featurePullRequests.repositoryId))
-        .where(eq(featurePullRequests.featureId, feature.id))
-        .orderBy(asc(featurePullRequests.createdAt));
+      const pullRequests = await pullRequestTargets(c, ctx, feature.id);
       return c.json({
         ...(withUrl ?? feature),
         runs,
@@ -923,6 +1011,94 @@ export function featureRoutes(ctx: AppContext) {
         });
       }
       return c.json({ published, failures });
+    })
+    /**
+     * Where each of the card's pull requests stands against its base:
+     * clean, conflicted, or unknown. Its own request rather than part of
+     * the card detail, because answering it costs a GitHub round trip
+     * per pull request and most card opens do not need it to render.
+     */
+    .get("/:id/merge-status", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      const rows = await pullRequestTargets(c, ctx, feature.id);
+      if (rows.length === 0) return c.json([]);
+      const connection = await githubConnectionFor(ctx, feature.organizationId);
+      const states = await readMergeStates(connection, rows);
+      return c.json(states.map(({ name, number, url, state }) => ({ name, number, url, state })));
+    })
+    /**
+     * Starts a run that rebases the card's branch onto the latest base
+     * branch and resolves the merge conflicts GitHub is reporting.
+     *
+     * The stage's agent does the resolving, in the card's own
+     * conversation: it is the agent that made the changes, so it is the
+     * one that knows their intent when both sides touched a line. The
+     * agent only rebases and commits; the push is the server's, through
+     * the same force-with-lease publishing every stage uses, which is
+     * why the run carries the "rebase" kind: run-executor republishes
+     * on it even when the stage itself is not set to create pull
+     * requests.
+     *
+     * Conflicts are re-read from GitHub here rather than trusted from
+     * the button, so a stale drawer cannot start a rebase nothing needs.
+     */
+    .post("/:id/resolve-conflicts", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      if (feature.status === "done" || feature.status === "cancelled") {
+        return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
+      }
+      if (!feature.branchName) {
+        return c.json({ error: "this card has no branch yet; run an agent on it first" }, 409);
+      }
+      const rows = await pullRequestTargets(c, ctx, feature.id);
+      if (rows.length === 0) {
+        return c.json({ error: "this card has no pull request yet; publish it first" }, 409);
+      }
+      const connection = await githubConnectionFor(ctx, feature.organizationId);
+      if (!connection) {
+        return c.json(
+          {
+            error:
+              "no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then try again.",
+          },
+          409,
+        );
+      }
+      const conflicted = (await readMergeStates(connection, rows)).filter((pr) => pr.state === "conflicted");
+      if (conflicted.length === 0) {
+        return c.json({ error: "GitHub reports no merge conflicts on this card's pull requests" }, 409);
+      }
+
+      // The conversation the rebase continues is the card's own work,
+      // never a judge's: same rule as the message route, because the
+      // resolving agent needs the context of the changes it made.
+      const [conversation] = await db(c, ctx)
+        .select()
+        .from(agentRuns)
+        .where(and(eq(agentRuns.featureId, feature.id), ne(agentRuns.kind, "judge")))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1);
+      if (!conversation) {
+        return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
+      }
+      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation);
+      const run = await startRunIfIdle(db(c, ctx), {
+        featureId: feature.id,
+        stageId: resumeFrom.stageId,
+        agentProfileId: resumeFrom.agentProfileId,
+        prompt: conflictResolutionPrompt(feature.branchName, conflicted),
+        cliSessionId: resumeFrom.cliSessionId,
+        executor: resumeFrom.executor,
+        kind: "rebase",
+        startedBy: actor(c),
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
+      if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
+      if (run === "gone") return c.json({ error: "not found" }, 404);
+      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
+      if (resumeFrom.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      return c.json(run, 201);
     })
     /** Links a pull request so PR based gate criteria can evaluate. */
     .post("/:id/link-pr", zValidator("json", z.object({ prNumber: z.number().int().positive() })), async (c) => {

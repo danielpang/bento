@@ -16,6 +16,20 @@ export interface PullRequestRef {
 }
 
 /**
+ * Whether a pull request can merge cleanly into its base.
+ *
+ * "unknown" is a real answer, not a failure: GitHub computes
+ * mergeability lazily, so the first read after a push can come back
+ * before the computation finishes. Callers treat it as "not known to
+ * conflict" and ask again later rather than blocking on it.
+ */
+export interface MergeStateSummary {
+  state: "clean" | "conflicted" | "unknown";
+  /** Closed and merged pull requests have nothing left to resolve. */
+  open: boolean;
+}
+
+/**
  * The GitHub surface the gate evaluators depend on. Kept narrow so gates
  * can be tested with a stub and so self-hosters without a GitHub App can
  * supply a token-based implementation instead.
@@ -25,6 +39,12 @@ export interface GitHubClient {
   reviewThreads(ref: PullRequestRef): Promise<ReviewThreadSummary>;
   /** Check runs on the PR head commit. */
   checks(ref: PullRequestRef): Promise<CheckSummary>;
+  /**
+   * Whether the pull request merges cleanly into its base. Optional so
+   * the many test stubs of the two gate reads above stay valid; both
+   * real clients implement it.
+   */
+  mergeState?(ref: PullRequestRef): Promise<MergeStateSummary>;
 }
 
 export interface PullRequestInput {

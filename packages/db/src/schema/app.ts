@@ -472,13 +472,15 @@ export const agentRuns = pgTable(
   prompt: text("prompt").notNull(),
   /**
    * What this run is, structurally. "judge" is the gate evaluator's
-   * completion check; everything else is work someone can talk to.
+   * completion check; "rebase" is the resolve-conflicts button, a work
+   * run whose finish must republish the branch whatever the stage's
+   * publish setting says; everything else is work someone can talk to.
    * A column rather than a prompt-prefix test, because the prompt is
    * user-reachable text: a chat message that happened to open with the
    * judge sentence used to make its run drop out of every "not a
    * judge" query in the server.
    */
-  kind: text("kind", { enum: ["task", "judge"] }).notNull().default("task"),
+  kind: text("kind", { enum: ["task", "judge", "rebase"] }).notNull().default("task"),
   /** Copied from the project when the run is created. */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /** Sandbox snapshot taken before this run, for rolling it back. */

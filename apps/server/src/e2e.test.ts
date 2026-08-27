@@ -3442,6 +3442,148 @@ test("publication transcript events arrive before a successful run is done", { t
 });
 
 /**
+ * The resolve-conflicts button end to end, minus GitHub itself: the
+ * server re-reads merge state rather than trusting the button, starts
+ * the card's own agent in the work conversation, marks the run
+ * "rebase" so its finish republishes the branch, and refuses when
+ * nothing conflicts or nothing has run.
+ */
+test("resolve-conflicts starts the work agent on a conflicted pull request", { timeout: 60_000 }, async () => {
+  const source = await fixtureRepo("resolve-conflicts");
+  const previousGitHubApp = ctx.githubApp;
+  let mergeAnswer: "clean" | "conflicted" = "conflicted";
+  const asked: { owner: string; repo: string; prNumber: number }[] = [];
+  const github = {
+    async mergeState(ref: { owner: string; repo: string; prNumber: number }) {
+      asked.push(ref);
+      return { state: mergeAnswer, open: true };
+    },
+  };
+  try {
+    const project = await json<{ id: string }>(
+      await app.request("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Resolve conflicts",
+          repositories: [
+            {
+              name: "resolve-conflicts",
+              localPath: source,
+              repoUrl: "https://github.com/acme/resolve-conflicts",
+              defaultBranch: "main",
+            },
+          ],
+        }),
+      }),
+    );
+    await unassignStages(project.id);
+    // The same organization scaffolding the publication test builds:
+    // githubConnectionFor only consults the App for a feature that
+    // belongs to an organization with an installation.
+    await ctx.db.insert(organization).values({
+      id: "resolve-conflicts-org",
+      name: "Resolve Conflicts",
+      slug: "resolve-conflicts",
+    });
+    await ctx.db.update(projects).set({ organizationId: "resolve-conflicts-org" }).where(eq(projects.id, project.id));
+    const projectPipelines = await ctx.db
+      .select({ id: pipelines.id })
+      .from(pipelines)
+      .where(eq(pipelines.projectId, project.id));
+    await ctx.db
+      .update(pipelines)
+      .set({ organizationId: "resolve-conflicts-org" })
+      .where(eq(pipelines.projectId, project.id));
+    for (const p of projectPipelines) {
+      await ctx.db.update(stages).set({ organizationId: "resolve-conflicts-org" }).where(eq(stages.pipelineId, p.id));
+    }
+    await ctx.db.insert(githubInstallations).values({
+      organizationId: "resolve-conflicts-org",
+      installationId: "resolve-conflicts-installation",
+      accountLogin: "acme",
+      accountType: "Organization",
+      installedBy: ctx.userId,
+    });
+    ctx.githubApp = {
+      forInstallation() {
+        return github;
+      },
+    } as unknown as NonNullable<AppContext["githubApp"]>;
+
+    const feature = await createFeature(project.id, "Conflicted card");
+    const worker = await fakeProfile("resolve-conflicts-agent");
+    await ctx.db
+      .update(agentProfiles)
+      .set({ organizationId: "resolve-conflicts-org" })
+      .where(eq(agentProfiles.id, worker.id));
+
+    // Nothing published yet: there is no pull request to resolve.
+    const early = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(early.status, 409);
+
+    await ctx.db.update(features).set({ branchName: "feature/conflicted" }).where(eq(features.id, feature.id));
+    const [repoRow] = await ctx.db.select().from(repositories).where(eq(repositories.projectId, project.id));
+    await ctx.db.insert(featurePullRequests).values({
+      featureId: feature.id,
+      repositoryId: repoRow!.id,
+      repoUrl: "https://github.com/acme/resolve-conflicts",
+      number: 41,
+      url: "https://github.com/acme/resolve-conflicts/pull/41",
+    });
+
+    // The drawer's question: which pull requests cannot merge.
+    const status = await json<{ name: string; number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/merge-status`),
+    );
+    assert.equal(status.length, 1);
+    assert.equal(status[0]?.number, 41);
+    assert.equal(status[0]?.state, "conflicted");
+
+    // A conflict with no conversation: there is no agent to hand it to.
+    const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(noRun.status, 400);
+
+    // The card's work run. Runner executor keeps the queued run parked,
+    // so this test never spawns an agent.
+    const pipeline = await json<{ stages: { id: string }[] }>(await app.request(`/api/projects/${project.id}/pipeline`));
+    await ctx.db.insert(agentRuns).values({
+      featureId: feature.id,
+      stageId: pipeline.stages[0]!.id,
+      agentProfileId: worker.id,
+      prompt: "build the thing",
+      status: "succeeded",
+      executor: "runner",
+      cliSessionId: "conflict-sess",
+    });
+
+    const started = await json<{ id: string; kind: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
+      await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" }),
+    );
+    assert.equal(started.kind, "rebase");
+    assert.equal(started.agentProfileId, worker.id, "the card's own agent resolves");
+    assert.equal(started.cliSessionId, "conflict-sess", "inside the work conversation, where the intent lives");
+    assert.match(started.prompt, /rebase/i);
+    assert.match(started.prompt, /#41/);
+    assert.deepEqual(asked.at(-1), { owner: "acme", repo: "resolve-conflicts", prNumber: 41 });
+
+    // One card, one agent: the queued rebase run holds the lock.
+    const busy = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(busy.status, 409);
+
+    // A stale drawer cannot start a rebase nothing needs: the server
+    // asks GitHub again, and a clean pull request refuses.
+    await ctx.db.delete(agentRuns).where(eq(agentRuns.id, started.id));
+    mergeAnswer = "clean";
+    const clean = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
+    assert.equal(clean.status, 409);
+  } finally {
+    if (previousGitHubApp) ctx.githubApp = previousGitHubApp;
+    else delete ctx.githubApp;
+  }
+});
+
+/**
  * Publishing is the half of "the agent opens a pull request" that the
  * agent does not do. The agent commits inside the worktree; the server
  * pushes and opens the pull requests, because an agent can read

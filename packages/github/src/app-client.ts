@@ -5,6 +5,7 @@ import type {
   GitHubClient,
   GitHubPublisher,
   GitHubRepository,
+  MergeStateSummary,
   OpenPullRequest,
   PullRequestInput,
   PullRequestRef,
@@ -120,6 +121,19 @@ export async function checksVia(octokit: Octokit, ref: PullRequestRef): Promise<
   return summarizeChecks(runs.data.check_runs);
 }
 
+export async function mergeStateVia(octokit: Octokit, ref: PullRequestRef): Promise<MergeStateSummary> {
+  const pr = await octokit.pulls.get({
+    owner: ref.owner,
+    repo: ref.repo,
+    pull_number: ref.prNumber,
+  });
+  return summarizeMergeState({
+    state: pr.data.state,
+    merged: pr.data.merged,
+    mergeable: pr.data.mergeable,
+  });
+}
+
 export async function ensurePullRequestVia(octokit: Octokit, input: PullRequestInput): Promise<OpenPullRequest> {
   // Every stage of a card commits to the same branch, so this runs
   // once per stage and must find the pull request the first one
@@ -167,6 +181,10 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
 
   checks(ref: PullRequestRef): Promise<CheckSummary> {
     return checksVia(this.octokit, ref);
+  }
+
+  mergeState(ref: PullRequestRef): Promise<MergeStateSummary> {
+    return mergeStateVia(this.octokit, ref);
   }
 
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest> {
@@ -223,6 +241,21 @@ export function summarizeChecks(runs: CheckRunLike[]): CheckSummary {
     }
   }
   return { total: runs.length, pending, failed };
+}
+
+export interface PullRequestMergeLike {
+  state: string;
+  merged: boolean;
+  /** GitHub computes this lazily; null means it has not finished yet. */
+  mergeable: boolean | null;
+}
+
+/** Exported for testing: maps GitHub's lazy mergeable flag onto an answer. */
+export function summarizeMergeState(pr: PullRequestMergeLike): MergeStateSummary {
+  const open = pr.state === "open" && !pr.merged;
+  if (!open) return { state: "unknown", open: false };
+  if (pr.mergeable === null) return { state: "unknown", open };
+  return { state: pr.mergeable ? "clean" : "conflicted", open };
 }
 
 /** Parses "owner/repo" out of the common GitHub remote URL shapes. */

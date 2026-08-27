@@ -150,8 +150,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // The prompt the user typed is their own line in the conversation,
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
-  // judge's would read as a message nobody sent.
-  if (run.prompt && run.kind !== "judge") await sayAsUser(run.prompt);
+  // judge's and the rebase run's would read as messages nobody sent.
+  if (run.prompt && run.kind === "task") await sayAsUser(run.prompt);
+  if (run.kind === "rebase") {
+    await saySystem(
+      "Resolving merge conflicts: the agent rebases the branch onto the latest base branch, and the server force pushes it with lease protection when the run finishes.",
+    );
+  }
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
@@ -541,6 +546,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   await settleAgentResult(ctx, {
     runId,
+    runKind: run.kind,
     feature,
     stage,
     profile,
@@ -558,6 +564,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 /** The rows a run settlement needs, shared by first runs and resumes. */
 interface RunSettlement {
   runId: string;
+  /** A "rebase" run publishes on finish whatever the stage says. */
+  runKind: (typeof agentRuns.$inferSelect)["kind"];
   feature: typeof features.$inferSelect;
   stage: typeof stages.$inferSelect;
   profile: typeof agentProfiles.$inferSelect;
@@ -668,7 +676,7 @@ export function mergeAgentExecEnv(
  * exactly the way a normal run does.
  */
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
-  const { runId, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
+  const { runId, runKind, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
     settlement;
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
@@ -798,13 +806,19 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // evaluated means a checks_pass or pr_comments_resolved criterion has
   // pull requests to read on the very first evaluation rather than
   // failing once and passing on a later sweep.
+  // A rebase run publishes whatever the stage says: the whole point of
+  // resolving conflicts is putting the rebased branch back on the pull
+  // request, and the resolve route already confirmed one exists.
+  const mustPublish = stage.createPr || runKind === "rebase";
   const publishNotes: string[] = [];
-  if (stage.createPr && !publisher) {
+  if (mustPublish && !publisher) {
     publishNotes.push(
-      "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
+      runKind === "rebase"
+        ? "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish."
+        : "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
     );
   }
-  if (stage.createPr && publisher) {
+  if (mustPublish && publisher) {
     const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
     const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
       featureId: feature.id,
@@ -835,7 +849,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     );
     if (published.length === 0 && failures.length === 0) {
       publishNotes.push(
-        "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
+        runKind === "rebase"
+          ? "The rebase left the branch with no commits beyond the base branch, so there was nothing to push."
+          : "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
       );
     }
   }
@@ -1679,6 +1695,7 @@ async function resumeInterruptedRun(
 
   await settleAgentResult(ctx, {
     runId: run.id,
+    runKind: run.kind,
     feature,
     stage,
     profile,
