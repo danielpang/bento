@@ -180,6 +180,16 @@ fly secrets set -a bento-production \
 rather than the repo root, so flyctl cannot discover it from the
 working directory.
 
+The server answers every request that reached it over TLS with
+`Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`,
+so a custom domain gets HSTS with no extra configuration. It is sent only
+when `x-forwarded-proto` says the browser's own hop was HTTPS, which keeps
+it off a local-mode install on 127.0.0.1.
+
+`includeSubDomains` is the part to think about before submitting the
+domain to hstspreload.org: every host under it then has to speak HTTPS,
+and coming back off the preload list takes months to reach browsers.
+
 Sign in is origin-checked against `BENTO_TRUSTED_ORIGINS`, so an origin
 missing from the list fails with "Invalid origin" even though the page
 loads. Keeping the fly.dev origin in the list leaves a spare door if
