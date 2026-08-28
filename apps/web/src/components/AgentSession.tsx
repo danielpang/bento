@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
 import { forgetsBetweenRuns, hasNoLiveTranscript, modelGuidanceFor, type AgentEvent } from "@bento/core";
@@ -533,29 +534,15 @@ export function AgentSession({
         the newest entry hands the pane back to "follow the latest",
         which is also where it snaps when a new run starts.
       */}
-      {runs.length > 0 && (
+      {runs.length > 0 && viewedRun && (
         <div className="session-runs">
-          <select
-            className="select run-picker"
-            aria-label="Run shown in the conversation"
-            value={viewedRun?.id ?? ""}
-            onChange={(e) => setViewedRunId(e.target.value === latestRun?.id ? null : e.target.value)}
-          >
-            {runs.map((run) => {
-              // A native option cannot carry a styled dot, so the dot
-              // is a character: colour carries the outcome, the stage
-              // names the work, and the timestamp tells three red
-              // "Code review" attempts apart. Agent and cost live in
-              // the transcript the pick reveals.
-              const stage = stages?.find((s) => s.id === run.stageId)?.name;
-              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
-              return (
-                <option key={run.id} value={run.id}>
-                  {runDotChar(run.status)} {stage ?? agent} · {runTime(run.queuedAt)}
-                </option>
-              );
-            })}
-          </select>
+          <RunPicker
+            runs={runs}
+            profiles={profiles}
+            stages={stages}
+            value={viewedRun.id}
+            onValueChange={(id) => setViewedRunId(id === latestRun?.id ? null : id)}
+          />
         </div>
       )}
       {latestRun ? (
@@ -1028,19 +1015,68 @@ export function runDot(status: string): "succeeded" | "failed" | "cancelled" | "
 }
 
 /**
- * The same mapping for the one place CSS cannot reach: a native
- * select's options, where the dot has to be a character. Blue is
- * anything still in motion; a stopped run gets the hollow circle.
+ * Which run the conversation is showing.
+ *
+ * A native select cannot carry a CSS dot, which is why this used to be
+ * a coloured emoji in each option. The menu is the same control the
+ * project picker uses, so each row can wear the same 6px status dot
+ * the sessions list already uses: colour still carries the outcome,
+ * the stage names the work, and the timestamp tells three red
+ * "Code review" attempts apart.
  */
-function runDotChar(status: string): string {
-  switch (runDot(status)) {
-    case "succeeded":
-      return "\u{1F7E2}"; // green circle
-    case "failed":
-      return "\u{1F534}"; // red circle
-    case "cancelled":
-      return "⚪"; // hollow circle
-    default:
-      return "\u{1F535}"; // blue circle
-  }
+function RunPicker({
+  runs,
+  profiles,
+  stages,
+  value,
+  onValueChange,
+}: {
+  runs: AgentRun[];
+  profiles: AgentProfile[];
+  stages?: Stage[];
+  value: string;
+  onValueChange: (id: string) => void;
+}) {
+  const selected = runs.find((run) => run.id === value) ?? runs[0];
+  const selectedCaption = selected ? runCaption(selected, profiles, stages) : "";
+  const selectedStatus = selected ? runWords(selected.status) : "";
+
+  return (
+    <Menu.Root>
+      <Menu.Trigger
+        className="select run-picker"
+        aria-label={
+          selected
+            ? `Run shown in the conversation: ${selectedStatus}, ${selectedCaption}`
+            : "Run shown in the conversation"
+        }
+      >
+        {selected && <RunStatusDot status={selected.status} />}
+        {selected && <span className="run-picker-label">{selectedCaption}</span>}
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Content className="picker-menu run-picker-menu" align="start" sideOffset={4} data-portal-layer="">
+          <Menu.RadioGroup className="picker-group" value={value} onValueChange={onValueChange}>
+            {runs.map((run) => (
+              <Menu.RadioItem key={run.id} value={run.id} className="picker-item">
+                <RunStatusDot status={run.status} />
+                <span className="visually-hidden">{runWords(run.status)}. </span>
+                <span className="picker-item-name">{runCaption(run, profiles, stages)}</span>
+              </Menu.RadioItem>
+            ))}
+          </Menu.RadioGroup>
+        </Menu.Content>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}
+
+function runCaption(run: AgentRun, profiles: AgentProfile[], stages: Stage[] | undefined): string {
+  const stage = stages?.find((s) => s.id === run.stageId)?.name;
+  const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
+  return `${stage ?? agent} · ${runTime(run.queuedAt)}`;
+}
+
+function RunStatusDot({ status }: { status: string }) {
+  return <span className="dot" data-state={runDot(status)} aria-hidden="true" />;
 }

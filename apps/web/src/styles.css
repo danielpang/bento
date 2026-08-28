@@ -3679,8 +3679,23 @@ button.session-expand[aria-pressed="true"] {
   gap: 8px;
 }
 .run-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
   min-width: 0;
+  width: 100%;
+  text-align: left;
+}
+.run-picker-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-picker-menu {
+  min-width: var(--radix-dropdown-menu-trigger-width);
+  max-width: min(420px, calc(100vw - 24px));
 }
 
 /*
@@ -4162,6 +4177,9 @@ button.session-expand[aria-pressed="true"] {
   border-radius: var(--radius);
   background: var(--panel-raised);
   box-shadow: 0 10px 30px var(--shadow-2);
+  /* Portalled to the body. The card drawer is z-index 20, so without
+     this a run list opened from inside it paints under the panel. */
+  z-index: 30;
 }
 .picker-group {
   display: flex;
@@ -4189,7 +4207,8 @@ button.session-expand[aria-pressed="true"] {
   text-decoration: none;
   cursor: pointer;
 }
-.picker-item:hover {
+.picker-item:hover,
+.picker-item[data-highlighted] {
   background: var(--bg);
 }
 .picker-item[aria-checked="true"] {
