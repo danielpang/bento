@@ -1149,8 +1149,15 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  /* Seven-column boards squeeze lanes to the 192px floor, where
+     status, spend, and the PR chip no longer fit on one line. Wrap
+     rather than overflow: a chip hanging off the card was painting
+     into the gutter. */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
+.card-meta .status,
 .card-meta .chip {
   flex: none;
   white-space: nowrap;
@@ -1158,10 +1165,16 @@ button {
 
 .card-meta-end {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   flex: none;
   min-width: 0;
+  max-width: 100%;
+  /* Stay on the right when the row wraps, not only when it shares a
+     line with the status. */
+  margin-left: auto;
 }
 
 .card-spend {
