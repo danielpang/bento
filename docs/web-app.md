@@ -222,7 +222,7 @@ The console updates itself: it subscribes to `/api/board/:id/events`, a server-s
 
 ## Icons, and why their URLs carry a hash
 
-The icons live in `apps/web/public`, so their names never change: `/favicon.svg` is `/favicon.svg` forever while the bytes behind it move. A short `max-age` is not what decides whether a favicon updates. Browsers keep favicons in a store of their own, keyed by origin, and consult it long past any expiry; the deployment serves these with no ETag and no `Last-Modified`, so there is not even a cheap revalidation to fall back on. app.usebento.dev drew a replaced icon for months while serving the correct bytes the whole time.
+The icons live in `apps/web/public`, so their names never change: `/favicon.svg` is `/favicon.svg` forever while the bytes behind it move. A short `max-age` is not what decides whether a favicon updates. Browsers keep favicons in a store of their own, keyed by origin, and consult it long past any expiry; the deployment serves these with no ETag and no `Last-Modified`, so there is not even a cheap revalidation to fall back on. The hosted console drew a replaced icon for months while serving the correct bytes the whole time.
 
 So a Vite plugin in `apps/web/vite.config.ts` stamps every icon link in `index.html`, and every icon in `site.webmanifest`, with a hash of the file it points at. Change an icon, rebuild, and the URL moves on its own. Nothing to remember to bump.
 
