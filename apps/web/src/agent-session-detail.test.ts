@@ -185,7 +185,7 @@ test("the run picker wears a CSS status dot, not a colour emoji", () => {
   withStorage(storageWithout(), () => {
     const html = renderSession([run("succeeded")]);
     assert.match(html, /class="dot"[^>]*data-state="succeeded"/);
-    assert.match(html, /class="run-picker"/);
+    assert.match(html, /class="select run-picker"/);
     assert.doesNotMatch(html, /\u{1F7E2}/u);
     assert.doesNotMatch(html, /\u{1F534}/u);
     assert.doesNotMatch(html, /\u{1F535}/u);
