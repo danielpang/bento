@@ -7,6 +7,7 @@ import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
 import { activeOrg, actorMiddleware, maybeActor } from "./middleware/actor.js";
 import { tenantMiddleware } from "./middleware/tenant.js";
+import { securityHeaders } from "./security-headers.js";
 import { artifactRoutes } from "./routes/artifacts.js";
 import { boardEventRoutes, runRoutes } from "./routes/runs.js";
 import { featureRoutes } from "./routes/features.js";
@@ -70,6 +71,11 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     console.error(`unhandled error on ${c.req.method} ${c.req.path}:`, err);
     return c.json({ error: "internal server error" }, 500);
   });
+
+  // Registered before everything, so it reaches the console shell and
+  // the static assets as well as the API. See security-headers.ts for
+  // why it is conditional.
+  app.use("*", securityHeaders());
 
   // CORS must be registered before the routes it covers. set-auth-token
   // has to be exposed or browsers silently drop the bearer token.
