@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { internalPath } from "./internal-path.js";
 
-const HERE = "https://app.usebento.dev";
+const HERE = "https://app.usebento.ai";
 
 test("a path inside the app is kept whole", () => {
   assert.equal(internalPath("/accept-invitation?id=abc123", HERE), "/accept-invitation?id=abc123");
@@ -26,7 +26,7 @@ test("anything that resolves off this origin falls back to the board", () => {
     "/\n/evil.com",
     "https://evil.com",
     "http://evil.com/path",
-    "//evil.com/\\@app.usebento.dev",
+    "//evil.com/\\@app.usebento.ai",
     "javascript:alert(1)",
     "data:text/html,<script>alert(1)</script>",
   ]) {
@@ -35,8 +35,8 @@ test("anything that resolves off this origin falls back to the board", () => {
 });
 
 test("a lookalike host is not this origin", () => {
-  assert.equal(internalPath("https://app.usebento.dev.evil.com/x", HERE), "/");
-  assert.equal(internalPath("https://notapp.usebento.dev/x", HERE), "/");
+  assert.equal(internalPath("https://app.usebento.ai.evil.com/x", HERE), "/");
+  assert.equal(internalPath("https://notapp.usebento.ai/x", HERE), "/");
 });
 
 test("an absolute address on this very origin is reduced to its path", () => {

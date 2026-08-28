@@ -16,10 +16,10 @@ import react from "@vitejs/plugin-react";
  * ETag and no Last-Modified, so there is not even a cheap revalidation to
  * fall back on. The result is a tab that keeps drawing an icon that was
  * replaced months ago, on a deployment serving the correct bytes the whole
- * time. That is not hypothetical: it is what app.usebento.dev was doing.
+ * time. That is not hypothetical: it is what the hosted console was doing.
  *
  * A changed file therefore has to mean a changed URL. `?v=<hash>` is the
- * whole mechanism, and it is what usebento.dev already gets for free from
+ * whole mechanism, and it is what usebento.ai already gets for free from
  * Next, which fingerprints its icon links with a deployment id.
  *
  * Derived from the bytes rather than written by hand, because a version

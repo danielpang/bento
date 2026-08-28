@@ -15,7 +15,7 @@
  * The console's footer and menu send people to the marketing changelog,
  * not this page. This file still feeds `/changelog` for old bookmarks.
  */
-export const CHANGELOG_URL = "https://usebento.dev/changelog";
+export const CHANGELOG_URL = "https://usebento.ai/changelog";
 
 export interface ChangelogEntry {
   /** The anchor this entry answers to. Never change a published one. */
