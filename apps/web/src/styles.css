@@ -1462,17 +1462,18 @@ button {
  * is space, not another element.
  */
 /*
- * First-line slot for the status mark. The name is 11px on a 16px
- * line; without this the 6px dot sat on the top of the two-line
- * block and read as hanging off the shoulder of the title.
+ * Status mark for a requirement row. The name and detail are two
+ * lines; aligning the mark to the start of the block left the 6px
+ * dot on the shoulder of the title. Centre it on the row so it
+ * sits in the middle of the two-line card.
  */
 .gate-check-mark {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: none;
+  align-self: center;
   width: 6px;
-  height: 16px;
 }
 
 .gate-tick {
