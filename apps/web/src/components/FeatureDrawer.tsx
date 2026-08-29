@@ -696,7 +696,7 @@ export function FeatureDrawer({
             card waits, explained itself with blank space. */}
         {feature.currentStageId && !finished && (
           <section className="section">
-            <span className="label">What has to happen here</span>
+            <span className="label">Requirements</span>
             {detailsPending ? (
               <div className="skeleton-stack">
                 <div className="gate-check" aria-hidden="true">
@@ -715,19 +715,21 @@ export function FeatureDrawer({
             ) : gate && gate.checks.length > 0 ? (
               gate.checks.map((check, i) => (
                 <div key={check.id} className="gate-check">
-                  {check.status === "passed" ? (
-                    /*
-                     * Keyed on the status so the check draws when a
-                     * requirement passes and not on every re-render of
-                     * the drawer. Staggered down the list, which makes
-                     * the order they cleared in visible: with four rows
-                     * settling at once, that ordering is the only thing
-                     * saying which one was waiting on the others.
-                     */
-                    <GateTick key={`${check.id}-passed`} index={i} />
-                  ) : (
-                    <span className="dot" data-state={check.status === "failed" ? "failed" : "gated"} />
-                  )}
+                  <span className="gate-check-mark">
+                    {check.status === "passed" ? (
+                      /*
+                       * Keyed on the status so the check draws when a
+                       * requirement passes and not on every re-render of
+                       * the drawer. Staggered down the list, which makes
+                       * the order they cleared in visible: with four rows
+                       * settling at once, that ordering is the only thing
+                       * saying which one was waiting on the others.
+                       */
+                      <GateTick key={`${check.id}-passed`} index={i} />
+                    ) : (
+                      <span className="dot" data-state={check.status === "failed" ? "failed" : "gated"} />
+                    )}
+                  </span>
                   <span className="gate-check-text">
                     <span className="gate-check-name">{criterionName(check.criterion.type)}</span>
                     <br />

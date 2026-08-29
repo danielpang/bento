@@ -1461,9 +1461,24 @@ button {
  * rows keeps one text edge. It encroaches 3px into an 8px gap, which
  * is space, not another element.
  */
+/*
+ * Status mark for a requirement row. The name and detail are two
+ * lines; aligning the mark to the start of the block left the 6px
+ * dot on the shoulder of the title. Centre it on the row so it
+ * sits in the middle of the two-line card.
+ */
+.gate-check-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  align-self: center;
+  width: 6px;
+}
+
 .gate-tick {
   flex: none;
-  margin: -1px -3px 0;
+  margin: 0 -3px;
 }
 
 .gate-tick path {
@@ -1629,6 +1644,7 @@ button {
   font-family: var(--sans);
   font-weight: 600;
   font-size: 11px;
+  line-height: 16px;
   color: var(--text);
   overflow-wrap: anywhere;
 }
