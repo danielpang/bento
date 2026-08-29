@@ -3072,6 +3072,162 @@ button {
     grid-template-columns: 1fr;
   }
 }
+/*
+ * Completions: one column per bucket, the brand hue carrying the only
+ * series. Text stays in text tokens; the window picker is ordinary
+ * buttons above the chart, not a chart mark.
+ */
+.spend-completions {
+  margin: 36px 0 0;
+}
+.spend-completions-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.spend-completions-title {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.spend-range {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.spend-range button {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.spend-range button:hover {
+  color: var(--text);
+}
+.spend-range button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--brand) 16%, transparent);
+  color: var(--text);
+}
+.spend-completions-total {
+  margin: 10px 0 0;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.spend-chart {
+  margin-top: 14px;
+}
+.spend-chart[data-loading] .spend-chart-plot {
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+}
+.spend-chart-plot {
+  position: relative;
+  height: 160px;
+  border-bottom: 1px solid var(--line-bright);
+}
+.spend-chart-gridline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--line);
+  pointer-events: none;
+}
+.spend-chart-gridline span {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.spend-chart-bars {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+}
+.spend-chart-slot {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: default;
+}
+.spend-chart-bar {
+  width: min(70%, 24px);
+  background: var(--brand);
+  border-radius: 4px 4px 0 0;
+}
+.spend-chart-bar:not([data-empty]) {
+  min-height: 3px;
+}
+.spend-chart-slot:hover .spend-chart-bar:not([data-empty]),
+.spend-chart-slot:focus-visible .spend-chart-bar:not([data-empty]) {
+  filter: brightness(1.15);
+}
+.spend-chart-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  box-shadow: 0 2px 8px var(--shadow-1);
+  font-family: var(--sans);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+.spend-chart-tip[data-edge="start"] {
+  transform: translateX(-8px);
+}
+.spend-chart-tip[data-edge="end"] {
+  transform: translateX(calc(-100% + 8px));
+}
+.spend-chart-tip strong {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.spend-chart-tip span {
+  color: var(--text-dim);
+}
+.spend-chart-axis {
+  display: flex;
+  margin-top: 6px;
+}
+.spend-chart-axis span {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
 .sessions-list {
   display: flex;
   flex-direction: column;

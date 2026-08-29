@@ -3186,6 +3186,90 @@ test("usage ignores judge runs and in-flight runs", async () => {
   assert.equal(untouched.costUsd, null);
 });
 
+/**
+ * The completions chart counts a card once, at its latest completion,
+ * and only while it is still done. A reopened card leaves the chart
+ * the same way it leaves the Done lane, and a card finished twice is
+ * one completion, not two.
+ */
+test("completions count done cards once, at their latest completion", async () => {
+  const { project } = await setupProject("completions");
+  const now = Date.now();
+  const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000);
+  const fortyDaysAgo = new Date(now - 40 * 24 * 60 * 60 * 1000);
+
+  const doneNow = await createFeature(project.id, "done recently");
+  const reopened = await createFeature(project.id, "done then reopened");
+  const doneTwice = await createFeature(project.id, "done twice");
+  const doneLongAgo = await createFeature(project.id, "done long ago");
+  await createFeature(project.id, "never finished");
+
+  const finish = (featureId: string, at: Date) => ({
+    featureId,
+    kind: "status_changed" as const,
+    fromStatus: "active",
+    toStatus: "done",
+    trigger: "manual" as const,
+    at,
+  });
+  await ctx.db.insert(featureEvents).values([
+    finish(doneNow.id, twoHoursAgo),
+    finish(reopened.id, twoHoursAgo),
+    finish(doneTwice.id, fortyDaysAgo),
+    finish(doneTwice.id, twoHoursAgo),
+    finish(doneLongAgo.id, fortyDaysAgo),
+  ]);
+  for (const id of [doneNow.id, doneTwice.id, doneLongAgo.id]) {
+    await ctx.db.update(features).set({ status: "done" }).where(eq(features.id, id));
+  }
+  // Reopened after finishing: the done event stays in the log, but the
+  // card is active again and must not be counted.
+  await ctx.db.update(features).set({ status: "active" }).where(eq(features.id, reopened.id));
+
+  type Completions = {
+    range: string;
+    bucketUnit: string;
+    total: number;
+    buckets: { start: string; completed: number }[];
+  };
+
+  const week = await json<Completions>(
+    await app.request(`/api/projects/${project.id}/completions?range=1w`),
+  );
+  assert.equal(week.bucketUnit, "day");
+  assert.equal(week.buckets.length, 7, "a week is seven day buckets, empty days included");
+  assert.equal(week.total, 2, "the recent card and the twice-done card, nothing else");
+  assert.equal(
+    week.buckets.reduce((sum, b) => sum + b.completed, 0),
+    week.total,
+    "the headline total is the sum of the bars",
+  );
+  const starts = week.buckets.map((b) => Date.parse(b.start));
+  assert.deepEqual(starts, [...starts].sort((a, b) => a - b), "buckets arrive oldest first");
+
+  const day = await json<Completions>(
+    await app.request(`/api/projects/${project.id}/completions?range=1d`),
+  );
+  assert.equal(day.bucketUnit, "hour");
+  assert.equal(day.buckets.length, 24);
+  assert.equal(day.total, 2, "both fresh completions fall inside the last day");
+
+  const year = await json<Completions>(
+    await app.request(`/api/projects/${project.id}/completions?range=1y`),
+  );
+  assert.equal(year.bucketUnit, "month");
+  assert.equal(year.buckets.length, 12);
+  assert.equal(year.total, 3, "the old completion appears, and the twice-done card still counts once");
+
+  const defaulted = await json<Completions>(await app.request(`/api/projects/${project.id}/completions`));
+  assert.equal(defaulted.range, "1m", "no range asked for means the last month");
+  assert.equal(defaulted.buckets.length, 30);
+  assert.equal(defaulted.total, 2, "a forty day old completion is outside the month");
+
+  const bad = await app.request(`/api/projects/${project.id}/completions?range=2w`);
+  assert.equal(bad.status, 400, "an unknown window is refused, not guessed at");
+});
+
 test("webhooks are rejected without a valid signature", async () => {
   const res = await app.request("/api/webhooks/github", {
     method: "POST",
