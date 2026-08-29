@@ -154,6 +154,47 @@ export interface McpServerPatch {
   scopes?: string | null;
 }
 
+/**
+ * An inbound MCP connection: a token an outside agent presents to
+ * Bento's own MCP server. The raw token appears only in the create
+ * response; rows carry a masked hint.
+ */
+export interface McpConnection {
+  id: string;
+  name: string;
+  scope: "organization" | "projects";
+  /** The pinned projects; name is null when one has left the organization. */
+  projects: { id: string; name: string | null }[];
+  tokenHint: string;
+  mine: boolean;
+  /** For an admin reading a teammate's connection, who owns it. */
+  ownerName: string | null;
+  lastUsedAt: string | null;
+  requestCount: number;
+  createdAt: string;
+}
+
+export interface McpConnectionList {
+  canManage: boolean;
+  connections: McpConnection[];
+}
+
+export interface McpConnectionInput {
+  name: string;
+  scope: "organization" | "projects";
+  projectIds?: string[];
+}
+
+export interface McpConnectionCreated {
+  id: string;
+  name: string;
+  scope: "organization" | "projects";
+  projectIds: string[];
+  tokenHint: string;
+  /** Shown once; never retrievable again. */
+  token: string;
+}
+
 export interface LinearTeamOption {
   id: string;
   key: string;
@@ -638,6 +679,21 @@ export class BentoClient {
 
   disconnectMcpUserCredential(id: string) {
     return this.request<{ ok: boolean }>(`/api/mcp/${id}/user-credential`, { method: "DELETE" });
+  }
+
+  listMcpConnections() {
+    return this.request<McpConnectionList>("/api/mcp-connections");
+  }
+
+  createMcpConnection(input: McpConnectionInput) {
+    return this.request<McpConnectionCreated>("/api/mcp-connections", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteMcpConnection(id: string) {
+    return this.request<{ ok: boolean }>(`/api/mcp-connections/${id}`, { method: "DELETE" });
   }
 
   slackStatus() {

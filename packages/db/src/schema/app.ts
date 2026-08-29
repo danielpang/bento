@@ -1048,6 +1048,48 @@ export const mcpRunGrants = pgTable(
   ],
 );
 
+/**
+ * An inbound MCP connection: a token an outside agent presents to
+ * Bento's own MCP server (/api/mcp-server) to create cards and read
+ * their progress. The mirror image of mcp_servers, which is Bento
+ * consuming somebody else's server.
+ *
+ * A connection acts as its creator, within the scope chosen when it
+ * was authorized: the whole organization, or a pinned selection of
+ * projects (the mcp_run_grants serverIds precedent). Only the sha256
+ * of the token is stored; the raw value is shown once at creation and
+ * never again.
+ */
+export const mcpConnections = pgTable(
+  "mcp_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** The member this connection acts as. Their departure ends it. */
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /**
+     * "organization" reaches every project the team has, now and later;
+     * "projects" reaches only projectIds, re-checked live per request so
+     * a project that leaves the organization drops out of scope.
+     */
+    scope: text("scope", { enum: ["organization", "projects"] }).notNull(),
+    projectIds: jsonb("project_ids").$type<string[]>().notNull().default([]),
+    tokenHash: text("token_hash").notNull(),
+    /** Masked tail so the UI can say which token a row is. */
+    tokenHint: text("token_hint").notNull().default(""),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    requestCount: integer("request_count").notNull().default(0),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("mcp_connections_token_idx").on(t.tokenHash),
+    index("mcp_connections_org_idx").on(t.organizationId),
+  ],
+);
+
 /** One GitHub App installation selected by each hosted organization. */
 export const githubInstallations = pgTable("github_installations", {
   id: uuid("id").primaryKey().defaultRandom(),

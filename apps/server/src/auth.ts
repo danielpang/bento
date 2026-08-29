@@ -6,6 +6,7 @@ import {
   account,
   deviceCode,
   invitation,
+  mcpConnections,
   mcpCredentials,
   mcpRunGrants,
   member,
@@ -286,6 +287,12 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
               await db
                 .delete(mcpCredentials)
                 .where(and(eq(mcpCredentials.organizationId, org.id), eq(mcpCredentials.userId, removed.id)));
+              // Inbound connections act as their creator, so a removed
+              // member's stop resolving immediately (the live membership
+              // re-read); deleting the rows is the same hygiene.
+              await db
+                .delete(mcpConnections)
+                .where(and(eq(mcpConnections.organizationId, org.id), eq(mcpConnections.ownerId, removed.id)));
               await db
                 .update(mcpRunGrants)
                 .set({ revokedAt: new Date() })

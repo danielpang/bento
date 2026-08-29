@@ -43,6 +43,7 @@ const TENANT_TABLES = [
   "mcp_servers",
   "mcp_credentials",
   "mcp_run_grants",
+  "mcp_connections",
 ];
 
 let pool: pg.Pool;

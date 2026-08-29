@@ -2,6 +2,8 @@
 
 An organization defines its remote MCP servers once, and every agent Bento runs gets them, on every harness that supports MCP. Agents never hold the real credential: each run reaches a server through Bento's gateway with a token that lives only as long as the run.
 
+Bento also works in the other direction: it is itself an MCP server that outside agents can connect to. That is the last section of this page.
+
 ## What an agent sees
 
 Nothing about the real server. At run start Bento writes each harness's MCP config pointing every enabled server at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway authenticates that token, attaches the organization's (or the acting member's) real credential, and proxies the traffic upstream. When the run settles the token is revoked. So a prompt injection that reads the config out of the sandbox gets a token that dies with the run and never leaves the gateway, not an API key or an OAuth token.
@@ -60,3 +62,36 @@ OAuth state is signed with `BENTO_SECRET_KEY` (or `BETTER_AUTH_SECRET`), the sam
 ## What is not here yet
 
 Per-project server enablement (a server is available to every project in the organization), stdio (command) servers, and delivering MCP servers to runner-executed runs on a member's own machine. See the plan for the follow-ups.
+
+## Bento as an MCP server
+
+The mirror image of everything above: an agent running outside Bento (Claude Code on a laptop, an agent in some other product) connects to `/api/mcp-server` and can put cards on the board and follow what happens to them. Currently behind the beta testers flag.
+
+### Authorizing a connection
+
+Settings, then MCP, under "Connect an agent to Bento". Any member may authorize a connection; it acts as them. Creating one asks two things:
+
+- **A name**, so the row means something later ("Claude Code on my laptop").
+- **What the agent can reach.** Either the whole team (every project the organization has, including ones created later), or a selection of projects, one or several, pinned at authorization. A pinned project that later leaves the organization drops out of reach on its own.
+
+The create hands back a token once. Only its hash is stored, so a lost token means revoking the connection and making a new one. Revoking takes effect on the connection's next request, as does removal from the organization: membership is re-read live, and leaving the team also deletes the member's connections. Owners and admins see every connection and can revoke any of them; members see and revoke their own.
+
+### Connecting an agent
+
+The transport is Streamable HTTP, stateless, with the token as a bearer Authorization header:
+
+```
+claude mcp add --transport http bento https://your-bento/api/mcp-server \
+  --header "Authorization: Bearer bmcp_..."
+```
+
+### What the agent gets
+
+Four tools, scoped to the connection:
+
+- `list_projects`: the projects the connection reaches.
+- `create_feature`: a new card, in the backlog by default; `start: true` moves it into the first pipeline stage instead, exactly as a Slack mention does, so the project's agents can pick it up.
+- `get_feature_status`: one card's progress: status, current stage and position in the pipeline, the latest agent run, pull requests, and recent history.
+- `list_features`: a project's board, filterable by status.
+
+Every refusal, including a bad token, answers the same "not found" the rest of the API speaks, so a probe learns nothing about what exists.
