@@ -684,6 +684,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ],
     ["GET", `/api/projects/${project.id}/sessions`],
     ["GET", `/api/projects/${project.id}/usage`],
+    ["GET", `/api/projects/${project.id}/completions`],
     ["GET", `/api/projects/${project.id}/board/plain`],
     ["GET", `/api/projects/${project.id}/pipeline/plain`],
     ["GET", `/api/projects/${project.id}/repositories`],

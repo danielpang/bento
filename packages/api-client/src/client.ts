@@ -3,6 +3,7 @@ import type {
   AgentProfile,
   AgentRun,
   AgentTool,
+  CompletionRange,
   Feature,
   FeatureChanges,
   FeatureMergeStatus,
@@ -11,6 +12,7 @@ import type {
   GateState,
   Pipeline,
   Project,
+  ProjectCompletions,
   ProjectSession,
   ProjectUsage,
   Repository,
@@ -1004,6 +1006,14 @@ export class BentoClient {
    */
   getUsage(projectId: string) {
     return this.request<ProjectUsage>(`/api/projects/${projectId}/usage`);
+  }
+
+  /**
+   * Cards completed over the asked-for window, bucketed server-side so
+   * the chart never re-derives week or month boundaries.
+   */
+  getCompletions(projectId: string, range: CompletionRange) {
+    return this.request<ProjectCompletions>(`/api/projects/${projectId}/completions?range=${range}`);
   }
 
   listProfiles() {

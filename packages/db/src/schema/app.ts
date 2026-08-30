@@ -354,6 +354,13 @@ export const featureEvents = pgTable(
   },
   (t) => [
     index("feature_events_feature_at_idx").on(t.featureId, t.at),
+    // The spend page counts completions over time: for each done card,
+    // the latest status_changed-to-done event. A partial index keeps
+    // that lookup on completion rows only, instead of walking every
+    // stage move a busy card has ever made.
+    index("feature_events_completions_idx")
+      .on(t.featureId, t.at)
+      .where(sql`${t.kind} = 'status_changed' and ${t.toStatus} = 'done'`),
     check(
       "feature_events_kind_shape",
       sql`(${t.kind} = 'stage_moved' and ${t.fromStatus} is null and ${t.toStatus} is null)

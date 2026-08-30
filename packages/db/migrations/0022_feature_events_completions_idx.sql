@@ -1,0 +1,1 @@
+CREATE INDEX "feature_events_completions_idx" ON "feature_events" USING btree ("feature_id","at") WHERE "feature_events"."kind" = 'status_changed' and "feature_events"."to_status" = 'done';
