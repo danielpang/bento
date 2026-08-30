@@ -98,6 +98,28 @@ export interface SlackConnection {
   interactivityUrl?: string | null;
 }
 
+export interface McpCatalogEntry {
+  /** Reverse-DNS registry name, stable across versions. */
+  name: string;
+  title: string;
+  description: string;
+  url: string;
+  transport: "http" | "sse";
+  /** Publishing namespace, so a wrapper does not read as the vendor. */
+  publisher: string;
+  /** Suggested tool name, derived from the registry name. */
+  slug: string;
+  /** Already in this team's registry (or the caller's own servers). */
+  added: boolean;
+}
+
+export interface McpCatalog {
+  /** False when the registry could not be read; the list is then empty. */
+  reachable: boolean;
+  canManage: boolean;
+  entries: McpCatalogEntry[];
+}
+
 export interface McpServerStatus {
   id: string;
   name: string;
@@ -597,6 +619,11 @@ export class BentoClient {
 
   syncLinearNow() {
     return this.request<{ ok: boolean }>("/api/linear/sync", { method: "POST" });
+  }
+
+  mcpCatalog(search?: string) {
+    const query = search ? `?search=${encodeURIComponent(search)}` : "";
+    return this.request<McpCatalog>(`/api/mcp/catalog${query}`);
   }
 
   mcpStatus() {

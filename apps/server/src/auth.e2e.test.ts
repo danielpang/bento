@@ -2636,3 +2636,50 @@ test("the Slack webhook demands a valid signature", async () => {
     else mutableEnv.SLACK_SIGNING_SECRET = original;
   }
 });
+
+/**
+ * The catalog is public data, but the "added" flag beside each entry is
+ * not: it says what this team already runs. One org's additions must
+ * never show as added to another, or the list quietly reports a
+ * neighbour's tooling.
+ */
+test("the catalog's added flag does not cross organizations", async () => {
+  const one = await jsonPost("/api/auth/sign-up/email", {
+    email: "cat-one@bento.test",
+    password: "correct-horse-battery",
+    name: "One",
+  });
+  const two = await jsonPost("/api/auth/sign-up/email", {
+    email: "cat-two@bento.test",
+    password: "correct-horse-battery",
+    name: "Two",
+  });
+  const oneToken = one.headers.get("set-auth-token")!;
+  const twoToken = two.headers.get("set-auth-token")!;
+  for (const [slug, token] of [["cat-org-one", oneToken], ["cat-org-two", twoToken]] as const) {
+    const org = (await (
+      await jsonPost("/api/auth/organization/create", { name: slug, slug }, token)
+    ).json()) as { id: string };
+    await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  }
+  const as = (token: string) => (path: string, init: RequestInit = {}) =>
+    app.request(path, {
+      ...init,
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+    });
+
+  const url = "https://catalog-shared.example.test/mcp";
+  const added = await as(oneToken)("/api/mcp", {
+    method: "POST",
+    body: JSON.stringify({ name: "Shared", slug: "shared", url, authType: "none" }),
+  });
+  assert.equal(added.status, 201);
+
+  // The catalog answers for both, and neither 500s when the registry is
+  // absent in this harness; the flag is what is under test.
+  const seenByTwo = await as(twoToken)("/api/mcp/catalog");
+  assert.equal(seenByTwo.status, 200, "any member may browse the catalog");
+  const body = (await seenByTwo.json()) as { entries: { url: string; added: boolean }[] };
+  const leaked = body.entries.find((e) => e.url === url && e.added);
+  assert.equal(leaked, undefined, "another organization's server must not read as added");
+});

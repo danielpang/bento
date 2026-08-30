@@ -15,6 +15,7 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
+import { clearCatalogCache } from "./mcp/catalog.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "mcp_test";
@@ -31,6 +32,7 @@ let app: ReturnType<typeof createApp>;
  */
 let upstream: Server;
 let upstreamUrl: string;
+let catalogRegistry: Server;
 const GOOD_KEY = "mcp-key-correct";
 let upstreamRequests: { authorization: string | null; header: Record<string, string | undefined> }[] = [];
 
@@ -42,12 +44,36 @@ before(async () => {
   await admin.end();
   await runMigrations(testUrl);
 
+  // A fixture MCP registry, so the catalog test never depends on the
+  // live public one.
+  catalogRegistry = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        servers: [
+          {
+            server: {
+              name: "com.fixture/docs",
+              title: "Fixture Docs",
+              description: "A catalog fixture",
+              remotes: [{ type: "streamable-http", url: "https://fixture.test/mcp" }],
+            },
+          },
+          { server: { name: "io.github.x/stdio", title: "Stdio only" } },
+        ],
+      }),
+    );
+  });
+  await new Promise<void>((r) => catalogRegistry.listen(0, "127.0.0.1", r));
+  const registryUrl = `http://127.0.0.1:${(catalogRegistry.address() as { port: number }).port}`;
+
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-mcp-"));
   const env = loadEnv({
     BENTO_MODE: "local",
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
+    BENTO_MCP_REGISTRY_URL: registryUrl,
     // The OAuth flow tests below sign a state blob with this.
     BENTO_SECRET_KEY: "mcp-test-state-signing-key-32-chars-min",
   } as NodeJS.ProcessEnv);
@@ -120,6 +146,7 @@ before(async () => {
 
 after(async () => {
   upstream?.close();
+  catalogRegistry?.close();
   await ctx.boss.stop({ close: true, timeout: 1000 });
   await ctx.pool.end();
 });
@@ -456,4 +483,44 @@ test("the callback rejects a missing iss when the authorization server advertise
   assert.equal(server!.issParamSupported, true, "discovery persisted the iss support flag");
   const noIss = await app.request(`/api/mcp/callback/${id}?state=${encodeURIComponent(state)}&code=the-auth-code`);
   assert.match(noIss.headers.get("location") ?? "", /mcp=invalid/, "an omitted iss is refused when advertised");
+});
+
+test("the catalog lists only remote servers, and marks what is already added", async () => {
+  clearCatalogCache();
+  const res = await app.request("/api/mcp/catalog");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    reachable: boolean;
+    entries: { name: string; slug: string; url: string; transport: string; added: boolean }[];
+  };
+  assert.equal(body.reachable, true);
+  // The stdio-only fixture entry must not be offered.
+  assert.deepEqual(body.entries.map((e) => e.name), ["com.fixture/docs"]);
+  const [entry] = body.entries;
+  assert.equal(entry!.slug, "docs");
+  assert.equal(entry!.transport, "http");
+  assert.equal(entry!.added, false, "not added yet");
+
+  // Add it, and the same entry now reads as added rather than offering
+  // a second copy of the same server.
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "Fixture Docs",
+    slug: "docs",
+    url: entry!.url,
+    authType: "none",
+  });
+  assert.equal(created.status, 201);
+  clearCatalogCache();
+  const again = (await (await app.request("/api/mcp/catalog")).json()) as {
+    entries: { added: boolean }[];
+  };
+  assert.equal(again.entries[0]!.added, true, "an added server is marked, not offered twice");
+});
+
+test("the catalog search reaches the registry", async () => {
+  clearCatalogCache();
+  const res = await app.request("/api/mcp/catalog?search=docs");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { entries: unknown[] };
+  assert.equal(body.entries.length, 1);
 });

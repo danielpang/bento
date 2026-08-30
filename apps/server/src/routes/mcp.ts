@@ -9,6 +9,7 @@ import { tenantDb as db } from "../middleware/tenant.js";
 import { maskSecret } from "../secrets.js";
 import { pingMcpServer } from "../mcp/client.js";
 import { safeFetchPolicy } from "../mcp/safe-fetch.js";
+import { fetchCatalog, slugFor } from "../mcp/catalog.js";
 import { discoverOAuth, registerClient, DiscoveryError } from "../mcp/discovery.js";
 import {
   buildAuthorizeUrl,
@@ -167,6 +168,46 @@ export function mcpRoutes(ctx: AppContext) {
       (row) => row.enabled && row.userCredential && !row.userCredential.connected,
     ).length;
     return c.json({ canManage: access.canManage, servers: rows, userConnectionsNeeded });
+  });
+
+  /**
+   * The browsable catalog: what a team can connect, before anyone has
+   * to know a URL. Public registry data, so it needs a signed-in caller
+   * and nothing more, but it does mark which entries this organization
+   * already has so the list reads as a state rather than a menu.
+   *
+   * A registry that will not load answers reachable:false with an empty
+   * list; the console then offers the custom URL form on its own.
+   */
+  routes.get("/catalog", async (c) => {
+    const access = await requireAccess(ctx, c);
+    if (!access.ok) return c.json({ error: "not found" }, 404);
+    const search = c.req.query("search") ?? "";
+    const { entries, reachable } = await fetchCatalog(safeFetchPolicy(ctx.env), {
+      registryUrl: ctx.env.BENTO_MCP_REGISTRY_URL,
+      search,
+    });
+
+    // Mark what is already here, by URL: the same server added by hand
+    // and picked from the catalog is one server, not two.
+    const existing = await db(c, ctx)
+      .select({ url: mcpServers.url, userId: mcpServers.userId })
+      .from(mcpServers)
+      .where(orgFilter(access.organizationId));
+    const me = actor(c);
+    const mine = new Set(
+      existing.filter((row) => !row.userId || row.userId === me).map((row) => normalizeUrl(row.url)),
+    );
+
+    return c.json({
+      reachable,
+      canManage: access.canManage,
+      entries: entries.map((entry) => ({
+        ...entry,
+        slug: slugFor(entry),
+        added: mine.has(normalizeUrl(entry.url)),
+      })),
+    });
   });
 
   /**
@@ -725,6 +766,16 @@ function callbackUrl(ctx: AppContext, serverId: string): string {
 
 function outcome(c: Parameters<typeof actor>[0], result: string) {
   return c.redirect(`/settings?tab=mcp&mcp=${result}`);
+}
+
+/** Compares server URLs ignoring a trailing slash and case in the host. */
+function normalizeUrl(value: string): string {
+  try {
+    const u = new URL(value);
+    return `${u.protocol}//${u.host.toLowerCase()}${u.pathname.replace(/\/$/, "")}${u.search}`;
+  } catch {
+    return value.trim().toLowerCase();
+  }
 }
 
 function orgFilter(organizationId: string | null) {

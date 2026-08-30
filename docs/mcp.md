@@ -6,9 +6,17 @@ An organization defines its remote MCP servers once, and every agent Bento runs 
 
 Nothing about the real server. At run start Bento writes each harness's MCP config pointing every enabled server at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway authenticates that token, attaches the organization's (or the acting member's) real credential, and proxies the traffic upstream. When the run settles the token is revoked. So a prompt injection that reads the config out of the sandbox gets a token that dies with the run and never leaves the gateway, not an API key or an OAuth token.
 
+## Finding a server
+
+Settings, then MCP, opens on "Add a connection": the servers published to the public MCP registry, searchable, each one addable in a click. Picking an entry fills in the name, URL, transport, and tool name, so the only thing left to choose is who connects. Servers that only run as a local command (stdio) are not listed, because Bento reaches servers over the network.
+
+A server no registry carries, an internal company one for instance, goes in through "Add a custom server by URL" below the list.
+
+The catalog is read server side and cached for a few minutes, so the console never calls the registry directly. Point `BENTO_MCP_REGISTRY_URL` at a private registry to offer an internal list instead. If the registry cannot be reached the section says so and the custom URL form still works.
+
 ## Team servers and personal servers
 
-Settings, then MCP. Remote servers only: a URL the sandbox can reach over the gateway, streamable HTTP or SSE. The slug is the tool name agents see (lowercase letters, digits, dashes).
+Remote servers only: a URL the sandbox can reach over the gateway, streamable HTTP or SSE. The slug is the tool name agents see (lowercase letters, digits, dashes).
 
 A server is either the team's or a member's own:
 
@@ -54,6 +62,8 @@ The gateway is reached at `BENTO_MCP_GATEWAY_URL`, which defaults to `BETTER_AUT
 
 - The Docker driver rewrites a localhost base to `host.docker.internal` automatically and adds the host alias to each sandbox.
 - A remote sandbox fleet (Fly Sprites) cannot reach the server's own loopback, so `BENTO_MCP_GATEWAY_URL` must be an address the sandbox can open.
+
+`BENTO_MCP_REGISTRY_URL` overrides where the browsable catalog is read from; it defaults to the official public registry.
 
 OAuth state is signed with `BENTO_SECRET_KEY` (or `BETTER_AUTH_SECRET`), the same key that encrypts stored credentials. Callback and authorize URLs are built from `BETTER_AUTH_URL`.
 

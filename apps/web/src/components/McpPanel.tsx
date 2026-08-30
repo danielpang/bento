@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { BentoClient, McpServerStatus, McpStatus } from "@bento/api-client";
+import type { BentoClient, McpCatalogEntry, McpServerStatus, McpStatus } from "@bento/api-client";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { SecretField } from "./SecretField.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
@@ -76,6 +76,8 @@ export function McpPanel({ client }: { client: BentoClient }) {
 
   return (
     <>
+      <ConnectionCatalog client={client} busy={busy} act={act} canManage={status.canManage} />
+
       <section className="section settings-card">
         <h3 className="settings-title">Your servers and sign-ins</h3>
         <p className="muted">
@@ -189,6 +191,16 @@ function McpServerCard({
   const iConnect = mode === "mine";
   const cred = server.personal ? server.userCredential : perMember ? server.userCredential : server.orgCredential;
   const connected = Boolean(cred?.connected);
+  /**
+   * Red only where this viewer has something to do on this row. A team
+   * card for a per-member server is telling you where the sign in lives,
+   * not reporting a fault: it turns red in Your servers, where the
+   * member can act, and stays quiet here.
+   */
+  const needsMe =
+    !connected &&
+    server.authType !== "none" &&
+    (iConnect || (mode === "team" && !perMember));
   const hint = server.personal ? server.userCredential?.hint ?? null : server.orgCredential?.hint ?? null;
 
   const statusLine = (() => {
@@ -220,7 +232,7 @@ function McpServerCard({
         <strong>{server.name}</strong> <ScopeChip server={server} />
         {!server.enabled && <span className="chip chip-empty">off</span>}
         <p className="muted">{server.url}</p>
-        <p className={!connected && mode !== "governance" && server.authType !== "none" ? "error" : "muted"}>
+        <p className={needsMe ? "error" : "muted"}>
           {statusLine}
         </p>
         {iConnect && server.authType === "api_key" && (
@@ -292,7 +304,18 @@ function McpServerCard({
  * is actually making. Each maps onto authType and credentialScope; the
  * spelling of those two columns is not something to make people learn.
  */
-const CONNECT_CHOICES = [
+/** One "who connects" option, shared by the team and personal sets. */
+interface ConnectChoice {
+  id: string;
+  label: string;
+  help: string;
+  authType: "none" | "api_key" | "oauth";
+  credentialScope: "org" | "user";
+  /** Adds the server as the member's own rather than the team's. */
+  personal?: boolean;
+}
+
+const CONNECT_CHOICES: ConnectChoice[] = [
   // Each member first: it is the default, and the common shape for the
   // SaaS connectors people reach for (Notion, Linear, Drive).
   {
@@ -326,7 +349,27 @@ const CONNECT_CHOICES = [
 ];
 
 /** The choices for a personal server: always the member's own credential. */
-const PERSONAL_CHOICES = [
+/** The catalog's "just me" options: same as the personal form, tagged. */
+const MINE_ONLY_CHOICES: ConnectChoice[] = [
+  {
+    id: "mine_oauth",
+    label: "Only my runs, I sign in",
+    help: "Your own account, on the runs you start. Nobody else gets it.",
+    authType: "oauth" as const,
+    credentialScope: "user" as const,
+    personal: true,
+  },
+  {
+    id: "mine_key",
+    label: "Only my runs, my API key",
+    help: "Stored encrypted for you, used only on your runs.",
+    authType: "api_key" as const,
+    credentialScope: "user" as const,
+    personal: true,
+  },
+];
+
+const PERSONAL_CHOICES: ConnectChoice[] = [
   {
     id: "oauth_user",
     label: "You sign in",
@@ -350,6 +393,184 @@ const PERSONAL_CHOICES = [
   },
 ];
 
+/**
+ * The browsable list of connections, from the public MCP registry.
+ *
+ * This leads the page: picking Notion from a list is the job, and
+ * typing a URL is the fallback for a server no registry carries. An
+ * entry fills in everything mechanical (name, URL, transport, tool
+ * name), so the only decision left is who connects.
+ */
+function ConnectionCatalog({
+  client,
+  busy,
+  act,
+  canManage,
+}: {
+  client: BentoClient;
+  busy: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<void>;
+  canManage: boolean;
+}) {
+  const [entries, setEntries] = useState<McpCatalogEntry[] | null>(null);
+  const [reachable, setReachable] = useState(true);
+  const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
+  const [chosen, setChosen] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await client.mcpCatalog(search);
+      setEntries(res.entries);
+      setReachable(res.reachable);
+    } catch {
+      setEntries([]);
+      setReachable(false);
+    }
+  }, [client, search]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Add a connection</h3>
+      <p className="muted">
+        Servers published to the public MCP registry. Pick one and Bento fills in the rest, or
+        add a custom server by URL below.
+      </p>
+      <form
+        className="actions"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setSearch(query.trim());
+        }}
+      >
+        <input
+          className="input"
+          placeholder="Search connections, like Notion or Sentry"
+          aria-label="Search connections"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button className="btn" type="submit" disabled={busy}>
+          Search
+        </button>
+      </form>
+
+      {entries === null && <p className="muted">Loading connections.</p>}
+      {entries !== null && !reachable && (
+        <p className="muted">
+          The connection registry could not be reached, so there is nothing to browse right now.
+          You can still add a server by URL below.
+        </p>
+      )}
+      {entries !== null && reachable && entries.length === 0 && (
+        <p className="muted">No connections match that search.</p>
+      )}
+
+      {(entries ?? []).map((entry) => (
+        <div className="criterion" key={entry.name}>
+          <div className="criterion-cmd">
+            <strong>{entry.title}</strong> <span className="chip chip-soft">{entry.publisher}</span>
+            {entry.added && <span className="chip">added</span>}
+            {entry.description && <p className="muted">{entry.description}</p>}
+            {chosen === entry.name && (
+              <CatalogConnect
+                entry={entry}
+                canManage={canManage}
+                busy={busy}
+                onCancel={() => setChosen(null)}
+                onAdd={(choice) =>
+                  act(async () => {
+                    await client.createMcpServer({
+                      name: entry.title.slice(0, 120),
+                      slug: entry.slug,
+                      url: entry.url,
+                      transport: entry.transport,
+                      authType: choice.authType,
+                      credentialScope: choice.credentialScope,
+                      personal: choice.personal ?? false,
+                    });
+                    setChosen(null);
+                    await load();
+                  })
+                }
+              />
+            )}
+          </div>
+          {chosen !== entry.name && (
+            <div className="actions">
+              <button
+                className="btn btn-primary"
+                disabled={busy || entry.added}
+                onClick={() => setChosen(entry.name)}
+              >
+                {entry.added ? "Added" : "Add"}
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+/**
+ * The one decision a catalog entry still needs: whose credential it
+ * uses. Everything else came from the registry.
+ */
+function CatalogConnect({
+  entry,
+  canManage,
+  busy,
+  onAdd,
+  onCancel,
+}: {
+  entry: McpCatalogEntry;
+  canManage: boolean;
+  busy: boolean;
+  onAdd: (choice: ConnectChoice) => Promise<void>;
+  onCancel: () => void;
+}) {
+  // An admin can add for the team or just for themselves; a member can
+  // only ever add their own.
+  const choices = canManage ? [...CONNECT_CHOICES, ...MINE_ONLY_CHOICES] : MINE_ONLY_CHOICES;
+  const [choice, setChoice] = useState(choices[0]!.id);
+  const picked = choices.find((c) => c.id === choice) ?? choices[0]!;
+  return (
+    <>
+      <fieldset className="mcp-choices">
+        <legend className="muted">Who connects to {entry.title}</legend>
+        {choices.map((c) => (
+          <label key={c.id} className="mcp-choice">
+            <input
+              type="radio"
+              name={`catalog-${entry.slug}`}
+              checked={choice === c.id}
+              disabled={busy}
+              onChange={() => setChoice(c.id)}
+            />
+            <span>
+              <strong>{c.label}</strong>
+              <span className="muted"> {c.help}</span>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      <div className="actions">
+        <button className="btn btn-primary" disabled={busy} onClick={() => void onAdd(picked)}>
+          Add {entry.title}
+        </button>
+        <button className="btn btn-ghost" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </>
+  );
+}
+
 function AddServerCard({
   client,
   busy,
@@ -362,7 +583,7 @@ function AddServerCard({
   personal?: boolean;
 }) {
   const choices = personal ? PERSONAL_CHOICES : CONNECT_CHOICES;
-  const [open, setOpen] = useState(!personal);
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [choice, setChoice] = useState(choices[0]!.id);
@@ -382,13 +603,13 @@ function AddServerCard({
   const picked = choices.find((c) => c.id === choice) ?? choices[0]!;
   const ready = name.trim() && slug.trim() && url.trim();
 
-  // A personal add is offered as a quiet button until opened, so the
-  // member's own section does not lead with a form.
-  if (personal && !open) {
+  // Offered as a quiet button until opened: the catalog is what leads,
+  // and a custom URL is the fallback for a server no registry lists.
+  if (!open) {
     return (
       <div className="actions" style={{ marginTop: -4, marginBottom: 12 }}>
         <button className="btn" onClick={() => setOpen(true)}>
-          Add your own server
+          {personal ? "Add your own server by URL" : "Add a custom server by URL"}
         </button>
       </div>
     );
