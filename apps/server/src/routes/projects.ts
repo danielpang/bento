@@ -6,6 +6,7 @@ import { gateCriteria, TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR } from "@be
 import {
   agentProfiles,
   agentRuns,
+  featureEvents,
   features,
   pipelines,
   projects,
@@ -67,6 +68,24 @@ const repositoryInput = z.object({
 
 /** Shared by creation and rename, so one door cannot refuse what the other accepts. */
 const projectName = z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/, "name must be one line");
+
+/**
+ * The windows the completions chart offers, each paired with the bucket
+ * that keeps its bar count readable: hours inside a day, days up to a
+ * month, weeks up to six months, months across a year.
+ */
+const COMPLETION_RANGES = ["1d", "1w", "1m", "3m", "6m", "1y"] as const;
+const completionWindows: Record<
+  (typeof COMPLETION_RANGES)[number],
+  { unit: "hour" | "day" | "week" | "month"; buckets: number }
+> = {
+  "1d": { unit: "hour", buckets: 24 },
+  "1w": { unit: "day", buckets: 7 },
+  "1m": { unit: "day", buckets: 30 },
+  "3m": { unit: "week", buckets: 13 },
+  "6m": { unit: "week", buckets: 26 },
+  "1y": { unit: "month", buckets: 12 },
+};
 
 /**
  * Repositories are optional at creation. On a hosted install the person
@@ -725,6 +744,61 @@ export function projectRoutes(ctx: AppContext) {
         })),
       });
     })
+    /**
+     * Cards completed over time, bucketed to fit the asked-for window.
+     * A card counts once, at its latest completion, and only while it
+     * is still done: reopening a card takes it off this chart the same
+     * way it takes it off the Done lane.
+     *
+     * Buckets are generated in SQL so an empty hour is a zero rather
+     * than a hole, and so week and month boundaries are Postgres's
+     * rather than a re-implementation that drifts from them.
+     */
+    .get(
+      "/:id/completions",
+      zValidator("query", z.object({ range: z.enum(COMPLETION_RANGES).default("1m") })),
+      async (c) => {
+        const projectId = c.req.param("id");
+        if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+        const { range } = c.req.valid("query");
+        const { unit, buckets } = completionWindows[range];
+        // Unit and count come from the table above, never the request,
+        // so they are safe to splice into interval literals.
+        const step = sql.raw(`interval '1 ${unit}'`);
+        const truncUnit = sql.raw(`'${unit}'`);
+        const back = sql.raw(String(buckets - 1));
+        const result = await db(c, ctx).execute(sql`
+          select b.bucket as bucket, count(c.completed_at)::int as completed
+          from generate_series(
+            date_trunc(${truncUnit}, now()) - (${back} * ${step}),
+            date_trunc(${truncUnit}, now()),
+            ${step}
+          ) as b(bucket)
+          left join (
+            select max(${featureEvents.at}) as completed_at
+            from ${featureEvents}
+            join ${features} on ${features.id} = ${featureEvents.featureId}
+            where ${features.projectId} = ${projectId}
+              and ${features.status} = 'done'
+              and ${featureEvents.kind} = 'status_changed'
+              and ${featureEvents.toStatus} = 'done'
+            group by ${featureEvents.featureId}
+          ) c on c.completed_at >= b.bucket and c.completed_at < b.bucket + ${step}
+          group by b.bucket
+          order by b.bucket
+        `);
+        const rows = result.rows as { bucket: Date; completed: number }[];
+        return c.json({
+          range,
+          bucketUnit: unit,
+          total: rows.reduce((sum, row) => sum + Number(row.completed), 0),
+          buckets: rows.map((row) => ({
+            start: new Date(row.bucket).toISOString(),
+            completed: Number(row.completed),
+          })),
+        });
+      },
+    )
     .get("/:id/pipeline", async (c) => {
       if (!(await canAccessProject(ctx, c, c.req.param("id")))) return c.json({ error: "not found" }, 404);
       const [pipeline] = await db(c, ctx)

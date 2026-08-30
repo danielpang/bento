@@ -5,6 +5,7 @@ import { compareFeatureSpend, formatFeatureSpend, type SpendSort } from "./spend
 import { createRequestGate } from "../latest-request.js";
 import { useToast } from "./Toasts.js";
 import { SpendPageSkeleton } from "./Skeleton.js";
+import { SpendCompletions } from "./SpendCompletions.js";
 
 /**
  * The project's agent spend, one row per card.
@@ -18,6 +19,9 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [sort, setSort] = useState<SpendSort>("spend-desc");
+  // Counts one refresh cycle; the completions section refetches on it
+  // so both halves of the page move on the same board events.
+  const [tick, setTick] = useState(0);
   const toastRef = useRef(toast);
   toastRef.current = toast;
   const usageGate = useRef(createRequestGate());
@@ -29,6 +33,7 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
       const next = await client.getUsage(projectId);
       if (!usageGate.current.isCurrent(seq)) return;
       setUsage(next);
+      setTick((t) => t + 1);
       setLoadFailed(false);
     } catch (err) {
       if (!usageGate.current.isCurrent(seq)) return;
@@ -89,7 +94,10 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
       ) : rows.length === 0 ? (
         <p className="muted">No cards yet. Add one from the board to start tracking spend.</p>
       ) : (
-        <SpendTable rows={rows} sort={sort} onSort={setSort} />
+        <>
+          <SpendTable rows={rows} sort={sort} onSort={setSort} />
+          <SpendCompletions client={client} projectId={projectId} tick={tick} />
+        </>
       )}
     </div>
   );

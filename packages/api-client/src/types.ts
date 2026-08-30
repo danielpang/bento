@@ -160,6 +160,22 @@ export interface FeatureSpend {
   runsWithoutCost: number;
 }
 
+/** The windows the completions chart can be asked for. */
+export type CompletionRange = "1d" | "1w" | "1m" | "3m" | "6m" | "1y";
+
+/**
+ * Cards completed over one window, bucketed server-side. A card counts
+ * once, at its latest completion, and only while it is still done.
+ * Buckets are contiguous and zero-filled, oldest first; `start` is the
+ * bucket's opening instant in UTC.
+ */
+export interface ProjectCompletions {
+  range: CompletionRange;
+  bucketUnit: "hour" | "day" | "week" | "month";
+  total: number;
+  buckets: { start: string; completed: number }[];
+}
+
 /**
  * One conversation on the sessions page: a card and its run history,
  * summarized by the newest run. Judge runs are not counted.
