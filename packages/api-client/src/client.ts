@@ -109,6 +109,8 @@ export interface McpCatalogEntry {
   publisher: string;
   /** Suggested tool name, derived from the registry name. */
   slug: string;
+  /** Icon served from Bento's own origin, or null when the service has none. */
+  iconUrl: string | null;
   /** Already in this team's registry (or the caller's own servers). */
   added: boolean;
 }
@@ -155,7 +157,8 @@ export interface McpServerInput {
   slug: string;
   url: string;
   transport?: "http" | "sse";
-  authType: "none" | "api_key" | "oauth";
+  /** Omitted lets Bento probe the server and decide. */
+  authType?: "none" | "api_key" | "oauth";
   credentialScope?: "org" | "user";
   /** A server only the creator's own runs get; any member may add one. */
   personal?: boolean;

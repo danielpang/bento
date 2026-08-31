@@ -35,6 +35,8 @@ export interface CatalogEntry {
   transport: "http" | "sse";
   /** The namespace that published it, so nobody mistakes a wrapper for the vendor. */
   publisher: string;
+  /** Host the icon is fetched from, proxied so the console calls nobody. */
+  iconHost: string;
 }
 
 interface RegistryRemote {
@@ -48,6 +50,12 @@ interface RegistryServer {
   description?: string;
   remotes?: RegistryRemote[];
 }
+
+/**
+ * Tails that name no vendor. Registry names are mostly "<vendor>/mcp",
+ * so these fall back to the namespace for both the title and the slug.
+ */
+const GENERIC_TAILS = new Set(["mcp", "server", "mcp-server", "mcpserver", "api", "remote"]);
 
 const cache = new Map<string, { at: number; entries: CatalogEntry[] }>();
 
@@ -125,11 +133,12 @@ export function toEntries(rows: { server?: RegistryServer }[]): CatalogEntry[] {
     if (byName.has(server.name)) continue;
     byName.set(server.name, {
       name: server.name,
-      title: server.title?.trim() || server.name,
+      title: displayTitle(server.name, server.title),
       description: (server.description ?? "").trim().slice(0, 300),
       url: remote.url,
       transport: remote.transport,
       publisher: publisherOf(server.name),
+      iconHost: hostOf(remote.url),
     });
   }
   return [...byName.values()];
@@ -152,6 +161,33 @@ function pickRemote(remotes: RegistryRemote[]): { url: string; transport: "http"
 }
 
 /**
+ * A name worth reading. Most registry entries carry no title, and the
+ * raw reverse-DNS name ("com.notion/mcp") is not something to put in a
+ * list, so the vendor is recovered from the name and capitalised.
+ */
+export function displayTitle(name: string, title?: string): string {
+  const given = title?.trim();
+  if (given) return given;
+  const [namespace = "", tail = ""] = name.includes("/")
+    ? [name.slice(0, name.indexOf("/")), name.slice(name.indexOf("/") + 1)]
+    : [name, ""];
+  const word = GENERIC_TAILS.has(tail.toLowerCase()) || !tail ? (namespace.split(".").pop() ?? name) : tail;
+  return word
+    .split(/[-_.]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/**
  * The publishing namespace, shown so an official server reads
  * differently from somebody's wrapper of it. Registry names are
  * reverse-DNS, so the part before the first slash is the publisher.
@@ -162,13 +198,9 @@ function publisherOf(name: string): string {
 }
 
 /**
- * The tool name agents see. Registry names are reverse-DNS, and a great
- * many are published as "<vendor>/mcp", so the tail alone would make
- * Notion, Linear, and Sentry all want the slug "mcp" and collide on the
- * second one added. A generic tail falls back to the vendor.
+ * The tool name agents see, from the same vendor rule as the title so
+ * Notion, Linear, and Sentry do not all want the slug "mcp".
  */
-const GENERIC_TAILS = new Set(["mcp", "server", "mcp-server", "mcpserver", "api", "remote"]);
-
 export function slugFor(entry: { name: string; title?: string }): string {
   const [namespace = "", tail = ""] = splitName(entry.name);
   const candidates = [

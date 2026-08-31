@@ -76,7 +76,7 @@ export function McpPanel({ client }: { client: BentoClient }) {
 
   return (
     <>
-      <ConnectionCatalog client={client} busy={busy} act={act} canManage={status.canManage} />
+      <ConnectionCatalog client={client} busy={busy} act={act} />
 
       <section className="section settings-card">
         <h3 className="settings-title">Your servers and sign-ins</h3>
@@ -311,8 +311,6 @@ interface ConnectChoice {
   help: string;
   authType: "none" | "api_key" | "oauth";
   credentialScope: "org" | "user";
-  /** Adds the server as the member's own rather than the team's. */
-  personal?: boolean;
 }
 
 const CONNECT_CHOICES: ConnectChoice[] = [
@@ -349,26 +347,6 @@ const CONNECT_CHOICES: ConnectChoice[] = [
 ];
 
 /** The choices for a personal server: always the member's own credential. */
-/** The catalog's "just me" options: same as the personal form, tagged. */
-const MINE_ONLY_CHOICES: ConnectChoice[] = [
-  {
-    id: "mine_oauth",
-    label: "Only my runs, I sign in",
-    help: "Your own account, on the runs you start. Nobody else gets it.",
-    authType: "oauth" as const,
-    credentialScope: "user" as const,
-    personal: true,
-  },
-  {
-    id: "mine_key",
-    label: "Only my runs, my API key",
-    help: "Stored encrypted for you, used only on your runs.",
-    authType: "api_key" as const,
-    credentialScope: "user" as const,
-    personal: true,
-  },
-];
-
 const PERSONAL_CHOICES: ConnectChoice[] = [
   {
     id: "oauth_user",
@@ -405,18 +383,15 @@ function ConnectionCatalog({
   client,
   busy,
   act,
-  canManage,
 }: {
   client: BentoClient;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<void>;
-  canManage: boolean;
 }) {
   const [entries, setEntries] = useState<McpCatalogEntry[] | null>(null);
   const [reachable, setReachable] = useState(true);
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [chosen, setChosen] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -437,8 +412,8 @@ function ConnectionCatalog({
     <section className="section settings-card">
       <h3 className="settings-title">Add a connection</h3>
       <p className="muted">
-        Servers published to the public MCP registry. Pick one and Bento fills in the rest, or
-        add a custom server by URL below.
+        Servers published to the public MCP registry. Adding one connects it for you: your runs
+        get it, and you sign in with your own account. A team-wide server goes in by URL below.
       </p>
       <form
         className="actions"
@@ -473,44 +448,36 @@ function ConnectionCatalog({
       {(entries ?? []).map((entry) => (
         <div className="criterion" key={entry.name}>
           <div className="criterion-cmd">
-            <strong>{entry.title}</strong> <span className="chip chip-soft">{entry.publisher}</span>
-            {entry.added && <span className="chip">added</span>}
+            <span className="mcp-entry-head">
+              <ServiceMark entry={entry} />
+              <strong>{entry.title}</strong>
+              <span className="chip chip-soft">{entry.publisher}</span>
+              {entry.added && <span className="chip">added</span>}
+            </span>
             {entry.description && <p className="muted">{entry.description}</p>}
-            {chosen === entry.name && (
-              <CatalogConnect
-                entry={entry}
-                canManage={canManage}
-                busy={busy}
-                onCancel={() => setChosen(null)}
-                onAdd={(choice) =>
-                  act(async () => {
-                    await client.createMcpServer({
-                      name: entry.title.slice(0, 120),
-                      slug: entry.slug,
-                      url: entry.url,
-                      transport: entry.transport,
-                      authType: choice.authType,
-                      credentialScope: choice.credentialScope,
-                      personal: choice.personal ?? false,
-                    });
-                    setChosen(null);
-                    await load();
-                  })
-                }
-              />
-            )}
           </div>
-          {chosen !== entry.name && (
-            <div className="actions">
-              <button
-                className="btn btn-primary"
-                disabled={busy || entry.added}
-                onClick={() => setChosen(entry.name)}
-              >
-                {entry.added ? "Added" : "Add"}
-              </button>
-            </div>
-          )}
+          <div className="actions">
+            <button
+              className="btn btn-primary"
+              disabled={busy || entry.added}
+              onClick={() =>
+                void act(async () => {
+                  // No questions: a catalog server is yours, and Bento
+                  // asks the server itself how it authenticates.
+                  await client.createMcpServer({
+                    name: entry.title.slice(0, 120),
+                    slug: entry.slug,
+                    url: entry.url,
+                    transport: entry.transport,
+                    personal: true,
+                  });
+                  await load();
+                })
+              }
+            >
+              {entry.added ? "Added" : "Add"}
+            </button>
+          </div>
         </div>
       ))}
     </section>
@@ -518,56 +485,30 @@ function ConnectionCatalog({
 }
 
 /**
- * The one decision a catalog entry still needs: whose credential it
- * uses. Everything else came from the registry.
+ * The service's own mark, served from Bento's origin, falling back to a
+ * monogram. A list of logos is scannable in a way a list of reverse-DNS
+ * names is not, and the fallback keeps the row aligned when a service
+ * publishes no icon.
  */
-function CatalogConnect({
-  entry,
-  canManage,
-  busy,
-  onAdd,
-  onCancel,
-}: {
-  entry: McpCatalogEntry;
-  canManage: boolean;
-  busy: boolean;
-  onAdd: (choice: ConnectChoice) => Promise<void>;
-  onCancel: () => void;
-}) {
-  // An admin can add for the team or just for themselves; a member can
-  // only ever add their own.
-  const choices = canManage ? [...CONNECT_CHOICES, ...MINE_ONLY_CHOICES] : MINE_ONLY_CHOICES;
-  const [choice, setChoice] = useState(choices[0]!.id);
-  const picked = choices.find((c) => c.id === choice) ?? choices[0]!;
+function ServiceMark({ entry }: { entry: McpCatalogEntry }) {
+  const [failed, setFailed] = useState(false);
+  const letter = (entry.title.trim()[0] ?? "?").toUpperCase();
+  if (!entry.iconUrl || failed) {
+    return (
+      <span className="mcp-mark mcp-mark-letter" aria-hidden="true">
+        {letter}
+      </span>
+    );
+  }
   return (
-    <>
-      <fieldset className="mcp-choices">
-        <legend className="muted">Who connects to {entry.title}</legend>
-        {choices.map((c) => (
-          <label key={c.id} className="mcp-choice">
-            <input
-              type="radio"
-              name={`catalog-${entry.slug}`}
-              checked={choice === c.id}
-              disabled={busy}
-              onChange={() => setChoice(c.id)}
-            />
-            <span>
-              <strong>{c.label}</strong>
-              <span className="muted"> {c.help}</span>
-            </span>
-          </label>
-        ))}
-      </fieldset>
-      <div className="actions">
-        <button className="btn btn-primary" disabled={busy} onClick={() => void onAdd(picked)}>
-          Add {entry.title}
-        </button>
-        <button className="btn btn-ghost" disabled={busy} onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-    </>
+    <img
+      className="mcp-mark"
+      src={entry.iconUrl}
+      alt=""
+      aria-hidden="true"
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
   );
 }
 

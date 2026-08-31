@@ -10,6 +10,8 @@ import { maskSecret } from "../secrets.js";
 import { pingMcpServer } from "../mcp/client.js";
 import { safeFetchPolicy } from "../mcp/safe-fetch.js";
 import { fetchCatalog, slugFor } from "../mcp/catalog.js";
+import { allowIconHosts, fetchServiceIcon, isIconHostAllowed } from "../mcp/icons.js";
+import { detectAuthType } from "../mcp/detect-auth.js";
 import { discoverOAuth, registerClient, DiscoveryError } from "../mcp/discovery.js";
 import {
   buildAuthorizeUrl,
@@ -73,7 +75,8 @@ const createServer = z.object({
   slug: z.string().regex(SLUG_PATTERN, "slugs are lowercase letters, digits, and dashes"),
   url: urlField,
   transport: z.enum(["http", "sse"]).default("http"),
-  authType: z.enum(["none", "api_key", "oauth"]),
+  /** Omitted means Bento probes the server and decides. */
+  authType: z.enum(["none", "api_key", "oauth"]).optional(),
   credentialScope: z.enum(["org", "user"]).default("org"),
   /** A member's own server: only their runs get it, any member may add one. */
   personal: z.boolean().default(false),
@@ -199,6 +202,10 @@ export function mcpRoutes(ctx: AppContext) {
       existing.filter((row) => !row.userId || row.userId === me).map((row) => normalizeUrl(row.url)),
     );
 
+    // Only hosts the catalog actually offered may be fetched for an
+    // icon, so the icon route cannot be pointed anywhere.
+    allowIconHosts(entries.map((entry) => entry.iconHost));
+
     return c.json({
       reachable,
       canManage: access.canManage,
@@ -206,8 +213,44 @@ export function mcpRoutes(ctx: AppContext) {
         ...entry,
         slug: slugFor(entry),
         added: mine.has(normalizeUrl(entry.url)),
+        iconUrl: entry.iconHost ? `/api/mcp/catalog/icon/${encodeURIComponent(entry.iconHost)}` : null,
       })),
     });
+  });
+
+  /**
+   * A service's own icon, fetched and cached by the server so the
+   * console never calls a vendor's domain itself. Only hosts the
+   * catalog has offered are fetchable, and anything that is not a small
+   * image answers 404, which the console renders as a monogram.
+   */
+  routes.get("/catalog/icon/:host", async (c) => {
+    const access = await requireAccess(ctx, c);
+    if (!access.ok) return c.json({ error: "not found" }, 404);
+    const host = decodeURIComponent(c.req.param("host") ?? "").toLowerCase();
+    // The allow list is filled by a catalog read, which happens in
+    // whichever process served it. Another process (or one restarted
+    // since) has an empty list, so fill it from the cached catalog
+    // before refusing, rather than 404ing an icon that is legitimately
+    // on offer.
+    if (!isIconHostAllowed(host)) {
+      const { entries } = await fetchCatalog(safeFetchPolicy(ctx.env), {
+        registryUrl: ctx.env.BENTO_MCP_REGISTRY_URL,
+      });
+      allowIconHosts(entries.map((entry) => entry.iconHost));
+    }
+    if (!isIconHostAllowed(host)) return c.json({ error: "not found" }, 404);
+    const icon = await fetchServiceIcon(host, safeFetchPolicy(ctx.env));
+    if (!icon) return c.json({ error: "not found" }, 404);
+    c.header("content-type", icon.contentType);
+    // Immutable enough: a favicon changing is not worth a revalidation
+    // on every settings visit.
+    c.header("cache-control", "private, max-age=86400");
+    // Agent-adjacent bytes from a third party: never let them be
+    // interpreted as anything but an image on our origin.
+    c.header("content-security-policy", "sandbox; default-src 'none'");
+    c.header("x-content-type-options", "nosniff");
+    return c.body(icon.body as unknown as ArrayBuffer);
   });
 
   /**
@@ -257,6 +300,9 @@ export function mcpRoutes(ctx: AppContext) {
     if (!body.personal && !access.canManage) {
       return c.json({ error: "organization admin required" }, 403);
     }
+    // Adding from the catalog says nothing about auth, because the
+    // server itself knows. Ask it rather than making somebody guess.
+    const authType = body.authType ?? (await detectAuthType(body.url, body.transport, safeFetchPolicy(ctx.env)));
     try {
       const [row] = await db(c, ctx)
         .insert(mcpServers)
@@ -268,10 +314,9 @@ export function mcpRoutes(ctx: AppContext) {
           slug: body.slug,
           url: body.url,
           transport: body.transport,
-          authType: body.authType,
-          // A personal oauth server is always the owner's own sign in.
-          credentialScope:
-            body.authType === "oauth" ? (body.personal ? "user" : body.credentialScope) : "org",
+          authType,
+          // A personal server is always its owner's own credential.
+          credentialScope: body.personal ? "user" : authType === "oauth" ? body.credentialScope : "org",
           apiKeyHeader: body.apiKeyHeader,
           clientId: body.clientId ?? null,
           encryptedClientSecret: body.clientSecret ? ctx.secretBox.encrypt(body.clientSecret) : null,

@@ -8,9 +8,11 @@ Nothing about the real server. At run start Bento writes each harness's MCP conf
 
 ## Finding a server
 
-Settings, then MCP, opens on "Add a connection": the servers published to the public MCP registry, searchable, each one addable in a click. Picking an entry fills in the name, URL, transport, and tool name, so the only thing left to choose is who connects. Servers that only run as a local command (stdio) are not listed, because Bento reaches servers over the network.
+Settings, then MCP, opens on "Add a connection": the servers published to the public MCP registry, searchable, each one addable in a click. Adding asks nothing else. The entry supplies the name, URL, transport, and tool name; Bento asks the server itself how it authenticates (a 401 carrying RFC 9728 resource metadata means a sign in, a plain refusal means a key, an answer means neither); and the server is connected for you, so your runs get it and you sign in with your own account. Servers that only run as a local command (stdio) are not listed, because Bento reaches servers over the network.
 
-A server no registry carries, an internal company one for instance, goes in through "Add a custom server by URL" below the list.
+Each entry shows the service's own icon, fetched and cached by the Bento server rather than by your browser, so the vendors in the list are never told who is reading the page. A service that publishes no icon gets a monogram.
+
+A server no registry carries, an internal company one for instance, goes in through "Add a custom server by URL" below the list. That form is also where a team-wide server is set up, with the full choice of who connects.
 
 The catalog is read server side and cached for a few minutes, so the console never calls the registry directly. Point `BENTO_MCP_REGISTRY_URL` at a private registry to offer an internal list instead. If the registry cannot be reached the section says so and the custom URL form still works.
 

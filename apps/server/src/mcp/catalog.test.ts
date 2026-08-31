@@ -1,7 +1,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { clearCatalogCache, fetchCatalog, slugFor, toEntries } from "./catalog.js";
+import { clearCatalogCache, displayTitle, fetchCatalog, slugFor, toEntries } from "./catalog.js";
 
 const localPolicy = { mode: "local" as const, ownHosts: [] };
 
@@ -143,4 +143,26 @@ test("an unreachable registry answers empty rather than throwing", async () => {
   });
   assert.equal(reachable, false);
   assert.deepEqual(entries, []);
+});
+
+test("a missing title becomes the vendor, not the raw registry name", () => {
+  // Most registry entries carry no title, and "com.notion/mcp" is not
+  // something to put in a list a person reads.
+  assert.equal(displayTitle("com.notion/mcp"), "Notion");
+  assert.equal(displayTitle("io.github.upstash/context7"), "Context7");
+  assert.equal(displayTitle("ai.smithery/smithery-notion"), "Smithery Notion");
+  // A title the publisher did set is left alone.
+  assert.equal(displayTitle("com.notion/mcp", "Notion Official"), "Notion Official");
+});
+
+test("an entry carries the host its icon comes from", () => {
+  const [entry] = toEntries([
+    {
+      server: {
+        name: "com.notion/mcp",
+        remotes: [{ type: "streamable-http", url: "https://mcp.notion.com/mcp" }],
+      },
+    },
+  ]);
+  assert.equal(entry!.iconHost, "mcp.notion.com");
 });

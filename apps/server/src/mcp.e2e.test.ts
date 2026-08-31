@@ -524,3 +524,71 @@ test("the catalog search reaches the registry", async () => {
   const body = (await res.json()) as { entries: unknown[] };
   assert.equal(body.entries.length, 1);
 });
+
+test("adding without an auth type asks the server, and lands as the member's own", async () => {
+  // An open server: answers initialize with no credential at all.
+  const open = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18", capabilities: {} } }));
+    });
+  });
+  await new Promise<void>((r) => open.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(open.address() as { port: number }).port}/mcp`;
+  try {
+    const created = await jsonRequest("/api/mcp", "POST", {
+      name: "Probed",
+      slug: "probed",
+      url,
+      personal: true,
+    });
+    assert.equal(created.status, 201);
+    const { id } = (await created.json()) as { id: string };
+    const [row] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+    assert.equal(row!.authType, "none", "an open server is detected as needing no credential");
+    assert.equal(row!.userId, ctx.userId, "a catalog add belongs to the member who made it");
+    assert.equal(row!.credentialScope, "user");
+  } finally {
+    open.close();
+  }
+});
+
+test("a server that demands a credential without naming an authorization server wants a key", async () => {
+  // The upstream fixture 401s with no WWW-Authenticate, which is what a
+  // key-based server looks like.
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "Keyed",
+    slug: "keyed",
+    url: upstreamUrl,
+    personal: true,
+  });
+  assert.equal(created.status, 201);
+  const { id } = (await created.json()) as { id: string };
+  const [row] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+  assert.equal(row!.authType, "api_key");
+});
+
+test("a server that refuses without a bearer is detected as OAuth", async () => {
+  const guarded = createServer((_req, res) => {
+    res.writeHead(401, { "www-authenticate": 'Bearer resource_metadata="https://x.test/.well-known/oauth-protected-resource"' });
+    res.end();
+  });
+  await new Promise<void>((r) => guarded.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(guarded.address() as { port: number }).port}/mcp`;
+  try {
+    const created = await jsonRequest("/api/mcp", "POST", {
+      name: "Guarded",
+      slug: "guarded",
+      url,
+      personal: true,
+    });
+    assert.equal(created.status, 201);
+    const { id } = (await created.json()) as { id: string };
+    const [row] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+    assert.equal(row!.authType, "oauth", "an RFC 9728 challenge means a sign in, not a key");
+  } finally {
+    guarded.close();
+  }
+});

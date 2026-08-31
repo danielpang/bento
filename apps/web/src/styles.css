@@ -5401,3 +5401,36 @@ button.session-expand[aria-pressed="true"] {
 .mcp-advanced[open] summary {
   margin-bottom: 8px;
 }
+
+/*
+ * A service mark beside a catalog entry. Logos make a list of
+ * connections scannable; a monogram keeps the row aligned when a
+ * service publishes no icon, so the column never goes ragged.
+ */
+.mcp-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mcp-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  flex: none;
+  object-fit: contain;
+}
+
+.mcp-mark-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--text-dim);
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+}
