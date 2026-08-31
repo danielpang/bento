@@ -27,6 +27,8 @@ import { linearRoutes } from "./routes/linear.js";
 import { slackRoutes } from "./routes/slack.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { mcpGatewayRoutes } from "./routes/mcp-gateway.js";
+import { mcpConnectionRoutes } from "./routes/mcp-connections.js";
+import { mcpEndpointRoutes } from "./routes/mcp-endpoint.js";
 import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 
@@ -239,6 +241,12 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // and holds no database connection across its proxied streams.
   app.route("/api/mcp-gateway", mcpGatewayRoutes(ctx));
 
+  // Bento's own MCP server, the inbound mirror of the gateway. The
+  // caller is an outside agent holding a connection token, not a
+  // session, so it too sits outside the actor and tenant middleware
+  // and scopes every query by hand.
+  app.route("/api/mcp-server", mcpEndpointRoutes(ctx));
+
   // The model catalog is the same for everyone and carries no tenant
   // data, so it sits outside the authenticated routes.
   app.route("/api/catalog", catalogRoutes());
@@ -274,6 +282,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/linear", linearRoutes(ctx))
     .route("/slack", slackRoutes(ctx))
     .route("/mcp", mcpRoutes(ctx))
+    .route("/mcp-connections", mcpConnectionRoutes(ctx))
     .route("/team", teamRoutes(ctx))
     .route("/contact", contactRoutes(ctx))
     .route("/settings", settingsRoutes(ctx));

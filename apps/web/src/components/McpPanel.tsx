@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { BentoClient, McpServerStatus, McpStatus } from "@bento/api-client";
+import { BetaOnly } from "../beta.js";
+import { McpConnectionsSection } from "./McpConnections.js";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { SecretField } from "./SecretField.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
@@ -137,6 +139,11 @@ export function McpPanel({ client }: { client: BentoClient }) {
         )}
       </section>
       {status.canManage && <AddServerCard client={client} busy={busy} act={act} />}
+      {/* The other direction: Bento as the MCP server outside agents
+          connect to. Beta while the surface settles. */}
+      <BetaOnly>
+        <McpConnectionsSection client={client} />
+      </BetaOnly>
     </>
   );
 }
