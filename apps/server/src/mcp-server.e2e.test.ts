@@ -198,7 +198,7 @@ test("a team-scoped connection creates a card and follows it", async () => {
   const toolsBody = (await tools.json()) as { result: { tools: { name: string }[] } };
   assert.deepEqual(
     toolsBody.result.tools.map((t) => t.name).sort(),
-    ["create_feature", "get_feature_status", "list_features", "list_projects"],
+    ["create_feature", "get_feature_status", "list_features", "list_projects", "search_features"],
   );
 
   const projects_ = await callTool(connection.token, "list_projects", {});
@@ -278,6 +278,76 @@ test("a project-scoped connection reaches only its pinned projects", async () =>
   const hidden = (await direct.json()) as { id: string };
   const peek = await callTool(connection.token, "get_feature_status", { featureId: hidden.id });
   assert.equal(peek.isError, true, "a feature outside the pin reads as not found");
+});
+
+test("search finds cards by words, across projects and inside the scope", async () => {
+  const token = await signUp("mcp-inbound-search@bento.test", "Searcher");
+  await makeOrg(token, "Search", "mcp-search");
+  const alpha = await makeProject(token, "Alpha");
+  const beta = await makeProject(token, "Beta");
+
+  const wide = (await (
+    await jsonPost("/api/mcp-connections", { name: "Wide", scope: "organization" }, token)
+  ).json()) as { token: string };
+  const narrow = (await (
+    await jsonPost("/api/mcp-connections", { name: "Narrow", scope: "projects", projectIds: [alpha] }, token)
+  ).json()) as { token: string };
+
+  const made = async (projectId: string, title: string, description: string) => {
+    const res = await callTool(wide.token, "create_feature", { projectId, title, description });
+    assert.equal(res.isError, false, `create_feature refused: ${res.text}`);
+    return res.data!.featureId as string;
+  };
+  const rateLimit = await made(alpha, "Add a rate limit to the public API", "Token bucket per key.");
+  await made(alpha, "Rewrite the onboarding email", "Nothing to do with limits.");
+  const betaLimit = await made(beta, "Rate limit the webhook intake", "Same shape, other service.");
+
+  // A word in the title, across every project the connection reaches.
+  const wideHits = await callTool(wide.token, "search_features", { query: "rate limit" });
+  assert.equal(wideHits.isError, false);
+  const wideIds = (wideHits.data!.features as { id: string }[]).map((f) => f.id).sort();
+  assert.deepEqual(wideIds, [rateLimit, betaLimit].sort(), "both projects' matching cards come back");
+  assert.equal(wideHits.data!.truncated, false);
+  const one = (wideHits.data!.features as { projectName: string; status: string; stage: unknown }[])[0]!;
+  assert.ok(one.projectName, "a result names its project, since results span projects");
+  assert.equal(one.status, "backlog");
+
+  // A word only in the description still matches.
+  const byBody = await callTool(wide.token, "search_features", { query: "token bucket" });
+  assert.deepEqual(
+    (byBody.data!.features as { id: string }[]).map((f) => f.id),
+    [rateLimit],
+    "the description is searched too",
+  );
+
+  // Narrowing by project, and by status.
+  const inAlpha = await callTool(wide.token, "search_features", { query: "rate limit", projectId: alpha });
+  assert.deepEqual((inAlpha.data!.features as { id: string }[]).map((f) => f.id), [rateLimit]);
+  const gatedOnly = await callTool(wide.token, "search_features", { query: "rate limit", status: "gated" });
+  assert.equal((gatedOnly.data!.features as unknown[]).length, 0, "no backlog card is gated");
+
+  // The scope is the join, not a filter over results: a project-scoped
+  // connection cannot see the other project's match at all.
+  const narrowHits = await callTool(narrow.token, "search_features", { query: "rate limit" });
+  assert.deepEqual(
+    (narrowHits.data!.features as { id: string }[]).map((f) => f.id),
+    [rateLimit],
+    "a project-scoped connection searches only its own projects",
+  );
+  const reachOut = await callTool(narrow.token, "search_features", { query: "rate limit", projectId: beta });
+  assert.equal(reachOut.isError, true, "naming a project out of scope reads as not found");
+  assert.match(reachOut.text, /not found/);
+
+  // A wildcard typed into the query is a literal, not pattern syntax.
+  const wildcard = await callTool(wide.token, "search_features", { query: "%" });
+  assert.equal((wildcard.data!.features as unknown[]).length, 0, "a bare % must not match every card");
+
+  const capped = await callTool(wide.token, "search_features", { query: "e", limit: 1 });
+  assert.equal((capped.data!.features as unknown[]).length, 1);
+  assert.equal(capped.data!.truncated, true, "a full page says so");
+
+  const empty = await callTool(wide.token, "search_features", { query: "" });
+  assert.equal(empty.isError, true, "an empty query is refused rather than listing everything");
 });
 
 test("authorization refuses projects the caller's organization does not hold", async () => {

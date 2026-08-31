@@ -87,11 +87,12 @@ claude mcp add --transport http bento https://your-bento/api/mcp-server \
 
 ### What the agent gets
 
-Four tools, scoped to the connection:
+Five tools, scoped to the connection:
 
 - `list_projects`: the projects the connection reaches.
 - `create_feature`: a new card, in the backlog by default; `start: true` moves it into the first pipeline stage instead, exactly as a Slack mention does, so the project's agents can pick it up.
 - `get_feature_status`: one card's progress: status, current stage and position in the pipeline, the latest agent run, pull requests, and recent history.
 - `list_features`: a project's board, filterable by status.
+- `search_features`: cards whose title or description carries the words you are looking for, across every project the connection reaches, or inside one you name. Each match comes back with its project, status and stage, so finding a card and reading where it stands is one call rather than two. Most recently updated first, and the answer says when the limit cut it short.
 
 Every refusal, including a bad token, answers the same "not found" the rest of the API speaks, so a probe learns nothing about what exists.

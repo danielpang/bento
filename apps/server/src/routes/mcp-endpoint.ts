@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { agentRuns, featureEvents, features, pipelines, projects, stages } from "@bento/db";
@@ -123,7 +123,10 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        featureId: { type: "string", description: "The feature to read, from create_feature or list_features." },
+        featureId: {
+          type: "string",
+          description: "The feature to read, from create_feature, list_features, or search_features.",
+        },
       },
       required: ["featureId"],
       additionalProperties: false,
@@ -146,6 +149,35 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "search_features",
+    description:
+      "Find feature cards by words in their title or description, across every project this connection can reach, and read the status and stage of each match. Use this when you know roughly what a card is about but not its id or which project it is on; use get_feature_status for the full detail of one card.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Words to look for in a card's title or description. Case insensitive.",
+        },
+        projectId: {
+          type: "string",
+          description: "Only search this project, from list_projects. Omit to search every project in reach.",
+        },
+        status: {
+          type: "string",
+          enum: ["backlog", "active", "gated", "done", "cancelled"],
+          description: "Only cards in this status.",
+        },
+        limit: {
+          type: "number",
+          description: "How many matches to return, 1 to 100. Defaults to 25, most recently updated first.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const createFeatureArgs = z.object({
@@ -160,6 +192,13 @@ const getFeatureStatusArgs = z.object({ featureId: z.string() });
 const listFeaturesArgs = z.object({
   projectId: z.string(),
   status: z.enum(["backlog", "active", "gated", "done", "cancelled"]).optional(),
+});
+
+const searchFeaturesArgs = z.object({
+  query: z.string().min(1).max(200),
+  projectId: z.string().optional(),
+  status: z.enum(["backlog", "active", "gated", "done", "cancelled"]).optional(),
+  limit: z.number().int().min(1).max(100).default(25),
 });
 
 export function mcpEndpointRoutes(ctx: AppContext) {
@@ -307,6 +346,8 @@ async function callTool(
       return getFeatureStatus(ctx, conn, args);
     case "list_features":
       return listFeatures(ctx, conn, args);
+    case "search_features":
+      return searchFeatures(ctx, conn, args);
     default:
       return undefined;
   }
@@ -461,6 +502,80 @@ async function listFeatures(ctx: AppContext, conn: ResolvedConnection, args: Rec
       createdAt: row.createdAt,
     })),
   });
+}
+
+/**
+ * Cards matching words in their title or description, across the
+ * connection's whole scope unless one project is named.
+ *
+ * The scope filter is the join condition rather than a post-filter, so
+ * a card in a project this connection cannot reach is never read, let
+ * alone returned. Ordered by most recently updated, because someone
+ * searching for a card is nearly always looking for the one that moved.
+ */
+async function searchFeatures(ctx: AppContext, conn: ResolvedConnection, args: Record<string, unknown>) {
+  const parsed = searchFeaturesArgs.safeParse(args);
+  if (!parsed.success) return toolRefusal(argsProblem(parsed.error));
+
+  // A named project is resolved through the scope first, so asking about
+  // one out of reach reads as not found rather than as no matches.
+  let onlyProject: string | undefined;
+  if (parsed.data.projectId !== undefined) {
+    const project = await projectForConnection(ctx, conn, parsed.data.projectId);
+    if (!project) return toolRefusal(NOT_FOUND);
+    onlyProject = project.id;
+  }
+
+  const term = `%${likeEscape(parsed.data.query)}%`;
+  const rows = await ctx.db
+    .select({ feature: features, projectName: projects.name })
+    .from(features)
+    .innerJoin(projects, eq(projects.id, features.projectId))
+    .where(
+      and(
+        connectionProjectFilter(conn),
+        or(ilike(features.title, term), ilike(features.description, term)),
+        ...(onlyProject ? [eq(features.projectId, onlyProject)] : []),
+        ...(parsed.data.status ? [eq(features.status, parsed.data.status)] : []),
+      ),
+    )
+    .orderBy(desc(features.updatedAt))
+    .limit(parsed.data.limit);
+
+  const stageIds = [
+    ...new Set(rows.map((row) => row.feature.currentStageId).filter((id): id is string => id !== null)),
+  ];
+  const stageRows = stageIds.length
+    ? await ctx.db.select({ id: stages.id, name: stages.name }).from(stages).where(inArray(stages.id, stageIds))
+    : [];
+
+  return toolResult({
+    query: parsed.data.query,
+    matches: rows.length,
+    // Said plainly, because a full page of results and a complete set
+    // look identical to a caller that cannot see the limit.
+    truncated: rows.length === parsed.data.limit,
+    features: rows.map(({ feature, projectName }) => ({
+      id: feature.id,
+      title: feature.title,
+      projectId: feature.projectId,
+      projectName,
+      status: feature.status,
+      stage: stageRows.find((s) => s.id === feature.currentStageId)?.name ?? null,
+      inBacklog: feature.currentStageId === null && feature.status === "backlog",
+      prNumber: feature.prNumber,
+      updatedAt: feature.updatedAt,
+    })),
+  });
+}
+
+/**
+ * A search term is data, not pattern syntax: without this a query
+ * containing % or _ would match far more than it says, and a trailing
+ * backslash would be a malformed pattern.
+ */
+function likeEscape(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
 /** The feature when its project is in the connection's scope, else null. */
