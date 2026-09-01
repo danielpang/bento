@@ -19,7 +19,7 @@ With one repository the agent starts inside it. With several it starts at the wo
 
 ## What a sandbox contains
 
-Git, the five coding agent CLIs, and no language runtime. Which toolchain a repository needs is a fact about that repository, so it arrives through that repository's own setup command rather than being baked into an image that would have to guess. See [pipeline.md](./pipeline.md#repository-commands).
+Git, the seven coding agent CLIs, and no language runtime. Which toolchain a repository needs is a fact about that repository, so it arrives through that repository's own setup command rather than being baked into an image that would have to guess. See [pipeline.md](./pipeline.md#repository-commands).
 
 Locally the sandbox is a Docker container the server creates through the host's daemon; hosted, it is a Fly.io Sprite that installs the agent CLIs on first use. Both sit behind one driver interface, along with a no-isolation local process driver used for development and CI.
 

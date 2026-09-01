@@ -4,14 +4,13 @@
 
 A command centre for coordinating AI coding agents through your product development pipeline. As agents have made shipping faster, keeping track of what's in progress is harder, bento makes it clear by showing you what features you are building and what their status is.
 
-Define your pipeline stages (product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering). Assign an agent and model to each stage (Claude Code, Codex CLI, Cursor CLI, opencode, or pi). Watch features move across a board while agents run concurrently in isolated sandboxes.
+Define your pipeline stages (product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering). Assign an agent and model to each stage (Claude Code, Codex CLI, Cursor CLI, opencode, pi, Poolside, or DeepSeek Harness). Watch features move across a board while agents run concurrently in isolated sandboxes.
 
 ## Local setup
 
-Docker is the only thing you need installed. One value has to be set first, because it is a bind mount rather than a setting: where your checkouts live.
+Docker is the only thing you need installed.
 
 ```bash
-echo 'BENTO_REPOS=/Users/you/code' >> .env
 docker compose up --build
 ```
 
@@ -19,13 +18,17 @@ Open **http://localhost:4400**.
 
 That builds the server, the console, and the sandbox image agents run in, brings up Postgres, applies migrations, and starts serving. Everything else is configured in the console.
 
-`BENTO_REPOS` is the exception because agents work in sandboxes the server creates through the host's Docker daemon, so your code has to be visible at the same path inside the server container, and nothing can mount a directory into a container that is already running.
+One thing is worth knowing before you add a repository. Agents work in sandboxes the server creates through the host's Docker daemon, so a checkout has to be visible inside the server container at the path it has on your machine, and nothing can mount a directory into a container that is already running. Compose mounts the directory you start it from, so trying Bento on Bento's own checkout works as it is. For repositories anywhere else, say where they live before you start:
+
+```bash
+echo 'BENTO_REPOS=/Users/you/code' >> .env
+```
 
 ## Build your first feature
 
 ### 1. Point Bento at a repository
 
-Create a project and give it a checkout under `BENTO_REPOS`. A project can span several repositories, and each gets its own worktree inside a card's workspace, so a change touching a frontend and a backend stays one card.
+Create a project and give it a checkout the server can see. A project can span several repositories, and each gets its own worktree inside a card's workspace, so a change touching a frontend and a backend stays one card.
 
 ### 2. Give the agents a key
 

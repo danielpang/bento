@@ -35,7 +35,7 @@ flowchart TB
         localproc["Local process<br/>dev and CI only"]
     end
 
-    agents["Agent CLIs<br/>Claude Code, Codex, Cursor, opencode, pi"]
+    agents["Agent CLIs<br/>Claude Code, Codex, Cursor,<br/>opencode, pi, Poolside, DeepSeek Harness"]
     github["GitHub App<br/>checks, PR threads, webhooks"]
     slack["Slack app<br/>mentions, thread progress"]
 

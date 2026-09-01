@@ -54,7 +54,7 @@ These are separate choices, which is what the terminal client is for:
 ```bash
 bento                                                     # everything on this machine
 bento --server https://bento.example.com                  # thin client: board and agents on the server
-bento --server https://bento.example.com --agents local   # shared board, agents run here
+bento --server https://bento.example.com --run-agents local   # shared board, agents run here
 ```
 
 The last one suits teams who want a shared board without their code or agent API keys leaving their machines. The board, run history, and transcripts are tracked normally and teammates see them; what stays local is the work product. Agents commit into checkouts on that machine, runs queued for a machine wait while it is offline, and nothing is pushed for you, because those worktrees are where the server cannot reach them.

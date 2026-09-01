@@ -1,6 +1,6 @@
 # Running the web console
 
-The console is a React app in `apps/web`, served by Vite in development and by the API server itself in production. This is the long version; the README has the three commands.
+The console is a React app in `apps/web`, served by Vite in development and by the API server itself in production. This is the long version; the README has the short one.
 
 ## What runs, and where
 
@@ -39,7 +39,7 @@ Open http://localhost:4401.
 
 ### Everything in containers
 
-One command runs the whole stack, but agents need three values in `.env` first, and compose reads that file on its own:
+One command runs the whole stack. Compose reads `.env` on its own, and there are two values worth putting there first:
 
 ```bash
 cat >> .env <<'EOF'
@@ -49,7 +49,7 @@ EOF
 docker compose up --build        # or: pnpm docker:up
 ```
 
-Open http://localhost:4400. This builds two images — one holding the server and the built console, one for the sandboxes agents run in — then brings up Postgres, runs migrations, and starts the server, in that order. No Node and no pnpm on the host; the two `.env` values exist because the server now lives in a container, which can see neither your checkouts nor your keychain unless told where they are. Commit attribution is a setting, under **Settings, GitHub**, not an environment variable.
+Open http://localhost:4400. This builds two images, one holding the server and the built console and one for the sandboxes agents run in, then brings up Postgres, runs migrations, and starts the server, in that order. No Node and no pnpm on the host. Both values exist because the server now lives in a container, which can see neither your checkouts nor your keychain unless told where they are. Neither is mandatory: `BENTO_REPOS` only matters for checkouts outside the directory you run compose from, and the Claude token can be saved in the console instead, under **Agents**. Commit attribution is a setting, under **Settings, GitHub**, not an environment variable.
 
 The ordering is enforced rather than hoped for. `migrate` and `sandbox-image` are one-shot services and `server` waits on `service_completed_successfully` for both, so it never starts against a schema that is behind or without the image its first card will need. Re-running is free: migrations take an advisory lock and apply only what is missing.
 
@@ -206,7 +206,7 @@ Those three are passed through only when set, so local mode is never handed an e
 | `apps/web/src/components/AgentsPanel.tsx` | Pairing a tool with a model, and the agents YAML file |
 | `apps/web/src/components/StageConfig.tsx` | Per stage agent and gate criteria, and the pipeline YAML file |
 | `apps/web/src/components/ConfigSettings.tsx` | Settings tab for both YAML files |
-| `apps/web/src/components/TeamPanel.tsx` | Organizations, members, credentials |
+| `apps/web/src/components/TeamSettings.tsx` | Organizations, members, credentials |
 | `apps/web/src/styles.css` | All of the styling, no framework |
 
 The console updates itself: it subscribes to `/api/board/:id/events`, a server-sent event stream, and refetches when the board changes. There is no refresh button because there is nothing to refresh.
