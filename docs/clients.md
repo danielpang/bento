@@ -1,10 +1,10 @@
 # Other clients
 
-The web console is the client Bento is built around. Two others exist and are usable, but they trail it: features land in the web app first, and these catch up.
+The web console is the client Bento is built around. Two others exist and are usable, but they trail it. Features land in the web app first.
 
 ## Terminal
 
-`apps/tui`. A full board in the terminal, plus the commands that make a board scriptable. It can also run the whole server itself, or act as a runner that executes work a shared server is holding.
+`apps/tui`. A full board in the terminal, plus commands that make a board scriptable. It can also run the whole server itself, or act as a runner executing work a shared server is holding.
 
 Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h` switches it to the card's history, `a` approves a manual gate and `R` rejects it, `r` re-checks, `x` stops the agent and `c` continues it with your own instructions.
 
@@ -19,7 +19,7 @@ bento pipeline export team-pipeline.yaml
 
 ## macOS app
 
-`apps/mac`. A native board built on the Native SDK, spawning the CLI underneath. It follows cards, approves gates, and edits agents, and does not yet do stages, repository commands, or the pipeline file.
+`apps/mac`. A native board built on the Native SDK, spawning the CLI underneath. It follows cards, approves gates, and edits agents. It does not yet handle stages, repository commands, or the pipeline file.
 
 ## What each covers today
 
@@ -45,7 +45,7 @@ bento pipeline export team-pipeline.yaml
 | Save and remove provider API keys | Yes | Yes | Yes |
 | Manage the team and its credentials | Yes | No | Yes |
 
-All three drive the same API. Team management and stored credentials are multi mode only in every client, because a local install has one user and no organization to hold them.
+All three drive the same API. Team management and stored credentials are multi mode only in every client: a local install has one user and no organization to hold them.
 
 ## Where the board lives, and where agents run
 
@@ -57,4 +57,4 @@ bento --server https://bento.example.com                  # thin client: board a
 bento --server https://bento.example.com --run-agents local   # shared board, agents run here
 ```
 
-The last one suits teams who want a shared board without their code or agent API keys leaving their machines. The board, run history, and transcripts are tracked normally and teammates see them; what stays local is the work product. Agents commit into checkouts on that machine, runs queued for a machine wait while it is offline, and nothing is pushed for you, because those worktrees are where the server cannot reach them.
+The last one suits teams who want a shared board without their code or agent API keys leaving their machines. The board, run history, and transcripts are tracked normally and teammates see them. Only the work product stays local. Agents commit into checkouts on that machine, runs queued for a machine wait while it is offline, and nothing is pushed for you, since the server cannot reach those worktrees.
