@@ -4,7 +4,7 @@ How the pieces of Bento fit together. The diagrams are Mermaid, which GitHub ren
 
 ## The system at a glance
 
-Every client talks to the same Hono API. The server owns the orchestrator and the queue, Postgres holds all state but one kind (binary run artifacts live in an S3-compatible bucket, Tigris on the hosted deployment, with their authority still in Postgres), and agents run inside sandboxes that the server (or a runner machine) manages through a common driver interface.
+Every client talks to the same Hono API. The server owns the orchestrator and the queue. Postgres holds all state except binary run artifacts, which live in an S3-compatible bucket or on disk, with their authority still in Postgres. Agents run inside sandboxes that the server, or a runner machine, manages through a common driver interface.
 
 ```mermaid
 flowchart TB
@@ -81,9 +81,9 @@ flowchart LR
     end
 ```
 
-In runner mode the machine claims runs the server holds for it, so the board, run history, and transcripts are shared while checkouts and agent credentials never leave the machine. Runs queued for an offline runner wait for it.
+In runner mode the machine claims runs the server is holding for it. The board, run history, and transcripts are shared, while checkouts and agent credentials stay on the machine. Runs queued for an offline runner wait for it.
 
-A server restart does not end hosted runs either: the sandbox keeps a disconnected agent running through a grace period, and the restarting server reattaches to the live session and carries the run to its normal finish. Only when the sandbox no longer holds the process (a deploy longer than the grace, or an agent that ended meanwhile) is the run closed as interrupted.
+A server restart does not end hosted runs. The sandbox keeps a disconnected agent running through a grace period, and the restarting server reattaches to the live session and carries the run to its normal finish. The run is closed as interrupted only when the sandbox no longer holds the process, after a deploy longer than the grace period or an agent that ended meanwhile.
 
 ## Life of a feature card
 
@@ -114,11 +114,11 @@ sequenceDiagram
     end
 ```
 
-Stages hand context to each other through committed artifact files (`docs/bento/<stage>.md`), so a card designed by one agent can be implemented by a different one. Gates are re-evaluated when a run finishes, when a GitHub webhook arrives, on manual re-check, and every five minutes as a fallback.
+Stages pass context to each other through committed artifact files (`docs/bento/<stage>.md`), so a card designed by one agent can be implemented by another. Gates are re-evaluated when a run finishes, when a GitHub webhook arrives, on manual re-check, and every five minutes as a fallback.
 
 ## Tenant isolation, three layers
 
-Multi mode keeps organizations apart with three mechanisms that fail differently, so no single mistake is enough to leak data.
+Multi mode keeps organizations apart with three mechanisms. They fail differently, so no single mistake leaks data.
 
 ```mermaid
 flowchart TB
@@ -128,24 +128,38 @@ flowchart TB
     trig --> rows[("Only this organization's rows")]
 ```
 
-Background workers deliberately skip the role switch: one process executes runs and evaluates gates for every tenant. SSE streams are excluded from the tenant transaction so they do not hold a pooled connection for the length of an agent run; they check access at setup and then read from the event bus.
+Background workers skip the role switch on purpose, because one process executes runs and evaluates gates for every tenant. SSE streams are excluded from the tenant transaction so they do not hold a pooled connection for the length of an agent run. They check access at setup and then read from the event bus.
 
 ## Credentials
 
-Agent API keys belong to the organization, never the server. They are saved through `bento setup`, the web console, or the API, encrypted at rest, and resolved per run. In multi mode a sandbox only ever sees the owning organization's keys. Local mode layers stored keys over the process environment, because there is one trusted user and no tenant boundary.
+Agent API keys belong to the organization, never the server. They are saved through `bento setup`, the web console, or the API, encrypted at rest, and resolved per run. In multi mode a sandbox only sees the owning organization's keys. Local mode layers stored keys over the process environment, since there is one trusted user and no tenant boundary.
 
-A subscription can stand in for a key. Locally, login sharing mounts each tool's own config read only and, for Claude Code on macOS, forwards a short lived token read from the Keychain per run. A server that runs where the login is not, the container stack being the usual case, uses the long lived token from `claude setup-token` instead, stored as `CLAUDE_CODE_OAUTH_TOKEN` in the environment or as a secret; it satisfies the credential check exactly as a key does. Because the two are alternatives rather than additions, only one of them reaches the sandbox: a token supersedes the key, unless a base URL has redirected the tool off the provider's own endpoint, where a token cannot work and the key wins instead.
+A subscription can stand in for a key. Locally, login sharing mounts each tool's own config read only, and for Claude Code on macOS forwards a short lived token read from the Keychain per run. A server that does not run where the login is, the container stack being the usual case, uses the long lived token from `claude setup-token` instead, stored as `CLAUDE_CODE_OAUTH_TOKEN` in the environment or as a secret. It satisfies the credential check the same way a key does.
+
+The two are alternatives rather than additions, so only one reaches the sandbox. A token supersedes the key, unless a base URL has redirected the tool off the provider's own endpoint, where a token cannot work and the key is used instead.
 
 Hosted deployments stay on API keys, and the console offers no subscription field there. Secrets are one value per organization, so a token saved by one member would put their personal subscription behind everyone's runs.
 
-GitHub credentials follow the same boundary. Each organization installs the Bento GitHub App for selected repositories. The server resolves that installation per run and narrows its short-lived token to the repository being transferred. Docker worktrees are exported as credential-free Git bundles before a trusted temporary checkout pushes them. For Sprites, the server clones privately into a trusted temporary checkout, uploads a credential-free seed bundle, and later downloads the agent's committed bundle for publishing. Installation tokens never enter a sandbox, and sandbox-controlled remotes are never used for a push.
+GitHub credentials follow the same boundary. Each organization installs the Bento GitHub App for selected repositories. The server resolves that installation per run and narrows its short-lived token to the repository being transferred.
+
+Docker worktrees are exported as credential-free Git bundles before a trusted temporary checkout pushes them. For Sprites, the server clones privately into a trusted temporary checkout, uploads a credential-free seed bundle, and later downloads the agent's committed bundle for publishing. Installation tokens never enter a sandbox, and sandbox-controlled remotes are never used for a push.
 
 ## Artifact storage
 
-Run artifacts are the files an agent leaves behind: stage write-ups, mockups, HTML previews. Their authority is always a `run_artifacts` row in Postgres, and where the bytes sit depends on what the file is. Text under 1 MiB is stored inline in the row itself, which covers `.md`, `.markdown`, `.mmd`, `.mermaid`, `.html`, `.htm` and `.txt`, so most write-ups and single file previews never reach a bucket at all. Everything else goes to the artifact store: images, any unrecognised extension, and text that runs past the inline cap.
+Run artifacts are the files an agent leaves behind: stage write-ups, mockups, HTML previews. Their authority is always a `run_artifacts` row in Postgres. Where the bytes sit depends on the file.
 
-The store is chosen at startup by `createArtifactStore`, and there are three outcomes. Set `BENTO_ARTIFACTS_BUCKET`, `BENTO_ARTIFACTS_ENDPOINT`, `BENTO_ARTIFACTS_ACCESS_KEY_ID` and `BENTO_ARTIFACTS_SECRET_ACCESS_KEY` (with `BENTO_ARTIFACTS_REGION` optional, defaulting to `auto`) and any S3-compatible service is used, Tigris on the hosted deployment. The same four are read from `BUCKET_NAME`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` when the Bento names are absent, which is what a Fly deployment sets for you. All four must be present; a partial set is ignored. Without them a local or self-hosted install falls back to disk, and multi mode gets no store at all: a binary artifact is then refused with a line on the card saying so, rather than dropped quietly.
+Text under 1 MiB is stored inline in the row, which covers `.md`, `.markdown`, `.mmd`, `.mermaid`, `.html`, `.htm` and `.txt`. Most write-ups and single file previews therefore never reach a bucket. Everything else goes to the artifact store: images, any unrecognised extension, and text past the inline cap.
 
-On disk the root is `BENTO_DATA_DIR/artifacts`, one file per artifact, created on first write. Running from the TUI or from source that is `~/.bento/artifacts`. The container stack sets `BENTO_DATA_DIR` to `/var/tmp/bento`, which deserves a note: `/var/tmp` is a temporary directory that system cleaners prune on their own schedule, and under Docker Desktop the path lives inside the Linux VM rather than on the host, so it is reachable only through `docker exec` and does not survive resetting Docker. Point `BENTO_STATE_DIR` at a real path to keep artifacts somewhere durable; compose mounts it at the same path inside and out, which is what keeps sandbox mounts resolving.
+The store is chosen at startup by `createArtifactStore`, with three outcomes.
 
-Nothing in Bento deletes stored bytes. Removing a card or a project deletes its rows, and the objects behind them are left where they are, so a deployment that cares about the bill wants its own lifecycle policy on the bucket. Reads never trust the store: every one goes through `getAccessibleArtifact` and answers 404 when the artifact is not the caller's, and a matching key alone is never a reason to serve anything.
+Set `BENTO_ARTIFACTS_BUCKET`, `BENTO_ARTIFACTS_ENDPOINT`, `BENTO_ARTIFACTS_ACCESS_KEY_ID` and `BENTO_ARTIFACTS_SECRET_ACCESS_KEY`, plus an optional `BENTO_ARTIFACTS_REGION` that defaults to `auto`, and any S3-compatible service is used. Tigris is what the hosted deployment uses. When the Bento names are absent the same four are read from `BUCKET_NAME`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, which is what a Fly deployment sets. All four must be present; a partial set is ignored.
+
+Without them, a local or self-hosted install falls back to disk. Multi mode gets no store at all, and a binary artifact is refused with a line on the card rather than dropped quietly.
+
+On disk the root is `BENTO_DATA_DIR/artifacts`, one file per artifact, created on first write. From the TUI or from source that is `~/.bento/artifacts`.
+
+The container stack sets `BENTO_DATA_DIR` to `/var/tmp/bento`, which is worth a warning. `/var/tmp` is a temporary directory that system cleaners prune on their own schedule. Under Docker Desktop the path also lives inside the Linux VM rather than on the host, so it is reachable only through `docker exec` and does not survive resetting Docker. Point `BENTO_STATE_DIR` at a real path to keep artifacts somewhere durable. Compose mounts it at the same path inside and out, which is what keeps sandbox mounts resolving.
+
+Nothing in Bento deletes stored bytes. Removing a card or a project deletes its rows and leaves the objects behind, so a deployment that cares about the bill needs its own lifecycle policy on the bucket.
+
+Reads never trust the store. Every one goes through `getAccessibleArtifact` and answers 404 when the artifact is not the caller's. A matching key is never a reason to serve anything.
