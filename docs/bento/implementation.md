@@ -75,6 +75,12 @@ with Postgres and a headless browser, to run the checks:
   - searching a phrase that exists only in a description ("Eircode")
     finds the card, and opening it shows the phrase.
 
+The whole repository suite (`pnpm test` against that database, on Node
+22.22 so the `mac` package runs) is 22 of 23 tasks green. The one
+failure is `packages/sandbox`, whose toolchain test asserts the x64 Node
+tarball URL while this machine is arm64. It predates this branch and has
+nothing to do with the console.
+
 Not exercised: a real Linear import or Slack card, because neither
 integration is connected here. Both store their text in the same column,
 and the long card's shape (an issue body plus a bare URL) is what they
