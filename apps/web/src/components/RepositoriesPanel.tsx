@@ -108,13 +108,8 @@ export function RepositoriesPanel({
             Close
           </button>
         </div>
-        {/* The two things that are not visible from the list below: which
-            checkout leads, and that a sandbox is not a machine with
-            everything already on it. */}
-        <p className="muted">
-          The git checkouts this project spans. The first leads: stage summaries and its pull
-          request go there.
-        </p>
+        {/* What the list below does not show: a sandbox is not a machine
+            with everything already on it. */}
         <p className="muted">
           Sandboxes carry no language runtime, so give each one a setup command to install what it
           needs and a test command for the agent.
@@ -264,11 +259,12 @@ export function RepositoriesPanel({
               <div className="actions">
                 <input
                   className="input"
-                  placeholder="/path/to/another/checkout"
+                  placeholder="/path/to/another/checkout or ~/checkout"
                   value={newRepo}
                   onChange={(e) => setNewRepo(e.target.value)}
                   spellCheck={false}
                   aria-label="Repository path"
+                  title="A full path, or one starting with ~ for the home of the machine the server runs on"
                 />
                 <button
                   className="btn btn-primary"
