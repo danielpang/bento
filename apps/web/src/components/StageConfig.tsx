@@ -487,9 +487,9 @@ function StageEditor({
             onChange={(e) => setDraft((d) => ({ ...d, createPr: e.target.checked }))}
           />
           <span className="gate-check-text">
-            Create a pull request when the agent finishes. The server pushes the card's branch and
-            opens the pull request, or updates the one already open.
-            {canPublish === false && " No GitHub connection is set up yet, so add a token under Settings, GitHub before this can run."}
+            Push the card's branch and open a pull request when the agent finishes, or update the
+            one already open.
+            {canPublish === false && " Connect GitHub under Settings first."}
           </span>
         </label>
       </div>
