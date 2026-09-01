@@ -333,9 +333,8 @@ export function AgentsPanel({
               were already failing.
             */}
             <p className="muted">
-              Run Claude Code on a subscription you already pay for, instead of an API key. Mint a
-              token in a terminal with <code>claude setup-token</code> and save it here. It takes
-              effect on the next run, with no restart, and it beats a token from the environment.
+              Use a Claude subscription instead of an API key. Mint a token with{" "}
+              <code>claude setup-token</code> and save it here; it takes effect on the next run.
             </p>
             <SecretField
               value={tokenValue}
@@ -356,7 +355,7 @@ export function AgentsPanel({
             />
             {tokenHint && (
               <p className="muted">
-                {`Saved (${tokenHint}). If runs fail with "OAuth access token has been revoked", the saved token was invalidated: mint a fresh one and save it again.`}
+                {`Saved (${tokenHint}). If runs fail with "OAuth access token has been revoked", mint a fresh token and save it again.`}
               </p>
             )}
             <h4 className="field-heading">Or share this machine's login</h4>
@@ -371,9 +370,8 @@ export function AgentsPanel({
             </p>
             {!machine.claude?.loggedIn && (
               <p className="muted">
-                If the server is running on your own machine, sign in with{" "}
-                <code>claude auth login</code> in a terminal and reopen this panel. If it is running
-                in a container, there is no login of yours to share and the token above is the way.
+                Sign in with <code>claude auth login</code> in a terminal and reopen this panel.
+                In a container there is no login to share, so use the token above.
               </p>
             )}
             <div className="actions">
@@ -392,8 +390,8 @@ export function AgentsPanel({
             </div>
             {machine.shareAgentAuth && (
               <p className="warn">
-                Sharing is on. These are long lived credentials for a paid account, and an agent can
-                read anything its sandbox can, so use it on repositories you trust.
+                Sharing is on. An agent can read anything its sandbox can, so use it only on
+                repositories you trust.
               </p>
             )}
           </section>
@@ -460,10 +458,8 @@ export function AgentsPanel({
               <span className="muted">{toolCapability(cli)}</span>
               {PREVIEW_TOOLS[cli] && (
                 <p className="warn">
-                  <strong>Developer preview.</strong> DeepSeek Harness is not finished, and its interfaces can change
-                  without warning. Two limits are worth knowing before you assign it to a stage. It prints nothing while
-                  it works, so the card stays quiet until the run ends. It cannot continue a previous conversation, so
-                  each message starts a fresh run with a compacted transcript.
+                  <strong>Developer preview.</strong> It prints nothing while it works, so the card stays quiet until
+                  the run ends, and each message starts a fresh run instead of continuing the conversation.
                 </p>
               )}
               {/* Said while the tool is being chosen, not when a run
@@ -565,7 +561,7 @@ export function AgentsPanel({
               <textarea
                 ref={skillRef}
                 className="input skill-input"
-                placeholder={"How this agent should work, and what its stage write-up must contain.\nExample: You are a product investigator. Your write-up must have three sections: Problem, Evidence from the code, Recommendation with effort estimate."}
+                placeholder={"How this agent should work, and what its stage write-up must contain.\nExample: You are a product investigator. Your write-up must have Problem, Evidence, and Recommendation sections."}
                 value={skill}
                 onChange={(e) => {
                   setSkill(e.target.value);
