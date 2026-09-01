@@ -1374,9 +1374,10 @@ button {
  * them apart, so each one is its own surface, the way a stage card and
  * a repository card already are elsewhere.
  *
- * The topbar and the actions keep their own treatment: the first block
- * is the one you act from, so it stays flush with the header rather
- * than floating as one panel among five.
+ * The topmost block keeps its own treatment: it stays flush with the
+ * header rather than floating as one panel among five. That is the
+ * actions on a card with no brief, and the description on one that has
+ * a brief, which is the thing the header is about either way.
  */
 .drawer-body-sectioned > .section {
   border: 1px solid var(--line);
@@ -1395,6 +1396,35 @@ button {
    the separation the rule was standing in for. */
 .drawer-body-sectioned > .section > .label::after {
   display: none;
+}
+
+/*
+ * The brief the card was filed with, as typed. Paragraphs are kept
+ * (pre-wrap) because Linear issue bodies and multi line requests are
+ * the normal input; the wrap rule is for the other normal input, a
+ * bare Slack permalink or Linear URL, which is one unbroken token long
+ * enough to push the whole drawer sideways without it.
+ */
+.card-description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * A long brief opens cut off, so the buttons stay on screen. Twelve
+ * lines, which is what needsClamp counts in FeatureDrawer.tsx: the two
+ * have to stay together, or Show more appears over text that was never
+ * cut and does nothing when pressed.
+ */
+.card-description.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 12;
+  line-clamp: 12;
+  overflow: hidden;
 }
 
 .section {

@@ -34,6 +34,7 @@ import {
   type AgentEvent,
 } from "@bento/core";
 import { deleteConsequences } from "./delete-consequences.js";
+import { descriptionText, hasDescription, needsClamp } from "../card-description.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
 interface DrawerProps {
@@ -126,6 +127,12 @@ export function FeatureDrawer({
   const [loadedId, setLoadedId] = useState<string | null>(null);
   const [showAllHistory, setShowAllHistory] = useState(false);
   /**
+   * A long description opens clamped. Per card, like the sections
+   * below: expanding one Linear body should not leave the next card's
+   * brief already unrolled before anybody asked for it.
+   */
+  const [descriptionOpen, setDescriptionOpen] = useState(false);
+  /**
    * Whether anything can actually open a pull request. Offering an
    * enabled button that can only fail is how a missing setting gets
    * mistaken for a broken feature.
@@ -162,6 +169,7 @@ export function FeatureDrawer({
     setLoadedId(null);
     setLoadFailed(false);
     setPublishNotes([]);
+    setDescriptionOpen(false);
   }, [feature.id]);
 
   useEffect(() => {
@@ -387,6 +395,14 @@ export function FeatureDrawer({
       ? "Reopen the card first. This cannot be done while its details are missing."
       : null;
   const deleteReasonId = useId();
+  const descriptionId = useId();
+  /**
+   * The brief comes off the card row the board already holds, not off
+   * the fetched detail: it is there the moment the drawer opens, needs
+   * no skeleton, and is still readable when the detail load failed.
+   */
+  const description = descriptionText(feature.description);
+  const descriptionClamps = needsClamp(description);
 
   return (
     <aside className="drawer" role="dialog" aria-label={feature.title} ref={panel}>
@@ -429,6 +445,39 @@ export function FeatureDrawer({
             {SEND_BACK_NOTICE}
           </p>
         )}
+        {/*
+          What was actually asked for. Every agent on this card is given
+          this text as its brief, search matches it, and Linear imports
+          and Slack cards keep their issue body and permalink in it, so
+          until now the one reader who could not see it was the person
+          who filed the card. Above the actions, because approving or
+          rejecting is a judgement about this.
+
+          Plain text, always: agents and integrations write here, and
+          React's escaping is the whole of the sanitization story.
+        */}
+        {hasDescription(description) && (
+          <section className="section">
+            <span className="label">Description</span>
+            <p
+              id={descriptionId}
+              className={descriptionClamps && !descriptionOpen ? "card-description clamped" : "card-description"}
+            >
+              {description}
+            </p>
+            {descriptionClamps && (
+              <button
+                className="btn btn-ghost"
+                aria-expanded={descriptionOpen}
+                aria-controls={descriptionId}
+                onClick={() => setDescriptionOpen((on) => !on)}
+              >
+                {descriptionOpen ? "Show less" : "Show more"}
+              </button>
+            )}
+          </section>
+        )}
+
         <section className="section">
           <span className="label">Actions</span>
           {/*
