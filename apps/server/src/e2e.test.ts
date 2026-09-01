@@ -186,9 +186,10 @@ async function waitForStage(featureId: string, stageId: string, timeoutMs = 60_0
 /**
  * The last transition on a card, once it reads as `expected`.
  *
- * advanceFeature commits the stage move before writing the history row,
- * so a card can reach its next stage a moment before the transition
- * that moved it exists; reading once sees the previous one. Returns the
+ * The move and the history row commit together, so a card that has
+ * already reached its next stage already has the transition that put
+ * it there. This still waits because the evaluator is a background
+ * job, and the test can get here before that job has run. Returns the
  * last trigger seen on timeout, so a real regression fails on the real
  * value rather than a throw.
  */
