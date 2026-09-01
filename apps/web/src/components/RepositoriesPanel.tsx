@@ -108,16 +108,16 @@ export function RepositoriesPanel({
             Close
           </button>
         </div>
+        {/* The two things that are not visible from the list below: which
+            checkout leads, and that a sandbox is not a machine with
+            everything already on it. */}
         <p className="muted">
-          The git checkouts this project spans, each its own worktree inside a card's workspace.
-          The first is the main one: stage summaries and the leading pull request go there.
+          The git checkouts this project spans. The first leads: stage summaries and its pull
+          request go there.
         </p>
-        {/* Said once, at the top, because it explains both fields below
-            and is the thing people are most surprised by: a sandbox is
-            not a machine with everything on it. */}
         <p className="muted">
-          Sandboxes carry git and the coding agents, but no language runtime. Set a setup command
-          to install what a repository needs, and a test command for the agent to check its own work.
+          Sandboxes carry no language runtime, so give each one a setup command to install what it
+          needs and a test command for the agent.
         </p>
       </header>
 
