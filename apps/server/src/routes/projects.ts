@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
@@ -104,6 +106,26 @@ const createProject = z.object({
   repositories: z.array(repositoryInput).max(20).optional(),
 });
 
+/**
+ * Expands a leading `~` in a checkout path typed by a person.
+ *
+ * Only a shell expands tildes. Node's fs treats `~` as an ordinary
+ * directory name, so a path entered in the console as `~/projects/app`
+ * was stored verbatim and every sandbox provision then failed on a
+ * directory that does not exist. The TUI already expands before it
+ * sends (prepareRepositoryPath); this closes the same gap for callers
+ * that do not, which is every other one.
+ *
+ * Local mode only. A path in any other mode names a directory on the
+ * runner, whose home is not this process's, so expanding it here would
+ * point at the wrong machine's home.
+ */
+function expandHomePath(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed === "~") return os.homedir();
+  return trimmed.startsWith("~/") ? path.join(os.homedir(), trimmed.slice(2)) : trimmed;
+}
+
 /** Derives a workspace directory name from a repository path. */
 function repoNameFromPath(localPath: string): string {
   const base = localPath.replace(/\/+$/, "").split("/").pop() ?? "repo";
@@ -173,6 +195,8 @@ async function resolveRepositoryInput(
     // caller supplied. Runner/local paths carry no server credential.
     if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return null;
     if (!input.localPath) return null;
+    const localPath =
+      ctx.env.BENTO_MODE === "local" ? expandHomePath(input.localPath) : input.localPath;
     // The checkout usually knows its GitHub remote already, and a person
     // who picked a directory should not have to type a URL git recorded
     // when they cloned. Local mode only, for the same reason as above: a
@@ -180,8 +204,8 @@ async function resolveRepositoryInput(
     // chosen through a caller supplied path.
     const repoUrl =
       input.repoUrl ??
-      (ctx.env.BENTO_MODE === "multi" ? null : await githubRemoteOf(input.localPath));
-    return { ...input, localPath: input.localPath, githubRepoId: null, repoUrl };
+      (ctx.env.BENTO_MODE === "multi" ? null : await githubRemoteOf(localPath));
+    return { ...input, localPath, githubRepoId: null, repoUrl };
   }
 
   const github = await githubForOrganization(ctx, organizationId);

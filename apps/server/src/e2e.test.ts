@@ -1,8 +1,8 @@
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { and, eq, isNull, sql } from "drizzle-orm";
@@ -4849,6 +4849,47 @@ async function fixtureRepo(label: string): Promise<string> {
   await run("git", ["-C", dir, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "init"]);
   return dir;
 }
+
+/**
+ * A path typed with a leading `~` used to be stored exactly as typed.
+ * Only a shell expands tildes, so provisioning later stat'd a directory
+ * literally named `~` and every run on that project died with
+ * "repository path ~/... does not exist on the machine running the
+ * server". The TUI expanded before sending; the console did not, and
+ * nothing between them did either.
+ */
+test("a repository path is stored expanded, not with the tilde as typed", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("tilde");
+  mock.method(os, "homedir", () => path.dirname(checkout));
+  try {
+    const project = await json<{ id: string; localPath: string }>(
+      await app.request("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Tilde", localPath: `~/${path.basename(checkout)}` }),
+      }),
+    );
+    assert.equal(project.localPath, checkout, "the project mirrors the expanded path");
+
+    const [repo] = await json<{ localPath: string }[]>(
+      await app.request(`/api/projects/${project.id}/repositories`),
+    );
+    assert.equal(repo?.localPath, checkout, "the repository stores a path the filesystem can find");
+
+    // The second door in, which takes the same input and once skipped
+    // the same step.
+    const added = await json<{ localPath: string }>(
+      await app.request(`/api/projects/${project.id}/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "again", localPath: `~/${path.basename(checkout)}` }),
+      }),
+    );
+    assert.equal(added.localPath, checkout, "adding a repository expands it too");
+  } finally {
+    mock.restoreAll();
+  }
+});
 
 const repoNames = async (projectId: string) =>
   (await json<{ name: string; position: number }[]>(await app.request(`/api/projects/${projectId}/repositories`))).map(
