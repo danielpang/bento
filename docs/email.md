@@ -1,6 +1,6 @@
 # Email
 
-Bento sends five emails of its own, and addresses a sixth for the deployment extension. Four of the five exist only in multi mode, since local mode has one auto-provisioned user and no sign in; the contact form is the exception and works in either mode, as long as `BENTO_CONTACT_EMAIL` is set.
+Bento sends five emails of its own and addresses a sixth for the deployment extension. Four of the five are multi mode only, because local mode has one auto-provisioned user and no sign in. The contact form works in either mode, as long as `BENTO_CONTACT_EMAIL` is set.
 
 | Email | Sent when | Built in |
 |---|---|---|
@@ -17,11 +17,11 @@ They all go through the layout in `apps/server/src/email-layout.ts`: a dark head
 
 ## Mail from the cloud module
 
-Plans and billing live in a separate repository, and the usage warnings it sends are the only mail a customer gets that Bento did not write. The layout still belongs here: it is built from the console's own colour tokens, and a second copy of the table markup over there would be a second copy to keep in step.
+Plans and billing live in a separate repository. The usage warnings it sends are the only mail a customer gets that Bento did not write. The layout still belongs here, because it is built from the console's own colour tokens and a second copy of the table markup would have to be kept in step.
 
-So the seam carries copy, not markup. `server.ts` hands the module a `notify` function, the module supplies a subject, a heading, paragraphs, and one action, and `noticeMessage` puts them in the same envelope as everything above. Every value is escaped on the way in, and the plain text half is built from the same paragraphs, so the two halves cannot drift apart.
+The seam therefore carries copy, not markup. `server.ts` hands the module a `notify` function. The module supplies a subject, a heading, paragraphs, and one action, and `noticeMessage` puts them in the same envelope as everything above. Every value is escaped on the way in, and the plain text half is built from the same paragraphs, so the two cannot drift apart.
 
-`notify` is optional on the module's side of the seam, since nothing type checks across two repositories. A host too old to have it still gets the warning, as plain text.
+`notify` is optional on the module's side, because nothing type checks across two repositories. A host too old to have it still gets the warning, as plain text.
 
 ## Previewing
 
@@ -31,27 +31,27 @@ pnpm --filter @bento/server preview:email
 
 That writes every email, HTML and plain text, to `apps/server/.email-preview/`. Open the `.html` files in a browser. It renders through the same functions the server calls, so there is nothing to keep in sync.
 
-A browser is not a mail client. The preview proves layout and copy; it does not prove that Outlook agrees. Send a real one before trusting a change to the table structure.
+A browser is not a mail client. The preview shows layout and copy, but not what Outlook will do. Send a real message before trusting a change to the table structure.
 
 ## Why it looks the way it does
 
-**Tables and inline styles.** There is no stylesheet in email and no cascade worth relying on, and Outlook still renders through Word.
+**Tables and inline styles.** Email has no stylesheet and no cascade worth relying on, and Outlook still renders through Word.
 
-**No remote images.** The mark is drawn from table cells with background colours, so it appears with images blocked, which is the default in most clients. It also means a self-hosted install needs no public URL to serve a logo from. Outlook drops the rounded corners and shows squares, which still reads as the mark.
+**No remote images.** The mark is drawn from table cells with background colours, so it shows up with images blocked, which is the default in most clients. A self-hosted install also needs no public URL to serve a logo from. Outlook drops the rounded corners and shows squares, which still reads as the mark.
 
 **No web fonts.** Geist never loads in mail, so the stack starts at the system UI font.
 
-**Light only, and declared as such** with `color-scheme` and `supported-color-schemes`. A client that inverts an already dark design tends to produce something neither theme intended. The colours are the light theme tokens from `apps/web/src/styles.css`.
+**Light only, and declared as such** with `color-scheme` and `supported-color-schemes`. A client that inverts an already dark design usually produces something neither theme intended. The colours are the light theme tokens from `apps/web/src/styles.css`.
 
-**Both halves carry the link.** Plain text is not a fallback nobody reads: a client that refuses HTML has to end up with a working link, so every message builds its text body deliberately rather than stripping tags out of the HTML.
+**Both halves carry the link.** A client that refuses HTML still has to end up with a working link, so every message builds its text body deliberately rather than stripping tags out of the HTML.
 
-**Values are escaped by default.** Body fragments are built with the `html` tagged template from `email-layout.ts`, which escapes everything it interpolates. An organization named after a script tag is not a way to write markup into someone else's inbox.
+**Values are escaped by default.** Body fragments are built with the `html` tagged template from `email-layout.ts`, which escapes everything it interpolates. An organization named after a script tag cannot write markup into someone else's inbox.
 
 ## Adding an email
 
 Add a builder to `mail.ts` that returns a `Message`, and give it:
 
-- `preheader`, the line clients show beside the subject. Without one they pull the first words of the body, so every account email in a list would start with the same sentence.
+- `preheader`, the line clients show beside the subject. Without one they use the first words of the body, so every account email in a list starts with the same sentence.
 - `footerNote`, one line saying why the mail arrived.
 - `appUrl`, the base URL of the console, which the footer link is built from. Both call sites derive it from `BETTER_AUTH_URL`.
 

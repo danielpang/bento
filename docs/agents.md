@@ -1,6 +1,6 @@
 # Supported coding agents
 
-Every stage of a pipeline runs one of these tools, paired with a model, as an agent you name and give a skill. They differ in three ways that matter day to day: how they authenticate, whether you can talk to them while they work, and whether they report what a run cost.
+Every stage runs one of these tools, paired with a model, as an agent you name and give a skill. They differ in three ways day to day: how they authenticate, whether you can talk to them while they work, and whether they report what a run cost.
 
 | Tool | Model format | Credential | Talk to a working agent | Reports cost |
 | --- | --- | --- | --- | --- |
@@ -16,7 +16,7 @@ Keys are stored encrypted, per organization in multi mode and locally in local m
 
 **DeepSeek models.** Use pi or opencode for streamed DeepSeek runs. Save `DEEPSEEK_API_KEY` and choose the DeepSeek provider for a native key and bill, or use `openrouter/deepseek/...` to bill OpenRouter. DeepSeek Harness (`dsh`) is also available as an experimental, one-shot tool with the limitations below.
 
-Warm sandboxes already holding pi below 0.70.1 or opencode below 1.14.24 reinstall just those two on the next provision, which is what native DeepSeek needs. A later DeepSeek Harness pin is the same: the installed `--version` is compared to the pin, so bumping `@deepseek-ai/dsh` reinstalls dsh without a toolchain version stampede.
+Warm sandboxes holding pi below 0.70.1 or opencode below 1.14.24 reinstall just those two on the next provision, which is what native DeepSeek needs. A later DeepSeek Harness pin works the same way: the installed `--version` is compared to the pin, so bumping `@deepseek-ai/dsh` reinstalls dsh without a toolchain version stampede.
 
 The named agents also read and write as a YAML file, from **Agents** or **Settings, Config**, and from `bento agents export` / `bento agents import`. Details: [pipeline.md](./pipeline.md#the-agents-file).
 
@@ -24,18 +24,18 @@ The named agents also read and write as a YAML file, from **Agents** or **Settin
 
 You can always type into a card's composer, whatever the agent is doing. What happens next depends on the tool:
 
-- **pi** holds a live session and *steers*: your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan first. On a manual stage, the session stays open after a turn so you can keep talking without starting a new run.
-- **Claude Code** holds a live session and *queues in conversation*: your message is read after the current step, in the same session, with everything the agent has already seen. On a manual stage, the session stays open after a turn the same way.
-- **Codex, Cursor, and opencode** take messages *between runs*: yours is delivered the moment the current run ends, as a resume of the same session, so no context is lost.
-- **pool and DeepSeek Harness** take messages between runs too, but start fresh runs rather than resuming because neither prints a usable session id. The new run carries the whole stage prompt and a compacted transcript of the previous conversation, so the agent is not working blind.
+- **pi** holds a live session and *steers*. Your message reaches the agent after the tool call it is in the middle of, and it changes course without finishing the old plan. On a manual stage the session stays open after a turn, so you can keep talking without starting a new run.
+- **Claude Code** holds a live session and *queues in conversation*. Your message is read after the current step, in the same session, with everything the agent has already seen. On a manual stage the session stays open the same way.
+- **Codex, Cursor, and opencode** take messages *between runs*. Yours is delivered when the current run ends, as a resume of the same session, so no context is lost.
+- **pool and DeepSeek Harness** also take messages between runs, but start a fresh run rather than resuming, because neither prints a usable session id. The new run carries the whole stage prompt and a compacted transcript of the previous conversation.
 
-If a resumed session is gone (the sandbox was recreated, or the CLI no longer holds that conversation), Bento starts a fresh run with the same instructions plus a compacted transcript of what was said, rather than looping on the dead session id.
+If a resumed session is gone, because the sandbox was recreated or the CLI no longer holds that conversation, Bento starts a fresh run with the same instructions and a compacted transcript rather than retrying the dead session id.
 
-The composer says which of these applies to the agent that is working, and Stop always ends the run immediately. A message that has to wait for the run to end stays on the card as a queued message until the agent picks it up.
+The composer says which of these applies to the working agent. Stop always ends the run immediately. A message that has to wait stays on the card as a queued message until the agent picks it up.
 
 ## Claude Code on a subscription
 
-Claude Code can run on a Claude subscription you already pay for instead of an API key. One step makes this durable:
+Claude Code can run on a Claude subscription instead of an API key. One step sets this up:
 
 ```bash
 claude setup-token
@@ -47,24 +47,26 @@ It opens a browser once, you approve, and it prints a long lived token. Save tha
 - **`bento setup`**: the credentials step offers "Claude subscription token".
 - **`.env`** as `CLAUDE_CODE_OAUTH_TOKEN=...` for the docker compose stack. A token saved in the console overrides this.
 
-The token counts as a full credential: with it present, no `ANTHROPIC_API_KEY` is needed and runs bill the subscription. The two are alternatives, so only the token is given to the agent and a key stored beside it is left behind. That matters because Claude Code prefers the key when it is handed both, which turned a stale key into an "Invalid API key" failure on a card that looked correctly set up. Setting `ANTHROPIC_BASE_URL` reverses this: a token is only valid at Anthropic's own endpoint, so a redirected tool gets the key and the token is the one left behind.
+The token counts as a full credential. With it present, no `ANTHROPIC_API_KEY` is needed and runs bill the subscription. The two are alternatives, so only the token reaches the agent and a key stored beside it is left behind. This matters because Claude Code prefers the key when handed both, which turned a stale key into an "Invalid API key" failure on a card that looked correctly set up.
+
+Setting `ANTHROPIC_BASE_URL` reverses the choice. A token is only valid at Anthropic's own endpoint, so a redirected tool gets the key instead.
 
 Three things to know:
 
-- **This is local mode only.** Hosted deployments do not offer the field. Credentials are stored one value per organization, so a token saved there would put one member's personal subscription behind every other member's runs, on that account's rate limits.
+- **This is local mode only.** Hosted deployments do not offer the field. Credentials are stored one value per organization, so a token saved there would put one member's personal subscription behind everyone else's runs, on that account's rate limits.
 
-- **Do not rely on the machine's Claude login for servers.** The login in the macOS Keychain rotates its access token on a timescale of minutes, so copies of it die almost immediately, and a server in a container cannot reach the Keychain at all. `setup-token` exists precisely for this; it is the only Claude credential that survives unattended operation.
+- **Do not rely on the machine's Claude login for servers.** The login in the macOS Keychain rotates its access token every few minutes, so copies of it die almost immediately, and a server in a container cannot reach the Keychain at all. `setup-token` is the only Claude credential that survives unattended operation.
 - **If a run fails with "OAuth access token has been revoked"**, the saved token was invalidated. Run `claude setup-token` again and save the new one; the failure message in the run log says exactly this.
 
 ## Per tool notes
 
 ### Claude Code
 
-Anthropic's agent. Model ids are bare (`claude-sonnet-5`, `claude-opus-5`). Credential: `ANTHROPIC_API_KEY` or the subscription token above. Runs report cost, so card and project spend are real figures. Live sessions run over its streaming JSON protocol; there is no mid-step interrupt short of Stop.
+Anthropic's agent. Model ids are bare (`claude-sonnet-5`, `claude-opus-5`). Credential: `ANTHROPIC_API_KEY` or the subscription token above. Runs report cost, so card and project spend are real figures. Live sessions run over its streaming JSON protocol. There is no mid-step interrupt short of Stop.
 
 ### pi
 
-The open source, provider agnostic agent from earendil-works. Models are `provider/id` (`anthropic/claude-sonnet-5`, `deepseek/deepseek-v4-pro`, `openrouter/z-ai/glm-4.6`); it uses whichever of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, or `DEEPSEEK_API_KEY` the chosen provider needs. Live sessions run over its RPC mode, and steering is pi's own first class concept. Reports cost.
+The open source, provider agnostic agent from earendil-works. Models are `provider/id` (`anthropic/claude-sonnet-5`, `deepseek/deepseek-v4-pro`, `openrouter/z-ai/glm-4.6`). It uses whichever of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, or `DEEPSEEK_API_KEY` the chosen provider needs. Live sessions run over its RPC mode, and steering is built into pi itself. Reports cost.
 
 ### Codex CLI
 
@@ -72,7 +74,9 @@ OpenAI's agent. Bare model ids (`gpt-5-codex`). Credential: `OPENAI_API_KEY`, or
 
 ### Cursor CLI
 
-Cursor's terminal agent. Bare model ids, subject to your Cursor plan. Credential: `CURSOR_API_KEY`, which pays for whichever model the agent runs: the picker offers Cursor's own Composer, Grok, Gemini, Claude and GPT, and none of them needs that company's key on top. Grok ids refresh from models.dev; Composer is listed by hand because that source has no Cursor provider. Anything the list has not caught up with can still be typed in. Its headless mode takes no input while running, so messages are delivered between runs; that is a limit of the tool, not a configuration. Does not report cost.
+Cursor's terminal agent. Bare model ids, subject to your Cursor plan. Credential: `CURSOR_API_KEY`, which pays for whichever model the agent runs. The picker offers Cursor's own Composer, Grok, Gemini, Claude and GPT, and none needs that company's key on top. Grok ids refresh from models.dev. Composer is listed by hand, because that source has no Cursor provider. Anything the list has not caught up with can be typed in.
+
+Its headless mode takes no input while running, so messages are delivered between runs. That is a limit of the tool, not a setting. Does not report cost.
 
 ### opencode
 
@@ -80,17 +84,17 @@ The open source terminal agent from sst. Models are `provider/id`, with `openrou
 
 ### Poolside (pool)
 
-Poolside's terminal agent, running Poolside's own Laguna models. Model ids carry the vendor prefix (`poolside/laguna-s-2.1`), which is what Poolside's inference API takes, and the picker offers the one id Poolside publishes; the others in the Laguna family can be typed in. Credential: `POOLSIDE_API_KEY`, a key from Poolside Platform, which is the same key `pool login` asks for in a terminal.
+Poolside's terminal agent, running Poolside's own Laguna models. Model ids carry the vendor prefix (`poolside/laguna-s-2.1`), which is what Poolside's inference API takes. The picker offers the one id Poolside publishes; the rest of the Laguna family can be typed in. Credential: `POOLSIDE_API_KEY` from Poolside Platform, the same key `pool login` asks for in a terminal.
 
 Two details are specific to this tool:
 
-- **The model and the endpoint travel as environment variables.** `pool exec` has no `--model` flag, so Bento passes `POOLSIDE_STANDALONE_MODEL`, and with it the Poolside Platform base URL that the CLI needs before a key means anything. A local runner can override `POOLSIDE_STANDALONE_BASE_URL` in its environment. Hosted enterprise endpoint settings are outside v1.
+- **The model and the endpoint travel as environment variables.** `pool exec` has no `--model` flag, so Bento passes `POOLSIDE_STANDALONE_MODEL`, along with the Poolside Platform base URL the CLI needs before a key means anything. A local runner can override `POOLSIDE_STANDALONE_BASE_URL`. Hosted enterprise endpoint settings are outside v1.
 - **A card's later messages start new runs.** See above: the CLI keeps a run id but never prints one.
 
-To run Laguna weights through OpenRouter instead, which is a different endpoint and a different bill, choose pi or opencode with a model such as `openrouter/poolside/laguna-s-2.1`. That path is unchanged and needs only the OpenRouter key. Does not report cost.
+To run Laguna weights through OpenRouter instead, a different endpoint and a different bill, choose pi or opencode with a model such as `openrouter/poolside/laguna-s-2.1`. That path needs only the OpenRouter key. Does not report cost.
 
 ### DeepSeek Harness (dsh)
 
 DeepSeek's developer-preview agent runtime. Bento pins `@deepseek-ai/dsh@0.1.1-rc.2`, runs its headless profile inside Bento's existing sandbox, and selects a bare model id such as `deepseek-v4-pro` per run. It uses `DEEPSEEK_API_KEY`; `DEEPSEEK_BASE_URL` can point it at a compatible endpoint.
 
-Headless Harness prints only its final assistant message. The card therefore shows an explicit quiet-run state and elapsed time until the process exits, then displays that final message as one bubble. There are no streamed tool or thinking events. It also exposes no session id, so later messages start new runs with a compacted transcript. Use the card's **Changes** view as the primary evidence of what a Harness run did. These limits and upstream's unstable interface are why the tool is marked preview.
+Headless Harness prints only its final assistant message. The card shows a quiet-run state and elapsed time until the process exits, then displays that message as one bubble. There are no streamed tool or thinking events. It exposes no session id either, so later messages start new runs with a compacted transcript. Use the card's **Changes** view to see what a Harness run did. These limits, and upstream's unstable interface, are why the tool is marked preview.

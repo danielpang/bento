@@ -1,29 +1,35 @@
 # MCP servers
 
-An organization defines its remote MCP servers once, and every agent Bento runs gets them, on every harness that supports MCP. Agents never hold the real credential: each run reaches a server through Bento's gateway with a token that lives only as long as the run.
+An organization defines its remote MCP servers once, and every agent Bento runs gets them, on every harness that supports MCP. Agents never hold the real credential. Each run reaches a server through Bento's gateway with a token that lives only as long as the run.
 
 ## What an agent sees
 
-Nothing about the real server. At run start Bento writes each harness's MCP config pointing every enabled server at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway authenticates that token, attaches the organization's (or the acting member's) real credential, and proxies the traffic upstream. When the run settles the token is revoked. So a prompt injection that reads the config out of the sandbox gets a token that dies with the run and never leaves the gateway, not an API key or an OAuth token.
+Nothing about the real server. At run start Bento writes each harness's MCP config, pointing every enabled server at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway authenticates that token, attaches the organization's real credential (or the acting member's), and proxies the traffic upstream. The token is revoked when the run settles.
+
+A prompt injection that reads the config out of the sandbox therefore gets a token that dies with the run and never leaves the gateway, not an API key or an OAuth token.
 
 ## Finding a server
 
-Settings, then MCP, opens on "Add a connection": the servers published to the public MCP registry, searchable, each one addable in a click. Adding asks nothing else. The entry supplies the name, URL, transport, and tool name; Bento asks the server itself how it authenticates (a 401 carrying RFC 9728 resource metadata means a sign in, a plain refusal means a key, an answer means neither); and the server is connected for you, so your runs get it and you sign in with your own account. Servers that only run as a local command (stdio) are not listed, because Bento reaches servers over the network.
+Settings, then MCP, opens on "Add a connection", listing the servers published to the public MCP registry. They are searchable, and each is added in one click.
 
-Each entry shows the service's own icon, fetched and cached by the Bento server rather than by your browser, so the vendors in the list are never told who is reading the page. A service that publishes no icon gets a monogram.
+Adding asks nothing else. The registry entry supplies the name, URL, transport, and tool name. Bento asks the server itself how it authenticates: a 401 carrying RFC 9728 resource metadata means a sign in, a plain refusal means a key, and an answer means neither. The server is then connected as a personal one, so your runs get it and you sign in with your own account.
 
-A server no registry carries, an internal company one for instance, goes in through "Add a custom server by URL" below the list. That form is also where a team-wide server is set up, with the full choice of who connects.
+Servers that only run as a local command (stdio) are not listed. Bento reaches servers over the network.
 
-The catalog is read server side and cached for a few minutes, so the console never calls the registry directly. Point `BENTO_MCP_REGISTRY_URL` at a private registry to offer an internal list instead. If the registry cannot be reached the section says so and the custom URL form still works.
+Each entry shows the service's own icon, fetched and cached by the Bento server rather than by your browser, so the vendors in the list are not told who is reading the page. A service that publishes no icon gets a monogram.
+
+A server no registry carries, such as an internal company one, goes in through "Add a custom server by URL" below the list. That form is also where a team-wide server is set up, with the full choice of who connects.
+
+The catalog is read server side and cached for a few minutes, so the console never calls the registry directly. Point `BENTO_MCP_REGISTRY_URL` at a private registry to offer an internal list instead. If the registry cannot be reached, the section says so and the custom URL form still works.
 
 ## Team servers and personal servers
 
-Remote servers only: a URL the sandbox can reach over the gateway, streamable HTTP or SSE. The slug is the tool name agents see (lowercase letters, digits, dashes).
+Remote servers only, meaning a URL the sandbox can reach over the gateway, streamable HTTP or SSE. The slug is the tool name agents see (lowercase letters, digits, dashes).
 
 A server is either the team's or a member's own:
 
 - **Team servers** are the shared registry. An owner or admin defines them, and every agent the team runs gets them. This is where a shared docs or search server, or an internal company MCP server, belongs.
-- **Personal servers** are one member's own. Any member may add one from the "Existing connections" section; only runs that member starts get it, and only their own credential is ever attached. A teammate never sees another member's personal server. An admin can see one (named by its owner) and turn it off or remove it as governance, but cannot read or store its credentials.
+- **Personal servers** belong to one member. Any member may add one from the "Existing connections" section. Only runs that member starts get it, and only their own credential is attached. A teammate never sees another member's personal server. An admin can see one, named by its owner, and turn it off or remove it, but cannot read or store its credentials.
 
 If a personal server's slug matches a team server's, the team server wins for that run and the transcript says so.
 
@@ -45,7 +51,7 @@ Each server has its own callback path (`/api/mcp/callback/<serverId>`) and regis
 
 ## Changing or removing a server
 
-Changing a server's URL origin, its auth type, or its credential scope clears its stored credentials: a credential is bound to the endpoints it was issued for, so a repointed server must be reconnected. Removing a server deletes its credentials. Removing a member deletes that member's own connections.
+Changing a server's URL origin, its auth type, or its credential scope clears its stored credentials. A credential is bound to the endpoints it was issued for, so a repointed server must be reconnected. Removing a server deletes its credentials, and removing a member deletes that member's own connections.
 
 ## Which harnesses use MCP
 
