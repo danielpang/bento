@@ -361,18 +361,20 @@ export function AgentsPanel({
             )}
             <h4 className="field-heading">Or share this machine's login</h4>
             <p className="muted">
-              When the server runs on the machine you use Claude Code from, agents can borrow that
-              login and no token is needed.{" "}
+              Agents borrow this server's Claude Code login, so no token is needed.{" "}
               {machine.claude?.loggedIn
                 ? `Signed in${machine.claude.email ? ` as ${machine.claude.email}` : ""}${
                     machine.claude.subscriptionType ? ` on a ${machine.claude.subscriptionType} plan` : ""
                   }.`
-                : "No Claude Code login was found in this server's home directory."}
+                : "None found in the server's home directory."}
             </p>
+            {/* Where to run it matters more than how: a container has a
+                home of its own, which is why the login is missing in the
+                setup people most often ask about. */}
             {!machine.claude?.loggedIn && (
               <p className="muted">
-                Sign in with <code>claude auth login</code> in a terminal and reopen this panel.
-                In a container there is no login to share, so use the token above.
+                Run <code>claude auth login</code> where the server runs, then reopen this panel. A
+                container has no login to share.
               </p>
             )}
             <div className="actions">
