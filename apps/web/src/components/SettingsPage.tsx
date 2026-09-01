@@ -154,7 +154,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
             <SlackPanel client={client} />
           </Tabs.Content>
           <Tabs.Content value="mcp" className="settings-body">
-            <McpPanel client={client} />
+            <McpPanel client={client} mode={mode} />
           </Tabs.Content>
           <Tabs.Content value="account" className="settings-body">
             <AccountSettings />

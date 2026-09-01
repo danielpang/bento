@@ -118,10 +118,6 @@ services:
       # pull requests without the GitHub App. Stays on the server; it is
       # never part of an agent's environment.
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      # Commits are attributed to you. The container has no global
-      # gitconfig, so the identity arrives through the environment.
-      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-}
-      - GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-}
     volumes:
       # Agents run in sibling containers, created through the host's own
       # Docker daemon rather than a daemon inside this one.

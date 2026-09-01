@@ -25,6 +25,257 @@ const FETCH_TIMEOUT_MS = 10_000;
 /** One page is a browsable list, not a database dump. */
 const PAGE_LIMIT = 100;
 
+/**
+ * The servers worth seeing first, in the order they are shown.
+ *
+ * Curated, because the registry carries no popularity signal of any
+ * kind: no installs, no stars, no ratings. Ranking by namespace instead
+ * would be worse than nothing, since a domain namespace only proves
+ * control of that name. `com.trycloudflare.*` is anyone with a tunnel
+ * and `app.vercel.*` is anyone with a deployment, so a "verified"
+ * ordering would promote strangers as though they were the vendor.
+ *
+ * Held in full rather than as names to look up. Resolving these cost a
+ * registry request each, and the public registry is slow and uneven
+ * under that pattern: a cold browse took ten seconds against a warm
+ * five milliseconds, and one bad moment returned nothing at all. A
+ * server's name, URL and transport change about as often as a vendor
+ * renames itself, so keeping them here trades a rare stale row for a
+ * page that always opens instantly and works when the registry is down.
+ *
+ * Each was checked to exist in the registry with a remote. To refresh,
+ * search the registry for the name and copy the current values.
+ */
+interface FeaturedServer {
+  name: string;
+  title: string;
+  description: string;
+  url: string;
+  transport: "http" | "sse";
+}
+
+const FEATURED: FeaturedServer[] = [
+  {
+    name: "com.notion/mcp",
+    title: "",
+    description:
+      "Official Notion MCP server",
+    url: "https://mcp.notion.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "app.linear/linear",
+    title: "Linear",
+    description:
+      "MCP server for Linear project management and issue tracking",
+    url: "https://mcp.linear.app/mcp",
+    transport: "http",
+  },
+  {
+    name: "io.github.PostHog/mcp",
+    title: "PostHog MCP Server",
+    description:
+      "Official PostHog MCP Server for product analytics, feature flags, experiments, and more.",
+    url: "https://mcp.posthog.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.stripe/mcp",
+    title: "",
+    description:
+      "MCP server integrating with Stripe - tools for customers, products, payments, and more.",
+    url: "https://mcp.stripe.com",
+    transport: "http",
+  },
+  {
+    name: "com.figma.mcp/mcp",
+    title: "Figma MCP Server",
+    description:
+      "The Figma MCP server brings Figma design context directly into your AI workflow.",
+    url: "https://mcp.figma.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.vercel/vercel-mcp",
+    title: "",
+    description:
+      "An MCP server for Vercel",
+    url: "https://mcp.vercel.com",
+    transport: "http",
+  },
+  {
+    name: "com.atlassian/atlassian-mcp-server",
+    title: "Atlassian Rovo MCP Server",
+    description:
+      "Connect to Atlassian Jira, Confluence, and Compass to search, create, and manage your work.",
+    url: "https://mcp.atlassian.com/v1/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.cloudflare.mcp/mcp",
+    title: "",
+    description:
+      "Cloudflare MCP servers",
+    url: "https://docs.mcp.cloudflare.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.supabase/mcp",
+    title: "Supabase",
+    description:
+      "MCP server for interacting with the Supabase platform",
+    url: "https://mcp.supabase.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.airtable/mcp",
+    title: "",
+    description:
+      "Official Airtable MCP server — database and operations layer for agents.",
+    url: "https://mcp.airtable.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "co.huggingface/hf-mcp-server",
+    title: "Hugging Face",
+    description:
+      "Connect to Hugging Face Hub and thousands of Gradio AI Applications",
+    url: "https://huggingface.co/mcp?login",
+    transport: "http",
+  },
+  {
+    name: "ai.exa/exa",
+    title: "",
+    description:
+      "Fast, intelligent web search and web crawling.\n\nNew mcp tool: Exa-code is a context tool for coding",
+    url: "https://mcp.exa.ai/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.zapier/mcp",
+    title: "Zapier",
+    description:
+      "Hosted MCP server connecting AI assistants to 9,000+ apps and 40,000+ actions via Zapier.",
+    url: "https://mcp.zapier.com/api/v1/connect",
+    transport: "http",
+  },
+  {
+    name: "com.gitlab/mcp",
+    title: "",
+    description:
+      "Official GitLab MCP Server",
+    url: "https://gitlab.com/api/v4/mcp",
+    transport: "http",
+  },
+  {
+    name: "io.prisma/mcp",
+    title: "",
+    description:
+      "MCP server for managing Prisma Postgres.",
+    url: "https://mcp.prisma.io/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.webflow/mcp",
+    title: "",
+    description:
+      "AI-powered design and management for Webflow Sites",
+    url: "https://mcp.webflow.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.wix/mcp",
+    title: "",
+    description:
+      "A Model Context Protocol server for Wix AI tools",
+    url: "https://mcp.wix.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.monday/monday.com",
+    title: "",
+    description:
+      "MCP server for monday.com integration.",
+    url: "https://mcp.monday.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.paypal.mcp/mcp",
+    title: "",
+    description:
+      "PayPal MCP server provides access to PayPal services and operations for AI assistants",
+    url: "https://mcp.paypal.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "ai.fireflies/fireflies",
+    title: "Fireflies.ai",
+    description:
+      "Search and analyze meeting transcripts, summaries, soundbites and analytics from Fireflies.ai",
+    url: "https://api.fireflies.ai/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.egnyte/mcp-server",
+    title: "Egnyte Remote MCP Server",
+    description:
+      "Egnyte's remote MCP server for secure AI access, search, upload and file management in your account.",
+    url: "https://mcp-server.egnyte.com/mcp",
+    transport: "http",
+  },
+  {
+    name: "com.close/close-mcp",
+    title: "",
+    description:
+      "Close CRM to manage your sales pipeline. Learn more at https://close.com or https://mcp.close.com",
+    url: "https://mcp.close.com/mcp",
+    transport: "http",
+  },
+];
+
+/**
+ * Categories, also curated: the registry has no taxonomy, and guessing
+ * one from description text misfiles constantly, because descriptions
+ * are vendor marketing copy. An unmapped server has no category and
+ * appears only under "All", which is honest about what is known.
+ */
+export const CATALOG_CATEGORIES = [
+  "Analytics",
+  "Dev tools",
+  "Data",
+  "Design",
+  "Docs",
+  "Project",
+  "Payments",
+] as const;
+
+export type CatalogCategory = (typeof CATALOG_CATEGORIES)[number];
+
+const CATEGORY_BY_NAME: Record<string, CatalogCategory> = {
+  "io.github.PostHog/mcp": "Analytics",
+  "com.cloudflare.mcp/mcp": "Dev tools",
+  "com.vercel/vercel-mcp": "Dev tools",
+  "com.gitlab/mcp": "Dev tools",
+  "co.huggingface/hf-mcp-server": "Dev tools",
+  "ai.exa/exa": "Dev tools",
+  "com.zapier/mcp": "Dev tools",
+  "com.supabase/mcp": "Data",
+  "com.airtable/mcp": "Data",
+  "io.prisma/mcp": "Data",
+  "com.egnyte/mcp-server": "Data",
+  "com.figma.mcp/mcp": "Design",
+  "com.webflow/mcp": "Design",
+  "com.wix/mcp": "Design",
+  "com.notion/mcp": "Docs",
+  "ai.fireflies/fireflies": "Docs",
+  "app.linear/linear": "Project",
+  "com.atlassian/atlassian-mcp-server": "Project",
+  "com.monday/monday.com": "Project",
+  "com.close/close-mcp": "Project",
+  "com.stripe/mcp": "Payments",
+  "com.paypal.mcp/mcp": "Payments",
+};
+
 export interface CatalogEntry {
   /** Reverse-DNS registry name, stable across versions. */
   name: string;
@@ -37,6 +288,10 @@ export interface CatalogEntry {
   publisher: string;
   /** Host the icon is fetched from, proxied so the console calls nobody. */
   iconHost: string;
+  /** On the curated list, so it leads the browse view. */
+  featured: boolean;
+  /** Curated category, or null when this server is not mapped. */
+  category: CatalogCategory | null;
 }
 
 interface RegistryRemote {
@@ -120,6 +375,26 @@ export async function fetchCatalog(
   return { entries, reachable: true };
 }
 
+/**
+ * The featured servers, built from the table above with no network at
+ * all. This used to resolve each name against the registry, which put
+ * twenty-two upstream requests on the browse view's cold path and made
+ * the section only as reliable as the registry was that minute.
+ */
+export function featuredEntries(): CatalogEntry[] {
+  return FEATURED.map((entry) => ({
+    name: entry.name,
+    title: displayTitle(entry.name, entry.title),
+    description: entry.description,
+    url: entry.url,
+    transport: entry.transport,
+    publisher: publisherOf(entry.name),
+    iconHost: hostOf(entry.url),
+    featured: true,
+    category: CATEGORY_BY_NAME[entry.name] ?? null,
+  }));
+}
+
 /** Registry rows to the shape the console shows, remotes only. */
 export function toEntries(rows: { server?: RegistryServer }[]): CatalogEntry[] {
   const byName = new Map<string, CatalogEntry>();
@@ -139,6 +414,8 @@ export function toEntries(rows: { server?: RegistryServer }[]): CatalogEntry[] {
       transport: remote.transport,
       publisher: publisherOf(server.name),
       iconHost: hostOf(remote.url),
+      featured: FEATURED.some((entry) => entry.name === server.name),
+      category: CATEGORY_BY_NAME[server.name] ?? null,
     });
   }
   return [...byName.values()];
@@ -171,12 +448,15 @@ export function displayTitle(name: string, title?: string): string {
   const [namespace = "", tail = ""] = name.includes("/")
     ? [name.slice(0, name.indexOf("/")), name.slice(name.indexOf("/") + 1)]
     : [name, ""];
-  const word = GENERIC_TAILS.has(tail.toLowerCase()) || !tail ? (namespace.split(".").pop() ?? name) : tail;
-  return word
-    .split(/[-_.]/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+  const word =
+    GENERIC_TAILS.has(tail.toLowerCase()) || !tail ? vendorLabel(namespace) ?? name : stripTld(tail);
+  const parts = word.split(/[-_.]/).filter(Boolean);
+  // "vercel-mcp" is Vercel and "close-mcp" is Close: the suffix says
+  // what it is, which every row here already is.
+  while (parts.length > 1 && GENERIC_TAILS.has(parts[parts.length - 1]!.toLowerCase())) {
+    parts.pop();
+  }
+  return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
 
 function hostOf(url: string): string {
@@ -192,6 +472,24 @@ function hostOf(url: string): string {
  * differently from somebody's wrapper of it. Registry names are
  * reverse-DNS, so the part before the first slash is the publisher.
  */
+/**
+ * The vendor label in a reverse-DNS namespace, skipping generic tails.
+ * `com.cloudflare.mcp` is Cloudflare, not "Mcp": taking the last label
+ * blindly titled two different featured servers "Mcp".
+ */
+function vendorLabel(namespace: string): string | null {
+  const labels = namespace.split(".").filter(Boolean);
+  while (labels.length > 1 && GENERIC_TAILS.has(labels[labels.length - 1]!.toLowerCase())) {
+    labels.pop();
+  }
+  return labels.pop() ?? null;
+}
+
+/** `monday.com` is Monday; the suffix is address, not name. */
+function stripTld(tail: string): string {
+  return tail.replace(/\.(com|io|ai|dev|app|sh|co|net|org)$/i, "");
+}
+
 function publisherOf(name: string): string {
   const namespace = name.split("/")[0] ?? name;
   return namespace.startsWith("io.github.") ? namespace.slice("io.github.".length) : namespace;

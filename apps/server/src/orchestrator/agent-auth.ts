@@ -108,15 +108,15 @@ export async function agentAuthEnv(ctx: AppContext, adapter: AgentAdapter): Prom
  *
  * Three sources, in this order:
  *
- * 1. The environment, so a launch flag and CI stay predictable. This is
- *    also how the compose stack was configured before there was a
- *    setting, and those .env files must keep working.
- * 2. What was typed under Agents, which is the answer for a server in a
- *    container: it has no global git config to read, so every commit
- *    arrived as "Bento Agent" with nowhere in the product to say
- *    otherwise.
- * 3. The host's global config, which is why running from source has
+ * 1. What was typed under Settings, GitHub. One place owns this, and it
+ *    is the one the console can show and change. GIT_AUTHOR_NAME and
+ *    GIT_AUTHOR_EMAIL used to outrank it, which left the field visibly
+ *    inert and the real value somewhere the product could not edit.
+ * 2. The host's global git config, which is why running from source has
  *    always just worked.
+ *
+ * Nothing set leaves the sandbox image's own placeholder in place, so
+ * the commit arrives as Bento Agent <no-reply@usebento.ai>.
  *
  * Never in multi mode: the operator's identity is not a tenant's, and
  * an empty result leaves the sandbox image's own placeholder in place.
@@ -133,8 +133,8 @@ export async function gitIdentityEnv(ctx: AppContext): Promise<Record<string, st
   };
   const stored = await readSettings(ctx);
   const [name, email] = await Promise.all([
-    process.env.GIT_AUTHOR_NAME?.trim() || stored.gitAuthorName.trim() || read("user.name"),
-    process.env.GIT_AUTHOR_EMAIL?.trim() || stored.gitAuthorEmail.trim() || read("user.email"),
+    stored.gitAuthorName.trim() || read("user.name"),
+    stored.gitAuthorEmail.trim() || read("user.email"),
   ]);
   if (!name || !email) return {};
   return {

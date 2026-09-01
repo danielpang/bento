@@ -166,3 +166,26 @@ test("an entry carries the host its icon comes from", () => {
   ]);
   assert.equal(entry!.iconHost, "mcp.notion.com");
 });
+
+test("a generic namespace tail does not become the title", () => {
+  // com.cloudflare.mcp/mcp and com.paypal.mcp/mcp both came out as
+  // "Mcp": the tail was generic, and so was the last namespace label.
+  assert.equal(displayTitle("com.cloudflare.mcp/mcp"), "Cloudflare");
+  assert.equal(displayTitle("com.paypal.mcp/mcp"), "Paypal");
+  assert.equal(displayTitle("com.notion/mcp"), "Notion");
+});
+
+test("a domain suffix in the tail is address, not name", () => {
+  assert.equal(displayTitle("com.monday/monday.com"), "Monday");
+});
+
+test("a title the registry gives always wins", () => {
+  assert.equal(displayTitle("com.cloudflare.mcp/mcp", "Cloudflare Docs"), "Cloudflare Docs");
+});
+
+test("a generic suffix in the tail is trimmed", () => {
+  assert.equal(displayTitle("com.vercel/vercel-mcp"), "Vercel");
+  assert.equal(displayTitle("com.close/close-mcp"), "Close");
+  // Not over-trimmed: a name that is only the generic word keeps it.
+  assert.equal(displayTitle("com.example/mcp"), "Example");
+});

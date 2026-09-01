@@ -391,7 +391,7 @@ async function withoutStageNotes(
       "-c",
       "user.name=Bento",
       "-c",
-      "user.email=agent@bento.dev",
+      "user.email=no-reply@usebento.ai",
       "commit-tree",
       stripped.trim(),
       "-p",

@@ -9,7 +9,7 @@ import { tenantDb as db } from "../middleware/tenant.js";
 import { maskSecret } from "../secrets.js";
 import { pingMcpServer } from "../mcp/client.js";
 import { safeFetchPolicy } from "../mcp/safe-fetch.js";
-import { fetchCatalog, slugFor } from "../mcp/catalog.js";
+import { fetchCatalog, featuredEntries, slugFor } from "../mcp/catalog.js";
 import { allowIconHosts, fetchServiceIcon, isIconHostAllowed } from "../mcp/icons.js";
 import { detectAuthType } from "../mcp/detect-auth.js";
 import { discoverOAuth, registerClient, DiscoveryError } from "../mcp/discovery.js";
@@ -186,10 +186,21 @@ export function mcpRoutes(ctx: AppContext) {
     const access = await requireAccess(ctx, c);
     if (!access.ok) return c.json({ error: "not found" }, 404);
     const search = c.req.query("search") ?? "";
-    const { entries, reachable } = await fetchCatalog(safeFetchPolicy(ctx.env), {
+    const policy = safeFetchPolicy(ctx.env);
+    const { entries: found, reachable } = await fetchCatalog(policy, {
       registryUrl: ctx.env.BENTO_MCP_REGISTRY_URL,
       search,
     });
+
+    // Browsing leads with the curated set; a search is answered with
+    // what was asked for, in the registry's own order. The curated set
+    // needs no registry, so it still leads when the registry is down.
+    let entries = found;
+    if (!search.trim()) {
+      const featured = featuredEntries();
+      const pinned = new Set(featured.map((entry) => entry.name));
+      entries = [...featured, ...found.filter((entry) => !pinned.has(entry.name))];
+    }
 
     // Mark what is already here, by URL: the same server added by hand
     // and picked from the catalog is one server, not two.
@@ -707,7 +718,15 @@ export function mcpRoutes(ctx: AppContext) {
         safeFetchPolicy(ctx.env),
       );
     } catch (err) {
-      if (err instanceof OAuthError) return outcome(c, "failed");
+      if (err instanceof OAuthError) {
+        // The message carries the provider's own error code and no
+        // secret, and without it a failed connect is undiagnosable:
+        // the console can only say the sign in did not complete.
+        console.warn(
+          `[mcp] token exchange failed for ${server.name} at ${new URL(server.tokenEndpoint).host}: ${err.message}`,
+        );
+        return outcome(c, "failed");
+      }
       throw err;
     }
 

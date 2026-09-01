@@ -111,6 +111,10 @@ export interface McpCatalogEntry {
   slug: string;
   /** Icon served from Bento's own origin, or null when the service has none. */
   iconUrl: string | null;
+  /** On the curated list, so the console leads with it. */
+  featured: boolean;
+  /** Curated category, or null when this server is not mapped. */
+  category: string | null;
   /** Already in this team's registry (or the caller's own servers). */
   added: boolean;
 }
@@ -952,7 +956,6 @@ export class BentoClient {
       gitAuthorEmail?: string;
       /** What a commit would actually say, from whichever source wins. */
       gitIdentity?: { name: string; email: string } | null;
-      gitIdentityPinnedByEnv?: boolean;
       logins: { cli: string; signedIn: boolean }[];
       claude?: { loggedIn: boolean; subscriptionType?: string; email?: string } | null;
     }>("/api/settings");

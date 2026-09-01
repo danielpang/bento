@@ -45,13 +45,11 @@ One command runs the whole stack, but agents need three values in `.env` first, 
 cat >> .env <<'EOF'
 BENTO_REPOS=/Users/you/code                # where your checkouts live
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-...     # from: claude setup-token   (or set ANTHROPIC_API_KEY)
-GIT_AUTHOR_NAME=Your Name                  # commit attribution; the container has no gitconfig
-GIT_AUTHOR_EMAIL=you@example.com
 EOF
 docker compose up --build        # or: pnpm docker:up
 ```
 
-Open http://localhost:4400. This builds two images — one holding the server and the built console, one for the sandboxes agents run in — then brings up Postgres, runs migrations, and starts the server, in that order. No Node and no pnpm on the host; the three `.env` values exist because the server now lives in a container, which can see neither your checkouts, nor your keychain, nor your gitconfig unless told where they are.
+Open http://localhost:4400. This builds two images — one holding the server and the built console, one for the sandboxes agents run in — then brings up Postgres, runs migrations, and starts the server, in that order. No Node and no pnpm on the host; the two `.env` values exist because the server now lives in a container, which can see neither your checkouts nor your keychain unless told where they are. Commit attribution is a setting, under **Settings, GitHub**, not an environment variable.
 
 The ordering is enforced rather than hoped for. `migrate` and `sandbox-image` are one-shot services and `server` waits on `service_completed_successfully` for both, so it never starts against a schema that is behind or without the image its first card will need. Re-running is free: migrations take an advisory lock and apply only what is missing.
 
@@ -164,9 +162,9 @@ Credentials are the other half. The containerized server cannot reach this machi
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...              # an API key
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-...    # or your subscription: claude setup-token
-GIT_AUTHOR_NAME=Your Name                 # and commit attribution, since the
-GIT_AUTHOR_EMAIL=you@example.com          # container has no global gitconfig
 ```
+
+Commit attribution is not in this list: it is a setting under **Settings, GitHub**, saved on the server rather than passed in through the environment.
 
 The token counts as a credential exactly like a key does, and a run started without either fails immediately with a message saying which is missing.
 

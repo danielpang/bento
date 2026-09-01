@@ -23,7 +23,7 @@ Remote servers only: a URL the sandbox can reach over the gateway, streamable HT
 A server is either the team's or a member's own:
 
 - **Team servers** are the shared registry. An owner or admin defines them, and every agent the team runs gets them. This is where a shared docs or search server, or an internal company MCP server, belongs.
-- **Personal servers** are one member's own. Any member may add one from the "Your servers and sign-ins" section; only runs that member starts get it, and only their own credential is ever attached. A teammate never sees another member's personal server. An admin can see one (named by its owner) and turn it off or remove it as governance, but cannot read or store its credentials.
+- **Personal servers** are one member's own. Any member may add one from the "Existing connections" section; only runs that member starts get it, and only their own credential is ever attached. A teammate never sees another member's personal server. An admin can see one (named by its owner) and turn it off or remove it as governance, but cannot read or store its credentials.
 
 If a personal server's slug matches a team server's, the team server wins for that run and the transcript says so.
 
