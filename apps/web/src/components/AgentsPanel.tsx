@@ -359,43 +359,51 @@ export function AgentsPanel({
             {tokenHint && (
               <p className="muted">{`Saved (${tokenHint}).`}</p>
             )}
-            <h4 className="field-heading">Or share this machine's login</h4>
-            <p className="muted">
-              Agents borrow this server's Claude Code login, so no token is needed.{" "}
-              {machine.claude?.loggedIn
-                ? `Signed in${machine.claude.email ? ` as ${machine.claude.email}` : ""}${
-                    machine.claude.subscriptionType ? ` on a ${machine.claude.subscriptionType} plan` : ""
-                  }.`
-                : "None found in the server's home directory."}
-            </p>
-            {/* Where to run it matters more than how: a container has a
-                home of its own, which is why the login is missing in the
-                setup people most often ask about. */}
-            {!machine.claude?.loggedIn && (
-              <p className="muted">
-                Run <code>claude auth login</code> where the server runs, then reopen this panel. A
-                container has no login to share.
-              </p>
-            )}
-            <div className="actions">
-              <button
-                className="btn"
-                disabled={busy || machine.pinnedByEnv}
-                title={
-                  machine.pinnedByEnv
-                    ? "BENTO_SHARE_AGENT_AUTH is set, so this is decided when the server starts"
-                    : undefined
-                }
-                onClick={() => act(() => client.setShareAgentAuth(!machine.shareAgentAuth))}
-              >
-                {machine.shareAgentAuth ? "Stop sharing this machine's logins" : "Use this machine's logins"}
-              </button>
-            </div>
-            {machine.shareAgentAuth && (
-              <p className="warn">
-                Sharing is on. An agent can read anything its sandbox can, so use it only on
-                repositories you trust.
-              </p>
+            {/*
+              Absent, not disabled, when the server runs in a container.
+              Sharing carries the login of the machine the SERVER runs
+              on, and a container has a home of its own holding nobody's
+              login: the control could only ever report failure. It says
+              nothing about how sandboxes run, which is the reading the
+              old copy invited.
+            */}
+            {machine.canShareMachineLogin !== false && (
+              <>
+                <h4 className="field-heading">Or share this machine's login</h4>
+                <p className="muted">
+                  Agents borrow this server's Claude Code login, so no token is needed.{" "}
+                  {machine.claude?.loggedIn
+                    ? `Signed in${machine.claude.email ? ` as ${machine.claude.email}` : ""}${
+                        machine.claude.subscriptionType ? ` on a ${machine.claude.subscriptionType} plan` : ""
+                      }.`
+                    : "None found in the server's home directory."}
+                </p>
+                {!machine.claude?.loggedIn && (
+                  <p className="muted">
+                    Run <code>claude auth login</code> here, then reopen this panel.
+                  </p>
+                )}
+                <div className="actions">
+                  <button
+                    className="btn"
+                    disabled={busy || machine.pinnedByEnv}
+                    title={
+                      machine.pinnedByEnv
+                        ? "BENTO_SHARE_AGENT_AUTH is set, so this is decided when the server starts"
+                        : undefined
+                    }
+                    onClick={() => act(() => client.setShareAgentAuth(!machine.shareAgentAuth))}
+                  >
+                    {machine.shareAgentAuth ? "Stop sharing this machine's logins" : "Use this machine's logins"}
+                  </button>
+                </div>
+                {machine.shareAgentAuth && (
+                  <p className="warn">
+                    Sharing is on. An agent can read anything its sandbox can, so use it only on
+                    repositories you trust.
+                  </p>
+                )}
+              </>
             )}
           </section>
         )}

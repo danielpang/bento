@@ -924,6 +924,13 @@ export class BentoClient {
       gitIdentity?: { name: string; email: string } | null;
       gitIdentityPinnedByEnv?: boolean;
       logins: { cli: string; signedIn: boolean }[];
+      /**
+       * Whether the server can offer its machine's login at all. False
+       * when the server runs in a container, whose home holds nobody's
+       * login. Optional: an older server does not send it, and the
+       * console treats only an explicit false as "hide".
+       */
+      canShareMachineLogin?: boolean;
       claude?: { loggedIn: boolean; subscriptionType?: string; email?: string } | null;
     }>("/api/settings");
   }

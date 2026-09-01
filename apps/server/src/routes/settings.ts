@@ -85,6 +85,17 @@ export function settingsRoutes(ctx: AppContext) {
         /** Set by the environment, so this route cannot change it. */
         pinnedByEnv: ctx.env.BENTO_SHARE_AGENT_AUTH !== undefined,
         logins,
+        /**
+         * Whether this server can offer a machine login at all.
+         *
+         * Sharing carries the login of the machine the SERVER runs on
+         * into each sandbox. A containerised server has a home of its
+         * own (/root) holding nobody's login, and no keychain to ask,
+         * so the offer is inert there however the sandboxes run. The
+         * console hides the section rather than showing a control that
+         * cannot work.
+         */
+        canShareMachineLogin: !(await runsInContainer()),
         claude: await claudeAuthStatus(),
       });
     })
@@ -103,6 +114,47 @@ export function settingsRoutes(ctx: AppContext) {
       await writeSettings(ctx, next);
       return c.json(next);
     });
+}
+
+/**
+ * Whether this process is inside a container.
+ *
+ * Docker writes /.dockerenv into every container it starts, and
+ * anything else that gets here (podman, a devcontainer) is named in
+ * /proc/1/cgroup or marked by /run/.containerenv. None of the three is
+ * authoritative alone, so all three are asked and any one is enough.
+ *
+ * Cached: this cannot change while the process lives, and the settings
+ * route is read every time the panel opens.
+ */
+let containerCheck: Promise<boolean> | null = null;
+
+function runsInContainer(): Promise<boolean> {
+  containerCheck ??= (async () => {
+    // A Mac or a Linux host running the server directly is the common
+    // case, and it exits here without reading anything.
+    if (process.platform !== "linux") return false;
+    for (const marker of ["/.dockerenv", "/run/.containerenv"]) {
+      try {
+        await access(marker);
+        return true;
+      } catch {
+        // Absent, so try the next signal.
+      }
+    }
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const cgroup = await readFile("/proc/1/cgroup", "utf8");
+      return /docker|containerd|kubepods|libpod/.test(cgroup);
+    } catch {
+      // No procfs to read, which is not evidence either way. Treated as
+      // a host: hiding a working control is worse than showing an inert
+      // one, because only one of the two can be recovered from by the
+      // person looking at it.
+      return false;
+    }
+  })();
+  return containerCheck;
 }
 
 /**

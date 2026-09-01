@@ -4213,6 +4213,22 @@ test("starting a run on a card that was deleted answers gone, not a foreign key 
 });
 
 /**
+ * Sharing carries the login of the machine the SERVER runs on into each
+ * sandbox, so a containerised server has nothing to offer however its
+ * sandboxes run. The console reads this to hide the control rather than
+ * show one that can only report failure.
+ *
+ * This suite runs the server as a host process, which is the case that
+ * must stay visible: hiding a working control is the worse mistake,
+ * because the person looking at it cannot recover from it.
+ */
+test("the settings route says whether a machine login can be shared", { timeout: 60_000 }, async () => {
+  const settings = await json<{ canShareMachineLogin: boolean }>(await app.request("/api/settings"));
+  assert.equal(typeof settings.canShareMachineLogin, "boolean", "the console gets an answer, not undefined");
+  assert.equal(settings.canShareMachineLogin, true, "a server running on the host can offer its own login");
+});
+
+/**
  * The identity on agent commits had no home in the product: a server in
  * a container has no git config to read, so every commit arrived as the
  * sandbox image's placeholder and the only fix was an env var set
