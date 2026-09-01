@@ -1415,7 +1415,7 @@ button {
 
 /*
  * A long brief opens cut off, so the buttons stay on screen. Twelve
- * lines, which is what needsClamp counts in FeatureDrawer.tsx: the two
+ * lines, which is what needsClamp counts in card-description.ts: the two
  * have to stay together, or Show more appears over text that was never
  * cut and does nothing when pressed.
  */
