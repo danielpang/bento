@@ -21,6 +21,14 @@ export type SettingsTab =
   | "billing"
   | "account";
 
+/**
+ * Slack is a team surface: it installs an app for an organization, and
+ * the panel speaks throughout of owners, admins, and "this Bento team".
+ * Local mode has one user and no organization, so the tab offered a
+ * section that could only describe something that is not there.
+ */
+const MULTI_ONLY: SettingsTab[] = ["slack"];
+
 const ALWAYS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "projects", label: "Projects" },
@@ -42,9 +50,12 @@ export function settingsSections(
   mode: "local" | "multi",
   opts: { hasBilling: boolean; requested: SettingsTab },
 ): { id: SettingsTab; label: string }[] {
-  if (mode === "local") return ALWAYS;
+  // Filtered rather than appended, so a team-only section keeps its
+  // place in the strip instead of being pushed to the end in multi.
+  const base = ALWAYS.filter((entry) => mode === "multi" || !MULTI_ONLY.includes(entry.id));
+  if (mode === "local") return base;
   return [
-    ...ALWAYS,
+    ...base,
     { id: "team", label: "Team" },
     ...(opts.hasBilling || opts.requested === "billing"
       ? [{ id: "billing" as const, label: "Billing" }]

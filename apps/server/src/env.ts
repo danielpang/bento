@@ -59,6 +59,14 @@ const envSchema = z.object({
    * needs this pointed at a URL the sandbox can actually open.
    */
   BENTO_MCP_GATEWAY_URL: z.string().optional(),
+
+  /**
+   * Where the browsable MCP catalog is read from. Defaults to the
+   * official public registry. Point it at a private registry to offer
+   * an internal list instead, or set it to a URL that does not resolve
+   * to hide the catalog and leave only the custom URL form.
+   */
+  BENTO_MCP_REGISTRY_URL: z.string().optional(),
   /** Origins allowed to call the API with credentials, comma separated. */
   BENTO_TRUSTED_ORIGINS: z
     .string()

@@ -143,9 +143,8 @@ export function GitHubAccountCard({ client }: { client: BentoClient }) {
     <section className="section settings-card">
       <h3 className="settings-title">Your GitHub account</h3>
       <p className="muted">
-        Connecting the Bento GitHub App to this organization is only allowed for someone GitHub
-        already shows the installation to, so Bento checks it against your own GitHub account. If
-        you signed up with an email and a password, connect one here first.
+        Bento checks the App installation against your own GitHub account, so connect yours here
+        first.
       </p>
       {status.identityLinked ? (
         <>

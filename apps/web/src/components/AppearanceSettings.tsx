@@ -93,13 +93,8 @@ export function AppearanceSettings() {
 
   return (
     <>
-      <p className="muted">How Bento looks on this machine. Stored here, not on the server.</p>
       <div className="section settings-card">
         <h3 className="settings-title">Accent</h3>
-        <p className="muted">
-          One hue for the primary action, focus, and selection. Statuses keep their own reserved
-          colours whichever you pick.
-        </p>
         <div className="accent-row" role="radiogroup" aria-label="Accent">
           {ACCENTS.map((option) => (
             <button
@@ -119,7 +114,6 @@ export function AppearanceSettings() {
 
       <div className="section settings-card">
         <h3 className="settings-title">Theme</h3>
-        <p className="muted">System follows your device's appearance; the others pin it.</p>
         <div className="accent-row" role="radiogroup" aria-label="Theme">
           {THEMES.map((option) => (
             <button

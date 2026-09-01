@@ -10,6 +10,8 @@ const localPolicy = { mode: "local" as const, ownHosts: [] };
 let server: Server;
 let base: string;
 let issuerMismatch = false;
+/** When set, the protected resource declares this instead of the URL itself. */
+let declaredResource: string | null = null;
 
 before(async () => {
   server = createServer((req, res) => {
@@ -27,7 +29,7 @@ before(async () => {
         res.end();
         return;
       case "/.well-known/oauth-protected-resource/mcp":
-        json({ resource: `${base}/mcp`, authorization_servers: [base] });
+        json({ resource: declaredResource ?? `${base}/mcp`, authorization_servers: [base] });
         return;
       case "/.well-known/oauth-authorization-server":
         json({
@@ -75,6 +77,30 @@ test("discovery walks the 401 challenge to the authorization server metadata", a
   assert.equal(discovered.issParameterSupported, true);
   assert.equal(discovered.resource, `${base}/mcp`);
   assert.equal(discovered.scopesSupported, "files:read files:write");
+});
+
+/**
+ * The case the fixture above hides by making the two equal: a server at
+ * /mcp whose metadata names the bare origin as the resource. Sending the
+ * typed URL as the indicator is what an authorization server that checks
+ * it refuses, with invalid_request, and only once a real code is in play.
+ */
+test("discovery takes the resource the metadata declares, not the URL", async () => {
+  issuerMismatch = false;
+  declaredResource = base;
+  try {
+    const discovered = await discoverOAuth(`${base}/mcp`, localPolicy);
+    assert.equal(discovered.resource, base);
+  } finally {
+    declaredResource = null;
+  }
+});
+
+test("discovery falls back to the URL when the metadata declares no resource", async () => {
+  issuerMismatch = false;
+  declaredResource = null;
+  const discovered = await discoverOAuth(`${base}/mcp`, localPolicy);
+  assert.equal(discovered.resource, `${base}/mcp`);
 });
 
 test("discovery refuses metadata that claims a different issuer", async () => {

@@ -448,7 +448,7 @@ if [ -n "$missing" ]; then
   for tool in $missing; do echo "bento: $tool is not installed" >&2; done
 fi
 
-git config --system user.email "agent@bento.dev" || true
+git config --system user.email "no-reply@usebento.ai" || true
 git config --system user.name "Bento Agent" || true
 git config --system --add safe.directory '*' || true
 

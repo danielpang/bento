@@ -512,6 +512,7 @@ button {
   min-width: 190px;
 }
 
+select,
 .select,
 .input {
   background: var(--bg);
@@ -526,6 +527,17 @@ button {
 /*
  * A select that belongs to this interface.
  *
+ * Keyed to the element, not just the class. Eleven of the console's
+ * nineteen dropdowns carried `.input` instead of `.select` and so drew
+ * the platform widget: a different arrow per OS, jammed against the
+ * right edge, next to eight that looked like ours. Which one you got
+ * depended on the class whoever wrote the field happened to pick.
+ *
+ * `select.input` is listed as well as `select`: the shared field rule
+ * matches those through `.input`, which outranks a bare element
+ * selector, and its `padding` and `background` shorthands would
+ * otherwise undo both the room on the right and the chevron itself.
+ *
  * Nothing ever reset `appearance`, so every dropdown in the console was
  * drawing the platform widget: a grey bevelled arrow on macOS, a
  * different one elsewhere, neither of them ours and both of them dated.
@@ -536,6 +548,8 @@ button {
  * The colour is baked into the data URI because a background image
  * cannot read currentColor, which is why each theme states its own.
  */
+select,
+select.input,
 .select {
   appearance: none;
   -webkit-appearance: none;
@@ -552,11 +566,15 @@ button {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23a8a49b' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.75 6 7.75 9 4.75'/%3E%3C/svg%3E");
 }
 
+:root[data-theme="light"] select,
+:root[data-theme="light"] select.input,
 :root[data-theme="light"] .select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23575145' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.75 6 7.75 9 4.75'/%3E%3C/svg%3E");
 }
 
 /* The navy theme's --text-dim, which the warm chevron would clash with. */
+:root[data-theme="navy"] select,
+:root[data-theme="navy"] select.input,
 :root[data-theme="navy"] .select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%238496b0' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.75 6 7.75 9 4.75'/%3E%3C/svg%3E");
 }
@@ -1421,6 +1439,33 @@ button {
   flex: 1 1 12rem;
   min-width: 0;
   width: auto;
+}
+
+/*
+ * A row of labelled fields. Not `.actions`: that row stretches its
+ * items to equal height and hands `.input` `flex: 1 1 12rem`, which on
+ * an input nested in a `.field` column grows it downwards, so every box
+ * came out as tall as the row. Here the column takes the flex, the
+ * input keeps its own height, and the row aligns to the top.
+ */
+.field-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.field-row > .field {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.field-row .input,
+.field-row .select {
+  width: 100%;
+  flex: none;
 }
 
 .gate-check {
@@ -3516,12 +3561,30 @@ button {
     height: 44px;
   }
 }
-.signout-mark {
+.signout-mark,
+.pencil-mark,
+.check-mark {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/*
+ * Sits with the name, not in the action row: a pencil next to the text
+ * it edits needs no label, while the same action as a word in a row of
+ * words has to be read to be told apart from the two beside it.
+ */
+.name-edit {
+  padding: 0 4px;
+  margin-left: 4px;
+  vertical-align: middle;
+  color: var(--text-faint);
+}
+
+.name-edit:hover:not(:disabled) {
+  color: var(--text);
 }
 
 /* The session label row holds the open-in-tab door on the right. */
@@ -4485,11 +4548,37 @@ button.session-expand[aria-pressed="true"] {
   font-weight: 650;
   letter-spacing: -0.02em;
 }
+/*
+ * One rhythm for every settings tab.
+ *
+ * The spacing came from two sources that did not agree: this column's
+ * gap plus each card's own margin-bottom set the space between cards,
+ * while the space above the first card was this padding alone. So every
+ * tab opened tight against the strip and then breathed twice as much
+ * between its cards. The gap owns it now, and a card in this column
+ * brings no margin of its own.
+ */
 .settings-body {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding-top: 4px;
+  gap: 24px;
+  padding-top: 24px;
+}
+
+.settings-body > .settings-card {
+  margin-bottom: 0;
+}
+
+/*
+ * An inactive tab panel is still in the DOM, carrying `hidden`. A class
+ * that sets `display` beats the browser's own `[hidden] { display:none }`,
+ * so all nine of them kept their padding and stacked up above the panel
+ * you were reading: the gap over a tab's first card was this padding
+ * times the number of tabs to its left, which is why every tab sat at a
+ * different height.
+ */
+.settings-body[hidden] {
+  display: none;
 }
 
 /*
@@ -5377,16 +5466,48 @@ button.session-expand[aria-pressed="true"] {
  * Everything technical (slug, transport, header) sits behind a native
  * disclosure so the default path is name, URL, choice, done.
  */
+/*
+ * Category pills. Same treatment as the accent options, which are the
+ * console's existing "pick one of these" control, so this introduces a
+ * filter rather than a new visual idea.
+ */
+.pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 2px;
+}
+
+.pill {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.pill[data-on] {
+  border-color: var(--brand);
+  color: var(--text);
+}
+
 .mcp-choices {
   border: 0;
-  padding: 10px 0 0;
-  margin: 0;
+  /* Padding sits under the legend, margin above it: the group needs
+     room from the fields it follows without reopening the gap between
+     the label and its own options. */
+  padding: 2px 0 0;
+  margin: 14px 0 0;
   min-width: 0;
 }
 
 .mcp-choices legend {
   font-size: 12px;
-  padding: 0 0 2px;
+  padding: 0;
 }
 
 .mcp-choice {
@@ -5421,4 +5542,37 @@ button.session-expand[aria-pressed="true"] {
 
 .mcp-advanced[open] summary {
   margin-bottom: 8px;
+}
+
+/*
+ * A service mark beside a catalog entry. Logos make a list of
+ * connections scannable; a monogram keeps the row aligned when a
+ * service publishes no icon, so the column never goes ragged.
+ */
+.mcp-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mcp-mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  flex: none;
+  object-fit: contain;
+}
+
+.mcp-mark-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-dim);
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
 }
