@@ -333,9 +333,8 @@ export function AgentsPanel({
               were already failing.
             */}
             <p className="muted">
-              Run Claude Code on a subscription you already pay for, instead of an API key. Mint a
-              token in a terminal with <code>claude setup-token</code> and save it here. It takes
-              effect on the next run, with no restart, and it beats a token from the environment.
+              Run Claude Code on a subscription instead of an API key: mint a token with{" "}
+              <code>claude setup-token</code> and save it here.
             </p>
             <SecretField
               value={tokenValue}
@@ -356,13 +355,13 @@ export function AgentsPanel({
             />
             {tokenHint && (
               <p className="muted">
-                {`Saved (${tokenHint}). If runs fail with "OAuth access token has been revoked", the saved token was invalidated: mint a fresh one and save it again.`}
+                {`Saved (${tokenHint}); mint a fresh one if runs fail with "OAuth access token has been revoked".`}
               </p>
             )}
             <h4 className="field-heading">Or share this machine's login</h4>
             <p className="muted">
-              When the server runs on the machine you use Claude Code from, agents can borrow that
-              login and no token is needed.{" "}
+              Agents can borrow this machine&apos;s Claude Code login when the server runs where that
+              login is.{" "}
               {machine.claude?.loggedIn
                 ? `Signed in${machine.claude.email ? ` as ${machine.claude.email}` : ""}${
                     machine.claude.subscriptionType ? ` on a ${machine.claude.subscriptionType} plan` : ""
@@ -371,9 +370,8 @@ export function AgentsPanel({
             </p>
             {!machine.claude?.loggedIn && (
               <p className="muted">
-                If the server is running on your own machine, sign in with{" "}
-                <code>claude auth login</code> in a terminal and reopen this panel. If it is running
-                in a container, there is no login of yours to share and the token above is the way.
+                Sign in with <code>claude auth login</code> if the server runs on your own machine; in
+                a container there is no login to share.
               </p>
             )}
             <div className="actions">
@@ -392,8 +390,8 @@ export function AgentsPanel({
             </div>
             {machine.shareAgentAuth && (
               <p className="warn">
-                Sharing is on. These are long lived credentials for a paid account, and an agent can
-                read anything its sandbox can, so use it on repositories you trust.
+                Sharing is on: these are long lived credentials for a paid account, and an agent can
+                read anything its sandbox can.
               </p>
             )}
           </section>

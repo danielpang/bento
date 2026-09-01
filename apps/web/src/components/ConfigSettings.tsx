@@ -85,10 +85,7 @@ export function ConfigSettings({ client }: { client: BentoClient }) {
     <>
       <section className="section settings-card">
         <h3 className="settings-title">Agents file</h3>
-        <p className="muted">
-          Every named agent: the tool, the model, and the skill. Importing matches by name, so
-          importing twice edits rather than duplicating. Agents the file leaves out are left alone.
-        </p>
+        <p className="muted">YAML file that defines each agent, model, and skill.</p>
         <YamlFileActions
           busy={busy}
           imported={agentsImported}
@@ -100,8 +97,7 @@ export function ConfigSettings({ client }: { client: BentoClient }) {
       <section className="section settings-card">
         <h3 className="settings-title">Pipeline file</h3>
         <p className="muted">
-          A project's stages, their requirements, the agents behind them, and each repository's
-          commands. Pick which project, then export or import.
+          YAML configuration that defines each pipeline (agent, repository, requirements, etc).
         </p>
         {failed ? (
           <p className="error">Could not load the projects. Retry once the server is reachable.</p>

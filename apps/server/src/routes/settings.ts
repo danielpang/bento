@@ -72,16 +72,13 @@ export function settingsRoutes(ctx: AppContext) {
         gitAuthorEmail: settings.gitAuthorEmail,
         /**
          * What a commit would actually say, which is not the same as
-         * what is stored: the environment wins over it, and this
-         * machine's git config stands in when neither is set. Saying
-         * only the stored value would leave someone editing a field
-         * that changes nothing.
+         * what is stored: this machine's git config stands in when the
+         * setting is blank. Saying only the stored value would leave
+         * someone editing a field that appears to change nothing.
          */
         gitIdentity: identity.GIT_AUTHOR_NAME
           ? { name: identity.GIT_AUTHOR_NAME, email: identity.GIT_AUTHOR_EMAIL ?? "" }
           : null,
-        gitIdentityPinnedByEnv:
-          Boolean(process.env.GIT_AUTHOR_NAME?.trim()) || Boolean(process.env.GIT_AUTHOR_EMAIL?.trim()),
         /** Set by the environment, so this route cannot change it. */
         pinnedByEnv: ctx.env.BENTO_SHARE_AGENT_AUTH !== undefined,
         logins,

@@ -20,7 +20,7 @@ Turn that off under **Settings, GitHub** to send them along too. On a shared ser
 
 **The server does the pushing, not the agent.** An agent can read anything its sandbox can, so a push credential inside one would be a write credential for every repository in the organization, one prompt injection from leaving. Agents are told to stay on their branch and never merge into `main` or `master`; publishing refuses a protected branch outright, because a prompt is a request and this is not.
 
-Commits are attributed to the identity under **Settings, GitHub**. The server reads this machine's global git config, which a container does not have, so without a name and email the work arrives as `Bento Agent <agent@bento.dev>`. `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` still win when they are set, so an existing `.env` keeps working and CI stays predictable.
+Commits are attributed to the identity under **Settings, GitHub**, which is the only place that sets it. Left blank, the server falls back to this machine's global git config, which a container does not have, so the work arrives as `Bento Agent <no-reply@usebento.ai>`.
 
 ## Connecting GitHub
 

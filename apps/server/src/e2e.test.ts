@@ -4241,14 +4241,15 @@ test("the commit identity can be set from the settings route", { timeout: 60_000
   assert.equal(identity.GIT_AUTHOR_EMAIL, "ada@example.com");
   assert.equal(identity.GIT_COMMITTER_NAME, "Ada Lovelace", "the committer is set too, not just the author");
 
-  // The environment outranks it, so a .env that already worked keeps working.
+  // The setting is the only thing that sets this. The environment used
+  // to outrank it, which left the console showing a field that changed
+  // nothing while the real value lived somewhere it could not edit.
   process.env.GIT_AUTHOR_NAME = "CI Runner";
   process.env.GIT_AUTHOR_EMAIL = "ci@example.com";
   try {
-    const pinned = await gitIdentityEnv(ctx);
-    assert.equal(pinned.GIT_AUTHOR_NAME, "CI Runner");
-    const reported = await json<{ gitIdentityPinnedByEnv: boolean }>(await app.request("/api/settings"));
-    assert.equal(reported.gitIdentityPinnedByEnv, true, "and the console is told, so it can say why the field is inert");
+    const ignored = await gitIdentityEnv(ctx);
+    assert.equal(ignored.GIT_AUTHOR_NAME, "Ada Lovelace", "the environment does not override the setting");
+    assert.equal(ignored.GIT_AUTHOR_EMAIL, "ada@example.com");
   } finally {
     delete process.env.GIT_AUTHOR_NAME;
     delete process.env.GIT_AUTHOR_EMAIL;

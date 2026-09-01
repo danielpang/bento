@@ -29,9 +29,10 @@ export class DiscoveryError extends Error {}
 
 export async function discoverOAuth(serverUrl: string, policy: SafeFetchPolicy): Promise<DiscoveredEndpoints> {
   const resourceMetadataUrl = await findResourceMetadataUrl(serverUrl, policy);
-  const authServer = resourceMetadataUrl
+  const resourceMetadata = resourceMetadataUrl
     ? await readResourceMetadata(resourceMetadataUrl, policy)
-    : new URL(serverUrl).origin;
+    : null;
+  const authServer = resourceMetadata?.authorizationServer ?? new URL(serverUrl).origin;
 
   const metadata = await readAuthServerMetadata(authServer, policy);
   const authorizationEndpoint = str(metadata.authorization_endpoint);
@@ -46,7 +47,15 @@ export async function discoverOAuth(serverUrl: string, policy: SafeFetchPolicy):
     issuer: str(metadata.issuer) ?? authServer,
     issParameterSupported: metadata.authorization_response_iss_parameter_supported === true,
     scopesSupported: Array.isArray(metadata.scopes_supported) ? metadata.scopes_supported.join(" ") : null,
-    resource: serverUrl,
+    /**
+     * The canonical resource identifier the protected resource declares,
+     * not the URL that was typed. RFC 8707 wants the value from the
+     * metadata document, and the two differ routinely: a server at
+     * https://host/mcp usually names https://host as its resource. An
+     * authorization server that checks the indicator refuses the token
+     * request with invalid_request when they disagree.
+     */
+    resource: resourceMetadata?.resource ?? serverUrl,
   };
 }
 
@@ -95,11 +104,16 @@ export function parseResourceMetadata(header: string): string | null {
   return match ? match[1]! : null;
 }
 
-async function readResourceMetadata(url: string, policy: SafeFetchPolicy): Promise<string> {
+async function readResourceMetadata(
+  url: string,
+  policy: SafeFetchPolicy,
+): Promise<{ authorizationServer: string; resource: string | null }> {
   const doc = await readJson(url, policy);
   const servers = doc.authorization_servers;
-  if (Array.isArray(servers) && typeof servers[0] === "string") return servers[0];
-  throw new DiscoveryError("the protected resource metadata names no authorization server");
+  if (!Array.isArray(servers) || typeof servers[0] !== "string") {
+    throw new DiscoveryError("the protected resource metadata names no authorization server");
+  }
+  return { authorizationServer: servers[0], resource: str(doc.resource) };
 }
 
 /**

@@ -92,7 +92,7 @@ export function LinearPanel({ client }: { client: BentoClient }) {
           </p>
         )}
         <p className="muted">
-          How each project trades cards with Linear is set under Settings, then Projects.
+          Which projects sync, and in which direction, is set under Settings, then Projects.
         </p>
         <div className="actions">
           <button
@@ -147,12 +147,9 @@ function ConnectCard({
     <section className="section settings-card">
       <h3 className="settings-title">Linear</h3>
       <p className="muted">
-        Bring your Linear backlog onto the board. Map a team to a project to sync its backlog, add
-        a "bento" label to any issue to pull it in ad hoc, or import issues by hand. As cards move
-        through the pipeline, their Linear issues follow: state changes plus a comment naming the
-        stage. It works the other way too: a card created in Bento files an issue, which each
-        project can turn off in its own settings. Paste a personal API key from Linear under Settings, then Security
-        and access. It stays on the server, encrypted, and is never given to an agent.
+        Syncs both ways: Linear issues become cards, and cards file and update Linear issues as they
+        move through the pipeline. Which projects sync, and in which direction, is set under
+        Settings, then Projects.
       </p>
       <SecretField
         value={value}

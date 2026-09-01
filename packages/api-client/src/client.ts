@@ -98,6 +98,34 @@ export interface SlackConnection {
   interactivityUrl?: string | null;
 }
 
+export interface McpCatalogEntry {
+  /** Reverse-DNS registry name, stable across versions. */
+  name: string;
+  title: string;
+  description: string;
+  url: string;
+  transport: "http" | "sse";
+  /** Publishing namespace, so a wrapper does not read as the vendor. */
+  publisher: string;
+  /** Suggested tool name, derived from the registry name. */
+  slug: string;
+  /** Icon served from Bento's own origin, or null when the service has none. */
+  iconUrl: string | null;
+  /** On the curated list, so the console leads with it. */
+  featured: boolean;
+  /** Curated category, or null when this server is not mapped. */
+  category: string | null;
+  /** Already in this team's registry (or the caller's own servers). */
+  added: boolean;
+}
+
+export interface McpCatalog {
+  /** False when the registry could not be read; the list is then empty. */
+  reachable: boolean;
+  canManage: boolean;
+  entries: McpCatalogEntry[];
+}
+
 export interface McpServerStatus {
   id: string;
   name: string;
@@ -133,7 +161,8 @@ export interface McpServerInput {
   slug: string;
   url: string;
   transport?: "http" | "sse";
-  authType: "none" | "api_key" | "oauth";
+  /** Omitted lets Bento probe the server and decide. */
+  authType?: "none" | "api_key" | "oauth";
   credentialScope?: "org" | "user";
   /** A server only the creator's own runs get; any member may add one. */
   personal?: boolean;
@@ -599,6 +628,11 @@ export class BentoClient {
     return this.request<{ ok: boolean }>("/api/linear/sync", { method: "POST" });
   }
 
+  mcpCatalog(search?: string) {
+    const query = search ? `?search=${encodeURIComponent(search)}` : "";
+    return this.request<McpCatalog>(`/api/mcp/catalog${query}`);
+  }
+
   mcpStatus() {
     return this.request<McpStatus>("/api/mcp/status");
   }
@@ -922,7 +956,6 @@ export class BentoClient {
       gitAuthorEmail?: string;
       /** What a commit would actually say, from whichever source wins. */
       gitIdentity?: { name: string; email: string } | null;
-      gitIdentityPinnedByEnv?: boolean;
       logins: { cli: string; signedIn: boolean }[];
       claude?: { loggedIn: boolean; subscriptionType?: string; email?: string } | null;
     }>("/api/settings");
