@@ -167,7 +167,7 @@ export function StageConfig({
         </div>
         <p className="muted">
           Cards move left to right through these stages, each with its own agent and exit rule.
-          Drag a handle to reorder, or focus one and use the arrow keys.
+          Drag to re-order.
         </p>
       </header>
 
@@ -502,9 +502,7 @@ function StageEditor({
           onChange={(criteria) => setDraft((d) => ({ ...d, criteria }))}
         />
       ) : (
-        <p className="muted">
-          You decide on the card: Approve moves it on, Reject sends it back.
-        </p>
+        <p className="muted">Manual approval.</p>
       )}
     </Modal>
   );
