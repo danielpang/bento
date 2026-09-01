@@ -19,7 +19,7 @@ Who creates the children: **the agent on the parent**, when that test passes. A 
 
 This takes the working parent from option 1 and the spawn-the-parts behaviour from option 2. It rejects option 3 (do not model this) and rejects a parent that cannot itself do work.
 
-On the board the parent is still a card in a lane. A **badge** marks it as a parent (the same kind of chip the card already uses for a pull request). A **related-cards** view, opened from the parent or from any child, draws the parent with **arrows to all of its children**. The board itself does not grow arrows between lanes.
+On the board the parent is still a card in a lane. A **badge** marks it as a parent (the same kind of chip the card already uses for a pull request). A **related-cards** view, opened from the parent or from any child, draws the parent with **arrows to all of its children**. Those arrows move only **horizontally and vertically** — no diagonals. The board itself does not grow arrows between lanes.
 
 ## Who has this problem
 
@@ -58,7 +58,7 @@ Concretely:
 - An agent can create **real cards** in the same project, each associated with the card it is working, not only a list in a write-up.
 - It does so only after judging the work large **and** worth dividing. Efficiency is the bar: parallel sandboxes, smaller context, or a pipeline that can finish parts independently. "It would be tidy to outline sub-tasks" is not enough.
 - Those parts are **linked** to the parent. The parent remains a working card in a lane, so it has to be **recognisable as a parent without opening it**: a badge on the card, in the same meta row as status and the PR chip. Cards with no children stay unmarked.
-- There is a **related-cards view** from a card in the group: the parent, with arrows to every child. The arrows are the parent–child association, not a dependency graph. They point at all children, including ones in other lanes or already completed. From a child, the same view is how you get back to the parent.
+- There is a **related-cards view** from a card in the group: the parent, with arrows to every child. The arrows are the parent–child association, not a dependency graph. They are **orthogonal**: each segment is horizontal or vertical, never diagonal. They point at all children, including ones in other lanes or already completed. From a child, the same view is how you get back to the parent.
 - Each part keeps today's invariant: **one card, one branch, one sandbox, one agent**. The large task is a relationship between cards, not a second kind of sandbox.
 - The parent remains a working card. It keeps its branch and its pipeline. Spawning does not turn it into a folder.
 - Somebody looking at the parent (badge, or the related view) can tell whether parts were created, whether they are moving, and whether any have failed, without hunting the board.
@@ -82,7 +82,7 @@ The options as considered:
 Not "we shipped parent ids." These are the checks that would make the feature real:
 
 1. On the board, a parent is identifiable at a glance by a badge. A card with no children has none.
-2. From a parent or a child, related cards shows the parent with arrows to **all** of its children. Missing a child in that view is a bug, even if the child has already finished or sits in another lane.
+2. From a parent or a child, related cards shows the parent with arrows to **all** of its children. Those arrows only run horizontally and vertically. A diagonal is a bug. Missing a child in that view is a bug, even if the child has already finished or sits in another lane.
 3. When an agent splits, the parts exist as rows that later stages can pick up independently, not as headings in a markdown file.
 4. A card whose work is one change, or whose parts cannot be divided without fighting over the same branch, finishes with **zero** children. An agent that always splits has failed the efficiency test.
 5. A card that did split does not carry the children's scope into implementation on its own branch. What remains on the parent is only work the agent kept for itself, if any.
