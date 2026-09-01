@@ -19,6 +19,8 @@ Who creates the children: **the agent on the parent**, when that test passes. A 
 
 This takes the working parent from option 1 and the spawn-the-parts behaviour from option 2. It rejects option 3 (do not model this) and rejects a parent that cannot itself do work.
 
+On the board the parent is still a card in a lane. A **badge** marks it as a parent (the same kind of chip the card already uses for a pull request). A **related-cards** view, opened from the parent or from any child, draws the parent with **arrows to all of its children**. The board itself does not grow arrows between lanes.
+
 ## Who has this problem
 
 Three people, and they are not the same person.
@@ -55,10 +57,11 @@ Concretely:
 
 - An agent can create **real cards** in the same project, each associated with the card it is working, not only a list in a write-up.
 - It does so only after judging the work large **and** worth dividing. Efficiency is the bar: parallel sandboxes, smaller context, or a pipeline that can finish parts independently. "It would be tidy to outline sub-tasks" is not enough.
-- Those parts are **linked** to the parent, so the board can show the group and a reviewer can open the parent and see the children.
+- Those parts are **linked** to the parent. The parent remains a working card in a lane, so it has to be **recognisable as a parent without opening it**: a badge on the card, in the same meta row as status and the PR chip. Cards with no children stay unmarked.
+- There is a **related-cards view** from a card in the group: the parent, with arrows to every child. The arrows are the parent–child association, not a dependency graph. They point at all children, including ones in other lanes or already completed. From a child, the same view is how you get back to the parent.
 - Each part keeps today's invariant: **one card, one branch, one sandbox, one agent**. The large task is a relationship between cards, not a second kind of sandbox.
 - The parent remains a working card. It keeps its branch and its pipeline. Spawning does not turn it into a folder.
-- Somebody looking at the parent can tell whether parts were created, whether they are moving, and whether any have failed, without opening each child.
+- Somebody looking at the parent (badge, or the related view) can tell whether parts were created, whether they are moving, and whether any have failed, without hunting the board.
 - Hosted spend still makes sense: hours belong to the card that ran them; a group total is a sum. Splitting must not become a way around the 24-hour card ceiling or the team allowance.
 
 The change should not try to become an agent operating system. Tracking every worktree, validating a combined diff, scheduling children in dependency order, and merging N pull requests as one are follow-on problems. They are only worth building after a group of cards has existed long enough for someone to say which of those they actually missed.
@@ -78,19 +81,21 @@ The options as considered:
 
 Not "we shipped parent ids." These are the checks that would make the feature real:
 
-1. A person can open a parent and see its children, their stages, and whether any agent is running, without hunting the board.
-2. When an agent splits, the parts exist as rows that later stages can pick up independently, not as headings in a markdown file.
-3. A card whose work is one change, or whose parts cannot be divided without fighting over the same branch, finishes with **zero** children. An agent that always splits has failed the efficiency test.
-4. A card that did split does not carry the children's scope into implementation on its own branch. What remains on the parent is only work the agent kept for itself, if any.
-5. Deleting or finishing the parent has a defined effect on children (keep them, cancel them, or refuse) and that effect is visible before it happens.
-6. Spend on the group equals the sum of spend on the cards. A child has its own 24-hour clock. The team allowance still sums every card.
-7. A team that only files small cards sees no new ceremony.
+1. On the board, a parent is identifiable at a glance by a badge. A card with no children has none.
+2. From a parent or a child, related cards shows the parent with arrows to **all** of its children. Missing a child in that view is a bug, even if the child has already finished or sits in another lane.
+3. When an agent splits, the parts exist as rows that later stages can pick up independently, not as headings in a markdown file.
+4. A card whose work is one change, or whose parts cannot be divided without fighting over the same branch, finishes with **zero** children. An agent that always splits has failed the efficiency test.
+5. A card that did split does not carry the children's scope into implementation on its own branch. What remains on the parent is only work the agent kept for itself, if any.
+6. Deleting or finishing the parent has a defined effect on children (keep them, cancel them, or refuse) and that effect is visible before it happens.
+7. Spend on the group equals the sum of spend on the cards. A child has its own 24-hour clock. The team allowance still sums every card.
+8. A team that only files small cards sees no new ceremony. No badge, no related view, nothing extra on the card.
 
 If we cannot describe a card that would fail those checks, we are not ready to build.
 
 ## What this is deliberately leaving out
 
-- Dependency graphs, blockers, and "child B starts when child A is done."
+- Dependency graphs, blockers, and "child B starts when child A is done." Arrows in the related view mean "this card spawned these," not "this one blocks that one."
+- A second board, a swimlane per parent, or drawing arrows across the kanban itself. The badge lives on the card; the arrows live in related cards. The board stays lanes of cards.
 - Sharing or stacking worktrees across cards. Each child is a normal card.
 - Combining child pull requests into one, or merging in a parent-defined order.
 - A dedicated container object, a new pipeline type, or a second board. The parent is a card.
