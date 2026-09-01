@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, isNull, ne } from "drizzle-orm";
 import { gateCriteria, type GateCriterion } from "@bento/core";
 import { agentProfiles, agentRuns, featureEvents, features, gateChecks, projects, repositories, runEvents, sandboxes, stages } from "@bento/db";
+import type { Db } from "@bento/db";
 import { evaluateGate, type GateContext, type GateResult } from "@bento/gates";
 import { parseRepoUrl } from "@bento/github";
 import type { AppContext } from "../context.js";
@@ -184,8 +185,7 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
 
   if (!outcome.passed) {
     if (feature.status !== "gated") {
-      await ctx.db.update(features).set({ status: "gated", updatedAt: new Date() }).where(eq(features.id, feature.id));
-      await recordFeatureEvent(ctx, {
+      const event: FeatureEvent = {
         featureId: feature.id,
         kind: "status_changed",
         fromStatus: feature.status,
@@ -195,7 +195,12 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
         detail: {
           failedCriteria: outcome.outcomes.filter((o) => o.result.status !== "passed").map((o) => o.criterion.type),
         },
+      };
+      await ctx.db.transaction(async (tx) => {
+        await tx.update(features).set({ status: "gated", updatedAt: new Date() }).where(eq(features.id, feature.id));
+        await insertFeatureEvent(tx, event);
       });
+      await queueFeatureEventFollowUps(ctx, event);
       ctx.bus.emitBoardEvent({
         type: "feature_updated",
         projectId: feature.projectId,
@@ -219,26 +224,32 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
   await advanceFeature(ctx, feature.id, "gate_auto", undefined, stage.id);
 }
 
+export type FeatureEvent = {
+  featureId: string;
+  kind: "stage_moved" | "status_changed";
+  fromStageId?: string | null;
+  toStageId?: string | null;
+  fromStatus?: string | null;
+  toStatus?: string | null;
+  trigger: "manual" | "manual_back" | "gate_auto" | "gate_auto_back" | "agent_run" | "linear_auto" | "system";
+  actorUserId?: string | null;
+  runId?: string | null;
+  detail?: Record<string, unknown> | null;
+};
+
+/** Either the pool or an open transaction on it. */
+type FeatureEventWriter = Pick<Db, "insert">;
+
 /**
  * Appends to a feature's history. Stage moves and status changes share
  * the log so "what happened to this card" is one ordered query.
+ *
+ * Takes a writer rather than the context so a caller changing a card's
+ * state can put this insert in the same transaction as the update it
+ * describes. Every state change in this file does.
  */
-export async function recordFeatureEvent(
-  ctx: AppContext,
-  event: {
-    featureId: string;
-    kind: "stage_moved" | "status_changed";
-    fromStageId?: string | null;
-    toStageId?: string | null;
-    fromStatus?: string | null;
-    toStatus?: string | null;
-    trigger: "manual" | "manual_back" | "gate_auto" | "gate_auto_back" | "agent_run" | "linear_auto" | "system";
-    actorUserId?: string | null;
-    runId?: string | null;
-    detail?: Record<string, unknown> | null;
-  },
-): Promise<void> {
-  await ctx.db.insert(featureEvents).values({
+export async function insertFeatureEvent(db: FeatureEventWriter, event: FeatureEvent): Promise<void> {
+  await db.insert(featureEvents).values({
     featureId: event.featureId,
     kind: event.kind,
     fromStageId: event.fromStageId ?? null,
@@ -250,6 +261,16 @@ export async function recordFeatureEvent(
     runId: event.runId ?? null,
     detail: event.detail ?? null,
   });
+}
+
+/**
+ * What a history row sets off elsewhere, run once it has committed.
+ *
+ * Deliberately outside the insert's transaction: both are queue writes,
+ * and a job queued from a transaction that then rolls back is a job
+ * about something that never happened.
+ */
+export async function queueFeatureEventFollowUps(ctx: AppContext, event: FeatureEvent): Promise<void> {
   // Mirror the transition to Linear when this card came from there.
   // Queued, so a slow or failing Linear API never blocks the board.
   await queueLinearOutbound(ctx, {
@@ -351,27 +372,48 @@ export async function advanceFeature(
         ? and(eq(features.id, feature.id), isNull(features.currentStageId), notDone)
         : and(eq(features.id, feature.id), eq(features.currentStageId, expectedStageId), notDone);
 
-  const [updated] = await ctx.db
-    .update(features)
-    .set(
-      nextStage
-        ? { status: "active", currentStageId: nextStage.id, branchName, updatedAt: new Date() }
-        : { status: "done", updatedAt: new Date() },
-    )
-    .where(guard)
-    .returning();
-  // Another evaluation moved the card first; leave it alone.
+  const events: FeatureEvent[] = [
+    {
+      featureId: feature.id,
+      kind: "stage_moved",
+      fromStageId: feature.currentStageId,
+      // Null when the card just left the last stage: there is nowhere further.
+      toStageId: nextStage ? nextStage.id : null,
+      trigger,
+      actorUserId: actorUserId ?? null,
+    },
+  ];
+  if (!nextStage) {
+    events.push({
+      featureId: feature.id,
+      kind: "status_changed",
+      fromStatus: feature.status,
+      toStatus: "done",
+      trigger,
+      actorUserId: actorUserId ?? null,
+    });
+  }
+
+  // The move and the history describing it commit together, so a card
+  // cannot end up on a stage with nothing saying how it got there.
+  const updated = await ctx.db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(features)
+      .set(
+        nextStage
+          ? { status: "active", currentStageId: nextStage.id, branchName, updatedAt: new Date() }
+          : { status: "done", updatedAt: new Date() },
+      )
+      .where(guard)
+      .returning();
+    // Another evaluation moved the card first; leave it alone.
+    if (!row) return null;
+    for (const event of events) await insertFeatureEvent(tx, event);
+    return row;
+  });
   if (!updated) return null;
 
-  await recordFeatureEvent(ctx, {
-    featureId: feature.id,
-    kind: "stage_moved",
-    fromStageId: feature.currentStageId,
-    // Null when the card just left the last stage: there is nowhere further.
-    toStageId: nextStage ? nextStage.id : null,
-    trigger,
-    actorUserId: actorUserId ?? null,
-  });
+  for (const event of events) await queueFeatureEventFollowUps(ctx, event);
   // Spend is per visit, not per run: the dashboard sums these, and a
   // run that never leaves its stage is still on `agent run finished`.
   if (feature.currentStageId) {
@@ -384,14 +426,6 @@ export async function advanceFeature(
     });
   }
   if (!nextStage) {
-    await recordFeatureEvent(ctx, {
-      featureId: feature.id,
-      kind: "status_changed",
-      fromStatus: feature.status,
-      toStatus: "done",
-      trigger,
-      actorUserId: actorUserId ?? null,
-    });
     // The card is over, so the machine it was worked on goes. It costs
     // money for as long as it exists, not for as long as it is used.
     await queueSandboxReap(ctx, feature.id);
@@ -474,30 +508,40 @@ export async function moveFeatureTo(
   const guard = feature.currentStageId
     ? and(eq(features.id, feature.id), eq(features.currentStageId, feature.currentStageId))
     : and(eq(features.id, feature.id), isNull(features.currentStageId));
-  const [updated] = await ctx.db
-    .update(features)
-    .set({ status: "active", currentStageId: targetStageId, branchName, updatedAt: new Date() })
-    .where(guard)
-    .returning();
-  if (!updated) return null;
-
-  // The stage being left keeps no verdicts: an approval or a green
-  // check given for work that is now moving would let the card walk
-  // straight past the next evaluation.
-  if (feature.currentStageId) {
-    await ctx.db
-      .delete(gateChecks)
-      .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)));
-  }
-
-  await recordFeatureEvent(ctx, {
+  const event: FeatureEvent = {
     featureId: feature.id,
     kind: "stage_moved",
     fromStageId: feature.currentStageId,
     toStageId: targetStageId,
     trigger: forward ? "manual" : "manual_back",
     actorUserId: actorUserId ?? null,
+  };
+
+  // The move, the verdicts it invalidates and the history describing it
+  // commit together, so no reader sees a card that moved with stale
+  // checks still standing or with nothing saying how it got there.
+  const updated = await ctx.db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(features)
+      .set({ status: "active", currentStageId: targetStageId, branchName, updatedAt: new Date() })
+      .where(guard)
+      .returning();
+    if (!row) return null;
+
+    // The stage being left keeps no verdicts: an approval or a green
+    // check given for work that is now moving would let the card walk
+    // straight past the next evaluation.
+    if (feature.currentStageId) {
+      await tx
+        .delete(gateChecks)
+        .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)));
+    }
+    await insertFeatureEvent(tx, event);
+    return row;
   });
+  if (!updated) return null;
+
+  await queueFeatureEventFollowUps(ctx, event);
   // Forward is a completion; backward is a redo and must not recount
   // spend for work that is about to happen again.
   if (forward && feature.currentStageId) {
@@ -572,31 +616,51 @@ export async function finishFeature(
    * already, so two clicks (or a drop racing a gate that advanced the
    * card) write one finish rather than two pairs of history rows.
    */
-  const [updated] = await ctx.db
-    .update(features)
-    .set({ status: "done", updatedAt: new Date() })
-    .where(
-      and(
-        eq(features.id, feature.id),
-        feature.currentStageId
-          ? eq(features.currentStageId, feature.currentStageId)
-          : isNull(features.currentStageId),
-        ne(features.status, "done"),
-      ),
-    )
-    .returning();
+  const events: FeatureEvent[] = [
+    {
+      featureId: feature.id,
+      kind: "stage_moved",
+      fromStageId: feature.currentStageId,
+      // Null the way the end of the pipeline is null: there is nowhere
+      // further for this card to go.
+      toStageId: null,
+      trigger: "manual",
+      actorUserId: actorUserId ?? null,
+    },
+    {
+      featureId: feature.id,
+      kind: "status_changed",
+      fromStatus: feature.status,
+      toStatus: "done",
+      trigger: "manual",
+      actorUserId: actorUserId ?? null,
+    },
+  ];
+
+  // Both history rows commit with the finish. Written after it, a crash
+  // between them could leave a card done with half its history, which
+  // reads as a card that never finished.
+  const updated = await ctx.db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(features)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(
+        and(
+          eq(features.id, feature.id),
+          feature.currentStageId
+            ? eq(features.currentStageId, feature.currentStageId)
+            : isNull(features.currentStageId),
+          ne(features.status, "done"),
+        ),
+      )
+      .returning();
+    if (!row) return null;
+    for (const event of events) await insertFeatureEvent(tx, event);
+    return row;
+  });
   if (!updated) return null;
 
-  await recordFeatureEvent(ctx, {
-    featureId: feature.id,
-    kind: "stage_moved",
-    fromStageId: feature.currentStageId,
-    // Null the way the end of the pipeline is null: there is nowhere
-    // further for this card to go.
-    toStageId: null,
-    trigger: "manual",
-    actorUserId: actorUserId ?? null,
-  });
+  for (const event of events) await queueFeatureEventFollowUps(ctx, event);
   if (feature.currentStageId) {
     await captureStageSpend(ctx, {
       feature,
@@ -606,14 +670,6 @@ export async function finishFeature(
       toStageId: null,
     });
   }
-  await recordFeatureEvent(ctx, {
-    featureId: feature.id,
-    kind: "status_changed",
-    fromStatus: feature.status,
-    toStatus: "done",
-    trigger: "manual",
-    actorUserId: actorUserId ?? null,
-  });
   // The card is over, so the machine it was worked on goes.
   await queueSandboxReap(ctx, feature.id);
   captureFeatureCompleted(ctx, feature, "manual", actorUserId);
@@ -650,33 +706,40 @@ export async function reopenFeature(
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
   if (!feature || feature.status !== "done") return null;
 
-  const [updated] = await ctx.db
-    .update(features)
-    .set({ status: "active", updatedAt: new Date() })
-    .where(and(eq(features.id, feature.id), eq(features.status, "done")))
-    .returning();
-  if (!updated) return null;
-
-  /**
-   * A card finished straight from the backlog has no stage to discard
-   * verdicts for, and reopens into the backlog. Requiring a stage here
-   * would leave that card the frozen thing reopening exists to
-   * prevent.
-   */
-  if (feature.currentStageId) {
-    await ctx.db
-      .delete(gateChecks)
-      .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)));
-  }
-
-  await recordFeatureEvent(ctx, {
+  const event: FeatureEvent = {
     featureId: feature.id,
     kind: "status_changed",
     fromStatus: "done",
     toStatus: "active",
     trigger: "manual_back",
     actorUserId: actorUserId ?? null,
+  };
+
+  const updated = await ctx.db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(features)
+      .set({ status: "active", updatedAt: new Date() })
+      .where(and(eq(features.id, feature.id), eq(features.status, "done")))
+      .returning();
+    if (!row) return null;
+
+    /**
+     * A card finished straight from the backlog has no stage to discard
+     * verdicts for, and reopens into the backlog. Requiring a stage here
+     * would leave that card the frozen thing reopening exists to
+     * prevent.
+     */
+    if (feature.currentStageId) {
+      await tx
+        .delete(gateChecks)
+        .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)));
+    }
+    await insertFeatureEvent(tx, event);
+    return row;
   });
+  if (!updated) return null;
+
+  await queueFeatureEventFollowUps(ctx, event);
 
   ctx.bus.emitBoardEvent({
     type: "feature_updated",
@@ -717,22 +780,7 @@ export async function moveFeatureBack(
   if (currentIndex < 0) return null;
   const previousStage = currentIndex > 0 ? stageRows[currentIndex - 1] : null;
 
-  const [updated] = await ctx.db
-    .update(features)
-    .set({
-      status: "active",
-      currentStageId: previousStage ? previousStage.id : null,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(features.id, feature.id), eq(features.currentStageId, feature.currentStageId)))
-    .returning();
-  if (!updated) return null;
-
-  await ctx.db
-    .delete(gateChecks)
-    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)));
-
-  await recordFeatureEvent(ctx, {
+  const event: FeatureEvent = {
     featureId: feature.id,
     kind: "stage_moved",
     fromStageId: feature.currentStageId,
@@ -740,7 +788,30 @@ export async function moveFeatureBack(
     toStageId: previousStage ? previousStage.id : null,
     trigger: trigger === "manual" ? "manual_back" : "gate_auto_back",
     actorUserId: actorUserId ?? null,
+  };
+  const leftStageId = feature.currentStageId;
+
+  const updated = await ctx.db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(features)
+      .set({
+        status: "active",
+        currentStageId: previousStage ? previousStage.id : null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(features.id, feature.id), eq(features.currentStageId, leftStageId)))
+      .returning();
+    if (!row) return null;
+
+    await tx
+      .delete(gateChecks)
+      .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, leftStageId)));
+    await insertFeatureEvent(tx, event);
+    return row;
   });
+  if (!updated) return null;
+
+  await queueFeatureEventFollowUps(ctx, event);
 
   ctx.bus.emitBoardEvent({
     type: "feature_updated",
@@ -877,45 +948,58 @@ async function holdFeature(ctx: AppContext, feature: Feature, stageId: string, r
     ) === checkSignature(rows);
   if (already) return;
 
-  if (feature.status !== "gated") {
-    /**
-     * Guarded on the status this evaluation started from, and nothing
-     * is written when the guard misses. A card marked done (or moved)
-     * while the gate was being worked out was being dragged back to
-     * gated by an answer about where it used to be, held by a stage it
-     * had already left.
-     */
-    const [held] = await ctx.db
-      .update(features)
-      .set({ status: "gated", updatedAt: new Date() })
-      .where(and(eq(features.id, feature.id), eq(features.status, feature.status)))
-      .returning();
-    if (!held) return;
-  }
+  const firstHold = feature.status !== "gated";
+  const event: FeatureEvent | null = firstHold
+    ? {
+        featureId: feature.id,
+        kind: "status_changed",
+        fromStatus: feature.status,
+        toStatus: "gated",
+        trigger: "gate_auto",
+        detail: { message: rows[rows.length - 1]?.message ?? "" },
+      }
+    : null;
 
-  // Checks first, then Slack: the notify job reads these rows for the
-  // waiting reason and for whether Approve/Reject belong on the message.
-  await ctx.db.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stageId)));
-  await ctx.db.insert(gateChecks).values(
-    rows.map((row) => ({
-      featureId: feature.id,
-      stageId,
-      criterion: row.criterion as unknown as Record<string, unknown>,
-      status: row.status,
-      detail: { message: row.message },
-      lastEvaluatedAt: new Date(),
-    })),
-  );
+  /**
+   * The hold, the reason rows and the history commit together. Slack
+   * reads the check rows for its waiting reason, so a notify queued
+   * against a half written hold would describe a card nobody is holding.
+   */
+  const held = await ctx.db.transaction(async (tx) => {
+    if (firstHold) {
+      /**
+       * Guarded on the status this evaluation started from, and nothing
+       * is written when the guard misses. A card marked done (or moved)
+       * while the gate was being worked out was being dragged back to
+       * gated by an answer about where it used to be, held by a stage it
+       * had already left.
+       */
+      const [row] = await tx
+        .update(features)
+        .set({ status: "gated", updatedAt: new Date() })
+        .where(and(eq(features.id, feature.id), eq(features.status, feature.status)))
+        .returning();
+      if (!row) return false;
+    }
 
-  if (feature.status !== "gated") {
-    await recordFeatureEvent(ctx, {
-      featureId: feature.id,
-      kind: "status_changed",
-      fromStatus: feature.status,
-      toStatus: "gated",
-      trigger: "gate_auto",
-      detail: { message: rows[rows.length - 1]?.message ?? "" },
-    });
+    await tx.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stageId)));
+    await tx.insert(gateChecks).values(
+      rows.map((row) => ({
+        featureId: feature.id,
+        stageId,
+        criterion: row.criterion as unknown as Record<string, unknown>,
+        status: row.status,
+        detail: { message: row.message },
+        lastEvaluatedAt: new Date(),
+      })),
+    );
+    if (event) await insertFeatureEvent(tx, event);
+    return true;
+  });
+  if (!held) return;
+
+  if (event) {
+    await queueFeatureEventFollowUps(ctx, event);
   } else {
     // Already waiting, but the reason changed (a new run, a new judge
     // question). The first gating already wrote history; Slack still
