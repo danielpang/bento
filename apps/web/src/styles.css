@@ -1618,6 +1618,27 @@ button {
   border-color: var(--line);
 }
 
+/*
+ * The capability chips under the coding agent field. A row rather than
+ * a sentence: two short facts read faster side by side than in prose,
+ * and they wrap together when the dialog is narrow.
+ */
+.cap-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* Flex so the glyph centers on the label's line box rather than sitting
+   on the baseline, which put a 12px icon through the chip's border. */
+.cap-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: default;
+}
+
 /* A chip closing a row: held at its own width, so a long issue title
    wraps rather than squeezing "Already in Bento" onto three lines. */
 .gate-check .chip {
