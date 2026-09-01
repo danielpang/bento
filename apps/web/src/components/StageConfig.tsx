@@ -166,9 +166,8 @@ export function StageConfig({
           </button>
         </div>
         <p className="muted">
-          Cards move left to right through these stages. Each stage decides which agent runs it and
-          how a card leaves: waiting for you, or advancing when its requirements pass. Drag a stage
-          by its handle to reorder them, or focus a handle and use the arrow keys.
+          Cards move left to right through these stages, each with its own agent and exit rule.
+          Drag a handle to reorder, or focus one and use the arrow keys.
         </p>
       </header>
 
@@ -290,8 +289,8 @@ export function StageConfig({
         <section className="section">
           <span className="label">Pipeline file</span>
           <p className="muted">
-            The stages, their requirements, the agents behind them, and each repository's commands,
-            as one YAML file. Import it into another project instead of building it again.
+            Your stages, agents, and commands as one YAML file. Import it into another project
+            instead of rebuilding it.
           </p>
           <YamlFileActions
             busy={busy}
@@ -488,9 +487,9 @@ function StageEditor({
             onChange={(e) => setDraft((d) => ({ ...d, createPr: e.target.checked }))}
           />
           <span className="gate-check-text">
-            Create a pull request when the agent finishes. The server pushes the card's branch and
-            opens the pull request, or updates the one already open.
-            {canPublish === false && " No GitHub connection is set up yet, so add a token under Settings, GitHub before this can run."}
+            Push the card's branch and open a pull request when the agent finishes, or update the
+            one already open.
+            {canPublish === false && " Connect GitHub under Settings first."}
           </span>
         </label>
       </div>
@@ -504,7 +503,7 @@ function StageEditor({
         />
       ) : (
         <p className="muted">
-          You decide on the card: Approve moves it on, Reject sends it back. No requirements apply.
+          You decide on the card: Approve moves it on, Reject sends it back.
         </p>
       )}
     </Modal>
@@ -613,8 +612,8 @@ function CriteriaEditor({
         </button>
       </div>
       <p className="muted">
-        A judge is a second agent that reviews the work and rules on it. It works best with its own
-        skill saying what complete means here, on a different model from the agent doing the work.
+        A judge is a second agent that reviews the work and rules on it. Give it its own skill and
+        a different model from the agent doing the work.
       </p>
       <div className="actions">
         <input

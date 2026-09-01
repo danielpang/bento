@@ -1,8 +1,8 @@
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { and, eq, isNull, sql } from "drizzle-orm";
@@ -4213,6 +4213,22 @@ test("starting a run on a card that was deleted answers gone, not a foreign key 
 });
 
 /**
+ * Sharing carries the login of the machine the SERVER runs on into each
+ * sandbox, so a containerised server has nothing to offer however its
+ * sandboxes run. The console reads this to hide the control rather than
+ * show one that can only report failure.
+ *
+ * This suite runs the server as a host process, which is the case that
+ * must stay visible: hiding a working control is the worse mistake,
+ * because the person looking at it cannot recover from it.
+ */
+test("the settings route says whether a machine login can be shared", { timeout: 60_000 }, async () => {
+  const settings = await json<{ canShareMachineLogin: boolean }>(await app.request("/api/settings"));
+  assert.equal(typeof settings.canShareMachineLogin, "boolean", "the console gets an answer, not undefined");
+  assert.equal(settings.canShareMachineLogin, true, "a server running on the host can offer its own login");
+});
+
+/**
  * The identity on agent commits had no home in the product: a server in
  * a container has no git config to read, so every commit arrived as the
  * sandbox image's placeholder and the only fix was an env var set
@@ -4850,6 +4866,81 @@ async function fixtureRepo(label: string): Promise<string> {
   await run("git", ["-C", dir, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "init"]);
   return dir;
 }
+
+/**
+ * A path typed with a leading `~` used to be stored exactly as typed.
+ * Only a shell expands tildes, so provisioning later stat'd a directory
+ * literally named `~` and every run on that project died with
+ * "repository path ~/... does not exist on the machine running the
+ * server". The TUI expanded before sending; the console did not, and
+ * nothing between them did either.
+ */
+test("a repository path is stored expanded, not with the tilde as typed", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("tilde");
+  mock.method(os, "homedir", () => path.dirname(checkout));
+  try {
+    const project = await json<{ id: string; localPath: string }>(
+      await app.request("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Tilde", localPath: `~/${path.basename(checkout)}` }),
+      }),
+    );
+    assert.equal(project.localPath, checkout, "the project mirrors the expanded path");
+
+    const [repo] = await json<{ localPath: string }[]>(
+      await app.request(`/api/projects/${project.id}/repositories`),
+    );
+    assert.equal(repo?.localPath, checkout, "the repository stores a path the filesystem can find");
+
+    // The second door in, which takes the same input and once skipped
+    // the same step.
+    const added = await json<{ localPath: string }>(
+      await app.request(`/api/projects/${project.id}/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "again", localPath: `~/${path.basename(checkout)}` }),
+      }),
+    );
+    assert.equal(added.localPath, checkout, "adding a repository expands it too");
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+/**
+ * Expanding a tilde is only right when the server shares a home with
+ * the person typing. Inside a container `~` is /root, so expanding
+ * quietly would store /root/projects/app: still wrong, and now naming a
+ * directory nobody typed. A path that resolves to nothing is refused
+ * while the field is still on screen.
+ */
+test("a checkout path that resolves to nothing is refused at once", { timeout: 60_000 }, async () => {
+  const elsewhere = await mkdtemp(path.join(tmpdir(), "bento-not-home-"));
+  mock.method(os, "homedir", () => elsewhere);
+  try {
+    const res = await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Nowhere", localPath: "~/projects/absent" }),
+    });
+    assert.equal(res.status, 400, "a path pointing at nothing does not become a project");
+    const { error } = (await res.json()) as { error: string };
+    assert.match(error, /home/, "the refusal names the home the server actually has");
+    assert.match(error, /~\/projects\/absent/, "and the path as it was typed");
+
+    // A relative path is refused for the same reason: nothing here
+    // should be resolved against whatever directory the server started in.
+    const relative = await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Relative", localPath: "projects/app" }),
+    });
+    assert.equal(relative.status, 400, "a relative path is refused");
+  } finally {
+    mock.restoreAll();
+  }
+});
 
 const repoNames = async (projectId: string) =>
   (await json<{ name: string; position: number }[]>(await app.request(`/api/projects/${projectId}/repositories`))).map(

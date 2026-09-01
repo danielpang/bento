@@ -108,19 +108,16 @@ export function RepositoriesPanel({
             Close
           </button>
         </div>
+        {/* The two things that are not visible from the list below: which
+            checkout leads, and that a sandbox is not a machine with
+            everything already on it. */}
         <p className="muted">
-          The git checkouts this project spans. Each becomes its own worktree inside a card's
-          workspace, so a change touching two of them is still a single card. The first is the main
-          one: stage summaries are written there and its pull request leads.
+          The git checkouts this project spans. The first leads: stage summaries and its pull
+          request go there.
         </p>
-        {/* Said once, at the top, because it explains both fields below
-            and is the thing people are most surprised by: a sandbox is
-            not a machine with everything on it. */}
         <p className="muted">
-          Sandboxes carry git and the coding agents, and no language runtime. Each repository says
-          what it needs: a setup command, run once in a fresh sandbox before any agent starts, and a
-          test command, handed to the agent so it can check its own work while it can still fix what
-          it broke. Bento does not run that one for you.
+          Sandboxes carry no language runtime, so give each one a setup command to install what it
+          needs and a test command for the agent.
         </p>
       </header>
 
@@ -175,8 +172,7 @@ export function RepositoriesPanel({
             ) : githubUnknown ? (
               <div className="actions">
                 <p className="muted">
-                  Could not check GitHub access, so this is not offering the wrong way to add a
-                  repository. Retry once the server is reachable.
+                  Could not check GitHub access. Retry once the server is reachable.
                 </p>
                 <button className="btn" disabled={busy} onClick={() => act(async () => {})}>
                   Retry
@@ -257,9 +253,8 @@ export function RepositoriesPanel({
                       </button>
                       <p className="muted">
                         If your GitHub organization requires approval, the install becomes a
-                        request to its owners. Once an owner approves it on GitHub, the
-                        installation appears here to connect. Agents, pipelines, and cards all
-                        work in the meantime.
+                        request to its owners and appears here once approved. Everything else
+                        keeps working in the meantime.
                       </p>
                     </>
                   ))}

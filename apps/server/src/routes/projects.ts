@@ -1,3 +1,6 @@
+import { stat } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
@@ -104,6 +107,56 @@ const createProject = z.object({
   repositories: z.array(repositoryInput).max(20).optional(),
 });
 
+/**
+ * Resolves a checkout path a person typed, or says why it cannot be used.
+ *
+ * Only a shell expands tildes, so `~/projects/app` stored as typed made
+ * every sandbox provision fail on a directory literally named `~`. But
+ * expanding it is only correct when the server shares a home with the
+ * person typing. In a container `~` is /root, and silently resolving to
+ * /root/projects/app trades one wrong path for a more confusing one,
+ * because it names a directory nobody typed.
+ *
+ * So expand, then require the result to exist. What resolves to a real
+ * directory is stored; anything else is refused here, while a person is
+ * still looking at the field, rather than at the first run half an hour
+ * later.
+ *
+ * Local mode only. A path in any other mode names a directory on the
+ * runner, which this process cannot see and must not judge.
+ */
+async function resolveLocalCheckout(input: string): Promise<{ path: string } | { error: string }> {
+  const trimmed = input.trim();
+  const expanded =
+    trimmed === "~"
+      ? os.homedir()
+      : trimmed.startsWith("~/")
+        ? path.join(os.homedir(), trimmed.slice(2))
+        : trimmed;
+
+  if (!path.isAbsolute(expanded)) {
+    return { error: `Use the full path to the checkout, starting at the root, rather than ${trimmed}.` };
+  }
+  if (!(await isDirectory(expanded))) {
+    // The tilde case names both halves. The server's home is the
+    // surprise, and it is not the home the person typing has in mind.
+    return {
+      error: trimmed.startsWith("~")
+        ? `The server's home is ${os.homedir()}, so ${trimmed} means ${expanded}, and nothing is there. Type the full path to the checkout instead.`
+        : `${expanded} does not exist on the machine running the server. If the server runs in a container, use the path the checkout is mounted at inside it.`,
+    };
+  }
+  return { path: expanded };
+}
+
+async function isDirectory(target: string): Promise<boolean> {
+  try {
+    return (await stat(target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Derives a workspace directory name from a repository path. */
 function repoNameFromPath(localPath: string): string {
   const base = localPath.replace(/\/+$/, "").split("/").pop() ?? "repo";
@@ -155,24 +208,41 @@ function uniqueNames(names: string[]): string[] {
 
 type RepositoryInput = z.infer<typeof repositoryInput>;
 
+type ResolvedRepository = Omit<RepositoryInput, "localPath" | "githubRepoId" | "repoUrl"> & {
+  localPath: string;
+  githubRepoId: string | null;
+  repoUrl: string | null;
+};
+
+/**
+ * A resolution carries its own refusal, because the two ways this can
+ * fail want different words. "Not available to this organization" tells
+ * someone nothing about a path that is merely misspelled.
+ */
+type RepositoryResolution = { ok: true; repo: ResolvedRepository } | { ok: false; error: string };
+
+const UNAVAILABLE = "repository is not available to this organization";
+
 async function resolveRepositoryInput(
   ctx: AppContext,
   c: Context,
   input: RepositoryInput,
   organizationId: string | null,
-): Promise<
-  (Omit<RepositoryInput, "localPath" | "githubRepoId" | "repoUrl"> & {
-    localPath: string;
-    githubRepoId: string | null;
-    repoUrl: string | null;
-  }) | null
-> {
+): Promise<RepositoryResolution> {
   if (!input.githubRepoId) {
-    if (ctx.driver.provider === "sprite") return null;
+    if (ctx.driver.provider === "sprite") return { ok: false, error: UNAVAILABLE };
     // A hosted installation token must never be selected from a URL the
     // caller supplied. Runner/local paths carry no server credential.
-    if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return null;
-    if (!input.localPath) return null;
+    if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return { ok: false, error: UNAVAILABLE };
+    if (!input.localPath) return { ok: false, error: UNAVAILABLE };
+
+    let localPath = input.localPath;
+    if (ctx.env.BENTO_MODE === "local") {
+      const resolved = await resolveLocalCheckout(input.localPath);
+      if ("error" in resolved) return { ok: false, error: resolved.error };
+      localPath = resolved.path;
+    }
+
     // The checkout usually knows its GitHub remote already, and a person
     // who picked a directory should not have to type a URL git recorded
     // when they cloned. Local mode only, for the same reason as above: a
@@ -180,22 +250,25 @@ async function resolveRepositoryInput(
     // chosen through a caller supplied path.
     const repoUrl =
       input.repoUrl ??
-      (ctx.env.BENTO_MODE === "multi" ? null : await githubRemoteOf(input.localPath));
-    return { ...input, localPath: input.localPath, githubRepoId: null, repoUrl };
+      (ctx.env.BENTO_MODE === "multi" ? null : await githubRemoteOf(localPath));
+    return { ok: true, repo: { ...input, localPath, githubRepoId: null, repoUrl } };
   }
 
   const github = await githubForOrganization(ctx, organizationId);
-  if (!github) return null;
+  if (!github) return { ok: false, error: UNAVAILABLE };
   const allowed = await github.listRepositories();
   const selected = allowed.find((repo) => String(repo.id) === input.githubRepoId);
-  if (!selected) return null;
+  if (!selected) return { ok: false, error: UNAVAILABLE };
   return {
-    ...input,
-    name: input.name ?? selected.name,
-    localPath: selected.fullName,
-    repoUrl: selected.url,
-    githubRepoId: String(selected.id),
-    defaultBranch: selected.defaultBranch,
+    ok: true,
+    repo: {
+      ...input,
+      name: input.name ?? selected.name,
+      localPath: selected.fullName,
+      repoUrl: selected.url,
+      githubRepoId: String(selected.id),
+      defaultBranch: selected.defaultBranch,
+    },
   };
 }
 
@@ -247,8 +320,8 @@ export function projectRoutes(ctx: AppContext) {
       const repoInputs = [];
       for (const requested of requestedInputs) {
         const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
-        if (!resolved) return c.json({ error: "repository is not available to this organization" }, 400);
-        repoInputs.push(resolved);
+        if (!resolved.ok) return c.json({ error: resolved.error }, 400);
+        repoInputs.push(resolved.repo);
       }
 
       const names = uniqueNames(repoInputs.map((r) => r.name ?? repoNameFromPath(r.localPath)));
@@ -327,8 +400,9 @@ export function projectRoutes(ctx: AppContext) {
         return c.json({ error: "not found" }, 404);
       }
       const requested = c.req.valid("json");
-      const body = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
-      if (!body) return c.json({ error: "repository is not available to this organization" }, 400);
+      const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
+      if (!resolved.ok) return c.json({ error: resolved.error }, 400);
+      const body = resolved.repo;
 
       const existing = await db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId));
       const wanted = body.name ?? repoNameFromPath(body.localPath);

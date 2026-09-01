@@ -113,8 +113,7 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
     <section className="section settings-card">
       <h3 className="settings-title">Model provider keys</h3>
       <p className="muted">
-        API keys for the providers your agents' models run on, stored encrypted. A green dot means
-        that provider is already set.
+        API keys for the providers your agents' models run on, stored encrypted.
       </p>
       {loadFailed && (
         <p className="error">

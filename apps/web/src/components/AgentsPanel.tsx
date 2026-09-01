@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { PREVIEW_TOOLS, toolCapability, useDismissable } from "./ui.js";
+import { PREVIEW_TOOLS, toolCapabilities, useDismissable, type ToolCapability } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import type { AgentProfile, AgentTool, BentoClient } from "@bento/api-client";
 
@@ -260,7 +260,7 @@ export function AgentsPanel({
             Close
           </button>
         </div>
-        <p className="muted">Pair a coding tool with a model, then assign it to a stage.</p>
+        <p className="muted">Pair a coding agent with a model, then assign it to a stage.</p>
       </header>
 
       <div className="drawer-body">
@@ -292,7 +292,7 @@ export function AgentsPanel({
                   setConfirming({
                     title: `Remove ${profile.name}?`,
                     description:
-                      "Its recorded runs go too, transcripts and all, and that cannot be undone. Stages assigned to it are left with no agent, so nothing starts there until you assign another. The cards themselves keep their history.",
+                      "Its recorded runs and transcripts go with it, and that cannot be undone. Stages using it are left with no agent until you assign another, though cards keep their history.",
                     confirmLabel: "Remove agent",
                     run: () => client.deleteProfile(profile.id),
                   })
@@ -307,9 +307,12 @@ export function AgentsPanel({
 
         <section className="section settings-card">
           <h3 className="settings-title">Agents file</h3>
+          {/* Word for word with Settings, Config. Two descriptions of
+              one file taught two different things about how importing
+              behaves, and only one of them was right. */}
           <p className="muted">
-            Every named agent as one YAML file: the tool, the model, and the skill. Import it into
-            another install instead of pairing them again.
+            Every named agent: the tool, the model, and the skill. Importing matches by name, so
+            importing twice edits rather than duplicating. Agents the file leaves out are left alone.
           </p>
           <YamlFileActions
             busy={busy}
@@ -333,8 +336,8 @@ export function AgentsPanel({
               were already failing.
             */}
             <p className="muted">
-              Run Claude Code on a subscription instead of an API key: mint a token with{" "}
-              <code>claude setup-token</code> and save it here.
+              Use your Claude subscription instead of an API key, get a token with{" "}
+              <code>claude setup-token</code>. Rotate the token if it has expired.
             </p>
             <SecretField
               value={tokenValue}
@@ -354,45 +357,53 @@ export function AgentsPanel({
               busy={busy}
             />
             {tokenHint && (
-              <p className="muted">
-                {`Saved (${tokenHint}); mint a fresh one if runs fail with "OAuth access token has been revoked".`}
-              </p>
+              <p className="muted">{`Saved (${tokenHint}).`}</p>
             )}
-            <h4 className="field-heading">Or share this machine's login</h4>
-            <p className="muted">
-              Agents can borrow this machine&apos;s Claude Code login when the server runs where that
-              login is.{" "}
-              {machine.claude?.loggedIn
-                ? `Signed in${machine.claude.email ? ` as ${machine.claude.email}` : ""}${
-                    machine.claude.subscriptionType ? ` on a ${machine.claude.subscriptionType} plan` : ""
-                  }.`
-                : "No Claude Code login was found in this server's home directory."}
-            </p>
-            {!machine.claude?.loggedIn && (
-              <p className="muted">
-                Sign in with <code>claude auth login</code> if the server runs on your own machine; in
-                a container there is no login to share.
-              </p>
-            )}
-            <div className="actions">
-              <button
-                className="btn"
-                disabled={busy || machine.pinnedByEnv}
-                title={
-                  machine.pinnedByEnv
-                    ? "BENTO_SHARE_AGENT_AUTH is set, so this is decided when the server starts"
-                    : undefined
-                }
-                onClick={() => act(() => client.setShareAgentAuth(!machine.shareAgentAuth))}
-              >
-                {machine.shareAgentAuth ? "Stop sharing this machine's logins" : "Use this machine's logins"}
-              </button>
-            </div>
-            {machine.shareAgentAuth && (
-              <p className="warn">
-                Sharing is on: these are long lived credentials for a paid account, and an agent can
-                read anything its sandbox can.
-              </p>
+            {/*
+              Absent, not disabled, when the server runs in a container.
+              Sharing carries the login of the machine the SERVER runs
+              on, and a container has a home of its own holding nobody's
+              login: the control could only ever report failure. It says
+              nothing about how sandboxes run, which is the reading the
+              old copy invited.
+            */}
+            {machine.canShareMachineLogin !== false && (
+              <>
+                <h4 className="field-heading">Or share this machine's login</h4>
+                <p className="muted">
+                  Agents borrow this server's Claude Code login, so no token is needed.{" "}
+                  {machine.claude?.loggedIn
+                    ? `Signed in${machine.claude.email ? ` as ${machine.claude.email}` : ""}${
+                        machine.claude.subscriptionType ? ` on a ${machine.claude.subscriptionType} plan` : ""
+                      }.`
+                    : "None found in the server's home directory."}
+                </p>
+                {!machine.claude?.loggedIn && (
+                  <p className="muted">
+                    Run <code>claude auth login</code> here, then reopen this panel.
+                  </p>
+                )}
+                <div className="actions">
+                  <button
+                    className="btn"
+                    disabled={busy || machine.pinnedByEnv}
+                    title={
+                      machine.pinnedByEnv
+                        ? "BENTO_SHARE_AGENT_AUTH is set, so this is decided when the server starts"
+                        : undefined
+                    }
+                    onClick={() => act(() => client.setShareAgentAuth(!machine.shareAgentAuth))}
+                  >
+                    {machine.shareAgentAuth ? "Stop sharing this machine's logins" : "Use this machine's logins"}
+                  </button>
+                </div>
+                {machine.shareAgentAuth && (
+                  <p className="warn">
+                    Sharing is on. An agent can read anything its sandbox can, so use it only on
+                    repositories you trust.
+                  </p>
+                )}
+              </>
             )}
           </section>
         )}
@@ -407,8 +418,8 @@ export function AgentsPanel({
             title={editingId ? `Edit ${profiles.find((p) => p.id === editingId)?.name ?? "agent"}` : "New agent"}
             description={
               editingId
-                ? "Every stage using this agent follows the change. Nothing needs reassigning."
-                : "Pair a coding tool with a model. Assign it to a stage afterwards under Pipeline."
+                ? undefined
+                : "Pair a coding agent with a model. Assign it to a stage afterwards under Pipeline."
             }
             large
             onClose={closeForm}
@@ -447,7 +458,7 @@ export function AgentsPanel({
             }
           >
             <label className="field">
-              <span className="label">Tool</span>
+              <span className="label">Coding agent</span>
               <select className="select" value={cli} onChange={(e) => pickCli(e.target.value as AgentCli)}>
                 {CLIS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -455,13 +466,11 @@ export function AgentsPanel({
                   </option>
                 ))}
               </select>
-              <span className="muted">{toolCapability(cli)}</span>
+              <CapabilityChips cli={cli} />
               {PREVIEW_TOOLS[cli] && (
                 <p className="warn">
-                  <strong>Developer preview.</strong> DeepSeek Harness is not finished, and its interfaces can change
-                  without warning. Two limits are worth knowing before you assign it to a stage. It prints nothing while
-                  it works, so the card stays quiet until the run ends. It cannot continue a previous conversation, so
-                  each message starts a fresh run with a compacted transcript.
+                  <strong>Developer preview.</strong> It prints nothing while it works, so the card stays quiet until
+                  the run ends, and each message starts a fresh run instead of continuing the conversation.
                 </p>
               )}
               {/* Said while the tool is being chosen, not when a run
@@ -541,7 +550,13 @@ export function AgentsPanel({
                 ))}
               </datalist>
               {guidance && <p className="muted">{guidance.format}</p>}
-              <p className={pairing.status === "impossible" ? "error" : "muted"}>{pairing.detail}</p>
+              {/* Only when there is something to act on. "Runs on
+                  Anthropic." restated the model id that is already in
+                  the field above it; a routing requirement or a pairing
+                  that cannot work is worth the line. */}
+              {pairing.status !== "ok" && (
+                <p className={pairing.status === "impossible" ? "error" : "muted"}>{pairing.detail}</p>
+              )}
             </label>
             <label className="field">
               <span className="label">Name</span>
@@ -563,7 +578,7 @@ export function AgentsPanel({
               <textarea
                 ref={skillRef}
                 className="input skill-input"
-                placeholder={"How this agent should work, and what its stage write-up must contain.\nExample: You are a product investigator. Your write-up must have three sections: Problem, Evidence from the code, Recommendation with effort estimate."}
+                placeholder={"How this agent should work, and what its stage write-up must contain.\nExample: You are a product investigator. Your write-up must have Problem, Evidence, and Recommendation sections."}
                 value={skill}
                 onChange={(e) => {
                   setSkill(e.target.value);
@@ -571,10 +586,7 @@ export function AgentsPanel({
                 }}
                 rows={5}
               />
-              <span className="muted">
-                Sent to the agent at the start of every run, after the stage goal. Define the outputs
-                here and the next stage can rely on them.
-              </span>
+              <span className="muted">Sent to the agent at the start of every run.</span>
             </label>
           </Modal>
         )}
@@ -593,5 +605,67 @@ export function AgentsPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+
+/**
+ * The two facts about a coding agent that change how a stage feels to
+ * work with, as chips: can you talk to it while it runs, and does it
+ * say what it spent.
+ *
+ * Icons carry it and two words confirm it. The sentence each one
+ * replaced is still on the chip's title, so the detail is a hover away
+ * rather than three lines of prose nobody finished.
+ */
+function CapabilityChips({ cli }: { cli: string }) {
+  return (
+    <div className="cap-chips">
+      {toolCapabilities(cli).map((capability) => (
+        <span key={capability.icon} className="chip chip-soft cap-chip" title={capability.detail}>
+          <CapabilityIcon icon={capability.icon} />
+          {capability.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** One 12px glyph per capability. Decorative: the label beside it says the same thing. */
+function CapabilityIcon({ icon }: { icon: ToolCapability["icon"] }) {
+  const common = {
+    viewBox: "0 0 16 16",
+    width: 12,
+    height: 12,
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  // A bolt for a message that lands now, stacked bars for one that
+  // waits its turn, a clock for one that waits for the run to end.
+  if (icon === "steer") return <svg {...common}><path d="M9 1.5 3 9h4l-1 5.5L13 7H9z" /></svg>;
+  if (icon === "queue")
+    return (
+      <svg {...common}>
+        <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" />
+      </svg>
+    );
+  if (icon === "between-runs")
+    return (
+      <svg {...common}>
+        <circle cx="8" cy="8" r="6.25" />
+        <path d="M8 4.5V8l2.5 1.5" />
+      </svg>
+    );
+  // A coin, struck through when nothing is reported.
+  return (
+    <svg {...common}>
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 4.75v6.5M9.9 6.3a2 2 0 0 0-3.8.7c0 1.9 3.8.9 3.8 2.7a2 2 0 0 1-3.8.7" />
+      {icon === "no-cost" && <path d="M2.75 13.25 13.25 2.75" />}
+    </svg>
   );
 }
