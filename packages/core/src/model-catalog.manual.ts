@@ -10,7 +10,11 @@ import type { CatalogProvider } from "./models.js";
  * described nowhere the generator looks. Nor does it have a Poolside
  * provider: it lists Laguna under OpenRouter, which is a different
  * endpoint, a different key and different ids from Poolside's own
- * inference. Those are the entries here.
+ * inference. Those are the entries here, plus any model a provider has
+ * shipped since the snapshot was taken: models.dev trails releases by
+ * days or weeks, and a model missing from the picker cannot be chosen
+ * for Claude Code in the console at all, because the field is a select
+ * whenever the provider is known.
  *
  * Kept in a separate file because `pnpm models:update` overwrites the
  * generated one wholesale. Anything added there by hand disappears the
@@ -32,6 +36,26 @@ import type { CatalogProvider } from "./models.js";
  * nothing, so the agent still lists and runs; only the logo is missing.
  */
 export const MANUAL_CATALOG: readonly CatalogProvider[] = [
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    env: ["ANTHROPIC_API_KEY"],
+    // The generated entry supplies the mark and comes first in the
+    // merge, so only the model ids below are ever read from here.
+    logo: "",
+    /**
+     * Models Anthropic serves that the 2026-08-19 snapshot predates.
+     * The id is the one the Claude API takes, with no date suffix.
+     * Claude Mythos 5.1 is deliberately absent: it is served only to
+     * organizations in Project Glasswing, so listing it would put a
+     * model most keys cannot use in front of everybody. It stays
+     * typeable through the API and the TUI, like any unlisted id.
+     *
+     * Delete this entry once `pnpm models:update` brings the id in;
+     * until then the merge keeps it from duplicating.
+     */
+    models: [{ id: "claude-fable-5-1", name: "Claude Fable 5.1" }],
+  },
   {
     id: "deepseek",
     name: "DeepSeek",
