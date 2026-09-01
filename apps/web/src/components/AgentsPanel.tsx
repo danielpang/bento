@@ -292,7 +292,7 @@ export function AgentsPanel({
                   setConfirming({
                     title: `Remove ${profile.name}?`,
                     description:
-                      "Its recorded runs go too, transcripts and all, and that cannot be undone. Stages assigned to it are left with no agent, so nothing starts there until you assign another. The cards themselves keep their history.",
+                      "Its recorded runs and transcripts go with it, and that cannot be undone. Stages using it are left with no agent until you assign another, though cards keep their history.",
                     confirmLabel: "Remove agent",
                     run: () => client.deleteProfile(profile.id),
                   })
