@@ -491,12 +491,19 @@ test("the catalog lists only remote servers, and marks what is already added", a
   assert.equal(res.status, 200);
   const body = (await res.json()) as {
     reachable: boolean;
-    entries: { name: string; slug: string; url: string; transport: string; added: boolean }[];
+    entries: { name: string; slug: string; url: string; transport: string; added: boolean; featured: boolean }[];
   };
   assert.equal(body.reachable, true);
   // The stdio-only fixture entry must not be offered.
-  assert.deepEqual(body.entries.map((e) => e.name), ["com.fixture/docs"]);
-  const [entry] = body.entries;
+  assert.ok(
+    !body.entries.some((e) => e.name === "io.github.x/stdio"),
+    "a stdio-only server is not offered",
+  );
+  // Browsing leads with the curated set; the registry's entries follow.
+  assert.ok(body.entries.length > 1, "the curated set is offered alongside the registry");
+  assert.ok(body.entries[0]!.featured, "the curated set leads the browse view");
+  const entry = body.entries.find((e) => e.name === "com.fixture/docs");
+  assert.ok(entry, "the registry's remote entry is offered");
   assert.equal(entry!.slug, "docs");
   assert.equal(entry!.transport, "http");
   assert.equal(entry!.added, false, "not added yet");
@@ -512,9 +519,10 @@ test("the catalog lists only remote servers, and marks what is already added", a
   assert.equal(created.status, 201);
   clearCatalogCache();
   const again = (await (await app.request("/api/mcp/catalog")).json()) as {
-    entries: { added: boolean }[];
+    entries: { name: string; added: boolean }[];
   };
-  assert.equal(again.entries[0]!.added, true, "an added server is marked, not offered twice");
+  const marked = again.entries.find((e) => e.name === "com.fixture/docs");
+  assert.equal(marked!.added, true, "an added server is marked, not offered twice");
 });
 
 test("the catalog search reaches the registry", async () => {
