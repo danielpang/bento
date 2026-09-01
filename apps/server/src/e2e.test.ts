@@ -4891,6 +4891,40 @@ test("a repository path is stored expanded, not with the tilde as typed", { time
   }
 });
 
+/**
+ * Expanding a tilde is only right when the server shares a home with
+ * the person typing. Inside a container `~` is /root, so expanding
+ * quietly would store /root/projects/app: still wrong, and now naming a
+ * directory nobody typed. A path that resolves to nothing is refused
+ * while the field is still on screen.
+ */
+test("a checkout path that resolves to nothing is refused at once", { timeout: 60_000 }, async () => {
+  const elsewhere = await mkdtemp(path.join(tmpdir(), "bento-not-home-"));
+  mock.method(os, "homedir", () => elsewhere);
+  try {
+    const res = await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Nowhere", localPath: "~/projects/absent" }),
+    });
+    assert.equal(res.status, 400, "a path pointing at nothing does not become a project");
+    const { error } = (await res.json()) as { error: string };
+    assert.match(error, /home/, "the refusal names the home the server actually has");
+    assert.match(error, /~\/projects\/absent/, "and the path as it was typed");
+
+    // A relative path is refused for the same reason: nothing here
+    // should be resolved against whatever directory the server started in.
+    const relative = await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Relative", localPath: "projects/app" }),
+    });
+    assert.equal(relative.status, 400, "a relative path is refused");
+  } finally {
+    mock.restoreAll();
+  }
+});
+
 const repoNames = async (projectId: string) =>
   (await json<{ name: string; position: number }[]>(await app.request(`/api/projects/${projectId}/repositories`))).map(
     (r) => [r.name, r.position] as const,
