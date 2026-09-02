@@ -48,6 +48,7 @@ import { reapSandbox } from "./orchestrator/reap-sandbox.js";
 import { appendRunEvent } from "./orchestrator/transcript.js";
 import { JUDGE_PROMPT_PREFIX, advanceFeature, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
 import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
+import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
@@ -1512,7 +1513,7 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
       executor: "server",
     })
     .returning();
-  await ctx.boss.send("run.execute", { runId: running!.id });
+  await enqueueRun(ctx, running!.id);
 
   const deadline = Date.now() + 30_000;
   let seen: { status: string; cliSessionId: string | null } | null = null;
@@ -1556,7 +1557,7 @@ test("two messages racing into the parking slot both survive", { timeout: 60_000
       executor: "server",
     })
     .returning();
-  await ctx.boss.send("run.execute", { runId: running!.id });
+  await enqueueRun(ctx, running!.id);
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const run = await json<{ status: string }>(await app.request(`/api/runs/${running!.id}`));

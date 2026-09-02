@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentRuns, projects, stages, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { enqueueRun } from "./queue.js";
 import { requeueUndelivered } from "./messages.js";
 import { followUpSource, type FollowUpWorkRun } from "./follow-up-source.js";
 
@@ -84,7 +85,7 @@ export async function startAssignedStageAgent(
     ctx.analytics,
   );
   if (run !== "busy" && run !== "gone" && !("outOfCompute" in run) && executor === "server") {
-    await ctx.boss.send("run.execute", { runId: run.id });
+    await enqueueRun(ctx, run.id);
   }
 }
 

@@ -21,6 +21,7 @@ import { createDriver, createGitHubApp, ensureLocalUser, type AppContext } from 
 import { EventBus } from "./events.js";
 import { loadEnv, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
+import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
 
 export interface StartOptions {
   /** Overrides applied on top of the process environment. */
@@ -86,6 +87,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       // Polling does not need one connection per worker. Enough that a
       // burst of completions is not queued behind the default 10.
       max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
+      // Idle workers poll slowly so an idle database can be idle; see
+      // orchestrator/queue.ts for why, and for the run workers' own pace.
+      pollingIntervalSeconds: QUEUE_POLL_SECONDS,
     });
     boss.on("error", (err) => console.error("pg-boss error:", err));
     await boss.start();

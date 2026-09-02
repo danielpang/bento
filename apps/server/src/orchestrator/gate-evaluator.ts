@@ -8,6 +8,7 @@ import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { featurePullRequestTargets } from "../feature-prs.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { enqueueRun } from "./queue.js";
 import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
@@ -1159,7 +1160,7 @@ async function judgeStageWork(
   // looked at it. Failing here would reject a card for something the
   // card had nothing to do with.
   if ("outOfCompute" in run) return { status: "pending", detail: run.outOfCompute };
-  if (executor !== "runner") await ctx.boss.send("run.execute", { runId: run.id });
+  if (executor !== "runner") await enqueueRun(ctx, run.id);
   return { status: "pending", detail: `${judgeProfile.name} is reviewing the work` };
 }
 

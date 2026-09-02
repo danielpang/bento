@@ -107,6 +107,24 @@ with 409 and `CARD_BUSY`; the auto-start paths skip quietly, because
 the active run's finish queues the evaluation that looks at the new
 stage.
 
+The run then goes to the queue through `enqueueRun` in
+`apps/server/src/orchestrator/queue.ts`, not a bare
+`boss.send("run.execute")`. The `run.execute` workers poll every
+thirty seconds, because one worker per slot polling every two seconds
+kept the hosted database busy enough to never scale down; `enqueueRun`
+wakes them, so a run queued in-process still starts at once. A bare
+send works, and waits for the next poll.
+
+## Queue workers poll slowly on purpose
+
+pg-boss has no push, so every idle worker costs a query per poll. The
+default interval is ten seconds (`QUEUE_POLL_SECONDS`) and the run
+workers use thirty. Before that, the server issued about seventeen
+transactions a second on an empty queue, and Neon billed the compute
+as busy around the clock. Give a new queue a faster explicit
+`pollingIntervalSeconds` only when a person is waiting on its jobs
+and one worker covers it; `gate.evaluate` is the example.
+
 ## Agent credentials belong to the organization, never the server
 
 `resolveAgentEnv` reads keys from the organization's encrypted secrets.
