@@ -163,6 +163,10 @@ export function runRoutes(ctx: AppContext) {
           run.checkpointId,
         );
       } catch (err) {
+        ctx.analytics?.captureException(err, actor(c), run.organizationId, {
+          run_id: run.id,
+          source: "sandbox_rollback",
+        });
         return c.json({ error: `the sandbox could not be restored (${String(err)}). The run's work may be partly in place, so check the card's changes before retrying` }, 502);
       }
 

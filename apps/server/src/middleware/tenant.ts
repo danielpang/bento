@@ -32,7 +32,7 @@ export function tenantMiddleware(ctx: AppContext): MiddlewareHandler {
     if (ctx.env.BENTO_MODE !== "multi" || isStream(c.req.path)) {
       c.set(TENANT_DB_KEY, ctx.db);
       await next();
-      await runDeferred(deferred);
+      await runDeferred(deferred, ctx);
       return;
     }
 
@@ -49,7 +49,7 @@ export function tenantMiddleware(ctx: AppContext): MiddlewareHandler {
       await next();
     });
     // Only now are the handler's rows visible to anyone else.
-    await runDeferred(deferred);
+    await runDeferred(deferred, ctx);
   };
 }
 
@@ -81,12 +81,13 @@ export function deferAfterCommit(
   deferred.push(task);
 }
 
-async function runDeferred(tasks: (() => Promise<void>)[]): Promise<void> {
+async function runDeferred(tasks: (() => Promise<void>)[], ctx?: AppContext): Promise<void> {
   for (const task of tasks) {
     try {
       await task();
     } catch (err) {
       console.error("deferred task failed:", err);
+      ctx?.analytics?.captureException(err, null, null, { source: "deferred_after_commit" });
     }
   }
 }

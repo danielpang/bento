@@ -110,6 +110,7 @@ export async function reapFinishedSandboxes(ctx: AppContext): Promise<void> {
     } catch (err) {
       // One machine that will not go must not stop the rest going.
       console.warn(`could not reap the sandbox for feature ${featureId}:`, err);
+      ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "sandbox_reap" });
     }
   }
 }

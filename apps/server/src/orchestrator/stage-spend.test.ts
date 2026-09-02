@@ -131,12 +131,15 @@ test("a completed stage emits the summed cost of this visit", async () => {
   });
 });
 
-test("a query failure does not throw", async () => {
+test("a query failure does not throw, and is reported as an exception", async () => {
+  const captured: unknown[] = [];
   const analytics: Analytics = {
     capture: () => {
       throw new Error("should not capture");
     },
-    captureException: () => {},
+    captureException: (error) => {
+      captured.push(error);
+    },
     shutdown: async () => {},
   };
   await captureStageSpend(
@@ -150,4 +153,6 @@ test("a query failure does not throw", async () => {
     } as unknown as AppContext,
     { feature: FEATURE, stageId: "stage-1", trigger: "manual" },
   );
+  assert.equal(captured.length, 1);
+  assert.equal((captured[0] as Error).message, "db down");
 });
