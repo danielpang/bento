@@ -488,6 +488,7 @@ export async function queueLinearOutbound(
   } catch (err) {
     // Linear mirroring must never block the board transition itself.
     console.error(`linear.outbound enqueue for ${event.featureId} failed:`, err);
+    ctx.analytics?.captureException(err, null, null, { feature_id: event.featureId, queue: "linear.outbound" });
   }
 }
 

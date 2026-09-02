@@ -100,6 +100,18 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
           github: Boolean(ctx.env.GITHUB_CLIENT_ID && ctx.env.GITHUB_CLIENT_SECRET),
           google: Boolean(ctx.env.GOOGLE_CLIENT_ID && ctx.env.GOOGLE_CLIENT_SECRET),
         },
+        // The project token is a public phc_ key. The console uses it
+        // to init posthog-js for exception capture; omitted when
+        // analytics is off so the client never phones an empty host.
+        ...(ctx.env.POSTHOG_API_KEY
+          ? {
+              posthog: {
+                apiKey: ctx.env.POSTHOG_API_KEY,
+                host: ctx.env.POSTHOG_HOST,
+                environment: ctx.env.BENTO_ENVIRONMENT,
+              },
+            }
+          : {}),
       });
     } catch (err) {
       return c.json({ ok: false, error: String(err) }, 503);

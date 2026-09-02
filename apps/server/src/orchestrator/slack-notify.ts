@@ -74,6 +74,7 @@ export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Pr
     }
   }
   console.error(`slack.notify enqueue for ${job.featureId} failed:`, lastErr);
+  ctx.analytics?.captureException(lastErr, null, null, { feature_id: job.featureId, queue: "slack.notify" });
 }
 
 /**

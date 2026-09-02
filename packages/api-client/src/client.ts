@@ -400,6 +400,12 @@ export class BentoClient {
       driver: string;
       /** Which social logins the server is configured for (multi mode). */
       social?: { github: boolean; google: boolean };
+      /**
+       * Public PostHog project token, when the server has one. The
+       * console uses it for exception capture. A project token is
+       * designed to be in the browser; it is not a secret.
+       */
+      posthog?: { apiKey: string; host: string; environment: string };
     }>("/api/health");
   }
 

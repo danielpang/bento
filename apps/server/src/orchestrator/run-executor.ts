@@ -292,6 +292,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
+    ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+      run_id: runId,
+      feature_id: feature.id,
+      source: "sandbox_provision",
+    });
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
@@ -376,6 +381,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     } catch (err) {
       // A missing snapshot costs rollback, not the run.
       console.error(`could not snapshot before run ${runId}:`, err);
+      ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+        run_id: runId,
+        source: "sandbox_snapshot",
+      });
     }
   }
 
@@ -1357,6 +1366,7 @@ async function announceRunFinished(
   if (announce) {
     void announce(runId).catch((err: unknown) => {
       console.warn(`could not record what run ${runId} cost:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "billing_on_run_finished" });
     });
   }
   await captureRunFinished(ctx, runId, status);
@@ -1439,10 +1449,18 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
      */
     void resumeInterruptedRun(ctx, orphan, sandbox).catch(async (err) => {
       console.error(`could not resume run ${orphan.id} after the restart:`, err);
+      ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
+        run_id: orphan.id,
+        source: "resume_interrupted",
+      });
       try {
         await failRunAsInterrupted(ctx, orphan);
       } catch (inner) {
         console.error(`could not close run ${orphan.id} as interrupted either:`, inner);
+        ctx.analytics?.captureException(inner, orphan.startedBy, orphan.organizationId, {
+          run_id: orphan.id,
+          source: "resume_interrupted_close",
+        });
       }
     });
   }

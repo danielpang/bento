@@ -87,7 +87,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       // burst of completions is not queued behind the default 10.
       max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
     });
-    boss.on("error", (err) => console.error("pg-boss error:", err));
+    boss.on("error", (err) => {
+      console.error("pg-boss error:", err);
+      analytics?.captureException(err, null, null, { source: "pg-boss" });
+    });
     await boss.start();
 
     // Local mode has a single implicit user; multi mode uses better-auth.
@@ -127,6 +130,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
             })
             .catch((err: unknown) => {
               console.warn("could not record the sign up:", err);
+              posthog.captureException(err, u.id, null, { source: "signup_capture" });
             });
         }, SIGNUP_CONFIRM_DELAY_MS).unref();
       };
@@ -338,6 +342,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       },
     };
   } catch (err) {
+    analytics?.captureException(err, null, null, { source: "boot" });
     await analytics?.shutdown().catch(() => {});
     await featureFlags.shutdown().catch(() => {});
     await logExport?.stop().catch(() => {});

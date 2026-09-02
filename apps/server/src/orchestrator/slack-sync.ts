@@ -733,6 +733,7 @@ export async function registerSlackJobs(ctx: AppContext): Promise<void> {
         await handleSlackInbound(ctx, job.data);
       } catch (err) {
         console.error("slack.inbound failed:", err);
+        ctx.analytics?.captureException(err, null, null, { queue: "slack.inbound" });
         throw err;
       }
     }
@@ -744,6 +745,10 @@ export async function registerSlackJobs(ctx: AppContext): Promise<void> {
         await handleSlackNotify(ctx, job.data);
       } catch (err) {
         console.error(`slack.notify ${job.data.featureId} failed:`, err);
+        ctx.analytics?.captureException(err, null, null, {
+          queue: "slack.notify",
+          feature_id: job.data.featureId,
+        });
         throw err;
       }
     }

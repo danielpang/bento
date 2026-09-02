@@ -202,10 +202,11 @@ const envSchema = z.object({
   /**
    * PostHog: product analytics, error tracking, log export, and the
    * beta-testers feature flag. All four read the same project token.
-   * Without a key nothing is sent and nothing breaks; in multi mode
-   * the server says so once at boot, because events silently missed
-   * are worse than a line of noise. New product that is not ready
-   * for every signed-in user is gated on `beta-testers`.
+   * The console also reads it from /api/health to capture browser
+   * exceptions. Without a key nothing is sent and nothing breaks; in
+   * multi mode the server says so once at boot, because events
+   * silently missed are worse than a line of noise. New product that
+   * is not ready for every signed-in user is gated on `beta-testers`.
    */
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),
