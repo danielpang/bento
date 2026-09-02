@@ -169,19 +169,14 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
 
   const outcome = await evaluateGate(criteria, gateCtx);
 
-  await ctx.db.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
-  if (outcome.outcomes.length > 0) {
-    await ctx.db.insert(gateChecks).values(
-      outcome.outcomes.map((o) => ({
-        featureId: feature.id,
-        stageId: stage.id,
-        criterion: o.criterion as unknown as Record<string, unknown>,
-        status: o.result.status,
-        detail: { message: o.result.detail, ...(o.result.data ?? {}) },
-        lastEvaluatedAt: new Date(),
-      })),
-    );
-  }
+  const checkRows = outcome.outcomes.map((o) => ({
+    featureId: feature.id,
+    stageId: stage.id,
+    criterion: o.criterion as unknown as Record<string, unknown>,
+    status: o.result.status,
+    detail: { message: o.result.detail, ...(o.result.data ?? {}) },
+    lastEvaluatedAt: new Date(),
+  }));
 
   if (!outcome.passed) {
     if (feature.status !== "gated") {
@@ -196,10 +191,32 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
           failedCriteria: outcome.outcomes.filter((o) => o.result.status !== "passed").map((o) => o.criterion.type),
         },
       };
-      await ctx.db.transaction(async (tx) => {
-        await tx.update(features).set({ status: "gated", updatedAt: new Date() }).where(eq(features.id, feature.id));
+      /**
+       * The hold, the reason rows and the history commit together, and
+       * nothing is written if the card has left this status or this
+       * stage while the gate was being worked out. A card marked done
+       * (or moved) was being dragged back to gated by an answer about
+       * where it used to be.
+       */
+      const held = await ctx.db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(features)
+          .set({ status: "gated", updatedAt: new Date() })
+          .where(
+            and(
+              eq(features.id, feature.id),
+              eq(features.status, feature.status),
+              eq(features.currentStageId, stage.id),
+            ),
+          )
+          .returning();
+        if (!row) return false;
+        await tx.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+        if (checkRows.length > 0) await tx.insert(gateChecks).values(checkRows);
         await insertFeatureEvent(tx, event);
+        return true;
       });
+      if (!held) return;
       await queueFeatureEventFollowUps(ctx, event);
       ctx.bus.emitBoardEvent({
         type: "feature_updated",
@@ -209,6 +226,8 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
         currentStageId: stage.id,
       });
     } else {
+      await ctx.db.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+      if (checkRows.length > 0) await ctx.db.insert(gateChecks).values(checkRows);
       const nextSig = checkSignature(
         outcome.outcomes.map((o) => ({ status: o.result.status, message: o.result.detail ?? "" })),
       );
@@ -218,6 +237,9 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
     }
     return;
   }
+
+  await ctx.db.delete(gateChecks).where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  if (checkRows.length > 0) await ctx.db.insert(gateChecks).values(checkRows);
 
   // Pass the stage this decision was made about: concurrent evaluations
   // (two runs finishing together) must not each advance the card.

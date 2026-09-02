@@ -14,6 +14,7 @@ import {
   featureEvents,
   featurePullRequests,
   features,
+  gateChecks,
   githubInstallations,
   agentRuns,
   organization,
@@ -46,7 +47,13 @@ import {
 } from "./orchestrator/run-executor.js";
 import { reapSandbox } from "./orchestrator/reap-sandbox.js";
 import { appendRunEvent } from "./orchestrator/transcript.js";
-import { JUDGE_PROMPT_PREFIX, advanceFeature, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
+import {
+  JUDGE_PROMPT_PREFIX,
+  advanceFeature,
+  evaluateFeatureGate,
+  finishFeature,
+  moveFeatureTo,
+} from "./orchestrator/gate-evaluator.js";
 import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
@@ -186,9 +193,10 @@ async function waitForStage(featureId: string, stageId: string, timeoutMs = 60_0
 /**
  * The last transition on a card, once it reads as `expected`.
  *
- * advanceFeature commits the stage move before writing the history row,
- * so a card can reach its next stage a moment before the transition
- * that moved it exists; reading once sees the previous one. Returns the
+ * The move and the history row commit together, so a card that has
+ * already reached its next stage already has the transition that put
+ * it there. This still waits because the evaluator is a background
+ * job, and the test can get here before that job has run. Returns the
  * last trigger seen on timeout, so a real regression fails on the real
  * value rather than a throw.
  */
@@ -5735,6 +5743,214 @@ test("a move that cannot be recorded does not happen", async () => {
     .from(featureEvents)
     .where(eq(featureEvents.featureId, feature.id));
   assert.deepEqual(history, [], "a move that did not happen writes no history");
+});
+
+/**
+ * Puts a card on a stage without going through advanceFeature, which
+ * would queue a gate job. These tests call evaluateFeatureGate
+ * themselves, so a job racing them would write the hold they are
+ * trying to control.
+ */
+async function placeOnStage(featureId: string, stageId: string) {
+  await ctx.db
+    .update(features)
+    .set({ status: "active", currentStageId: stageId, updatedAt: new Date() })
+    .where(eq(features.id, featureId));
+}
+
+test("a failed gate holds the card, writes the reason, and records history", async () => {
+  const { project, stages } = await setupProject("Failed gate hold");
+  const feature = await createFeature(project.id, "Hold me");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("failed-gate-hold");
+  await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "failed",
+    executor: "server",
+    error: "the agent failed",
+  });
+
+  await evaluateFeatureGate(ctx, feature.id);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "gated");
+  assert.equal(row?.currentStageId, stage.id, "the card stays on the stage that failed");
+
+  const checks = await ctx.db
+    .select({ status: gateChecks.status, criterion: gateChecks.criterion })
+    .from(gateChecks)
+    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]?.status, "failed");
+  assert.equal((checks[0]?.criterion as { type?: string } | null)?.type, "run_succeeded");
+
+  const history = await ctx.db
+    .select()
+    .from(featureEvents)
+    .where(eq(featureEvents.featureId, feature.id));
+  const held = history.find((e) => e.kind === "status_changed" && e.toStatus === "gated");
+  assert.ok(held, "the hold must appear in the history");
+  assert.deepEqual((held.detail as { failedCriteria?: string[] } | null)?.failedCriteria, ["run_succeeded"]);
+});
+
+test("a late failed gate does not drag a finished card back to gated", async () => {
+  const { project, stages } = await setupProject("Late gate vs done");
+  const feature = await createFeature(project.id, "Already finished");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("late-gate-done");
+  /**
+   * Sleeps inside evaluateGate so finishFeature can commit after this
+   * evaluation has already read the card as active, and before it
+   * writes gated. The early "feature is done" return would not be
+   * the race; this is.
+   */
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "sleep 2; exit 1", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "late-gate-done",
+    status: "ready",
+    workdir: path.dirname(repoDir),
+  });
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+    executor: "server",
+  });
+
+  const evaluation = evaluateFeatureGate(ctx, feature.id);
+  await new Promise((r) => setTimeout(r, 400));
+  await finishFeature(ctx, feature.id, ctx.userId);
+  await evaluation;
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "done", "a late gate must not drag a finished card back to gated");
+  const held = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(and(eq(featureEvents.featureId, feature.id), eq(featureEvents.toStatus, "gated")));
+  assert.deepEqual(held, [], "a hold that did not happen writes no history");
+});
+
+test("a late failed gate does not hold a card that has already left the stage", async () => {
+  const { project, stages } = await setupProject("Late gate vs move");
+  const feature = await createFeature(project.id, "Already moved");
+  const stage = stages[0]!;
+  const next = stages[1]!;
+  const profile = await fakeProfile("late-gate-move");
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "sleep 2; exit 1", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "late-gate-move",
+    status: "ready",
+    workdir: path.dirname(repoDir),
+  });
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+    executor: "server",
+  });
+
+  const evaluation = evaluateFeatureGate(ctx, feature.id);
+  await new Promise((r) => setTimeout(r, 400));
+  /**
+   * A concurrent move, written directly so the destination stage does
+   * not start its own evaluation and hold the card for a different
+   * reason. The question is whether THIS evaluation still writes.
+   */
+  await ctx.db
+    .update(features)
+    .set({ status: "active", currentStageId: next.id, updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  await evaluation;
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.currentStageId, next.id, "the card stays on the stage it was moved to");
+  assert.equal(row?.status, "active", "a failure about the previous stage must not gate it");
+  const held = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(and(eq(featureEvents.featureId, feature.id), eq(featureEvents.toStatus, "gated")));
+  assert.deepEqual(held, [], "a hold that did not happen writes no history");
+});
+
+test("a hold that cannot be recorded does not happen", async () => {
+  const { project, stages } = await setupProject("Atomic hold");
+  const feature = await createFeature(project.id, "Stay active");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("atomic-hold");
+  await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "failed",
+    executor: "server",
+    error: "the agent failed",
+  });
+
+  /**
+   * The history insert fails while the status update and the check
+   * rows on their own would have succeeded. They share a transaction,
+   * so none of them land: before they did, this left failed checks on
+   * a card that was still active, with nothing saying it was held.
+   */
+  await ctx.db.execute(sql`
+    create or replace function bento_test_reject_feature_events() returns trigger as $$
+    begin
+      raise exception 'test: history insert rejected';
+    end;
+    $$ language plpgsql
+  `);
+  await ctx.db.execute(sql`
+    create trigger bento_test_reject_feature_events
+    before insert on feature_events
+    for each row execute function bento_test_reject_feature_events()
+  `);
+  try {
+    await assert.rejects(() => evaluateFeatureGate(ctx, feature.id));
+
+    const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+    assert.equal(row?.status, "active", "the card must still be active");
+    assert.equal(row?.currentStageId, stage.id);
+    const checks = await ctx.db
+      .select({ id: gateChecks.id })
+      .from(gateChecks)
+      .where(eq(gateChecks.featureId, feature.id));
+    assert.deepEqual(checks, [], "a hold that did not happen writes no checks");
+    const history = await ctx.db
+      .select({ id: featureEvents.id })
+      .from(featureEvents)
+      .where(eq(featureEvents.featureId, feature.id));
+    assert.deepEqual(history, [], "a hold that did not happen writes no history");
+  } finally {
+    await ctx.db.execute(sql`drop trigger if exists bento_test_reject_feature_events on feature_events`);
+    await ctx.db.execute(sql`drop function if exists bento_test_reject_feature_events()`);
+  }
 });
 
 async function runCount(featureId: string): Promise<number> {
