@@ -1,40 +1,44 @@
-# How it works
+# How Bento works
 
-Each feature is a card that moves through your stages. When a card enters a stage, that stage's agent runs in a sandbox holding git worktrees of your repositories. Stages pass context to each other through committed artifact files (`docs/bento/<stage>.md`). That is how a card designed by one agent can be implemented by another.
+A feature is a card that moves through pipeline stages. When a card enters a stage, that stage's agent runs in a sandbox with git worktrees of the project's repositories. Stages pass context through committed files under `docs/bento/<stage>.md`.
 
 ## Cards, sandboxes and worktrees
 
-One card, one branch, one sandbox. The sandbox is created when the card's first agent runs, and it outlives that run. The second stage therefore starts warm, with the setup command's dependencies and the first agent's caches still in place. Hosted sandboxes also outlive the server. A deploy during a run does not end it: the sandbox keeps the agent working through the disconnect, and the restarted server reattaches.
+One card, one branch, one sandbox. The sandbox is created on the first agent run and reused for later stages on that card. Setup dependencies and caches from earlier runs remain available.
 
-A follow-up message continues the same CLI session when the tool prints a session id. Claude Code, Codex, Cursor, opencode and pi all do. Tools that cannot resume, and sessions the sandbox no longer holds, start a fresh run with the stage prompt and a compacted transcript. pi and Claude Code also hold the process open for a short idle window after a turn on a manual stage, so you can keep talking without starting a new run.
+Hosted sandboxes outlive the server process. If the server restarts during a run, the sandbox continues and the server reattaches.
 
-**A project can span several repositories.** Each gets its own worktree inside one feature workspace, so a change touching a frontend and a backend is a single card:
+Follow-up messages resume the CLI session when the tool exposes a session id (Claude Code, Codex, Cursor, opencode, pi). If the session is unavailable, Bento starts a new run with the stage prompt and a compacted transcript. See [agents.md](./agents.md#talking-to-a-working-agent) for per-tool behavior.
+
+**Multi-repository projects.** Each repository gets a worktree under one feature workspace:
 
 ```
 <data-dir>/worktrees/<featureId>/web
 <data-dir>/worktrees/<featureId>/api
 ```
 
-With one repository the agent starts inside it. With several it starts at the workspace root and the prompt lists what is checked out where. The first repository is the main one: a stage writes its artifact file there, and the project's own repository fields follow it if it changes.
+With one repository, the agent starts in that checkout. With several, it starts at the workspace root and the prompt lists each checkout. The first repository is primary: stage artifacts are written there, and project repository fields follow it.
 
 ## What a sandbox contains
 
-Git, the seven coding agent CLIs, and no language runtime. A repository's toolchain arrives through its own setup command rather than being baked into the image. See [pipeline.md](./pipeline.md#repository-commands).
+Git, the seven coding agent CLIs, and no language runtime. Repository toolchains are installed via setup commands. See [pipeline.md](./pipeline.md#repository-commands).
 
-Locally the sandbox is a Docker container the server creates through the host's daemon; hosted, it is a Fly.io Sprite that installs the agent CLIs on first use. Both sit behind one driver interface, along with a no-isolation local process driver used for development and CI.
+Local deployments use Docker containers (default) or an in-process driver with no isolation. Hosted deployments use Fly Sprites. All drivers share one interface.
 
 ## Spend
 
-Agent spend is shown per card and per project where it is known, and never enforced. Bento prices nothing itself. It records the figure the tool reports, and only Claude Code and pi report one. A total therefore states how many runs it could not measure, rather than counting them as free.
+Spend is recorded per card and per project when the tool reports it. Bento does not bill or enforce limits. Only Claude Code and pi report cost. Totals include a count of unmeasured runs; unmeasured runs are not treated as zero cost.
 
 ## Tenancy
 
-A local install has one user and no organizations, and every `organization_id` is null. A shared server puts every project inside an organization, and every member of that organization sees all of its projects. There is no per-project sharing.
+Local mode: one user, no organizations, `organization_id` is null everywhere.
 
-Three layers keep a tenant's rows to itself, and each catches something the others do not:
+Multi mode: projects belong to an organization. All members of that organization see all of its projects. There is no per-project sharing.
 
-- Route checks, which re-read membership on every request.
-- Row-level security, which confines every query to the caller's organization.
-- Insert triggers, which derive the tenant from the parent row.
+Three isolation layers:
 
-The full table-by-table picture, with the delete rules: [diagrams/database_schema.md](./diagrams/database_schema.md).
+- Route checks re-read membership on every request.
+- Row-level security confines queries to the caller's organization.
+- Insert triggers derive `organization_id` from the parent row.
+
+Table-level detail: [diagrams/database_schema.md](./diagrams/database_schema.md).
