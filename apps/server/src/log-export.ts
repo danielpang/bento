@@ -3,7 +3,7 @@ import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs";
-import type { Env } from "./env.js";
+import { posthogApiKey, type Env } from "./env.js";
 
 export interface LogExport {
   /** Restores console and flushes what is buffered. */
@@ -39,8 +39,9 @@ const STOP_BUDGET_MS = 3000;
 
 /**
  * Ships the server's logs to PostHog over OTLP, or returns null when
- * no key is configured. (The missing key is announced by server.ts;
- * it is the same variable, and one line is enough.)
+ * this process must not send (local mode, or no key). The missing key
+ * is announced by server.ts; it is the same variable, and one line is
+ * enough.
  *
  * This server logs through console, everywhere and on purpose, so the
  * bridge wraps the console methods rather than introducing a logger
@@ -50,7 +51,8 @@ const STOP_BUDGET_MS = 3000;
  * console it wraps, which is why the wrapper never recurses into it.
  */
 export function startLogExport(env: Env): LogExport | null {
-  if (!env.POSTHOG_API_KEY) return null;
+  const apiKey = posthogApiKey(env);
+  if (!apiKey) return null;
   if (active) return null;
   active = true;
 
@@ -69,7 +71,7 @@ export function startLogExport(env: Env): LogExport | null {
       new BatchLogRecordProcessor({
         exporter: new OTLPLogExporter({
           url: `${host}/i/v1/logs`,
-          headers: { Authorization: `Bearer ${env.POSTHOG_API_KEY}` },
+          headers: { Authorization: `Bearer ${apiKey}` },
         }),
       }),
     ],

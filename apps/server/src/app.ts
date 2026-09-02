@@ -29,6 +29,7 @@ import { mcpRoutes } from "./routes/mcp.js";
 import { mcpGatewayRoutes } from "./routes/mcp-gateway.js";
 import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
+import { posthogApiKey } from "./env.js";
 
 export interface AppExtras {
   /**
@@ -90,6 +91,9 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   app.get("/api/health", async (c) => {
     try {
       await ping(ctx.db);
+      // Null in local mode and whenever the key is unset, so a laptop
+      // never phones home, leftover env vars included.
+      const posthogKey = posthogApiKey(ctx.env);
       return c.json({
         ok: true,
         mode: ctx.env.BENTO_MODE,
@@ -101,12 +105,11 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
           google: Boolean(ctx.env.GOOGLE_CLIENT_ID && ctx.env.GOOGLE_CLIENT_SECRET),
         },
         // The project token is a public phc_ key. The console uses it
-        // to init posthog-js for exception capture; omitted when
-        // analytics is off so the client never phones an empty host.
-        ...(ctx.env.POSTHOG_API_KEY
+        // to init posthog-js for exception capture.
+        ...(posthogKey
           ? {
               posthog: {
-                apiKey: ctx.env.POSTHOG_API_KEY,
+                apiKey: posthogKey,
                 host: ctx.env.POSTHOG_HOST,
                 environment: ctx.env.BENTO_ENVIRONMENT,
               },

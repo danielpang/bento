@@ -5,12 +5,21 @@ import { loadEnv } from "./env.js";
 
 /** A key-shaped token and an unroutable host, so nothing ever sends. */
 const FAKE_ENV = {
+  BENTO_MODE: "multi",
   POSTHOG_API_KEY: "phc_test_key_never_sent_anywhere",
   POSTHOG_HOST: "http://127.0.0.1:1",
 };
 
 test("no key means no analytics, quietly", () => {
   assert.equal(createAnalytics(loadEnv({})), null);
+  assert.equal(createAnalytics(loadEnv({ BENTO_MODE: "multi" })), null);
+});
+
+test("local mode never constructs a client, even with a leftover key", () => {
+  assert.equal(
+    createAnalytics(loadEnv({ BENTO_MODE: "local", POSTHOG_API_KEY: "phc_leftover_from_hosted" })),
+    null,
+  );
 });
 
 test("capture and captureException accept every identity shape without throwing", async () => {

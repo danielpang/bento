@@ -19,7 +19,7 @@ import { and, eq } from "drizzle-orm";
 import { member, user } from "@bento/db";
 import { createDriver, createGitHubApp, ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
-import { loadEnv, type Env } from "./env.js";
+import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
 
 export interface StartOptions {
@@ -158,8 +158,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     // Beside the artifact warning and at the same level, because it is
     // the same kind of news: an optional service a hosted deployment
     // probably wanted is off. Local installs and the TUI stay quiet;
-    // measuring a laptop was never the point.
-    if (env.BENTO_MODE === "multi" && !env.POSTHOG_API_KEY && !options.quiet) {
+    // measuring a laptop was never the point, and a leftover key must
+    // not start sending.
+    if (env.BENTO_MODE === "multi" && !posthogApiKey(env) && !options.quiet) {
       console.warn(
         "POSTHOG_API_KEY variable required by PostHog is missing or un-configured, this causes events to be silently missed. This warning stops appearing once POSTHOG_API_KEY is configured.",
       );
