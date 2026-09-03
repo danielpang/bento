@@ -14,7 +14,7 @@ import {
 } from "@bento/core";
 import type { GateCriteria, GateCriterion } from "@bento/core";
 import { getAdapter } from "@bento/agents";
-import type { AgentProfile, AgentTool, BentoClient, Project, Repository, Stage } from "@bento/api-client";
+import type { AgentProfile, AgentTool, BentoClient, McpServerStatus, Project, Repository, Stage } from "@bento/api-client";
 import { TextInput } from "./TextInput.js";
 import { CRITERION_KINDS, describeCriterion } from "../criteria.js";
 import {
@@ -54,7 +54,16 @@ type Screen =
   | { name: "keys" }
   | { name: "github" }
   | { name: "subscription" }
-  | { name: "keyValue"; credential: string; from: "keys" | "github"; value: string };
+  | { name: "keyValue"; credential: string; from: "keys" | "github"; value: string }
+  | { name: "mcp" }
+  | { name: "mcpName"; value: string }
+  | { name: "mcpUrl"; serverName: string; value: string }
+  | { name: "mcpKey"; serverName: string; url: string; value: string }
+  | { name: "yamlAgents" }
+  | { name: "yamlPipeline" }
+  | { name: "yamlPath"; kind: "agents-export" | "agents-import" | "pipeline-export" | "pipeline-import"; value: string }
+  | { name: "repoSetup"; repoId: string; value: string }
+  | { name: "repoTest"; repoId: string; setupCommand: string; value: string };
 
 /** What the server reports about the machine it runs on. */
 type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
@@ -69,6 +78,12 @@ const TYPING = new Set([
   "newStage",
   "keyValue",
   "criterionCmd",
+  "mcpName",
+  "mcpUrl",
+  "mcpKey",
+  "yamlPath",
+  "repoSetup",
+  "repoTest",
 ]);
 
 /**
@@ -86,7 +101,7 @@ const PROVIDER_CREDENTIALS = AGENT_CREDENTIALS.filter(
 const GITHUB_CREDENTIAL = AGENT_CREDENTIALS.find((credential) => credential.name === "GITHUB_TOKEN")!;
 
 /** Screens whose hint advertises d, so d owes an answer on every row. */
-const REMOVABLE = new Set(["repos", "agents", "criteria", "keys", "github", "stages"]);
+const REMOVABLE = new Set(["repos", "agents", "criteria", "keys", "github", "stages", "mcp"]);
 
 /** The key whose presence means a provider is paid for, per provider. */
 export const PROVIDER_KEYS = [
@@ -140,6 +155,8 @@ export function Setup({
    * all rather than as "missing".
    */
   const [tools, setTools] = useState<AgentTool[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
+  const [mcpCanManage, setMcpCanManage] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   /**
@@ -156,7 +173,7 @@ export function Setup({
   const hints: Record<string, string> = Object.fromEntries(secrets.map((row) => [row.name, row.hint]));
 
   async function load() {
-    const [projectRows, profileRows, secretRows, machineRow, toolRows] = await Promise.all([
+    const [projectRows, profileRows, secretRows, machineRow, toolRows, mcp] = await Promise.all([
       client.listProjects(),
       client.listProfiles(),
       client.listSecrets(),
@@ -164,6 +181,7 @@ export function Setup({
       // has no such route; neither is worth failing setup over.
       client.getMachineSettings().catch(() => null),
       client.listAgentTools().catch(() => []),
+      client.mcpStatus().catch(() => ({ canManage: false, servers: [], userConnectionsNeeded: 0 })),
     ]);
     setProjects(projectRows);
     setProfiles(profileRows);
@@ -171,6 +189,8 @@ export function Setup({
     setCanManageCredentials(secretRows.canManage);
     setMachine(machineRow);
     setTools(toolRows);
+    setMcpServers(mcp.servers);
+    setMcpCanManage(mcp.canManage);
     // In local mode the server is this process, so its report and this
     // machine's are the same answer. With a remote server they are not:
     // the agents run here, so the logins that matter are here, and the
@@ -363,6 +383,21 @@ export function Setup({
       status: hints[GITHUB_CREDENTIAL.name] ?? "no token saved",
       open: () => go({ name: "github" }),
     },
+    {
+      label: "MCP servers",
+      status: mcpServers.length ? `${mcpServers.length} configured` : "none yet",
+      open: () => go({ name: "mcp" }),
+    },
+    {
+      label: "Agents file",
+      status: profiles.length ? `${profiles.length} named agents` : "none yet",
+      open: () => go({ name: "yamlAgents" }),
+    },
+    {
+      label: "Pipeline file",
+      status: project ? `${stages.length} stages` : "connect a repository first",
+      open: () => (project ? go({ name: "yamlPipeline" }) : setNotice("Connect a repository first.")),
+    },
     { label: "Finish and open the board", status: "", open: onDone },
   ];
 
@@ -487,6 +522,17 @@ export function Setup({
           void act(`Removed ${repo.name}`, () => client.removeRepository(project.id, repo.id));
           return;
         }
+        if (screen.name === "mcp") {
+          const server = mcpServers[indexRef.current];
+          if (server) {
+            if (!mcpCanManage) {
+              setNotice("Only owners and admins can remove a team MCP server.");
+              return;
+            }
+            void act(`Removed ${server.name}`, () => client.deleteMcpServer(server.id));
+            return;
+          }
+        }
         // A screen whose hint advertises d owes an answer on every row,
         // including the ones with nothing behind them.
         if (REMOVABLE.has(screen.name)) setNotice("Nothing saved here yet.");
@@ -537,6 +583,11 @@ export function Setup({
         return PROVIDER_CREDENTIALS.length + 1;
       case "github":
         return 2; // the token, then back
+      case "mcp":
+        return mcpServers.length + 2; // servers, add, back
+      case "yamlAgents":
+      case "yamlPipeline":
+        return 3; // export, import, back
       default:
         return 1;
     }
@@ -553,7 +604,40 @@ export function Setup({
           go({ name: "repoPath", value: repositoryPathOwner === "client" ? process.cwd() : "" });
         } else if (index === repos.length + 1) {
           go({ name: "hub" });
+        } else if (project && repos[index]) {
+          go({ name: "repoSetup", repoId: repos[index]!.id, value: repos[index]!.setupCommand ?? "" });
         }
+        return;
+      }
+      case "mcp": {
+        if (index === mcpServers.length) {
+          if (!mcpCanManage) {
+            setNotice("Only owners and admins can add a team MCP server.");
+            return;
+          }
+          go({ name: "mcpName", value: "" });
+          return;
+        }
+        if (index === mcpServers.length + 1) {
+          go({ name: "hub" });
+          return;
+        }
+        const server = mcpServers[index];
+        if (server?.authType === "oauth" && !server.userCredential?.connected && !server.orgCredential?.connected) {
+          setNotice("Connect this server in the web console. OAuth needs a browser.");
+        }
+        return;
+      }
+      case "yamlAgents": {
+        if (index === 0) go({ name: "yamlPath", kind: "agents-export", value: "agents.yaml" });
+        else if (index === 1) go({ name: "yamlPath", kind: "agents-import", value: "agents.yaml" });
+        else go({ name: "hub" });
+        return;
+      }
+      case "yamlPipeline": {
+        if (index === 0) go({ name: "yamlPath", kind: "pipeline-export", value: "pipeline.yaml" });
+        else if (index === 1) go({ name: "yamlPath", kind: "pipeline-import", value: "pipeline.yaml" });
+        else go({ name: "hub" });
         return;
       }
       case "agents": {
@@ -1055,16 +1139,249 @@ export function Setup({
 
   if (screen.name === "repos") {
     return (
-      <Frame title="Repositories" hint="j/k move · Enter choose · d remove · Escape back" notice={notice} error={error}>
+      <Frame title="Repositories" hint="j/k move · Enter commands · d remove · Escape back" notice={notice} error={error}>
         <Text color="gray">
-          {project ? `Project ${project.name}. Each repository becomes its own worktree.` : "No project yet."}
+          Sandboxes carry no language runtime, so give each one a setup command to install what it
+          needs and a test command for the agent.
         </Text>
         <Box flexDirection="column" marginTop={1}>
           {repos.map((repo, i) => (
-            <Row key={repo.id} selected={i === index} label={repo.name} status={repo.localPath} />
+            <Row
+              key={repo.id}
+              selected={i === index}
+              label={repo.name}
+              status={`${repo.localPath}${repo.setupCommand ? ` · setup: ${repo.setupCommand}` : ""}${repo.testCommand ? ` · test: ${repo.testCommand}` : ""}`}
+            />
           ))}
           <Row selected={index === repos.length} label={project ? "Add another repository" : "Connect a repository"} />
           <Row selected={index === repos.length + 1} label="Back" />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "repoSetup") {
+    return (
+      <Frame title="Setup command" hint="Enter to continue, Escape to go back">
+        <Text color="gray">
+          Shell run once in a fresh sandbox, before any agent starts. Leave it empty for none.
+        </Text>
+        <Box marginTop={1}>
+          <Text>Setup: </Text>
+          <TextInput
+            value={screen.value}
+            placeholder="npm ci"
+            onChange={(value) => setScreen({ ...screen, value })}
+            onCancel={() => go({ name: "repos" })}
+            onSubmit={(setupCommand) => {
+              const repo = repos.find((r) => r.id === screen.repoId);
+              go({ name: "repoTest", repoId: screen.repoId, setupCommand, value: repo?.testCommand ?? "" });
+            }}
+          />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "repoTest") {
+    return (
+      <Frame title="Test command" hint="Enter to save, Escape to go back" error={error}>
+        <Text color="gray">Shell the agent is told to run to check its work. Leave it empty for none.</Text>
+        <Box marginTop={1}>
+          <Text>Test: </Text>
+          <TextInput
+            value={screen.value}
+            placeholder="npm test"
+            onChange={(value) => setScreen({ ...screen, value })}
+            onCancel={() => go({ name: "repos" })}
+            onSubmit={(testCommand) => {
+              if (!project) return;
+              void act("Saved the commands", () =>
+                client.updateRepository(project.id, screen.repoId, {
+                  setupCommand: screen.setupCommand.trim() || null,
+                  testCommand: testCommand.trim() || null,
+                }),
+              ).then((ok) => {
+                if (ok) go({ name: "repos" });
+              });
+            }}
+          />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "mcp") {
+    return (
+      <Frame title="MCP servers" hint="j/k move · Enter add · d remove · Escape back" notice={notice} error={error}>
+        <Text color="gray">
+          Servers agents can call during a run. OAuth servers have to be connected in the web
+          console.
+        </Text>
+        <Box flexDirection="column" marginTop={1}>
+          {mcpServers.map((server, i) => {
+            const connected =
+              server.authType === "none" ||
+              server.orgCredential?.connected === true ||
+              server.userCredential?.connected === true;
+            return (
+              <Row
+                key={server.id}
+                selected={i === index}
+                label={server.name}
+                status={`${server.authType} · ${server.enabled ? "on" : "off"} · ${connected ? "connected" : "not connected"}`}
+              />
+            );
+          })}
+          <Row selected={index === mcpServers.length} label="Add a custom URL" />
+          <Row selected={index === mcpServers.length + 1} label="Back" />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "mcpName") {
+    return (
+      <Frame title="Name this MCP server" hint="Enter to continue, Escape to go back">
+        <Box marginTop={1}>
+          <Text>Name: </Text>
+          <TextInput
+            value={screen.value}
+            placeholder="Docs"
+            onChange={(value) => setScreen({ ...screen, value })}
+            onCancel={() => go({ name: "mcp" })}
+            onSubmit={(name) => {
+              const trimmed = name.trim();
+              if (!trimmed) return;
+              go({ name: "mcpUrl", serverName: trimmed, value: "" });
+            }}
+          />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "mcpUrl") {
+    return (
+      <Frame title={`URL for ${screen.serverName}`} hint="Enter to continue, Escape to go back">
+        <Box marginTop={1}>
+          <Text>URL: </Text>
+          <TextInput
+            value={screen.value}
+            placeholder="https://example.test/mcp"
+            onChange={(value) => setScreen({ ...screen, value })}
+            onCancel={() => go({ name: "mcp" })}
+            onSubmit={(url) => {
+              const trimmed = url.trim();
+              if (!trimmed) return;
+              go({ name: "mcpKey", serverName: screen.serverName, url: trimmed, value: "" });
+            }}
+          />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "mcpKey") {
+    return (
+      <Frame title="API key (optional)" hint="Enter to save, Escape to go back" error={error}>
+        <Text color="gray">Leave empty for a server that needs no auth.</Text>
+        <Box marginTop={1}>
+          <Text>Key: </Text>
+          <TextInput
+            value={screen.value}
+            mask
+            onChange={(value) => setScreen({ ...screen, value })}
+            onCancel={() => go({ name: "mcp" })}
+            onSubmit={(raw) => {
+              const key = raw.trim();
+              const slug = screen.serverName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "server";
+              void act(`Added ${screen.serverName}`, async () => {
+                const created = await client.createMcpServer({
+                  name: screen.serverName,
+                  slug,
+                  url: screen.url,
+                  authType: key ? "api_key" : "none",
+                });
+                if (key) await client.setMcpApiKey(created.id, key);
+              }).then((ok) => {
+                if (ok) go({ name: "mcp" });
+              });
+            }}
+          />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "yamlAgents") {
+    return (
+      <Frame title="Agents file" hint="j/k move · Enter choose · Escape back" notice={notice} error={error}>
+        <Text color="gray">
+          Every named agent: the tool, the model, and the skill. Importing matches by name, so
+          importing twice edits rather than duplicating.
+        </Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Row selected={index === 0} label="Export to a file" />
+          <Row selected={index === 1} label="Import from a file" />
+          <Row selected={index === 2} label="Back" />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "yamlPipeline") {
+    return (
+      <Frame title="Pipeline file" hint="j/k move · Enter choose · Escape back" notice={notice} error={error}>
+        <Text color="gray">
+          Your stages, agents, and commands as one YAML file. Import it into another project
+          instead of rebuilding it.
+        </Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Row selected={index === 0} label="Export to a file" />
+          <Row selected={index === 1} label="Import from a file" />
+          <Row selected={index === 2} label="Back" />
+        </Box>
+      </Frame>
+    );
+  }
+
+  if (screen.name === "yamlPath") {
+    const exporting = screen.kind.endsWith("export");
+    const agents = screen.kind.startsWith("agents");
+    return (
+      <Frame
+        title={exporting ? "Write the YAML where?" : "Read the YAML from where?"}
+        hint="Enter to continue, Escape to go back"
+        error={error}
+      >
+        <Box marginTop={1}>
+          <Text>Path: </Text>
+          <TextInput
+            value={screen.value}
+            onChange={(value) => setScreen({ ...screen, value })}
+            onCancel={() => go({ name: agents ? "yamlAgents" : "yamlPipeline" })}
+            onSubmit={(raw) => {
+              const file = raw.trim();
+              if (!file) return;
+              if (exporting) {
+                void act(`Wrote ${file}`, async () => {
+                  const yaml = agents ? await client.exportAgents() : await client.exportPipeline(project!.id);
+                  await fs.promises.writeFile(file, yaml, "utf8");
+                }).then((ok) => {
+                  if (ok) go({ name: agents ? "yamlAgents" : "yamlPipeline" });
+                });
+                return;
+              }
+              void act(`Imported ${file}`, async () => {
+                const yaml = await fs.promises.readFile(file, "utf8");
+                if (agents) await client.importAgents(yaml);
+                else await client.importPipeline(project!.id, yaml);
+              }).then((ok) => {
+                if (ok) go({ name: agents ? "yamlAgents" : "yamlPipeline" });
+              });
+            }}
+          />
         </Box>
       </Frame>
     );

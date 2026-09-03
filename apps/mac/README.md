@@ -25,14 +25,19 @@ implementation of the polling contract and no JSON parser in the app core.
 
 The same surface as the web console and the terminal:
 
-- **Board.** The backlog and six stage columns, a card detail pane with the live transcript,
-  the card's history, and what its gate is still waiting on.
+- **Board.** The backlog, the stage columns, and a Completed lane for finished
+  work, plus a card detail pane with the live transcript, the card's history,
+  and what its gate is still waiting on.
 - **Card actions.** Start the pipeline, approve or reject, re-check the gate,
   start the stage's agent, stop it, continue in your own words (the agent keeps
-  its session), and send a card back a stage. Each card on the board also carries arrows that move it one stage either way without opening it.
+  its session), send a card back a stage, mark it completed from anywhere, and
+  delete it. Each card on the board also carries arrows that move it one stage
+  either way without opening it.
 - **Creation.** New project, new card.
 - **Agents.** Pair a tool with a model, change an existing pairing, and delete one. Editing keeps the agent's id, so every stage assigned to it follows the change.
-- **Pipeline.** Connect and remove repositories, rename a stage, assign its agent, and choose whether it waits for you or advances on its requirements.
+- **Pipeline.** Connect and remove repositories, add, remove and rename a stage,
+  assign its agent, choose whether it waits for you or advances on its
+  requirements, and turn its pull request on or off.
 - **Team.** Switch and create organizations, invite members, change roles,
   remove members, and store the organization's agent credentials. Multi mode
   only; local mode has one trusted user and no organizations.
@@ -46,6 +51,7 @@ because there is no JSON parser in this binary:
 - `GET /api/projects/:id/board/plain` every 3s for the board
 - `GET /api/projects/:id/pipeline/plain` for stages, their agents, and their gates
 - `GET /api/features/:id/gate/plain` and `/history/plain` for the detail pane
+- `GET /api/features/:id/merge-status/plain` when a card is open, for the resolve-conflicts button
 - `GET /api/runs/:id/transcript?since=<cursor>` every 1.5s for the live transcript
 - `GET /api/profiles/plain`, `/api/secrets/plain`, `/api/team/plain`
 - `GET /api/catalog/{models,tools,credentials}/plain` for the choices a form offers
