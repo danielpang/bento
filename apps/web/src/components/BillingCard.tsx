@@ -386,9 +386,7 @@ function AgentHoursCard({
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Agent hours</h3>
-      <p className="muted">
-        Hours are pooled for the whole team, and only a sandbox actually running spends them.
-      </p>
+      <p className="muted">Hours are pooled for the whole team.</p>
 
       <div className="hours-usage">
         <div className="hours-usage-head">
