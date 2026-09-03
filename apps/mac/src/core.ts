@@ -438,6 +438,9 @@ export const viewUnbound = [
   "stages",
   "cards",
   "pipelineId",
+  "confirmKind",
+  "confirmIndex",
+  "confirmText",
 ] as const;
 
 // ---- text editing ----
