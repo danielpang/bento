@@ -758,6 +758,21 @@ export function parseCredentials(body: Uint8Array): readonly Credential[] {
   return out;
 }
 
+/**
+ * Lines are pr|<state>|<number>|<name>. Only "conflicted" asks for the
+ * resolve button; anything else is treated as not known to conflict.
+ */
+export function parseHasConflicts(body: Uint8Array): boolean {
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("pr");
+  const conflicted = asciiBytes("conflicted");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length >= 3 && bytesEq(fields[0], tag) && bytesEq(fields[1], conflicted)) return true;
+  }
+  return false;
+}
+
 /** Lines are gate|<status>|<stageId> then check|<type>|<status>|<detail>. */
 export function parseGate(body: Uint8Array): readonly GateCheck[] {
   const out: GateCheck[] = [];

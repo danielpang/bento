@@ -198,3 +198,67 @@ test("a stage can be added, removed, and told to open a pull request", () => {
   assert.ok(pr, "expected a createPr PATCH");
   assert.match(pr, /\\"createPr\\":true/);
 });
+
+test("a conflicted pull request can start a resolve-conflicts run", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "board_ok",
+      status: 200,
+      body: bytes("stage|stage-1|0|Build\nfeature|card-1|stage-1|active|succeeded|run-1|-|-|Conflicted card"),
+    },
+    { kind: "pick_card", index: 0 },
+    { kind: "merge_ok", status: 200, body: bytes("pr|conflicted|41|checkout") },
+    { kind: "resolve_conflicts" },
+  ]);
+
+  assert.ok(
+    result.commands.some((line) => line.includes("/api/features/card-1/merge-status/plain")),
+    "expected a merge-status read when the card opens",
+  );
+
+  const afterMerge = result.models.find((model) => model.hasConflicts);
+  assert.ok(afterMerge, "expected hasConflicts after a conflicted merge-status");
+
+  const resolve = result.commands.find((line) => line.includes("/api/features/card-1/resolve-conflicts"));
+  assert.ok(resolve, "expected a resolve-conflicts POST");
+  assert.match(resolve, /method="POST"/);
+  assert.match(resolve, /body=/);
+});
+
+test("resolve-conflicts waits when an agent is already working the card", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "board_ok",
+      status: 200,
+      body: bytes("stage|stage-1|0|Build\nfeature|card-1|stage-1|active|running|run-1|-|-|Busy card"),
+    },
+    { kind: "pick_card", index: 0 },
+    { kind: "merge_ok", status: 200, body: bytes("pr|conflicted|41|checkout") },
+    { kind: "resolve_conflicts" },
+  ]);
+
+  const notice = result.models.filter((model) => model.notice?.$bytes).at(-1)?.notice?.$bytes ?? "";
+  assert.match(notice, /Resolve conflicts when it finishes/);
+  assert.ok(!result.commands.some((line) => line.includes("/resolve-conflicts")));
+});
+
+test("resolve-conflicts stays quiet when GitHub reports no conflict", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "board_ok",
+      status: 200,
+      body: bytes("stage|stage-1|0|Build\nfeature|card-1|stage-1|active|succeeded|run-1|-|-|Clean card"),
+    },
+    { kind: "pick_card", index: 0 },
+    { kind: "merge_ok", status: 200, body: bytes("pr|clean|41|checkout") },
+    { kind: "resolve_conflicts" },
+  ]);
+
+  assert.ok(!result.commands.some((line) => line.includes("/resolve-conflicts")));
+});

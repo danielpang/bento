@@ -51,6 +51,7 @@ because there is no JSON parser in this binary:
 - `GET /api/projects/:id/board/plain` every 3s for the board
 - `GET /api/projects/:id/pipeline/plain` for stages, their agents, and their gates
 - `GET /api/features/:id/gate/plain` and `/history/plain` for the detail pane
+- `GET /api/features/:id/merge-status/plain` when a card is open, for the resolve-conflicts button
 - `GET /api/runs/:id/transcript?since=<cursor>` every 1.5s for the live transcript
 - `GET /api/profiles/plain`, `/api/secrets/plain`, `/api/team/plain`
 - `GET /api/catalog/{models,tools,credentials}/plain` for the choices a form offers

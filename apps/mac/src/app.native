@@ -244,6 +244,14 @@
                 </column>
               </if>
               <else>
+                <if test="{canResolveConflicts}">
+                  <column gap="6">
+                    <text foreground="warning" wrap="true">GitHub cannot merge this card's pull request: the base branch has moved and the changes collide.</text>
+                    <row gap="8">
+                      <button size="sm" on-press="resolve_conflicts">Resolve conflicts</button>
+                    </row>
+                  </column>
+                </if>
                 <row gap="8">
                   <if test="{inAStage}">
                     <button size="sm" variant="primary" on-press="approve">Approve</button>

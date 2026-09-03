@@ -3640,6 +3640,9 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.equal(status[0]?.number, 41);
     assert.equal(status[0]?.state, "conflicted");
 
+    const plain = await (await app.request(`/api/features/${feature.id}/merge-status/plain`)).text();
+    assert.match(plain, /^pr\|conflicted\|41\|/);
+
     // A conflict with no conversation: there is no agent to hand it to.
     const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
     assert.equal(noRun.status, 400);

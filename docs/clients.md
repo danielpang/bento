@@ -6,7 +6,7 @@ The web console is the client Bento is built around. Two others exist and are us
 
 `apps/tui`. A full board in the terminal, plus the commands that make a board scriptable. It can also run the whole server itself, or act as a runner that executes work a shared server is holding.
 
-Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h` switches it to the card's history, `a` approves a manual gate and `R` rejects it, `r` re-checks, `x` stops the agent and `c` continues it with your own instructions. `n` adds a card, `f` marks it completed, and `D` deletes it after a confirm.
+Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h` switches it to the card's history, `a` approves a manual gate and `R` rejects it, `r` re-checks, `x` stops the agent and `c` continues it with your own instructions. `n` adds a card, `f` marks it completed, `m` resolves merge conflicts, and `D` deletes it after a confirm.
 
 `bento setup` covers repositories, agents, stages, and provider keys. The scriptable versions of the same things:
 
@@ -41,6 +41,7 @@ bento pipeline export team-pipeline.yaml
 | Switch a stage between manual and automatic | Yes | Yes | Yes |
 | Edit stage requirements, judge agent included | Yes | Yes | Judge shown, not edited |
 | Turn a stage's pull request on or off | Yes | Yes | Yes |
+| Resolve merge conflicts on a card's pull request | Yes | Yes | Yes |
 | Approve or reject a card | Yes | Yes | Yes |
 | Move a card between stages | Drag it between lanes | `a` and `b` keys, one step | Arrows on each card |
 | Start, stop, and continue an agent | Yes | Yes | Yes |

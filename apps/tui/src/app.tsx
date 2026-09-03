@@ -7,6 +7,7 @@ import {
   type AgentRun,
   type Feature,
   type FeatureEvent,
+  type FeatureMergeStatus,
   type GateState,
   type Stage,
 } from "@bento/api-client";
@@ -280,6 +281,7 @@ function Console({
   const [latestRunId, setLatestRunId] = useState<string | null>(null);
   const [cardRuns, setCardRuns] = useState<AgentRun[]>([]);
   const [latestRunStatus, setLatestRunStatus] = useState<string>("");
+  const [mergeStates, setMergeStates] = useState<FeatureMergeStatus[]>([]);
 
   // Where to land once the server is reachable and, in multi mode,
   // signed in: the board normally, the credentials wizard for `setup`.
@@ -425,6 +427,37 @@ function Console({
   const cardAgent = profiles.find((profile) => profile.id === cardRuns[0]?.agentProfileId);
   const runActive = Boolean(latestRunStatus) && !["succeeded", "failed", "cancelled"].includes(latestRunStatus);
   const quietLine = quietRunStatus(cardAgent?.cli, runActive);
+  const latestSettledRunId =
+    latestRunId && ["succeeded", "failed", "cancelled"].includes(latestRunStatus) ? latestRunId : null;
+  const hasConflicts = mergeStates.some((state) => state.state === "conflicted");
+  const canResolveConflicts =
+    hasConflicts && current?.status !== "done" && current?.status !== "cancelled";
+
+  /**
+   * Merge state on its own cadence: when the selected card changes, and
+   * again when a run settles. The 3s board refresh must not ask GitHub;
+   * that is a round trip per pull request per viewer. No pull requests
+   * answers [] without a GitHub call.
+   */
+  useEffect(() => {
+    if (!current) {
+      setMergeStates([]);
+      return;
+    }
+    let cancelled = false;
+    setMergeStates([]);
+    void client
+      .getMergeStatus(current.id)
+      .then((states) => {
+        if (!cancelled) setMergeStates(states);
+      })
+      .catch(() => {
+        if (!cancelled) setMergeStates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, current?.id, latestSettledRunId]);
 
   // Follow the selected card's newest run.
   useEffect(() => {
@@ -804,6 +837,27 @@ function Console({
         setDeleteConfirm(true);
         return;
       }
+      if (input === "m") {
+        if (isDone) {
+          setNotice(finishedHint);
+        } else if (current.status === "cancelled") {
+          setNotice("This card was cancelled. It has no further actions.");
+        } else if (!canResolveConflicts) {
+          setNotice("GitHub reports no merge conflicts on this card's pull requests.");
+        } else if (runActive) {
+          setNotice("An agent is working this card. Resolve conflicts when it finishes.");
+        } else {
+          void client
+            .resolveConflicts(current.id)
+            .then(() =>
+              setNotice(
+                "Resolving conflicts. The stage agent rebases the branch, and the pull request updates when it finishes.",
+              ),
+            )
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        }
+      }
       if (input === "s") {
         if (!inAStage) {
           setNotice(isDone ? finishedHint : "Start the pipeline first: press a.");
@@ -907,6 +961,14 @@ function Console({
             <Text color={statusColor(current.status)}> {current.status}</Text>
             {spend && <Text color="gray"> {spend}</Text>}
           </Box>
+          {canResolveConflicts && (
+            <Text color="yellow">
+              GitHub cannot merge {mergeStates.filter((s) => s.state === "conflicted").length === 1
+                ? "this card's pull request"
+                : "some of this card's pull requests"}
+              : the base branch has moved and the changes collide. Press m to resolve conflicts.
+            </Text>
+          )}
           <Text bold color="gray">{showChanges ? "Changes" : showHistory ? "History" : "Agent logs"}</Text>
           {showChanges ? (
             <>
@@ -989,7 +1051,7 @@ function Console({
           </Text>
           <Text color="gray">
             act: n new card · s start · x stop · c message · a approve · shift+R reject · b send back · f completed ·
-            shift+D delete
+            m resolve · shift+D delete
           </Text>
         </Box>
       ) : (

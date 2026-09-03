@@ -1001,6 +1001,25 @@ export function featureRoutes(ctx: AppContext) {
       return c.json(states.map(({ defaultBranch, ...pr }) => pr));
     })
     /**
+     * The same merge status in line form, for the Mac app.
+     *
+     *   pr|<state>|<number>|<name>
+     *
+     * Name is last because a repository name may contain pipes. "conflicted"
+     * is the only state that asks for a button; the others are listed so
+     * a later client can show clean pull requests without a new route.
+     */
+    .get("/:id/merge-status/plain", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.text("error|not found", 404);
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) return c.text("");
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      const states = await readMergeStates(connection, rows);
+      const lines = states.map((pr) => `pr|${pr.state}|${pr.number}|${pr.name}`);
+      return c.text(lines.join("\n"));
+    })
+    /**
      * Starts a run that rebases the card's branch onto the latest base
      * branch and resolves the merge conflicts GitHub is reporting.
      *

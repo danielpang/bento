@@ -37,6 +37,7 @@ import {
   parseProfiles,
   parseRepos,
   parseProjects,
+  parseHasConflicts,
   parseSecrets,
   parseInvitations,
   parseMembers,
@@ -154,6 +155,12 @@ export interface Model {
   readonly credentials: readonly Credential[];
   readonly secrets: readonly Secret[];
   readonly gateChecks: readonly GateCheck[];
+  /**
+   * GitHub reports a merge conflict on at least one of this card's
+   * pull requests. The resolve button reads this; unknown or clean
+   * stays false so a failed GitHub read does not invent a conflict.
+   */
+  readonly hasConflicts: boolean;
 
   readonly pipelineStages: readonly StageConfig[];
   /**
@@ -239,6 +246,8 @@ export type Msg =
   | { readonly kind: "transcript_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "history_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "gate_ok"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "merge_ok"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "merge_failed"; readonly reason: Uint8Array }
   | { readonly kind: "profiles_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "tools_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "catalog_ok"; readonly status: number; readonly body: Uint8Array }
@@ -258,6 +267,7 @@ export type Msg =
   | { readonly kind: "send_back" }
   | { readonly kind: "reject" }
   | { readonly kind: "recheck" }
+  | { readonly kind: "resolve_conflicts" }
   | { readonly kind: "start_agent" }
   | { readonly kind: "stop_agent" }
   | { readonly kind: "run_claude" }
@@ -383,6 +393,8 @@ export const viewUnbound = [
   "history_ok",
   "changes_ok",
   "gate_ok",
+  "merge_ok",
+  "merge_failed",
   "profiles_ok",
   "tools_ok",
   "catalog_ok",
@@ -441,6 +453,7 @@ export const viewUnbound = [
   "confirmKind",
   "confirmIndex",
   "confirmText",
+  "hasConflicts",
 ] as const;
 
 // ---- text editing ----
@@ -539,6 +552,11 @@ function pipelineUrl(model: Model): Uint8Array {
   );
 }
 
+function mergeStatusUrl(model: Model): Uint8Array {
+  if (!hasSelectedCard(model)) return projectsUrl(model);
+  return idUrl(model, asciiBytes("/api/features/"), model.cards[model.selectedCard].id, asciiBytes("/merge-status/plain"));
+}
+
 function transcriptUrl(model: Model): Uint8Array {
   if (!hasSelectedCard(model)) return projectsUrl(model);
   const card = model.cards[model.selectedCard];
@@ -598,6 +616,7 @@ export function initialModel(): Model {
     credentials: [],
     secrets: [],
     gateChecks: [],
+    hasConflicts: false,
     pipelineStages: [],
     pipelineId: new Uint8Array(0),
     repos: [],
@@ -1135,6 +1154,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         transcript: new Uint8Array(0),
         history: [],
         gateChecks: [],
+        hasConflicts: false,
         cursor: 0,
         boardInFlight: true,
         transcriptInFlight: false,
@@ -1215,6 +1235,13 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "gate_ok":
       if (msg.status >= 400) return loadRefused(model, msg.status);
       return { ...model, gateChecks: parseGate(msg.body), lastError: new Uint8Array(0) };
+    case "merge_ok":
+      // A failed or empty read is "unknown", which must not invent a
+      // conflict or replace the card's last error with a GitHub blip.
+      if (msg.status >= 400) return { ...model, hasConflicts: false };
+      return { ...model, hasConflicts: parseHasConflicts(msg.body) };
+    case "merge_failed":
+      return { ...model, hasConflicts: false };
     case "history_ok":
       if (msg.status >= 400) return loadRefused(model, msg.status);
       return { ...model, history: parseHistory(msg.body), lastError: new Uint8Array(0) };
@@ -1272,7 +1299,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         !bytesEq(model.cards[model.selectedCard].runId, cards[selectedCard].runId);
       // lastError survives this poll: a refusal shown for under three
       // seconds might as well not be shown.
-      return {
+      const next: Model = {
         ...model,
         boardInFlight: false,
         stages: parseStages(msg.body),
@@ -1280,6 +1307,23 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         selectedCard: selectedCard,
         ...(runChanged ? { transcript: new Uint8Array(0), cursor: 0 } : {}),
       };
+      // A run that just settled is the only moment a push can have
+      // changed GitHub's merge answer. Do not ask on every board poll.
+      if (runChanged && selectedCard >= 0) {
+        return [
+          next,
+          Cmd.fetch(
+            {
+              url: mergeStatusUrl(next),
+              method: "GET",
+              timeoutMs: 10000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "merge", ok: "merge_ok", err: "merge_failed" },
+          ),
+        ];
+      }
+      return next;
     }
 
     case "board_tick": {
@@ -1325,6 +1369,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         transcript: new Uint8Array(0),
         history: [],
         showHistory: false, showChanges: false, changes: new Uint8Array(0),
+        hasConflicts: false,
         cursor: 0,
         boardInFlight: true,
       };
@@ -1373,6 +1418,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         transcript: new Uint8Array(0),
         history: [],
         gateChecks: [],
+        hasConflicts: false,
         showHistory: false, showChanges: false, changes: new Uint8Array(0),
         cursor: 0,
         transcriptInFlight: selectedCardHasRun({ ...model, selectedCard: msg.index }),
@@ -1390,6 +1436,15 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             },
             { key: "gate", ok: "gate_ok", err: "load_failed" },
           ),
+          Cmd.fetch(
+            {
+              url: mergeStatusUrl(next),
+              method: "GET",
+              timeoutMs: 10000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "merge", ok: "merge_ok", err: "merge_failed" },
+          ),
           next.transcriptInFlight
             ? Cmd.fetch(
                 {
@@ -1406,7 +1461,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "close_card":
-      return { ...model, selectedCard: -1, transcript: new Uint8Array(0), history: [], gateChecks: [], changes: new Uint8Array(0), cursor: 0 };
+      return { ...model, selectedCard: -1, transcript: new Uint8Array(0), history: [], gateChecks: [], hasConflicts: false, changes: new Uint8Array(0), cursor: 0 };
 
     /**
      * History and transcript share the detail pane: a terminal has one
@@ -1664,6 +1719,31 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             // The HTTP client asserts that a POST carries a body, and
             // aborts the process when one does not, so an action that
             // takes no arguments still sends an empty object.
+            body: asciiBytes("{}"),
+          },
+          { key: "act", ok: "board_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    /**
+     * Starts the stage agent on the merge conflicts GitHub reported.
+     * Hidden unless GitHub said "conflicted"; the server re-reads that
+     * so a stale pane cannot start a rebase nothing needs.
+     */
+    case "resolve_conflicts": {
+      if (!canResolveConflicts(model)) return model;
+      if (canStopAgent(model)) {
+        return { ...model, notice: asciiBytes("An agent is working this card. Resolve conflicts when it finishes.") };
+      }
+      return [
+        { ...model, notice: asciiBytes("Resolving conflicts") },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/features/"), model.cards[model.selectedCard].id, asciiBytes("/resolve-conflicts")),
+            method: "POST",
+            timeoutMs: 10000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
             body: asciiBytes("{}"),
           },
           { key: "act", ok: "board_changed", err: "act_failed" },
@@ -2313,6 +2393,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           transcript: new Uint8Array(0),
           history: [],
           gateChecks: [],
+          hasConflicts: false,
           showHistory: false, showChanges: false, changes: new Uint8Array(0),
           cursor: 0,
           boardInFlight: false,
@@ -2762,6 +2843,15 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             },
             { key: "gate", ok: "gate_ok", err: "load_failed" },
           ),
+          Cmd.fetch(
+            {
+              url: mergeStatusUrl(model),
+              method: "GET",
+              timeoutMs: 10000,
+              headers: { authorization: authHeader(model) },
+            },
+            { key: "merge", ok: "merge_ok", err: "merge_failed" },
+          ),
         ]),
       ];
     }
@@ -2961,6 +3051,15 @@ export function hasSecrets(model: Model): boolean {
 /** Whether the card's gate has anything to show. */
 export function hasGateChecks(model: Model): boolean {
   return model.gateChecks.length > 0;
+}
+
+/**
+ * GitHub said a pull request cannot merge, and the card can still be
+ * worked. Finished and cancelled cards keep the warning off: reopen
+ * first, the same rule the console uses.
+ */
+export function canResolveConflicts(model: Model): boolean {
+  return model.hasConflicts && hasSelectedCard(model) && !selectedCardTerminal(model);
 }
 
 /**
