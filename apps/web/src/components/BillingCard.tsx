@@ -4,6 +4,10 @@ import { useToast } from "./Toasts.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
 import {
   displayHighlights,
+  formatHours,
+  formatHoursPhrase,
+  hoursMeterState,
+  hoursUsage,
   monthlyTotal,
   money,
   overageCheckoutNote,
@@ -11,6 +15,7 @@ import {
   seatPrice,
   useBillingPlan,
   type PlanOffer,
+  type PlanState,
 } from "./billing-plan.js";
 
 /**
@@ -32,7 +37,14 @@ export function BillingCard() {
   const [allActivity, setAllActivity] = useState(false);
 
   if (absent) return null;
-  if (!state) return <SettingsCardSkeleton rows={4} />;
+  if (!state) {
+    return (
+      <>
+        <SettingsCardSkeleton rows={3} />
+        <SettingsCardSkeleton rows={5} />
+      </>
+    );
+  }
 
   const current = state.catalog.find((offer) => offer.plan === state.plan);
 
@@ -73,203 +85,132 @@ export function BillingCard() {
   };
 
   return (
-    <section className="section settings-card">
-      {/*
-        The plan is the headline, not a word inside a sentence. The old
-        line buried "Pro" mid-paragraph, and the one fact everyone
-        opens this tab for should be readable from across the room: the
-        name large, the team's own total beside it, and the per seat
-        rate as the small print under both.
-      */}
-      <div className="plan-head">
-        <h3 className="settings-title">Plan</h3>
-        <div className="plan-head-row">
-          <span className="plan-name">{state.planName}</span>
+    <>
+      <section className="section settings-card">
+        {/*
+          The plan is the headline, not a word inside a sentence. The old
+          line buried "Pro" mid-paragraph, and the one fact everyone
+          opens this tab for should be readable from across the room: the
+          name large, the team's own total beside it, and the per seat
+          rate as the small print under both.
+        */}
+        <div className="plan-head">
+          <h3 className="settings-title">Plan</h3>
+          <div className="plan-head-row">
+            <span className="plan-name">{state.planName}</span>
+            {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
+              <span className="plan-total">{monthlyTotal(current, state.seats.held)}</span>
+            )}
+          </div>
           {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
-            <span className="plan-total">{monthlyTotal(current, state.seats.held)}</span>
+            <span className="muted plan-rate">{seatPrice(current.pricing)}</span>
           )}
         </div>
-        {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
-          <span className="muted plan-rate">{seatPrice(current.pricing)}</span>
-        )}
-      </div>
-      {/*
-        Then one line per thing billed: seats, hours. Live features are
-        shown nowhere because nothing charges for them, and the team's
-        own model spend is absent because it goes to their provider,
-        not to us.
-      */}
-      <p className="muted">{members(state.usage.members, state.limits.members)}</p>
-      <p className="muted">
-        {state.agentHours.used} of {state.agentHours.included} agent hours used, resetting on{" "}
-        {resetsOn(state)}. Hours are pooled for the whole team, and only a sandbox actually running
-        spends them.
-      </p>
+        <p className="muted">{members(state.usage.members, state.limits.members)}</p>
 
-      {/*
-        What happens at the end of the allowance, as a choice rather
-        than as our policy. A team on a deadline would rather find $40
-        on the invoice than a board that stopped overnight, and a team
-        on a budget would much rather the reverse. Neither is wrong
-        about their own situation, so neither should be assumed.
-      */}
-      {state.overage.changeable && (
-        <div className="field">
-          <span className="label">When the included hours run out</span>
-          {OVERAGE_CHOICES.map((choice) => (
-            <label key={choice.policy} className="overage-choice">
-              <input
-                type="radio"
-                name="overage-policy"
-                checked={state.overage.policy === choice.policy}
-                disabled={busy || !state.canManageBilling}
-                onChange={() =>
-                  act(async () => {
-                    await post("/api/billing/overage-policy", { policy: choice.policy });
-                    setNotice(choice.confirmation(state.overage.usdPerAgentHour));
-                  })
-                }
-              />
-              <span>
-                <strong>{choice.label}</strong>
-                <span className="muted"> {choice.help(state.overage.usdPerAgentHour)}</span>
-              </span>
-            </label>
-          ))}
-        </div>
-      )}
-      {/*
-        A ceiling, which binds even for a team that chose to pay. They
-        agreed to pay for what they use; they did not agree to pay for
-        whatever a loop can spend overnight.
-      */}
-      {state.overage.changeable && state.overage.policy === "allow" && (
-        <label className="field">
-          <span className="label">Stop anyway past</span>
-          <div className="actions">
-            <input
-              className="input"
-              type="number"
-              min={0}
-              step={10}
-              placeholder="no ceiling"
-              defaultValue={state.overage.ceilingUsd ?? ""}
-              disabled={busy || !state.canManageBilling}
-              aria-label="Overage ceiling in dollars"
-              onBlur={(e) => {
-                const raw = e.target.value.trim();
-                const next = raw === "" ? null : Number(raw);
-                if (next !== null && !Number.isFinite(next)) return;
-                if (next === state.overage.ceilingUsd) return;
-                void act(async () => {
-                  await post("/api/billing/overage-ceiling", { ceilingUsd: next });
-                  setNotice(
-                    next === null
-                      ? "Removed the ceiling. Overage is billed with nothing stopping it."
-                      : `Agents stop once overage passes ${money(next)} in a period.`,
-                  );
-                });
-              }}
-            />
-            <span className="muted">
-              {money(state.overage.spentUsd)} of overage so far this period.
-            </span>
-          </div>
-        </label>
-      )}
-
-      {/*
-        Who spent it. Hours are pooled across the team, so this is what
-        lets them settle "one person used it all" between themselves
-        rather than asking us for a rationing system.
-      */}
-      {state.usageByMember.length > 1 && (
-        <div className="field">
-          <span className="label">Agent hours by person</span>
-          {state.usageByMember.map((entry) => (
-            <div key={entry.userId ?? "automatic"} className="history-row">
-              <span className="history-what">{entry.name ?? "Started automatically"}</span>
-              <span className="muted">{entry.agentHours} hours</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {notice && <p className="muted">{notice}</p>}
-      {!state.canManageBilling && (
-        <p className="muted">Only an owner or admin can change the plan for this team.</p>
-      )}
-      <div className="actions">
-        {/*
-          One button to the comparison rather than one per plan. The
-          old pair named a limit and no price, so the first time anyone
-          saw what they were agreeing to was on Stripe's own page,
-          after the redirect.
-        */}
-        {state.canManageBilling && state.upgradable && state.plan !== "enterprise" && (
-          <button className="btn btn-primary" disabled={busy} onClick={() => setPlansOpen(true)}>
-            {state.plan === "free" ? "See plans and prices" : "Change plan"}
-          </button>
+        {notice && <p className="muted">{notice}</p>}
+        {!state.canManageBilling && (
+          <p className="muted">Only an owner or admin can change the plan for this team.</p>
         )}
-        {state.canManageBilling && state.manageable && (
-          <button
-            className="btn"
-            disabled={busy}
-            onClick={() =>
-              act(async () => {
-                const { url } = await post("/api/billing/portal");
-                if (url) window.location.assign(url);
-              })
-            }
-          >
-            Manage billing
-          </button>
-        )}
-        {state.salesConfigured && (
-          <button className="btn" disabled={busy} onClick={() => setSalesOpen(true)}>
-            Enterprise: contact sales
-          </button>
-        )}
-      </div>
-
-      {/* Every upgrade, downgrade, cancellation and payment, so "did
-          this go through" and "when did we change plan" have an answer
-          in the product rather than only in the Stripe dashboard. */}
-      {/*
-        The recent few, expandable to the twenty the server sends,
-        newest first. Not paginated further on purpose: this card is a
-        glance at what happened lately, and the complete ledger with
-        every invoice already exists in Stripe's portal one button up,
-        under Manage billing. Building an archive here would duplicate
-        one that is better somewhere else.
-      */}
-      {state.activity && state.activity.length > 0 && (
-        <div className="field">
-          <span className="label">Subscription activity</span>
-          {(allActivity ? state.activity : state.activity.slice(0, 5)).map((entry, i) => (
-            <div key={i} className="history-row">
-              <span className="history-when">{new Date(entry.occurredAt).toLocaleDateString()}</span>
-              <span className="history-what">
-                {describeActivity(entry.activity, entry.fromPlan, entry.toPlan)}
-                {entry.amountTotal !== null && (
-                  <span className="muted"> {formatMoney(entry.amountTotal, entry.currency)}</span>
-                )}
-              </span>
-            </div>
-          ))}
-          {state.activity.length > 5 && (
-            <button className="btn btn-ghost" onClick={() => setAllActivity((v) => !v)}>
-              {allActivity ? "Show recent only" : `Show all ${state.activity.length}`}
+        <div className="actions">
+          {/*
+            One button to the comparison rather than one per plan. The
+            old pair named a limit and no price, so the first time anyone
+            saw what they were agreeing to was on Stripe's own page,
+            after the redirect.
+          */}
+          {state.canManageBilling && state.upgradable && state.plan !== "enterprise" && (
+            <button className="btn btn-primary" disabled={busy} onClick={() => setPlansOpen(true)}>
+              {state.plan === "free" ? "See plans and prices" : "Change plan"}
             </button>
           )}
-          {allActivity && state.activity.length >= 20 && (
-            <span className="muted">
-              Only the latest 20 changes are shown here. The complete history, every invoice
-              included, is under Manage billing.
-            </span>
+          {state.canManageBilling && state.manageable && (
+            <button
+              className="btn"
+              disabled={busy}
+              onClick={() =>
+                act(async () => {
+                  const { url } = await post("/api/billing/portal");
+                  if (url) window.location.assign(url);
+                })
+              }
+            >
+              Manage billing
+            </button>
+          )}
+          {state.salesConfigured && (
+            <button className="btn" disabled={busy} onClick={() => setSalesOpen(true)}>
+              Enterprise: contact sales
+            </button>
           )}
         </div>
-      )}
+
+        {/* Every upgrade, downgrade, cancellation and payment, so "did
+            this go through" and "when did we change plan" have an answer
+            in the product rather than only in the Stripe dashboard. */}
+        {/*
+          The recent few, expandable to the twenty the server sends,
+          newest first. Not paginated further on purpose: this card is a
+          glance at what happened lately, and the complete ledger with
+          every invoice already exists in Stripe's portal one button up,
+          under Manage billing. Building an archive here would duplicate
+          one that is better somewhere else.
+        */}
+        {state.activity && state.activity.length > 0 && (
+          <div className="field">
+            <span className="label">Subscription activity</span>
+            {(allActivity ? state.activity : state.activity.slice(0, 5)).map((entry, i) => (
+              <div key={i} className="history-row">
+                <span className="history-when">{new Date(entry.occurredAt).toLocaleDateString()}</span>
+                <span className="history-what">
+                  {describeActivity(entry.activity, entry.fromPlan, entry.toPlan)}
+                  {entry.amountTotal !== null && (
+                    <span className="muted"> {formatMoney(entry.amountTotal, entry.currency)}</span>
+                  )}
+                </span>
+              </div>
+            ))}
+            {state.activity.length > 5 && (
+              <button className="btn btn-ghost" onClick={() => setAllActivity((v) => !v)}>
+                {allActivity ? "Show recent only" : `Show all ${state.activity.length}`}
+              </button>
+            )}
+            {allActivity && state.activity.length >= 20 && (
+              <span className="muted">
+                Only the latest 20 changes are shown here. The complete history, every invoice
+                included, is under Manage billing.
+              </span>
+            )}
+          </div>
+        )}
+      </section>
+
+      <AgentHoursCard
+        state={state}
+        busy={busy}
+        canManage={state.canManageBilling}
+        notice={notice}
+        onOveragePolicy={(policy) =>
+          act(async () => {
+            await post("/api/billing/overage-policy", { policy });
+            setNotice(
+              OVERAGE_CHOICES.find((choice) => choice.policy === policy)?.confirmation(
+                state.overage.usdPerAgentHour,
+              ) ?? "Saved.",
+            );
+          })
+        }
+        onOverageCeiling={(ceilingUsd) =>
+          act(async () => {
+            await post("/api/billing/overage-ceiling", { ceilingUsd });
+            setNotice(
+              ceilingUsd === null
+                ? "Removed the ceiling. Overage is billed with nothing stopping it."
+                : `Agents stop once overage passes ${money(ceilingUsd)} in a period.`,
+            );
+          })
+        }
+      />
 
       {plansOpen && (
         <ChoosePlan
@@ -306,6 +247,187 @@ export function BillingCard() {
             setNotice("Sent. We reply to the address you gave, usually within a business day.");
           }}
         />
+      )}
+    </>
+  );
+}
+
+/**
+ * The team's hours this period, as their own card.
+ *
+ * Seats and hours were one paragraph, so the figure everyone opens
+ * Billing to check (how much is left, who spent it) sat in a sentence
+ * with the headcount. The meter, the leftover, and the per-person
+ * rows are the same facts, readable without parsing prose.
+ */
+function AgentHoursCard({
+  state,
+  busy,
+  canManage,
+  notice,
+  onOveragePolicy,
+  onOverageCeiling,
+}: {
+  state: PlanState;
+  busy: boolean;
+  canManage: boolean;
+  notice: string;
+  onOveragePolicy: (policy: "stop" | "allow") => void;
+  onOverageCeiling: (ceilingUsd: number | null) => void;
+}) {
+  const usage = hoursUsage(state.agentHours);
+  const meter = hoursMeterState(usage, state.stopped);
+  const people = [...state.usageByMember]
+    .filter((entry) => entry.agentHours > 0)
+    .sort((a, b) => b.agentHours - a.agentHours || (a.name ?? "").localeCompare(b.name ?? ""));
+  const leftoverLabel = usage.overage > 0 ? "Overage" : "Left";
+  const stoppedNote =
+    state.stopped === "ceiling"
+      ? "New agents are not starting. Overage has reached the ceiling this team set."
+      : state.stopped === "pool"
+        ? "New agents are not starting. The included hours are used."
+        : null;
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Agent hours</h3>
+      <p className="muted">
+        Hours are pooled for the whole team, and only a sandbox actually running spends them.
+      </p>
+
+      <div className="hours-usage">
+        <div className="hours-usage-head">
+          <span className="hours-usage-count">
+            {formatHours(usage.used)} of {formatHours(usage.included)} used
+          </span>
+          <span className="muted">
+            {usage.overage > 0
+              ? `${formatHoursPhrase(usage.overage)} over the included pool`
+              : usage.remaining === 0
+                ? "None left this period"
+                : `${formatHoursPhrase(usage.remaining)} left`}
+          </span>
+        </div>
+        <div
+          className="hours-meter"
+          role="meter"
+          aria-label="Agent hours used"
+          aria-valuemin={0}
+          aria-valuemax={usage.included}
+          aria-valuenow={Math.min(usage.used, usage.included)}
+          aria-valuetext={`${formatHours(usage.used)} of ${formatHours(usage.included)} hours used`}
+        >
+          <div
+            className="hours-meter-fill"
+            data-state={meter}
+            style={{ width: `${Math.round(usage.fillRatio * 1000) / 10}%` }}
+          />
+        </div>
+        <div className="hours-facts">
+          <div className="hours-fact">
+            <span className="label">Used</span>
+            <span className="hours-fact-value">{formatHoursPhrase(usage.used)}</span>
+          </div>
+          <div className="hours-fact">
+            <span className="label">{leftoverLabel}</span>
+            <span className="hours-fact-value">
+              {formatHoursPhrase(usage.overage > 0 ? usage.overage : usage.remaining)}
+            </span>
+          </div>
+          <div className="hours-fact">
+            <span className="label">Resets</span>
+            <span className="hours-fact-value">{resetsOn(state)}</span>
+          </div>
+        </div>
+      </div>
+
+      {stoppedNote && <p className="warn">{stoppedNote}</p>}
+
+      {/*
+        Who spent it. Hours are pooled across the team, so this is what
+        lets them settle "one person used it all" between themselves
+        rather than asking us for a rationing system. Shown whenever
+        anyone has spent, including a team of one: the card is about
+        the hours, not about comparing people.
+      */}
+      {people.length > 0 && (
+        <div className="field">
+          <span className="label">By person</span>
+          {people.map((entry) => {
+            const share = usage.included === 0 ? 0 : Math.min(1, entry.agentHours / usage.included);
+            return (
+              <div key={entry.userId ?? "automatic"} className="hours-person">
+                <span className="hours-person-name">{entry.name ?? "Started automatically"}</span>
+                <div className="hours-person-track" aria-hidden="true">
+                  <div className="hours-person-fill" style={{ width: `${Math.round(share * 1000) / 10}%` }} />
+                </div>
+                <span className="muted">{formatHoursPhrase(entry.agentHours)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/*
+        What happens at the end of the allowance, as a choice rather
+        than as our policy. A team on a deadline would rather find $40
+        on the invoice than a board that stopped overnight, and a team
+        on a budget would much rather the reverse. Neither is wrong
+        about their own situation, so neither should be assumed.
+      */}
+      {state.overage.changeable && (
+        <div className="field">
+          <span className="label">When the included hours run out</span>
+          {OVERAGE_CHOICES.map((choice) => (
+            <label key={choice.policy} className="overage-choice">
+              <input
+                type="radio"
+                name="overage-policy"
+                checked={state.overage.policy === choice.policy}
+                disabled={busy || !canManage}
+                onChange={() => onOveragePolicy(choice.policy)}
+              />
+              <span>
+                <strong>{choice.label}</strong>
+                <span className="muted"> {choice.help(state.overage.usdPerAgentHour)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+      {/*
+        A ceiling, which binds even for a team that chose to pay. They
+        agreed to pay for what they use; they did not agree to pay for
+        whatever a loop can spend overnight.
+      */}
+      {state.overage.changeable && state.overage.policy === "allow" && (
+        <label className="field">
+          <span className="label">Stop anyway past</span>
+          <div className="actions">
+            <input
+              className="input"
+              type="number"
+              min={0}
+              step={10}
+              placeholder="no ceiling"
+              defaultValue={state.overage.ceilingUsd ?? ""}
+              disabled={busy || !canManage}
+              aria-label="Overage ceiling in dollars"
+              onBlur={(e) => {
+                const raw = e.target.value.trim();
+                const next = raw === "" ? null : Number(raw);
+                if (next !== null && !Number.isFinite(next)) return;
+                if (next === state.overage.ceilingUsd) return;
+                onOverageCeiling(next);
+              }}
+            />
+            <span className="muted">{money(state.overage.spentUsd)} of overage so far this period.</span>
+          </div>
+        </label>
+      )}
+      {notice && <p className="muted">{notice}</p>}
+      {!canManage && state.overage.changeable && (
+        <p className="muted">Only an owner or admin can change this.</p>
       )}
     </section>
   );

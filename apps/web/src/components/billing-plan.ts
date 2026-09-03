@@ -146,6 +146,68 @@ export function resetsOn(state: PlanState): string {
   });
 }
 
+/**
+ * A hours figure as people read it: whole when the tenth is zero,
+ * one decimal otherwise. The meter and the per-person rows have to
+ * agree, and 12.00 on a billing card looks like a bug.
+ */
+export function formatHours(n: number): string {
+  if (!Number.isFinite(n)) return "0";
+  const rounded = Math.round(n * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+/** "1 hour" or "12.4 hours", for a row that would otherwise say "1 hours". */
+export function formatHoursPhrase(n: number): string {
+  return `${formatHours(n)} ${Math.round(n * 10) / 10 === 1 ? "hour" : "hours"}`;
+}
+
+export type HoursUsage = {
+  used: number;
+  included: number;
+  remaining: number;
+  overage: number;
+  /** 0 to 1, against the included allowance, never past full. */
+  fillRatio: number;
+};
+
+/**
+ * The allowance broken into the numbers the hours card prints.
+ *
+ * Remaining and overage are mutually exclusive: a team still inside
+ * the pool has leftover hours, and a team past it has overage, never
+ * both. The fill is capped at the included hours so a paying overage
+ * does not blow the meter past the track.
+ */
+export function hoursUsage(hours: PlanState["agentHours"]): HoursUsage {
+  const included = Math.max(0, hours.included);
+  const used = Math.max(0, hours.used);
+  return {
+    used,
+    included,
+    remaining: Math.max(0, included - used),
+    overage: Math.max(0, used - included),
+    fillRatio: included === 0 ? (used > 0 ? 1 : 0) : Math.min(1, used / included),
+  };
+}
+
+/**
+ * How the hours meter should colour.
+ *
+ * Stopped is the wall the gate already hit. Overage is a team that
+ * chose to pay past the pool. Warn is the same three-quarters line
+ * the usage email already sends, so the card and the inbox agree.
+ */
+export function hoursMeterState(
+  usage: HoursUsage,
+  stopped: PlanState["stopped"],
+): "stopped" | "over" | "warn" | undefined {
+  if (stopped) return "stopped";
+  if (usage.overage > 0) return "over";
+  if (usage.fillRatio >= 0.75) return "warn";
+  return undefined;
+}
+
 /** Whole dollars, because every price on the ladder is one. */
 export function money(usd: number): string {
   return `$${usd % 1 === 0 ? usd.toFixed(0) : usd.toFixed(2)}`;

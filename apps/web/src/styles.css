@@ -5492,6 +5492,123 @@ button.session-expand[aria-pressed="true"] {
 }
 
 /*
+ * Agent hours on Billing. The allowance used to be a sentence under
+ * the plan name, so "how much is left" and "who spent it" had to be
+ * parsed out of prose. The meter, the three facts, and the per-person
+ * rows are the same numbers, at a glance.
+ *
+ * The fill uses the reserved status hues only when they mean a state:
+ * gold at three quarters (the same line the usage email already
+ * sends), coral when new agents have actually stopped. A paying
+ * overage is gold too: they chose to continue, they have not hit a
+ * wall. The track is a divider, not a control, so the brand accent
+ * stays off it.
+ */
+.hours-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.hours-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.hours-usage-count {
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.hours-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.hours-meter-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-dim);
+  max-width: 100%;
+}
+
+.hours-meter-fill[data-state="warn"],
+.hours-meter-fill[data-state="over"] {
+  background: var(--gated);
+}
+
+.hours-meter-fill[data-state="stopped"] {
+  background: var(--failed);
+}
+
+.hours-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin-top: 4px;
+}
+
+.hours-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hours-fact-value {
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.hours-person {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(64px, 2fr) auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 12.5px;
+  padding: 4px 0;
+}
+
+.hours-person-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hours-person-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.hours-person-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-dim);
+  max-width: 100%;
+}
+
+@media (max-width: 560px) {
+  .hours-facts {
+    grid-template-columns: 1fr;
+  }
+  .hours-person {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .hours-person-track {
+    display: none;
+  }
+}
+
+/*
  * The MCP add form. The choice of who connects is the decision that
  * matters, so it reads as prose radio rows (the billing overage idiom)
  * rather than a select whose options do not fit their consequences.
