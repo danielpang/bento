@@ -160,10 +160,6 @@ export function SettingsPage({ client }: { client: BentoClient }) {
             <AccountSettings />
           </Tabs.Content>
           <Tabs.Content value="billing" className="settings-body">
-            <p className="muted">
-              The plan covers this team. Payments go through Stripe; Bento never sees a card
-              number.
-            </p>
             <BillingCard />
           </Tabs.Content>
         </Tabs.Root>
