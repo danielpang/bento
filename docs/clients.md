@@ -6,9 +6,9 @@ The web console is the client Bento is built around. Two others exist and are us
 
 `apps/tui`. A full board in the terminal, plus the commands that make a board scriptable. It can also run the whole server itself, or act as a runner that executes work a shared server is holding.
 
-Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h` switches it to the card's history, `a` approves a manual gate and `R` rejects it, `r` re-checks, `x` stops the agent and `c` continues it with your own instructions. `n` adds a card, `f` marks it completed, `m` resolves merge conflicts, and `D` deletes it after a confirm.
+Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h` switches it to the card's history, `a` approves a manual gate and `R` rejects it, `r` re-checks, `x` stops the agent and `c` continues it with your own instructions. `n` adds a card, `f` marks it completed, `m` resolves merge conflicts, and `D` deletes it after a confirm. `u` opens spend, `e` opens sessions.
 
-`bento setup` covers repositories, agents, stages, and provider keys. The scriptable versions of the same things:
+`bento setup` covers repositories, agents, stages, provider keys, MCP servers, and YAML files. The scriptable versions of the same things:
 
 ```bash
 bento repos add ../api --project Checkout --setup "npm ci" --test "npm test"
@@ -19,7 +19,7 @@ bento pipeline export team-pipeline.yaml
 
 ## macOS app
 
-`apps/mac`. A native board built on the Native SDK, spawning the CLI underneath. It follows cards, approves gates, edits agents and stages, and does not yet do repository setup commands or the pipeline file.
+`apps/mac`. A native board built on the Native SDK, spawning the CLI underneath. It follows cards, approves gates, edits agents and stages, sets repository commands, and reads and writes the agents and pipeline files.
 
 ## What each covers today
 
@@ -28,9 +28,9 @@ bento pipeline export team-pipeline.yaml
 | Create a project | Yes | Yes | Yes |
 | Create one spanning several repositories | Yes | One, then add | One, then add |
 | Connect and remove repositories | Yes | Yes | Yes |
-| Set a repository's setup and test commands | Yes | `bento repos set` | No |
-| Export and import a pipeline as YAML | Yes | `bento pipeline` | No |
-| Export and import agents as YAML | Yes | `bento agents export` / `import` | No |
+| Set a repository's setup and test commands | Yes | Yes | Yes |
+| Export and import a pipeline as YAML | Yes | Yes | Yes |
+| Export and import agents as YAML | Yes | Yes | Yes |
 | Add a card | Yes | Yes | Yes |
 | Delete a card | Yes | Yes | Yes |
 | Mark a card completed from any stage | Yes | Yes | Yes |
@@ -39,13 +39,16 @@ bento pipeline export team-pipeline.yaml
 | Add, remove and rename stages | Yes | Yes | Yes |
 | Reorder stages | Drag, or arrow keys | No | No |
 | Switch a stage between manual and automatic | Yes | Yes | Yes |
-| Edit stage requirements, judge agent included | Yes | Yes | Judge shown, not edited |
+| Edit stage requirements, judge agent included | Yes | Yes | Yes |
 | Turn a stage's pull request on or off | Yes | Yes | Yes |
 | Resolve merge conflicts on a card's pull request | Yes | Yes | Yes |
 | Approve or reject a card | Yes | Yes | Yes |
 | Move a card between stages | Drag it between lanes | `a` and `b` keys, one step | Arrows on each card |
 | Start, stop, and continue an agent | Yes | Yes | Yes |
 | Save and remove provider API keys | Yes | Yes | Yes |
+| View spend by card | Yes | Yes | Yes |
+| View sessions | Yes | Yes | Yes |
+| Manage MCP servers | Yes | Yes | Custom URL, no OAuth |
 | Manage the team and its credentials | Yes | No | Yes |
 
 All three drive the same API. Team management and stored credentials are multi mode only in every client, because a local install has one user and no organization to hold them.

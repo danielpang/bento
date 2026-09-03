@@ -246,6 +246,69 @@ test("resolve-conflicts waits when an agent is already working the card", () => 
   assert.ok(!result.commands.some((line) => line.includes("/resolve-conflicts")));
 });
 
+test("a stage save can name a judge agent", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "profiles_ok",
+      status: 200,
+      body: bytes("profile|judge-1|claude-code|claude-sonnet-5|anthropic|compatible|Reviewer"),
+    },
+    {
+      kind: "pipeline_ok",
+      status: 200,
+      body: bytes("pipeline|pipe-1\nstage|stage-1|0|-|auto|0|Build\ncriterion|stage-1|0|agent_judge|-|judge-1"),
+    },
+    { kind: "edit_stage", index: 0 },
+    { kind: "set_gate_judge", index: 0 },
+    { kind: "submit_gate" },
+  ]);
+
+  const patch = result.commands.find((line) => line.includes("/api/stages/stage-1") && line.includes("gateCriteria"));
+  assert.ok(patch, "expected a gate PATCH");
+  assert.match(patch, /agent_judge/);
+  assert.match(patch, /judge-1/);
+});
+
+test("repository setup and test commands can be saved", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "repos_ok",
+      status: 200,
+      body: bytes("repo|repo-1|api|/tmp/api\nsetup|repo-1|npm ci\ntest|repo-1|npm test"),
+    },
+    { kind: "edit_repo", index: 0 },
+    { kind: "submit_repo_commands" },
+  ]);
+
+  const after = result.models.find((model) => model.repos?.length === 1);
+  assert.ok(after, "expected the repo to parse with commands");
+  assert.equal(after.repos[0].setupCommand.$bytes, "npm ci");
+  assert.equal(after.repos[0].testCommand.$bytes, "npm test");
+
+  const patch = result.commands.find((line) => line.includes("/repositories/repo-1") && line.includes('method="PATCH"'));
+  assert.ok(patch, "expected a repository commands PATCH");
+  assert.match(patch, /setupCommand/);
+  assert.match(patch, /testCommand/);
+});
+
+test("spend and sessions panels fetch their plain listings", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    { kind: "open_spend" },
+    { kind: "open_sessions" },
+    { kind: "open_mcp" },
+  ]);
+
+  assert.ok(result.commands.some((line) => line.includes("/usage/plain")), "expected a spend read");
+  assert.ok(result.commands.some((line) => line.includes("/sessions/plain")), "expected a sessions read");
+  assert.ok(result.commands.some((line) => line.includes("/api/mcp/plain")), "expected an MCP read");
+});
+
 test("resolve-conflicts stays quiet when GitHub reports no conflict", () => {
   const result = runCore([
     { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },

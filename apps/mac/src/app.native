@@ -71,9 +71,12 @@
         <button size="sm" variant="primary" on-press="open_new_feature">New card</button>
       </else>
       <button size="sm" on-press="open_pipeline">Pipeline</button>
+      <button size="sm" on-press="open_spend">Spend</button>
+      <button size="sm" on-press="open_sessions">Sessions</button>
     </if>
     <if test="{connected}">
       <button size="sm" on-press="open_agents">Agents</button>
+      <button size="sm" on-press="open_mcp">MCP</button>
       <if test="{isMulti}">
         <button size="sm" on-press="open_team">Team</button>
       </if>
@@ -452,6 +455,17 @@
         </else>
         <button size="sm" on-press="open_secret">Add a credential</button>
 
+        <separator />
+        <text>Agents file</text>
+        <text foreground="text_muted" wrap="true">Every named agent: the tool, the model, and the skill. Importing matches by name, so importing twice edits rather than duplicating. Agents the file leaves out are left alone.</text>
+        <button size="sm" on-press="export_agents_yaml">Export YAML</button>
+        <if test="{hasYamlText}">
+          <text wrap="true">{yamlText}</text>
+        </if>
+        <text foreground="text_muted">Paste YAML to import</text>
+        <text-field text="{yamlImportEdit.text}" placeholder="Paste agents YAML" on-input="yaml_import_edit" label="Agents YAML" />
+        <button size="sm" on-press="import_agents_yaml">Import YAML</button>
+
         <row gap="8">
           <spacer grow="1" />
           <button size="sm" variant="ghost" on-press="close_panel">Close</button>
@@ -466,18 +480,40 @@
         <text foreground="text_muted" wrap="true">Cards move left to right through these stages, each with its own agent and exit rule.</text>
 
         <text>Repositories</text>
-        <text foreground="text_muted" wrap="true">A change that spans more than one repo is still one card.</text>
+        <text foreground="text_muted" wrap="true">Sandboxes carry no language runtime, so give each one a setup command to install what it needs and a test command for the agent.</text>
         <column gap="6">
           <for each="repos" key="index" as="r">
-            <row key="{r.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
-              <column grow="1" gap="2">
-                <text>{r.name}</text>
-                <text foreground="text_muted" wrap="true">{r.localPath}</text>
-              </column>
-              <button size="sm" variant="ghost" on-press="delete_repo:{r.index}" label="Remove this repository" icon="trash" />
-            </row>
+            <column key="{r.index}" background="surface" radius="sm" padding="8" gap="6">
+              <row gap="8" cross="center">
+                <column grow="1" gap="2">
+                  <text>{r.name}</text>
+                  <text foreground="text_muted" wrap="true">{r.localPath}</text>
+                </column>
+                <button size="sm" variant="ghost" on-press="edit_repo:{r.index}">Commands</button>
+                <button size="sm" variant="ghost" on-press="delete_repo:{r.index}" label="Remove this repository" icon="trash" />
+              </row>
+              <if test="{r.hasSetup}">
+                <text foreground="text_muted" wrap="true">setup: {r.setupCommand}</text>
+              </if>
+              <if test="{r.hasTest}">
+                <text foreground="text_muted" wrap="true">test: {r.testCommand}</text>
+              </if>
+            </column>
           </for>
         </column>
+        <if test="{editingARepo}">
+          <column background="surface" radius="md" padding="12" gap="8">
+            <text>Commands for {editingRepoName}</text>
+            <text foreground="text_muted">Setup command</text>
+            <text-field text="{repoSetupEdit.text}" placeholder="npm ci" on-input="repo_setup_edit" label="Setup command" />
+            <text foreground="text_muted">Test command</text>
+            <text-field text="{repoTestEdit.text}" placeholder="npm test" on-input="repo_test_edit" label="Test command" />
+            <row gap="8">
+              <button size="sm" variant="primary" on-press="submit_repo_commands">Save commands</button>
+              <button size="sm" variant="ghost" on-press="cancel_repo_edit">Cancel</button>
+            </row>
+          </column>
+        </if>
         <button size="sm" on-press="open_new_repo">Add repository</button>
         <separator />
         <column gap="6">
@@ -504,6 +540,9 @@
                    identical to one that does not. -->
               <if test="{s.createPr}">
                 <text foreground="text_muted">opens a pull request</text>
+              </if>
+              <if test="{s.hasJudge}">
+                <text foreground="text_muted">judge: {s.gateJudgeLabel}</text>
               </if>
               <if test="{s.gateForeign}">
                 <text foreground="warning" wrap="true">Has a requirement only the web console can edit.</text>
@@ -554,6 +593,21 @@
               <text foreground="text_muted">Command to run (optional)</text>
               <text-field text="{gateCmdEdit.text}" placeholder="pnpm test" on-input="gate_cmd_edit" label="Gate command" />
               <text foreground="text_muted" wrap="true">This runs inside this project's sandbox. Leave it empty for no command.</text>
+
+              <text foreground="text_muted">Judge agent</text>
+              <text foreground="text_muted" wrap="true">A judge is a second agent that reviews the work and rules on it. Give it its own skill and a different model from the agent doing the work.</text>
+              <stack>
+                <select placeholder="Choose a judge" text="{selectedJudgeLabel}" on-press="toggle_judge_picker" label="Judge agent" />
+                <if test="{judgePickerOpen}">
+                  <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="toggle_judge_picker">
+                    <for each="profiles" key="index" as="j">
+                      <menu-item on-press="set_gate_judge:{j.index}">{j.name}</menu-item>
+                    </for>
+                    <separator />
+                    <menu-item on-press="clear_gate_judge">No judge</menu-item>
+                  </dropdown-menu>
+                </if>
+              </stack>
             </if>
 
             <text foreground="text_muted">Pull request</text>
@@ -573,11 +627,163 @@
         </if>
 
         <button size="sm" on-press="open_new_stage">Add stage</button>
+
+        <separator />
+        <text>Pipeline file</text>
+        <text foreground="text_muted" wrap="true">Your stages, agents, and commands as one YAML file. Import it into another project instead of rebuilding it. Stages are matched by slug, so a live board keeps its cards where they are.</text>
+        <button size="sm" on-press="export_pipeline_yaml">Export YAML</button>
+        <if test="{hasYamlText}">
+          <text wrap="true">{yamlText}</text>
+        </if>
+        <text foreground="text_muted">Paste YAML to import</text>
+        <text-field text="{yamlImportEdit.text}" placeholder="Paste pipeline YAML" on-input="yaml_import_edit" label="Pipeline YAML" />
+        <button size="sm" on-press="import_pipeline_yaml">Import YAML</button>
+
         <row gap="8">
           <spacer grow="1" />
           <button size="sm" variant="ghost" on-press="close_panel">Close</button>
         </row>
       </column>
+    </drawer>
+  </if>
+
+  <if test="{showingSpend}">
+    <drawer text="Spend">
+      <scroll grow="1">
+        <column gap="10" padding="14" min-width="420">
+          <text>Spend</text>
+          <text foreground="text_muted" wrap="true">Bento records the figure an agent CLI prints. It does not price tokens itself. A run that fails before finishing reports nothing either. Any figure here is a floor rather than a full total.</text>
+          <text>{spendHeadline}</text>
+          <if test="{hasSpendCards}">
+            <column gap="6">
+              <for each="spendCards" key="index" as="u">
+                <row key="{u.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
+                  <column grow="1" gap="2">
+                    <text>{u.title}</text>
+                    <text foreground="text_muted">{u.runs} runs</text>
+                  </column>
+                  <if test="{u.hasCost}">
+                    <text>${u.cost}</text>
+                  </if>
+                  <else>
+                    <if test="{u.hasRuns}">
+                      <text foreground="text_muted">Not reported</text>
+                    </if>
+                    <else>
+                      <text foreground="text_muted">No runs</text>
+                    </else>
+                  </else>
+                  <button size="sm" variant="ghost" on-press="open_spend_card:{u.index}">Open</button>
+                </row>
+              </for>
+            </column>
+          </if>
+          <else>
+            <text foreground="text_muted" wrap="true">No cards yet. Add one from the board to start tracking spend.</text>
+          </else>
+          <row gap="8">
+            <spacer grow="1" />
+            <button size="sm" variant="ghost" on-press="close_panel">Close</button>
+          </row>
+        </column>
+      </scroll>
+    </drawer>
+  </if>
+
+  <if test="{showingSessions}">
+    <drawer text="Sessions">
+      <scroll grow="1">
+        <column gap="10" padding="14" min-width="420">
+          <text>Sessions</text>
+          <text foreground="text_muted" wrap="true">Every conversation in this project, newest activity first. A row opens that card.</text>
+          <if test="{hasSessions}">
+            <column gap="6">
+              <for each="sessions" key="index" as="n">
+                <row key="{n.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
+                  <column grow="1" gap="2">
+                    <text>{n.title}</text>
+                    <text foreground="text_muted">{n.agentName} · {n.statusLabel} · {n.runCount} runs</text>
+                  </column>
+                  <if test="{n.hasCost}">
+                    <text>${n.cost}</text>
+                  </if>
+                  <button size="sm" variant="ghost" on-press="open_session:{n.index}">Open</button>
+                </row>
+              </for>
+            </column>
+          </if>
+          <else>
+            <text foreground="text_muted" wrap="true">No sessions yet. Start an agent from the board to begin a conversation.</text>
+          </else>
+          <row gap="8">
+            <spacer grow="1" />
+            <button size="sm" variant="ghost" on-press="close_panel">Close</button>
+          </row>
+        </column>
+      </scroll>
+    </drawer>
+  </if>
+
+  <if test="{showingMcp}">
+    <drawer text="MCP">
+      <scroll grow="1">
+        <column gap="10" padding="14" min-width="420">
+          <text>MCP servers</text>
+          <text foreground="text_muted" wrap="true">Servers agents can call during a run. OAuth servers have to be connected in the web console. Custom URLs with no auth or an API key can be added here.</text>
+          <if test="{hasMcpServers}">
+            <column gap="6">
+              <for each="mcpServers" key="index" as="p">
+                <column key="{p.index}" background="surface" radius="sm" padding="8" gap="6">
+                  <row gap="8" cross="center">
+                    <column grow="1" gap="2">
+                      <text>{p.name}</text>
+                      <text foreground="text_muted">{p.slug} · {p.authType} · {p.scope}</text>
+                    </column>
+                    <if test="{p.enabled}">
+                      <button size="sm" variant="ghost" on-press="toggle_mcp:{p.index}">Enabled</button>
+                    </if>
+                    <else>
+                      <button size="sm" variant="ghost" on-press="toggle_mcp:{p.index}">Disabled</button>
+                    </else>
+                    <button size="sm" variant="ghost" on-press="delete_mcp:{p.index}" label="Remove this MCP server" icon="trash" />
+                  </row>
+                  <if test="{p.connected}">
+                    <text foreground="text_muted">connected</text>
+                  </if>
+                  <else>
+                    <if test="{p.isOauth}">
+                      <text foreground="warning" wrap="true">Connect this server in the web console.</text>
+                    </if>
+                    <else>
+                      <text foreground="text_muted">not connected</text>
+                    </else>
+                  </else>
+                </column>
+              </for>
+            </column>
+          </if>
+          <else>
+            <text foreground="text_muted" wrap="true">No MCP servers yet.</text>
+          </else>
+          <if test="{canManageMcp}">
+            <separator />
+            <text>Add a server</text>
+            <text-field text="{mcpNameEdit.text}" placeholder="Docs" on-input="mcp_name_edit" label="MCP name" />
+            <text-field text="{mcpUrlEdit.text}" placeholder="https://example.test/mcp" on-input="mcp_url_edit" label="MCP URL" />
+            <text foreground="text_muted" wrap="true">Leave the key empty for a server that needs no auth. OAuth is configured in the web console.</text>
+            <text-field text="{mcpKeyEdit.text}" placeholder="API key (optional)" on-input="mcp_key_edit" label="MCP API key" />
+            <button size="sm" variant="primary" on-press="submit_mcp">Add server</button>
+            <text foreground="text_muted">Save a key on an existing API key server</text>
+            <for each="mcpServers" key="index" as="k">
+              <button key="{k.index}" size="sm" variant="ghost" on-press="save_mcp_key:{k.index}">Save key for {k.name}</button>
+            </for>
+          </if>
+          <row gap="8">
+            <spacer grow="1" />
+            <button size="sm" variant="ghost" on-press="close_panel">Close</button>
+          </row>
+        </column>
+      </scroll>
     </drawer>
   </if>
 
@@ -846,6 +1052,9 @@
           </if>
           <if test="{confirmingRepo}">
             <button size="sm" variant="destructive" on-press="confirm_delete_repo">Remove</button>
+          </if>
+          <if test="{confirmingMcp}">
+            <button size="sm" variant="destructive" on-press="confirm_delete_mcp">Remove</button>
           </if>
           <if test="{confirmingSecret}">
             <button size="sm" variant="destructive" on-press="confirm_delete_secret">Remove</button>

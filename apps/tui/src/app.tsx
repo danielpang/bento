@@ -9,6 +9,8 @@ import {
   type FeatureEvent,
   type FeatureMergeStatus,
   type GateState,
+  type ProjectSession,
+  type ProjectUsage,
   type Stage,
 } from "@bento/api-client";
 import { actorDisplayName, forgetsBetweenRuns, hasNoLiveTranscript, historyTriggerLabel } from "@bento/core";
@@ -278,6 +280,10 @@ function Console({
   // A second D confirms. One press that removed a card (and its
   // sandbox) would be the wrong moment to learn there is no undo.
   const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [overlay, setOverlay] = useState<"none" | "spend" | "sessions">("none");
+  const [overlayIndex, setOverlayIndex] = useState(0);
+  const [usage, setUsage] = useState<ProjectUsage | null>(null);
+  const [sessionRows, setSessionRows] = useState<ProjectSession[] | null>(null);
   const [latestRunId, setLatestRunId] = useState<string | null>(null);
   const [cardRuns, setCardRuns] = useState<AgentRun[]>([]);
   const [latestRunStatus, setLatestRunStatus] = useState<string>("");
@@ -627,6 +633,33 @@ function Console({
       }
       if (screen !== "board") return;
 
+      if (overlay !== "none") {
+        if (key.escape || input === "q") {
+          setOverlay("none");
+          return;
+        }
+        const rows =
+          overlay === "spend" ? (usage?.byFeature.length ?? 0) : (sessionRows?.length ?? 0);
+        if (key.downArrow || input === "j") {
+          setOverlayIndex((i) => Math.min(i + 1, Math.max(0, rows - 1)));
+          return;
+        }
+        if (key.upArrow || input === "k") {
+          setOverlayIndex((i) => Math.max(i - 1, 0));
+          return;
+        }
+        if (key.return) {
+          const featureId =
+            overlay === "spend" ? usage?.byFeature[overlayIndex]?.featureId : sessionRows?.[overlayIndex]?.featureId;
+          if (featureId) {
+            setSelectedFeatureId(featureId);
+            setOverlay("none");
+          }
+          return;
+        }
+        return;
+      }
+
       if (newCard !== null) {
         if (key.escape) {
           setNewCard(null);
@@ -858,6 +891,32 @@ function Console({
             .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
         }
       }
+      if (input === "u") {
+        if (!projectId) {
+          setNotice("No project yet. Run `bento setup` to connect a repository.");
+          return;
+        }
+        setOverlayIndex(0);
+        setOverlay("spend");
+        void client
+          .getUsage(projectId)
+          .then(setUsage)
+          .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        return;
+      }
+      if (input === "e") {
+        if (!projectId) {
+          setNotice("No project yet. Run `bento setup` to connect a repository.");
+          return;
+        }
+        setOverlayIndex(0);
+        setOverlay("sessions");
+        void client
+          .listSessions(projectId)
+          .then((result) => setSessionRows(result.sessions))
+          .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        return;
+      }
       if (input === "s") {
         if (!inAStage) {
           setNotice(isDone ? finishedHint : "Start the pipeline first: press a.");
@@ -945,14 +1004,68 @@ function Console({
 
       {options.mode === "runner" && <RunnerNotice server={options.server ?? baseUrl} sandbox={options.sandbox} />}
 
-      <Board
-        stages={stages}
-        features={features}
-        profiles={profiles}
-        selectedIndex={selected}
-        runStatus={runStatus}
-        gateWait={gateWait}
-      />
+      {overlay === "spend" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text bold>Spend</Text>
+          <Text color="gray">
+            Bento records the figure an agent CLI prints. It does not price tokens itself. Escape
+            goes back to the board.
+          </Text>
+          {usage ? (
+            usage.byFeature.length === 0 ? (
+              <Text color="gray">No cards yet. Add one from the board to start tracking spend.</Text>
+            ) : (
+              usage.byFeature.map((row, i) => (
+                <Text key={row.featureId} color={i === overlayIndex ? "cyan" : "white"}>
+                  {i === overlayIndex ? " > " : "   "}
+                  {row.title}{" "}
+                  {row.runs === 0
+                    ? "No runs"
+                    : row.costUsd === null
+                      ? "Not reported"
+                      : `$${row.costUsd.toFixed(2)}${row.runsWithoutCost > 0 ? "+" : ""}`}
+                </Text>
+              ))
+            )
+          ) : (
+            <Text color="gray">Loading spend...</Text>
+          )}
+        </Box>
+      )}
+
+      {overlay === "sessions" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text bold>Sessions</Text>
+          <Text color="gray">
+            Every conversation in this project. Enter opens the card. Escape goes back.
+          </Text>
+          {sessionRows ? (
+            sessionRows.length === 0 ? (
+              <Text color="gray">No sessions yet. Start an agent from the board to begin a conversation.</Text>
+            ) : (
+              sessionRows.map((row, i) => (
+                <Text key={row.featureId} color={i === overlayIndex ? "cyan" : "white"}>
+                  {i === overlayIndex ? " > " : "   "}
+                  {row.title} {row.latestRun.status} {row.runCount} runs
+                </Text>
+              ))
+            )
+          ) : (
+            <Text color="gray">Loading sessions...</Text>
+          )}
+        </Box>
+      )}
+
+      {overlay === "none" && (
+        <Board
+          stages={stages}
+          features={features}
+          profiles={profiles}
+          selectedIndex={selected}
+          runStatus={runStatus}
+          gateWait={gateWait}
+        />
+      )}
 
       {current && (
         <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
@@ -1046,8 +1159,8 @@ function Console({
       {isRawModeSupported ? (
         <Box flexDirection="column">
           <Text color="gray">
-            look: j/k move · h {showHistory ? "logs" : "history"} · d {showChanges ? "logs" : "changes"} · r recheck · q
-            quit
+            look: j/k move · h {showHistory ? "logs" : "history"} · d {showChanges ? "logs" : "changes"} · r recheck ·
+            u spend · e sessions · q quit
           </Text>
           <Text color="gray">
             act: n new card · s start · x stop · c message · a approve · shift+R reject · b send back · f completed ·

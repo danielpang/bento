@@ -272,6 +272,171 @@ export async function runPipeline(options: CliOptions): Promise<void> {
 }
 
 /**
+ * Agent spend for a project, one line per card. The figure is what the
+ * agent CLI printed, not a token price Bento computed, so a dash means
+ * nothing reported rather than zero.
+ */
+export async function runSpend(options: CliOptions): Promise<void> {
+  const { BentoClient } = await import("@bento/api-client");
+  const { spendCoverageNote } = await import("@bento/core");
+
+  let embedded: { url: string; stop(): Promise<void> } | undefined;
+  let baseUrl = options.server;
+  if (!baseUrl) {
+    embedded = await startEmbedded(options, bootProgress(options));
+    baseUrl = embedded.url;
+  }
+
+  try {
+    const client = new BentoClient({ baseUrl, tokens: new FileTokenStore(baseUrl) });
+    const project = await resolveProject(client, options);
+    if (!project) return;
+    const usage = await client.getUsage(project.id);
+    if (usage.totalRuns === 0) {
+      console.log("No agent runs yet.");
+    } else {
+      const measured = usage.totalRuns - usage.runsWithoutCost;
+      console.log(
+        usage.runsWithoutCost > 0
+          ? `$${usage.totalUsd.toFixed(2)}+ across ${measured} of ${usage.totalRuns} runs.`
+          : `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns} run${usage.totalRuns === 1 ? "" : "s"}.`,
+      );
+    }
+    console.error(spendCoverageNote());
+    for (const row of usage.byFeature) {
+      const cost =
+        row.runs === 0 ? "No runs" : row.costUsd === null ? "Not reported" : `$${row.costUsd.toFixed(2)}${row.runsWithoutCost > 0 ? "+" : ""}`;
+      console.log(`${row.title}\t${cost}\t${row.runs}`);
+    }
+  } catch (err) {
+    console.error(readableError(err));
+    process.exitCode = 1;
+  } finally {
+    await embedded?.stop().catch(() => {});
+  }
+}
+
+/**
+ * Conversations in a project, newest activity first. Judge runs are
+ * left out: they are the gate talking to itself.
+ */
+export async function runSessions(options: CliOptions): Promise<void> {
+  const { BentoClient } = await import("@bento/api-client");
+
+  let embedded: { url: string; stop(): Promise<void> } | undefined;
+  let baseUrl = options.server;
+  if (!baseUrl) {
+    embedded = await startEmbedded(options, bootProgress(options));
+    baseUrl = embedded.url;
+  }
+
+  try {
+    const client = new BentoClient({ baseUrl, tokens: new FileTokenStore(baseUrl) });
+    const project = await resolveProject(client, options);
+    if (!project) return;
+    const [{ sessions }, profiles] = await Promise.all([client.listSessions(project.id), client.listProfiles()]);
+    if (sessions.length === 0) {
+      console.log("No sessions yet. Start an agent from the board to begin a conversation.");
+      return;
+    }
+    const nameById = new Map(profiles.map((p) => [p.id, p.name]));
+    for (const session of sessions) {
+      const agent = session.latestRun.agentProfileId
+        ? (nameById.get(session.latestRun.agentProfileId) ?? "-")
+        : "-";
+      const cost = session.totalCostUsd === null ? "-" : `$${session.totalCostUsd.toFixed(2)}`;
+      console.log(
+        `${session.title}\t${session.latestRun.status}\t${agent}\t${session.runCount}\t${cost}`,
+      );
+    }
+  } catch (err) {
+    console.error(readableError(err));
+    process.exitCode = 1;
+  } finally {
+    await embedded?.stop().catch(() => {});
+  }
+}
+
+/**
+ * Lists, adds, and removes MCP servers the organization's agents can
+ * call. OAuth connect lives in the web console: there is no browser
+ * here to finish the dance.
+ */
+export async function runMcp(options: CliOptions): Promise<void> {
+  const { BentoClient } = await import("@bento/api-client");
+
+  let embedded: { url: string; stop(): Promise<void> } | undefined;
+  let baseUrl = options.server;
+  if (!baseUrl) {
+    embedded = await startEmbedded(options, bootProgress(options));
+    baseUrl = embedded.url;
+  }
+
+  try {
+    const client = new BentoClient({ baseUrl, tokens: new FileTokenStore(baseUrl) });
+    const [action, subject] = options.positionals;
+    switch (action) {
+      case undefined:
+      case "list": {
+        const status = await client.mcpStatus();
+        for (const server of status.servers) {
+          const connected = server.orgCredential?.connected || server.userCredential?.connected || server.authType === "none";
+          console.log(
+            `${server.name}\t${server.slug}\t${server.authType}\t${server.enabled ? "on" : "off"}\t${connected ? "connected" : "not connected"}`,
+          );
+        }
+        return;
+      }
+      case "add": {
+        if (!subject) throw new Error("mcp add needs a name: bento mcp add Docs --url https://example.test/mcp");
+        if (!options.url) throw new Error("mcp add needs --url <url>");
+        const slug = slugifyName(subject);
+        const created = await client.createMcpServer({
+          name: subject,
+          slug,
+          url: options.url,
+          authType: options.mcpKey ? "api_key" : "none",
+        });
+        if (options.mcpKey) {
+          await client.setMcpApiKey(created.id, options.mcpKey);
+        }
+        console.log(`${subject}\t${slug}\t${options.url}`);
+        return;
+      }
+      case "remove": {
+        if (!subject) throw new Error("mcp remove needs a name: bento mcp remove Docs");
+        const status = await client.mcpStatus();
+        const found = status.servers.find((s) => s.id === subject || s.name === subject || s.slug === subject);
+        if (!found) {
+          throw new Error(
+            `no MCP server called "${subject}". Known: ${status.servers.map((s) => s.name).join(", ") || "none"}`,
+          );
+        }
+        await client.deleteMcpServer(found.id);
+        console.log(`removed\t${found.name}`);
+        return;
+      }
+      default:
+        throw new Error(`unknown mcp action "${action}". Use list, add, or remove.`);
+    }
+  } catch (err) {
+    console.error(readableError(err));
+    process.exitCode = 1;
+  } finally {
+    await embedded?.stop().catch(() => {});
+  }
+}
+
+function slugifyName(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return slug || "server";
+}
+
+/**
  * The project a command acts on: the only one, or the one named. Prints
  * the reason and leaves a non-zero exit when there is no answer.
  */

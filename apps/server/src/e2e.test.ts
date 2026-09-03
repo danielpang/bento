@@ -3123,6 +3123,16 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   const line = board.split("\n").find((l) => l.startsWith(`feature|${feature.id}|`))!;
   const cost = line.split("|")[6]!;
   assert.match(cost, /^\d+\.\d\d$/, `expected a cost field on the board line, got ${cost}`);
+
+  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
+  assert.match(plain, /^total\|/);
+  const billedLine = plain.split("\n").find((l) => l.startsWith(`card|${feature.id}|`));
+  assert.ok(billedLine, "the spend rollup lists the card that ran");
+  assert.match(billedLine, new RegExp(`\\|${cost}\\|`));
+  assert.ok(
+    plain.split("\n").some((l) => l.startsWith(`card|${idle.id}|`)),
+    "a card that never ran still belongs on the spend page",
+  );
 });
 
 /**
@@ -3192,6 +3202,12 @@ test("usage ignores judge runs and in-flight runs", async () => {
   assert.ok(untouched);
   assert.equal(untouched.runs, 0);
   assert.equal(untouched.costUsd, null);
+
+  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
+  const [tag, totalUsd, totalRuns] = plain.split("\n")[0]!.split("|");
+  assert.equal(tag, "total");
+  assert.equal(totalUsd, "4.20");
+  assert.equal(totalRuns, "1");
 });
 
 /**
@@ -3805,6 +3821,12 @@ test("a judge agent rules on the work before an automatic stage advances", { tim
     defaultAgentProfileId: worker.id,
     gateCriteria: [{ type: "agent_judge", agentProfileId: rejecter.id }],
   });
+  const pipelinePlain = await (await app.request(`/api/projects/${project.id}/pipeline/plain`)).text();
+  assert.match(
+    pipelinePlain,
+    new RegExp(`criterion\\|${first.id}\\|\\d+\\|agent_judge\\|-\\|${rejecter.id}`),
+    "the judge's agent id is on the wire so a client can edit it",
+  );
 
   // Advancing starts the worker; its finish starts the judge; the
   // judge's INCOMPLETE verdict holds the card where its reason shows.
@@ -4361,6 +4383,10 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ setupCommand: "npm ci", testCommand: "npm test" }),
   });
+  const repoPlain = await (await app.request(`/api/projects/${source.project.id}/repositories/plain`)).text();
+  assert.match(repoPlain, new RegExp(`^repo\\|${repo!.id}\\|`, "m"));
+  assert.match(repoPlain, new RegExp(`^setup\\|${repo!.id}\\|npm ci$`, "m"));
+  assert.match(repoPlain, new RegExp(`^test\\|${repo!.id}\\|npm test$`, "m"));
 
   const exported = await app.request(`/api/projects/${source.project.id}/pipeline/export`);
   assert.equal(exported.status, 200);

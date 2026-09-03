@@ -266,9 +266,11 @@ export function mcpRoutes(ctx: AppContext) {
 
   /**
    * Line format for the TUI and Mac app, which cannot import the typed
-   * client: mcp|<id>|<slug>|<authType>|<scope>|<enabled>|<connected>.
-   * connected reflects the org credential, or the caller's own for a
-   * per-user server. No route returns a secret; this is no exception.
+   * client: access|<canManage> then
+   * mcp|<id>|<slug>|<authType>|<scope>|<enabled>|<connected>|<name>.
+   * Name is last because it may contain pipes. connected reflects the
+   * org credential, or the caller's own for a per-user server. No
+   * route returns a secret; this is no exception.
    */
   routes.get("/plain", async (c) => {
     const access = await requireAccess(ctx, c);
@@ -283,20 +285,22 @@ export function mcpRoutes(ctx: AppContext) {
           : isNull(mcpCredentials.organizationId),
       );
     const me = actor(c);
-    const lines = servers
-      .filter((server) => !server.userId || server.userId === me)
-      .map((server) => {
-        const personal = server.userId !== null;
-        const perUser = personal || (server.authType === "oauth" && server.credentialScope === "user");
-        const connected =
-          server.authType === "none"
-            ? true
-            : perUser
-              ? credentials.some((r) => r.serverId === server.id && r.userId === me)
-              : credentials.some((r) => r.serverId === server.id && r.userId === null);
-        const scope = personal ? "personal" : server.credentialScope;
-        return `mcp|${server.id}|${server.slug}|${server.authType}|${scope}|${server.enabled}|${connected}`;
-      });
+    const lines = [`access|${access.canManage ? "1" : "0"}`];
+    for (const server of servers) {
+      if (server.userId && server.userId !== me) continue;
+      const personal = server.userId !== null;
+      const perUser = personal || (server.authType === "oauth" && server.credentialScope === "user");
+      const connected =
+        server.authType === "none"
+          ? true
+          : perUser
+            ? credentials.some((r) => r.serverId === server.id && r.userId === me)
+            : credentials.some((r) => r.serverId === server.id && r.userId === null);
+      const scope = personal ? "personal" : server.credentialScope;
+      lines.push(
+        `mcp|${server.id}|${server.slug}|${server.authType}|${scope}|${server.enabled}|${connected}|${server.name}`,
+      );
+    }
     return c.text(lines.join("\n"));
   });
 

@@ -25,13 +25,18 @@ import {
   jsonObject1,
   jsonObject2,
   jsonObject3,
+  mcpCreateBody,
+  mcpEnabledPatch,
   numberBytes,
+  parseNumber,
   parseCards,
   parseStages,
   parseCatalog,
   parseCredentials,
   parseGate,
   parseHistory,
+  parseMcpCanManage,
+  parseMcpServers,
   parsePipeline,
   parsePipelineId,
   parseProfiles,
@@ -39,11 +44,17 @@ import {
   parseProjects,
   parseHasConflicts,
   parseSecrets,
+  parseSessions,
+  parseSpendCards,
+  parseSpendMissing,
+  parseSpendTotalRuns,
+  parseSpendTotalUsd,
   parseInvitations,
   parseMembers,
   parseOrgs,
   parseTeamIsMulti,
   parseTools,
+  repoCommandsPatch,
   stageAgentPatch,
   stageCreatePrPatch,
   runWords,
@@ -55,12 +66,15 @@ import {
   type GateCheck,
   type HistoryEntry,
   type Invitation,
+  type McpServer,
   type Member,
   type Org,
   type Profile,
   type Repo,
   type Project,
   type Secret,
+  type SessionRow,
+  type SpendCard,
   type Stage,
   type StageConfig,
   type Tool,
@@ -77,7 +91,7 @@ export type HelperState = "idle" | "starting" | "ready" | "failed";
  * is a single window, and two stacked configuration surfaces would
  * leave no board to configure against.
  */
-export type Panel = "none" | "agents" | "pipeline" | "team" | "settings";
+export type Panel = "none" | "agents" | "pipeline" | "team" | "settings" | "spend" | "sessions" | "mcp";
 
 /**
  * The modal forms. Also one at a time, for the same reason. Gate
@@ -103,6 +117,7 @@ export type Dialog =
 const SHORT_CAP = 512;
 const PROMPT_CAP = 4096;
 const SECRET_CAP = 8192;
+const YAML_CAP = 65536;
 
 export interface Model {
   /** Empty until a mode is chosen, which gates the whole board. */
@@ -170,6 +185,14 @@ export interface Model {
    */
   readonly pipelineId: Uint8Array;
   readonly repos: readonly Repo[];
+  readonly spendTotalUsd: Uint8Array;
+  readonly spendTotalRuns: Uint8Array;
+  readonly spendMissing: Uint8Array;
+  readonly spendCards: readonly SpendCard[];
+  readonly sessions: readonly SessionRow[];
+  readonly mcpServers: readonly McpServer[];
+  readonly mcpCanManage: boolean;
+  readonly yamlText: Uint8Array;
 
   /**
    * The system appearance, which decides which rendition of a provider
@@ -198,6 +221,12 @@ export interface Model {
   readonly repoPathEdit: TextEditState;
   readonly stageNameEdit: TextEditState;
   readonly gateCmdEdit: TextEditState;
+  readonly repoSetupEdit: TextEditState;
+  readonly repoTestEdit: TextEditState;
+  readonly yamlImportEdit: TextEditState;
+  readonly mcpNameEdit: TextEditState;
+  readonly mcpUrlEdit: TextEditState;
+  readonly mcpKeyEdit: TextEditState;
 
   /** Which tool and model the add-agent form has selected. */
   readonly agentToolIndex: number;
@@ -212,12 +241,15 @@ export interface Model {
   readonly secretNameIndex: number;
   /** The stage the pipeline panel is editing, or -1. */
   readonly editingStage: number;
+  readonly editingRepo: number;
   readonly gateManual: boolean;
   readonly gateChecksPass: boolean;
   readonly gatePrComments: boolean;
   readonly gateTimeout: number;
+  readonly gateJudgeId: Uint8Array;
   /** Open dropdowns, which are model state like everything else. */
   readonly stageAgentPickerOpen: boolean;
+  readonly judgePickerOpen: boolean;
   readonly toolPickerOpen: boolean;
   readonly modelPickerOpen: boolean;
   readonly credentialPickerOpen: boolean;
@@ -256,6 +288,12 @@ export type Msg =
   | { readonly kind: "pipeline_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "repos_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "repos_changed"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "usage_ok"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "sessions_ok"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "mcp_ok"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "mcp_changed"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "yaml_ok"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "yaml_changed"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "team_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "load_failed"; readonly reason: Uint8Array }
 
@@ -283,6 +321,9 @@ export type Msg =
   | { readonly kind: "open_settings" }
   | { readonly kind: "open_pipeline" }
   | { readonly kind: "open_team" }
+  | { readonly kind: "open_spend" }
+  | { readonly kind: "open_sessions" }
+  | { readonly kind: "open_mcp" }
   | { readonly kind: "close_panel" }
   | { readonly kind: "open_new_project" }
   | { readonly kind: "open_new_feature" }
@@ -314,6 +355,12 @@ export type Msg =
   | { readonly kind: "repo_path_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "stage_name_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "gate_cmd_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "repo_setup_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "repo_test_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "yaml_import_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "mcp_name_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "mcp_url_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "mcp_key_edit"; readonly edit: TextInputEvent }
 
   // Submissions.
   | { readonly kind: "submit_project" }
@@ -330,6 +377,20 @@ export type Msg =
   | { readonly kind: "delete_stage"; readonly index: number }
   | { readonly kind: "submit_gate" }
   | { readonly kind: "toggle_create_pr" }
+  | { readonly kind: "edit_repo"; readonly index: number }
+  | { readonly kind: "cancel_repo_edit" }
+  | { readonly kind: "submit_repo_commands" }
+  | { readonly kind: "export_agents_yaml" }
+  | { readonly kind: "import_agents_yaml" }
+  | { readonly kind: "export_pipeline_yaml" }
+  | { readonly kind: "import_pipeline_yaml" }
+  | { readonly kind: "submit_mcp" }
+  | { readonly kind: "toggle_mcp"; readonly index: number }
+  | { readonly kind: "delete_mcp"; readonly index: number }
+  | { readonly kind: "confirm_delete_mcp" }
+  | { readonly kind: "save_mcp_key"; readonly index: number }
+  | { readonly kind: "open_session"; readonly index: number }
+  | { readonly kind: "open_spend_card"; readonly index: number }
 
   // Agents panel.
   | { readonly kind: "toggle_tool_picker" }
@@ -349,6 +410,9 @@ export type Msg =
   | { readonly kind: "set_gate_auto" }
   | { readonly kind: "toggle_gate_checks" }
   | { readonly kind: "toggle_gate_pr" }
+  | { readonly kind: "toggle_judge_picker" }
+  | { readonly kind: "set_gate_judge"; readonly index: number }
+  | { readonly kind: "clear_gate_judge" }
 
   // Team panel.
   | { readonly kind: "switch_org"; readonly index: number }
@@ -404,11 +468,18 @@ export const viewUnbound = [
   "confirm_delete_card",
   "confirm_delete_stage",
   "confirm_delete_repo",
+  "confirm_delete_mcp",
   "confirm_delete_secret",
   "confirm_remove_member",
   "pipeline_ok",
   "repos_ok",
   "repos_changed",
+  "usage_ok",
+  "sessions_ok",
+  "mcp_ok",
+  "mcp_changed",
+  "yaml_ok",
+  "yaml_changed",
   "team_ok",
   "load_failed",
   "board_changed",
@@ -446,7 +517,10 @@ export const viewUnbound = [
   "editingProfile",
   "secretNameIndex",
   "editingStage",
+  "editingRepo",
+  "gateJudgeId",
   "gateTimeout",
+  "mcpCanManage",
   "stages",
   "cards",
   "pipelineId",
@@ -552,6 +626,36 @@ function pipelineUrl(model: Model): Uint8Array {
   );
 }
 
+function usageUrl(model: Model): Uint8Array {
+  if (!hasSelectedProject(model)) return projectsUrl(model);
+  return idUrl(
+    model,
+    asciiBytes("/api/projects/"),
+    model.projects[model.selectedProject].id,
+    asciiBytes("/usage/plain"),
+  );
+}
+
+function sessionsUrl(model: Model): Uint8Array {
+  if (!hasSelectedProject(model)) return projectsUrl(model);
+  return idUrl(
+    model,
+    asciiBytes("/api/projects/"),
+    model.projects[model.selectedProject].id,
+    asciiBytes("/sessions/plain"),
+  );
+}
+
+function reposUrl(model: Model): Uint8Array {
+  if (!hasSelectedProject(model)) return projectsUrl(model);
+  return idUrl(
+    model,
+    asciiBytes("/api/projects/"),
+    model.projects[model.selectedProject].id,
+    asciiBytes("/repositories/plain"),
+  );
+}
+
 function mergeStatusUrl(model: Model): Uint8Array {
   if (!hasSelectedCard(model)) return projectsUrl(model);
   return idUrl(model, asciiBytes("/api/features/"), model.cards[model.selectedCard].id, asciiBytes("/merge-status/plain"));
@@ -620,6 +724,14 @@ export function initialModel(): Model {
     pipelineStages: [],
     pipelineId: new Uint8Array(0),
     repos: [],
+    spendTotalUsd: asciiBytes("0.00"),
+    spendTotalRuns: asciiBytes("0"),
+    spendMissing: asciiBytes("0"),
+    spendCards: [],
+    sessions: [],
+    mcpServers: [],
+    mcpCanManage: false,
+    yamlText: new Uint8Array(0),
 
     colorScheme: "dark",
 
@@ -640,17 +752,26 @@ export function initialModel(): Model {
     repoPathEdit: emptyEdit(),
     stageNameEdit: emptyEdit(),
     gateCmdEdit: emptyEdit(),
+    repoSetupEdit: emptyEdit(),
+    repoTestEdit: emptyEdit(),
+    yamlImportEdit: emptyEdit(),
+    mcpNameEdit: emptyEdit(),
+    mcpUrlEdit: emptyEdit(),
+    mcpKeyEdit: emptyEdit(),
 
     agentToolIndex: 0,
     agentModelIndex: 0,
     editingProfile: -1,
     secretNameIndex: 0,
     editingStage: -1,
+    editingRepo: -1,
     gateManual: false,
     gateChecksPass: false,
     gatePrComments: false,
     gateTimeout: DEFAULT_GATE_TIMEOUT,
+    gateJudgeId: new Uint8Array(0),
     stageAgentPickerOpen: false,
+    judgePickerOpen: false,
     toolPickerOpen: false,
     modelPickerOpen: false,
     credentialPickerOpen: false,
@@ -814,10 +935,17 @@ function closedDialog(model: Model): Model {
     repoPathEdit: emptyEdit(),
     stageNameEdit: emptyEdit(),
     gateCmdEdit: emptyEdit(),
+    repoSetupEdit: emptyEdit(),
+    repoTestEdit: emptyEdit(),
+    yamlImportEdit: emptyEdit(),
+    mcpNameEdit: emptyEdit(),
+    mcpUrlEdit: emptyEdit(),
+    mcpKeyEdit: emptyEdit(),
     toolPickerOpen: false,
     modelPickerOpen: false,
     credentialPickerOpen: false,
     stageAgentPickerOpen: false,
+    judgePickerOpen: false,
   };
 }
 
@@ -866,6 +994,18 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return { ...model, stageNameEdit: applyEdit(model.stageNameEdit, msg.edit, SHORT_CAP) };
     case "gate_cmd_edit":
       return { ...model, gateCmdEdit: applyEdit(model.gateCmdEdit, msg.edit, PROMPT_CAP) };
+    case "repo_setup_edit":
+      return { ...model, repoSetupEdit: applyEdit(model.repoSetupEdit, msg.edit, PROMPT_CAP) };
+    case "repo_test_edit":
+      return { ...model, repoTestEdit: applyEdit(model.repoTestEdit, msg.edit, PROMPT_CAP) };
+    case "yaml_import_edit":
+      return { ...model, yamlImportEdit: applyEdit(model.yamlImportEdit, msg.edit, YAML_CAP) };
+    case "mcp_name_edit":
+      return { ...model, mcpNameEdit: applyEdit(model.mcpNameEdit, msg.edit, SHORT_CAP) };
+    case "mcp_url_edit":
+      return { ...model, mcpUrlEdit: applyEdit(model.mcpUrlEdit, msg.edit, SHORT_CAP) };
+    case "mcp_key_edit":
+      return { ...model, mcpKeyEdit: applyEdit(model.mcpKeyEdit, msg.edit, SECRET_CAP) };
 
     /**
      * A thin client still has to sign in: a hosted server rejects
@@ -1262,6 +1402,61 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       if (msg.status >= 400) return loadRefused(model, msg.status);
       if (!hasSelectedProject(model)) return model;
       return { ...model, repos: parseRepos(msg.body), lastError: new Uint8Array(0) };
+    case "usage_ok":
+      if (msg.status >= 400) return loadRefused(model, msg.status);
+      return {
+        ...model,
+        spendTotalUsd: parseSpendTotalUsd(msg.body),
+        spendTotalRuns: parseSpendTotalRuns(msg.body),
+        spendMissing: parseSpendMissing(msg.body),
+        spendCards: parseSpendCards(msg.body),
+        lastError: new Uint8Array(0),
+      };
+    case "sessions_ok":
+      if (msg.status >= 400) return loadRefused(model, msg.status);
+      return { ...model, sessions: parseSessions(msg.body), lastError: new Uint8Array(0) };
+    case "mcp_ok": {
+      if (msg.status >= 400) return loadRefused(model, msg.status);
+      const loaded: Model = {
+        ...model,
+        mcpServers: parseMcpServers(msg.body),
+        mcpCanManage: parseMcpCanManage(msg.body),
+        lastError: new Uint8Array(0),
+      };
+      // After adding a server the id is JSON we cannot parse, so the
+      // key waits on this refetch and is matched by the slug we sent.
+      const key = model.mcpKeyEdit.text.trim();
+      const name = model.mcpNameEdit.text.trim();
+      if (key.length === 0 || name.length === 0) return loaded;
+      const slug = slugify(name);
+      let found = -1;
+      for (let i = 0; i < loaded.mcpServers.length; i++) {
+        if (bytesEq(loaded.mcpServers[i].slug, slug)) found = i;
+      }
+      if (found < 0) return loaded;
+      return [
+        {
+          ...loaded,
+          mcpNameEdit: emptyEdit(),
+          mcpUrlEdit: emptyEdit(),
+          mcpKeyEdit: emptyEdit(),
+          notice: asciiBytes("Saved the API key"),
+        },
+        Cmd.fetch(
+          {
+            url: idUrl(loaded, asciiBytes("/api/mcp/"), loaded.mcpServers[found].id, asciiBytes("/api-key")),
+            method: "POST",
+            timeoutMs: 10000,
+            headers: { authorization: authHeader(loaded), "content-type": "application/json" },
+            body: jsonObject1(asciiBytes("value"), key),
+          },
+          { key: "act", ok: "mcp_changed", err: "act_failed" },
+        ),
+      ];
+    }
+    case "yaml_ok":
+      if (msg.status >= 400) return loadRefused(model, msg.status);
+      return { ...model, yamlText: msg.body, lastError: new Uint8Array(0), notice: asciiBytes("Exported. Copy the YAML below.") };
     case "team_ok":
       if (msg.status >= 400) return loadRefused(model, msg.status);
       return {
@@ -1880,7 +2075,14 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     // ---- panels and dialogs ----
 
     case "close_panel":
-      return { ...model, panel: "none", editingStage: -1, stageAgentPickerOpen: false };
+      return {
+        ...model,
+        panel: "none",
+        editingStage: -1,
+        editingRepo: -1,
+        stageAgentPickerOpen: false,
+        judgePickerOpen: false,
+      };
 
     // Nothing to fetch: the settings panel describes appearance, which
     // is decided by the build and the system, not by the server.
@@ -1955,6 +2157,46 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
               )
             : Cmd.none,
         ]),
+      ];
+    }
+
+    case "open_spend": {
+      if (!hasSelectedProject(model)) return { ...model, lastError: asciiBytes("Create a project first.") };
+      const next: Model = { ...closedDialog(model), panel: "spend", editingStage: -1, editingRepo: -1 };
+      return [
+        next,
+        Cmd.fetch(
+          { url: usageUrl(next), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(next) } },
+          { key: "usage", ok: "usage_ok", err: "load_failed" },
+        ),
+      ];
+    }
+
+    case "open_sessions": {
+      if (!hasSelectedProject(model)) return { ...model, lastError: asciiBytes("Create a project first.") };
+      const next: Model = { ...closedDialog(model), panel: "sessions", editingStage: -1, editingRepo: -1 };
+      return [
+        next,
+        Cmd.fetch(
+          { url: sessionsUrl(next), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(next) } },
+          { key: "sessions", ok: "sessions_ok", err: "load_failed" },
+        ),
+      ];
+    }
+
+    case "open_mcp": {
+      const next: Model = { ...closedDialog(model), panel: "mcp", editingStage: -1, editingRepo: -1 };
+      return [
+        next,
+        Cmd.fetch(
+          {
+            url: apiUrl(next, asciiBytes("/api/mcp/plain")),
+            method: "GET",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(next) },
+          },
+          { key: "mcp", ok: "mcp_ok", err: "load_failed" },
+        ),
       ];
     }
 
@@ -2262,13 +2504,22 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         gateChecksPass: stage.gateChecksPass,
         gatePrComments: stage.gatePrComments,
         gateTimeout: stage.gateTimeoutSec,
+        gateJudgeId: stage.gateJudgeId,
         gateCmdEdit: seedEdit(stage.gateCmd),
         stageAgentPickerOpen: false,
+        judgePickerOpen: false,
       };
     }
 
     case "cancel_stage_edit":
-      return { ...model, editingStage: -1, stageAgentPickerOpen: false, gateCmdEdit: emptyEdit() };
+      return {
+        ...model,
+        editingStage: -1,
+        stageAgentPickerOpen: false,
+        judgePickerOpen: false,
+        gateJudgeId: new Uint8Array(0),
+        gateCmdEdit: emptyEdit(),
+      };
 
     case "toggle_stage_agent_picker":
       return { ...model, stageAgentPickerOpen: !model.stageAgentPickerOpen };
@@ -2329,6 +2580,14 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return { ...model, gateChecksPass: !model.gateChecksPass };
     case "toggle_gate_pr":
       return { ...model, gatePrComments: !model.gatePrComments };
+    case "toggle_judge_picker":
+      return { ...model, judgePickerOpen: !model.judgePickerOpen };
+    case "set_gate_judge": {
+      if (msg.index < 0 || msg.index >= model.profiles.length) return model;
+      return { ...model, judgePickerOpen: false, gateJudgeId: model.profiles[msg.index].id };
+    }
+    case "clear_gate_judge":
+      return { ...model, judgePickerOpen: false, gateJudgeId: new Uint8Array(0) };
 
     /**
      * A command criterion runs inside this project's sandbox, which is
@@ -2366,11 +2625,240 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
               model.gatePrComments,
               model.gateCmdEdit.text.trim(),
               model.gateTimeout,
+              model.gateJudgeId,
             ),
           },
           { key: "act", ok: "pipeline_changed", err: "act_failed" },
         ),
       ];
+    }
+
+    case "edit_repo": {
+      if (msg.index < 0 || msg.index >= model.repos.length) return model;
+      const repo = model.repos[msg.index];
+      return {
+        ...model,
+        editingRepo: msg.index,
+        repoSetupEdit: seedEdit(repo.setupCommand),
+        repoTestEdit: seedEdit(repo.testCommand),
+      };
+    }
+
+    case "cancel_repo_edit":
+      return { ...model, editingRepo: -1, repoSetupEdit: emptyEdit(), repoTestEdit: emptyEdit() };
+
+    case "submit_repo_commands": {
+      if (model.editingRepo < 0 || model.editingRepo >= model.repos.length || !hasSelectedProject(model)) {
+        return model;
+      }
+      const repo = model.repos[model.editingRepo];
+      return [
+        { ...model, editingRepo: -1, notice: asciiBytes("Saved the commands") },
+        Cmd.fetch(
+          {
+            url: concat3(
+              idUrl(
+                model,
+                asciiBytes("/api/projects/"),
+                model.projects[model.selectedProject].id,
+                asciiBytes("/repositories/"),
+              ),
+              repo.id,
+              new Uint8Array(0),
+            ),
+            method: "PATCH",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
+            body: repoCommandsPatch(model.repoSetupEdit.text.trim(), model.repoTestEdit.text.trim()),
+          },
+          { key: "act", ok: "repos_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "export_agents_yaml": {
+      return [
+        { ...model, yamlText: new Uint8Array(0) },
+        Cmd.fetch(
+          {
+            url: apiUrl(model, asciiBytes("/api/profiles/export")),
+            method: "GET",
+            timeoutMs: 10000,
+            headers: { authorization: authHeader(model) },
+          },
+          { key: "yaml", ok: "yaml_ok", err: "load_failed" },
+        ),
+      ];
+    }
+
+    case "import_agents_yaml": {
+      const yaml = model.yamlImportEdit.text.trim();
+      if (yaml.length === 0) return { ...model, lastError: asciiBytes("Paste the YAML to import.") };
+      return [
+        { ...model, notice: asciiBytes("Imported the agents") },
+        Cmd.fetch(
+          {
+            url: apiUrl(model, asciiBytes("/api/profiles/import")),
+            method: "POST",
+            timeoutMs: 15000,
+            headers: { authorization: authHeader(model), "content-type": "application/yaml" },
+            body: yaml,
+          },
+          { key: "act", ok: "yaml_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "export_pipeline_yaml": {
+      if (!hasSelectedProject(model)) return { ...model, lastError: asciiBytes("Create a project first.") };
+      return [
+        { ...model, yamlText: new Uint8Array(0) },
+        Cmd.fetch(
+          {
+            url: idUrl(
+              model,
+              asciiBytes("/api/projects/"),
+              model.projects[model.selectedProject].id,
+              asciiBytes("/pipeline/export"),
+            ),
+            method: "GET",
+            timeoutMs: 10000,
+            headers: { authorization: authHeader(model) },
+          },
+          { key: "yaml", ok: "yaml_ok", err: "load_failed" },
+        ),
+      ];
+    }
+
+    case "import_pipeline_yaml": {
+      if (!hasSelectedProject(model)) return { ...model, lastError: asciiBytes("Create a project first.") };
+      const yaml = model.yamlImportEdit.text.trim();
+      if (yaml.length === 0) return { ...model, lastError: asciiBytes("Paste the YAML to import.") };
+      return [
+        { ...model, notice: asciiBytes("Imported the pipeline") },
+        Cmd.fetch(
+          {
+            url: idUrl(
+              model,
+              asciiBytes("/api/projects/"),
+              model.projects[model.selectedProject].id,
+              asciiBytes("/pipeline/import"),
+            ),
+            method: "POST",
+            timeoutMs: 15000,
+            headers: { authorization: authHeader(model), "content-type": "application/yaml" },
+            body: yaml,
+          },
+          { key: "act", ok: "yaml_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "submit_mcp": {
+      const name = model.mcpNameEdit.text.trim();
+      const url = model.mcpUrlEdit.text.trim();
+      if (name.length === 0 || url.length === 0) {
+        return { ...model, lastError: asciiBytes("A name and a URL are required.") };
+      }
+      const key = model.mcpKeyEdit.text.trim();
+      const authType = key.length > 0 ? asciiBytes("api_key") : asciiBytes("none");
+      return [
+        { ...model, notice: asciiBytes("Added the MCP server") },
+        Cmd.fetch(
+          {
+            url: apiUrl(model, asciiBytes("/api/mcp")),
+            method: "POST",
+            timeoutMs: 15000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
+            body: mcpCreateBody(name, slugify(name), url, authType),
+          },
+          { key: "act", ok: "mcp_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "toggle_mcp": {
+      if (msg.index < 0 || msg.index >= model.mcpServers.length) return model;
+      const server = model.mcpServers[msg.index];
+      return [
+        { ...model, notice: server.enabled ? asciiBytes("Disabled the server") : asciiBytes("Enabled the server") },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/mcp/"), server.id, new Uint8Array(0)),
+            method: "PATCH",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
+            body: mcpEnabledPatch(!server.enabled),
+          },
+          { key: "act", ok: "mcp_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "delete_mcp": {
+      if (msg.index < 0 || msg.index >= model.mcpServers.length) return model;
+      return {
+        ...closedDialog(model),
+        dialog: "confirm",
+        confirmKind: asciiBytes("mcp"),
+        confirmIndex: msg.index,
+        confirmText: concat3(
+          asciiBytes("Remove "),
+          model.mcpServers[msg.index].name,
+          asciiBytes("? Agents stop seeing this server on the next run."),
+        ),
+      };
+    }
+
+    case "confirm_delete_mcp": {
+      const index = model.confirmIndex;
+      if (index < 0 || index >= model.mcpServers.length) return model;
+      return [
+        { ...closedDialog(model), notice: asciiBytes("Removed the MCP server") },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/mcp/"), model.mcpServers[index].id, new Uint8Array(0)),
+            method: "DELETE",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model) },
+          },
+          { key: "act", ok: "mcp_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "save_mcp_key": {
+      if (msg.index < 0 || msg.index >= model.mcpServers.length) return model;
+      const key = model.mcpKeyEdit.text.trim();
+      if (key.length === 0) return { ...model, lastError: asciiBytes("Paste an API key first.") };
+      return [
+        { ...model, notice: asciiBytes("Saved the API key"), mcpKeyEdit: emptyEdit() },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/mcp/"), model.mcpServers[msg.index].id, asciiBytes("/api-key")),
+            method: "POST",
+            timeoutMs: 10000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
+            body: jsonObject1(asciiBytes("value"), key),
+          },
+          { key: "act", ok: "mcp_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "open_session":
+    case "open_spend_card": {
+      const rows = msg.kind === "open_session" ? model.sessions : model.spendCards;
+      if (msg.index < 0 || msg.index >= rows.length) return model;
+      const featureId = rows[msg.index].featureId;
+      let cardIndex = -1;
+      for (let i = 0; i < model.cards.length; i++) {
+        if (bytesEq(model.cards[i].id, featureId)) cardIndex = i;
+      }
+      if (cardIndex < 0) {
+        return { ...model, panel: "none", lastError: asciiBytes("That card is not on the board.") };
+      }
+      return update({ ...model, panel: "none", editingStage: -1, editingRepo: -1 }, { kind: "pick_card", index: cardIndex });
     }
 
     // ---- team panel ----
@@ -2388,6 +2876,10 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           pipelineStages: [],
           pipelineId: new Uint8Array(0),
           repos: [],
+          spendCards: [],
+          sessions: [],
+          mcpServers: [],
+          yamlText: new Uint8Array(0),
           profiles: [],
           secrets: [],
           transcript: new Uint8Array(0),
@@ -2739,20 +3231,68 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return [
         model,
         Cmd.fetch(
+          { url: reposUrl(model), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(model) } },
+          { key: "repos", ok: "repos_ok", err: "load_failed" },
+        ),
+      ];
+    }
+
+    case "mcp_changed": {
+      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      return [
+        model,
+        Cmd.fetch(
           {
-            url: idUrl(
-              model,
-              asciiBytes("/api/projects/"),
-              model.projects[model.selectedProject].id,
-              asciiBytes("/repositories/plain"),
-            ),
+            url: apiUrl(model, asciiBytes("/api/mcp/plain")),
             method: "GET",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model) },
           },
-          { key: "repos", ok: "repos_ok", err: "load_failed" },
+          { key: "mcp", ok: "mcp_ok", err: "load_failed" },
         ),
       ];
+    }
+
+    case "yaml_changed": {
+      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      const next: Model = {
+        ...model,
+        yamlImportEdit: emptyEdit(),
+        yamlText: new Uint8Array(0),
+        notice: asciiBytes("Imported"),
+      };
+      if (model.panel === "agents") {
+        return [
+          next,
+          Cmd.fetch(
+            {
+              url: apiUrl(next, asciiBytes("/api/profiles/plain")),
+              method: "GET",
+              timeoutMs: 5000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "profiles", ok: "profiles_ok", err: "load_failed" },
+          ),
+        ];
+      }
+      if (model.panel === "pipeline") {
+        return [
+          next,
+          Cmd.batch([
+            Cmd.fetch(
+              { url: pipelineUrl(next), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(next) } },
+              { key: "pipeline", ok: "pipeline_ok", err: "load_failed" },
+            ),
+            hasSelectedProject(next)
+              ? Cmd.fetch(
+                  { url: reposUrl(next), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(next) } },
+                  { key: "repos", ok: "repos_ok", err: "load_failed" },
+                )
+              : Cmd.none,
+          ]),
+        ];
+      }
+      return next;
     }
 
     case "delete_secret": {
@@ -3218,6 +3758,76 @@ export function showingTeam(model: Model): boolean {
 
 export function showingSettings(model: Model): boolean {
   return model.panel === "settings";
+}
+
+export function showingSpend(model: Model): boolean {
+  return model.panel === "spend";
+}
+
+export function showingSessions(model: Model): boolean {
+  return model.panel === "sessions";
+}
+
+export function showingMcp(model: Model): boolean {
+  return model.panel === "mcp";
+}
+
+export function hasSpendCards(model: Model): boolean {
+  return model.spendCards.length > 0;
+}
+
+export function hasSessions(model: Model): boolean {
+  return model.sessions.length > 0;
+}
+
+export function hasMcpServers(model: Model): boolean {
+  return model.mcpServers.length > 0;
+}
+
+export function hasYamlText(model: Model): boolean {
+  return model.yamlText.length > 0;
+}
+
+export function canManageMcp(model: Model): boolean {
+  return model.mcpCanManage;
+}
+
+export function spendHeadline(model: Model): Uint8Array {
+  if (bytesEq(model.spendTotalRuns, asciiBytes("0"))) return asciiBytes("No agent runs yet.");
+  const missing = parseNumber(model.spendMissing);
+  if (missing > 0) {
+    return concat3(
+      concat3(asciiBytes("$"), model.spendTotalUsd, asciiBytes("+ across ")),
+      model.spendTotalRuns,
+      asciiBytes(" runs. Some tools reported no figure."),
+    );
+  }
+  return concat3(asciiBytes("$"), model.spendTotalUsd, concat3(asciiBytes(" across "), model.spendTotalRuns, asciiBytes(" runs.")));
+}
+
+export function editingARepo(model: Model): boolean {
+  return model.editingRepo >= 0 && model.editingRepo < model.repos.length;
+}
+
+export function editingRepoName(model: Model): Uint8Array {
+  if (!editingARepo(model)) return new Uint8Array(0);
+  return model.repos[model.editingRepo].name;
+}
+
+export function selectedJudgeLabel(model: Model): Uint8Array {
+  if (model.gateJudgeId.length === 0) return asciiBytes("No judge");
+  for (let i = 0; i < model.profiles.length; i++) {
+    if (bytesEq(model.profiles[i].id, model.gateJudgeId)) return model.profiles[i].name;
+  }
+  return asciiBytes("missing judge");
+}
+
+export function hasJudge(model: Model): boolean {
+  return model.gateJudgeId.length > 0;
+}
+
+export function confirmingMcp(model: Model): boolean {
+  return bytesEq(model.confirmKind, asciiBytes("mcp"));
 }
 
 export function dialogNewProject(model: Model): boolean {
