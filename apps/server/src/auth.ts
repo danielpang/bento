@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth";
+import { APIError } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import { and, asc, eq, isNull } from "drizzle-orm";
@@ -30,6 +31,44 @@ const INVITATION_DAYS = 7;
 
 /** Long enough to survive a mail queue, short enough to be a poor stolen token. */
 const LINK_HOURS = 24;
+
+/**
+ * Whether a membership holds the owner role.
+ *
+ * Roles arrive as a comma separated string, so this parses the way the
+ * rest of the server does rather than comparing the whole field.
+ */
+function roleHasOwner(role: string): boolean {
+  return role.split(",").map((part) => part.trim()).includes("owner");
+}
+
+/**
+ * Names of organizations this person still owns. Deleting the account
+ * would leave those teams without an owner, so both the confirmation
+ * email and the actual delete refuse until each one has another, or is
+ * itself deleted.
+ */
+async function ownedOrganizationNames(db: Db, userId: string): Promise<string[]> {
+  const rows = await db
+    .select({ name: organizationTable.name, role: member.role })
+    .from(member)
+    .innerJoin(organizationTable, eq(organizationTable.id, member.organizationId))
+    .where(eq(member.userId, userId));
+  return rows.filter((row) => roleHasOwner(row.role)).map((row) => row.name);
+}
+
+function ownerDeletionMessage(names: string[]): string {
+  if (names.length === 1) {
+    return `You own ${names[0]}. Make someone else an owner first, or delete that organization.`;
+  }
+  return `You own ${names.length} organizations. Make someone else an owner in each, or delete them, before deleting your account.`;
+}
+
+async function refuseIfOwnsOrganization(db: Db, userId: string): Promise<void> {
+  const names = await ownedOrganizationNames(db, userId);
+  if (names.length === 0) return;
+  throw new APIError("BAD_REQUEST", { message: ownerDeletionMessage(names) });
+}
 
 /**
  * Sends one of the account emails, and never fails the request it was
@@ -228,9 +267,16 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
         enabled: true,
         // Confirmed by email rather than executed on the click: this
         // is irreversible, and a session someone left open on a shared
-        // machine must not be enough to erase an account.
+        // machine must not be enough to erase an account. An owner is
+        // refused before the mail goes out, and again before the row
+        // is deleted, so a link from an earlier attempt cannot land
+        // once they have become an owner in the meantime.
         async sendDeleteAccountVerification({ user, url }) {
+          await refuseIfOwnsOrganization(db, user.id);
           await sendOrLog(mailer, deleteAccountMessage({ email: user.email, url, expiresInHours: LINK_HOURS, appUrl }), url);
+        },
+        async beforeDelete(user) {
+          await refuseIfOwnsOrganization(db, user.id);
         },
         deleteTokenExpiresIn: LINK_HOURS * 60 * 60,
       },
