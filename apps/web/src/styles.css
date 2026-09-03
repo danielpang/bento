@@ -4052,6 +4052,9 @@ button.session-expand[aria-pressed="true"] {
 
 /* Stage cards: each stage is a box you can tell from its neighbours. */
 .stage-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   border: 1px solid var(--line-bright);
   border-radius: var(--radius);
   background: var(--panel-raised);
@@ -4061,10 +4064,31 @@ button.session-expand[aria-pressed="true"] {
   min-width: 0;
   max-width: 100%;
 }
+.stage-card-main {
+  flex: 1;
+  min-width: 0;
+}
 .stage-card-head {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+/*
+ * Edit and Remove sit in their own column so they stay centred on the
+ * two-line card. Left in the title row they hugged the top edge while
+ * the agent and the exit rule filled the space below.
+ */
+.stage-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  gap: 2px;
+}
+.stage-card-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* The grip. Only this drags, so a card's text stays selectable, and it

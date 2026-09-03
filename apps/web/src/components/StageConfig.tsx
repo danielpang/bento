@@ -194,57 +194,88 @@ export function StageConfig({
                 void commitDrag();
               }}
             >
-              <div className="stage-card-head">
-                {/* The handle is the only draggable part: a card that
-                    drags from anywhere makes selecting its text
-                    impossible, and it is focusable so the order can be
-                    changed without a mouse. */}
-                <button
-                  type="button"
-                  className="drag-handle"
-                  draggable
-                  aria-label={`Reorder ${stage.name}. Position ${index + 1} of ${order.length}. Use the arrow keys.`}
-                  title="Drag to reorder, or focus and use the arrow keys"
-                  disabled={busy}
-                  onDragStart={(e) => {
-                    e.dataTransfer.effectAllowed = "move";
-                    // Firefox starts no drag at all without payload.
-                    e.dataTransfer.setData("text/plain", stage.id);
-                    /**
-                     * The whole stage travels with the cursor, held at
-                     * the point on the grip where it was picked up.
-                     * Without this the browser drags a picture of the
-                     * grip alone, so nothing appears to move.
-                     */
-                    const card = e.currentTarget.closest(".stage-card");
-                    if (card instanceof HTMLElement) {
-                      const box = card.getBoundingClientRect();
-                      e.dataTransfer.setDragImage(card, e.clientX - box.left, e.clientY - box.top);
-                    }
-                    baseline.current = order;
-                    dropped.current = false;
-                    // After the browser has taken its snapshot, or the
-                    // card that follows the cursor is the faded one.
-                    const id = stage.id;
-                    setTimeout(() => setDragging(id), 0);
-                  }}
-                  onDragEnd={() => {
-                    setDragging(null);
-                    // Released over nothing: the preview was a proposal,
-                    // not a change, so it goes back.
-                    if (!dropped.current) setOrder(baseline.current);
-                  }}
-                  onKeyDown={(e) => {
-                    const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
-                    if (delta === 0) return;
-                    e.preventDefault();
-                    void move(index, index + delta);
-                  }}
-                >
-                  <GripMark />
-                </button>
-                <span className="lane-ord">{String(index + 1).padStart(2, "0")}</span>
-                <span className="stage-card-name">{stage.name}</span>
+              {/*
+                Grip, summary, and actions sit as three columns of one
+                row so Edit and Remove centre on the card rather than
+                riding the title line while the agent and exit rule
+                drop below them. The handle is still the only draggable
+                part: a card that drags from anywhere makes selecting
+                its text impossible, and it is focusable so the order
+                can be changed without a mouse.
+              */}
+              <button
+                type="button"
+                className="drag-handle"
+                draggable
+                aria-label={`Reorder ${stage.name}. Position ${index + 1} of ${order.length}. Use the arrow keys.`}
+                title="Drag to reorder, or focus and use the arrow keys"
+                disabled={busy}
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "move";
+                  // Firefox starts no drag at all without payload.
+                  e.dataTransfer.setData("text/plain", stage.id);
+                  /**
+                   * The whole stage travels with the cursor, held at
+                   * the point on the grip where it was picked up.
+                   * Without this the browser drags a picture of the
+                   * grip alone, so nothing appears to move.
+                   */
+                  const card = e.currentTarget.closest(".stage-card");
+                  if (card instanceof HTMLElement) {
+                    const box = card.getBoundingClientRect();
+                    e.dataTransfer.setDragImage(card, e.clientX - box.left, e.clientY - box.top);
+                  }
+                  baseline.current = order;
+                  dropped.current = false;
+                  // After the browser has taken its snapshot, or the
+                  // card that follows the cursor is the faded one.
+                  const id = stage.id;
+                  setTimeout(() => setDragging(id), 0);
+                }}
+                onDragEnd={() => {
+                  setDragging(null);
+                  // Released over nothing: the preview was a proposal,
+                  // not a change, so it goes back.
+                  if (!dropped.current) setOrder(baseline.current);
+                }}
+                onKeyDown={(e) => {
+                  const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
+                  if (delta === 0) return;
+                  e.preventDefault();
+                  void move(index, index + delta);
+                }}
+              >
+                <GripMark />
+              </button>
+              <div className="stage-card-main">
+                <div className="stage-card-head">
+                  <span className="lane-ord">{String(index + 1).padStart(2, "0")}</span>
+                  <span className="stage-card-name">{stage.name}</span>
+                </div>
+                <div className="stage-card-meta">
+                  {assigned ? (
+                    <span className="chip">
+                      <ProviderMark cli={assigned.cli} model={assigned.model} decorative />
+                      {assigned.name}
+                    </span>
+                  ) : (
+                    <span className="chip chip-empty">no agent</span>
+                  )}
+                  {assigned && PREVIEW_TOOLS[assigned.cli] && <span className="chip chip-soft">preview</span>}
+                  <span className="muted">
+                    {stage.gateType === "manual" ? "waits for your approval" : "advances on its requirements"}
+                  </span>
+                  {stage.gateType === "auto" && (
+                    <span className="muted">
+                      {criteria.length === 0
+                        ? "when the agent finishes"
+                        : `${criteria.length} requirement${criteria.length === 1 ? "" : "s"}`}
+                    </span>
+                  )}
+                  {stage.createPr && <span className="muted">opens a pull request</span>}
+                </div>
+              </div>
+              <div className="stage-card-actions">
                 <button className="btn btn-ghost" disabled={busy} onClick={() => setEditing(stage)}>
                   Edit
                 </button>
@@ -256,28 +287,6 @@ export function StageConfig({
                 >
                   Remove
                 </button>
-              </div>
-              <div className="stage-card-meta">
-                {assigned ? (
-                  <span className="chip">
-                    <ProviderMark cli={assigned.cli} model={assigned.model} decorative />
-                    {assigned.name}
-                  </span>
-                ) : (
-                  <span className="chip chip-empty">no agent</span>
-                )}
-                {assigned && PREVIEW_TOOLS[assigned.cli] && <span className="chip chip-soft">preview</span>}
-                <span className="muted">
-                  {stage.gateType === "manual" ? "waits for your approval" : "advances on its requirements"}
-                </span>
-                {stage.gateType === "auto" && (
-                  <span className="muted">
-                    {criteria.length === 0
-                      ? "when the agent finishes"
-                      : `${criteria.length} requirement${criteria.length === 1 ? "" : "s"}`}
-                  </span>
-                )}
-                {stage.createPr && <span className="muted">opens a pull request</span>}
               </div>
             </div>
           );

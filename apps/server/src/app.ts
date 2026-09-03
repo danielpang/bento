@@ -30,6 +30,7 @@ import { mcpGatewayRoutes } from "./routes/mcp-gateway.js";
 import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
+import { accountDeletionBlockedReason } from "./auth.js";
 
 export interface AppExtras {
   /**
@@ -124,6 +125,21 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // better-auth owns sign in, social login, and the device flow.
   if (ctx.auth) {
     const auth = ctx.auth;
+    /**
+     * Owners cannot delete their account: that would leave a team
+     * without anyone who can manage it. better-auth's own handler
+     * answers 200 and then sends the confirmation mail in the
+     * background, so the refusal has to happen in front of it, the
+     * same way a plan limit sits in front of invite-member.
+     */
+    app.post("/api/auth/delete-user", async (c) => {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (session) {
+        const reason = await accountDeletionBlockedReason(ctx.db, session.user.id);
+        if (reason) return c.json({ message: reason, error: reason }, 400);
+      }
+      return handleAuth(c);
+    });
     /**
      * The one auth endpoint with a plan limit on it. better-auth owns
      * invitation creation, so the check happens in front of it.

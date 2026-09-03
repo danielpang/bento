@@ -16,6 +16,7 @@ import {
   runArtifacts,
   runMigrations,
   user,
+  verification,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
@@ -2160,6 +2161,133 @@ test("deleting an organization removes its projects and notifies the deployment"
 
   const [orphan] = await ctx.db.select().from(projects).where(eq(projects.id, project.id));
   assert.equal(orphan, undefined, "the organization's projects go with it");
+});
+
+/**
+ * An owner cannot delete their account while they still own a team:
+ * that would leave the organization without anyone who can manage it.
+ * A member can still request the confirmation email.
+ */
+test("an owner cannot delete their account while they still own an organization", async () => {
+  const sent: string[] = [];
+  const hookedAuth = createAuth(ctx.env, ctx.db, {
+    description: "test",
+    async send(message) {
+      sent.push(message.subject);
+    },
+  });
+  assert.ok(hookedAuth);
+  const hookedApp = createApp({ ...ctx, auth: hookedAuth });
+
+  const ownerSignUp = await hookedApp.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "owner-stay@bento.test",
+      password: "correct-horse-battery",
+      name: "Owner Stay",
+    }),
+  });
+  const ownerToken = ownerSignUp.headers.get("set-auth-token")!;
+  const ownerAuth = { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" };
+
+  const org = (await (
+    await hookedApp.request("/api/auth/organization/create", {
+      method: "POST",
+      headers: ownerAuth,
+      body: JSON.stringify({ name: "Stay Co", slug: "stay-co" }),
+    })
+  ).json()) as { id: string };
+  await hookedApp.request("/api/auth/organization/set-active", {
+    method: "POST",
+    headers: ownerAuth,
+    body: JSON.stringify({ organizationId: org.id }),
+  });
+
+  const ownerDelete = await hookedApp.request("/api/auth/delete-user", {
+    method: "POST",
+    headers: ownerAuth,
+    body: JSON.stringify({ callbackURL: "/" }),
+  });
+  assert.equal(ownerDelete.status, 400, "owning a team blocks account deletion");
+  const ownerBody = (await ownerDelete.json()) as { message?: string; error?: { message?: string } | string };
+  const ownerMessage =
+    ownerBody.message ??
+    (typeof ownerBody.error === "string" ? ownerBody.error : ownerBody.error?.message) ??
+    JSON.stringify(ownerBody);
+  assert.match(ownerMessage, /Stay Co/);
+  assert.equal(
+    sent.filter((subject) => subject.includes("deleting your Bento account")).length,
+    0,
+    "no deletion mail for an owner",
+  );
+
+  const [ownerUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "owner-stay@bento.test"));
+  assert.ok(ownerUser);
+  const ownerTokens = await ctx.db.select().from(verification).where(eq(verification.value, ownerUser.id));
+  assert.equal(
+    ownerTokens.filter((row) => row.identifier.startsWith("delete-account-")).length,
+    0,
+    "no deletion token is stored for an owner",
+  );
+
+  const memberSignUp = await hookedApp.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "member-leave@bento.test",
+      password: "correct-horse-battery",
+      name: "Member Leave",
+    }),
+  });
+  const memberToken = memberSignUp.headers.get("set-auth-token")!;
+  const invite = (await (
+    await hookedApp.request("/api/auth/organization/invite-member", {
+      method: "POST",
+      headers: ownerAuth,
+      body: JSON.stringify({
+        email: "member-leave@bento.test",
+        role: "member",
+        organizationId: org.id,
+      }),
+    })
+  ).json()) as { id: string };
+  await hookedApp.request("/api/auth/organization/accept-invitation", {
+    method: "POST",
+    headers: { authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ invitationId: invite.id }),
+  });
+
+  sent.length = 0;
+  const memberDelete = await hookedApp.request("/api/auth/delete-user", {
+    method: "POST",
+    headers: { authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ callbackURL: "/" }),
+  });
+  assert.equal(memberDelete.status, 200, "a member may request the confirmation mail");
+  const memberBody = (await memberDelete.json()) as { success?: boolean; message?: string };
+  assert.equal(memberBody.message, "Verification email sent");
+
+  const [memberUser] = await ctx.db
+    .select({ id: user.id })
+    .from(user)
+    .where(eq(user.email, "member-leave@bento.test"));
+  assert.ok(memberUser);
+  const memberTokens = await ctx.db.select().from(verification).where(eq(verification.value, memberUser.id));
+  assert.ok(
+    memberTokens.some((row) => row.identifier.startsWith("delete-account-")),
+    "a confirmation token is stored for a member",
+  );
+
+  // The mail is sent after the 200, as a background task.
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !sent.includes("Confirm deleting your Bento account")) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(
+    sent.includes("Confirm deleting your Bento account"),
+    `a member is emailed the confirmation link, got ${JSON.stringify(sent)}`,
+  );
 });
 
 /**

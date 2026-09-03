@@ -218,8 +218,10 @@ export function monthlyTotal(offer: PlanOffer, held: number): string | null {
   if (offer.monthlyTotalUsd === 0) return "Free";
   const total = `${money(offer.monthlyTotalUsd)} a month`;
   const seats = `${offer.billableSeats} ${offer.billableSeats === 1 ? "seat" : "seats"}`;
-  if (offer.billableSeats > held) return `${total} (${seats} minimum, this team has ${held})`;
-  return `${total} for ${seats}`;
+  if (offer.billableSeats > held) {
+    return `${total} for this team (${seats} minimum, this team has ${held}, not including tax)`;
+  }
+  return `${total} for this team (${seats}, not including tax)`;
 }
 
 /**
