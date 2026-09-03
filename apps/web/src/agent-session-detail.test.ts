@@ -8,6 +8,7 @@ import {
   isLongQuietRun,
   runDuration,
   withNoLiveTranscriptNote,
+  withProviderOutageErrors,
   type ChatItem,
 } from "./components/AgentSession.js";
 
@@ -180,6 +181,24 @@ function renderSession(runs: AgentRun[]) {
     }),
   );
 }
+
+test("a Claude outage on a result line names the Claude status page", () => {
+  const items: ChatItem[] = [
+    {
+      key: "r",
+      kind: "result",
+      ok: false,
+      error: `API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+    },
+  ];
+  const noted = withProviderOutageErrors(items, { cli: "claude-code", model: "claude-sonnet-5" });
+  assert.match(noted[0]?.kind === "result" ? (noted[0].error ?? "") : "", /status\.claude\.com/);
+  assert.doesNotMatch(
+    items[0]?.kind === "result" ? (items[0].error ?? "") : "",
+    /status\.claude\.com/,
+    "the source transcript is not mutated",
+  );
+});
 
 test("the run picker wears a CSS status dot, not a colour emoji", () => {
   withStorage(storageWithout(), () => {
