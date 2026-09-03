@@ -5596,6 +5596,44 @@ button.session-expand[aria-pressed="true"] {
   max-width: 100%;
 }
 
+.hours-person-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  line-height: 1.25;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.hours-people-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hours-people-find {
+  font-family: var(--sans);
+  margin: 4px 0 2px;
+}
+
+.settings-page .input.hours-people-find {
+  font-family: var(--sans);
+  min-height: 32px;
+}
+
+.hours-people-find::-webkit-search-cancel-button,
+.hours-people-find::-webkit-search-decoration {
+  appearance: none;
+}
+
+.hours-people-rest {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
 .hours-people[data-scroll] {
   max-height: 220px;
   overflow-y: auto;

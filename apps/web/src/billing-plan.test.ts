@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  filterHoursPeople,
   formatHours,
   formatHoursPhrase,
+  formatHoursShare,
   hoursMeterState,
+  hoursPeopleRestCopy,
+  hoursPersonFill,
   hoursUsage,
   monthlyTotal,
+  rankHoursPeople,
   type PlanOffer,
 } from "./components/billing-plan.js";
 
@@ -92,4 +97,52 @@ test("the hours meter colours at three quarters, overage, and a stop", () => {
   assert.equal(hoursMeterState(over, null), "over");
   assert.equal(hoursMeterState(over, "pool"), "stopped");
   assert.equal(hoursMeterState(over, "ceiling"), "stopped");
+});
+
+test("the people list keeps the heaviest five and summarises the rest", () => {
+  const entries = [
+    { userId: "a", name: "Ada", agentHours: 8 },
+    { userId: "b", name: "Bea", agentHours: 0 },
+    { userId: "c", name: "Cy", agentHours: 3 },
+    { userId: "d", name: "Di", agentHours: 1.2 },
+    { userId: "e", name: "Ed", agentHours: 0.4 },
+    { userId: "f", name: "Fay", agentHours: 6 },
+    { userId: "g", name: "Gus", agentHours: 2 },
+    { userId: null, name: null, agentHours: 0.1 },
+  ];
+  const ranked = rankHoursPeople(entries);
+  assert.deepEqual(
+    ranked.preview.map((row) => row.name),
+    ["Ada", "Fay", "Cy", "Gus", "Di"],
+  );
+  assert.equal(ranked.rest.length, 2);
+  assert.equal(ranked.ranked.length, 7);
+  assert.equal(ranked.restHours, 0.5);
+  assert.equal(
+    hoursPeopleRestCopy(ranked.rest.length, ranked.restHours, 20.7),
+    "and 2 others used 0.5 hours this period (2%).",
+  );
+  assert.equal(hoursPeopleRestCopy(1, 0.4, 20), "and 1 other used 0.4 hours this period (2%).");
+});
+
+test("a name filter matches automatic runs and ignores unused seats", () => {
+  const ranked = rankHoursPeople([
+    { userId: "a", name: "Ada Lovelace", agentHours: 4 },
+    { userId: "b", name: "Alan Turing", agentHours: 2 },
+    { userId: null, name: null, agentHours: 1 },
+  ]);
+  assert.equal(filterHoursPeople(ranked.ranked, "ada").length, 1);
+  assert.equal(filterHoursPeople(ranked.ranked, "TUR").length, 1);
+  assert.equal(filterHoursPeople(ranked.ranked, "started").length, 1);
+  assert.equal(filterHoursPeople(ranked.ranked, "nobody").length, 0);
+});
+
+test("person bars scale to the heaviest spender, not the pool", () => {
+  assert.equal(hoursPersonFill(12, 12), 1);
+  assert.equal(hoursPersonFill(6, 12), 0.5);
+  assert.equal(hoursPersonFill(12, 500), 12 / 500);
+  assert.equal(hoursPersonFill(0, 12), 0);
+  assert.equal(formatHoursShare(12.4, 19), "65%");
+  assert.equal(formatHoursShare(0.1, 25), "<1%");
+  assert.equal(formatHoursShare(0, 25), null);
 });

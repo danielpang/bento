@@ -208,6 +208,96 @@ export function hoursMeterState(
   return undefined;
 }
 
+/** How many spenders the hours card shows before collapsing the rest. */
+export const HOURS_PEOPLE_PREVIEW = 5;
+
+/** Matches shown for a name filter. The rest ask for a longer query. */
+export const HOURS_PEOPLE_MATCH_CAP = 20;
+
+export type HoursPerson = PlanState["usageByMember"][number];
+
+export type RankedHoursPeople = {
+  ranked: HoursPerson[];
+  preview: HoursPerson[];
+  rest: HoursPerson[];
+  restHours: number;
+};
+
+/**
+ * Who spent hours, heaviest first, with the card's preview cut.
+ *
+ * Zero-hour rows are dropped: a Business roster of forty would
+ * otherwise be a membership list, and Billing is answering who used
+ * the pool, not who could have. The rest are summarised, not listed,
+ * because mounting every name (even behind a "show all") is what
+ * fails to scale.
+ */
+export function rankHoursPeople(
+  entries: HoursPerson[],
+  preview = HOURS_PEOPLE_PREVIEW,
+): RankedHoursPeople {
+  const ranked = [...entries]
+    .filter((entry) => entry.agentHours > 0)
+    .sort((a, b) => b.agentHours - a.agentHours || (a.name ?? "").localeCompare(b.name ?? ""));
+  const rest = ranked.slice(preview);
+  return {
+    ranked,
+    preview: ranked.slice(0, preview),
+    rest,
+    restHours: rest.reduce((sum, entry) => sum + entry.agentHours, 0),
+  };
+}
+
+/**
+ * A name filter over the ranked spenders.
+ *
+ * Runs that nobody started are filed as "Started automatically", so
+ * that phrase is what a search has to match, not a blank.
+ */
+export function filterHoursPeople(ranked: HoursPerson[], query: string): HoursPerson[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return ranked;
+  return ranked.filter((entry) => hoursPersonName(entry).toLowerCase().includes(needle));
+}
+
+export function hoursPersonName(entry: HoursPerson): string {
+  return entry.name ?? "Started automatically";
+}
+
+/**
+ * Width of a person's bar, 0 to 1, against the heaviest spender.
+ *
+ * Scaling to the included pool draws a 12 hour row as a sliver on a
+ * 500 hour Business allowance, which is exactly when a team is large
+ * enough to need the breakdown. The heaviest row is full; everyone
+ * else is relative to them.
+ */
+export function hoursPersonFill(hours: number, heaviest: number): number {
+  if (heaviest <= 0 || hours <= 0) return 0;
+  return Math.min(1, hours / heaviest);
+}
+
+/** Share of a whole, as people read a percentage. Null when there is nothing to say. */
+export function formatHoursShare(part: number, whole: number): string | null {
+  if (whole <= 0 || part <= 0) return null;
+  const pct = Math.round((part / whole) * 100);
+  if (pct < 1) return "<1%";
+  return `${pct}%`;
+}
+
+/**
+ * The collapsed tail of the people list, in one sentence.
+ *
+ * Naming the count and the hours is what makes the preview honest:
+ * the top five are not "the team".
+ */
+export function hoursPeopleRestCopy(count: number, hours: number, used: number): string {
+  const who = count === 1 ? "and 1 other used" : `and ${count} others used`;
+  const body = `${who} ${formatHoursPhrase(hours)} this period`;
+  const share = formatHoursShare(hours, used);
+  return share ? `${body} (${share}).` : `${body}.`;
+}
+
 /** Whole dollars, because every price on the ladder is one. */
 export function money(usd: number): string {
   return `$${usd % 1 === 0 ? usd.toFixed(0) : usd.toFixed(2)}`;
