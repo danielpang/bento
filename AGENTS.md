@@ -121,9 +121,11 @@ pg-boss has no push, so every idle worker costs a query per poll. The
 default interval is ten seconds (`QUEUE_POLL_SECONDS`) and the run
 workers use thirty. Before that, the server issued about seventeen
 transactions a second on an empty queue, and Neon billed the compute
-as busy around the clock. Give a new queue a faster explicit
-`pollingIntervalSeconds` only when a person is waiting on its jobs
-and one worker covers it; `gate.evaluate` is the example.
+as busy around the clock. Give a new queue the faster
+`INTERACTIVE_POLL_SECONDS` (two seconds) only when a person is
+waiting on its jobs and one worker covers it. Today that is
+`gate.evaluate`, `slack.inbound`, `slack.notify`, `linear.inbound`,
+`linear.create-issue`, and `linear.outbound`.
 
 ## Agent credentials belong to the organization, never the server
 

@@ -15,6 +15,7 @@ import {
 // module, so the two import each other. Both sides call functions at run
 // time only, which is what keeps the cycle harmless.
 import { advanceFeature } from "./gate-evaluator.js";
+import { INTERACTIVE_POLL_SECONDS } from "./queue.js";
 
 const BENTO_LABEL = "bento";
 
@@ -518,7 +519,10 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
     }
   }));
 
-  await ctx.boss.work<Parameters<typeof handleLinearInbound>[1]>("linear.inbound", async (jobs) => {
+  // A person just changed an issue in Linear, or a card on the board.
+  // Same two second pace as gate.evaluate; the backlog sweep above can
+  // wait for the slow default.
+  await ctx.boss.work<Parameters<typeof handleLinearInbound>[1]>("linear.inbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     for (const job of jobs) {
       try {
         await handleLinearInbound(ctx, job.data);
@@ -530,7 +534,7 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
     }
   });
 
-  await ctx.boss.work<Parameters<typeof handleLinearIssueCreate>[1]>("linear.create-issue", async (jobs) => {
+  await ctx.boss.work<Parameters<typeof handleLinearIssueCreate>[1]>("linear.create-issue", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     for (const job of jobs) {
       try {
         await handleLinearIssueCreate(ctx, job.data);
@@ -542,7 +546,7 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
     }
   });
 
-  await ctx.boss.work<Parameters<typeof handleLinearOutbound>[1]>("linear.outbound", async (jobs) => {
+  await ctx.boss.work<Parameters<typeof handleLinearOutbound>[1]>("linear.outbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     for (const job of jobs) {
       try {
         await handleLinearOutbound(ctx, job.data);

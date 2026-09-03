@@ -16,10 +16,19 @@ import type { AppContext } from "../context.js";
 /**
  * Seconds an idle worker sleeps between polls, for every queue that
  * does not set its own. The queues on this cadence are fed by cron
- * every few minutes or by webhooks, so ten seconds of pickup lag is
+ * every few minutes or by a bulk sync, so ten seconds of pickup lag is
  * invisible next to the interval that produced the job.
  */
 export const QUEUE_POLL_SECONDS = 10;
+
+/**
+ * Seconds an idle worker sleeps when a person is waiting on the job:
+ * a card moving after its run, a Slack mention or Approve, a Linear
+ * webhook, filing or mirroring an issue. One worker at two seconds is
+ * cheap. Thirty-two run workers at two seconds were not, which is why
+ * those poll slowly and enqueueRun wakes them instead.
+ */
+export const INTERACTIVE_POLL_SECONDS = 2;
 
 /**
  * Seconds an idle `run.execute` worker sleeps. Deliberately long:

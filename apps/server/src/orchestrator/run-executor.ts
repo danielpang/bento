@@ -36,7 +36,7 @@ import { extendRunGrant, revokeRunGrant, runHasActiveMcp, sweepExpiredGrants } f
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
-import { enqueueRun, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
@@ -1887,10 +1887,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     }
   }));
 
-  // Polled at pg-boss's old pace rather than the slow default: this is
-  // what moves a card once its run ends, and one worker every two
+  // Polled at the interactive pace rather than the slow default: this
+  // is what moves a card once its run ends, and one worker every two
   // seconds is cheap where a worker per slot was not.
-  await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: 2 }, async (jobs) => {
+  await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     await Promise.all(
       jobs.map(async (job) => {
         try {
