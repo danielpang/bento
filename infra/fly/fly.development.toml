@@ -25,9 +25,17 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = "suspend"
   auto_start_machines = true
-  # Keep one machine warm: the orchestrator owns queue workers and the
-  # gate sweep, which should not stop when web traffic goes quiet.
-  min_machines_running = 1
+  # Unlike production, nothing stays warm. A suspended machine polls no
+  # queue, so the development Neon compute scales to zero behind it
+  # instead of running around the clock for a database nobody is using,
+  # which was half the Neon bill. The cost is that the cron sweeps do
+  # not run while it sleeps; the next request or deploy wakes it and
+  # the sweeps catch up. Fly only counts HTTP through its proxy, so an
+  # agent run with the console closed can be suspended mid-run too:
+  # output produced while asleep never reaches the transcript. Keep
+  # the console open (the live stream holds the machine) while a
+  # development run is working.
+  min_machines_running = 0
 
 [[vm]]
   size = "shared-cpu-2x"
