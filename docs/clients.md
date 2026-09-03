@@ -6,7 +6,7 @@ The web console is the client Bento is built around. Two others exist and are us
 
 `apps/tui`. A full board in the terminal, plus the commands that make a board scriptable. It can also run the whole server itself, or act as a runner that executes work a shared server is holding.
 
-Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h` switches it to the card's history, `a` approves a manual gate and `R` rejects it, `r` re-checks, `x` stops the agent and `c` continues it with your own instructions.
+Select a card with `j`/`k`; the pane below tails the newest run's transcript, `h` switches it to the card's history, `a` approves a manual gate and `R` rejects it, `r` re-checks, `x` stops the agent and `c` continues it with your own instructions. `n` adds a card, `f` marks it completed, and `D` deletes it after a confirm.
 
 `bento setup` covers repositories, agents, stages, and provider keys. The scriptable versions of the same things:
 
@@ -19,7 +19,7 @@ bento pipeline export team-pipeline.yaml
 
 ## macOS app
 
-`apps/mac`. A native board built on the Native SDK, spawning the CLI underneath. It follows cards, approves gates, and edits agents, and does not yet do stages, repository commands, or the pipeline file.
+`apps/mac`. A native board built on the Native SDK, spawning the CLI underneath. It follows cards, approves gates, edits agents and stages, and does not yet do repository setup commands or the pipeline file.
 
 ## What each covers today
 
@@ -31,14 +31,16 @@ bento pipeline export team-pipeline.yaml
 | Set a repository's setup and test commands | Yes | `bento repos set` | No |
 | Export and import a pipeline as YAML | Yes | `bento pipeline` | No |
 | Export and import agents as YAML | Yes | `bento agents export` / `import` | No |
-| Add a card | Yes | No | Yes |
+| Add a card | Yes | Yes | Yes |
+| Delete a card | Yes | Yes | Yes |
+| Mark a card completed from any stage | Yes | Yes | Yes |
 | Add, edit and remove agents | Yes | Yes | Yes |
 | Assign an agent to a stage | Yes | Yes | Yes |
-| Add, remove and rename stages | Yes | Yes | Rename only |
+| Add, remove and rename stages | Yes | Yes | Yes |
 | Reorder stages | Drag, or arrow keys | No | No |
 | Switch a stage between manual and automatic | Yes | Yes | Yes |
 | Edit stage requirements, judge agent included | Yes | Yes | Judge shown, not edited |
-| Turn a stage's pull request on or off | Yes | Yes | No |
+| Turn a stage's pull request on or off | Yes | Yes | Yes |
 | Approve or reject a card | Yes | Yes | Yes |
 | Move a card between stages | Drag it between lanes | `a` and `b` keys, one step | Arrows on each card |
 | Start, stop, and continue an agent | Yes | Yes | Yes |

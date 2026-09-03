@@ -231,6 +231,7 @@ function Console({
   const [error, setError] = useState("");
 
   const [projectName, setProjectName] = useState("");
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
   const [features, setFeatures] = useState<Feature[]>([]);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
@@ -270,6 +271,12 @@ function Console({
   // When set, keystrokes compose a follow-up prompt instead of driving
   // the board. This is how a person takes over from an agent.
   const [takeover, setTakeover] = useState<string | null>(null);
+  // Same composer shape for a new card: the title is one line, and the
+  // board keys have to stand down while it is being typed.
+  const [newCard, setNewCard] = useState<string | null>(null);
+  // A second D confirms. One press that removed a card (and its
+  // sandbox) would be the wrong moment to learn there is no undo.
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [latestRunId, setLatestRunId] = useState<string | null>(null);
   const [cardRuns, setCardRuns] = useState<AgentRun[]>([]);
   const [latestRunStatus, setLatestRunStatus] = useState<string>("");
@@ -308,6 +315,7 @@ function Console({
       return;
     }
     setProjectName(project.name);
+    setProjectId(project.id);
     const [pipeline, featureRows, profileRows, statuses] = await Promise.all([
       client.getPipeline(project.id),
       client.listFeatures(project.id),
@@ -331,9 +339,7 @@ function Console({
     } else if (!pipeline.stages.some((stage) => stage.defaultAgentProfileId)) {
       setNotice("No stage has an agent. Run `bento setup` to assign one.");
     } else if (featureRows.length === 0) {
-      // A configured board with nothing on it looks broken, and the
-      // terminal cannot add a card, so name the place that can.
-      setNotice(`No cards yet. Add one in the web console at ${baseUrl}.`);
+      setNotice("No cards yet. Press n to add one.");
     }
   };
 
@@ -588,6 +594,52 @@ function Console({
       }
       if (screen !== "board") return;
 
+      if (newCard !== null) {
+        if (key.escape) {
+          setNewCard(null);
+          return;
+        }
+        if (key.return) {
+          const title = newCard.trim();
+          setNewCard(null);
+          if (!title || !projectId) return;
+          void client
+            .createFeature({ projectId, title })
+            .then((created) => {
+              setSelectedFeatureId(created.id);
+              setNotice(`Added ${created.title}`);
+            })
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setNewCard(newCard.slice(0, -1));
+          return;
+        }
+        if (input) setNewCard(newCard + input);
+        return;
+      }
+
+      if (deleteConfirm) {
+        if (input === "y" || input === "D") {
+          setDeleteConfirm(false);
+          if (!current) return;
+          void client
+            .deleteFeature(current.id)
+            .then(() => setNotice(`Deleted ${current.title}`))
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+          return;
+        }
+        if (key.escape || input === "n") {
+          setDeleteConfirm(false);
+          setNotice("Kept the card.");
+          return;
+        }
+        return;
+      }
+
       // Composing a follow-up prompt: everything goes into the text.
       if (takeover !== null) {
         if (key.escape) {
@@ -628,8 +680,23 @@ function Console({
         return;
       }
       if (input === "q") quit();
-      if (key.downArrow || input === "j") setSelectedFeatureId(ordered[Math.min(selected + 1, ordered.length - 1)]?.id ?? null);
-      if (key.upArrow || input === "k") setSelectedFeatureId(ordered[Math.max(selected - 1, 0)]?.id ?? null);
+      if (key.downArrow || input === "j") {
+        setDeleteConfirm(false);
+        setSelectedFeatureId(ordered[Math.min(selected + 1, ordered.length - 1)]?.id ?? null);
+      }
+      if (key.upArrow || input === "k") {
+        setDeleteConfirm(false);
+        setSelectedFeatureId(ordered[Math.max(selected - 1, 0)]?.id ?? null);
+      }
+      if (input === "n") {
+        if (!projectId) {
+          setNotice("No project yet. Run `bento setup` to connect a repository.");
+          return;
+        }
+        setDeleteConfirm(false);
+        setNewCard("");
+        return;
+      }
       if (!current) return;
       /**
        * Three places a card can be, and the keys mean different things
@@ -715,6 +782,27 @@ function Console({
             .then(refresh)
             .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
         }
+      }
+      if (input === "f") {
+        if (isDone) {
+          setNotice(finishedHint);
+        } else if (current.status === "cancelled") {
+          setNotice("This card was cancelled. It has no further actions.");
+        } else {
+          void client
+            .finishFeature(current.id)
+            .then(() => setNotice(`Marked ${current.title} completed`))
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        }
+      }
+      if (input === "D") {
+        if (latestRunId && !["succeeded", "failed", "cancelled"].includes(latestRunStatus)) {
+          setNotice("An agent is working this card. Stop it (x) or wait for it to finish.");
+          return;
+        }
+        setDeleteConfirm(true);
+        return;
       }
       if (input === "s") {
         if (!inAStage) {
@@ -864,6 +952,21 @@ function Console({
         </Box>
       )}
 
+      {newCard !== null && (
+        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="cyan">New card. Enter to add it to the backlog, Escape to cancel.</Text>
+          <Text>{newCard}▊</Text>
+        </Box>
+      )}
+      {deleteConfirm && current && (
+        <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
+          <Text color="red">Delete {current.title}?</Text>
+          <Text color="gray">
+            It leaves the board for everyone. The branch and any pull request stay. There is no undo.
+          </Text>
+          <Text color="gray">y delete · n cancel</Text>
+        </Box>
+      )}
       {takeover !== null && (
         <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
           <Text color="cyan">{takeoverTitle(cardAgent?.cli, runActive, cardAgent?.name ?? "The agent")}</Text>
@@ -884,7 +987,10 @@ function Console({
             look: j/k move · h {showHistory ? "logs" : "history"} · d {showChanges ? "logs" : "changes"} · r recheck · q
             quit
           </Text>
-          <Text color="gray">act: s start · x stop · c message · a approve · shift+R reject · b send back</Text>
+          <Text color="gray">
+            act: n new card · s start · x stop · c message · a approve · shift+R reject · b send back · f completed ·
+            shift+D delete
+          </Text>
         </Box>
       ) : (
         <Text color="gray">read only: no terminal input available</Text>

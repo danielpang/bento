@@ -33,6 +33,7 @@ import {
   parseGate,
   parseHistory,
   parsePipeline,
+  parsePipelineId,
   parseProfiles,
   parseRepos,
   parseProjects,
@@ -43,6 +44,7 @@ import {
   parseTeamIsMulti,
   parseTools,
   stageAgentPatch,
+  stageCreatePrPatch,
   runWords,
   stageGatePatch,
   statusWords,
@@ -92,6 +94,7 @@ export type Dialog =
   | "secret"
   | "new_repo"
   | "rename_stage"
+  | "new_stage"
   | "confirm";
 
 // Byte budgets for the text fields. The secret budget matches what the
@@ -153,6 +156,12 @@ export interface Model {
   readonly gateChecks: readonly GateCheck[];
 
   readonly pipelineStages: readonly StageConfig[];
+  /**
+   * Needed to append a stage. Empty until the pipeline snapshot
+   * arrives; adding a stage is refused until then rather than posting
+   * a blank id.
+   */
+  readonly pipelineId: Uint8Array;
   readonly repos: readonly Repo[];
 
   /**
@@ -244,6 +253,8 @@ export type Msg =
   // Board actions.
   | { readonly kind: "approve" }
   | { readonly kind: "advance" }
+  | { readonly kind: "finish" }
+  | { readonly kind: "delete_card" }
   | { readonly kind: "send_back" }
   | { readonly kind: "reject" }
   | { readonly kind: "recheck" }
@@ -272,8 +283,11 @@ export type Msg =
   | { readonly kind: "open_secret" }
   | { readonly kind: "open_new_repo" }
   | { readonly kind: "open_rename_stage"; readonly index: number }
+  | { readonly kind: "open_new_stage" }
   | { readonly kind: "close_dialog" }
   | { readonly kind: "confirm_delete_profile" }
+  | { readonly kind: "confirm_delete_card" }
+  | { readonly kind: "confirm_delete_stage" }
   | { readonly kind: "confirm_delete_repo" }
   | { readonly kind: "confirm_delete_secret" }
   | { readonly kind: "confirm_remove_member" }
@@ -301,8 +315,11 @@ export type Msg =
   | { readonly kind: "submit_secret" }
   | { readonly kind: "submit_repo" }
   | { readonly kind: "submit_stage_name" }
+  | { readonly kind: "submit_new_stage" }
   | { readonly kind: "delete_repo"; readonly index: number }
+  | { readonly kind: "delete_stage"; readonly index: number }
   | { readonly kind: "submit_gate" }
+  | { readonly kind: "toggle_create_pr" }
 
   // Agents panel.
   | { readonly kind: "toggle_tool_picker" }
@@ -372,6 +389,8 @@ export const viewUnbound = [
   "credentials_ok",
   "secrets_ok",
   "confirm_delete_profile",
+  "confirm_delete_card",
+  "confirm_delete_stage",
   "confirm_delete_repo",
   "confirm_delete_secret",
   "confirm_remove_member",
@@ -418,6 +437,7 @@ export const viewUnbound = [
   "gateTimeout",
   "stages",
   "cards",
+  "pipelineId",
 ] as const;
 
 // ---- text editing ----
@@ -576,6 +596,7 @@ export function initialModel(): Model {
     secrets: [],
     gateChecks: [],
     pipelineStages: [],
+    pipelineId: new Uint8Array(0),
     repos: [],
 
     colorScheme: "dark",
@@ -1106,6 +1127,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         stages: [],
         cards: [],
         pipelineStages: [],
+        pipelineId: new Uint8Array(0),
         repos: [],
         transcript: new Uint8Array(0),
         history: [],
@@ -1200,7 +1222,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "pipeline_ok":
       if (msg.status >= 400) return loadRefused(model, msg.status);
       if (!hasSelectedProject(model)) return model;
-      return { ...model, pipelineStages: parsePipeline(msg.body, model.profiles), lastError: new Uint8Array(0) };
+      return {
+        ...model,
+        pipelineStages: parsePipeline(msg.body, model.profiles),
+        pipelineId: parsePipelineId(msg.body),
+        lastError: new Uint8Array(0),
+      };
     case "repos_ok":
       if (msg.status >= 400) return loadRefused(model, msg.status);
       if (!hasSelectedProject(model)) return model;
@@ -1321,6 +1348,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           selectedCard: -1,
           stages: [],
           cards: [],
+          pipelineStages: [],
+          pipelineId: new Uint8Array(0),
           transcript: new Uint8Array(0),
           history: [],
           showHistory: false, showChanges: false, changes: new Uint8Array(0),
@@ -1542,6 +1571,63 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     // Send the card back a stage, for work that needs redoing. On a
     // finished card the same request reopens it into the stage it
     // finished in, so the notice says which one happened.
+    /**
+     * Marks the card completed from wherever it is, skipping the rest
+     * of the pipeline. The card keeps that stage, so Reopen returns it
+     * there. Same request the web console's Completed lane drop uses.
+     */
+    case "finish": {
+      if (!hasSelectedCard(model) || selectedCardTerminal(model)) return model;
+      return [
+        { ...model, notice: asciiBytes("Marked completed") },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/features/"), model.cards[model.selectedCard].id, asciiBytes("/finish")),
+            method: "POST",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
+            body: asciiBytes("{}"),
+          },
+          { key: "act", ok: "board_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "delete_card": {
+      if (!hasSelectedCard(model)) return model;
+      if (canStopAgent(model)) {
+        return { ...model, notice: asciiBytes("An agent is working this card. Stop it or wait for it to finish.") };
+      }
+      return {
+        ...closedDialog(model),
+        dialog: "confirm",
+        confirmKind: asciiBytes("card"),
+        confirmIndex: model.selectedCard,
+        confirmText: concat3(
+          asciiBytes("Delete "),
+          model.cards[model.selectedCard].title,
+          asciiBytes("? It leaves the board for everyone. The branch and any pull request stay. There is no undo."),
+        ),
+      };
+    }
+
+    case "confirm_delete_card": {
+      if (model.confirmIndex < 0 || model.confirmIndex >= model.cards.length) return closedDialog(model);
+      const doomed = model.cards[model.confirmIndex];
+      return [
+        { ...closedDialog(model), selectedCard: -1, notice: asciiBytes("Deleted the card") },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/features/"), doomed.id, new Uint8Array(0)),
+            method: "DELETE",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model) },
+          },
+          { key: "act", ok: "board_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
     case "send_back": {
       if (!hasSelectedCard(model) || selectedCardCancelled(model)) return model;
       return [
@@ -1847,6 +1933,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         stageNameEdit: seedEdit(model.pipelineStages[msg.index].name),
       };
     }
+
+    case "open_new_stage":
+      if (model.pipelineId.length === 0) {
+        return { ...model, notice: asciiBytes("The pipeline is still loading. Try again in a moment.") };
+      }
+      return { ...closedDialog(model), dialog: "new_stage", stageNameEdit: emptyEdit() };
 
     /**
      * The add-agent form needs the model list for the selected tool,
@@ -2211,6 +2303,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           stages: [],
           cards: [],
           pipelineStages: [],
+          pipelineId: new Uint8Array(0),
           repos: [],
           profiles: [],
           secrets: [],
@@ -2476,6 +2569,80 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             timeoutMs: 5000,
             headers: { authorization: authHeader(model), "content-type": "application/json" },
             body: jsonObject1(asciiBytes("name"), name),
+          },
+          { key: "act", ok: "pipeline_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "submit_new_stage": {
+      const name = model.stageNameEdit.text.trim();
+      if (name.length === 0 || model.pipelineId.length === 0) return closedDialog(model);
+      return [
+        { ...closedDialog(model), notice: asciiBytes("Added the stage") },
+        Cmd.fetch(
+          {
+            url: apiUrl(model, asciiBytes("/api/stages")),
+            method: "POST",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
+            body: jsonObject2(asciiBytes("pipelineId"), model.pipelineId, asciiBytes("name"), name),
+          },
+          { key: "act", ok: "pipeline_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "delete_stage": {
+      if (msg.index < 0 || msg.index >= model.pipelineStages.length) return model;
+      return {
+        ...closedDialog(model),
+        dialog: "confirm",
+        confirmKind: asciiBytes("stage"),
+        confirmIndex: msg.index,
+        confirmText: concat3(
+          asciiBytes("Remove "),
+          model.pipelineStages[msg.index].name,
+          asciiBytes("? The server refuses while cards are still in it."),
+        ),
+      };
+    }
+
+    case "confirm_delete_stage": {
+      if (model.confirmIndex < 0 || model.confirmIndex >= model.pipelineStages.length) return closedDialog(model);
+      const doomed = model.pipelineStages[model.confirmIndex];
+      return [
+        { ...closedDialog(model), editingStage: -1, notice: asciiBytes("Removed the stage") },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/stages/"), doomed.id, new Uint8Array(0)),
+            method: "DELETE",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model) },
+          },
+          { key: "act", ok: "pipeline_changed", err: "act_failed" },
+        ),
+      ];
+    }
+
+    case "toggle_create_pr": {
+      if (model.editingStage < 0 || model.editingStage >= model.pipelineStages.length) return model;
+      const stage = model.pipelineStages[model.editingStage];
+      const next = !stage.createPr;
+      return [
+        {
+          ...model,
+          notice: next
+            ? asciiBytes("This stage will open a pull request")
+            : asciiBytes("This stage will no longer open a pull request"),
+        },
+        Cmd.fetch(
+          {
+            url: idUrl(model, asciiBytes("/api/stages/"), stage.id, new Uint8Array(0)),
+            method: "PATCH",
+            timeoutMs: 5000,
+            headers: { authorization: authHeader(model), "content-type": "application/json" },
+            body: stageCreatePrPatch(next),
           },
           { key: "act", ok: "pipeline_changed", err: "act_failed" },
         ),
@@ -3014,6 +3181,31 @@ export function dialogRenameStage(model: Model): boolean {
   return model.dialog === "rename_stage";
 }
 
+export function dialogNewStage(model: Model): boolean {
+  return model.dialog === "new_stage";
+}
+
+export function confirmingCard(model: Model): boolean {
+  return bytesEq(model.confirmKind, asciiBytes("card"));
+}
+
+export function confirmingStage(model: Model): boolean {
+  return bytesEq(model.confirmKind, asciiBytes("stage"));
+}
+
+export function canFinish(model: Model): boolean {
+  return hasSelectedCard(model) && !selectedCardTerminal(model);
+}
+
+export function canDeleteCard(model: Model): boolean {
+  return hasSelectedCard(model);
+}
+
+export function editingStageCreatesPr(model: Model): boolean {
+  if (!editingAStage(model)) return false;
+  return model.pipelineStages[model.editingStage].createPr;
+}
+
 /** The mirror of gateManual, so the pair reads as one choice of two. */
 export function gateAutomatic(model: Model): boolean {
   return !model.gateManual;
@@ -3100,7 +3292,7 @@ export function needsSetupHint(model: Model): boolean {
 }
 
 function colCards(model: Model, position: number): readonly Card[] {
-  return model.cards.filter((c) => c.stagePos === position);
+  return model.cards.filter((c) => c.stagePos === position && !c.finished);
 }
 
 function colName(model: Model, position: number): Uint8Array {
@@ -3119,7 +3311,12 @@ function colName(model: Model, position: number): Uint8Array {
  * be selected.
  */
 export function colBacklog(model: Model): readonly Card[] {
-  return model.cards.filter((c) => c.stagePos < 0);
+  return model.cards.filter((c) => c.stagePos < 0 && !c.finished);
+}
+
+/** Finished and cancelled cards, which keep their last stage but leave its column. */
+export function colCompleted(model: Model): readonly Card[] {
+  return model.cards.filter((c) => c.finished);
 }
 
 /**
@@ -3134,7 +3331,7 @@ export function colBacklog(model: Model): readonly Card[] {
 const LAST_COLUMN = 9;
 
 function colCardsAt(model: Model, position: number): readonly Card[] {
-  if (position === LAST_COLUMN) return model.cards.filter((c) => c.stagePos >= LAST_COLUMN);
+  if (position === LAST_COLUMN) return model.cards.filter((c) => c.stagePos >= LAST_COLUMN && !c.finished);
   return colCards(model, position);
 }
 

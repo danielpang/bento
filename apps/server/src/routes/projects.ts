@@ -705,6 +705,7 @@ export function projectRoutes(ctx: AppContext) {
      * polls every three seconds, and gate criteria would be a payload
      * nobody reads on all but one screen.
      *
+     *   pipeline|<id>
      *   stage|<id>|<position>|<agentProfileId or ->|<gateType>|<createPr 1 or 0>|<name>
      *   criterion|<stageId>|<index>|<type>|<timeoutSec or ->|<cmd or ->
      *
@@ -724,7 +725,7 @@ export function projectRoutes(ctx: AppContext) {
         .where(eq(stages.pipelineId, pipeline.id))
         .orderBy(stages.position);
 
-      const lines: string[] = [];
+      const lines: string[] = [`pipeline|${pipeline.id}`];
       for (const s of stageRows) {
         lines.push(
           `stage|${s.id}|${s.position}|${s.defaultAgentProfileId ?? "-"}|${s.gateType}|${s.createPr ? "1" : "0"}|${s.name}`,

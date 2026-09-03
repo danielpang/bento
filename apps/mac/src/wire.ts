@@ -240,6 +240,26 @@ export function jsonObject3(
   return concat3(concat3(head, second, asciiBytes(",")), third, asciiBytes("}"));
 }
 
+/** Toggle whether a successful run on this stage opens a pull request. */
+export function stageCreatePrPatch(createPr: boolean): Uint8Array {
+  return createPr ? asciiBytes("{\"createPr\":true}") : asciiBytes("{\"createPr\":false}");
+}
+
+/**
+ * The pipeline id the Mac app needs to append a stage. The board
+ * snapshot never carries it: adding a stage is rare, and the board
+ * polls every three seconds.
+ */
+export function parsePipelineId(body: Uint8Array): Uint8Array {
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("pipeline");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length >= 2 && bytesEq(fields[0], tag)) return fields[1];
+  }
+  return new Uint8Array(0);
+}
+
 /**
  * A stage patch naming its default agent. Null clears the assignment,
  * which is how a stage goes back to running nothing on its own, and
@@ -370,6 +390,12 @@ export interface Card {
    */
   readonly canBack: boolean;
   readonly canFwd: boolean;
+  /**
+   * Finished or cancelled. Those cards leave their stage column for
+   * Completed, the way the web console's lane does, because they keep
+   * the stage they ended in and would otherwise inflate that queue.
+   */
+  readonly finished: boolean;
   /** The agent's latest spoken line, while the card is being worked. */
   readonly output: Uint8Array;
   readonly hasOutput: boolean;
@@ -571,6 +597,7 @@ export function parseCards(body: Uint8Array): readonly Card[] {
       index: out.length,
       canBack: stagePos >= 0 && !terminal,
       canFwd: !terminal,
+      finished: terminal,
       runFailed: !isDash(fields[5]) && bytesEq(fields[4], asciiBytes("failed")),
       isGated: bytesEq(fields[3], asciiBytes("gated")),
     });

@@ -1,7 +1,7 @@
-<!-- Bento command centre: project picker, six stage kanban board, a
-     detail pane with the live agent transcript, and the three
-     configuration panels the web console has (agents, pipeline, team).
-     Binds the model in core.ts; validate with: native check -->
+<!-- Bento command centre: project picker, stage kanban board with a
+     Completed lane, a detail pane with the live agent transcript, and
+     the three configuration panels the web console has (agents,
+     pipeline, team). Binds the model in core.ts; validate with: native check -->
 
 <template name="board-column" args="title cards">
   <column gap="8" padding="8" min-width="180" background="surface" radius="md">
@@ -171,6 +171,11 @@
             <if test="{hasCol7}"><use template="board-column" title="{colName7}" cards="{col7}" /></if>
             <if test="{hasCol8}"><use template="board-column" title="{colName8}" cards="{col8}" /></if>
             <if test="{hasCol9}"><use template="board-column" title="{colName9}" cards="{col9}" /></if>
+            <!-- Finished work leaves its stage, the way the web
+                 console's Completed lane does. A shipped card sitting
+                 in Review next to work still being reviewed made the
+                 count lie about the queue. -->
+            <use template="board-column" title="Completed" cards="{colCompleted}" />
           </row>
         </scroll>
 
@@ -203,14 +208,16 @@
               </if>
             </row>
 
-            <!-- What the gate is waiting on, which is the answer to the
-                 question a stuck card actually raises. -->
+            <!-- What the gate is waiting on. Titled Requirements, the
+                 same heading the web console uses, so the two clients
+                 name the same section. -->
             <column gap="6">
+              <text foreground="text_muted">Requirements</text>
               <if test="{hasGateChecks}">
                 <for each="gateChecks" key="index" as="g">
                   <row key="{g.index}" gap="6" cross="start">
-                    <text foreground="text_muted">{g.type}</text>
                     <text>{g.status}</text>
+                    <text foreground="text_muted">{g.type}</text>
                     <text foreground="text_muted" wrap="true" grow="1">{g.detail}</text>
                   </row>
                 </for>
@@ -241,13 +248,18 @@
                   <if test="{inAStage}">
                     <button size="sm" variant="primary" on-press="approve">Approve</button>
                     <button size="sm" variant="destructive" on-press="reject">Reject</button>
-                    <button size="sm" on-press="recheck">Re-check gate</button>
+                    <button size="sm" on-press="recheck">Re-check requirements</button>
                     <button size="sm" on-press="send_back">Send back</button>
                   </if>
                   <else>
                     <button size="sm" variant="primary" on-press="advance">Start pipeline</button>
                   </else>
                 </row>
+                <if test="{canFinish}">
+                  <row gap="8">
+                    <button size="sm" on-press="finish">Mark completed</button>
+                  </row>
+                </if>
               </else>
             </else>
             <row gap="8">
@@ -259,6 +271,10 @@
               </if>
               <if test="{canContinue}">
                 <button size="sm" on-press="open_takeover">Continue</button>
+              </if>
+              <if test="{canDeleteCard}">
+                <spacer grow="1" />
+                <button size="sm" variant="ghost" on-press="delete_card" label="Delete this card" icon="trash" />
               </if>
             </row>
             <row gap="8">
@@ -462,7 +478,8 @@
               <row gap="8" cross="center">
                 <text grow="1">{s.name}</text>
                 <button size="sm" variant="ghost" on-press="open_rename_stage:{s.index}">Rename</button>
-              <button size="sm" variant="ghost" on-press="edit_stage:{s.index}">Configure</button>
+                <button size="sm" variant="ghost" on-press="edit_stage:{s.index}">Configure</button>
+                <button size="sm" variant="ghost" on-press="delete_stage:{s.index}" label="Remove this stage" icon="trash" />
               </row>
               <row gap="6" cross="center">
                 <if test="{isDarkMode}">
@@ -531,6 +548,14 @@
               <text foreground="text_muted" wrap="true">This runs inside this project's sandbox. Leave it empty for no command.</text>
             </if>
 
+            <text foreground="text_muted">Pull request</text>
+            <if test="{editingStageCreatesPr}">
+              <button size="sm" on-press="toggle_create_pr">Opens a pull request when the agent finishes</button>
+            </if>
+            <else>
+              <button size="sm" on-press="toggle_create_pr">Does not open a pull request</button>
+            </else>
+
             <row gap="8">
               <button size="sm" variant="primary" on-press="submit_gate">Save the gate</button>
               <button size="sm" variant="ghost" on-press="cancel_stage_edit">Cancel</button>
@@ -538,6 +563,7 @@
           </column>
         </if>
 
+        <button size="sm" on-press="open_new_stage">Add a stage</button>
         <row gap="8">
           <spacer grow="1" />
           <button size="sm" variant="ghost" on-press="close_panel">Close</button>
@@ -758,6 +784,19 @@
     </dialog>
   </if>
 
+  <if test="{dialogNewStage}">
+    <dialog text="Add a stage">
+      <column gap="10" padding="14" min-width="420">
+        <text foreground="text_muted" wrap="true">It joins the end of the pipeline, waiting for your approval and with no agent, until you say otherwise.</text>
+        <text-field text="{stageNameEdit.text}" placeholder="Security review" on-input="stage_name_edit" on-submit="submit_new_stage" label="Stage name" autofocus="true" />
+        <row gap="8">
+          <button size="sm" variant="primary" on-press="submit_new_stage">Add</button>
+          <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
+        </row>
+      </column>
+    </dialog>
+  </if>
+
   <if test="{dialogSecret}">
     <dialog text="Add a credential">
       <column gap="10" padding="14" min-width="460">
@@ -803,6 +842,12 @@
           </if>
           <if test="{confirmingMember}">
             <button size="sm" variant="destructive" on-press="confirm_remove_member">Remove</button>
+          </if>
+          <if test="{confirmingCard}">
+            <button size="sm" variant="destructive" on-press="confirm_delete_card">Delete</button>
+          </if>
+          <if test="{confirmingStage}">
+            <button size="sm" variant="destructive" on-press="confirm_delete_stage">Remove</button>
           </if>
           <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
         </row>
