@@ -173,6 +173,21 @@ test("a runner-reported OpenRouter outage names the OpenRouter status page", () 
   assert.match(reported ?? "", /status\.openrouter\.ai/);
 });
 
+test("a runner-reported Cursor outage names the Cursor status page", () => {
+  const reported = runnerReportedError("cursor", "503 Service Unavailable", "claude-sonnet-5");
+  assert.match(reported ?? "", /status\.cursor\.com/);
+});
+
+test("a runner-reported DeepSeek outage names the DeepSeek status page", () => {
+  const reported = runnerReportedError("dsh", "503 Service Unavailable", "deepseek-v4-pro");
+  assert.match(reported ?? "", /status\.deepseek\.com/);
+});
+
+test("a runner-reported Grok mention names the xAI status page", () => {
+  const reported = runnerReportedError("cursor", "xAI API error: grok-4.6 is overloaded", "grok-4.6");
+  assert.match(reported ?? "", /status\.x\.ai/);
+});
+
 test("a runner-reported auth failure is not given a status page", () => {
   assert.equal(
     runnerReportedError("claude-code", "401 Unauthorized: invalid API key", "claude-sonnet-5"),

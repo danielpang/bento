@@ -15,15 +15,18 @@ test("a status page URL becomes its own link piece", () => {
   assert.match(parts[0]?.text ?? "", /529 Overloaded/);
 });
 
-test("OpenAI and OpenRouter status URLs are recognized", () => {
-  assert.deepEqual(splitErrorLinks("see https://status.openai.com").at(-1), {
-    text: "https://status.openai.com",
-    href: "https://status.openai.com",
-  });
-  assert.deepEqual(splitErrorLinks("see https://status.openrouter.ai").at(-1), {
-    text: "https://status.openrouter.ai",
-    href: "https://status.openrouter.ai",
-  });
+test("every provider status URL is recognized", () => {
+  for (const url of [
+    "https://status.openai.com",
+    "https://status.openrouter.ai",
+    "https://status.cursor.com",
+    "https://status.x.ai",
+    "https://status.deepseek.com",
+    "https://aistudio.google.com/status",
+    "https://status.poolside.ai",
+  ]) {
+    assert.deepEqual(splitErrorLinks(`see ${url}`).at(-1), { text: url, href: url });
+  }
 });
 
 test("a trailing period is not part of the href", () => {

@@ -1,50 +1,97 @@
 import { providerForProfile } from "./models.js";
 
 /**
- * Official status pages for the model providers a Bento run can fail
- * with. When the provider is down, Bento is down too: the useful next
- * step is their page, not ours.
+ * Official status pages for every model provider a Bento tool can
+ * reach. When the provider is down, Bento is down too: the useful
+ * next step is their page, not ours.
+ *
+ * Only providers a CLI talks to directly. Models served through
+ * OpenRouter still point at OpenRouter, because that is the API
+ * the tool called.
  */
 export const PROVIDER_STATUS_PAGES = {
   anthropic: { name: "Claude", url: "https://status.claude.com" },
   openai: { name: "OpenAI", url: "https://status.openai.com" },
   openrouter: { name: "OpenRouter", url: "https://status.openrouter.ai" },
+  cursor: { name: "Cursor", url: "https://status.cursor.com" },
+  xai: { name: "Grok", url: "https://status.x.ai" },
+  deepseek: { name: "DeepSeek", url: "https://status.deepseek.com" },
+  google: { name: "Gemini", url: "https://aistudio.google.com/status" },
+  poolside: { name: "Poolside", url: "https://status.poolside.ai" },
 } as const;
 
 export type StatusProvider = keyof typeof PROVIDER_STATUS_PAGES;
 
+/** How a model-string prefix or catalog id maps onto a status page. */
+const BY_ID: Record<string, StatusProvider> = {
+  anthropic: "anthropic",
+  openai: "openai",
+  openrouter: "openrouter",
+  cursor: "cursor",
+  xai: "xai",
+  deepseek: "deepseek",
+  google: "google",
+  gemini: "google",
+  poolside: "poolside",
+};
+
+/**
+ * The tool's own API, when the error and model do not name anyone.
+ * Cursor bills every model through Cursor, so a Cursor run that only
+ * says 503 is a Cursor outage, not Claude's or Grok's.
+ */
+const BY_CLI: Record<string, StatusProvider> = {
+  "claude-code": "anthropic",
+  codex: "openai",
+  cursor: "cursor",
+  dsh: "deepseek",
+  pool: "poolside",
+};
+
+/**
+ * Mentions in the error, most specific first. OpenRouter wins over
+ * the model behind it: a Claude Code run routed through OpenRouter
+ * still says "openrouter" when the gateway is what failed.
+ */
+const MENTIONS: readonly [RegExp, StatusProvider][] = [
+  [/openrouter/i, "openrouter"],
+  [/anthropic|status\.claude|api\.anthropic|\bclaude\b/i, "anthropic"],
+  [/\bopenai\b|chatgpt|api\.openai/i, "openai"],
+  [/\bcursor\b|\bcomposer\b/i, "cursor"],
+  [/\bgrok\b|\bxai\b|x\.ai/i, "xai"],
+  [/deepseek/i, "deepseek"],
+  [/gemini|aistudio\.google|generativelanguage\.googleapis|\bgoogle\b/i, "google"],
+  [/poolside|\blaguna\b/i, "poolside"],
+];
+
 /**
  * The provider whose outage this error is about, when we can tell.
  *
- * Mentions in the error win, because a Claude Code run routed through
- * OpenRouter still says "openrouter" when the gateway is the thing
- * that failed. The model string and the tool are the fallback for
- * errors that only report a status (529, overloaded) and name nobody.
- *
- * Cursor is left out of the fallback: everything it runs is billed
- * through Cursor, so a Cursor outage is not a Claude or OpenAI one.
+ * Mentions in the error win, then a provider/model prefix, then the
+ * tool's own API. providerForProfile is last, for opencode and pi
+ * whose model string already names the company.
  */
 export function outageProvider(
   error: string,
   hint?: { cli?: string | undefined; model?: string | undefined },
 ): StatusProvider | null {
-  const text = error.toLowerCase();
-  if (text.includes("openrouter")) return "openrouter";
-  if (/anthropic|status\.claude|api\.anthropic/.test(text)) return "anthropic";
-  if (/\bopenai\b|chatgpt|api\.openai/.test(text)) return "openai";
+  for (const [pattern, provider] of MENTIONS) {
+    if (pattern.test(error)) return provider;
+  }
 
   const model = hint?.model?.trim();
   if (model) {
-    const prefix = model.split("/")[0];
-    if (prefix === "openrouter" || prefix === "anthropic" || prefix === "openai") return prefix;
+    const prefix = model.split("/")[0] ?? "";
+    const named = BY_ID[prefix];
+    if (named) return named;
   }
 
-  const cli = hint?.cli;
-  if (cli === "claude-code") return "anthropic";
-  if (cli === "codex") return "openai";
-  if (cli && model && cli !== "cursor" && cli !== "pool" && cli !== "dsh" && cli !== "fake") {
-    const id = providerForProfile(cli, model)?.id;
-    if (id === "openrouter" || id === "anthropic" || id === "openai") return id;
+  const fromCli = hint?.cli ? BY_CLI[hint.cli] : undefined;
+  if (fromCli) return fromCli;
+
+  if (hint?.cli && model) {
+    const id = providerForProfile(hint.cli, model)?.id;
+    if (id && id in BY_ID) return BY_ID[id] ?? null;
   }
   return null;
 }

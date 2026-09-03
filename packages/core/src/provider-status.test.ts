@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  PROVIDER_STATUS_PAGES,
   looksLikeProviderOutage,
   outageProvider,
   providerOutageAdvice,
@@ -53,10 +54,42 @@ test("a missing model is not an outage", () => {
   assert.equal(looksLikeProviderOutage("404 Not Found: The model `laguna-xl-9` does not exist"), false);
 });
 
-test("a Cursor failure is not blamed on Claude", () => {
+test("a Cursor CLI outage names Cursor, not the model behind it", () => {
   const error = "503 Service Unavailable";
-  assert.equal(outageProvider(error, { cli: "cursor", model: "claude-sonnet-5" }), null);
-  assert.equal(providerOutageAdvice(error, { cli: "cursor", model: "claude-sonnet-5" }), null);
+  assert.equal(outageProvider(error, { cli: "cursor", model: "claude-sonnet-5" }), "cursor");
+  assert.match(providerOutageAdvice(error, { cli: "cursor", model: "claude-sonnet-5" }) ?? "", /status\.cursor\.com/);
+  assert.equal(outageProvider(error, { cli: "cursor", model: "grok-4.6" }), "cursor");
+});
+
+test("a Grok mention names the xAI status page", () => {
+  const error = "xAI API error: 503 grok-4.6 is overloaded";
+  assert.equal(outageProvider(error, { cli: "cursor", model: "grok-4.6" }), "xai");
+  assert.match(providerOutageAdvice(error) ?? "", /status\.x\.ai/);
+});
+
+test("a DeepSeek Harness outage names the DeepSeek status page", () => {
+  const error = "503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "dsh", model: "deepseek-v4-pro" }), "deepseek");
+  assert.match(providerOutageAdvice(error, { cli: "dsh" }) ?? "", /status\.deepseek\.com/);
+});
+
+test("a Gemini model prefix names the Gemini status page", () => {
+  const error = "503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "pi", model: "google/gemini-2.5-pro" }), "google");
+  assert.match(providerOutageAdvice(error, { cli: "opencode", model: "google/gemini-2.5-pro" }) ?? "", /aistudio\.google\.com\/status/);
+});
+
+test("a Poolside outage names the Poolside status page", () => {
+  const error = "502 Bad Gateway";
+  assert.equal(outageProvider(error, { cli: "pool", model: "poolside/laguna-s-2.1" }), "poolside");
+  assert.match(providerOutageAdvice(error, { cli: "pool" }) ?? "", /status\.poolside\.ai/);
+});
+
+test("every provider page is an https status URL", () => {
+  for (const [id, page] of Object.entries(PROVIDER_STATUS_PAGES)) {
+    assert.match(page.url, /^https:\/\//, `${id} is not an https URL`);
+    assert.ok(page.name.trim(), `${id} has no display name`);
+  }
 });
 
 test("an outage with no identifiable provider gets no status page", () => {
