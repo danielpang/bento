@@ -2208,7 +2208,7 @@ test("an owner cannot delete their account while they still own an organization"
     headers: ownerAuth,
     body: JSON.stringify({ callbackURL: "/" }),
   });
-  assert.notEqual(ownerDelete.status, 200, "owning a team blocks account deletion");
+  assert.equal(ownerDelete.status, 400, "owning a team blocks account deletion");
   const ownerBody = (await ownerDelete.json()) as { message?: string; error?: { message?: string } | string };
   const ownerMessage =
     ownerBody.message ??
@@ -2255,6 +2255,13 @@ test("an owner cannot delete their account while they still own an organization"
     body: JSON.stringify({ callbackURL: "/" }),
   });
   assert.equal(memberDelete.status, 200, "a member may request the confirmation mail");
+  const memberBody = (await memberDelete.json()) as { success?: boolean; message?: string };
+  assert.equal(memberBody.message, "Verification email sent");
+  // The mail is sent after the 200, as a background task.
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && !sent.some((subject) => /delete/i.test(subject))) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   assert.ok(
     sent.some((subject) => /delete/i.test(subject)),
     "a member is emailed the confirmation link",

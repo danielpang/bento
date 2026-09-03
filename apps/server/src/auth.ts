@@ -65,9 +65,21 @@ function ownerDeletionMessage(names: string[]): string {
 }
 
 async function refuseIfOwnsOrganization(db: Db, userId: string): Promise<void> {
+  const reason = await accountDeletionBlockedReason(db, userId);
+  if (!reason) return;
+  throw new APIError("BAD_REQUEST", { message: reason });
+}
+
+/**
+ * Why this account cannot be deleted right now, or null if it can.
+ *
+ * Exported so the HTTP layer can refuse the confirmation-mail request
+ * before better-auth answers 200 and sends the mail in the background.
+ */
+export async function accountDeletionBlockedReason(db: Db, userId: string): Promise<string | null> {
   const names = await ownedOrganizationNames(db, userId);
-  if (names.length === 0) return;
-  throw new APIError("BAD_REQUEST", { message: ownerDeletionMessage(names) });
+  if (names.length === 0) return null;
+  return ownerDeletionMessage(names);
 }
 
 /**
