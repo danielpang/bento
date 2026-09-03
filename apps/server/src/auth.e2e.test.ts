@@ -16,6 +16,7 @@ import {
   runArtifacts,
   runMigrations,
   user,
+  verification,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
@@ -2216,9 +2217,18 @@ test("an owner cannot delete their account while they still own an organization"
     JSON.stringify(ownerBody);
   assert.match(ownerMessage, /Stay Co/);
   assert.equal(
-    sent.filter((subject) => /delete/i.test(subject)).length,
+    sent.filter((subject) => subject.includes("deleting your Bento account")).length,
     0,
     "no deletion mail for an owner",
+  );
+
+  const [ownerUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "owner-stay@bento.test"));
+  assert.ok(ownerUser);
+  const ownerTokens = await ctx.db.select().from(verification).where(eq(verification.value, ownerUser.id));
+  assert.equal(
+    ownerTokens.filter((row) => row.identifier.startsWith("delete-account-")).length,
+    0,
+    "no deletion token is stored for an owner",
   );
 
   const memberSignUp = await hookedApp.request("/api/auth/sign-up/email", {
@@ -2257,14 +2267,26 @@ test("an owner cannot delete their account while they still own an organization"
   assert.equal(memberDelete.status, 200, "a member may request the confirmation mail");
   const memberBody = (await memberDelete.json()) as { success?: boolean; message?: string };
   assert.equal(memberBody.message, "Verification email sent");
+
+  const [memberUser] = await ctx.db
+    .select({ id: user.id })
+    .from(user)
+    .where(eq(user.email, "member-leave@bento.test"));
+  assert.ok(memberUser);
+  const memberTokens = await ctx.db.select().from(verification).where(eq(verification.value, memberUser.id));
+  assert.ok(
+    memberTokens.some((row) => row.identifier.startsWith("delete-account-")),
+    "a confirmation token is stored for a member",
+  );
+
   // The mail is sent after the 200, as a background task.
-  const deadline = Date.now() + 1000;
-  while (Date.now() < deadline && !sent.some((subject) => /delete/i.test(subject))) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !sent.includes("Confirm deleting your Bento account")) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.ok(
-    sent.some((subject) => /delete/i.test(subject)),
-    "a member is emailed the confirmation link",
+    sent.includes("Confirm deleting your Bento account"),
+    `a member is emailed the confirmation link, got ${JSON.stringify(sent)}`,
   );
 });
 
