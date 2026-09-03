@@ -4,24 +4,24 @@ import { useToast } from "./Toasts.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
 import {
   displayHighlights,
-  filterHoursPeople,
+  filterHoursEntries,
   formatHours,
   formatHoursPhrase,
   formatHoursShare,
-  HOURS_PEOPLE_MATCH_CAP,
+  HOURS_MATCH_CAP,
+  hoursBarFill,
+  hoursEntriesFromFeatures,
   hoursMeterState,
-  hoursPeopleRestCopy,
-  hoursPersonFill,
-  hoursPersonName,
+  hoursRestCopy,
   hoursUsage,
   monthlyTotal,
   money,
   overageCheckoutNote,
-  rankHoursPeople,
+  rankHoursEntries,
   resetsOn,
   seatPrice,
   useBillingPlan,
-  type HoursPerson,
+  type HoursEntry,
   type PlanOffer,
   type PlanState,
 } from "./billing-plan.js";
@@ -261,33 +261,73 @@ export function BillingCard() {
 }
 
 /**
- * Who spent the hours, without listing the roster.
+ * Which cards spent the hours, without listing the board.
  *
  * The heaviest few are the signal. The rest collapse to a count and
- * a name field, because "show all" on a team of forty is a membership
- * directory that pushes the overage choice off the screen and still
- * does not help anyone find a person.
+ * a title field, because a "show all" of forty cards is a directory
+ * that pushes the overage choice off the screen and still does not
+ * help anyone find a card.
  */
-function HoursByPerson({ entries, used }: { entries: HoursPerson[]; used: number }) {
+function HoursByCard({ state, used }: { state: PlanState; used: number }) {
+  const billed = state.usageByFeature;
+  const [entries, setEntries] = useState<HoursEntry[] | null>(
+    billed !== undefined ? hoursEntriesFromFeatures(billed) : null,
+  );
+
+  useEffect(() => {
+    if (billed !== undefined) {
+      setEntries(hoursEntriesFromFeatures(billed));
+      return;
+    }
+    const from = encodeURIComponent(state.agentHours.periodStart);
+    const to = encodeURIComponent(state.agentHours.periodEnd);
+    let cancelled = false;
+    void fetch(`/api/team/hours?from=${from}&to=${to}`, { credentials: "include" })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          setEntries([]);
+          return;
+        }
+        const body = (await res.json()) as {
+          features?: { featureId: string; title: string; agentHours: number }[];
+        };
+        setEntries(hoursEntriesFromFeatures(body.features ?? []));
+      })
+      .catch(() => {
+        if (!cancelled) setEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [billed, state.agentHours.periodStart, state.agentHours.periodEnd]);
+
+  if (!entries) return null;
+  return <HoursBreakdown entries={entries} used={used} />;
+}
+
+const CARD_NOUN = { singular: "card", plural: "cards" };
+
+function HoursBreakdown({ entries, used }: { entries: HoursEntry[]; used: number }) {
   const [query, setQuery] = useState("");
-  const { ranked, preview, rest, restHours } = rankHoursPeople(entries);
+  const { ranked, preview, rest, restHours } = rankHoursEntries(entries);
   if (ranked.length === 0) return null;
 
   const heaviest = ranked[0]?.agentHours ?? 0;
   const searching = query.trim().length > 0;
-  const matches = searching ? filterHoursPeople(ranked, query) : preview;
-  const shown = searching ? matches.slice(0, HOURS_PEOPLE_MATCH_CAP) : matches;
+  const matches = searching ? filterHoursEntries(ranked, query) : preview;
+  const shown = searching ? matches.slice(0, HOURS_MATCH_CAP) : matches;
   const truncated = searching && matches.length > shown.length;
   const scroll = shown.length > 5;
 
   return (
     <div className="field">
       <div className="hours-people-head">
-        <span className="label">By person</span>
+        <span className="label">By card</span>
         <span className="muted">
           {searching
-            ? `${matches.length} of ${ranked.length} ${ranked.length === 1 ? "person" : "people"}`
-            : `${ranked.length} ${ranked.length === 1 ? "person" : "people"} this period`}
+            ? `${matches.length} of ${ranked.length} ${ranked.length === 1 ? "card" : "cards"}`
+            : `${ranked.length} ${ranked.length === 1 ? "card" : "cards"} this period`}
         </span>
       </div>
       {rest.length > 0 && (
@@ -295,8 +335,8 @@ function HoursByPerson({ entries, used }: { entries: HoursPerson[]; used: number
           className="input hours-people-find"
           type="search"
           value={query}
-          placeholder="Find someone by name"
-          aria-label="Find who used agent hours"
+          placeholder="Find a card"
+          aria-label="Find which card used agent hours"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Escape" && searching) {
@@ -309,36 +349,36 @@ function HoursByPerson({ entries, used }: { entries: HoursPerson[]; used: number
       {shown.length > 0 ? (
         <div className="hours-people" data-scroll={scroll || undefined}>
           {shown.map((entry) => (
-            <HoursPersonRow key={entry.userId ?? hoursPersonName(entry)} entry={entry} heaviest={heaviest} used={used} />
+            <HoursEntryRow key={entry.id} entry={entry} heaviest={heaviest} used={used} />
           ))}
         </div>
       ) : (
-        <p className="muted">No one matching that name used hours this period.</p>
+        <p className="muted">No card matching that name used hours this period.</p>
       )}
-      {truncated && (
-        <p className="muted">Showing the first {HOURS_PEOPLE_MATCH_CAP}. Type more of the name.</p>
-      )}
+      {truncated && <p className="muted">Showing the first {HOURS_MATCH_CAP}. Type more of the name.</p>}
       {!searching && rest.length > 0 && (
-        <p className="hours-people-rest">{hoursPeopleRestCopy(rest.length, restHours, used)}</p>
+        <p className="hours-people-rest">{hoursRestCopy(rest.length, restHours, used, CARD_NOUN)}</p>
       )}
     </div>
   );
 }
 
-function HoursPersonRow({
+function HoursEntryRow({
   entry,
   heaviest,
   used,
 }: {
-  entry: HoursPerson;
+  entry: HoursEntry;
   heaviest: number;
   used: number;
 }) {
-  const fill = hoursPersonFill(entry.agentHours, heaviest);
+  const fill = hoursBarFill(entry.agentHours, heaviest);
   const share = formatHoursShare(entry.agentHours, used);
   return (
     <div className="hours-person">
-      <span className="hours-person-name">{hoursPersonName(entry)}</span>
+      <a className="hours-person-name" href={`/?feature=${entry.id}`} title="Open this card">
+        {entry.name}
+      </a>
       <div className="hours-person-track" aria-hidden="true">
         <div className="hours-person-fill" style={{ width: `${Math.round(fill * 1000) / 10}%` }} />
       </div>
@@ -354,9 +394,9 @@ function HoursPersonRow({
  * The team's hours this period, as their own card.
  *
  * Seats and hours were one paragraph, so the figure everyone opens
- * Billing to check (how much is left, who spent it) sat in a sentence
- * with the headcount. The meter, the leftover, and the per-person
- * rows are the same facts, readable without parsing prose.
+ * Billing to check (how much is left, which cards spent it) sat in a
+ * sentence with the headcount. The meter, the leftover, and the
+ * per-card rows are the same facts, readable without parsing prose.
  */
 function AgentHoursCard({
   state,
@@ -436,7 +476,7 @@ function AgentHoursCard({
 
       {stoppedNote && <p className="warn">{stoppedNote}</p>}
 
-      <HoursByPerson entries={state.usageByMember} used={usage.used} />
+      <HoursByCard state={state} used={usage.used} />
 
       {/*
         What happens at the end of the allowance, as a choice rather
