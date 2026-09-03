@@ -475,7 +475,7 @@ export interface Secret {
   readonly index: number;
 }
 
-/** A checkout the pipeline works in. Each becomes its own worktree. */
+/** A checkout the pipeline works in. */
 export interface Repo {
   readonly id: Uint8Array;
   readonly name: Uint8Array;

@@ -1654,7 +1654,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "recheck": {
       if (!inAStage(model)) return model;
       return [
-        { ...model, notice: asciiBytes("Re-checked the gate") },
+        { ...model, notice: asciiBytes("Re-checked the requirements") },
         Cmd.fetch(
           {
             url: idUrl(model, asciiBytes("/api/features/"), model.cards[model.selectedCard].id, asciiBytes("/recheck")),
@@ -2143,7 +2143,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         confirmText: concat3(
           asciiBytes("Remove "),
           model.profiles[msg.index].name,
-          asciiBytes("? Stages using it are left with no agent, so nothing starts there until you assign another."),
+          asciiBytes("? Its recorded runs and transcripts go with it, and that cannot be undone. Stages using it are left with no agent until you assign another, though cards keep their history."),
         ),
       };
     }
@@ -2532,7 +2532,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         confirmText: concat3(
           asciiBytes("Remove "),
           model.repos[msg.index].name,
-          asciiBytes("? New cards stop checking it out, and stages lose the code they read from it."),
+          asciiBytes("? New cards stop checking it out, and stages lose the code they read from it. Pull requests already open are left alone."),
         ),
       };
     }
@@ -2606,7 +2606,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         confirmText: concat3(
           asciiBytes("Remove "),
           model.pipelineStages[msg.index].name,
-          asciiBytes("? The server refuses while cards are still in it."),
+          asciiBytes("? The lane disappears from the board. Cards that passed through it keep their history. Removal is refused while cards are still in it."),
         ),
       };
     }
@@ -3142,6 +3142,10 @@ export function editingAnAgent(model: Model): boolean {
   return model.dialog === "new_agent" && model.editingProfile >= 0;
 }
 
+export function addingAnAgent(model: Model): boolean {
+  return model.dialog === "new_agent" && model.editingProfile < 0;
+}
+
 export function dialogNewOrg(model: Model): boolean {
   return model.dialog === "new_org";
 }
@@ -3282,7 +3286,7 @@ export function hasActiveOrg(model: Model): boolean {
  */
 export function setupHint(model: Model): Uint8Array {
   if (model.profiles.length === 0) {
-    return asciiBytes("No coding agents yet. Add one before a stage can run.");
+    return asciiBytes("No coding agents yet. Pair a tool with a model before a stage can run.");
   }
   if (model.pipelineStages.length > 0 && !model.pipelineStages.some((stage) => stage.agentProfileId.length > 0)) {
     return asciiBytes("No stage has an agent, so nothing starts on its own.");

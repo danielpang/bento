@@ -739,7 +739,7 @@ function Console({
         } else {
           void client
             .recheckGate(current.id)
-            .then(() => setNotice("Re-checked the gate"))
+            .then(() => setNotice("Re-checked the requirements"))
             .then(refresh)
             .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
         }

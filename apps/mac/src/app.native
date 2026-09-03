@@ -237,7 +237,7 @@
             <else>
               <if test="{cardDone}">
                 <column gap="6">
-                  <text foreground="text_muted" wrap="true">This card has been through every stage. Reopen it to change something.</text>
+                  <text foreground="text_muted" wrap="true">This card is finished. Reopen it to change something; it comes back to where it left off.</text>
                   <row gap="8">
                     <button size="sm" on-press="send_back">Reopen</button>
                   </row>
@@ -395,7 +395,7 @@
   <if test="{showingAgents}">
     <drawer text="Agents">
       <column gap="10" padding="14" min-width="380">
-        <text foreground="text_muted" wrap="true">An agent is a tool paired with a model. Stages point at one of these, which is how "Codex implements, Claude reviews" gets expressed.</text>
+        <text foreground="text_muted" wrap="true">Pair a coding agent with a model, then assign it to a stage.</text>
         <column gap="6">
           <for each="profiles" key="index" as="a">
             <row key="{a.index}" background="surface" radius="sm" padding="10" gap="8" cross="center">
@@ -421,12 +421,12 @@
           </for>
         </column>
         <row gap="8">
-          <button size="sm" variant="primary" on-press="open_new_agent">Add an agent</button>
+          <button size="sm" variant="primary" on-press="open_new_agent">New agent</button>
         </row>
 
         <separator />
         <text>Credentials</text>
-        <text foreground="text_muted" wrap="true">API keys for the providers your agents run on, plus the GitHub token that opens pull requests. Stored encrypted, and never shown again after you save them.</text>
+        <text foreground="text_muted" wrap="true">API keys for the providers your agents' models run on, stored encrypted.</text>
         <column gap="6">
           <for each="secrets" key="index" as="k">
             <row key="{k.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
@@ -455,10 +455,10 @@
   <if test="{showingPipeline}">
     <drawer text="Pipeline">
       <column gap="10" padding="14" min-width="420">
-        <text foreground="text_muted" wrap="true">Which agent runs each stage, and what has to be true before a card moves on.</text>
+        <text foreground="text_muted" wrap="true">Cards move left to right through these stages, each with its own agent and exit rule.</text>
 
         <text>Repositories</text>
-        <text foreground="text_muted" wrap="true">Each becomes its own worktree inside a feature workspace, so a change spanning two of them is still one card.</text>
+        <text foreground="text_muted" wrap="true">A change that spans more than one repo is still one card.</text>
         <column gap="6">
           <for each="repos" key="index" as="r">
             <row key="{r.index}" background="surface" radius="sm" padding="8" gap="8" cross="center">
@@ -470,7 +470,7 @@
             </row>
           </for>
         </column>
-        <button size="sm" on-press="open_new_repo">Add a repository</button>
+        <button size="sm" on-press="open_new_repo">Add repository</button>
         <separator />
         <column gap="6">
           <for each="pipelineStages" key="index" as="s">
@@ -536,10 +536,10 @@
                 <toggle-button size="sm" selected="{gateChecksPass}" on-toggle="toggle_gate_checks">Checks pass</toggle-button>
                 <toggle-button size="sm" selected="{gatePrComments}" on-toggle="toggle_gate_pr">PR comments resolved</toggle-button>
               </toggle-group>
-              <text foreground="text_muted" wrap="true">With none chosen, the card moves on when this stage's agent finishes.</text>
+              <text foreground="text_muted" wrap="true">Nothing required yet: the stage advances as soon as its agent finishes.</text>
             </if>
             <else>
-              <text foreground="text_muted" wrap="true">A manual stage waits for you. Requirements are not consulted.</text>
+              <text foreground="text_muted" wrap="true">Manual approval.</text>
             </else>
 
             <if test="{gateAutomatic}">
@@ -549,21 +549,22 @@
             </if>
 
             <text foreground="text_muted">Pull request</text>
+            <text foreground="text_muted" wrap="true">Push the card's branch and open a pull request when the agent finishes, or update the one already open.</text>
             <if test="{editingStageCreatesPr}">
-              <button size="sm" on-press="toggle_create_pr">Opens a pull request when the agent finishes</button>
+              <button size="sm" on-press="toggle_create_pr">Opens or updates a pull request</button>
             </if>
             <else>
               <button size="sm" on-press="toggle_create_pr">Does not open a pull request</button>
             </else>
 
             <row gap="8">
-              <button size="sm" variant="primary" on-press="submit_gate">Save the gate</button>
+              <button size="sm" variant="primary" on-press="submit_gate">Save changes</button>
               <button size="sm" variant="ghost" on-press="cancel_stage_edit">Cancel</button>
             </row>
           </column>
         </if>
 
-        <button size="sm" on-press="open_new_stage">Add a stage</button>
+        <button size="sm" on-press="open_new_stage">Add stage</button>
         <row gap="8">
           <spacer grow="1" />
           <button size="sm" variant="ghost" on-press="close_panel">Close</button>
@@ -576,7 +577,7 @@
     <drawer text="Team">
       <scroll grow="1">
         <column gap="10" padding="14" min-width="420">
-          <text foreground="text_muted" wrap="true">Everyone in an organization shares its boards.</text>
+          <text foreground="text_muted" wrap="true">Boards, cards, agents, members, and stored credentials all belong to an organization. Switching changes which of them you see.</text>
 
           <!-- Each list gets its own container. Row keys are scoped to
                their siblings, so four lists sharing one parent would
@@ -630,7 +631,7 @@
 
             <separator />
             <text>Agent credentials</text>
-            <text foreground="text_muted" wrap="true">This organization's API keys and GitHub token live under Agents, so there is one place to look for them.</text>
+            <text foreground="text_muted" wrap="true">This organization's model provider keys and GitHub token live under Agents.</text>
           </if>
 
           <row gap="8">
@@ -649,7 +650,7 @@
   <if test="{dialogNewProject}">
     <dialog text="New project">
       <column gap="10" padding="14" min-width="420">
-        <text foreground="text_muted" wrap="true">Point Bento at a git repository on this machine. If a change usually spans more than one, add the others in Pipeline straight after.</text>
+        <text foreground="text_muted" wrap="true">Point Bento at a git repository on this machine. Add more than one if a change usually spans them.</text>
         <text-field text="{projectNameEdit.text}" placeholder="Checkout" on-input="project_name_edit" label="Project name" autofocus="true" />
         <text-field text="{projectPathEdit.text}" placeholder="/Users/you/code/checkout" on-input="project_path_edit" label="Repository path" on-submit="submit_project" />
         <row gap="8">
@@ -663,7 +664,8 @@
   <if test="{dialogNewFeature}">
     <dialog text="New card">
       <column gap="10" padding="14" min-width="420">
-        <text-field text="{featureTitleEdit.text}" placeholder="What should the agents build?" on-input="feature_title_edit" on-submit="submit_feature" label="Card title" autofocus="true" />
+        <text foreground="text_muted" wrap="true">A short title for the board.</text>
+        <text-field text="{featureTitleEdit.text}" placeholder="Add a rate limit to the public API" on-input="feature_title_edit" on-submit="submit_feature" label="Title" autofocus="true" />
         <row gap="8">
           <button size="sm" variant="primary" on-press="submit_feature">Add</button>
           <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
@@ -693,8 +695,8 @@
       <column gap="10" padding="14" min-width="460">
         <!-- One dialog for both: the tool, the model and the name are
              the same three questions whether adding or changing. -->
-        <if test="{editingAnAgent}">
-          <text foreground="text_muted" wrap="true">Every stage using this agent follows the change.</text>
+        <if test="{addingAnAgent}">
+          <text foreground="text_muted" wrap="true">Pair a coding agent with a model. Assign it to a stage afterwards under Pipeline.</text>
         </if>
         <text foreground="text_muted">Tool</text>
         <stack>
@@ -760,10 +762,10 @@
   </if>
 
   <if test="{dialogNewRepo}">
-    <dialog text="Add a repository">
+    <dialog text="Add repository">
       <column gap="10" padding="14" min-width="460">
-        <text foreground="text_muted" wrap="true">A path on this machine. It becomes another worktree in every feature workspace.</text>
-        <text-field text="{repoPathEdit.text}" placeholder="/Users/you/code/another" on-input="repo_path_edit" on-submit="submit_repo" label="Repository path" autofocus="true" />
+        <text foreground="text_muted" wrap="true">A full path, or one starting with ~ for your home directory.</text>
+        <text-field text="{repoPathEdit.text}" placeholder="/path/to/another/checkout or ~/checkout" on-input="repo_path_edit" on-submit="submit_repo" label="Repository path" autofocus="true" />
         <row gap="8">
           <button size="sm" variant="primary" on-press="submit_repo">Add</button>
           <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
@@ -785,9 +787,9 @@
   </if>
 
   <if test="{dialogNewStage}">
-    <dialog text="Add a stage">
+    <dialog text="New stage">
       <column gap="10" padding="14" min-width="420">
-        <text foreground="text_muted" wrap="true">It joins the end of the pipeline, waiting for your approval and with no agent, until you say otherwise.</text>
+        <text foreground="text_muted" wrap="true">The stage joins the end of the pipeline, waiting for your approval until you say otherwise.</text>
         <text-field text="{stageNameEdit.text}" placeholder="Security review" on-input="stage_name_edit" on-submit="submit_new_stage" label="Stage name" autofocus="true" />
         <row gap="8">
           <button size="sm" variant="primary" on-press="submit_new_stage">Add</button>
