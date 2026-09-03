@@ -4,6 +4,7 @@ import {
   agentRunPrompt,
   forgetsBetweenRuns,
   modelGuidanceFor,
+  withProviderOutageAdvice,
   type RunOutcome,
 } from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
@@ -679,12 +680,16 @@ export function dshFailureAdvice(error: string): string | null {
  * up tool-specific advice on their own. Same sentences, same place the
  * hosted board reads the error from, for every runner client.
  */
-export function runnerReportedError(cli: string | undefined, error: string | undefined): string | null {
+export function runnerReportedError(
+  cli: string | undefined,
+  error: string | undefined,
+  model?: string,
+): string | null {
   const base = error ?? null;
   if (!base) return null;
   const advice = cli === "pool" ? poolFailureAdvice(base) : cli === "dsh" ? dshFailureAdvice(base) : null;
   if (advice) return `${base} ${advice}`;
-  return base;
+  return withProviderOutageAdvice(base, { cli, model });
 }
 
 export function mergeAgentExecEnv(
@@ -789,6 +794,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
         : profile.cli === "dsh"
           ? dshFailureAdvice(outcome.error ?? "")
           : null;
+    const providerAdvice = toolAdvice
+      ? `${outcome.error} ${toolAdvice}`
+      : withProviderOutageAdvice(outcome.error ?? "", { cli: profile.cli, model: profile.model });
     const enriched =
       authDead && profile.cli === "claude-code"
         ? {
@@ -800,8 +808,8 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
               ...outcome,
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
             }
-          : toolAdvice
-            ? { ...outcome, error: `${outcome.error} ${toolAdvice}` }
+          : providerAdvice !== (outcome.error ?? "")
+            ? { ...outcome, error: providerAdvice }
             : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");

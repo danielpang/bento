@@ -31,8 +31,10 @@ import {
   needsSendBackPrompt,
   SEND_BACK_NOTICE,
   spendCoverageNote,
+  withProviderOutageAdvice,
   type AgentEvent,
 } from "@bento/core";
+import { linkifiedError } from "../error-text.js";
 import { deleteConsequences } from "./delete-consequences.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
@@ -136,6 +138,7 @@ export function FeatureDrawer({
   const stage = stages.find((s) => s.id === feature.currentStageId);
   // The server sends runs newest first.
   const latestRun = runs[0];
+  const latestAgent = profiles.find((p) => p.id === latestRun?.agentProfileId);
   /**
    * Detail that is fetched, not the card row the board already had.
    * Until it lands, sections that would say "nothing has happened"
@@ -594,7 +597,14 @@ export function FeatureDrawer({
               sentence closes the transcript, but a person looking at a
               red card reads the actions first. */}
           {latestRun?.status === "failed" && latestRun.error && !finished && (
-            <p className="error">{latestRun.error}</p>
+            <p className="error">
+              {linkifiedError(
+                withProviderOutageAdvice(latestRun.error, {
+                  cli: latestAgent?.cli,
+                  model: latestAgent?.model,
+                }),
+              )}
+            </p>
           )}
           <CardSpend runs={runs} />
 

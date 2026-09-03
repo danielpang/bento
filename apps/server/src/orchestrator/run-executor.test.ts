@@ -145,6 +145,41 @@ test("runner-reported dsh failures receive Harness advice", () => {
   assert.match(reported ?? "", /Replace DEEPSEEK_API_KEY/);
 });
 
+test("a runner-reported Claude outage names the Claude status page", () => {
+  const reported = runnerReportedError(
+    "claude-code",
+    `API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+    "claude-sonnet-5",
+  );
+  assert.match(reported ?? "", /529/);
+  assert.match(reported ?? "", /status\.claude\.com/);
+});
+
+test("a runner-reported OpenAI outage names the OpenAI status page", () => {
+  const reported = runnerReportedError(
+    "codex",
+    "The server had an error while processing your request. Sorry about that!",
+    "gpt-5-codex",
+  );
+  assert.match(reported ?? "", /status\.openai\.com/);
+});
+
+test("a runner-reported OpenRouter outage names the OpenRouter status page", () => {
+  const reported = runnerReportedError(
+    "opencode",
+    "OpenRouter API error: Provider returned error (502 Bad Gateway)",
+    "openrouter/anthropic/claude-sonnet-5",
+  );
+  assert.match(reported ?? "", /status\.openrouter\.ai/);
+});
+
+test("a runner-reported auth failure is not given a status page", () => {
+  assert.equal(
+    runnerReportedError("claude-code", "401 Unauthorized: invalid API key", "claude-sonnet-5"),
+    "401 Unauthorized: invalid API key",
+  );
+});
+
 test("text-mode adapters do not announce launch on their first event", () => {
   assert.equal(announcesLaunchOnFirstEvent({ stdoutMode: "text" }), false);
   assert.equal(announcesLaunchOnFirstEvent({}), true);
