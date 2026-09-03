@@ -252,6 +252,9 @@ export function BillingCard() {
   );
 }
 
+/** How many spenders the hours card shows before asking to expand. */
+const PEOPLE_PREVIEW = 5;
+
 /**
  * The team's hours this period, as their own card.
  *
@@ -275,6 +278,7 @@ function AgentHoursCard({
   onOveragePolicy: (policy: "stop" | "allow") => void;
   onOverageCeiling: (ceilingUsd: number | null) => void;
 }) {
+  const [allPeople, setAllPeople] = useState(false);
   const usage = hoursUsage(state.agentHours);
   const meter = hoursMeterState(usage, state.stopped);
   const people = [...state.usageByMember]
@@ -346,25 +350,33 @@ function AgentHoursCard({
       {/*
         Who spent it. Hours are pooled across the team, so this is what
         lets them settle "one person used it all" between themselves
-        rather than asking us for a rationing system. Shown whenever
-        anyone has spent, including a team of one: the card is about
-        the hours, not about comparing people.
+        rather than asking us for a rationing system. The heaviest
+        five sit in the card; the rest are one click behind, in a
+        scrolling list, because a Business team of forty would otherwise
+        push the overage choice off the screen.
       */}
       {people.length > 0 && (
         <div className="field">
           <span className="label">By person</span>
-          {people.map((entry) => {
-            const share = usage.included === 0 ? 0 : Math.min(1, entry.agentHours / usage.included);
-            return (
-              <div key={entry.userId ?? "automatic"} className="hours-person">
-                <span className="hours-person-name">{entry.name ?? "Started automatically"}</span>
-                <div className="hours-person-track" aria-hidden="true">
-                  <div className="hours-person-fill" style={{ width: `${Math.round(share * 1000) / 10}%` }} />
+          <div className="hours-people" data-scroll={allPeople || undefined}>
+            {(allPeople ? people : people.slice(0, PEOPLE_PREVIEW)).map((entry) => {
+              const share = usage.included === 0 ? 0 : Math.min(1, entry.agentHours / usage.included);
+              return (
+                <div key={entry.userId ?? "automatic"} className="hours-person">
+                  <span className="hours-person-name">{entry.name ?? "Started automatically"}</span>
+                  <div className="hours-person-track" aria-hidden="true">
+                    <div className="hours-person-fill" style={{ width: `${Math.round(share * 1000) / 10}%` }} />
+                  </div>
+                  <span className="muted">{formatHoursPhrase(entry.agentHours)}</span>
                 </div>
-                <span className="muted">{formatHoursPhrase(entry.agentHours)}</span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+          {people.length > PEOPLE_PREVIEW && (
+            <button className="btn btn-ghost" onClick={() => setAllPeople((v) => !v)}>
+              {allPeople ? "Show the top 5" : `Show all ${people.length}`}
+            </button>
+          )}
         </div>
       )}
 

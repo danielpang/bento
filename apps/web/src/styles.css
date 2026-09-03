@@ -5596,6 +5596,12 @@ button.session-expand[aria-pressed="true"] {
   max-width: 100%;
 }
 
+.hours-people[data-scroll] {
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 @media (max-width: 560px) {
   .hours-facts {
     grid-template-columns: 1fr;
