@@ -40,7 +40,14 @@ export interface SwarmActions {
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
-  onCreatePullRequest: () => void;
+  /**
+   * Opens a pull request for the swarm's branch.
+   *
+   * Optional, and absent is the answer today: no route does it, so the
+   * button says so by being unavailable rather than by doing nothing
+   * when it is pressed.
+   */
+  onCreatePullRequest?: () => void;
   onWorkers: (workers: number) => void;
   onAnswer: (questionId: string, text: string) => void;
 }
@@ -167,7 +174,16 @@ export function SwarmPage({
           <button className="btn" disabled={busy || !canStop(swarm.status)} onClick={actions.onStop}>
             Stop
           </button>
-          <button className="btn btn-primary" disabled={busy} onClick={actions.onCreatePullRequest}>
+          <button
+            className="btn btn-primary"
+            disabled={busy || !actions.onCreatePullRequest}
+            title={
+              actions.onCreatePullRequest
+                ? undefined
+                : "Opening a pull request from a swarm is not available yet. Its branch is in the repository, so it can be opened there."
+            }
+            onClick={actions.onCreatePullRequest}
+          >
             Create PR
           </button>
         </div>

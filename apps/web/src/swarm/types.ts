@@ -1,19 +1,18 @@
 /**
  * What the swarm endpoints answer with.
  *
- * The routes do not exist yet. This module is the shape they will
- * send, written down once so the console can be built and driven
- * today against `fixtures.ts` and switched to real fetches by
- * changing `client.ts` alone. The names are the table's, because the
- * swarm route answers with the row itself: `nodeType` here is
- * `swarm_tasks.node_type` there, and one vocabulary end to end is
- * what keeps the console reading what the server sends. Renaming a
- * field is a change on both sides, never on one.
+ * This is the shape the console draws from. The names are mostly the
+ * table's, because the swarm routes answer with their rows: `nodeType`
+ * here is `swarm_tasks.node_type` there, and one vocabulary end to end
+ * is what keeps the console reading what the server sends. Where the
+ * two differ (a swarm's name, its status words, a leaf's attention)
+ * `client.ts` is the one place that translates, and the fixtures speak
+ * this shape so the tests can drive the console without a server.
  *
- * Two endpoints:
+ * Two endpoints fill it:
  *
- *   GET /api/projects/:id/swarms  ->  SwarmSummary[]   (the strip)
- *   GET /api/swarms/:id           ->  SwarmDetail      (the page)
+ *   GET /api/swarms?projectId=  ->  SwarmSummary[]   (the strip)
+ *   GET /api/swarms/:id         ->  SwarmDetail      (the page)
  *
  * Everything an agent wrote (a title, a description, a report, a
  * flag's value) is untrusted text. It renders as text, and a report

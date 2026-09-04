@@ -23,8 +23,12 @@ import {
  * both.
  *
  * This is the only component that talks to the swarm endpoints, and
- * it does so through `swarmApi`, which answers from fixtures until
- * the routes land. Everything below it takes plain data.
+ * it does so through `swarmApi`. Everything below it takes plain data.
+ *
+ * Two controls the fixtures once offered are not wired to anything:
+ * opening a pull request for a swarm, and marking a leaf done by hand.
+ * Neither has a route, so neither gets a handler, and the surfaces
+ * render them as unavailable rather than as buttons that do nothing.
  *
  * The model is built here, once per change, and handed to the strip's
  * ring, the header's ring, the tree and the outline alike. Four
@@ -33,12 +37,9 @@ import {
 export function SwarmBoard({
   projectId,
   surfaces,
-  branches,
 }: {
   projectId: string;
   surfaces: ModeSurfaces;
-  /** Branches the New swarm dialog can start on. */
-  branches: string[];
 }) {
   const storage = useMemo(() => browserStorage(), []);
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
@@ -210,7 +211,6 @@ export function SwarmBoard({
             onPause: () => selectedId && act(() => swarmApi.pauseSwarm(selectedId)),
             onResume: () => selectedId && act(() => swarmApi.resumeSwarm(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
-            onCreatePullRequest: () => selectedId && act(() => swarmApi.createPullRequest(selectedId)),
             onWorkers: (workers) => selectedId && act(() => swarmApi.setWorkers(selectedId, workers)),
             onAnswer: (questionId, text) =>
               selectedId && act(() => swarmApi.answerQuestion(selectedId, questionId, text)),
@@ -221,20 +221,13 @@ export function SwarmBoard({
       )}
 
       {task && node && (
-        <SwarmNodeDrawer
-          task={task}
-          node={node}
-          busy={busy}
-          onClose={() => setTaskId(null)}
-          onMarkDone={(id) => selectedId && act(() => swarmApi.markTaskDone(selectedId, id))}
-        />
+        <SwarmNodeDrawer task={task} node={node} busy={busy} onClose={() => setTaskId(null)} />
       )}
 
       {creating && (
         <NewSwarmDialog
           projectId={projectId}
           templates={templates}
-          branches={branches}
           surfaces={surfaces}
           busy={busy}
           onClose={() => setCreating(false)}

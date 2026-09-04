@@ -34,7 +34,15 @@ export function SwarmNodeDrawer({
   /** The rolled up figures for this node, from the shared model. */
   node: SwarmNode;
   onClose: () => void;
-  onMarkDone: (taskId: string) => void;
+  /**
+   * Marks a leaf done by hand.
+   *
+   * Optional, and absent is the answer today: no route finishes a task
+   * on somebody's say so, so the button is drawn disabled with the
+   * reason under it rather than wired to something that would look
+   * like it worked and do nothing.
+   */
+  onMarkDone?: (taskId: string) => void;
   /**
    * The worker's conversation.
    *
@@ -186,13 +194,11 @@ export function SwarmNodeDrawer({
         <section className="section">
           <span className="label">Actions</span>
           <div className="actions">
-            {/* Phase one has no workers, so somebody has to be able to
-                say a leaf is finished. The confirmation is not
-                ceremony: marking done moves every ring above it, up to
-                the one on the tab. */}
+            {/* The confirmation is not ceremony: marking done moves
+                every ring above it, up to the one on the tab. */}
             <button
               className="btn"
-              disabled={busy || task.status === "done" || task.nodeType !== "leaf"}
+              disabled={!onMarkDone || busy || task.status === "done" || task.nodeType !== "leaf"}
               onClick={() => setConfirming(true)}
             >
               Mark done
@@ -200,6 +206,12 @@ export function SwarmNodeDrawer({
           </div>
           {task.nodeType !== "leaf" && (
             <p className="muted">A plan node is finished by its own tasks finishing.</p>
+          )}
+          {onMarkDone === undefined && task.nodeType === "leaf" && (
+            <p className="muted">
+              Finishing a task by hand is not available yet. A leaf is done when its worker reports
+              and the planner accepts it.
+            </p>
           )}
         </section>
       </div>
@@ -218,7 +230,7 @@ export function SwarmNodeDrawer({
               className="btn btn-primary"
               onClick={() => {
                 setConfirming(false);
-                onMarkDone(task.id);
+                onMarkDone?.(task.id);
               }}
             >
               Mark done

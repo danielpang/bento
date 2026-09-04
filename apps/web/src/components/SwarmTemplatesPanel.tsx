@@ -16,6 +16,10 @@ import type { SwarmTemplate } from "../swarm/types.js";
  * Read only for now. The dialog picks from these; editing them is its
  * own task, and a panel that pretends to save would be worse than one
  * that says where the list comes from.
+ *
+ * The cost shape is drawn for a template that has one. Nothing on the
+ * server records what a tool reports its spend in yet, so today this
+ * is a list of names and ceilings, which is what is actually known.
  */
 export function SwarmTemplatesPanel() {
   const [templates, setTemplates] = useState<SwarmTemplate[] | null>(null);
@@ -51,7 +55,12 @@ export function SwarmTemplatesPanel() {
             <span className="gate-check-text">
               <span className="gate-check-name">{template.name}</span>
               <br />
-              {template.plannerModel} plans, {template.workerModel} works
+              {/* The models, when the list says which they are. A
+                  template that does not is left saying its ceilings,
+                  rather than "  plans,   works". */}
+              {template.plannerModel && template.workerModel
+                ? `${template.plannerModel} plans, ${template.workerModel} works`
+                : template.description}
             </span>
             <span className="swarm-template-tiers">
               {template.tools.map((tool) => (
@@ -61,8 +70,12 @@ export function SwarmTemplatesPanel() {
               ))}
             </span>
             <span className="muted swarm-template-estimate">
-              {estimateLine(estimateSwarm(template), template.typicalLeaves)} Up to{" "}
-              {template.maxWorkers} workers
+              {/* An estimate needs a cost shape. Without one this says
+                  what the template limits and claims no figure. */}
+              {template.typicalLeaves > 0
+                ? `${estimateLine(estimateSwarm(template), template.typicalLeaves)} `
+                : ""}
+              Up to {template.maxWorkers} workers
               {template.maxBudgetUsd === null ? "" : `, ${formatUsd(template.maxBudgetUsd)} cap`}.
             </span>
           </div>

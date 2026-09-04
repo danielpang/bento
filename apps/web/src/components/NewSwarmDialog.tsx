@@ -7,12 +7,18 @@ import type { NewSwarmInput, SwarmTemplate } from "../swarm/types.js";
 /**
  * Starting a swarm.
  *
- * The dialog is a cost decision as much as a work decision, so the
- * template and its cost shape sit side by side: which model plans,
- * which model works, and which tier each tool will report in. A
+ * The dialog is a cost decision as much as a work decision, so a
+ * template's cost shape sits beside it where it has one: which model
+ * plans, which model works, and which tier each tool reports in. A
  * person choosing a template is choosing how much of their bill will
  * be a measurement and how much a guess, and that is said here rather
  * than discovered on the header afterwards.
+ *
+ * It asks for what the create route takes and nothing else. A field
+ * the server has no home for is a promise the console cannot keep, so
+ * the branch is a preview of the one the server will name rather than
+ * a choice, and there is no plan only box: a swarm always plans first
+ * and waits for Start.
  *
  * Local mode drops the plan footer and the agent hours line, because
  * it has neither a plan nor an organization to bill, and shows the
@@ -22,7 +28,6 @@ import type { NewSwarmInput, SwarmTemplate } from "../swarm/types.js";
 export function NewSwarmDialog({
   projectId,
   templates,
-  branches,
   surfaces,
   busy,
   onClose,
@@ -30,8 +35,6 @@ export function NewSwarmDialog({
 }: {
   projectId: string;
   templates: SwarmTemplate[];
-  /** Branches this project already has, for starting on one of them. */
-  branches: string[];
   surfaces: ModeSurfaces;
   busy?: boolean;
   onClose: () => void;
@@ -41,25 +44,28 @@ export function NewSwarmDialog({
   const template = templates.find((entry) => entry.id === templateId) ?? templates[0] ?? null;
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
-  const [attachments, setAttachments] = useState<{ name: string; bytes: number }[]>([]);
-  const [startKind, setStartKind] = useState<"new-branch" | "existing-branch">("new-branch");
-  const [branch, setBranch] = useState("");
-  const [deliverable, setDeliverable] = useState<"code" | "document">("code");
   const [budget, setBudget] = useState("");
   const [workers, setWorkers] = useState(template?.maxWorkers ? Math.min(4, template.maxWorkers) : 4);
-  const [planOnly, setPlanOnly] = useState(false);
 
   const leaves = template?.typicalLeaves ?? 0;
   const estimate = useMemo(
     () => (template ? estimateSwarm(template, leaves) : { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 }),
     [template, leaves],
   );
+  /**
+   * Whether this template says what a run of it costs.
+   *
+   * Templates carry ceilings today and no cost shape, and an estimate
+   * of nothing printed as a figure would read as a swarm that is free.
+   * So the shape and the estimate are drawn when there is one and left
+   * out when there is not.
+   */
+  const hasCostShape = (template?.tools.length ?? 0) > 0 || leaves > 0;
 
-  const branchName =
-    startKind === "new-branch"
-      ? branch.trim() || suggestBranch(name)
-      : branch.trim() || branches[0] || "";
-  const ready = name.trim() !== "" && goal.trim() !== "" && template !== null && branchName !== "";
+  // The server names the branch after the swarm, so this is a preview
+  // of what it will be rather than a choice.
+  const branchName = suggestBranch(name);
+  const ready = name.trim() !== "" && goal.trim() !== "" && template !== null;
 
   return (
     <Modal
@@ -71,15 +77,7 @@ export function NewSwarmDialog({
           <button className="btn btn-ghost" onClick={onClose}>
             Cancel
           </button>
-          <button
-            className="btn"
-            disabled={!ready || busy}
-            onClick={() => submit(true)}
-            title="Plan the work and stop before any worker starts"
-          >
-            Plan only
-          </button>
-          <button className="btn btn-primary" disabled={!ready || busy} onClick={() => submit(false)}>
+          <button className="btn btn-primary" disabled={!ready || busy} onClick={submit}>
             Create
           </button>
         </>
@@ -106,7 +104,7 @@ export function NewSwarmDialog({
           ))}
         </div>
 
-        {template && (
+        {template && hasCostShape && (
           <div className="swarm-new-shape">
             <span className="label">Cost shape</span>
             <dl className="swarm-shape">
@@ -163,96 +161,6 @@ export function NewSwarmDialog({
           />
         </label>
 
-        <label className="field">
-          <span className="field-heading">Attachments</span>
-          <input
-            type="file"
-            className="input"
-            multiple
-            onChange={(e) =>
-              setAttachments(
-                Array.from(e.target.files ?? []).map((file) => ({ name: file.name, bytes: file.size })),
-              )
-            }
-          />
-          {attachments.length > 0 && (
-            <ul className="swarm-attachments">
-              {attachments.map((file) => (
-                <li key={file.name}>
-                  <span className="chip">{file.name}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </label>
-
-        <div className="field">
-          <span className="field-heading">Starting point</span>
-          <div className="seg" role="group" aria-label="Starting point">
-            <button
-              type="button"
-              className="seg-item"
-              data-on={startKind === "new-branch" ? "" : undefined}
-              onClick={() => setStartKind("new-branch")}
-            >
-              New branch
-            </button>
-            <button
-              type="button"
-              className="seg-item"
-              data-on={startKind === "existing-branch" ? "" : undefined}
-              onClick={() => setStartKind("existing-branch")}
-            >
-              Existing branch
-            </button>
-          </div>
-          {startKind === "new-branch" ? (
-            <input
-              className="input"
-              value={branch}
-              placeholder={suggestBranch(name)}
-              aria-label="New branch name"
-              onChange={(e) => setBranch(e.target.value)}
-            />
-          ) : (
-            <select
-              className="select"
-              value={branch}
-              aria-label="Existing branch"
-              onChange={(e) => setBranch(e.target.value)}
-            >
-              {branches.length === 0 && <option value="">No branches loaded</option>}
-              {branches.map((entry) => (
-                <option key={entry} value={entry}>
-                  {entry}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        <div className="field">
-          <span className="field-heading">Deliverable</span>
-          <div className="seg" role="group" aria-label="Deliverable">
-            <button
-              type="button"
-              className="seg-item"
-              data-on={deliverable === "code" ? "" : undefined}
-              onClick={() => setDeliverable("code")}
-            >
-              Code
-            </button>
-            <button
-              type="button"
-              className="seg-item"
-              data-on={deliverable === "document" ? "" : undefined}
-              onClick={() => setDeliverable("document")}
-            >
-              Document
-            </button>
-          </div>
-        </div>
-
         <div className="field-row">
           <label className="field">
             <span className="field-heading">Budget</span>
@@ -283,16 +191,6 @@ export function NewSwarmDialog({
           </label>
         </div>
 
-        <label className="field">
-          <span className="field-heading">Plan only</span>
-          <span className="swarm-checkline">
-            <input type="checkbox" checked={planOnly} onChange={(e) => setPlanOnly(e.target.checked)} />
-            <span className="muted">
-              Stop after the planner has split the goal, before any worker starts.
-            </span>
-          </span>
-        </label>
-
         {/*
           * The money lines, and which of them this mode has.
           *
@@ -302,7 +200,13 @@ export function NewSwarmDialog({
           * `creationNotes`, rather than three conditions to keep in
           * step.
           */}
+        <p className="muted">
+          Creating a swarm puts its planner to work. Nothing else starts until you have read the plan
+          and pressed Start.
+        </p>
+
         {template &&
+          hasCostShape &&
           creationNotes(surfaces, estimate, leaves).map((note) => (
             <p key={note.id} className={note.emphasis ? "swarm-estimate" : "muted"}>
               {note.text}
@@ -312,19 +216,26 @@ export function NewSwarmDialog({
     </Modal>
   );
 
-  function submit(onlyPlan: boolean) {
+  /**
+   * What the create route takes, and the fields the console still
+   * carries for its own fixtures.
+   *
+   * A swarm always plans first and waits for Start, so plan only is
+   * how every swarm begins rather than a box to tick.
+   */
+  function submit() {
     if (!ready || !template) return;
     onCreate({
       projectId,
       templateId: template.id,
       name: name.trim(),
       goal: goal.trim(),
-      attachments,
-      start: { kind: startKind, name: branchName },
-      deliverable,
+      attachments: [],
+      start: { kind: "new-branch", name: branchName },
+      deliverable: "code",
       budgetUsd: parseBudget(budget),
       workers,
-      planOnly: onlyPlan || planOnly,
+      planOnly: true,
     });
   }
 }
