@@ -76,15 +76,6 @@ export interface PlanState {
    * them.
    */
   usageByMember: { userId: string | null; name: string | null; agentHours: number }[];
-  /**
-   * Which cards spent the hours. Prefer this over usageByMember: a
-   * team of forty people is still a handful of cards doing the work,
-   * and "who used it" on a board is the card.
-   *
-   * Absent when the billing module has not started sending it; the
-   * console then rolls the period up from runs itself.
-   */
-  usageByFeature?: { featureId: string; title: string; agentHours: number }[];
   seats: { held: number; billable: number; monthlyTotalUsd: number | null; billed: boolean };
   catalog: PlanOffer[];
   activity?: {
@@ -218,36 +209,36 @@ export function hoursMeterState(
 }
 
 /** How many spenders the hours card shows before collapsing the rest. */
-export const HOURS_PREVIEW = 5;
+export const HOURS_PEOPLE_PREVIEW = 5;
 
 /** Matches shown for a name filter. The rest ask for a longer query. */
-export const HOURS_MATCH_CAP = 20;
+export const HOURS_PEOPLE_MATCH_CAP = 20;
 
-export type HoursEntry = { id: string; name: string; agentHours: number };
+export type HoursPerson = PlanState["usageByMember"][number];
 
-export type RankedHoursEntries = {
-  ranked: HoursEntry[];
-  preview: HoursEntry[];
-  rest: HoursEntry[];
+export type RankedHoursPeople = {
+  ranked: HoursPerson[];
+  preview: HoursPerson[];
+  rest: HoursPerson[];
   restHours: number;
 };
 
 /**
  * Who spent hours, heaviest first, with the card's preview cut.
  *
- * Zero-hour rows are dropped: a board of forty cards would otherwise
- * be a directory, and Billing is answering which cards used the pool,
- * not which ones could have. The rest are summarised, not listed,
- * because mounting every title (even behind a "show all") is what
+ * Zero-hour rows are dropped: a Business roster of forty would
+ * otherwise be a membership list, and Billing is answering who used
+ * the pool, not who could have. The rest are summarised, not listed,
+ * because mounting every name (even behind a "show all") is what
  * fails to scale.
  */
-export function rankHoursEntries(
-  entries: HoursEntry[],
-  preview = HOURS_PREVIEW,
-): RankedHoursEntries {
+export function rankHoursPeople(
+  entries: HoursPerson[],
+  preview = HOURS_PEOPLE_PREVIEW,
+): RankedHoursPeople {
   const ranked = [...entries]
     .filter((entry) => entry.agentHours > 0)
-    .sort((a, b) => b.agentHours - a.agentHours || a.name.localeCompare(b.name));
+    .sort((a, b) => b.agentHours - a.agentHours || (a.name ?? "").localeCompare(b.name ?? ""));
   const rest = ranked.slice(preview);
   return {
     ranked,
@@ -257,32 +248,31 @@ export function rankHoursEntries(
   };
 }
 
-/** A title filter over the ranked spenders. */
-export function filterHoursEntries(ranked: HoursEntry[], query: string): HoursEntry[] {
+/**
+ * A name filter over the ranked spenders.
+ *
+ * Runs that nobody started are filed as "Started automatically", so
+ * that phrase is what a search has to match, not a blank.
+ */
+export function filterHoursPeople(ranked: HoursPerson[], query: string): HoursPerson[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return ranked;
-  return ranked.filter((entry) => entry.name.toLowerCase().includes(needle));
+  return ranked.filter((entry) => hoursPersonName(entry).toLowerCase().includes(needle));
 }
 
-export function hoursEntriesFromFeatures(
-  features: { featureId: string; title: string; agentHours: number }[],
-): HoursEntry[] {
-  return features.map((entry) => ({
-    id: entry.featureId,
-    name: entry.title,
-    agentHours: entry.agentHours,
-  }));
+export function hoursPersonName(entry: HoursPerson): string {
+  return entry.name ?? "Started automatically";
 }
 
 /**
- * Width of a row's bar, 0 to 1, against the heaviest spender.
+ * Width of a person's bar, 0 to 1, against the heaviest spender.
  *
  * Scaling to the included pool draws a 12 hour row as a sliver on a
  * 500 hour Business allowance, which is exactly when a team is large
  * enough to need the breakdown. The heaviest row is full; everyone
  * else is relative to them.
  */
-export function hoursBarFill(hours: number, heaviest: number): number {
+export function hoursPersonFill(hours: number, heaviest: number): number {
   if (heaviest <= 0 || hours <= 0) return 0;
   return Math.min(1, hours / heaviest);
 }
@@ -296,18 +286,13 @@ export function formatHoursShare(part: number, whole: number): string | null {
 }
 
 /**
- * The collapsed tail of the hours list, in one sentence.
+ * The collapsed tail of the people list, in one sentence.
  *
  * Naming the count and the hours is what makes the preview honest:
  * the top five are not "the team".
  */
-export function hoursRestCopy(
-  count: number,
-  hours: number,
-  used: number,
-  noun: { singular: string; plural: string },
-): string {
-  const who = count === 1 ? `and 1 more ${noun.singular} used` : `and ${count} more ${noun.plural} used`;
+export function hoursPeopleRestCopy(count: number, hours: number, used: number): string {
+  const who = count === 1 ? "and 1 other used" : `and ${count} others used`;
   const body = `${who} ${formatHoursPhrase(hours)} this period`;
   const share = formatHoursShare(hours, used);
   return share ? `${body} (${share}).` : `${body}.`;

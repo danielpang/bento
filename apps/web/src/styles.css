@@ -5582,15 +5582,6 @@ button.session-expand[aria-pressed="true"] {
   white-space: nowrap;
 }
 
-a.hours-person-name {
-  color: inherit;
-  text-decoration: none;
-}
-
-a.hours-person-name:hover {
-  text-decoration: underline;
-}
-
 .hours-person-track {
   height: 4px;
   border-radius: 999px;
