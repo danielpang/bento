@@ -32,6 +32,7 @@ import { CHANGELOG_URL } from "./changelog.js";
 import { BetaTestersProvider, useBetaTesters } from "./beta.js";
 import { BoardModeToggle } from "./components/BoardModeToggle.js";
 import { useSwarmPlan } from "./swarm/plan.js";
+import { isSwarmEvent } from "./swarm/events.js";
 import {
   boardHref,
   browserStorage,
@@ -669,6 +670,14 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       projectId,
       (event) => {
         const e = event as { featureId?: string; status?: string; type?: string; text?: string };
+        /*
+         * The other board's, on the same channel. Ignored here rather
+         * than handled: nothing on this screen renders a swarm, and
+         * falling through to the refresh below re-fetched stages,
+         * features and usage several times a second for every viewer
+         * of the Pipeline while a swarm ran.
+         */
+        if (isSwarmEvent(event)) return;
         if (e.type === "run_updated" && e.featureId && e.status) {
           setRunStatus((prev) => ({ ...prev, [e.featureId!]: e.status }));
           // The drawer refetches its runs list on this tick, so a run
