@@ -14,6 +14,7 @@ import {
   projects,
   runMigrations,
   sandboxes,
+  swarmLandings,
   swarmTasks,
   swarms,
   type Db,
@@ -26,6 +27,8 @@ import { ensureLocalUser, type AppContext } from "../context.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { createFeatureFlags } from "../feature-flags.js";
+import { mintRunGrant } from "../mcp/grants.js";
+import { BENTO_SWARM_SERVER_ID } from "../mcp/swarm-server.js";
 import { RUNNER_PROJECT_REFUSAL } from "./swarms.js";
 
 /**
@@ -125,6 +128,7 @@ beforeEach(async () => {
   await db.delete(sandboxes);
   await db.delete(swarms);
   await db.update(projects).set({ executor: "server" }).where(eq(projects.id, projectId));
+  ctx.running.clear();
   queued = [];
   statements.length = 0;
 });
@@ -144,6 +148,44 @@ async function createSwarm(overrides: Record<string, unknown> = {}) {
   assert.equal(res.status, 201, await res.clone().text());
   return (await res.json()) as { id: string; slug: string; status: string; branchName: string; plannerRunId: string };
 }
+
+/**
+ * The swarm's planner, as it is once its agent is actually away: the
+ * row in the running status, this process holding its abort handle, and
+ * its sandbox holding a gateway token for Bento's own swarm tools.
+ */
+async function plannerAtWork(swarmId: string) {
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarmId));
+  await db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, run!.id));
+  const controller = new AbortController();
+  ctx.running.set(run!.id, controller);
+  const token = await mintRunGrant(ctx, {
+    runId: run!.id,
+    organizationId: null,
+    actingUserId: ctx.userId,
+    serverIds: [BENTO_SWARM_SERVER_ID],
+    swarmId,
+    ttlMs: 60_000,
+  });
+  return { run: run!, controller, token };
+}
+
+/**
+ * One tool call, made the way the agent makes it: through the gateway,
+ * with the run's bearer token and nothing else. A dead grant is a 404
+ * there, the same answer as a token that never existed.
+ */
+async function callSwarmTool(token: string, name: string, args: Record<string, unknown>) {
+  const res = await app.request(`/api/mcp-gateway/${BENTO_SWARM_SERVER_ID}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  return res.status;
+}
+
+const tasksOf = async (swarmId: string) =>
+  await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarmId));
 
 /* ---------------------------------------------------------------- */
 
@@ -273,6 +315,126 @@ test("pausing and resuming are a person's, and resuming wakes the reconciler", a
   assert.equal(Number((await readSwarm(swarm.id)).budgetUsd), 12.5);
   await patch(`/api/swarms/${swarm.id}`, { budgetUsd: null });
   assert.equal((await readSwarm(swarm.id)).budgetUsd, null);
+});
+
+/**
+ * Stopping a swarm stops its agents, which is the whole of what the
+ * button means.
+ *
+ * Setting the swarm's status and leaving the runs alone was cosmetic:
+ * the planner kept working, kept calling these tools on a plan the
+ * person had already stopped, and kept spending. So the assertion here
+ * is not that a row changed but that the agent can no longer act.
+ */
+test("cancelling a swarm stops the agents working in it, and their tools with them", async () => {
+  const swarm = await createSwarm();
+  const { run, controller, token } = await plannerAtWork(swarm.id);
+
+  assert.equal(await callSwarmTool(token, "create_task", { title: "before" }), 200);
+  assert.equal((await tasksOf(swarm.id)).length, 1, "the planner could act while the swarm was running");
+
+  // A run that ended before the stop is somebody else's ending.
+  const endedAt = new Date("2026-01-01T00:00:00.000Z");
+  const [finished] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "worker",
+      agentProfileId: run.agentProfileId,
+      prompt: "",
+      status: "succeeded",
+      endedAt,
+    })
+    .returning();
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/cancel`)).status, 200);
+  assert.equal((await readSwarm(swarm.id)).status, "cancelled");
+
+  const [stopped] = await db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  assert.equal(stopped!.status, "cancelled", "the run the person stopped is stopped");
+  assert.ok(stopped!.endedAt, "and it has an ending, so nothing counts it as still working");
+  assert.ok(controller.signal.aborted, "the agent was interrupted where it was, not left to finish");
+
+  assert.equal(
+    await callSwarmTool(token, "create_task", { title: "after the stop" }),
+    404,
+    "and the token in its sandbox opens nothing",
+  );
+  assert.equal((await tasksOf(swarm.id)).length, 1, "so nothing it asked for after the stop happened");
+
+  const [untouched] = await db.select().from(agentRuns).where(eq(agentRuns.id, finished!.id));
+  assert.equal(untouched!.status, "succeeded", "a run that had already ended is not re-ended");
+  assert.equal(untouched!.endedAt?.getTime(), endedAt.getTime(), "and its ending did not move");
+});
+
+/**
+ * Pausing is the other decision, and it is deliberately the gentler
+ * one: a worker mid task finishes and reports. Pinned here because the
+ * cancel above is a stop, and the two must not converge by accident.
+ */
+test("pausing lets the agent in flight finish", async () => {
+  const swarm = await createSwarm();
+  const { run, controller, token } = await plannerAtWork(swarm.id);
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/pause`)).status, 200);
+  const [still] = await db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  assert.equal(still!.status, "running", "the agent keeps its turn");
+  assert.equal(controller.signal.aborted, false, "nothing interrupted it");
+  assert.equal(await callSwarmTool(token, "create_task", { title: "finishing up" }), 200, "and it can still report");
+});
+
+/** A queue nothing will ever serve is not a queue, it is a lie. */
+test("a cancelled swarm's landings are not left queued", async () => {
+  const swarm = await createSwarm();
+  const [a, b, c, d] = await db
+    .insert(swarmTasks)
+    .values([
+      { swarmId: swarm.id, title: "Cart", position: 0 },
+      { swarmId: swarm.id, title: "Payment", position: 1 },
+      { swarmId: swarm.id, title: "Receipts", position: 2 },
+      { swarmId: swarm.id, title: "Emails", position: 3 },
+    ])
+    .returning();
+  await db.insert(swarmLandings).values([
+    { swarmId: swarm.id, taskId: a!.id, position: 0, status: "landed" },
+    { swarmId: swarm.id, taskId: b!.id, position: 1, status: "conflicted" },
+    { swarmId: swarm.id, taskId: c!.id, position: 2, status: "queued" },
+    { swarmId: swarm.id, taskId: d!.id, position: 3, status: "queued" },
+  ]);
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/cancel`)).status, 200);
+
+  const landings = await db.select().from(swarmLandings).where(eq(swarmLandings.swarmId, swarm.id));
+  const byTask = new Map(landings.map((row) => [row.taskId, row]));
+  assert.equal(byTask.get(c!.id)!.status, "cancelled", "a branch waiting its turn waits for nothing now");
+  assert.equal(byTask.get(d!.id)!.status, "cancelled");
+  assert.ok(byTask.get(c!.id)!.endedAt, "and each says when it stopped");
+  assert.equal(
+    byTask.get(b!.id)!.status,
+    "cancelled",
+    "a conflict nobody will resolve is over too",
+  );
+  assert.equal(byTask.get(a!.id)!.status, "landed", "and what already landed keeps its ending");
+});
+
+/**
+ * Deletion refuses while agents are working (the run would keep going
+ * in its sandbox with nothing left to report to), so the way to delete
+ * a live swarm is to stop it first. That only works if stopping it
+ * really stops the runs, which is what this walks: cancel, then delete.
+ */
+test("a stopped swarm can then be deleted, agents and all", async () => {
+  const swarm = await createSwarm();
+  await plannerAtWork(swarm.id);
+
+  const busy = await app.request(`/api/swarms/${swarm.id}`, { method: "DELETE" });
+  assert.equal(busy.status, 409, "not while an agent is working");
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/cancel`)).status, 200);
+  const gone = await app.request(`/api/swarms/${swarm.id}`, { method: "DELETE" });
+  assert.equal(gone.status, 200, await gone.clone().text());
+  assert.equal((await db.select().from(swarms).where(eq(swarms.id, swarm.id))).length, 0);
 });
 
 /**

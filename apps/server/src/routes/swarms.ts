@@ -9,6 +9,7 @@ import {
   ensureSwarmAgents,
   projects,
   sandboxes,
+  swarmLandings,
   swarmMessages,
   swarmTasks,
   swarmTemplates,
@@ -25,6 +26,7 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
+import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
@@ -303,11 +305,13 @@ export function swarmRoutes(ctx: AppContext) {
       return c.json(paused);
     })
     /**
-     * Stops a swarm for good.
+     * Stops a swarm for good, agents included.
      *
-     * Separate from pausing because it is a different decision: a
-     * cancelled swarm is not waiting for anybody, and the coordinator
-     * never spawns on it again. Its rows stay, so what it did and what
+     * Separate from pausing because it is a different decision, and it
+     * is the stronger one in both directions. Pausing lets the workers
+     * that are mid task finish; cancelling stops them where they are,
+     * because a person who pressed stop is not asking to keep paying
+     * for the turn in flight. Its rows stay, so what it did and what
      * it cost is still readable.
      */
     .post("/:id/cancel", async (c) => {
@@ -318,11 +322,69 @@ export function swarmRoutes(ctx: AppContext) {
       if (swarm.status === "done") {
         return c.json({ error: "This swarm is done, so there is nothing to stop." }, 409);
       }
+      const now = new Date();
+      /*
+       * The status lands first, and the runs are stopped after it. That
+       * order is the whole safety of this route. Both of the
+       * reconciler's spawn steps read this status (a cancelled swarm
+       * wakes no planner and is given no worker), and a tick takes the
+       * swarm row's lock before it reads anything, so once this update
+       * holds that lock a concurrent tick either waited for it and then
+       * spawns nothing, or already held it and whatever it started is
+       * queued or running by now, which is exactly what the query below
+       * looks for. Stopping the runs first would leave that second tick
+       * free to put a fresh agent on a swarm that was still running
+       * when it looked, and the person's stop would have killed one run
+       * and started another.
+       */
       const [cancelled] = await db(c, ctx)
         .update(swarms)
-        .set({ status: "cancelled", pausedReason: null, updatedAt: new Date() })
+        .set({ status: "cancelled", pausedReason: null, updatedAt: now })
         .where(eq(swarms.id, swarm.id))
         .returning();
+
+      /*
+       * The merge queue goes with it, in the same transaction as the
+       * status, because it is the same decision: a landing waiting its
+       * turn, or waiting for somebody to resolve a conflict, is waiting
+       * on a swarm that will never run again, and a queue full of rows
+       * that say "queued" reads as work still to come. Landed and
+       * failed rows keep the ending they already have, and a landing in
+       * flight belongs to whatever is performing it.
+       */
+      await db(c, ctx)
+        .update(swarmLandings)
+        .set({ status: "cancelled", endedAt: now, updatedAt: now })
+        .where(
+          and(eq(swarmLandings.swarmId, swarm.id), inArray(swarmLandings.status, ["queued", "conflicted"])),
+        );
+
+      /*
+       * And the agents themselves, through the card board's own
+       * cancellation rather than a second one: markCancelled is a
+       * compare-and-set against the active statuses, so a run some
+       * other path already ended is not ended twice, and it is what
+       * revokes the run's gateway token (an agent that keeps talking
+       * finds the swarm tools gone), meters the hours, and tells the
+       * streams.
+       *
+       * A swarm's runs are always this server's (a project on a runner
+       * cannot have a swarm at all), but the abort handle lives in the
+       * memory of the process carrying the run, so one this process is
+       * not carrying is marked rather than interrupted: its token is
+       * dead from here, so its tools stop answering, and the finish it
+       * eventually writes is refused by the same compare-and-set. A run
+       * still queued stops outright, because the executor picks up
+       * nothing that is no longer queued.
+       */
+      const active = await db(c, ctx)
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+      for (const run of active) {
+        ctx.running.get(run.id)?.abort();
+        await markCancelled(ctx, run.id);
+      }
       return c.json(cancelled);
     })
     /**
