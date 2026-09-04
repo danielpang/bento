@@ -11,6 +11,7 @@ import {
 } from "@bento/db";
 import type { AppContext } from "../../context.js";
 import type { BoardEvent } from "../../events.js";
+import { enqueueRun } from "../queue.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 
@@ -107,6 +108,13 @@ export interface SwarmTickResult {
  * inside it: a viewer that refetches on an event has to find the state
  * the event describes, and a client that refetched inside the
  * transaction would read the rows as they were before it.
+ *
+ * The runs this tick started are queued after the commit for the same
+ * reason, and because a run that is not queued is a run that never
+ * happens: startRunIfIdle writes a row in the queued status, and only
+ * enqueueRun turns that row into a `run.execute` job. Without it the
+ * row sits queued forever, the next tick reads it as this swarm being
+ * busy, and the swarm stops for good with nothing saying why.
  */
 export async function tickSwarm(
   ctx: AppContext,
@@ -116,6 +124,11 @@ export async function tickSwarm(
   const events: BoardEvent[] = [];
   const result = await ctx.db.transaction(async (tx) => runTick(tx, swarmId, deps, events));
   for (const event of events) ctx.bus.emitBoardEvent(event);
+  if (result) {
+    for (const runId of [...(result.plannerRunId ? [result.plannerRunId] : []), ...result.workerRunIds]) {
+      await enqueueRun(ctx, runId);
+    }
+  }
   return result;
 }
 

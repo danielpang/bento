@@ -39,6 +39,10 @@ let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
 let emitted: BoardEvent[];
+/** Jobs the tick queued, in order. A run row without one never starts. */
+let queued: { queue: string; data: { runId?: string } }[];
+/** Run workers this process nudged, so a queued run does not wait for a poll. */
+let notified: string[];
 
 before(async () => {
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -67,12 +71,31 @@ before(async () => {
 
   const bus = new EventBus();
   emitted = [];
+  queued = [];
+  notified = [];
   ctx = {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
     pool,
     bus,
     userId: "u1",
+    /**
+     * The queue, recorded rather than stubbed away.
+     *
+     * A run row is not a run: startRunIfIdle writes it queued, and only
+     * a `run.execute` job makes anything pick it up. These tests used to
+     * assert the row alone, which is exactly why a coordinator that
+     * never queued anything passed them while every swarm it started
+     * deadlocked.
+     */
+    boss: {
+      send: async (queue: string, data: unknown) => {
+        queued.push({ queue, data: data as { runId?: string } });
+        return "job";
+      },
+      notifyWorker: (id: string) => notified.push(id),
+    },
+    runWorkers: ["worker-1"],
   } as unknown as AppContext;
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
 });
@@ -84,7 +107,13 @@ after(async () => {
 beforeEach(async () => {
   await pool.query("delete from swarms");
   emitted.length = 0;
+  queued.length = 0;
+  notified.length = 0;
 });
+
+/** The runs this tick actually handed to the `run.execute` workers. */
+const queuedRunIds = () =>
+  queued.filter((job) => job.queue === "run.execute").map((job) => job.data.runId);
 
 /** A stubbed door: it records what was asked for, and inserts a real row. */
 function starter(
@@ -279,6 +308,8 @@ test("the planner is not woken while one is already running", async () => {
   const [sent] = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
   assert.equal(sent!.status, "sent");
   assert.equal(sent!.runId, delivered.plannerRunId);
+  // The row is queued; only the job makes anything run it.
+  assert.deepEqual(queuedRunIds(), [delivered.plannerRunId], "the planner was handed to the run workers");
 
   // Folded once: a third tick has nothing left to tell it.
   await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, delivered.plannerRunId!));
@@ -325,6 +356,15 @@ test("workers spawn up to the ceiling, and a plan limit stops the loop on the le
   const started = await read(first.id);
   assert.equal(started.status, "working");
   assert.equal(started.assignedRunId, result!.workerRunIds[0]);
+  /*
+   * The point of the spawn: a `run.execute` job naming that run. A row
+   * without one stays queued forever, and because queued counts as
+   * active the next tick reads the swarm as busy and the swarm stops
+   * for good. The workers poll every thirty seconds, so the nudge is
+   * what makes it start now rather than then.
+   */
+  assert.deepEqual(queuedRunIds(), [result!.workerRunIds[0]], "the spawned worker was queued");
+  assert.deepEqual(notified, ["worker-1"], "and this process's workers were woken");
 
   const refused = await read(second.id);
   assert.equal(refused.status, "assigned", "a refused leaf keeps its place in the queue");
@@ -349,6 +389,33 @@ test("no worker is spawned before somebody starts the swarm", async () => {
   assert.ok(
     deps.calls.every((call) => call.type === "swarm" && call.role !== "worker"),
     "nothing asked for a worker",
+  );
+  assert.deepEqual(queuedRunIds(), [], "and nothing was queued");
+});
+
+/**
+ * The rule the two assertions above are instances of, said once
+ * against the rows: every run this swarm has that is waiting to start
+ * was handed to the `run.execute` workers by the tick that started it.
+ */
+test("every run a tick starts is queued for the executor, and none is left sitting", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { title: "first", status: "assigned", position: 0 });
+  await makeTask(swarm.id, { title: "second", status: "assigned", position: 1 });
+  await db.insert(swarmMessages).values({ swarmId: swarm.id, text: "also do X", userId: "u1" });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(result);
+  assert.ok(result.plannerRunId, "the message woke the planner");
+  assert.equal(result.workerRunIds.length, 2, "and both ready leaves got a worker");
+
+  const rows = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  const waiting = rows.filter((row) => row.status === "queued").map((row) => row.id);
+  assert.equal(waiting.length, 3);
+  assert.deepEqual(
+    [...queuedRunIds()].sort(),
+    [...waiting].sort(),
+    "a queued run row with no job is a swarm that deadlocks until a restart",
   );
 });
 
