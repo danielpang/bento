@@ -667,6 +667,66 @@ test("the verification email returns an invitee to the invitation", async () => 
 });
 
 /**
+ * A swarm started by a team, in multi mode, under row-level security.
+ *
+ * This is the case the run tenant trigger was rewritten for, and the
+ * one a locally-run suite cannot see. In local mode every organization
+ * involved is null, so nothing is ever distinct from anything and the
+ * inserts pass whatever the rules say. Here the swarm, its planner run
+ * and its agent profile all carry a real organization, the request runs
+ * as bento_user inside the tenant transaction, and a rule that does not
+ * hold refuses the insert rather than quietly writing the wrong tenant.
+ */
+test("a team's swarm and its planner run carry the team, under RLS", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "swarm-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Swarm Owner",
+  });
+  const token = owner.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Swarm Team", slug: "swarm-team" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const project = (await (
+    await jsonPost("/api/projects", { name: "Team swarms", localPath: "/tmp" }, token)
+  ).json()) as { id: string; organizationId: string };
+  assert.equal(project.organizationId, org.id);
+
+  const flagsBefore = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(
+    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
+    false,
+  );
+  try {
+    const created = await jsonPost("/api/swarms", { projectId: project.id, title: "Team goal", goal: "ship it" }, token);
+    assert.equal(created.status, 201, await created.clone().text());
+    const swarm = (await created.json()) as { id: string; plannerRunId: string; organizationId: string | null };
+    assert.equal(swarm.organizationId, org.id, "the insert trigger derived the team from the project");
+    assert.ok(swarm.plannerRunId, "and a planner was started");
+
+    const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+    assert.equal(run?.organizationId, org.id, "the run carries the same team");
+    assert.equal(run?.type, "swarm");
+    assert.equal(run?.role, "planner");
+    assert.equal(run?.featureId, null, "and no card, which is what its shape constraint says");
+
+    const [profile] = await ctx.db
+      .select({ organizationId: agentProfiles.organizationId })
+      .from(agentProfiles)
+      .where(eq(agentProfiles.id, run!.agentProfileId));
+    assert.equal(
+      profile?.organizationId,
+      org.id,
+      "the seeded planner agent belongs to the team too, which the run tenant trigger requires",
+    );
+  } finally {
+    ctx.featureFlags = flagsBefore;
+  }
+});
+
+/**
  * The authorization matrix: every route that acts on a feature, run,
  * stage, or project must refuse a token from a different tenant. This
  * exists because the earlier "scoped to owner" test only covered
