@@ -1279,36 +1279,53 @@ export async function captureRunFinished(
   const analytics = ctx.analytics;
   if (!analytics) return;
   try {
+    /**
+     * Both boards, so both are joined and neither is required.
+     *
+     * A swarm's run has no feature, and an inner join on it dropped
+     * every one of them: no swarm run reported that it had finished,
+     * and its cost, turns and exit code were lost. The project and the
+     * organization come from whichever parent this run actually has.
+     */
     const [row] = await ctx.db
       .select({
         startedBy: agentRuns.startedBy,
+        type: agentRuns.type,
         featureId: agentRuns.featureId,
         stageId: agentRuns.stageId,
+        swarmId: agentRuns.swarmId,
+        swarmTaskId: agentRuns.swarmTaskId,
         role: agentRuns.role,
         executor: agentRuns.executor,
         costUsd: agentRuns.costUsd,
         numTurns: agentRuns.numTurns,
         exitCode: agentRuns.exitCode,
         error: agentRuns.error,
-        organizationId: features.organizationId,
-        projectId: features.projectId,
+        featureOrganizationId: features.organizationId,
+        featureProjectId: features.projectId,
+        swarmOrganizationId: swarms.organizationId,
+        swarmProjectId: swarms.projectId,
       })
       .from(agentRuns)
-      .innerJoin(features, eq(features.id, agentRuns.featureId))
+      .leftJoin(features, eq(features.id, agentRuns.featureId))
+      .leftJoin(swarms, eq(swarms.id, agentRuns.swarmId))
       .where(eq(agentRuns.id, runId))
       .limit(1);
     if (!row) return;
     analytics.capture({
       event: "agent run finished",
       userId: row.startedBy ?? null,
-      organizationId: row.organizationId,
+      organizationId: row.featureOrganizationId ?? row.swarmOrganizationId,
       properties: {
         status,
         success: status === "succeeded",
         run_id: runId,
+        type: row.type,
         feature_id: row.featureId,
         stage_id: row.stageId,
-        project_id: row.projectId,
+        swarm_id: row.swarmId,
+        swarm_task_id: row.swarmTaskId,
+        project_id: row.featureProjectId ?? row.swarmProjectId,
         role: row.role,
         executor: row.executor,
         cost_usd: row.costUsd === null ? null : Number(row.costUsd),
