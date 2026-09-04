@@ -39,7 +39,7 @@ interface TaskSeed {
   id: string;
   parentId: string | null;
   title: string;
-  kind: "plan" | "leaf";
+  nodeType: "plan" | "leaf";
   status: TaskStatus;
   weight?: number;
   attention?: SwarmTask["attention"];
@@ -62,13 +62,13 @@ function task(seed: TaskSeed, position: number, now: number): SwarmTask {
     description:
       seed.description ??
       "Written by the planner from the goal. Renders as text, never as markup, because an agent wrote it.",
-    kind: seed.kind,
+    nodeType: seed.nodeType,
     status: seed.status,
     attention: seed.attention ?? "none",
     weight: seed.weight ?? 1,
     assignedRunId:
       seed.status === "working" || seed.status === "assigned" ? `run-${seed.id}` : null,
-    branchName: seed.branchName ?? (seed.kind === "leaf" ? `bento/${seed.id}` : null),
+    branchName: seed.branchName ?? (seed.nodeType === "leaf" ? `bento/${seed.id}` : null),
     cost: seed.cost ?? spend(),
     flags: seed.flags ?? {},
     report: seed.report ?? null,
@@ -89,13 +89,13 @@ function task(seed: TaskSeed, position: number, now: number): SwarmTask {
 }
 
 const CHECKOUT_SEEDS: TaskSeed[] = [
-  { id: "t-root", parentId: null, title: "Ship the new checkout", kind: "plan", status: "working", weight: 5, startedMinAgo: 96 },
-  { id: "t-pay", parentId: "t-root", title: "Payments", kind: "plan", status: "working", startedMinAgo: 92 },
+  { id: "t-root", parentId: null, title: "Ship the new checkout", nodeType: "plan", status: "working", weight: 5, startedMinAgo: 96 },
+  { id: "t-pay", parentId: "t-root", title: "Payments", nodeType: "plan", status: "working", startedMinAgo: 92 },
   {
     id: "t-pay-token",
     parentId: "t-pay",
     title: "Card tokenisation",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "done",
     weight: 3,
     startedMinAgo: 92,
@@ -108,7 +108,7 @@ const CHECKOUT_SEEDS: TaskSeed[] = [
     id: "t-pay-wallet",
     parentId: "t-pay",
     title: "Apple Pay",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "done",
     weight: 2,
     startedMinAgo: 88,
@@ -121,19 +121,19 @@ const CHECKOUT_SEEDS: TaskSeed[] = [
     id: "t-pay-refund",
     parentId: "t-pay",
     title: "Refund path",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "working",
     weight: 3,
     startedMinAgo: 38,
     cost: spend(0.51, 0.2),
     criteria: ["A partial refund leaves the order open"],
   },
-  { id: "t-cart", parentId: "t-root", title: "Cart", kind: "plan", status: "done", startedMinAgo: 94, endedMinAgo: 55 },
+  { id: "t-cart", parentId: "t-root", title: "Cart", nodeType: "plan", status: "done", startedMinAgo: 94, endedMinAgo: 55 },
   {
     id: "t-cart-totals",
     parentId: "t-cart",
     title: "Line item totals",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "done",
     weight: 2,
     startedMinAgo: 94,
@@ -145,32 +145,32 @@ const CHECKOUT_SEEDS: TaskSeed[] = [
     id: "t-cart-promo",
     parentId: "t-cart",
     title: "Promo codes",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "done",
     startedMinAgo: 80,
     endedMinAgo: 55,
     cost: spend(0.38),
     report: "One code per cart, checked on the server.",
   },
-  { id: "t-ui", parentId: "t-root", title: "Checkout UI", kind: "plan", status: "working", startedMinAgo: 70 },
+  { id: "t-ui", parentId: "t-root", title: "Checkout UI", nodeType: "plan", status: "working", startedMinAgo: 70 },
   {
     id: "t-ui-address",
     parentId: "t-ui",
     title: "Address form",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "working",
     weight: 2,
     startedMinAgo: 7,
     cost: spend(0.11),
     criteria: ["Autofill still works", "Errors read as sentences"],
   },
-  { id: "t-ui-summary", parentId: "t-ui", title: "Order summary", kind: "leaf", status: "assigned", weight: 2, startedMinAgo: 1 },
-  { id: "t-ui-errors", parentId: "t-ui", title: "Error states", kind: "leaf", status: "open", weight: 1 },
+  { id: "t-ui-summary", parentId: "t-ui", title: "Order summary", nodeType: "leaf", status: "assigned", weight: 2, startedMinAgo: 1 },
+  { id: "t-ui-errors", parentId: "t-ui", title: "Error states", nodeType: "leaf", status: "open", weight: 1 },
   {
     id: "t-docs",
     parentId: "t-root",
     title: "Update the checkout docs",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "blocked",
     attention: "escalated",
     weight: 1,
@@ -179,12 +179,12 @@ const CHECKOUT_SEEDS: TaskSeed[] = [
     flags: { blockedBy: "t-pay-refund", attempts: 2 },
     criteria: ["Every screenshot matches the new flow"],
   },
-  { id: "t-tests", parentId: "t-root", title: "Tests", kind: "plan", status: "working", startedMinAgo: 66 },
+  { id: "t-tests", parentId: "t-root", title: "Tests", nodeType: "plan", status: "working", startedMinAgo: 66 },
   {
     id: "t-tests-happy",
     parentId: "t-tests",
     title: "End to end happy path",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "landed",
     weight: 2,
     startedMinAgo: 66,
@@ -196,7 +196,7 @@ const CHECKOUT_SEEDS: TaskSeed[] = [
     id: "t-tests-failure",
     parentId: "t-tests",
     title: "Failure cases",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "failed",
     weight: 2,
     startedMinAgo: 50,
@@ -208,7 +208,7 @@ const CHECKOUT_SEEDS: TaskSeed[] = [
     id: "t-tests-dupe",
     parentId: "t-tests",
     title: "Duplicate coverage, dropped",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "cancelled",
     weight: 1,
     startedMinAgo: 48,
@@ -217,16 +217,16 @@ const CHECKOUT_SEEDS: TaskSeed[] = [
 ];
 
 const DOCS_SEEDS: TaskSeed[] = [
-  { id: "d-root", parentId: null, title: "Refresh the API reference", kind: "plan", status: "open", weight: 3 },
+  { id: "d-root", parentId: null, title: "Refresh the API reference", nodeType: "plan", status: "open", weight: 3 },
 ];
 
 const API_SEEDS: TaskSeed[] = [
-  { id: "a-root", parentId: null, title: "Retire the v1 endpoints", kind: "plan", status: "done", startedMinAgo: 400, endedMinAgo: 180 },
+  { id: "a-root", parentId: null, title: "Retire the v1 endpoints", nodeType: "plan", status: "done", startedMinAgo: 400, endedMinAgo: 180 },
   {
     id: "a-audit",
     parentId: "a-root",
     title: "Find every caller",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "done",
     weight: 2,
     startedMinAgo: 400,
@@ -238,7 +238,7 @@ const API_SEEDS: TaskSeed[] = [
     id: "a-shim",
     parentId: "a-root",
     title: "Shim the three external callers",
-    kind: "leaf",
+    nodeType: "leaf",
     status: "done",
     weight: 3,
     startedMinAgo: 320,
@@ -273,7 +273,7 @@ export function generateSwarmTasks(count: number, opts: { branching?: number; do
       id: `g-${i}`,
       parentId: parentIndex === null ? null : `g-${parentIndex}`,
       title: `Task ${i}`,
-      kind: isPlan ? "plan" : "leaf",
+      nodeType: isPlan ? "plan" : "leaf",
       status,
       weight: (i % 5) + 1,
       cost: spend((i % 7) / 100, (i % 3) / 100, (i % 2) / 100),
@@ -368,7 +368,7 @@ export function seedSwarms(projectId: string, now: number): SwarmDetail[] {
         now,
       ),
       tasks: tasksFrom(
-        [{ id: "s-root", parentId: null, title: "Outbox spike", kind: "leaf", status: "cancelled", startedMinAgo: 800, endedMinAgo: 700 }],
+        [{ id: "s-root", parentId: null, title: "Outbox spike", nodeType: "leaf", status: "cancelled", startedMinAgo: 800, endedMinAgo: 700 }],
         now,
       ),
       landings: [],
@@ -553,7 +553,7 @@ export function draftSwarm(input: NewSwarmInput, now: number): SwarmDetail {
       now,
     ),
     tasks: tasksFrom(
-      [{ id: `${id}-root`, parentId: null, title: input.name, kind: "plan", status: "open", weight: 3 }],
+      [{ id: `${id}-root`, parentId: null, title: input.name, nodeType: "plan", status: "open", weight: 3 }],
       now,
     ),
     landings: [],

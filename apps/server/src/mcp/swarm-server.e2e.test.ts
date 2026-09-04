@@ -256,7 +256,7 @@ test("a planner token for one swarm cannot read or change another", async () => 
 
 test("a sub planner may only reach the part of the plan it was given", async () => {
   const { swarmId, token: plannerToken } = await agentOn("planner");
-  const mine = await makeTask(swarmId, { kind: "plan", title: "mine" });
+  const mine = await makeTask(swarmId, { nodeType: "plan", title: "mine" });
   const child = await makeTask(swarmId, { parentId: mine.id, title: "child" });
   const elsewhere = await makeTask(swarmId, { title: "elsewhere" });
 
@@ -297,7 +297,7 @@ test("the planner builds the plan, and the tree says what it built", async () =>
   const created = await call(token, "create_task", { title: "Rewrite checkout", description: "all of it" });
   assert.match(created.text, /Created leaf node/);
   const [leaf] = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarmId));
-  assert.equal(leaf!.kind, "leaf");
+  assert.equal(leaf!.nodeType, "leaf");
   assert.equal(leaf!.status, "open");
   assert.equal(leaf!.title, "Rewrite checkout");
 
@@ -306,7 +306,7 @@ test("the planner builds the plan, and the tree says what it built", async () =>
     children: [{ title: "Cart page" }, { title: "Payment step" }],
   });
   assert.match(split.text, /Split .* into 2 tasks/);
-  assert.equal((await task(leaf!.id))!.kind, "plan", "the leaf became a plan node");
+  assert.equal((await task(leaf!.id))!.nodeType, "plan", "the leaf became a plan node");
   const children = await db.select().from(swarmTasks).where(eq(swarmTasks.parentId, leaf!.id));
   assert.equal(children.length, 2);
   assert.deepEqual(children.map((row) => row.position).sort(), [0, 1]);
@@ -366,7 +366,7 @@ test("accepting queues the branch once, and rejecting sends the leaf back with t
 
 test("cancelling takes the subtree with it", async () => {
   const { token, swarmId } = await agentOn("planner");
-  const group = await makeTask(swarmId, { kind: "plan", title: "group" });
+  const group = await makeTask(swarmId, { nodeType: "plan", title: "group" });
   const child = await makeTask(swarmId, { parentId: group.id, title: "child" });
   const grandchild = await makeTask(swarmId, { parentId: child.id, title: "grandchild" });
   const untouched = await makeTask(swarmId, { title: "elsewhere" });

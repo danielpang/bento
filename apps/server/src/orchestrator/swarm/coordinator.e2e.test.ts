@@ -178,7 +178,7 @@ test("the states a person owns are never recomputed from the tree", () => {
 
 test("cost rolls leaves to root, and the swarm's spend is the total", async () => {
   const swarm = await makeSwarm();
-  const group = await makeTask(swarm.id, { kind: "plan", title: "G", status: "open" });
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "G", status: "open" });
   await makeTask(swarm.id, {
     parentId: group.id,
     title: "one",
@@ -215,7 +215,7 @@ test("cost rolls leaves to root, and the swarm's spend is the total", async () =
 
 test("a tick applied twice changes nothing the second time", async () => {
   const swarm = await makeSwarm();
-  const group = await makeTask(swarm.id, { kind: "plan", title: "G" });
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "G" });
   const leaf = await makeTask(swarm.id, { parentId: group.id, status: "done", costMeasuredUsd: "1.00" });
 
   await tickSwarm(ctx, swarm.id, starter());
@@ -397,7 +397,7 @@ test("a swarm that is gone ticks to nothing rather than throwing", async () => {
 
 test("status changes are announced on the project's board, after the writes", async () => {
   const swarm = await makeSwarm({ status: "running" });
-  const group = await makeTask(swarm.id, { kind: "plan", title: "G" });
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "G" });
   const leaf = await makeTask(swarm.id, { parentId: group.id, status: "done" });
 
   await tickSwarm(ctx, swarm.id, starter());

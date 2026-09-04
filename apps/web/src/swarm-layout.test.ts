@@ -33,7 +33,7 @@ let seq = 0;
 function node(
   id: string,
   parentId: string | null,
-  kind: "plan" | "leaf",
+  nodeType: "plan" | "leaf",
   status: TaskStatus,
   extra: Partial<SwarmTask> = {},
 ): SwarmTask {
@@ -43,7 +43,7 @@ function node(
     position: extra.position ?? seq++,
     title: extra.title ?? id,
     description: "",
-    kind,
+    nodeType,
     status,
     attention: extra.attention ?? "none",
     weight: extra.weight ?? 1,

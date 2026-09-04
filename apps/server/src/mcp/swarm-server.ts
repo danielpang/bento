@@ -123,7 +123,7 @@ const shapes = {
       parentId: uuidArg.nullish(),
       title,
       description,
-      kind: z.enum(["plan", "leaf"]).default("leaf"),
+      nodeType: z.enum(["plan", "leaf"]).default("leaf"),
       weight: z.number().int().min(1).max(100).default(1),
     })
     .strip(),
@@ -184,7 +184,11 @@ const TOOLS: Record<ToolName, ToolSpec> = {
         parentId: str("The plan node to add it under. Omit for a top level node."),
         title: str("One line, plain text."),
         description: str("What finished means for this task."),
-        kind: { type: "string", enum: ["plan", "leaf"], description: "leaf (work an agent does) or plan (a node to decompose)." },
+        nodeType: {
+          type: "string",
+          enum: ["plan", "leaf"],
+          description: "leaf (work an agent does) or plan (a node to decompose).",
+        },
         weight: { type: "integer", description: "Rough size, 1 to 100. Ordering only, never billing." },
       },
       required: ["title"],
@@ -515,7 +519,7 @@ async function getTree(ctx: AppContext, caller: SwarmCaller): Promise<string> {
   const tree = rows.map((task) => ({
     id: task.id,
     parentId: task.parentId,
-    kind: task.kind,
+    nodeType: task.nodeType,
     title: task.title,
     description: task.description,
     status: task.status,
@@ -539,7 +543,7 @@ async function createTask(
   let parentId: string | null = args.parentId ?? null;
   if (parentId) {
     const parent = await requireTask(ctx, caller, parentId);
-    if (parent.kind !== "plan") {
+    if (parent.nodeType !== "plan") {
       throw new ToolRefusal(
         `task ${parent.id} is a leaf, so it cannot hold children. Use split_task to turn it into a plan node.`,
       );
@@ -557,7 +561,7 @@ async function createTask(
       swarmId: caller.swarmId,
       parentId,
       position: await nextPosition(ctx, caller.swarmId, parentId),
-      kind: args.kind,
+      nodeType: args.nodeType,
       title: args.title,
       description: args.description,
       weight: args.weight,
@@ -571,7 +575,7 @@ async function createTask(
     runId: caller.runId,
   });
   events.push(taskEvent(caller, created.id, created.status));
-  return `Created ${created.kind} node ${created.id}. It is ${created.status}; assign it when it is ready to be worked.`;
+  return `Created ${created.nodeType} node ${created.id}. It is ${created.status}; assign it when it is ready to be worked.`;
 }
 
 async function splitTask(
@@ -581,7 +585,7 @@ async function splitTask(
   events: BoardEvent[],
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
-  if (task.kind !== "leaf") {
+  if (task.nodeType !== "leaf") {
     throw new ToolRefusal(`task ${task.id} is already a plan node; add to it with create_task.`);
   }
   if (task.status === "working" || task.status === "landed") {
@@ -596,7 +600,7 @@ async function splitTask(
       // A plan node is never worked directly, so the leaf's own
       // assignment goes with the split: whatever it was waiting for,
       // its children are what waits now.
-      .set({ kind: "plan", status: "open", attention: null, assignedRunId: null, updatedAt: new Date() })
+      .set({ nodeType: "plan", status: "open", attention: null, assignedRunId: null, updatedAt: new Date() })
       .where(eq(swarmTasks.id, task.id));
     let position = 0;
     for (const child of args.children) {
@@ -606,7 +610,7 @@ async function splitTask(
           swarmId: caller.swarmId,
           parentId: task.id,
           position: position++,
-          kind: "leaf",
+          nodeType: "leaf",
           title: child.title,
           description: child.description,
           weight: child.weight,
@@ -638,7 +642,7 @@ async function assign(
   events: BoardEvent[],
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
-  if (task.kind !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node. Assign its leaves instead.`);
+  if (task.nodeType !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node. Assign its leaves instead.`);
   if (task.status === "working" || task.status === "landed") {
     throw new ToolRefusal(`task ${task.id} is already being worked.`);
   }
@@ -709,7 +713,7 @@ async function accept(
   events: BoardEvent[],
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
-  if (task.kind !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node; there is nothing to accept.`);
+  if (task.nodeType !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node; there is nothing to accept.`);
   if (!task.report) throw new ToolRefusal(`task ${task.id} has not reported yet, so there is nothing to accept.`);
 
   await ctx.db.transaction(async (tx) => {
@@ -762,7 +766,7 @@ async function reject(
   events: BoardEvent[],
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
-  if (task.kind !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node; there is nothing to reject.`);
+  if (task.nodeType !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node; there is nothing to reject.`);
   if (!task.report) throw new ToolRefusal(`task ${task.id} has not reported yet, so there is nothing to reject.`);
 
   await ctx.db

@@ -192,13 +192,13 @@ export function SwarmNodeDrawer({
                 the one on the tab. */}
             <button
               className="btn"
-              disabled={busy || task.status === "done" || task.kind !== "leaf"}
+              disabled={busy || task.status === "done" || task.nodeType !== "leaf"}
               onClick={() => setConfirming(true)}
             >
               Mark done
             </button>
           </div>
-          {task.kind !== "leaf" && (
+          {task.nodeType !== "leaf" && (
             <p className="muted">A plan node is finished by its own tasks finishing.</p>
           )}
         </section>

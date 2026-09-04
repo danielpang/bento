@@ -28,7 +28,7 @@ function tasks(): SwarmTask[] {
   const base = (
     id: string,
     parentId: string | null,
-    kind: "plan" | "leaf",
+    nodeType: "plan" | "leaf",
     status: SwarmTask["status"],
     extra: Partial<SwarmTask> = {},
   ): SwarmTask => ({
@@ -37,7 +37,7 @@ function tasks(): SwarmTask[] {
     position: extra.position ?? 0,
     title: extra.title ?? id,
     description: extra.description ?? "",
-    kind,
+    nodeType,
     status,
     attention: extra.attention ?? "none",
     weight: extra.weight ?? 1,

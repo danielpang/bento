@@ -112,7 +112,7 @@ function TreeNode({
         width: `${NODE_WIDTH}px`,
         height: `${NODE_HEIGHT}px`,
       }}
-      data-kind={node.kind}
+      data-node-type={node.nodeType}
       data-state={taskTone(node.status)}
       data-attention={attention ? "" : undefined}
       data-collapsed={node.collapsed ? "" : undefined}
@@ -128,7 +128,7 @@ function TreeNode({
         <span className="swarm-node-head">
           <CompletionRing
             fraction={node.completion}
-            size={node.kind === "plan" ? 18 : 15}
+            size={node.nodeType === "plan" ? 18 : 15}
             stroke={2.5}
             tone={attention ? "muted" : "brand"}
           />

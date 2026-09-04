@@ -506,7 +506,7 @@ async function spawnWorkers(
    */
   if (swarm.status !== "running" && swarm.status !== "blocked") return { runIds, refusal: null };
 
-  const ready = tasks.filter((task) => task.kind === "leaf" && task.status === "assigned");
+  const ready = tasks.filter((task) => task.nodeType === "leaf" && task.status === "assigned");
   if (ready.length === 0) return { runIds, refusal: null };
 
   const profileId = await workerProfileFor(tx, swarm);

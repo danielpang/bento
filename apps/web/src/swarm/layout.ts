@@ -1,4 +1,4 @@
-import type { SpendTier, SwarmSpend, SwarmTask, TaskAttention, TaskKind, TaskStatus } from "./types.js";
+import type { NodeType, SpendTier, SwarmSpend, SwarmTask, TaskAttention, TaskStatus } from "./types.js";
 
 /**
  * The plan, as numbers.
@@ -60,7 +60,7 @@ export interface SwarmNode {
   childIds: string[];
   depth: number;
   title: string;
-  kind: TaskKind;
+  nodeType: NodeType;
   status: TaskStatus;
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
@@ -148,7 +148,7 @@ export function addSpend(a: SwarmSpend, b: SwarmSpend): SwarmSpend {
  */
 export function attentionFor(task: SwarmTask, now: number, longRunMs = LONG_RUN_WARNING_MS): TaskAttention {
   if (task.attention !== "none") return task.attention;
-  if (task.kind !== "leaf" || !WORKING.includes(task.status)) return "none";
+  if (task.nodeType !== "leaf" || !WORKING.includes(task.status)) return "none";
   return elapsedFor(task, now) >= longRunMs ? "long_running" : "none";
 }
 
@@ -184,7 +184,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       childIds: [],
       depth: 0,
       title: task.title,
-      kind: task.kind,
+      nodeType: task.nodeType,
       status: task.status,
       attention: attentionFor(task, now, longRunMs),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
@@ -264,7 +264,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
     const kids = node.childIds.map((id) => byId.get(id)).filter((n): n is SwarmNode => !!n && seen.has(n.id));
     node.frontier = WORKING.includes(node.status) || node.attention !== "none";
     if (kids.length === 0) {
-      const counted = !isAbandoned(node.status) && node.kind === "leaf";
+      const counted = !isAbandoned(node.status) && node.nodeType === "leaf";
       node.totalWeight = counted ? node.weight : 0;
       node.doneWeight = counted && isDone(node.status) ? node.weight : 0;
       node.totalLeaves = counted ? 1 : 0;
@@ -441,7 +441,7 @@ export interface OutlineRow {
   id: string;
   depth: number;
   title: string;
-  kind: TaskKind;
+  nodeType: NodeType;
   status: TaskStatus;
   attention: TaskAttention;
   completion: number;
@@ -467,7 +467,7 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     id: node.id,
     depth: node.depth,
     title: node.title,
-    kind: node.kind,
+    nodeType: node.nodeType,
     status: node.status,
     attention: node.attention,
     completion: node.completion,

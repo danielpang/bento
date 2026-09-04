@@ -4,12 +4,11 @@
  * The routes do not exist yet. This module is the shape they will
  * send, written down once so the console can be built and driven
  * today against `fixtures.ts` and switched to real fetches by
- * changing `client.ts` alone. Nothing below is a database row: the
- * tables carry a coordinator's vocabulary (a node is a `group` or a
- * `task`, a task is `pending` or `ready`), and the console carries a
- * reader's (a node is a `plan` or a `leaf`, a leaf is `open` or
- * `assigned`). The mapping belongs in the route, so the two can be
- * renamed independently and neither has to explain the other.
+ * changing `client.ts` alone. The names are the table's, because the
+ * swarm route answers with the row itself: `nodeType` here is
+ * `swarm_tasks.node_type` there, and one vocabulary end to end is
+ * what keeps the console reading what the server sends. Renaming a
+ * field is a change on both sides, never on one.
  *
  * Two endpoints:
  *
@@ -33,7 +32,7 @@ export type SwarmStatus =
   | "failed";
 
 /** A plan node is decomposed further. A leaf is what a worker is given. */
-export type TaskKind = "plan" | "leaf";
+export type NodeType = "plan" | "leaf";
 
 export type TaskStatus =
   | "open"
@@ -81,7 +80,7 @@ export interface SwarmTask {
   position: number;
   title: string;
   description: string;
-  kind: TaskKind;
+  nodeType: NodeType;
   status: TaskStatus;
   attention: TaskAttention;
   /** The planner's rough size, 1 to 5. Weights the rollup, never billed. */

@@ -1329,11 +1329,12 @@ export const swarmTasks = pgTable(
     parentId: uuid("parent_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "cascade" }),
     position: integer("position").notNull().default(0),
     /**
-     * A plan node is decomposed further and never worked directly; a
-     * leaf is work an agent is given. A subplanner turns a plan node
-     * into more of both, which is why the two share a table.
+     * What type of node this is in the tree. A plan node is decomposed
+     * further and never worked directly; a leaf is work an agent is
+     * given. A subplanner turns a plan node into more of both, which is
+     * why the two share a table.
      */
-    kind: text("kind", { enum: ["plan", "leaf"] }).notNull().default("leaf"),
+    nodeType: text("node_type", { enum: ["plan", "leaf"] }).notNull().default("leaf"),
     title: text("title").notNull(),
     description: text("description").notNull().default(""),
     /**

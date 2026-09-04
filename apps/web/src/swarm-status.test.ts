@@ -33,7 +33,7 @@ function leaf(status: TaskStatus, extra: Partial<SwarmTask> = {}): SwarmTask {
     position: 0,
     title: "A leaf",
     description: "",
-    kind: "leaf",
+    nodeType: "leaf",
     status,
     attention: extra.attention ?? "none",
     weight: 1,

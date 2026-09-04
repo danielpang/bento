@@ -218,7 +218,7 @@ test("the swarm reads back with its plan, and the strip reads back with its numb
   const swarm = await createSwarm();
   const [group] = await db
     .insert(swarmTasks)
-    .values({ swarmId: swarm.id, kind: "plan", title: "Checkout", position: 0 })
+    .values({ swarmId: swarm.id, nodeType: "plan", title: "Checkout", position: 0 })
     .returning();
   await db.insert(swarmTasks).values([
     { swarmId: swarm.id, parentId: group!.id, title: "Cart page", status: "done", position: 0 },
