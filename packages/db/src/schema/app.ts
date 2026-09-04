@@ -1331,37 +1331,43 @@ export const swarmTasks = pgTable(
     parentId: uuid("parent_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "cascade" }),
     position: integer("position").notNull().default(0),
     /**
-     * A group is decomposed further and never worked directly; a task
-     * is a leaf an agent is given. A subplanner turns a group into more
-     * of both, which is why the two share a table.
+     * A plan node is decomposed further and never worked directly; a
+     * leaf is work an agent is given. A subplanner turns a plan node
+     * into more of both, which is why the two share a table.
      */
-    kind: text("kind", { enum: ["group", "task"] }).notNull().default("task"),
+    kind: text("kind", { enum: ["plan", "leaf"] }).notNull().default("leaf"),
     title: text("title").notNull(),
     description: text("description").notNull().default(""),
+    /**
+     * Where this node is in its life: open (in the plan, not handed
+     * out), assigned (ready for an agent), working (one is on it),
+     * landed (its branch is on the swarm's branch), done, blocked,
+     * failed, cancelled.
+     */
     status: text("status", {
-      enum: [
-        "pending",
-        "planning",
-        "ready",
-        "running",
-        "blocked",
-        "landing",
-        "done",
-        "failed",
-        "cancelled",
-      ],
+      enum: ["open", "assigned", "working", "landed", "done", "blocked", "failed", "cancelled"],
     })
       .notNull()
-      .default("pending"),
+      .default("open"),
     /**
      * Why this task wants a person, or null when it does not.
      *
      * Separate from status because a swarm that stops for a question is
      * still running everything else, and a board that has to be read
-     * for a stalled leaf is a board nobody reads.
+     * for a stalled leaf is a board nobody reads. Orthogonal to status
+     * for the same reason: a working node can want attention without
+     * ceasing to be worked.
+     *
+     * Two kinds of value in one column, deliberately. long_running and
+     * escalated are severity, set by the clock: a worker past the
+     * warning threshold, and one past the escalation threshold whose
+     * planner is woken about it. The rest are reasons, set by an event:
+     * a planner's question, a landing conflict, a failure, a budget
+     * stop. Both answer the same question a board asks, which is which
+     * node a person should look at, so they share the column.
      */
     attention: text("attention", {
-      enum: ["question", "blocked", "failed", "conflict", "budget"],
+      enum: ["long_running", "escalated", "question", "blocked", "failed", "conflict", "budget"],
     }),
     /**
      * Rough size, set by the planner. Used to order work and to spread

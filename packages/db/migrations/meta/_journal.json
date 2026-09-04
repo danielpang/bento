@@ -176,6 +176,13 @@
       "when": 1788542593728,
       "tag": "0024_agent_run_type",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1788545064032,
+      "tag": "0025_swarm_task_vocabulary",
+      "breakpoints": true
     }
   ]
 }
