@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createDb, createPool, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
+import { createDb, createPool, pgBossDatabase, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -81,12 +81,18 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const pool = createPool(env.DATABASE_URL, { max: poolMax });
     const db = createDb(pool);
 
-    const boss = new PgBoss({
-      connectionString: env.DATABASE_URL,
-      schema: "pgboss",
+    // pg-boss 10 would otherwise `new pg.Pool(config)` with only a
+    // connection string, which is how Timekeeper.onCron reused a
+    // Neon-dropped socket and surfaced `read ETIMEDOUT`. This pool
+    // is the same factory as `pool` above. pg-boss will not close it.
+    const bossPool = createPool(env.DATABASE_URL, {
       // Polling does not need one connection per worker. Enough that a
       // burst of completions is not queued behind the default 10.
       max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
+    });
+    const boss = new PgBoss({
+      db: pgBossDatabase(bossPool),
+      schema: "pgboss",
       // Idle workers poll slowly so an idle database can be idle; see
       // orchestrator/queue.ts for why, and for the run workers' own pace.
       pollingIntervalSeconds: QUEUE_POLL_SECONDS,
@@ -343,6 +349,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         await analytics?.shutdown().catch(() => {});
         await featureFlags.shutdown().catch(() => {});
         await logExport?.stop().catch(() => {});
+        await bossPool.end().catch(() => {});
         await pool.end().catch(() => {});
       },
     };
