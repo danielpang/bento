@@ -297,6 +297,93 @@ test("organization members share projects, outsiders do not", async () => {
 });
 
 /**
+ * Billing's hours breakdown is by card, not by person. The ranking
+ * has to be the caller's organization, or a probe of another team's
+ * period would learn which cards they ran.
+ */
+test("team hours ranks cards for the active org and 404s a foreign tenant", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Owner",
+  });
+  const stranger = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-stranger@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Stranger",
+  });
+  const ownerToken = owner.headers.get("set-auth-token")!;
+  const strangerToken = stranger.headers.get("set-auth-token")!;
+
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Hours Co", slug: "hours-co" }, ownerToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, ownerToken);
+
+  const foreignOrg = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Hours Foreign", slug: "hours-foreign" }, strangerToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: foreignOrg.id }, strangerToken);
+
+  async function board(token: string, name: string, title: string, hours: number) {
+    const project = (await (
+      await jsonPost("/api/projects", { name, localPath: "/tmp" }, token)
+    ).json()) as { id: string };
+    const pipeline = (await (
+      await app.request(`/api/projects/${project.id}/pipeline`, { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { stages: { id: string; defaultAgentProfileId: string | null }[] };
+    const profileId = pipeline.stages[0]?.defaultAgentProfileId;
+    assert.ok(profileId, "a new project ships with an agent on the first stage");
+    const feature = (await (
+      await jsonPost("/api/features", { projectId: project.id, title }, token)
+    ).json()) as { id: string };
+    const startedAt = new Date("2026-09-10T12:00:00.000Z");
+    await ctx.db.insert(agentRuns).values({
+      featureId: feature.id,
+      stageId: pipeline.stages[0]!.id,
+      agentProfileId: profileId,
+      prompt: "work",
+      status: "succeeded",
+      startedAt,
+      endedAt: new Date(startedAt.getTime() + hours * 3_600_000),
+    });
+    return feature.id;
+  }
+
+  const heavyId = await board(ownerToken, "Hours board", "Rate limit", 3);
+  await board(ownerToken, "Hours board 2", "Login polish", 1);
+  await board(strangerToken, "Foreign board", "Secret card", 10);
+
+  const from = "2026-09-01T00:00:00.000Z";
+  const to = "2026-10-01T00:00:00.000Z";
+  const mine = await app.request(`/api/team/hours?from=${from}&to=${to}`, {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(mine.status, 200);
+  const body = (await mine.json()) as { features: { featureId: string; title: string; agentHours: number }[] };
+  assert.deepEqual(
+    [...body.features].sort((a, b) => b.agentHours - a.agentHours).map((row) => [row.title, row.agentHours]),
+    [
+      ["Rate limit", 3],
+      ["Login polish", 1],
+    ],
+  );
+  assert.ok(body.features.some((row) => row.featureId === heavyId));
+  assert.ok(!body.features.some((row) => row.title === "Secret card"));
+
+  const outsider = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-outsider@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Outsider",
+  });
+  const outsiderToken = outsider.headers.get("set-auth-token")!;
+  const refused = await app.request(`/api/team/hours?from=${from}&to=${to}`, {
+    headers: { authorization: `Bearer ${outsiderToken}` },
+  });
+  assert.equal(refused.status, 404);
+});
+
+/**
  * The invitation preview is the one read the sign-in page may make
  * before there is a session. It answers only for a live pending
  * invitation id, which travels nowhere but the invitation email, and
@@ -705,6 +792,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/recheck`],
     ["POST", `/api/features/${feature.id}/publish`],
     ["GET", "/api/team/policy"],
+    ["GET", "/api/team/hours"],
     ["PATCH", "/api/team/policy", { body: JSON.stringify({ restrictNetwork: false }) }],
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
     ["GET", `/api/features/${feature.id}/merge-status`],

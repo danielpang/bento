@@ -1,12 +1,13 @@
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { invitation, member, organization, organizationPolicies, user } from "@bento/db";
+import { agentRuns, features, invitation, member, organization, organizationPolicies, user } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
+import { hoursByFeature } from "../hours-by-feature.js";
 
 /**
  * The organization roster in line form, for the Mac app.
@@ -69,7 +70,51 @@ export function teamRoutes(ctx: AppContext) {
           target: organizationPolicies.organizationId,
           set: { restrictNetwork, updatedAt: new Date() },
         });
-      return c.json({ restrictNetwork });
+        return c.json({ restrictNetwork });
+      })
+    /**
+     * Agent hours this team spent, by card, in a window.
+     *
+     * Billing's meter is a team total; this is the ranking that says
+     * which cards made it. Scoped to the active organization, so a
+     * foreign tenant asking for another team's period sees 404, not
+     * an empty list of somebody else's cards.
+     *
+     * `from` and `to` are the period the billing card already knows.
+     * A run that straddles the boundary only counts the overlap.
+     */
+    .get("/hours", async (c) => {
+      const membership = await getActiveOrganizationMembership(ctx, c);
+      if (!membership) return c.json({ error: "not found" }, 404);
+
+      const fromRaw = c.req.query("from");
+      const toRaw = c.req.query("to");
+      const from = fromRaw ? new Date(fromRaw) : new Date(0);
+      const to = toRaw ? new Date(toRaw) : new Date();
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+        return c.json({ error: "from and to must be dates" }, 400);
+      }
+
+      const now = new Date();
+      const runs = await db(c, ctx)
+        .select({
+          featureId: features.id,
+          title: features.title,
+          startedAt: agentRuns.startedAt,
+          endedAt: agentRuns.endedAt,
+        })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(
+          and(
+            eq(features.organizationId, membership.organizationId),
+            isNotNull(agentRuns.startedAt),
+            lt(agentRuns.startedAt, to),
+            or(isNull(agentRuns.endedAt), gt(agentRuns.endedAt, from)),
+          ),
+        );
+
+      return c.json({ features: hoursByFeature(runs, from, to, now) });
     })
     /**
      * The caller's own pending invitations, by the address on their

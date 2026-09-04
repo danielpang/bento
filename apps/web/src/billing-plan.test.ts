@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  filterHoursPeople,
+  filterHoursEntries,
   formatHours,
   formatHoursPhrase,
   formatHoursShare,
+  hoursBarFill,
   hoursMeterState,
-  hoursPeopleRestCopy,
-  hoursPersonFill,
+  hoursRestCopy,
   hoursUsage,
   monthlyTotal,
-  rankHoursPeople,
+  rankHoursEntries,
   type PlanOffer,
 } from "./components/billing-plan.js";
 
@@ -99,49 +99,51 @@ test("the hours meter colours at three quarters, overage, and a stop", () => {
   assert.equal(hoursMeterState(over, "ceiling"), "stopped");
 });
 
-test("the people list keeps the heaviest five and summarises the rest", () => {
+test("the hours list keeps the heaviest five cards and summarises the rest", () => {
   const entries = [
-    { userId: "a", name: "Ada", agentHours: 8 },
-    { userId: "b", name: "Bea", agentHours: 0 },
-    { userId: "c", name: "Cy", agentHours: 3 },
-    { userId: "d", name: "Di", agentHours: 1.2 },
-    { userId: "e", name: "Ed", agentHours: 0.4 },
-    { userId: "f", name: "Fay", agentHours: 6 },
-    { userId: "g", name: "Gus", agentHours: 2 },
-    { userId: null, name: null, agentHours: 0.1 },
+    { id: "a", name: "Rate limit", agentHours: 8 },
+    { id: "b", name: "Idle card", agentHours: 0 },
+    { id: "c", name: "Login polish", agentHours: 3 },
+    { id: "d", name: "Search", agentHours: 1.2 },
+    { id: "e", name: "Email", agentHours: 0.4 },
+    { id: "f", name: "Billing meter", agentHours: 6 },
+    { id: "g", name: "Webhooks", agentHours: 2 },
+    { id: "h", name: "Tiny", agentHours: 0.1 },
   ];
-  const ranked = rankHoursPeople(entries);
+  const ranked = rankHoursEntries(entries);
   assert.deepEqual(
     ranked.preview.map((row) => row.name),
-    ["Ada", "Fay", "Cy", "Gus", "Di"],
+    ["Rate limit", "Billing meter", "Login polish", "Webhooks", "Search"],
   );
   assert.equal(ranked.rest.length, 2);
   assert.equal(ranked.ranked.length, 7);
   assert.equal(ranked.restHours, 0.5);
   assert.equal(
-    hoursPeopleRestCopy(ranked.rest.length, ranked.restHours, 20.7),
-    "and 2 others used 0.5 hours this period (2%).",
+    hoursRestCopy(ranked.rest.length, ranked.restHours, 20.7, { singular: "card", plural: "cards" }),
+    "and 2 more cards used 0.5 hours this period (2%).",
   );
-  assert.equal(hoursPeopleRestCopy(1, 0.4, 20), "and 1 other used 0.4 hours this period (2%).");
+  assert.equal(
+    hoursRestCopy(1, 0.4, 20, { singular: "card", plural: "cards" }),
+    "and 1 more card used 0.4 hours this period (2%).",
+  );
 });
 
-test("a name filter matches automatic runs and ignores unused seats", () => {
-  const ranked = rankHoursPeople([
-    { userId: "a", name: "Ada Lovelace", agentHours: 4 },
-    { userId: "b", name: "Alan Turing", agentHours: 2 },
-    { userId: null, name: null, agentHours: 1 },
+test("a title filter matches cards and ignores unused ones", () => {
+  const ranked = rankHoursEntries([
+    { id: "a", name: "Rate limit middleware", agentHours: 4 },
+    { id: "b", name: "Login polish", agentHours: 2 },
+    { id: "c", name: "Webhooks", agentHours: 1 },
   ]);
-  assert.equal(filterHoursPeople(ranked.ranked, "ada").length, 1);
-  assert.equal(filterHoursPeople(ranked.ranked, "TUR").length, 1);
-  assert.equal(filterHoursPeople(ranked.ranked, "started").length, 1);
-  assert.equal(filterHoursPeople(ranked.ranked, "nobody").length, 0);
+  assert.equal(filterHoursEntries(ranked.ranked, "rate").length, 1);
+  assert.equal(filterHoursEntries(ranked.ranked, "POLISH").length, 1);
+  assert.equal(filterHoursEntries(ranked.ranked, "nobody").length, 0);
 });
 
-test("person bars scale to the heaviest spender, not the pool", () => {
-  assert.equal(hoursPersonFill(12, 12), 1);
-  assert.equal(hoursPersonFill(6, 12), 0.5);
-  assert.equal(hoursPersonFill(12, 500), 12 / 500);
-  assert.equal(hoursPersonFill(0, 12), 0);
+test("card bars scale to the heaviest spender, not the pool", () => {
+  assert.equal(hoursBarFill(12, 12), 1);
+  assert.equal(hoursBarFill(6, 12), 0.5);
+  assert.equal(hoursBarFill(12, 500), 12 / 500);
+  assert.equal(hoursBarFill(0, 12), 0);
   assert.equal(formatHoursShare(12.4, 19), "65%");
   assert.equal(formatHoursShare(0.1, 25), "<1%");
   assert.equal(formatHoursShare(0, 25), null);
