@@ -82,6 +82,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const subject = await describeRunSubject(ctx, found);
   const { run, profile, project, repoRows } = subject;
+  // An agent needs somewhere to work. Thrown rather than failed as a
+  // run, the way it always was: the job retries, and a project with no
+  // repository is a setup problem the person fixes once.
+  if (repoRows.length === 0) {
+    throw new Error(`project ${project.id} has no repositories; add at least one before running agents`);
+  }
   const emitBoard = (status: string) => subject.emitBoard(status);
 
   /**

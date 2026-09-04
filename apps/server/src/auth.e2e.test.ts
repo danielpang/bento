@@ -15,6 +15,7 @@ import {
   projects,
   runArtifacts,
   runMigrations,
+  swarmTasks,
   user,
   verification,
 } from "@bento/db";
@@ -760,6 +761,32 @@ test("every entity route refuses a foreign tenant", async () => {
     .returning({ id: mcpServers.id });
   assert.ok(mcpServer!.id, "the owner's MCP server must exist for the MCP routes to be probed");
 
+  /**
+   * Swarms sit behind the beta testers flag, which answers 404 for
+   * everybody without a PostHog key. Turned on for both users here, so
+   * what the matrix measures is the tenant check rather than the flag:
+   * a route that refuses because the feature is hidden proves nothing
+   * about whether it would refuse a foreign tenant once it is not.
+   */
+  const flagsBefore = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(
+    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
+    false,
+  );
+  const swarm = (await (
+    await asOwner("/api/swarms", { method: "POST", body: JSON.stringify({ projectId: project.id, title: "Mine" }) })
+  ).json()) as { id: string };
+  assert.ok(swarm.id, "the owner's swarm must exist for the swarm routes to be probed");
+  const [swarmTask] = await ctx.db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Leaf" })
+    .returning({ id: swarmTasks.id });
+  assert.ok(swarmTask?.id, "with a node, so start has a plan to refuse over rather than a missing one");
+  const template = (await (
+    await asOwner("/api/swarm-templates", { method: "POST", body: JSON.stringify({ name: "Mine" }) })
+  ).json()) as { id: string };
+  assert.ok(template.id, "the owner's swarm template must exist for its routes to be probed");
+
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
     ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ name: "Stolen" }) }],
@@ -858,6 +885,23 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/mcp/${mcpServer!.id}/connect`],
     ["DELETE", `/api/mcp/${mcpServer!.id}/user-credential`],
     ["DELETE", `/api/mcp/${mcpServer!.id}`],
+    // The list is not here: it is scoped to the caller, so it answers
+    // 200 with the intruder's own templates, which is checked below.
+    ["GET", `/api/swarm-templates/${template.id}`],
+    ["PATCH", `/api/swarm-templates/${template.id}`, { body: JSON.stringify({ name: "stolen" }) }],
+    ["POST", "/api/swarms", { body: JSON.stringify({ projectId: project.id, title: "Injected" }) }],
+    ["GET", `/api/swarms?projectId=${project.id}`],
+    ["GET", `/api/swarms/${swarm.id}`],
+    ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ title: "Stolen" }) }],
+    ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ maxWorkers: 32 }) }],
+    ["POST", `/api/swarms/${swarm.id}/start`],
+    ["GET", `/api/swarms/${swarm.id}/messages`],
+    ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
+    // The stream, for the reason the run stream is here: it must refuse
+    // before it streams anything.
+    ["GET", `/api/swarms/${swarm.id}/events`],
+    ["DELETE", `/api/swarm-templates/${template.id}`],
+    ["DELETE", `/api/swarms/${swarm.id}`],
     ["DELETE", `/api/features/${feature.id}`],
     // Last: a delete that went through would refuse everything after it
     // for the wrong reason. The project last, because it would take the
@@ -879,6 +923,29 @@ test("every entity route refuses a foreign tenant", async () => {
   // cannot show.
   const stillThere = await asOwner(`/api/features/${feature.id}`);
   assert.equal(stillThere.status, 200, "the intruder's DELETE must not have removed the owner's card");
+
+  // The swarm is still the owner's, under its own name and its own
+  // ceilings. A refusal that answered 404 and wrote anyway would pass
+  // the loop above and quietly hand somebody else's agents a bigger
+  // budget to spend.
+  const swarmAfter = await asOwner(`/api/swarms/${swarm.id}`);
+  assert.equal(swarmAfter.status, 200, "the intruder must not have deleted the owner's swarm");
+  const swarmBody = (await swarmAfter.json()) as { swarm: { title: string; maxWorkers: number; status: string } };
+  assert.equal(swarmBody.swarm.title, "Mine", "nor renamed it");
+  assert.equal(swarmBody.swarm.maxWorkers, 4, "nor raised how many agents it may run at once");
+  assert.equal(swarmBody.swarm.status, "planning", "nor started its work");
+  const templateAfter = await asOwner(`/api/swarm-templates/${template.id}`);
+  assert.equal(templateAfter.status, 200, "the intruder must not have deleted the owner's swarm template");
+  assert.equal(((await templateAfter.json()) as { name: string }).name, "Mine");
+  // The list route is scoped rather than refused, so it is checked by
+  // what it contains: the intruder sees their own templates and none of
+  // the owner's.
+  const intruderTemplates = (await (await asIntruder("/api/swarm-templates")).json()) as { id: string }[];
+  assert.ok(
+    !intruderTemplates.some((row) => row.id === template.id),
+    "a foreign tenant's template list must not carry the owner's",
+  );
+  ctx.featureFlags = flagsBefore;
 
   // The MCP server row survived, under its own name. Read through
   // ctx.db because the org-less owner cannot use the routes either.

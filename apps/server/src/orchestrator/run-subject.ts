@@ -234,15 +234,21 @@ async function requireProject(ctx: AppContext, projectId: string) {
   return project;
 }
 
+/**
+ * The project's repositories, or none.
+ *
+ * Empty is not refused here, deliberately. This function describes a
+ * run, and closing a run that a restart stranded has to work whether or
+ * not the project still spans anything; only actually starting an agent
+ * needs a checkout, and that is where the refusal lives.
+ */
 async function repositoriesFor(ctx: AppContext, projectId: string) {
   const selected = await ctx.db
     .select()
     .from(repositories)
     .where(eq(repositories.projectId, projectId))
     .orderBy(asc(repositories.position));
-  if (selected.length === 0) {
-    throw new Error(`project ${projectId} has no repositories; add at least one before running agents`);
-  }
+  if (selected.length === 0) return selected;
   // Repositories added by path before their remote was read still have
   // no URL, which anything that publishes would report as "no GitHub
   // remote is linked". Read it from the checkout once.
