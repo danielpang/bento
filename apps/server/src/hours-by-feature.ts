@@ -1,6 +1,8 @@
 /**
- * Wall-clock hours a run spent inside a billing period.
+ * Wall-clock hours a run spent inside a billing month.
  *
+ * The window is the plan's period: from the organization's billing
+ * start to the next anniversary, not 1 to 30 of the calendar month.
  * Billing meters finished (and still-running) sandbox time, not token
  * spend. A run that started last period and ended in this one only
  * counts the overlap, so the card breakdown can sit next to the period
@@ -29,8 +31,9 @@ export type RunSlice = {
 };
 
 /**
- * Hours by card for a period. Cards that spent nothing are omitted:
- * this is a ranking of spenders, not a board.
+ * Hours by card for a billing month. Every run on a feature is summed.
+ * Cards that spent nothing in the window are omitted: this is a
+ * ranking of spenders, not a board.
  */
 export function hoursByFeature(
   runs: RunSlice[],

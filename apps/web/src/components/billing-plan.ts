@@ -77,12 +77,12 @@ export interface PlanState {
    */
   usageByMember: { userId: string | null; name: string | null; agentHours: number }[];
   /**
-   * Which cards spent the hours. Prefer this over usageByMember: a
-   * team of forty people is still a handful of cards doing the work,
-   * and "who used it" on a board is the card.
+   * Which cards spent the hours this billing month. Prefer this over
+   * usageByMember: a team of forty people is still a handful of cards
+   * doing the work, and "who used it" on a board is the card.
    *
    * Absent when the billing module has not started sending it; the
-   * console then rolls the period up from runs itself.
+   * console then rolls the period (from periodStart) up from runs.
    */
   usageByFeature?: { featureId: string; title: string; agentHours: number }[];
   seats: { held: number; billable: number; monthlyTotalUsd: number | null; billed: boolean };
@@ -156,8 +156,22 @@ export function resetsOn(state: PlanState): string {
 }
 
 /**
+ * When this billing month began, as a date.
+ *
+ * The ranking is hours since this instant, not since the first of the
+ * calendar month. Printing it next to "By card" is what keeps those
+ * two from being mistaken for each other.
+ */
+export function startedOn(periodStart: string): string {
+  return new Date(periodStart).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "long",
+  });
+}
+
+/**
  * A hours figure as people read it: whole when the tenth is zero,
- * one decimal otherwise. The meter and the per-person rows have to
+ * one decimal otherwise. The meter and the per-card rows have to
  * agree, and 12.00 on a billing card looks like a bug.
  */
 export function formatHours(n: number): string {
@@ -220,7 +234,7 @@ export function hoursMeterState(
 /** How many spenders the hours card shows before collapsing the rest. */
 export const HOURS_PREVIEW = 5;
 
-/** Matches shown for a name filter. The rest ask for a longer query. */
+/** Matches shown for a title filter. The rest ask for a longer query. */
 export const HOURS_MATCH_CAP = 20;
 
 export type HoursEntry = { id: string; name: string; agentHours: number };

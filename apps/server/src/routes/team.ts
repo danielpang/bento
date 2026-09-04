@@ -70,18 +70,21 @@ export function teamRoutes(ctx: AppContext) {
           target: organizationPolicies.organizationId,
           set: { restrictNetwork, updatedAt: new Date() },
         });
-        return c.json({ restrictNetwork });
-      })
+      return c.json({ restrictNetwork });
+    })
     /**
-     * Agent hours this team spent, by card, in a window.
+     * Agent hours this team spent, by card, in the billing month.
      *
      * Billing's meter is a team total; this is the ranking that says
-     * which cards made it. Scoped to the active organization, so a
-     * foreign tenant asking for another team's period sees 404, not
-     * an empty list of somebody else's cards.
+     * which cards made it. Hours are summed per feature from the
+     * period start the plan already uses (the org's billing
+     * anniversary, not the first of the calendar month). A run that
+     * straddles the boundary only counts the overlap.
      *
-     * `from` and `to` are the period the billing card already knows.
-     * A run that straddles the boundary only counts the overlap.
+     * Scoped to the active organization, so a foreign tenant asking
+     * for another team's period sees 404, not an empty list of
+     * somebody else's cards. `from` and `to` are required: defaulting
+     * them to all time would rank cards nobody billed this month.
      */
     .get("/hours", async (c) => {
       const membership = await getActiveOrganizationMembership(ctx, c);
@@ -89,10 +92,10 @@ export function teamRoutes(ctx: AppContext) {
 
       const fromRaw = c.req.query("from");
       const toRaw = c.req.query("to");
-      const from = fromRaw ? new Date(fromRaw) : new Date(0);
-      const to = toRaw ? new Date(toRaw) : new Date();
-      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
-        return c.json({ error: "from and to must be dates" }, 400);
+      const from = fromRaw ? new Date(fromRaw) : null;
+      const to = toRaw ? new Date(toRaw) : null;
+      if (!from || !to || Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+        return c.json({ error: "from and to must be the billing period" }, 400);
       }
 
       const now = new Date();

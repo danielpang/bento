@@ -11,6 +11,7 @@ import {
   hoursUsage,
   monthlyTotal,
   rankHoursEntries,
+  startedOn,
   type PlanOffer,
 } from "./components/billing-plan.js";
 
@@ -147,4 +148,12 @@ test("card bars scale to the heaviest spender, not the pool", () => {
   assert.equal(formatHoursShare(12.4, 19), "65%");
   assert.equal(formatHoursShare(0.1, 25), "<1%");
   assert.equal(formatHoursShare(0, 25), null);
+});
+
+test("the card ranking names the billing start, not the calendar month", () => {
+  const iso = "2026-08-04T12:00:00.000Z";
+  assert.equal(
+    startedOn(iso),
+    new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "long" }),
+  );
 });

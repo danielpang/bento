@@ -297,9 +297,9 @@ test("organization members share projects, outsiders do not", async () => {
 });
 
 /**
- * Billing's hours breakdown is by card, not by person. The ranking
- * has to be the caller's organization, or a probe of another team's
- * period would learn which cards they ran.
+ * Billing's hours breakdown is by card for the billing month, not by
+ * person. Hours before period start do not count, two runs on one
+ * card add up, and a probe of another team's period 404s.
  */
 test("team hours ranks cards for the active org and 404s a foreign tenant", async () => {
   const owner = await jsonPost("/api/auth/sign-up/email", {
@@ -325,7 +325,13 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
   ).json()) as { id: string };
   await jsonPost("/api/auth/organization/set-active", { organizationId: foreignOrg.id }, strangerToken);
 
-  async function board(token: string, name: string, title: string, hours: number) {
+  async function board(
+    token: string,
+    name: string,
+    title: string,
+    hours: number,
+    startedAt = new Date("2026-09-10T12:00:00.000Z"),
+  ) {
     const project = (await (
       await jsonPost("/api/projects", { name, localPath: "/tmp" }, token)
     ).json()) as { id: string };
@@ -337,7 +343,6 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
     const feature = (await (
       await jsonPost("/api/features", { projectId: project.id, title }, token)
     ).json()) as { id: string };
-    const startedAt = new Date("2026-09-10T12:00:00.000Z");
     await ctx.db.insert(agentRuns).values({
       featureId: feature.id,
       stageId: pipeline.stages[0]!.id,
@@ -347,15 +352,30 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
       startedAt,
       endedAt: new Date(startedAt.getTime() + hours * 3_600_000),
     });
-    return feature.id;
+    return { featureId: feature.id, stageId: pipeline.stages[0]!.id, profileId };
   }
 
-  const heavyId = await board(ownerToken, "Hours board", "Rate limit", 3);
+  const heavy = await board(ownerToken, "Hours board", "Rate limit", 3);
   await board(ownerToken, "Hours board 2", "Login polish", 1);
   await board(strangerToken, "Foreign board", "Secret card", 10);
+  await board(ownerToken, "Hours old", "Last month leftover", 8, new Date("2026-08-10T12:00:00.000Z"));
+  await ctx.db.insert(agentRuns).values({
+    featureId: heavy.featureId,
+    stageId: heavy.stageId,
+    agentProfileId: heavy.profileId,
+    prompt: "more work",
+    status: "succeeded",
+    startedAt: new Date("2026-09-20T12:00:00.000Z"),
+    endedAt: new Date("2026-09-20T14:00:00.000Z"),
+  });
 
   const from = "2026-09-01T00:00:00.000Z";
   const to = "2026-10-01T00:00:00.000Z";
+  const missingWindow = await app.request("/api/team/hours", {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(missingWindow.status, 400);
+
   const mine = await app.request(`/api/team/hours?from=${from}&to=${to}`, {
     headers: { authorization: `Bearer ${ownerToken}` },
   });
@@ -364,12 +384,13 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
   assert.deepEqual(
     [...body.features].sort((a, b) => b.agentHours - a.agentHours).map((row) => [row.title, row.agentHours]),
     [
-      ["Rate limit", 3],
+      ["Rate limit", 5],
       ["Login polish", 1],
     ],
   );
-  assert.ok(body.features.some((row) => row.featureId === heavyId));
+  assert.ok(body.features.some((row) => row.featureId === heavy.featureId));
   assert.ok(!body.features.some((row) => row.title === "Secret card"));
+  assert.ok(!body.features.some((row) => row.title === "Last month leftover"));
 
   const outsider = await jsonPost("/api/auth/sign-up/email", {
     email: "hours-outsider@bento.test",

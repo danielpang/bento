@@ -20,6 +20,7 @@ import {
   rankHoursEntries,
   resetsOn,
   seatPrice,
+  startedOn,
   useBillingPlan,
   type HoursEntry,
   type PlanOffer,
@@ -261,12 +262,14 @@ export function BillingCard() {
 }
 
 /**
- * Which cards spent the hours, without listing the board.
+ * Which cards spent the hours this billing month, without listing the board.
  *
- * The heaviest few are the signal. The rest collapse to a count and
- * a title field, because a "show all" of forty cards is a directory
- * that pushes the overage choice off the screen and still does not
- * help anyone find a card.
+ * Hours are summed per feature from the plan's period start (the
+ * organization's billing anniversary), heaviest first. The heaviest
+ * few are the signal. The rest collapse to a count and a title field,
+ * because a "show all" of forty cards is a directory that pushes the
+ * overage choice off the screen and still does not help anyone find a
+ * card.
  */
 function HoursByCard({ state, used }: { state: PlanState; used: number }) {
   const billed = state.usageByFeature;
@@ -303,12 +306,20 @@ function HoursByCard({ state, used }: { state: PlanState; used: number }) {
   }, [billed, state.agentHours.periodStart, state.agentHours.periodEnd]);
 
   if (!entries) return null;
-  return <HoursBreakdown entries={entries} used={used} />;
+  return <HoursBreakdown entries={entries} used={used} periodStart={state.agentHours.periodStart} />;
 }
 
 const CARD_NOUN = { singular: "card", plural: "cards" };
 
-function HoursBreakdown({ entries, used }: { entries: HoursEntry[]; used: number }) {
+function HoursBreakdown({
+  entries,
+  used,
+  periodStart,
+}: {
+  entries: HoursEntry[];
+  used: number;
+  periodStart: string;
+}) {
   const [query, setQuery] = useState("");
   const { ranked, preview, rest, restHours } = rankHoursEntries(entries);
   if (ranked.length === 0) return null;
@@ -319,6 +330,7 @@ function HoursBreakdown({ entries, used }: { entries: HoursEntry[]; used: number
   const shown = searching ? matches.slice(0, HOURS_MATCH_CAP) : matches;
   const truncated = searching && matches.length > shown.length;
   const scroll = shown.length > 5;
+  const since = startedOn(periodStart);
 
   return (
     <div className="field">
@@ -327,7 +339,7 @@ function HoursBreakdown({ entries, used }: { entries: HoursEntry[]; used: number
         <span className="muted">
           {searching
             ? `${matches.length} of ${ranked.length} ${ranked.length === 1 ? "card" : "cards"}`
-            : `${ranked.length} ${ranked.length === 1 ? "card" : "cards"} this period`}
+            : `${ranked.length} ${ranked.length === 1 ? "card" : "cards"} since ${since}`}
         </span>
       </div>
       {rest.length > 0 && (
@@ -353,9 +365,9 @@ function HoursBreakdown({ entries, used }: { entries: HoursEntry[]; used: number
           ))}
         </div>
       ) : (
-        <p className="muted">No card matching that name used hours this period.</p>
+        <p className="muted">No card matching that title used hours this period.</p>
       )}
-      {truncated && <p className="muted">Showing the first {HOURS_MATCH_CAP}. Type more of the name.</p>}
+      {truncated && <p className="muted">Showing the first {HOURS_MATCH_CAP}. Type more of the title.</p>}
       {!searching && rest.length > 0 && (
         <p className="hours-people-rest">{hoursRestCopy(rest.length, restHours, used, CARD_NOUN)}</p>
       )}
