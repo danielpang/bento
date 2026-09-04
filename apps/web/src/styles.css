@@ -1521,6 +1521,15 @@ select.input,
   width: 6px;
 }
 
+/*
+ * Provider logos in agent rows share the same two-line card as the
+ * requirement mark above. Left at flex-start they ride the title;
+ * centre them on the row so they sit in the middle of name + model.
+ */
+.gate-check > .provider-logo {
+  align-self: center;
+}
+
 .gate-tick {
   flex: none;
   margin: 0 -3px;
