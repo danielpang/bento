@@ -149,7 +149,7 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
 
   await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [{
       name: "api",
@@ -234,7 +234,7 @@ test("Sprite provisioning leaves the artifacts directory and unreadable director
 
   await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [{ name: "api", cloneUrl: "https://github.com/acme/api.git", branch: "main" }],
   });
@@ -292,7 +292,7 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
     stubClient(driver, sprite);
 
     await assert.rejects(
-      driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+      driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
       /503|fetch failed/,
     );
   }
@@ -328,7 +328,7 @@ test("Sprite provisioning still fails when listing the workspace hits a transpor
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     /fetch failed/,
   );
 });
@@ -372,7 +372,7 @@ test("Sprite provisioning survives an empty workspace", async () => {
 
   const handle = await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [],
     onProgress: (message) => {
@@ -412,7 +412,7 @@ test("Sprite provisioning still fails when the filesystem API does", async () =>
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     /503/,
   );
 });
@@ -454,7 +454,7 @@ test("Sprite provisioning says which agent CLI could not be installed", async ()
 
   const handle = await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     onProgress: (message) => {
       messages.push(message);
@@ -489,7 +489,7 @@ test("Sprite provisioning failures carry the script's stderr on the error", asyn
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     (err: Error & { stderr?: string }) => {
       assert.match(err.message, /exit code 1/);
       assert.match(err.stderr ?? "", /claude code install failed/);
@@ -1046,7 +1046,7 @@ test("Sprite provisioning holds the sandbox awake while its scripts run", async 
   const driver = new SpriteDriver({ token: "token" });
   stubClient(driver, sprite);
 
-  await driver.provision({ projectId: "p", featureId: "f", hostWorkspacePath: "/unused" });
+  await driver.provision({ projectId: "p", workspaceKey: "f", hostWorkspacePath: "/unused" });
 
   const registered = calls.filter((call) => /-X POST/.test(call));
   const released = calls.filter((call) => /-X DELETE/.test(call));
@@ -1534,7 +1534,7 @@ test("Sprite provisioning gives up on a script whose connection went silent", as
 
   const provisioning = driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   });
   const outcome = provisioning.then(
@@ -1705,7 +1705,7 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
   stubClient(driver, sprite);
 
   const outcome = driver
-    .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
     .then(
       () => "resolved",
       (err: Error) => err,

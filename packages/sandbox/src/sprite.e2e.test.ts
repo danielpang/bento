@@ -48,7 +48,7 @@ const skip = !process.env.BENTO_SPRITE_E2E
 const runTag = process.env.GITHUB_RUN_ID
   ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`
   : `local-${Date.now()}`;
-const featureId = `e2e-${runTag}`;
+const workspaceKey = `e2e-${runTag}`;
 
 /** Long: a cold sprite installs seven CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
@@ -82,7 +82,7 @@ createServer(async (request, response) => {
 test("a real sprite ends up with every agent CLI, and heals when one goes missing", { skip }, async (t) => {
   const driver = new SpriteDriver({ token: token!, timeoutMs: PROVISION_TIMEOUT_MS });
   const handle: SandboxHandle = {
-    externalId: spriteName(featureId),
+    externalId: spriteName(workspaceKey),
     provider: "sprite",
     workdir: "/workspace",
   };
@@ -121,7 +121,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   const provision = () =>
     driver.provision({
       projectId: "sprite-e2e",
-      featureId,
+      workspaceKey,
       hostWorkspacePath: "/unused",
       onProgress: (message) => {
         said.push(message);

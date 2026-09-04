@@ -139,7 +139,7 @@ export class LocalRunner {
       );
       handle = await this.driver.provision({
         projectId: "runner",
-        featureId: feature.id,
+        workspaceKey: feature.id,
         hostWorkspacePath: this.worktrees.workspacePath(feature.id),
         /**
          * A worktree's .git is a file naming the source repository's

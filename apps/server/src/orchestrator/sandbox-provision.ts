@@ -118,9 +118,7 @@ export async function provisionWorkspace(
 
   const handle = await ctx.driver.provision({
     projectId: input.projectId,
-    // The driver's own name for the workspace. It has always been the
-    // card's id here, and a swarm's key takes the same slot.
-    featureId: workspaceKey,
+    workspaceKey,
     ...(input.restrictNetwork ? { network: "restricted" as const } : {}),
     hostWorkspacePath: ctx.worktrees.workspacePath(workspaceKey),
     // Drivers with no host filesystem clone these instead of mounting.

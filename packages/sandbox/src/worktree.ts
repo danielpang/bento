@@ -35,38 +35,40 @@ export function repositoryPathIn(sandboxWorkdir: string, repoName: string): stri
 }
 
 /**
- * Manages per-feature git worktrees on the host.
+ * Manages per-workspace git worktrees on the host.
  *
- * A feature gets one workspace directory containing a worktree per
- * repository in its project:
+ * A workspace gets one directory containing a worktree per repository
+ * in its project:
  *
- *   <dataDir>/worktrees/<featureId>/<repoName>
+ *   <dataDir>/worktrees/<workspaceKey>/<repoName>
  *
  * The workspace directory is what gets mounted into the sandbox, so a
- * feature spanning several repositories sees /workspace/api and
+ * workspace spanning several repositories sees /workspace/api and
  * /workspace/web side by side. Single repository projects get the same
- * shape, which keeps prompts and paths uniform.
+ * shape, which keeps prompts and paths uniform. The key is a card's
+ * feature id on the pipeline and a swarm's own key on the other board:
+ * a name, not an id of any one table.
  */
 export class WorktreeManager {
   constructor(private dataDir: string) {}
 
   /** Host directory mounted into the sandbox as /workspace. */
-  workspacePath(featureId: string): string {
-    return path.join(this.dataDir, "worktrees", featureId);
+  workspacePath(workspaceKey: string): string {
+    return path.join(this.dataDir, "worktrees", workspaceKey);
   }
 
-  worktreePath(featureId: string, repoName: string): string {
-    return path.join(this.workspacePath(featureId), repoName);
+  worktreePath(workspaceKey: string, repoName: string): string {
+    return path.join(this.workspacePath(workspaceKey), repoName);
   }
 
   /** Creates or reuses a worktree for every repository in the project. */
-  async ensureAll(repos: RepositorySpec[], featureId: string, branch: string): Promise<PreparedRepository[]> {
-    const workspace = this.workspacePath(featureId);
+  async ensureAll(repos: RepositorySpec[], workspaceKey: string, branch: string): Promise<PreparedRepository[]> {
+    const workspace = this.workspacePath(workspaceKey);
     await mkdir(workspace, { recursive: true });
 
     const prepared: PreparedRepository[] = [];
     for (const repo of repos) {
-      const worktreePath = this.worktreePath(featureId, repo.name);
+      const worktreePath = this.worktreePath(workspaceKey, repo.name);
       await this.ensureOne(repo.localPath, worktreePath, branch);
       prepared.push({ ...repo, worktreePath });
     }
@@ -77,7 +79,7 @@ export class WorktreeManager {
   /**
    * Drops worktrees for repositories the project no longer spans.
    *
-   * A workspace is built once and reused for the life of the feature,
+   * A workspace is built once and reused for as long as it exists,
    * so without this a repository stays mounted after it is removed from
    * the project, and every later agent can still read and write it.
    * Removing a repository has to actually take it away.
@@ -188,9 +190,9 @@ export class WorktreeManager {
     });
   }
 
-  async remove(repoPath: string, featureId: string, repoName: string): Promise<void> {
+  async remove(repoPath: string, workspaceKey: string, repoName: string): Promise<void> {
     try {
-      await run("git", ["-C", repoPath, "worktree", "remove", "--force", this.worktreePath(featureId, repoName)]);
+      await run("git", ["-C", repoPath, "worktree", "remove", "--force", this.worktreePath(workspaceKey, repoName)]);
     } catch {
       // Already gone or never created.
     }

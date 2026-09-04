@@ -35,12 +35,12 @@ export class DockerDriver implements SandboxDriver {
     return Boolean(this.restrictedNetwork);
   }
 
-  containerName(featureId: string): string {
-    return `bento-sbx-${featureId}`;
+  containerName(workspaceKey: string): string {
+    return `bento-sbx-${workspaceKey}`;
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
-    const name = this.containerName(spec.featureId);
+    const name = this.containerName(spec.workspaceKey);
     const image = spec.image ?? DEFAULT_IMAGE;
     const binds = [
       `${spec.hostWorkspacePath}:/workspace`,
@@ -77,7 +77,7 @@ export class DockerDriver implements SandboxDriver {
       Cmd: ["sleep", "infinity"],
       Labels: {
         "dev.bento.project": spec.projectId,
-        "dev.bento.feature": spec.featureId,
+        "dev.bento.workspace": spec.workspaceKey,
       },
       Env: Object.entries(spec.env ?? {}).map(([k, v]) => `${k}=${v}`),
       WorkingDir: "/workspace",
