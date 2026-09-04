@@ -33,14 +33,14 @@ function offer(overrides: Partial<PlanOffer> & Pick<PlanOffer, "billableSeats" |
   };
 }
 
-test("the team total is seats times the per-user price, before tax", () => {
+test("the team total is seats times the per-user price", () => {
   assert.equal(
     monthlyTotal(offer({ billableSeats: 1, monthlyTotalUsd: 29 }), 1),
-    "$29 a month for this team (1 seat, not including tax)",
+    "$29 a month for this team (1 seat)",
   );
   assert.equal(
     monthlyTotal(offer({ billableSeats: 2, monthlyTotalUsd: 58 }), 2),
-    "$58 a month for this team (2 seats, not including tax)",
+    "$58 a month for this team (2 seats)",
   );
 });
 
@@ -55,7 +55,7 @@ test("a seat minimum is named when it is what decides the bill", () => {
       summary: "",
       highlights: [],
     } }), 2),
-    "$145 a month for this team (5 seats minimum, this team has 2, not including tax)",
+    "$145 a month for this team (5 seats minimum, this team has 2)",
   );
 });
 
