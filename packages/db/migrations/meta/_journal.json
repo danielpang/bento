@@ -162,6 +162,13 @@
       "when": 1788040409611,
       "tag": "0022_feature_events_completions_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1788300000000,
+      "tag": "0023_feature_parent",
+      "breakpoints": true
     }
   ]
 }

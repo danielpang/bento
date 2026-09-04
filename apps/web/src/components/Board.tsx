@@ -1,5 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentProfile, Feature, FeatureSpend, Stage } from "@bento/api-client";
+import { childBadgeLabel, childStatsFrom, childTone, type ChildStats } from "@bento/core";
+import { useBetaTesters } from "../beta.js";
 import { ProviderMark } from "./ProviderMark.js";
 import { formatCardSpend } from "./spend-format.js";
 
@@ -359,11 +361,55 @@ export function Board({
   spendByFeature = {},
   query = "",
 }: BoardProps) {
+  /**
+   * Groups are unfinished product, so the badge and the ring are only
+   * drawn for people on the beta flag. Read here rather than passed
+   * in, because both are derived from cards the board already holds:
+   * there is nothing for a caller to supply.
+   */
+  const showGroups = useBetaTesters();
   const searching = query.trim().length > 0;
   const shown = useMemo(
     () => (searching ? features.filter((f) => matchesQuery(f, query)) : features),
     [features, query, searching],
   );
+  /**
+   * Which cards were split, and how their parts are doing.
+   *
+   * Derived from the board's own cards rather than fetched. Every part
+   * of a card is a card in the same project, so they are all already
+   * here, and deriving keeps the badge live off the same board stream
+   * everything else repaints from, at no request.
+   *
+   * Counted over every card, not the ones a search left visible: a
+   * parent that claimed two parts because a filter hid the third would
+   * be worse than no count.
+   */
+  const childStats = useMemo(() => {
+    const stats = new Map<string, ChildStats>();
+    if (!showGroups) return stats;
+    const parents = new Set(features.map((f) => f.parentId).filter((id): id is string => Boolean(id)));
+    for (const parentId of parents) stats.set(parentId, childStatsFrom(parentId, features, runStatusByFeature));
+    return stats;
+  }, [features, runStatusByFeature, showGroups]);
+  /**
+   * The selected card's group, so the board can ring it.
+   *
+   * Selecting one card of a split rings the card it came from and the
+   * rest of the parts, wherever they sit, and dims everything else.
+   * That is the only thing the board itself does about groups: the
+   * arrows live in the related view, and lanes stay lanes of cards.
+   */
+  const relatedIds = useMemo(() => {
+    if (!showGroups || !selectedId) return null;
+    const card = features.find((f) => f.id === selectedId);
+    if (!card) return null;
+    const rootId = card.parentId ?? card.id;
+    const group = features.filter((f) => f.id === rootId || f.parentId === rootId);
+    // A card with no parent and no parts is not a group, and dimming
+    // the whole board around an ordinary selection would be noise.
+    return group.length > 1 ? new Set(group.map((f) => f.id)) : null;
+  }, [features, selectedId, showGroups]);
   /**
    * Finished cards leave their stage lane for the Done lane.
    *
@@ -434,6 +480,8 @@ export function Board({
       spend={spendByFeature[feature.id]}
       selected={feature.id === selectedId}
       onSelect={onSelect}
+      childStats={childStats.get(feature.id)}
+      inGroup={relatedIds?.has(feature.id) ?? false}
     />
   );
 
@@ -442,7 +490,12 @@ export function Board({
   const nothingFound = <p className="lane-empty">No matches</p>;
 
   return (
-    <div className="board" ref={boardRef} data-drawer-open={drawerOpen || undefined}>
+    <div
+      className="board"
+      ref={boardRef}
+      data-drawer-open={drawerOpen || undefined}
+      data-grouped={relatedIds ? "" : undefined}
+    >
       <Lane
         name="Backlog"
         ordinal="00"
@@ -599,6 +652,8 @@ const Card = memo(function Card({
   spend,
   selected,
   onSelect,
+  childStats,
+  inGroup,
 }: {
   feature: Feature;
   state: CardState;
@@ -609,6 +664,10 @@ const Card = memo(function Card({
   spend: FeatureSpend | undefined;
   selected: boolean;
   onSelect: (id: string) => void;
+  /** Present only on a card that was split, which is what draws the badge. */
+  childStats: ChildStats | undefined;
+  /** This card is in the selected card's group, so it keeps its ring. */
+  inGroup: boolean;
 }) {
   const finished = feature.status === "done" || feature.status === "cancelled";
   const spendLabel = finished ? formatCardSpend(spend) : null;
@@ -663,6 +722,7 @@ const Card = memo(function Card({
       data-feature={feature.id}
       data-state={state}
       data-finish={finishing ?? undefined}
+      data-related={inGroup ? "" : undefined}
       aria-pressed={selected}
       onClick={() => onSelect(feature.id)}
       /*
@@ -685,8 +745,29 @@ const Card = memo(function Card({
         {/* Spend sits with the PR chip in the existing meta row, not
             in a section of its own. Only a finished card prints it,
             and only when a CLI actually reported a figure. */}
-        {(spendLabel || feature.prNumber) && (
+        {(spendLabel || feature.prNumber || childStats) && (
           <span className="card-meta-end">
+            {/*
+              A card that was split says so where it stands, so a group
+              can be spotted without opening anything. It sits with the
+              spend and the pull request because it is the same kind of
+              fact about the card, and a card that was never split
+              renders nothing here at all.
+
+              A chip and not a control: the card is itself a button, and
+              a second button inside it is invalid and steals the click
+              a keyboard user aimed at the card. Selecting the card is
+              what opens the parts, in the drawer.
+            */}
+            {childStats && (
+              <span
+                className="chip chip-parts"
+                data-tone={childTone(childStats)}
+                title="This card was split. Open it to see the parts."
+              >
+                {childBadgeLabel(childStats)}
+              </span>
+            )}
             {spendLabel && (
               <span
                 className="card-spend"

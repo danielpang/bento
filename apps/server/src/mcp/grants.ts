@@ -107,12 +107,26 @@ export async function runGrantExists(ctx: AppContext, runId: string): Promise<bo
  * --mcp-config on reattach that its first life never had.
  */
 export async function runHasActiveMcp(ctx: AppContext, runId: string): Promise<boolean> {
+  return (await runGrantServerIds(ctx, runId)).length > 0;
+}
+
+/**
+ * Which servers a live grant pins, or nothing.
+ *
+ * The resume path needs more than a yes or no: which servers were
+ * attached decides not only the MCP flags but what the run's prompt
+ * claimed it could do. A grant minted before Bento's own tools existed
+ * pins only real servers, and a resumed run of it must not be told it
+ * can split its card.
+ */
+export async function runGrantServerIds(ctx: AppContext, runId: string): Promise<string[]> {
   const [row] = await ctx.db
     .select({ serverIds: mcpRunGrants.serverIds, revokedAt: mcpRunGrants.revokedAt })
     .from(mcpRunGrants)
     .where(eq(mcpRunGrants.runId, runId))
     .limit(1);
-  return Boolean(row && !row.revokedAt && Array.isArray(row.serverIds) && row.serverIds.length > 0);
+  if (!row || row.revokedAt || !Array.isArray(row.serverIds)) return [];
+  return row.serverIds;
 }
 
 /** Sweep: expired rows are audit noise after a week. */

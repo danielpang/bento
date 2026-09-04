@@ -3,7 +3,14 @@ import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
-import { actorDisplayName, agentCli, checkAgentPairing, gateCriterion, historyTriggerLabel } from "@bento/core";
+import {
+  actorDisplayName,
+  agentCli,
+  checkAgentPairing,
+  gateCriterion,
+  historyTriggerLabel,
+  parentDeleteRefusal,
+} from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -26,6 +33,8 @@ import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
+import { childCount, parentRefusal, relatedGroup } from "../feature-tree.js";
+import { getBetaTester } from "../feature-flags.js";
 import {
   advanceFeature,
   evaluateFeatureGate,
@@ -60,6 +69,12 @@ const createFeature = z.object({
   projectId: z.string().uuid(),
   title: z.string().min(1),
   description: z.string().default(""),
+  /**
+   * The card this one was split out of. Optional and rare: it is how a
+   * person, the TUI, or the agent-facing MCP tool files one part of a
+   * task that was judged too large for a single branch.
+   */
+  parentId: z.string().uuid().optional(),
 });
 
 /**
@@ -240,6 +255,21 @@ export function featureRoutes(ctx: AppContext) {
         .from(pipelines)
         .where(eq(pipelines.projectId, body.projectId));
       if (!pipeline) return c.json({ error: "project has no pipeline" }, 400);
+      /**
+       * The parent has to be one the caller can already see, in this
+       * same project, and not at the bottom of a chain of splits. The
+       * access check comes first and answers the same 404 a bad id
+       * would, so naming another tenant's card teaches nothing.
+       */
+      if (body.parentId) {
+        const parent = await getAccessibleFeature(ctx, c, body.parentId);
+        if (!parent) return c.json({ error: "not found" }, 404);
+        const refusal = await parentRefusal(db(c, ctx), {
+          parentId: body.parentId,
+          projectId: body.projectId,
+        });
+        if (refusal) return c.json({ error: refusal }, 400);
+      }
       const [feature] = await db(c, ctx)
         .insert(features)
         .values({
@@ -247,6 +277,7 @@ export function featureRoutes(ctx: AppContext) {
           pipelineId: pipeline.id,
           title: body.title,
           description: body.description,
+          ...(body.parentId ? { parentId: body.parentId } : {}),
         })
         .returning();
       if (!feature) return c.json({ error: "something went wrong saving the card; try again" }, 500);
@@ -310,10 +341,23 @@ export function featureRoutes(ctx: AppContext) {
      * What survives is the user's: the branch in every source
      * repository, and any pull request opened from it. Bento stops
      * tracking those, it does not close them.
+     *
+     * A card that spawned others is refused instead. The foreign key
+     * has no cascade on purpose: the parts of a split are ordinary
+     * cards with their own branches and pull requests, and one click
+     * on the card they came from must not take all of them. Delete or
+     * finish the children first.
      */
     .delete("/:id", async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
       if (!feature) return c.json({ error: "not found" }, 404);
+
+      // Before the transaction, so the answer names the count rather
+      // than surfacing a foreign key violation as a 500. The console
+      // disables the button for the same reason, from the same fact;
+      // this is the door, not the hint.
+      const children = await childCount(db(c, ctx), feature.id);
+      if (children > 0) return c.json({ error: parentDeleteRefusal(children) }, 409);
 
       const outcome = await db(c, ctx)
         .transaction(async (tx) => {
@@ -628,6 +672,29 @@ export function featureRoutes(ctx: AppContext) {
         .orderBy(desc(runArtifacts.createdAt))
         .limit(200);
       return c.json(rows);
+    })
+    /**
+     * The group this card belongs to: the card a split started from,
+     * and every card that split produced.
+     *
+     * One endpoint for both ends of the relationship. Opened from a
+     * child it resolves upward first, so the parent and the child
+     * answer with the same group and the view reads the same from
+     * either. The rows come from the database rather than from the
+     * caller's board, which is what keeps a finished part, or one that
+     * has been moved to another lane, in the picture.
+     *
+     * Null for a card that is neither a parent nor a child, which is
+     * most cards: the console draws nothing rather than an empty view.
+     */
+    .get("/:id/related", async (c) => {
+      // Unfinished product, so a non-tester must not learn the route
+      // exists. The access check still runs after it: the flag is not
+      // an authorization boundary.
+      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      return c.json(await relatedGroup(db(c, ctx), feature));
     })
     /**
      * The same, pre-rendered as display lines: the Mac app has no JSON

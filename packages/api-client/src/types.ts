@@ -105,6 +105,34 @@ export interface Feature {
   prNumber: number | null;
   /** The first pull request's address, so the number can be reached. */
   prUrl?: string | null;
+  /**
+   * The card this one was split out of, when it was. Null on nearly
+   * every card: it is only set when an agent, or a person, judged a
+   * task too large for one branch and filed its parts separately.
+   */
+  parentId?: string | null;
+}
+
+/** One card as the related-cards view draws it. */
+export interface RelatedCard {
+  id: string;
+  title: string;
+  status: FeatureStatus;
+  currentStageId: string | null;
+  stageName: string | null;
+  runStatus: string | null;
+  costUsd: number | null;
+  prNumber: number | null;
+  prUrl: string | null;
+}
+
+/**
+ * A card that was split, and every card that split produced. Null for
+ * a card that is neither, which is most of them.
+ */
+export interface RelatedGroup {
+  parent: RelatedCard;
+  children: RelatedCard[];
 }
 
 export interface AgentRun {
