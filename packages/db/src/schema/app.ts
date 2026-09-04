@@ -525,13 +525,27 @@ export const agentRuns = pgTable(
    */
   kind: text("kind", { enum: ["task", "judge", "rebase"] }).notNull().default("task"),
   /**
-   * Which job this run holds, across both board modes.
+   * Which board this run belongs to.
    *
-   * `kind` says what a card run is structurally and keeps its meaning
-   * for the pipeline; this says which of the two boards asked for the
-   * run and in what capacity, so a query can ask for "this swarm's
-   * workers" without knowing anything about stages. Existing rows are
-   * backfilled to "stage", which is what they all were.
+   * Not the same question as `role`, and not derivable from it: a judge
+   * run exists on both boards. A card names a judge agent for its gate,
+   * and a swarm template names one too, so `role = 'judge'` cannot say
+   * which board asked. The two are axes: this is which board, `role` is
+   * the capacity within it, and `kind` keeps its older pipeline-only
+   * meaning for cards.
+   *
+   * No default, deliberately. Every insert states its board, because a
+   * default is exactly how a swarm run would quietly record itself as a
+   * card's and then be picked up by a pipeline query.
+   */
+  type: text("type", { enum: ["pipeline", "swarm"] }).notNull(),
+  /**
+   * Which job this run holds within its board.
+   *
+   * A query can ask for "this swarm's workers" without knowing anything
+   * about stages. Existing rows are backfilled to "stage", which is
+   * what they all were. Which values are legal depends on `type`, and a
+   * check constraint holds that.
    */
   role: text("role", {
     enum: ["stage", "judge", "rebase", "planner", "subplanner", "worker", "resolver"],
@@ -563,12 +577,31 @@ export const agentRuns = pgTable(
     // swarm rather than by card.
     index("agent_runs_swarm_queued_idx").on(t.swarmId, t.queuedAt),
     /**
-     * A run belongs to a card or to a swarm, never to both and never
-     * to neither. Written as a constraint rather than left to the
-     * routes, because both boards insert runs and a run with no owner
-     * is invisible to every list either board draws.
+     * The discriminator and the columns have to agree, or the type is
+     * decoration. A pipeline run is a card at a stage and nothing else;
+     * a swarm run is a swarm, optionally one of its tasks, and never a
+     * card. swarm_task_id stays optional there: the planner and the
+     * merge queue's resolver act on the swarm as a whole.
      */
-    check("agent_runs_feature_or_swarm", sql`(${t.featureId} is null) <> (${t.swarmId} is null)`),
+    check(
+      "agent_runs_pipeline_shape",
+      sql`${t.type} <> 'pipeline' or (${t.featureId} is not null and ${t.stageId} is not null
+        and ${t.swarmId} is null and ${t.swarmTaskId} is null)`,
+    ),
+    check(
+      "agent_runs_swarm_shape",
+      sql`${t.type} <> 'swarm' or (${t.swarmId} is not null and ${t.featureId} is null and ${t.stageId} is null)`,
+    ),
+    /**
+     * A role belongs to one board or the other, except judging, which
+     * both boards do. Stated here so a swarm run cannot claim to be a
+     * stage, which is the value every pipeline query filters on.
+     */
+    check(
+      "agent_runs_role_for_type",
+      sql`(${t.type} = 'pipeline' and ${t.role} in ('stage', 'judge', 'rebase'))
+        or (${t.type} = 'swarm' and ${t.role} in ('planner', 'subplanner', 'worker', 'resolver', 'judge'))`,
+    ),
   ],
 );
 

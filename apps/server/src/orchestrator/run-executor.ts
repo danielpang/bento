@@ -47,6 +47,7 @@ import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
+import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -62,12 +63,12 @@ import {
  * worker; safe to retry because terminal states are only written once.
  */
 export async function executeRun(ctx: AppContext, runId: string): Promise<void> {
-  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) throw new Error(`run ${runId} not found`);
-  if (run.status !== "queued") return; // already picked up
+  const [found] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+  if (!found) throw new Error(`run ${runId} not found`);
+  if (found.status !== "queued") return; // already picked up
   // This executor is the pipeline's: it walks a card through a stage.
-  // A run with no card is a swarm's, and nothing queues one here.
-  if (!run.featureId || !run.stageId) throw new Error(`run ${runId} is not a pipeline run`);
+  // Narrowed here, once, so nothing below has to ask again.
+  const run = asPipelineRun(found);
 
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
@@ -729,7 +730,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      * starts in its place. Bounded by construction: the retry carries
      * no session id, so it cannot fail this way again.
      */
-    const [runRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+    const [reread] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+    // The same run this call is finishing, read back for its session.
+    const runRow = reread ? asPipelineRun(reread) : undefined;
     const deadSession =
       Boolean(runRow?.cliSessionId) && /No conversation found with session ID/i.test(outcome.error ?? "");
     if (deadSession) {
@@ -753,6 +756,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
         // queued-message delivery in finishRun already started the
         // continuation, which is the same fresh session this would be.
         const next = await startRunIfIdle(ctx.db, {
+          type: "pipeline" as const,
           featureId: feature.id,
           stageId: runRow.stageId,
           agentProfileId: runRow.agentProfileId,
@@ -1115,12 +1119,12 @@ async function finishRun(
       await appendRunEvent(ctx, runId, event);
       // The board card should say why it went red, not just that it did.
       const [owner] = await ctx.db
-        .select({ featureId: agentRuns.featureId, projectId: features.projectId })
+        .select({ featureId: features.id, projectId: features.projectId })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))
         .where(eq(agentRuns.id, runId));
       const spoken = runOutputPreview(event);
-      if (owner?.featureId && spoken) {
+      if (owner && spoken) {
         ctx.bus.emitBoardEvent({
           type: "run_output",
           projectId: owner.projectId,
@@ -1154,13 +1158,13 @@ async function finishRun(
  */
 export async function deliverQueuedMessage(ctx: AppContext, runId: string): Promise<void> {
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
-  // Messages are parked on a card, so a run with no card has none.
-  if (!run?.featureId) return;
-  const featureId = run.featureId;
-  const claimed = await claimQueuedMessages(ctx.db, featureId);
+  // Messages are parked on a card, so a run that is not a card's has
+  // none waiting. Every terminal path calls this, including a swarm's.
+  if (!run || !isPipelineRun(run)) return;
+  const claimed = await claimQueuedMessages(ctx.db, run.featureId);
   if (claimed.length === 0) return;
   const ids = claimed.map((m) => m.id);
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   if (!feature) {
     await requeueMessages(ctx.db, ids);
     return;
@@ -1192,14 +1196,8 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * message continues, unless the card has moved stages: then the
    * pipeline agent for the stage the card is in takes over.
    */
-  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, featureId) : run;
-  const previous = conversation ?? run;
-  // Only a card run can be continued, and every card run has a stage.
-  if (!previous.stageId) {
-    await requeueMessages(ctx.db, ids);
-    return;
-  }
-  const source = await resolveFollowUpRun(ctx.db, feature, { ...previous, stageId: previous.stageId });
+  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
+  const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   // The continuation acts as whoever wrote these messages, not whoever
   // started the run they follow: a per-user MCP server must serve
@@ -1212,6 +1210,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   const priorStarter = (conversation ?? run).startedBy;
 
   const next = await startRunIfIdle(ctx.db, {
+    type: "pipeline" as const,
     featureId: feature.id,
     stageId: source.stageId,
     agentProfileId: source.agentProfileId,
@@ -1440,10 +1439,19 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
  * other's run.
  */
 export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
-  const orphans = await ctx.db
+  // Only the pipeline's runs. A swarm run interrupted by a restart is
+  // recovered by the swarm's own path; closing one here would mark it
+  // failed on a board that never asked this worker about it.
+  const orphans = (await ctx.db
     .select()
     .from(agentRuns)
-    .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])));
+    .where(
+      and(
+        eq(agentRuns.executor, "server"),
+        eq(agentRuns.type, "pipeline"),
+        inArray(agentRuns.status, ["starting", "running"]),
+      ),
+    )).map(asPipelineRun);
 
   let closed = 0;
   let resuming = 0;
@@ -1511,7 +1519,7 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  * race a run that finished or was cancelled while recovery deliberated,
  * and the loser must change nothing.
  */
-async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureId: string | null }): Promise<void> {
+async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureId: string }): Promise<void> {
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
@@ -1541,9 +1549,7 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   // Any stream that reconnected before recovery ran is waiting live;
   // this lets it close the way a normal finish would.
   ctx.bus.emitRunDone(run.id, "failed");
-  const [feature] = run.featureId
-    ? await ctx.db.select().from(features).where(eq(features.id, run.featureId))
-    : [];
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   if (feature) {
     ctx.bus.emitBoardEvent({
       type: "run_updated",
@@ -1556,8 +1562,7 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   await requeueUndelivered(ctx.db, run.id);
   await deliverQueuedMessage(ctx, run.id);
   await queueRunFinishedSlack(ctx, run.id);
-  // The gate belongs to the pipeline; a run with no card has none.
-  if (run.featureId) await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
+  await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
 }
 
 /**
@@ -1575,11 +1580,9 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
  */
 async function resumeInterruptedRun(
   ctx: AppContext,
-  run: typeof agentRuns.$inferSelect,
+  run: PipelineRun,
   sandbox: typeof sandboxes.$inferSelect,
 ): Promise<void> {
-  // Resume is the pipeline's path, like the executor it recovers.
-  if (!run.featureId || !run.stageId) throw new Error(`run ${run.id} is not a pipeline run`);
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
   const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, run.agentProfileId));
@@ -1900,11 +1903,15 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       .where(
         and(
           eq(agentRuns.executor, "runner"),
+          eq(agentRuns.type, "pipeline"),
           eq(agentRuns.status, "starting"),
           lt(agentRuns.claimedAt, cutoff),
         ),
       )
-      .returning({ id: agentRuns.id, featureId: agentRuns.featureId });
+      .returning()
+      // The update already filtered to the pipeline; this is where that
+      // becomes a type, so the loop below reads the card straight off.
+      .then((rows) => rows.map(asPipelineRun));
     // Told where the user is looking: a card snapping from "starting"
     // back to "queued" with no explanation reads as a glitch.
     for (const run of stale) {
@@ -1913,9 +1920,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
         role: "system",
         text: "The machine running this stopped reporting, so the run was returned to the queue.",
       });
-      const [feature] = run.featureId
-        ? await ctx.db.select().from(features).where(eq(features.id, run.featureId))
-        : [];
+      const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
       if (feature) {
         ctx.bus.emitBoardEvent({
           type: "run_updated",

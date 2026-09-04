@@ -5,6 +5,7 @@ import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { enqueueRun } from "./queue.js";
 import { requeueUndelivered } from "./messages.js";
 import { followUpSource, type FollowUpWorkRun } from "./follow-up-source.js";
+import { asPipelineRun, type PipelineRun } from "./pipeline-run.js";
 
 export { followUpSource, type FollowUpWorkRun };
 
@@ -15,17 +16,22 @@ export { followUpSource, type FollowUpWorkRun };
  * message delivery) asks this same question; copying the query let the
  * copies drift.
  */
-export async function latestConversationRun(
-  db: Db,
-  featureId: string,
-): Promise<typeof agentRuns.$inferSelect | null> {
+export async function latestConversationRun(db: Db, featureId: string): Promise<PipelineRun | null> {
   const [run] = await db
     .select()
     .from(agentRuns)
-    .where(and(eq(agentRuns.featureId, featureId), ne(agentRuns.kind, "judge")))
+    .where(
+      and(
+        eq(agentRuns.featureId, featureId),
+        eq(agentRuns.type, "pipeline"),
+        ne(agentRuns.kind, "judge"),
+      ),
+    )
     .orderBy(desc(agentRuns.queuedAt))
     .limit(1);
-  return run ?? null;
+  // Narrowed where the query already decided it: everything downstream
+  // takes a card's run and none of it re-checks the columns.
+  return run ? asPipelineRun(run) : null;
 }
 
 /**
@@ -75,6 +81,7 @@ export async function startAssignedStageAgent(
   const run = await startRunIfIdle(
     ctx.db,
     {
+      type: "pipeline" as const,
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: stage.defaultAgentProfileId,

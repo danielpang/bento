@@ -169,6 +169,13 @@
       "when": 1788539013322,
       "tag": "0023_swarms",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788542593728,
+      "tag": "0024_agent_run_type",
+      "breakpoints": true
     }
   ]
 }

@@ -12,6 +12,7 @@ import {
 } from "@bento/db";
 import { markdownToMrkdwn, SlackApiError, truncateWriteUp, type SlackBlock } from "@bento/slack";
 import type { AppContext } from "../context.js";
+import { isPipelineRun } from "./pipeline-run.js";
 import { cardUrl, slackClientFor, slackConnectionByTeam, slackConnectionRow } from "../slack.js";
 
 /** Slack errors that will not succeed on retry. Drop rather than loop. */
@@ -85,13 +86,9 @@ export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Pr
  * conflicts and is waiting to hear whether the pull request updated.
  */
 export async function queueRunFinishedSlack(ctx: AppContext, runId: string): Promise<void> {
-  const [run] = await ctx.db
-    .select({ featureId: agentRuns.featureId, kind: agentRuns.kind })
-    .from(agentRuns)
-    .where(eq(agentRuns.id, runId))
-    .limit(1);
-  // A swarm run has no card, and Slack threads hang off cards.
-  if (!run || run.kind === "judge" || !run.featureId) return;
+  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+  // Slack threads hang off cards, so only a card's run posts to one.
+  if (!run || run.kind === "judge" || !isPipelineRun(run)) return;
   await queueSlackNotify(ctx, { type: "run_finished", featureId: run.featureId, runId });
 }
 
@@ -136,8 +133,9 @@ export async function handleSlackNotify(ctx: AppContext, job: SlackNotifyJob): P
 
   if (job.type === "run_finished") {
     const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, job.runId)).limit(1);
-    // Every notified run is a card's, so it has a stage to name.
-    if (!run || !run.stageId) return;
+    // Queued only for a card's run, and narrowed here so the stage it
+    // names is a value rather than a maybe.
+    if (!run || !isPipelineRun(run)) return;
     const stageName = await stageNameOf(ctx, run.stageId);
     if (run.status === "succeeded") {
       const writeUp = await stageWriteUp(ctx, run.id, run.stageId);

@@ -14,6 +14,7 @@ import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from ".
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { asPipelineRun, isPipelineRun } from "../orchestrator/pipeline-run.js";
 
 const claimInput = z.object({
   /** Identifies the machine claiming work, for display and debugging. */
@@ -62,12 +63,11 @@ async function authorizeReport(
   runnerId: string,
 ) {
   const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
-  // Runners execute the pipeline's runs, which are a card's; a run
-  // with no card is refused as not found like any other stranger's id.
-  if (!run?.featureId) return { error: "not found" as const, status: 404 as const };
-  const featureId = run.featureId;
+  // Runners execute the pipeline's runs. A run of the other board is
+  // refused as not found, like any other id that is not the caller's.
+  if (!run || !isPipelineRun(run)) return { error: "not found" as const, status: 404 as const };
 
-  const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, featureId));
+  const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, run.featureId));
   if (!feature) return { error: "not found" as const, status: 404 as const };
   if (!(await canAccessProject(ctx, c, feature.projectId))) {
     return { error: "not found" as const, status: 404 as const };
@@ -78,7 +78,7 @@ async function authorizeReport(
   if (run.claimedBy !== runnerId) {
     return { error: "this run was claimed by a different machine" as const, status: 409 as const };
   }
-  return { run: { ...run, featureId }, feature };
+  return { run, feature };
 }
 
 export function runnerRoutes(ctx: AppContext) {
@@ -102,6 +102,7 @@ export function runnerRoutes(ctx: AppContext) {
         .where(
           and(
             eq(agentRuns.status, "queued"),
+            eq(agentRuns.type, "pipeline"),
             eq(agentRuns.executor, "runner"),
             isNull(agentRuns.claimedBy),
             inArray(features.projectId, projectIds),
@@ -110,13 +111,11 @@ export function runnerRoutes(ctx: AppContext) {
         .orderBy(asc(agentRuns.queuedAt))
         .limit(1);
 
-      const candidate = candidates[0];
-      if (!candidate) return c.json({ run: null });
-      // The join is on features, so this is a card's run, and a card
-      // run always names the stage the runner is being handed. Checked
-      // before the claim: a run marked "starting" and then dropped
-      // would sit there with nobody executing it.
-      if (!candidate.run.stageId) return c.json({ run: null });
+      const found = candidates[0];
+      if (!found) return c.json({ run: null });
+      // The query already asked for the pipeline's; this is where that
+      // becomes the type everything below is handed.
+      const candidate = { ...found, run: asPipelineRun(found.run) };
 
       // Conditional update is the lock: a second runner racing for the
       // same row updates zero rows and simply polls again.

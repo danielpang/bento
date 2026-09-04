@@ -344,6 +344,7 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
       await jsonPost("/api/features", { projectId: project.id, title }, token)
     ).json()) as { id: string };
     await ctx.db.insert(agentRuns).values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: pipeline.stages[0]!.id,
       agentProfileId: profileId,
@@ -360,6 +361,7 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
   await board(strangerToken, "Foreign board", "Secret card", 10);
   await board(ownerToken, "Hours old", "Last month leftover", 8, new Date("2026-08-10T12:00:00.000Z"));
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: heavy.featureId,
     stageId: heavy.stageId,
     agentProfileId: heavy.profileId,

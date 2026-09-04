@@ -1165,6 +1165,7 @@ async function judgeStageWork(
   }
 
   const run = await startRunIfIdle(ctx.db, {
+    type: "pipeline" as const,
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: judgeProfile.id,

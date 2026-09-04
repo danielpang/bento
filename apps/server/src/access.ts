@@ -14,6 +14,7 @@ import {
 import type { Context } from "hono";
 import type { AppContext } from "./context.js";
 import { actor, activeOrg } from "./middleware/actor.js";
+import { isPipelineRun } from "./orchestrator/pipeline-run.js";
 import { tenantDb as db } from "./middleware/tenant.js";
 
 /**
@@ -100,9 +101,9 @@ export async function getAccessibleFeature(ctx: AppContext, c: Context, featureI
  */
 export async function getAccessibleRun(ctx: AppContext, c: Context, runId: string) {
   const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run?.featureId) return null;
+  if (!run || !isPipelineRun(run)) return null;
   const feature = await getAccessibleFeature(ctx, c, run.featureId);
-  return feature ? { run: { ...run, featureId: run.featureId }, feature } : null;
+  return feature ? { run, feature } : null;
 }
 
 /** The same, for an artifact: a swarm's artifact is not a card's. */

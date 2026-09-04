@@ -546,6 +546,7 @@ async function slackLinkedRun(
   const [row] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature!.id,
       stageId,
       agentProfileId: profile!.id,
