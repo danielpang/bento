@@ -88,7 +88,7 @@ export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Pr
 export async function queueRunFinishedSlack(ctx: AppContext, runId: string): Promise<void> {
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
   // Slack threads hang off cards, so only a card's run posts to one.
-  if (!run || run.kind === "judge" || !isPipelineRun(run)) return;
+  if (!run || run.role === "judge" || !isPipelineRun(run)) return;
   await queueSlackNotify(ctx, { type: "run_finished", featureId: run.featureId, runId });
 }
 

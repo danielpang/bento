@@ -24,7 +24,7 @@ export async function latestConversationRun(db: Db, featureId: string): Promise<
       and(
         eq(agentRuns.featureId, featureId),
         eq(agentRuns.type, "pipeline"),
-        ne(agentRuns.kind, "judge"),
+        ne(agentRuns.role, "judge"),
       ),
     )
     .orderBy(desc(agentRuns.queuedAt))
@@ -187,7 +187,7 @@ export async function stageIsLooping(ctx: AppContext, featureId: string, stageId
         eq(agentRuns.stageId, stageId),
         gte(agentRuns.queuedAt, since),
         isNull(agentRuns.startedBy),
-        ne(agentRuns.kind, "judge"),
+        ne(agentRuns.role, "judge"),
       ),
     );
   const started = row?.count ?? 0;

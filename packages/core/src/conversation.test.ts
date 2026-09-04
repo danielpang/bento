@@ -39,7 +39,7 @@ test("a judge keeps its own prompt even without a session", () => {
       stagePrompt: "Stage context",
       resume: false,
       compacted: "you: please ship it",
-      kind: "judge",
+      role: "judge",
     }),
     "You are the completion judge. VERDICT.",
   );
@@ -59,7 +59,7 @@ test("a rebase run keeps its own prompt even without a session", () => {
       stagePrompt: "Implement the feature from the card.",
       resume: false,
       compacted: "you: please ship it",
-      kind: "rebase",
+      role: "rebase",
     }),
     "GitHub reports merge conflicts. Rebase and resolve.",
   );
@@ -132,12 +132,12 @@ test("compactTranscript skips empty turns", () => {
 });
 
 test("a live session holds only a successful turn on a manual stage", () => {
-  assert.equal(shouldHoldLiveSession({ ok: true, kind: "task", gateType: "manual", idleSec: 90 }), true);
-  assert.equal(shouldHoldLiveSession({ ok: true, kind: "task", gateType: "auto", idleSec: 90 }), false);
-  assert.equal(shouldHoldLiveSession({ ok: false, kind: "task", gateType: "manual", idleSec: 90 }), false);
-  assert.equal(shouldHoldLiveSession({ ok: true, kind: "judge", gateType: "manual", idleSec: 90 }), false);
+  assert.equal(shouldHoldLiveSession({ ok: true, role: "stage", gateType: "manual", idleSec: 90 }), true);
+  assert.equal(shouldHoldLiveSession({ ok: true, role: "stage", gateType: "auto", idleSec: 90 }), false);
+  assert.equal(shouldHoldLiveSession({ ok: false, role: "stage", gateType: "manual", idleSec: 90 }), false);
+  assert.equal(shouldHoldLiveSession({ ok: true, role: "judge", gateType: "manual", idleSec: 90 }), false);
   // A rebase run's finish is what triggers the force push; holding the
   // session open would delay the publish it exists for.
-  assert.equal(shouldHoldLiveSession({ ok: true, kind: "rebase", gateType: "manual", idleSec: 90 }), false);
-  assert.equal(shouldHoldLiveSession({ ok: true, kind: "task", gateType: "manual", idleSec: 0 }), false);
+  assert.equal(shouldHoldLiveSession({ ok: true, role: "rebase", gateType: "manual", idleSec: 90 }), false);
+  assert.equal(shouldHoldLiveSession({ ok: true, role: "stage", gateType: "manual", idleSec: 0 }), false);
 });

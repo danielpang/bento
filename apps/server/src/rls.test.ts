@@ -529,7 +529,7 @@ test("a swarm and everything under it belongs to one organization", async () => 
   assert.equal(task.rows[0].organization_id, "org-a", "a task must inherit its swarm's organization");
 
   const event = await pool.query(
-    `insert into swarm_task_events (task_id,kind,to_status) values ($1,'status_changed','running')
+    `insert into swarm_task_events (task_id,kind,to_status) values ($1,'status_changed','working')
      returning organization_id`,
     [SWARM.task],
   );
@@ -692,8 +692,8 @@ test("a role has to belong to its board", async () => {
   // Judging is the exception, and the reason type and role are two
   // columns: both boards do it, so neither owns the role.
   await pool.query(
-    `insert into agent_runs (type,feature_id,stage_id,agent_profile_id,organization_id,prompt,role,kind)
-     values ('pipeline',$1,$2,$3,'org-a','judge the card','judge','judge')`,
+    `insert into agent_runs (type,feature_id,stage_id,agent_profile_id,organization_id,prompt,role)
+     values ('pipeline',$1,$2,$3,'org-a','judge the card','judge')`,
     [featureA, stageA, SWARM.profile],
   );
   await pool.query(

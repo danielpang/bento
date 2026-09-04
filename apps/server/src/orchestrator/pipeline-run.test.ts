@@ -19,7 +19,6 @@ function row(overrides: Partial<AgentRunRow>): AgentRunRow {
     organizationId: null,
     agentProfileId: "profile-1",
     role: "stage",
-    kind: "task",
     ...overrides,
   } as AgentRunRow;
 }

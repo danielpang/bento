@@ -133,8 +133,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
   // judge's and the rebase run's would read as messages nobody sent.
-  if (run.prompt && run.kind === "task") await sayAsUser(run.prompt);
-  if (run.kind === "rebase") {
+  if (run.prompt && run.role === "stage") await sayAsUser(run.prompt);
+  if (run.role === "rebase") {
     await saySystem(
       "Resolving merge conflicts: the agent rebases the branch onto the latest base branch, and the server force pushes it with lease protection when the run finishes.",
     );
@@ -335,7 +335,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ctx,
       runId,
       featureId: subject.feature.id,
-      kind: run.kind,
+      role: run.role,
       gateType: subject.stage.gateType,
       idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
       live,
@@ -587,7 +587,7 @@ export function mergeAgentExecEnv(
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
   const { runId, subject, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } = settlement;
   const { profile } = subject;
-  const runKind = subject.run.kind;
+  const runRole = subject.run.role;
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
   const { outcome, exitCode } = result;
@@ -754,9 +754,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     // request, and the resolve route already confirmed one exists. The
     // wording is picked once here so the two notes below cannot drift
     // apart and describe two different runs.
-    const mustPublish = stage.createPr || runKind === "rebase";
+    const mustPublish = stage.createPr || runRole === "rebase";
     const wording =
-      runKind === "rebase"
+      runRole === "rebase"
         ? {
             noConnection:
               "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish.",
@@ -889,7 +889,7 @@ async function buildRunCommand(
   // instructions on their own, and agentRunPrompt ignores a compacted
   // history for both, so computing one would be work thrown away.
   const compacted =
-    subject.kind === "pipeline" && run.prompt && run.kind === "task" && !resume
+    subject.kind === "pipeline" && run.prompt && run.role === "stage" && !resume
       ? await compactedConversation(ctx.db, subject.feature.id, run.id)
       : "";
   const prompt = agentRunPrompt({
@@ -898,7 +898,7 @@ async function buildRunCommand(
     stagePrompt: rolePrompt,
     resume,
     compacted,
-    kind: run.kind,
+    role: run.role,
   });
 
   // The org's MCP gateway flags follow the profile's own extra args, so
@@ -1152,7 +1152,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * message continues, unless the card has moved stages: then the
    * pipeline agent for the stage the card is in takes over.
    */
-  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
+  const conversation = run.role === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
   const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   // The continuation acts as whoever wrote these messages, not whoever
@@ -1278,7 +1278,7 @@ export async function captureRunFinished(
         startedBy: agentRuns.startedBy,
         featureId: agentRuns.featureId,
         stageId: agentRuns.stageId,
-        kind: agentRuns.kind,
+        role: agentRuns.role,
         executor: agentRuns.executor,
         costUsd: agentRuns.costUsd,
         numTurns: agentRuns.numTurns,
@@ -1303,7 +1303,7 @@ export async function captureRunFinished(
         feature_id: row.featureId,
         stage_id: row.stageId,
         project_id: row.projectId,
-        kind: row.kind,
+        role: row.role,
         executor: row.executor,
         cost_usd: row.costUsd === null ? null : Number(row.costUsd),
         num_turns: row.numTurns,
@@ -1660,7 +1660,7 @@ async function resumeInterruptedRun(
       ctx,
       runId: run.id,
       featureId: subject.feature.id,
-      kind: run.kind,
+      role: run.role,
       gateType: subject.stage.gateType,
       idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
       live,

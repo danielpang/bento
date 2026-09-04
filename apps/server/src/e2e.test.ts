@@ -1618,7 +1618,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   const plant = async (values: {
     profileId: string;
     prompt: string;
-    kind?: "task" | "judge";
+    role?: "stage" | "judge";
     cliSessionId: string;
     queuedAt: Date;
   }) => {
@@ -1630,7 +1630,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
         stageId: stage.id,
         agentProfileId: values.profileId,
         prompt: values.prompt,
-        kind: values.kind ?? "task",
+        role: values.role ?? "stage",
         status: "succeeded",
         executor: "server",
         cliSessionId: values.cliSessionId,
@@ -1648,7 +1648,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   await plant({
     profileId: judge.id,
     prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build". Decide whether it is complete.`,
-    kind: "judge",
+    role: "judge",
     cliSessionId: "judge-sess",
     queuedAt: new Date(),
   });
@@ -3177,7 +3177,7 @@ test("usage ignores judge runs and in-flight runs", async () => {
       stageId: stage.id,
       agentProfileId: worker.id,
       prompt: "build it",
-      kind: "task",
+      role: "stage",
       status: "succeeded",
       executor: "server",
       costUsd: "4.20",
@@ -3188,7 +3188,7 @@ test("usage ignores judge runs and in-flight runs", async () => {
       stageId: stage.id,
       agentProfileId: judge.id,
       prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build".`,
-      kind: "judge",
+      role: "judge",
       status: "succeeded",
       executor: "server",
       costUsd: "9.99",
@@ -3199,7 +3199,7 @@ test("usage ignores judge runs and in-flight runs", async () => {
       stageId: stage.id,
       agentProfileId: worker.id,
       prompt: "still going",
-      kind: "task",
+      role: "stage",
       status: "running",
       executor: "server",
       costUsd: null,
@@ -3709,10 +3709,10 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.match(((await onRunner.json()) as { error: string }).error, /runner/);
 
     await ctx.db.update(agentRuns).set({ executor: "server" }).where(eq(agentRuns.id, planted!.id));
-    const started = await json<{ id: string; kind: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
+    const started = await json<{ id: string; role: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
       await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" }),
     );
-    assert.equal(started.kind, "rebase");
+    assert.equal(started.role, "rebase");
     assert.equal(started.agentProfileId, worker.id, "the card's own agent resolves");
     assert.equal(started.cliSessionId, "conflict-sess", "inside the work conversation, where the intent lives");
     assert.match(started.prompt, /rebase/i);

@@ -116,11 +116,12 @@ export interface AgentRun {
   agentProfileId: string;
   status: RunStatus;
   /**
-   * "judge" is the gate evaluator talking to itself; "rebase" is a
+   * What this run is. "stage" is a card being walked through a stage,
+   * "judge" is the gate evaluator talking to itself, and "rebase" is a
    * resolve-conflicts run. Omitted on older payloads and treated as
    * work. Spend rollups skip judges.
    */
-  kind?: "task" | "judge" | "rebase";
+  role?: "stage" | "judge" | "rebase";
   cliSessionId: string | null;
   costUsd: string | null;
   error: string | null;

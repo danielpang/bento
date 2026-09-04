@@ -514,25 +514,13 @@ export const agentRuns = pgTable(
     .default("queued"),
   prompt: text("prompt").notNull(),
   /**
-   * What this run is, structurally. "judge" is the gate evaluator's
-   * completion check; "rebase" is the resolve-conflicts button, a work
-   * run whose finish must republish the branch whatever the stage's
-   * publish setting says; everything else is work someone can talk to.
-   * A column rather than a prompt-prefix test, because the prompt is
-   * user-reachable text: a chat message that happened to open with the
-   * judge sentence used to make its run drop out of every "not a
-   * judge" query in the server.
-   */
-  kind: text("kind", { enum: ["task", "judge", "rebase"] }).notNull().default("task"),
-  /**
    * Which board this run belongs to.
    *
    * Not the same question as `role`, and not derivable from it: a judge
    * run exists on both boards. A card names a judge agent for its gate,
    * and a swarm template names one too, so `role = 'judge'` cannot say
-   * which board asked. The two are axes: this is which board, `role` is
-   * the capacity within it, and `kind` keeps its older pipeline-only
-   * meaning for cards.
+   * which board asked. The two are axes: this is which board, and
+   * `role` is the capacity within it.
    *
    * No default, deliberately. Every insert states its board, because a
    * default is exactly how a swarm run would quietly record itself as a
@@ -540,11 +528,21 @@ export const agentRuns = pgTable(
    */
   type: text("type", { enum: ["pipeline", "swarm"] }).notNull(),
   /**
-   * Which job this run holds within its board.
+   * What this run is: which job it holds within its board.
    *
-   * A query can ask for "this swarm's workers" without knowing anything
-   * about stages. Existing rows are backfilled to "stage", which is
-   * what they all were. Which values are legal depends on `type`, and a
+   * "stage" is a card being walked through a stage, "judge" is the gate
+   * evaluator's completion check, "rebase" is the resolve-conflicts
+   * button (a work run whose finish republishes the branch whatever the
+   * stage's publish setting says), and the rest are a swarm's.
+   *
+   * A column rather than a prompt-prefix test, because the prompt is
+   * user-reachable text: a chat message that happened to open with the
+   * judge sentence used to make its run drop out of every "not a judge"
+   * query in the server.
+   *
+   * This absorbed the older `kind` column, which said the same thing
+   * for the pipeline in different words and had to be kept in step with
+   * this one by hand. Which values are legal depends on `type`, and a
    * check constraint holds that.
    */
   role: text("role", {

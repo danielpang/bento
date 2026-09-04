@@ -156,7 +156,7 @@ export function runnerRoutes(ctx: AppContext) {
       // Same gate as the server executor: judge and rebase prompts are
       // complete on their own and never take a compacted history.
       const compacted =
-        candidate.run.prompt && candidate.run.kind === "task" && !resume
+        candidate.run.prompt && candidate.run.role === "stage" && !resume
           ? await compactedConversation(db(c, ctx), candidate.feature.id, candidate.run.id)
           : "";
 
@@ -167,7 +167,7 @@ export function runnerRoutes(ctx: AppContext) {
           stageId: stage.id,
           prompt: candidate.run.prompt,
           resumeSessionId: candidate.run.cliSessionId,
-          kind: candidate.run.kind,
+          role: candidate.run.role,
         },
         feature: { id: candidate.feature.id, title: candidate.feature.title, branchName: candidate.feature.branchName },
         agent: { cli: profile.cli, model: profile.model, extraArgs: profile.extraArgs },

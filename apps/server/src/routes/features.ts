@@ -1129,7 +1129,7 @@ export function featureRoutes(ctx: AppContext) {
         prompt: buildConflictResolutionPrompt(feature.branchName, conflicted),
         cliSessionId: resumeFrom.cliSessionId,
         executor: resumeFrom.executor,
-        kind: "rebase",
+        role: "rebase",
         startedBy: actor(c),
       }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);

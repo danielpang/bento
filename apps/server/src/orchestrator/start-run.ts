@@ -119,7 +119,6 @@ export async function startRunIfIdle(
           stage_id: result.stageId,
           swarm_id: result.swarmId,
           swarm_task_id: result.swarmTaskId,
-          kind: result.kind,
           executor: result.executor,
           resumed: Boolean(values.cliSessionId),
         },
