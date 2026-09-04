@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createDb, createPool, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
+import { createDb, createPool, poolMaxForRuns, postgresPoolConfig, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -82,11 +82,16 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const db = createDb(pool);
 
     const boss = new PgBoss({
-      connectionString: env.DATABASE_URL,
+      // Same keepalive / idle recycle as the app pool. pg-boss 10
+      // constructs `new pg.Pool(config)`, and Timekeeper.onCron is
+      // what surfaced `read ETIMEDOUT` when a Neon-dropped socket was
+      // still sitting in this pool.
+      ...postgresPoolConfig(env.DATABASE_URL, {
+        // Polling does not need one connection per worker. Enough that a
+        // burst of completions is not queued behind the default 10.
+        max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
+      }),
       schema: "pgboss",
-      // Polling does not need one connection per worker. Enough that a
-      // burst of completions is not queued behind the default 10.
-      max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
       // Idle workers poll slowly so an idle database can be idle; see
       // orchestrator/queue.ts for why, and for the run workers' own pace.
       pollingIntervalSeconds: QUEUE_POLL_SECONDS,
