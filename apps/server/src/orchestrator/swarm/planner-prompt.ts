@@ -17,20 +17,48 @@ import type { swarms } from "@bento/db";
  * every other one.
  */
 
-/** How untrusted text is fenced. Long enough that quoted text cannot close it. */
-const FENCE = "~~~~~~~~";
+/** The shortest fence used, so ordinary text is quoted the same way every time. */
+const MIN_FENCE = 8;
+
+/** Characters that can close a fence, whichever one opened it. */
+const FENCE_RUN = /[~`]+/g;
+
+/**
+ * The longest unbroken run of fence characters anywhere in the text.
+ *
+ * Backticks count as well as tildes: the fence below is tildes, and a
+ * run of backticks cannot close it, but a fence shorter than something
+ * already in the text reads as a boundary to a model whatever the
+ * character is.
+ */
+function longestFenceRun(text: string): number {
+  let longest = 0;
+  for (const [run] of text.matchAll(FENCE_RUN)) longest = Math.max(longest, run.length);
+  return longest;
+}
 
 /**
  * Quotes agent written text so it cannot read as instructions.
  *
  * The fence is the mechanism and the sentence above it is the reason:
  * models follow both, and a fence with no explanation is a formatting
- * choice rather than a rule. Any occurrence of the fence inside the
- * text is broken up, so nothing can close its own quote and continue
- * outside it.
+ * choice rather than a rule.
+ *
+ * The fence is measured against the text rather than fixed, which is
+ * the whole of the guarantee: it is always longer than the longest run
+ * of fence characters the text contains, so no line inside a block can
+ * be the line that ends it. A fixed fence is closable by writing it,
+ * and escaping occurrences of it inside the text is not enough either:
+ * a fixed eight tilde fence with its occurrences shortened by one
+ * turned a nine tilde line into exactly the fence, which is how a
+ * worker's report used to continue as the planner's instructions.
+ *
+ * The text itself is passed through untouched, so the planner reads
+ * what the agent actually wrote.
  */
 export function quoteUntrusted(text: string): string {
-  return [FENCE, text.replaceAll(FENCE, FENCE.slice(1)), FENCE].join("\n");
+  const fence = "~".repeat(Math.max(MIN_FENCE, longestFenceRun(text) + 1));
+  return [fence, text, fence].join("\n");
 }
 
 export interface PlannerPromptInput {
