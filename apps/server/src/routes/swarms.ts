@@ -3,10 +3,12 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
+import type { SandboxHandle } from "@bento/sandbox";
 import {
   agentRuns,
   ensureSwarmAgents,
   projects,
+  sandboxes,
   swarmMessages,
   swarmTasks,
   swarmTemplates,
@@ -64,6 +66,17 @@ const createSwarm = z.object({
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
 });
 
+/**
+ * What a person may change about a swarm: what it is called, what it
+ * was asked to do, its ceilings, and whether it is put away.
+ *
+ * Deliberately not its status. Where a swarm is in its life is decided
+ * by the routes below, which is where the rules about it live: /start
+ * refuses a swarm with no plan and one that is over, and pausing
+ * records why it is paused. A status accepted here walked past all of
+ * that, so a PATCH could resurrect a cancelled swarm and set the
+ * reconciler on it again.
+ */
 const updateSwarm = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
@@ -71,10 +84,9 @@ const updateSwarm = z
     maxWorkers: z.number().int().min(1).max(32).optional(),
     budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
     timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
-    /** Pausing and resuming, which are the two a person does by hand. */
-    status: z.enum(["paused", "running", "cancelled"]).optional(),
     archived: z.boolean().optional(),
   })
+  .strict()
   .refine((value) => Object.keys(value).length > 0, { message: "nothing to change" });
 
 export function swarmRoutes(ctx: AppContext) {
@@ -242,31 +254,76 @@ export function swarmRoutes(ctx: AppContext) {
       if (refusal) return c.json(refusal.body, refusal.status);
       const body = c.req.valid("json");
 
-      const { budgetUsd, archived, status, ...rest } = body;
+      const { budgetUsd, archived, ...rest } = body;
       const [updated] = await db(c, ctx)
         .update(swarms)
         .set({
           ...rest,
           ...(budgetUsd === undefined ? {} : { budgetUsd: budgetUsd === null ? null : String(budgetUsd) }),
           ...(archived === undefined ? {} : { archivedAt: archived ? new Date() : null }),
-          ...(status === undefined
-            ? {}
-            : {
-                status,
-                // A person pausing says why the swarm is paused; a
-                // person resuming clears whatever the last reason was,
-                // including a question that has since been answered.
-                pausedReason: status === "paused" ? ("manual" as const) : null,
-              }),
           updatedAt: new Date(),
         })
         .where(eq(swarms.id, swarm.id))
         .returning();
-      // Resuming is a state change the reconciler has to act on: there
-      // may be leaves waiting for a worker slot that it refused while
-      // the swarm was paused.
-      if (status === "running") deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      /*
+       * Raising the ceiling is a change the reconciler has to act on:
+       * there may be leaves waiting for a worker slot it refused when
+       * the ceiling was lower. Lowering it takes effect as workers
+       * finish; nothing is killed mid task.
+       */
+      if (rest.maxWorkers !== undefined) deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       return c.json(updated);
+    })
+    /**
+     * Pauses a swarm, and says a person did it.
+     *
+     * Its own route rather than a status a client patches, because
+     * what "paused" means here is two writes that have to agree: the
+     * status, and why. The reason is what tells the board whether
+     * resuming is a button or a plan change, and a swarm paused
+     * without one reads as paused for a reason nobody recorded.
+     *
+     * Nothing already running is killed. A worker finishes its leaf and
+     * reports; what pausing stops is the next one starting, which the
+     * coordinator decides by reading this status.
+     */
+    .post("/:id/pause", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      if (swarm.status === "done" || swarm.status === "cancelled") {
+        return c.json({ error: `This swarm is ${swarm.status}, so there is nothing to pause.` }, 409);
+      }
+      const [paused] = await db(c, ctx)
+        .update(swarms)
+        .set({ status: "paused", pausedReason: "manual", updatedAt: new Date() })
+        .where(eq(swarms.id, swarm.id))
+        .returning();
+      return c.json(paused);
+    })
+    /**
+     * Stops a swarm for good.
+     *
+     * Separate from pausing because it is a different decision: a
+     * cancelled swarm is not waiting for anybody, and the coordinator
+     * never spawns on it again. Its rows stay, so what it did and what
+     * it cost is still readable.
+     */
+    .post("/:id/cancel", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      if (swarm.status === "done") {
+        return c.json({ error: "This swarm is done, so there is nothing to stop." }, 409);
+      }
+      const [cancelled] = await db(c, ctx)
+        .update(swarms)
+        .set({ status: "cancelled", pausedReason: null, updatedAt: new Date() })
+        .where(eq(swarms.id, swarm.id))
+        .returning();
+      return c.json(cancelled);
     })
     /**
      * Starts the work, once there is a plan to work.
@@ -276,6 +333,10 @@ export function swarmRoutes(ctx: AppContext) {
      * and until they do, the coordinator spawns nobody. A swarm with an
      * empty tree has nothing to start, and saying so beats starting a
      * swarm that then does nothing.
+     *
+     * Resuming a paused swarm comes through here too, and gets the
+     * same two refusals: there is no second door with its own idea of
+     * when a swarm may run.
      */
     .post("/:id/start", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
@@ -365,11 +426,18 @@ export function swarmRoutes(ctx: AppContext) {
       },
     )
     /**
-     * Deletes a swarm and everything under it.
+     * Deletes a swarm and everything under it, machines included.
      *
      * Refused while an agent is working, the way a card is: the run
      * would keep going in its sandbox with nothing left to report to,
      * and its machine would be nobody's to reap.
+     *
+     * The machines go before the rows, and a failure fails the request,
+     * which is the card delete's order and its reason. A swarm holds
+     * more of them than a card does (its own, and one per leaf), and
+     * sandboxes.swarm_id is "set null", so deleting the swarm first
+     * left every one of them running and billing with nothing in the
+     * product still naming it.
      */
     .delete("/:id", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
@@ -385,7 +453,47 @@ export function swarmRoutes(ctx: AppContext) {
       if (active) {
         return c.json({ error: "Agents are working in this swarm. Pause it and wait for them to stop, then delete." }, 409);
       }
+
+      /*
+       * Read whole, destroyed ones included: their rows have to go too,
+       * or the delete leaves exactly the pointerless row that is
+       * supposed to mean a machine is adrift.
+       */
+      const owned = await db(c, ctx).select().from(sandboxes).where(eq(sandboxes.swarmId, swarm.id));
+      for (const sandbox of owned.filter((row) => row.status !== "destroyed")) {
+        const handle: SandboxHandle = {
+          externalId: sandbox.externalId,
+          provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+          workdir: sandbox.workdir,
+        };
+        try {
+          await ctx.driver.destroy(handle);
+        } catch (err) {
+          return c.json(
+            {
+              error: `the sandbox could not be destroyed (${err instanceof Error ? err.message : String(err)}). The swarm was not deleted; try again`,
+            },
+            502,
+          );
+        }
+      }
+
       await db(c, ctx).delete(swarms).where(eq(swarms.id, swarm.id));
+      /*
+       * The sandbox rows last, and by id: the delete above has already
+       * set their swarm_id to null, so a delete by swarm_id would now
+       * match nothing and leave them behind. Explicitly rather than by
+       * cascade, because that "set null" is what makes a row deleted
+       * outside Bento evidence of a machine still running.
+       */
+      if (owned.length > 0) {
+        await db(c, ctx).delete(sandboxes).where(
+          inArray(
+            sandboxes.id,
+            owned.map((row) => row.id),
+          ),
+        );
+      }
       return c.json({ ok: true });
     })
     /**

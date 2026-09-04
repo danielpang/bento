@@ -13,11 +13,12 @@ import {
   createPool,
   projects,
   runMigrations,
+  sandboxes,
   swarmTasks,
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/sandbox";
 import { createApp } from "../app.js";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { SecretBox } from "../secrets.js";
@@ -121,6 +122,7 @@ after(async () => {
 });
 
 beforeEach(async () => {
+  await db.delete(sandboxes);
   await db.delete(swarms);
   await db.update(projects).set({ executor: "server" }).where(eq(projects.id, projectId));
   queued = [];
@@ -252,13 +254,14 @@ test("the swarm reads back with its plan, and the strip reads back with its numb
 
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {
   const swarm = await createSwarm();
-  await patch(`/api/swarms/${swarm.id}`, { status: "paused" });
+  await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });
+  assert.equal((await post(`/api/swarms/${swarm.id}/pause`)).status, 200);
   const paused = await readSwarm(swarm.id);
   assert.equal(paused.status, "paused");
   assert.equal(paused.pausedReason, "manual", "so the board knows which sentence to print");
 
   queued.length = 0;
-  await patch(`/api/swarms/${swarm.id}`, { status: "running" });
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
   const resumed = await readSwarm(swarm.id);
   assert.equal(resumed.status, "running");
   assert.equal(resumed.pausedReason, null);
@@ -270,6 +273,40 @@ test("pausing and resuming are a person's, and resuming wakes the reconciler", a
   assert.equal(Number((await readSwarm(swarm.id)).budgetUsd), 12.5);
   await patch(`/api/swarms/${swarm.id}`, { budgetUsd: null });
   assert.equal((await readSwarm(swarm.id)).budgetUsd, null);
+});
+
+/**
+ * Where a swarm is in its life is not a field a client sets.
+ *
+ * Every rule about it (a plan to start, and refusing a swarm that is
+ * over) lives on the lifecycle routes, so a status accepted on the
+ * general update would be a second door past all of them: PATCH
+ * {status: "running"} used to resurrect a stopped swarm and set the
+ * reconciler going on it again.
+ */
+test("a status cannot be patched onto a swarm, whatever else the body carries", async () => {
+  const swarm = await createSwarm();
+  await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });
+  assert.equal((await post(`/api/swarms/${swarm.id}/cancel`)).status, 200);
+  assert.equal((await readSwarm(swarm.id)).status, "cancelled");
+
+  queued.length = 0;
+  const patched = await patch(`/api/swarms/${swarm.id}`, { status: "running", title: "Renamed" });
+  assert.equal(patched.status, 400, "the status is not a field this route takes");
+  const after = await readSwarm(swarm.id);
+  assert.equal(after.status, "cancelled", "a stopped swarm stays stopped");
+  assert.equal(after.title, "Rewrite checkout", "and a refused body changes nothing else either");
+  assert.deepEqual(queued, [], "nothing was set going again");
+
+  // The door that does move a swarm keeps its own refusals.
+  const restarted = await post(`/api/swarms/${swarm.id}/start`);
+  assert.equal(restarted.status, 409);
+  assert.match(((await restarted.json()) as { error: string }).error, /cancelled/);
+  assert.equal((await post(`/api/swarms/${swarm.id}/pause`)).status, 409, "nor is there anything to pause");
+
+  // A rename is still a rename.
+  assert.equal((await patch(`/api/swarms/${swarm.id}`, { title: "Renamed" })).status, 200);
+  assert.equal((await readSwarm(swarm.id)).title, "Renamed");
 });
 
 test("a message waits for the planner rather than starting a second one", async () => {
@@ -310,6 +347,62 @@ test("a swarm with agents working is not deleted out from under them", async () 
   const gone = await app.request(`/api/swarms/${swarm.id}`, { method: "DELETE" });
   assert.equal(gone.status, 200);
   assert.equal((await db.select().from(swarms).where(eq(swarms.id, swarm.id))).length, 0);
+});
+
+test("deleting a swarm takes its machines with it", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+
+  // The swarm's own machine, and one a worker was given for a leaf.
+  const [leaf] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart" }).returning();
+  await db.insert(sandboxes).values([
+    { projectId, swarmId: swarm.id, provider: "docker", externalId: "bento-swarm-1", status: "ready" },
+    {
+      projectId,
+      swarmId: swarm.id,
+      swarmTaskId: leaf!.id,
+      provider: "docker",
+      externalId: "bento-swarm-1-leaf",
+      status: "ready",
+    },
+  ]);
+
+  const destroyed: string[] = [];
+  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
+  ctx.driver.destroy = async (handle: SandboxHandle) => void destroyed.push(handle.externalId);
+
+  const gone = await app.request(`/api/swarms/${swarm.id}`, { method: "DELETE" });
+  ctx.driver.destroy = realDestroy;
+  assert.equal(gone.status, 200, await gone.clone().text());
+  assert.deepEqual(
+    [...destroyed].sort(),
+    ["bento-swarm-1", "bento-swarm-1-leaf"],
+    "every machine the swarm held was destroyed, not just the first",
+  );
+  assert.equal(
+    (await db.select().from(sandboxes)).length,
+    0,
+    "and no row is left pointing at a machine that is gone",
+  );
+});
+
+test("a machine that will not go stops the delete rather than being abandoned", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await db
+    .insert(sandboxes)
+    .values({ projectId, swarmId: swarm.id, provider: "docker", externalId: "bento-stuck", status: "ready" });
+
+  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
+  ctx.driver.destroy = async () => {
+    throw new Error("fly said no");
+  };
+  const refused = await app.request(`/api/swarms/${swarm.id}`, { method: "DELETE" });
+  ctx.driver.destroy = realDestroy;
+  assert.equal(refused.status, 502);
+  assert.match(((await refused.json()) as { error: string }).error, /fly said no/);
+  assert.ok(await readSwarm(swarm.id), "the swarm is still there to try again from");
+  assert.equal((await db.select().from(sandboxes)).length, 1, "and its machine is still named by a row");
 });
 
 test("the stream queries at setup and then never again", async () => {

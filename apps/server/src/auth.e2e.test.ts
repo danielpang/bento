@@ -955,6 +955,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ title: "Stolen" }) }],
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ maxWorkers: 32 }) }],
     ["POST", `/api/swarms/${swarm.id}/start`],
+    ["POST", `/api/swarms/${swarm.id}/pause`],
+    ["POST", `/api/swarms/${swarm.id}/cancel`],
     ["GET", `/api/swarms/${swarm.id}/messages`],
     ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
     // The stream, for the reason the run stream is here: it must refuse
