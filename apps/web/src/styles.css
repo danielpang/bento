@@ -5797,3 +5797,863 @@ a.hours-person-name:hover {
   background: var(--panel-raised);
   border: 1px solid var(--line);
 }
+
+/*
+ * Swarms.
+ *
+ * A second board of the same project, in the same vocabulary as the
+ * first. Nothing here introduces a colour, a radius, or a type size
+ * that the console did not already have: the five status hues carry
+ * every state, the brand carries completion, 6px is a control and 8px
+ * is a card, and the mono label over a sans body is the same pairing
+ * the drawer and the settings cards use.
+ *
+ * The one new shape is the ring, and it is new only in that it is
+ * drawn: it is the brand hue on the --line track every meter in this
+ * console already sits on.
+ */
+
+/* A two segment control: one question, both answers visible. Sized
+   to the 52px topbar, so it sits on the picker's line. */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.seg-item {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+@media (hover: hover) {
+  .seg-item:hover {
+    color: var(--text-dim);
+  }
+}
+
+.seg-item[data-on] {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.seg-item:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.seg-lock {
+  display: inline-flex;
+  color: var(--text-faint);
+}
+
+/*
+ * The completion ring, at every size it appears.
+ *
+ * Track and arc are the same two values the hours meter uses, so a
+ * ring and a bar in this console read as the same instrument at two
+ * shapes. Full turns green, because a finished thing is the one state
+ * that has its own reserved colour.
+ */
+.ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.ring-track {
+  stroke: var(--line);
+}
+
+.ring-arc {
+  stroke: var(--brand);
+  transition: stroke-dasharray 240ms ease;
+}
+
+.ring[data-tone="muted"] .ring-arc {
+  stroke: var(--text-faint);
+}
+
+.ring[data-tone="succeeded"] .ring-arc,
+.ring[data-full] .ring-arc {
+  stroke: var(--succeeded);
+}
+
+.ring-label {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/* The outline's reading of the same fraction. */
+.swarm-bar {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.swarm-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--brand);
+  transition: width 240ms ease;
+}
+
+.swarm-bar[data-full] .swarm-bar-fill {
+  background: var(--succeeded);
+}
+
+/* The strip, on the same rail the settings tabs use. */
+.swarm-board {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.swarm-strip {
+  padding: 0 16px;
+  --tab-scroll-fade: var(--bg);
+}
+
+.swarm-tab {
+  gap: 8px;
+}
+
+.swarm-tab-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swarm-tab[data-archived] .swarm-tab-name {
+  color: var(--text-faint);
+}
+
+.swarm-tab-new,
+.swarm-tab-archived {
+  color: var(--text-faint);
+}
+
+.swarm-tab-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.swarm-archived-item {
+  gap: 8px;
+}
+
+.swarm-restore {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+/* The page: header, then the plan. */
+.swarm-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.swarm-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-head-lead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.swarm-head-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.swarm-name {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.swarm-head-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.swarm-head-spend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+
+/*
+ * Three figures, never one.
+ *
+ * Laid out as a row of three rather than a sentence, so the
+ * separation is structural: there is no arrangement of this list that
+ * reads as a total.
+ */
+.swarm-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.swarm-tiers li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.swarm-tiers-inline {
+  flex-direction: row;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.swarm-tiers-inline li {
+  flex-direction: column;
+  gap: 0;
+  align-items: flex-start;
+}
+
+.swarm-tier-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-tier-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.swarm-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+
+/* One track, three fills. The segments sit side by side rather than
+   stacking into a single length nobody could name. */
+.swarm-cap-track {
+  display: flex;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.swarm-cap-fill[data-tier="measured"] {
+  background: var(--brand);
+}
+
+.swarm-cap-fill[data-tier="estimated"] {
+  background: color-mix(in srgb, var(--brand) 55%, var(--bg));
+}
+
+.swarm-cap-fill[data-tier="assumed"] {
+  background: var(--line-bright);
+}
+
+.swarm-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.swarm-workers {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1px;
+}
+
+.swarm-workers-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.swarm-workers-of {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+/* The planner's question, with the answer in the same block. */
+.swarm-question {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 12px 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--gated);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--gated) 8%, transparent);
+}
+
+.swarm-question-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.swarm-question-reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.swarm-prs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px 0;
+}
+
+.swarm-viewbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  min-width: 0;
+}
+
+.swarm-goal {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* The tree. The stage scrolls; the canvas is the laid out size. */
+.swarm-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 8px 16px;
+}
+
+.swarm-stage-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 16px;
+}
+
+.swarm-canvas {
+  position: relative;
+}
+
+.swarm-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.swarm-edge {
+  stroke: var(--line-bright);
+  stroke-width: 1.5;
+}
+
+/* An edge into work that is happening reads brighter, so the frontier
+   is findable in a tree too large to read node by node. */
+.swarm-edge[data-live] {
+  stroke: color-mix(in srgb, var(--running) 60%, var(--line-bright));
+}
+
+.swarm-node {
+  position: absolute;
+}
+
+.swarm-node-face {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  text-align: left;
+  padding: 8px 9px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  /* One step softer than the controls inside it, the same as a card
+     on the pipeline board. */
+  border-radius: 8px;
+  border-left: 2px solid var(--idle);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.swarm-node[data-state="running"] .swarm-node-face {
+  border-left-color: var(--running);
+}
+.swarm-node[data-state="succeeded"] .swarm-node-face {
+  border-left-color: var(--succeeded);
+}
+.swarm-node[data-state="failed"] .swarm-node-face {
+  border-left-color: var(--failed);
+}
+.swarm-node[data-state="gated"] .swarm-node-face {
+  border-left-color: var(--gated);
+}
+
+/*
+ * Attention, painted over the status rather than instead of it.
+ *
+ * The left rule still says what the node is doing; the outline says
+ * somebody should look. That is why a long running worker can be blue
+ * and yellow at once, and why switching to the outline keeps both.
+ */
+.swarm-node[data-attention] .swarm-node-face {
+  border-color: var(--gated);
+  background: color-mix(in srgb, var(--gated) 7%, var(--panel-raised));
+}
+
+.swarm-node[data-collapsed] .swarm-node-face {
+  background: color-mix(in srgb, var(--succeeded) 12%, var(--panel-raised));
+  border-color: color-mix(in srgb, var(--succeeded) 35%, var(--line));
+}
+
+.swarm-node[data-selected] .swarm-node-face,
+.swarm-node-face:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.swarm-node-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.swarm-node-title {
+  font-family: var(--sans);
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.swarm-node-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.swarm-node-foot .status {
+  font-size: 10px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.swarm-node-cost {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.swarm-node-flag {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -9px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--gated);
+  background: var(--bg);
+  padding: 0 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swarm-node-fold {
+  position: absolute;
+  right: -8px;
+  top: -8px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--line-bright);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+/* The outline: the same nodes, as rows. */
+.swarm-outline {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 16px;
+}
+
+.swarm-outline-empty {
+  padding: 48px 16px;
+}
+
+.swarm-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.swarm-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(60px, 160px) 42px 110px 130px 80px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.swarm-row:hover {
+  border-color: var(--line);
+}
+
+.swarm-row[data-selected] {
+  border-color: var(--brand);
+}
+
+.swarm-row[data-attention] {
+  background: color-mix(in srgb, var(--gated) 6%, transparent);
+}
+
+.swarm-row-title {
+  font-family: var(--sans);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-row-pct,
+.swarm-row-cost {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.swarm-row-status {
+  font-size: 11px;
+}
+
+.swarm-attention-chip {
+  border-color: var(--gated);
+  color: var(--gated);
+}
+
+/* The node drawer. */
+.swarm-drawer-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Agent written, so it wraps as prose and never as markup. */
+.swarm-text {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.swarm-criteria,
+.swarm-flags,
+.swarm-commits,
+.swarm-attachments,
+.swarm-tools {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.swarm-criteria li {
+  padding-left: 14px;
+  position: relative;
+}
+
+.swarm-criteria li::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 7px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.swarm-flags li,
+.swarm-commits li,
+.swarm-tools li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.swarm-flag-key,
+.swarm-tool-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.swarm-flag-value,
+.swarm-commit-message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-sha {
+  font-family: var(--mono);
+}
+
+.swarm-confirm {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* The creation dialog. */
+.swarm-new {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.swarm-new-templates {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.swarm-template {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.swarm-template[data-on] {
+  border-color: var(--brand);
+}
+
+.swarm-template-name {
+  font-family: var(--sans);
+  font-weight: 600;
+}
+
+.swarm-new-shape {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-raised);
+}
+
+.swarm-shape {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.swarm-shape dt {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-shape dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.swarm-checkline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-estimate {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* Templates, listed in the Agents panel. */
+.swarm-template-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-template-tiers {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.swarm-template-estimate {
+  flex-basis: 100%;
+  font-size: 11px;
+}
+
+/*
+ * Narrow screens. The header stacks, the actions keep their row, and
+ * the outline drops the columns that are the first to stop fitting.
+ * The tree itself is left scrollable rather than reflowed: a plan is
+ * a shape, and a shape that rearranges at 700px is a different plan.
+ */
+@media (max-width: 720px) {
+  .swarm-head {
+    gap: 12px;
+  }
+
+  .swarm-head-actions {
+    margin-left: 0;
+  }
+
+  /* The bar goes, the percentage stays, and attention stays: a
+     yellow leaf has to survive a narrow screen as surely as it
+     survives the switch from Tree to Outline. */
+  .swarm-row {
+    grid-template-columns: minmax(90px, 1fr) 42px 90px 110px 66px;
+  }
+
+  .swarm-row-bar {
+    display: none;
+  }
+}
