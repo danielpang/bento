@@ -65,6 +65,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
   if (!run) throw new Error(`run ${runId} not found`);
   if (run.status !== "queued") return; // already picked up
+  // This executor is the pipeline's: it walks a card through a stage.
+  // A run with no card is a swarm's, and nothing queues one here.
+  if (!run.featureId || !run.stageId) throw new Error(`run ${runId} is not a pipeline run`);
 
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
@@ -1117,7 +1120,7 @@ async function finishRun(
         .innerJoin(features, eq(features.id, agentRuns.featureId))
         .where(eq(agentRuns.id, runId));
       const spoken = runOutputPreview(event);
-      if (owner && spoken) {
+      if (owner?.featureId && spoken) {
         ctx.bus.emitBoardEvent({
           type: "run_output",
           projectId: owner.projectId,
@@ -1151,11 +1154,13 @@ async function finishRun(
  */
 export async function deliverQueuedMessage(ctx: AppContext, runId: string): Promise<void> {
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) return;
-  const claimed = await claimQueuedMessages(ctx.db, run.featureId);
+  // Messages are parked on a card, so a run with no card has none.
+  if (!run?.featureId) return;
+  const featureId = run.featureId;
+  const claimed = await claimQueuedMessages(ctx.db, featureId);
   if (claimed.length === 0) return;
   const ids = claimed.map((m) => m.id);
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
   if (!feature) {
     await requeueMessages(ctx.db, ids);
     return;
@@ -1187,8 +1192,14 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * message continues, unless the card has moved stages: then the
    * pipeline agent for the stage the card is in takes over.
    */
-  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
-  const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
+  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, featureId) : run;
+  const previous = conversation ?? run;
+  // Only a card run can be continued, and every card run has a stage.
+  if (!previous.stageId) {
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
+  const source = await resolveFollowUpRun(ctx.db, feature, { ...previous, stageId: previous.stageId });
 
   // The continuation acts as whoever wrote these messages, not whoever
   // started the run they follow: a per-user MCP server must serve
@@ -1500,7 +1511,7 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  * race a run that finished or was cancelled while recovery deliberated,
  * and the loser must change nothing.
  */
-async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureId: string }): Promise<void> {
+async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureId: string | null }): Promise<void> {
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
@@ -1530,7 +1541,9 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   // Any stream that reconnected before recovery ran is waiting live;
   // this lets it close the way a normal finish would.
   ctx.bus.emitRunDone(run.id, "failed");
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+  const [feature] = run.featureId
+    ? await ctx.db.select().from(features).where(eq(features.id, run.featureId))
+    : [];
   if (feature) {
     ctx.bus.emitBoardEvent({
       type: "run_updated",
@@ -1543,7 +1556,8 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   await requeueUndelivered(ctx.db, run.id);
   await deliverQueuedMessage(ctx, run.id);
   await queueRunFinishedSlack(ctx, run.id);
-  await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
+  // The gate belongs to the pipeline; a run with no card has none.
+  if (run.featureId) await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
 }
 
 /**
@@ -1564,6 +1578,8 @@ async function resumeInterruptedRun(
   run: typeof agentRuns.$inferSelect,
   sandbox: typeof sandboxes.$inferSelect,
 ): Promise<void> {
+  // Resume is the pipeline's path, like the executor it recovers.
+  if (!run.featureId || !run.stageId) throw new Error(`run ${run.id} is not a pipeline run`);
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
   const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
   const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, run.agentProfileId));
@@ -1897,7 +1913,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
         role: "system",
         text: "The machine running this stopped reporting, so the run was returned to the queue.",
       });
-      const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+      const [feature] = run.featureId
+        ? await ctx.db.select().from(features).where(eq(features.id, run.featureId))
+        : [];
       if (feature) {
         ctx.bus.emitBoardEvent({
           type: "run_updated",

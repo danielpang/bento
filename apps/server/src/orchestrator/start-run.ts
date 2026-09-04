@@ -4,7 +4,12 @@ import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
-type NewRun = typeof agentRuns.$inferInsert;
+/**
+ * agent_runs now also carries swarm runs, whose feature_id is null.
+ * This door is the card's ("one card, one agent"), and every caller
+ * names the card it is starting on, so the id stays required here.
+ */
+type NewRun = typeof agentRuns.$inferInsert & { featureId: string };
 
 /**
  * A run that was not started because the plan has nothing left.

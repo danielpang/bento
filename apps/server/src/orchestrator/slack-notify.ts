@@ -90,7 +90,8 @@ export async function queueRunFinishedSlack(ctx: AppContext, runId: string): Pro
     .from(agentRuns)
     .where(eq(agentRuns.id, runId))
     .limit(1);
-  if (!run || run.kind === "judge") return;
+  // A swarm run has no card, and Slack threads hang off cards.
+  if (!run || run.kind === "judge" || !run.featureId) return;
   await queueSlackNotify(ctx, { type: "run_finished", featureId: run.featureId, runId });
 }
 
@@ -135,7 +136,8 @@ export async function handleSlackNotify(ctx: AppContext, job: SlackNotifyJob): P
 
   if (job.type === "run_finished") {
     const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, job.runId)).limit(1);
-    if (!run) return;
+    // Every notified run is a card's, so it has a stage to name.
+    if (!run || !run.stageId) return;
     const stageName = await stageNameOf(ctx, run.stageId);
     if (run.status === "succeeded") {
       const writeUp = await stageWriteUp(ctx, run.id, run.stageId);

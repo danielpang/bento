@@ -62,9 +62,12 @@ async function authorizeReport(
   runnerId: string,
 ) {
   const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) return { error: "not found" as const, status: 404 as const };
+  // Runners execute the pipeline's runs, which are a card's; a run
+  // with no card is refused as not found like any other stranger's id.
+  if (!run?.featureId) return { error: "not found" as const, status: 404 as const };
+  const featureId = run.featureId;
 
-  const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, run.featureId));
+  const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, featureId));
   if (!feature) return { error: "not found" as const, status: 404 as const };
   if (!(await canAccessProject(ctx, c, feature.projectId))) {
     return { error: "not found" as const, status: 404 as const };
@@ -75,7 +78,7 @@ async function authorizeReport(
   if (run.claimedBy !== runnerId) {
     return { error: "this run was claimed by a different machine" as const, status: 409 as const };
   }
-  return { run, feature };
+  return { run: { ...run, featureId }, feature };
 }
 
 export function runnerRoutes(ctx: AppContext) {
@@ -109,6 +112,11 @@ export function runnerRoutes(ctx: AppContext) {
 
       const candidate = candidates[0];
       if (!candidate) return c.json({ run: null });
+      // The join is on features, so this is a card's run, and a card
+      // run always names the stage the runner is being handed. Checked
+      // before the claim: a run marked "starting" and then dropped
+      // would sit there with nobody executing it.
+      if (!candidate.run.stageId) return c.json({ run: null });
 
       // Conditional update is the lock: a second runner racing for the
       // same row updates zero rows and simply polls again.

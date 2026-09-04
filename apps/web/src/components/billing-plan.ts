@@ -85,6 +85,14 @@ export interface PlanState {
    * console then rolls the period (from periodStart) up from runs.
    */
   usageByFeature?: { featureId: string; title: string; agentHours: number }[];
+  /**
+   * Whether this plan includes swarms. Sent by the billing module, so
+   * an install without one leaves it absent and the console falls back
+   * to whatever the server's own gate answers. Nothing renders from it
+   * yet; the type is here so the module and the console agree on the
+   * name before either uses it.
+   */
+  swarms?: { included: boolean };
   seats: { held: number; billable: number; monthlyTotalUsd: number | null; billed: boolean };
   catalog: PlanOffer[];
   activity?: {

@@ -547,7 +547,11 @@ export function featureRoutes(ctx: AppContext) {
        * one that just ran.
        */
       const conversation = await latestConversationRun(db(c, ctx), feature.id);
-      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
+      const previous = conversation ?? latest;
+      // Every run on a card names its stage; a run without one is a
+      // swarm's, and those never reach a card route.
+      if (!previous.stageId) return c.json({ queued: true as const });
+      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, { ...previous, stageId: previous.stageId });
       // Everything parked rides along, oldest first: the card is idle,
       // so this message and any it queued behind become one follow-up
       // run. Tools with a session resume it; pool gets fresh context.
@@ -1086,7 +1090,12 @@ export function featureRoutes(ctx: AppContext) {
       if (!latest) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
-      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
+      const previous = conversation ?? latest;
+      // As above: a card's run always has the stage it ran on.
+      if (!previous.stageId) {
+        return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
+      }
+      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, { ...previous, stageId: previous.stageId });
       /**
        * Runner-executed runs settle on the runner's machine, and the
        * server has no way to read that checkout, so the promise this
