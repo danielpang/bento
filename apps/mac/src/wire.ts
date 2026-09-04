@@ -240,6 +240,63 @@ export function jsonObject3(
   return concat3(concat3(head, second, asciiBytes(",")), third, asciiBytes("}"));
 }
 
+/**
+ * Pull `"error":"..."` out of a small JSON object the server returns on
+ * a refused write. The Mac core has no JSON parser; this only handles
+ * that one well-known shape, with basic backslash unescaping.
+ */
+export function extractJsonError(body: Uint8Array): Uint8Array {
+  const needle = asciiBytes("\"error\":\"");
+  let start = -1;
+  for (let i = 0; i + needle.length <= body.length; i++) {
+    let match = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (body[i + j] !== needle[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      start = i + needle.length;
+      break;
+    }
+  }
+  if (start < 0) return new Uint8Array(0);
+
+  const out = new Uint8Array(body.length - start);
+  let at = 0;
+  let i = start;
+  while (i < body.length) {
+    const b = body[i];
+    if (b === 0x22) break; // closing "
+    if (b === 0x5c && i + 1 < body.length) {
+      const next = body[i + 1];
+      if (next === 0x22 || next === 0x5c || next === 0x2f) {
+        out[at] = next;
+        at = at + 1;
+        i = i + 2;
+        continue;
+      }
+      if (next === 0x6e) {
+        out[at] = 0x0a;
+        at = at + 1;
+        i = i + 2;
+        continue;
+      }
+      if (next === 0x74) {
+        out[at] = 0x09;
+        at = at + 1;
+        i = i + 2;
+        continue;
+      }
+    }
+    out[at] = b;
+    at = at + 1;
+    i = i + 1;
+  }
+  return out.subarray(0, at);
+}
+
 /** Toggle whether a successful run on this stage opens a pull request. */
 export function stageCreatePrPatch(createPr: boolean): Uint8Array {
   return createPr ? asciiBytes("{\"createPr\":true}") : asciiBytes("{\"createPr\":false}");
@@ -449,6 +506,15 @@ export interface Card {
      warning colour, and neither may wear the accent. */
   readonly runFailed: boolean;
   readonly isGated: boolean;
+  /** Agent is queued, starting, or actively working. Drives the left rail. */
+  readonly isRunning: boolean;
+  /** Status is done (shipped), distinct from cancelled. */
+  readonly isDone: boolean;
+  /**
+   * Open in the detail pane. Set when the board columns are projected,
+   * not at parse time, so a selection change does not rewrite the wire.
+   */
+  readonly isSelected: boolean;
 }
 
 /** A tool paired with a model, which is what a stage points at. */
@@ -692,6 +758,13 @@ export function parseCards(body: Uint8Array): readonly Card[] {
       finished: terminal,
       runFailed: !isDash(fields[5]) && bytesEq(fields[4], asciiBytes("failed")),
       isGated: bytesEq(fields[3], asciiBytes("gated")),
+      isRunning:
+        !isDash(fields[5]) &&
+        (bytesEq(fields[4], asciiBytes("running")) ||
+          bytesEq(fields[4], asciiBytes("starting")) ||
+          bytesEq(fields[4], asciiBytes("queued"))),
+      isDone: bytesEq(fields[3], asciiBytes("done")),
+      isSelected: false,
     });
   }
   return out;

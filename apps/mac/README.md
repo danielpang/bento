@@ -16,10 +16,18 @@ app shows a code, you approve it in a browser, and every request then carries a
 bearer token. Local mode needs no sign in.
 
 The app has no JavaScript runtime, so it cannot host the server or run the
-device flow itself. It spawns the `bento` CLI as a helper and reads its stdout,
-which emits one `bento:<event> <value>` line per event, so there is one
+device flow itself. It spawns a helper process and reads its stdout, which
+emits one `bento:<event> <value>` line per event, so there is one
 implementation of the polling contract and no JSON parser in the app core.
-`bento` must be on your PATH.
+
+Packaged builds ship that helper inside the `.app` (`Contents/Resources/helper`)
+and set `BENTO_HELPER` from the launcher, so end users never install a CLI.
+For `native dev`, use `scripts/dev.sh`, which points `BENTO_HELPER` at a
+from-source helper. A bare `native dev` still falls back to `bento` on PATH
+when `BENTO_HELPER` is unset.
+
+Docker Desktop must be running for local mode (managed Postgres) and for
+agent sandboxes.
 
 ## What it does
 
@@ -112,15 +120,19 @@ board cards use `global-key`, because they genuinely move between columns.
 ## Develop
 
 Requires Node 22.15+ on PATH for the `native` CLI (pinned as a dev dependency at the repo root).
+Docker Desktop must be running for local mode and sandboxes.
 
 ```bash
-# from apps/mac, with the Bento server running (pnpm dev at the repo root)
+# from apps/mac
 ../../node_modules/.bin/native check        # validate markup + core
 ../../node_modules/.bin/native test         # typed model contract checks
-../../node_modules/.bin/native dev          # run the app, markup hot reloads
+./scripts/dev.sh                            # run the app with a bundled-from-source helper
 ../../node_modules/.bin/native build        # ReleaseFast binary in zig-out/bin/
-../../node_modules/.bin/native package --target macos   # .app bundle
+./scripts/package-macos.sh                  # .app with helper inside; then open zig-out/package/*.app
 ```
+
+`scripts/dev.sh` sets `BENTO_HELPER` so you do not need `pnpm -C apps/tui link --global`.
+A bare `../../node_modules/.bin/native dev` still works if `bento` is already on PATH.
 
 Headless logic loop (no window). Dispatch Msgs as JSON lines and read the model
 and effect transcript back, which is the cheapest way to check what a form
