@@ -15,11 +15,21 @@ const ISSUES_URL = "https://github.com/danielpang/bento/issues";
 export function ContactDialog({
   client,
   onClose,
+  initialKind = "issue",
+  featurePlaceholder,
 }: {
   client: BentoClient;
   onClose: () => void;
+  /**
+   * Preselect issue or feature. The Agents "request a new coding
+   * agent or model" control opens this as a feature request so the
+   * user does not have to flip the radio first.
+   */
+  initialKind?: "issue" | "feature";
+  /** Overrides the feature-request textarea hint when set. */
+  featurePlaceholder?: string;
 }) {
-  const [kind, setKind] = useState<"issue" | "feature">("issue");
+  const [kind, setKind] = useState<"issue" | "feature">(initialKind);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -112,7 +122,7 @@ export function ContactDialog({
             placeholder={
               kind === "issue"
                 ? "What happened, and what did you expect instead?"
-                : "What should Bento do, and what would it help you get done?"
+                : (featurePlaceholder ?? "What should Bento do, and what would it help you get done?")
             }
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={(e) => {

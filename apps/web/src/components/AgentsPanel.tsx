@@ -7,6 +7,7 @@ import type { AgentProfile, AgentTool, BentoClient } from "@bento/api-client";
 type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
 import { Modal } from "./Modal.js";
 import { ConfirmDialog } from "./PromptDialog.js";
+import { ContactDialog } from "./ContactDialog.js";
 import { ProviderKeysCard } from "./Credentials.js";
 import { ProviderMark } from "./ProviderMark.js";
 import { SecretField } from "./SecretField.js";
@@ -81,6 +82,11 @@ export function AgentsPanel({
    * scrolled drawer was invisible from the Edit button that opened it.
    */
   const [formOpen, setFormOpen] = useState(false);
+  /**
+   * Contact opened from this panel as a feature request: asking for a
+   * coding agent or model that is not in the list yet.
+   */
+  const [requestAgentOpen, setRequestAgentOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [machine, setMachine] = useState<MachineSettings | null>(null);
   const [tokenValue, setTokenValue] = useState("");
@@ -558,6 +564,15 @@ export function AgentsPanel({
                 <p className={pairing.status === "impossible" ? "error" : "muted"}>{pairing.detail}</p>
               )}
             </label>
+            <div className="field">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setRequestAgentOpen(true)}
+              >
+                Request a new coding agent or model
+              </button>
+            </div>
             <label className="field">
               <span className="label">Name</span>
               <input
@@ -601,6 +616,15 @@ export function AgentsPanel({
             onConfirm={async () => {
               await act(confirming.run);
             }}
+          />
+        )}
+
+        {requestAgentOpen && (
+          <ContactDialog
+            client={client}
+            initialKind="feature"
+            featurePlaceholder="Which coding agent or model should Bento support, and what would you use it for?"
+            onClose={() => setRequestAgentOpen(false)}
           />
         )}
       </div>
