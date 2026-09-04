@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { stageArtifactPath, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { runArtifacts } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
@@ -284,9 +284,23 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
   }
 }
 
-/** "This card's artifacts", or "this swarm's", as a WHERE clause. */
+/**
+ * "This card's artifacts", or "this leaf's", as a WHERE clause.
+ *
+ * A swarm is many agents producing files at once, and two leaves
+ * producing the same file is normal rather than a repeat: a swarm-wide
+ * filter made the second leaf's copy look like a duplicate of the
+ * first's and threw it away, so the task that produced it had nothing
+ * on it. The dedupe is therefore scoped to the task when the owner
+ * names one, and to the swarm's own runs (the planner's, which name no
+ * task) when it does not.
+ */
 function ownerFilter(owner: ArtifactOwner) {
-  return "featureId" in owner
-    ? eq(runArtifacts.featureId, owner.featureId)
-    : eq(runArtifacts.swarmId, owner.swarmId);
+  if ("featureId" in owner) return eq(runArtifacts.featureId, owner.featureId);
+  return and(
+    eq(runArtifacts.swarmId, owner.swarmId),
+    owner.swarmTaskId
+      ? eq(runArtifacts.swarmTaskId, owner.swarmTaskId)
+      : isNull(runArtifacts.swarmTaskId),
+  );
 }
