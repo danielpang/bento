@@ -690,9 +690,20 @@ export const runArtifacts = pgTable(
       .notNull()
       .references(() => agentRuns.id, { onDelete: "cascade" }),
     /**
-     * The card this artifact was produced for. Null on a swarm's
-     * artifact, which is keyed by swarm and task instead; exactly one
-     * of featureId and swarmId is set.
+     * Which board this artifact belongs to, said outright.
+     *
+     * The same statement agent_runs.type makes, for the same reason:
+     * "whichever id is set" is a fact about the columns rather than the
+     * row's own account of itself, and a reader had to know the rule to
+     * know which board a row is on. The shape checks below tie the two
+     * together, so a row whose columns disagree with its type cannot be
+     * written at all.
+     */
+    type: text("type", { enum: ["pipeline", "swarm"] }).notNull(),
+    /**
+     * The card this artifact was produced for. Set on a pipeline
+     * artifact and null on a swarm's, which is keyed by swarm and task
+     * instead.
      */
     featureId: uuid("feature_id").references(() => features.id, { onDelete: "cascade" }),
     /**
@@ -731,8 +742,20 @@ export const runArtifacts = pgTable(
     index("run_artifacts_run_idx").on(t.runId),
     index("run_artifacts_swarm_idx").on(t.swarmId, t.createdAt),
     check("run_artifacts_content_or_key", sql`(${t.content} is null) <> (${t.storageKey} is null)`),
-    /** An artifact belongs to a card or to a swarm, the same way its run does. */
-    check("run_artifacts_feature_or_swarm", sql`(${t.featureId} is null) <> (${t.swarmId} is null)`),
+    /**
+     * An artifact belongs to a card or to a swarm, the same way its run
+     * does, and its type is what says which. Two checks rather than one
+     * XOR, the shape agent_runs uses: an XOR says a row has exactly one
+     * owner without saying that the owner is the one the row claims.
+     */
+    check(
+      "run_artifacts_pipeline_shape",
+      sql`${t.type} <> 'pipeline' or (${t.featureId} is not null and ${t.swarmId} is null and ${t.swarmTaskId} is null)`,
+    ),
+    check(
+      "run_artifacts_swarm_shape",
+      sql`${t.type} <> 'swarm' or (${t.swarmId} is not null and ${t.featureId} is null)`,
+    ),
   ],
 );
 
@@ -1364,9 +1387,15 @@ export const swarmTasks = pgTable(
      * a planner's question, a landing conflict, a failure, a budget
      * stop. Both answer the same question a board asks, which is which
      * node a person should look at, so they share the column.
+     *
+     * "blocked" is not among them, though status has it. A stuck node
+     * is what status says, and repeating it here would mean the same
+     * word answering two different questions one column apart: is this
+     * node moving, and does a person need to come. Every value left
+     * adds something status cannot say.
      */
     attention: text("attention", {
-      enum: ["long_running", "escalated", "question", "blocked", "failed", "conflict", "budget"],
+      enum: ["long_running", "escalated", "question", "failed", "conflict", "budget"],
     }),
     /**
      * Rough size, set by the planner. Used to order work and to spread

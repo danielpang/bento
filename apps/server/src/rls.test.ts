@@ -300,8 +300,8 @@ test("run artifacts inherit their organization from the run", async () => {
 
   const inherited = await asOrg("org-a", (client) =>
     client.query(
-      `insert into run_artifacts (run_id,feature_id,stage_slug,stage_name,path,kind,mime,size,content)
-       values ($1,$2,'design','Design','docs/bento/design.md','markdown','text/markdown',5,'hello')
+      `insert into run_artifacts (run_id,type,feature_id,stage_slug,stage_name,path,kind,mime,size,content)
+       values ($1,'pipeline',$2,'design','Design','docs/bento/design.md','markdown','text/markdown',5,'hello')
        returning organization_id`,
       [run, feature],
     ),
@@ -311,11 +311,37 @@ test("run artifacts inherit their organization from the run", async () => {
   // Exactly one of the inline body and the store key, never both.
   await assert.rejects(
     pool.query(
-      `insert into run_artifacts (run_id,feature_id,stage_slug,stage_name,path,kind,mime,size,content,storage_key)
-       values ($1,$2,'design','Design','both.png','image','image/png',5,'x','a/key')`,
+      `insert into run_artifacts (run_id,type,feature_id,stage_slug,stage_name,path,kind,mime,size,content,storage_key)
+       values ($1,'pipeline',$2,'design','Design','both.png','image','image/png',5,'x','a/key')`,
       [run, feature],
     ),
     /run_artifacts_content_or_key/,
+  );
+
+  /*
+   * And the board it names has to be the board its columns describe.
+   * A discriminator a row can disagree with is worse than none: every
+   * reader would have to decide which of the two to believe, and the
+   * access helper that serves these bytes to a browser believes the
+   * discriminator.
+   */
+  await assert.rejects(
+    pool.query(
+      `insert into run_artifacts (run_id,type,feature_id,stage_slug,stage_name,path,kind,mime,size,content)
+       values ($1,'swarm',$2,'design','Design','claims-a-swarm.md','markdown','text/markdown',5,'x')`,
+      [run, feature],
+    ),
+    /run_artifacts_swarm_shape/,
+    "a row cannot call itself a swarm's while naming a card",
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into run_artifacts (run_id,type,stage_slug,stage_name,path,kind,mime,size,content)
+       values ($1,'pipeline','design','Design','names-nobody.md','markdown','text/markdown',5,'x')`,
+      [run],
+    ),
+    /run_artifacts_pipeline_shape/,
+    "nor call itself a card's while naming none",
   );
 });
 

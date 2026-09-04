@@ -21,6 +21,7 @@ import {
   pipelines,
   projects,
   repositories,
+  runArtifacts,
   runEvents,
   runMigrations,
   sandboxes,
@@ -436,6 +437,16 @@ test("a run's artifacts are captured, listed, and served safely", { timeout: 90_
   assert.ok(shot, "the image artifact is listed");
   assert.equal(plan.kind, "markdown");
   assert.equal(shot.kind, "image");
+
+  // Every row says which board it is on. The capture path writes for
+  // both, and a card's artifact that did not say so would be a swarm's
+  // by the only rule the reader had left.
+  const boards = await ctx.db
+    .select({ type: runArtifacts.type })
+    .from(runArtifacts)
+    .where(eq(runArtifacts.featureId, feature.id));
+  assert.ok(boards.length >= 2);
+  assert.ok(boards.every((row) => row.type === "pipeline"), "a card's artifacts are the pipeline's, said outright");
 
   // The write-up came back inline, sandboxed and unsniffable: agent
   // bytes served by the console must never be able to act as it.

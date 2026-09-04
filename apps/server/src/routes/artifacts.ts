@@ -37,7 +37,10 @@ export function artifactRoutes(ctx: AppContext) {
       // added to run_artifacts later has to be put here on purpose. The
       // store key stays out (bookkeeping between the server and its
       // bucket); inline content rides along because for text artifacts
-      // it is the useful half of the answer.
+      // it is the useful half of the answer. So does the type, kept out
+      // on purpose: the helper above has already refused everything
+      // that is not a card's, so it would be the same word on every
+      // response this route can ever send.
       const { id, runId, featureId, stageSlug, stageName, path, kind, mime, size, content, createdAt } = artifact;
       return c.json({ id, runId, featureId, stageSlug, stageName, path, kind, mime, size, content, createdAt });
     })

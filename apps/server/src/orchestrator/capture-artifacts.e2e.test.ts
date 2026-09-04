@@ -159,6 +159,11 @@ test("two leaves that produce the same file each keep their own copy", async () 
     [first.id, second.id].sort(),
     "and each is recorded under the task that produced it",
   );
+  assert.deepEqual(
+    rows.map((row) => row.type),
+    ["swarm", "swarm"],
+    "each says which board it belongs to, rather than leaving it to be read off the ids",
+  );
 });
 
 test("the same leaf writing the same file twice records it once", async () => {

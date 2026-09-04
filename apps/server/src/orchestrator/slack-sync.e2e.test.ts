@@ -432,6 +432,7 @@ test("a finished run posts its write-up, or the last assistant message if there 
   const { feature, run } = await slackLinkedRun("write-up card");
   await ctx.db.insert(runArtifacts).values({
     runId: run.id,
+    type: "pipeline",
     featureId: feature.id,
     stageSlug: "design",
     stageName: "Design",

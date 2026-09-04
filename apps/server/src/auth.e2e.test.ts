@@ -790,6 +790,7 @@ test("every entity route refuses a foreign tenant", async () => {
     .insert(runArtifacts)
     .values({
       runId: run.id,
+      type: "pipeline",
       featureId: feature.id,
       stageSlug: "matrix",
       stageName: "Matrix",

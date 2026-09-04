@@ -855,6 +855,7 @@ async function writeDesign(ctx: AppContext, caller: SwarmCaller, args: Args<"wri
       .where(and(eq(runArtifacts.swarmId, caller.swarmId), eq(runArtifacts.path, DESIGN_PATH)));
     await tx.insert(runArtifacts).values({
       runId: caller.runId,
+      type: "swarm",
       swarmId: caller.swarmId,
       ...(caller.taskId ? { swarmTaskId: caller.taskId } : {}),
       stageSlug: "plan",

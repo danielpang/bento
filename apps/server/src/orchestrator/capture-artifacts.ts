@@ -252,6 +252,9 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
     await ctx.db.insert(runArtifacts).values({
       id,
       runId: args.runId,
+      // Which board, said outright rather than left to be read off the
+      // ids below. The owner is the one thing here that knows.
+      type: "featureId" in args.owner ? "pipeline" : "swarm",
       ...args.owner,
       stageSlug: args.stageSlug,
       stageName: args.stageName,

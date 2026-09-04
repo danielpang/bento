@@ -106,10 +106,19 @@ export async function getAccessibleRun(ctx: AppContext, c: Context, runId: strin
   return feature ? { run, feature } : null;
 }
 
-/** The same, for an artifact: a swarm's artifact is not a card's. */
+/**
+ * The same, for an artifact: a swarm's artifact is not a card's.
+ *
+ * Read off the row's own discriminator rather than off which id
+ * happens to be set, the way getAccessibleRun reads a run's. Both
+ * halves are checked, for the reason isPipelineRun checks both: the
+ * shape constraint makes them agree, and the featureId check is what
+ * narrows the type so the caller is handed a card's artifact rather
+ * than one that might name no card.
+ */
 export async function getAccessibleArtifact(ctx: AppContext, c: Context, artifactId: string) {
   const [artifact] = await db(c, ctx).select().from(runArtifacts).where(eq(runArtifacts.id, artifactId));
-  if (!artifact?.featureId) return null;
+  if (artifact?.type !== "pipeline" || !artifact.featureId) return null;
   const feature = await getAccessibleFeature(ctx, c, artifact.featureId);
   return feature ? artifact : null;
 }
