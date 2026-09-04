@@ -153,10 +153,29 @@ export function runnerRoutes(ctx: AppContext) {
       });
 
       const resume = Boolean(candidate.run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
-      // Same gate as the server executor: judge and rebase prompts are
-      // complete on their own and never take a compacted history.
+      /**
+       * What this run's role is given, decided from the run row.
+       *
+       * A stage prompt is what a stage run is told to do. A judge or a
+       * rebase run carries a complete instruction of its own, and
+       * putting the stage's in front of it tells the agent to do the
+       * stage's work again.
+       *
+       * That decision used to travel as `role` and be made again by the
+       * runner. A runner that does not read the field makes it wrongly
+       * and cannot know: the field was renamed from `kind` in this
+       * repository, so a machine still running the older build sends
+       * nothing on it and every judge it claimed was handed the stage's
+       * instructions. The server holds the run row, so it resolves the
+       * role itself and simply does not send what must not be
+       * prepended. `role` still travels, because a runner that does
+       * read it has more to say with it than this.
+       */
+      const takesStagePrompt = candidate.run.role === "stage";
+      // Same gate, for the same reason: judge and rebase prompts never
+      // take a compacted history either.
       const compacted =
-        candidate.run.prompt && candidate.run.role === "stage" && !resume
+        candidate.run.prompt && takesStagePrompt && !resume
           ? await compactedConversation(db(c, ctx), candidate.feature.id, candidate.run.id)
           : "";
 
@@ -176,8 +195,13 @@ export function runnerRoutes(ctx: AppContext) {
           localPath: r.localPath,
           defaultBranch: r.defaultBranch,
         })),
-        /** Used when the run carries no explicit prompt. */
-        stagePrompt: buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill }),
+        /**
+         * Used when the run carries no explicit prompt. Empty for a
+         * role that does not take one: see takesStagePrompt above.
+         */
+        stagePrompt: takesStagePrompt
+          ? buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill })
+          : "",
         /**
          * Prior turns, compacted, for a follow-up that cannot resume a
          * CLI session. Empty when the run resumes or there is nothing

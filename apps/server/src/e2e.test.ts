@@ -5226,6 +5226,65 @@ test("a runner executes work the server holds for it", { timeout: 90_000 }, asyn
 });
 
 /**
+ * A judge's prompt is a complete instruction, and the stage's must
+ * never be put in front of it: an agent told to judge and to do the
+ * stage's work does the work.
+ *
+ * Which runs take a stage prompt is the run row's business, not the
+ * claiming machine's. It used to be neither: the payload said `role`
+ * and the runner decided again from it, so a machine built before that
+ * field was renamed read nothing, defaulted to ordinary work, and put
+ * the stage's instructions in front of every judge it claimed. The
+ * server resolves the role and sends only what the role takes, so a
+ * runner that says nothing about roles still gets the right prompt.
+ */
+test("a judge run claimed by a runner is handed no stage prompt", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("Judge on a runner");
+  await ctx.db.execute(sql`update projects set executor = 'runner' where id = ${project.id}`);
+
+  const feature = await createFeature(project.id, "Judged feature");
+  const profile = await fakeProfile("judge-runner-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  const created = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+    }),
+  );
+
+  // What the gate evaluator writes when it puts a judge on a card,
+  // without waiting for a gate to ask for one.
+  await ctx.db.execute(
+    sql`update agent_runs set role = 'judge', prompt = 'Decide whether this stage passed.' where id = ${created.id}`,
+  );
+
+  const claim = (await (
+    await app.request("/api/runner/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runnerId: "judge-laptop" }),
+    })
+  ).json()) as {
+    run: { id: string; role: string; prompt: string } | null;
+    stagePrompt?: string;
+    compactedConversation?: string;
+  };
+  assert.equal(claim.run?.id, created.id);
+  assert.equal(claim.run?.role, "judge", "the role still travels for a runner that reads it");
+  assert.equal(claim.run?.prompt, "Decide whether this stage passed.");
+  assert.equal(claim.stagePrompt, "", "and the stage's instructions do not travel at all");
+  assert.equal(claim.compactedConversation, "", "nor does a history a judge would never read");
+
+  // Nothing left queued: the tests after this one claim from the same pool.
+  await app.request(`/api/runner/runs/${created.id}/complete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runnerId: "judge-laptop", ok: true, exitCode: 0 }),
+  });
+});
+
+/**
  * One card, one agent. A second Start while a run is queued or working
  * would put two agents on the same branch, so every door refuses it,
  * and cancelling the run opens the door again.
