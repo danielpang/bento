@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createPool,
+  pgBossDatabase,
   POOL_CONNECTION_TIMEOUT_MS,
   POOL_IDLE_TIMEOUT_MS,
   POOL_KEEPALIVE_INITIAL_DELAY_MS,
@@ -39,4 +40,14 @@ test("pg-boss receives the same pool options the app pool uses", () => {
   assert.equal(config.connectionTimeoutMillis, POOL_CONNECTION_TIMEOUT_MS);
   assert.equal(config.maxLifetimeSeconds, POOL_MAX_LIFETIME_SECONDS);
   assert.equal(config.max, 16);
+});
+
+test("the pg-boss adapter is executeSql over a configured pool", async () => {
+  const pool = createPool("postgres://postgres:postgres@localhost:5432/app");
+  try {
+    const adapter = pgBossDatabase(pool);
+    assert.equal(typeof adapter.executeSql, "function");
+  } finally {
+    await pool.end();
+  }
 });

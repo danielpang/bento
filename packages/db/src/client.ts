@@ -80,6 +80,22 @@ export function createPool(databaseUrl: string, options?: { max?: number }): pg.
   return pool;
 }
 
+/**
+ * The `executeSql` surface pg-boss 10 needs when we own the pool.
+ * Passing this (instead of a connection string) is how Timekeeper
+ * cron gets the same keepalive and idle recycle as the app pool.
+ * pg-boss will not close a pool it did not create; call `pool.end()`.
+ */
+export function pgBossDatabase(pool: pg.Pool): {
+  executeSql(text: string, values?: unknown[]): Promise<pg.QueryResult>;
+} {
+  return {
+    executeSql(text, values) {
+      return pool.query(text, values);
+    },
+  };
+}
+
 export function createDb(pool: pg.Pool): Db {
   return drizzle(pool, { schema });
 }
