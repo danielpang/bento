@@ -9,8 +9,9 @@ import {
   hoursMeterState,
   hoursRestCopy,
   hoursUsage,
-  monthlyTotal,
+  monthlyTotalParts,
   rankHoursEntries,
+  seatRate,
   startedOn,
   type PlanOffer,
 } from "./components/billing-plan.js";
@@ -33,29 +34,64 @@ function offer(overrides: Partial<PlanOffer> & Pick<PlanOffer, "billableSeats" |
   };
 }
 
-test("the team total is seats times the per-user price", () => {
-  assert.equal(
-    monthlyTotal(offer({ billableSeats: 1, monthlyTotalUsd: 29 }), 1),
-    "$29 a month for this team (1 seat)",
-  );
-  assert.equal(
-    monthlyTotal(offer({ billableSeats: 2, monthlyTotalUsd: 58 }), 2),
-    "$58 a month for this team (2 seats)",
-  );
+test("the team total and the per-user rate are separate figures", () => {
+  assert.deepEqual(monthlyTotalParts(offer({ billableSeats: 1, monthlyTotalUsd: 29 }), 1), {
+    amount: "$29 a month",
+    seats: "1 seat",
+  });
+  assert.deepEqual(monthlyTotalParts(offer({ billableSeats: 2, monthlyTotalUsd: 58 }), 2), {
+    amount: "$58 a month",
+    seats: "2 seats",
+  });
+  assert.equal(seatRate(offer({ billableSeats: 2, monthlyTotalUsd: 58 }).pricing), "$29 a month");
 });
 
 test("a seat minimum is named when it is what decides the bill", () => {
+  assert.deepEqual(
+    monthlyTotalParts(
+      offer({
+        billableSeats: 5,
+        monthlyTotalUsd: 145,
+        pricing: {
+          perSeatUsd: 29,
+          fromPrice: false,
+          minimumSeats: 5,
+          includedAgentHours: 500,
+          overageUsdPerAgentHour: 2,
+          summary: "",
+          highlights: [],
+        },
+      }),
+      2,
+    ),
+    { amount: "$145 a month", seats: "5 seats minimum, this team has 2" },
+  );
+});
+
+test("a per-user rate can be a floor rather than the price", () => {
   assert.equal(
-    monthlyTotal(offer({ billableSeats: 5, monthlyTotalUsd: 145, pricing: {
-      perSeatUsd: 29,
-      fromPrice: false,
+    seatRate({
+      perSeatUsd: 99,
+      fromPrice: true,
       minimumSeats: 5,
-      includedAgentHours: 500,
+      includedAgentHours: 200,
       overageUsdPerAgentHour: 2,
       summary: "",
       highlights: [],
-    } }), 2),
-    "$145 a month for this team (5 seats minimum, this team has 2)",
+    }),
+    "From $99 a month",
+  );
+  assert.equal(
+    seatRate({
+      perSeatUsd: 0,
+      fromPrice: false,
+      minimumSeats: 1,
+      includedAgentHours: 0,
+      overageUsdPerAgentHour: null,
+      summary: "",
+      highlights: [],
+    }),
+    null,
   );
 });
 

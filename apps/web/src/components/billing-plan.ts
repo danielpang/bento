@@ -380,29 +380,38 @@ export function displayHighlights(highlights: string[]): string[] {
   return out;
 }
 
-/** What a plan costs per seat, in words, including the plans that have no price. */
-export function seatPrice(pricing: PlanPricing): string {
-  if (pricing.perSeatUsd === null) return "Talk to us";
-  if (pricing.perSeatUsd === 0) return "Free";
-  const price = `${money(pricing.perSeatUsd)} per user a month`;
-  return pricing.fromPrice ? `From ${price}` : price;
+/**
+ * The per-user figure on a paid plan, without the "per user" that the
+ * label already says. Null when there is no rate to put in that slot.
+ */
+export function seatRate(pricing: PlanPricing): string | null {
+  if (pricing.perSeatUsd === null || pricing.perSeatUsd === 0) return null;
+  const amount = `${money(pricing.perSeatUsd)} a month`;
+  return pricing.fromPrice ? `From ${amount}` : amount;
 }
 
+export type MonthlyTotalParts = {
+  /** "$58 a month", or Free. */
+  amount: string;
+  /** Who that number is for. Null on Free, where seats are not the bill. */
+  seats: string | null;
+};
+
 /**
- * What a team pays on a plan, said once so every surface says it the
- * same way. The seat minimum is named whenever it is what decides the
- * number, since a team of two on a five seat plan should meet that fact
- * here rather than on the invoice.
+ * What a team pays on a plan, as the figures the card prints.
+ *
+ * Amount and seats are separate so the Plan card can label them
+ * rather than packing both into one sentence beside the name. The
+ * seat minimum is named whenever it is what decides the number.
  */
-export function monthlyTotal(offer: PlanOffer, held: number): string | null {
+export function monthlyTotalParts(offer: PlanOffer, held: number): MonthlyTotalParts | null {
   if (offer.monthlyTotalUsd === null) return null;
-  if (offer.monthlyTotalUsd === 0) return "Free";
-  const total = `${money(offer.monthlyTotalUsd)} a month`;
+  if (offer.monthlyTotalUsd === 0) return { amount: "Free", seats: null };
   const seats = `${offer.billableSeats} ${offer.billableSeats === 1 ? "seat" : "seats"}`;
-  if (offer.billableSeats > held) {
-    return `${total} for this team (${seats} minimum, this team has ${held})`;
-  }
-  return `${total} for this team (${seats})`;
+  return {
+    amount: `${money(offer.monthlyTotalUsd)} a month`,
+    seats: offer.billableSeats > held ? `${seats} minimum, this team has ${held}` : seats,
+  };
 }
 
 /**

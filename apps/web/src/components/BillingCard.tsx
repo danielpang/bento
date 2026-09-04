@@ -14,12 +14,12 @@ import {
   hoursMeterState,
   hoursRestCopy,
   hoursUsage,
-  monthlyTotal,
+  monthlyTotalParts,
   money,
   overageCheckoutNote,
   rankHoursEntries,
   resetsOn,
-  seatPrice,
+  seatRate,
   startedOn,
   useBillingPlan,
   type HoursEntry,
@@ -97,23 +97,16 @@ export function BillingCard() {
     <>
       <section className="section settings-card">
         {/*
-          The plan is the headline, not a word inside a sentence. The old
-          line buried "Pro" mid-paragraph, and the one fact everyone
-          opens this tab for should be readable from across the room: the
-          name large, the team's own total beside it, and the per seat
-          rate as the small print under both.
+          The plan is the headline, not a word inside a sentence. The
+          old line buried "Pro" mid-paragraph. The name is large; the
+          team's monthly total and the per-user rate sit under it as
+          two labeled figures, the same shape as Used and Left on the
+          hours card, so neither has to be parsed out of a clause.
         */}
         <div className="plan-head">
           <h3 className="settings-title">Plan</h3>
-          <div className="plan-head-row">
-            <span className="plan-name">{state.planName}</span>
-            {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
-              <span className="plan-total">{monthlyTotal(current, state.seats.held)}</span>
-            )}
-          </div>
-          {current && current.pricing.perSeatUsd !== null && current.pricing.perSeatUsd > 0 && (
-            <span className="muted plan-rate">{seatPrice(current.pricing)}</span>
-          )}
+          <span className="plan-name">{state.planName}</span>
+          {current && <PlanPriceFacts offer={current} held={state.seats.held} />}
         </div>
         <p className="muted">{members(state.usage.members, state.limits.members)}</p>
 
@@ -258,6 +251,30 @@ export function BillingCard() {
         />
       )}
     </>
+  );
+}
+
+/**
+ * The two prices, labeled, so the team total is not a clause hanging
+ * off the plan name and the per-user rate is not small print under it.
+ */
+function PlanPriceFacts({ offer, held }: { offer: PlanOffer; held: number }) {
+  const paid = offer.pricing.perSeatUsd !== null && offer.pricing.perSeatUsd > 0;
+  const total = monthlyTotalParts(offer, held);
+  const rate = seatRate(offer.pricing);
+  if (!paid || !total || !rate) return null;
+  return (
+    <div className="plan-facts">
+      <div className="plan-fact">
+        <span className="label">This team</span>
+        <span className="plan-fact-value">{total.amount}</span>
+        {total.seats && <span className="muted">{total.seats}</span>}
+      </div>
+      <div className="plan-fact">
+        <span className="label">Per user</span>
+        <span className="plan-fact-value">{rate}</span>
+      </div>
+    </div>
   );
 }
 
@@ -630,12 +647,12 @@ function ChoosePlan({
                 >
                   <div className="plan-option-head">
                     <strong>{offer.name}</strong>
-                    {/* The price once. The Free card said Free three
-                        times over, name, price and total, which read
-                        as a rendering fault because it was one. */}
-                    <span className="plan-option-price">{paid ? seatPrice(offer.pricing) : "$0"}</span>
                   </div>
-                  {paid && <p className="plan-option-total">{monthlyTotal(offer, heldSeats)}</p>}
+                  {paid ? (
+                    <PlanPriceFacts offer={offer} held={heldSeats} />
+                  ) : (
+                    <span className="plan-option-price">$0</span>
+                  )}
                   <p className="muted">{offer.pricing.summary}</p>
                   <ul className="plan-option-list">
                     {displayHighlights(offer.pricing.highlights).map((line) => (

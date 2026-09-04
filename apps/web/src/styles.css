@@ -5310,9 +5310,9 @@ button.session-expand[aria-pressed="true"] {
 }
 
 /*
- * One plan card. Lives inside the plans panel's row; the price and the
- * team's own total sit at the top because per seat pricing makes the
- * headline number the least useful one on the card.
+ * One plan card. Lives inside the plans panel's row. The team's monthly
+ * total and the per-user rate sit as two labeled facts, stacked, because
+ * four columns is too narrow to put them side by side.
  */
 .plan-option {
   display: flex;
@@ -5340,12 +5340,6 @@ button.session-expand[aria-pressed="true"] {
 .plan-option-price {
   font-size: 12px;
   color: var(--text-dim);
-}
-
-.plan-option-total {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 650;
 }
 
 .plan-option-list {
@@ -5458,20 +5452,13 @@ button.session-expand[aria-pressed="true"] {
 }
 
 /* The plan as a headline. The name is the one fact everyone opens the
-   Billing tab for, so it reads at a glance rather than mid-sentence;
-   the team's own total sits beside it, the per seat rate beneath. */
+   Billing tab for. The team's monthly total and the per-user rate sit
+   under it as two labeled figures, not a sentence beside the name. */
 .plan-head {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
   margin-bottom: 10px;
-}
-
-.plan-head-row {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  flex-wrap: wrap;
 }
 
 .plan-name {
@@ -5482,13 +5469,35 @@ button.session-expand[aria-pressed="true"] {
   line-height: 1.2;
 }
 
-.plan-total {
+.plan-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin-top: 4px;
+}
+
+.plan-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plan-fact-value {
   font-size: 15px;
   font-weight: 620;
 }
 
-.plan-rate {
-  font-size: 12.5px;
+/* Comparison cards are a quarter of the panel. Stack the two prices
+   so "$4158 a month" does not wrap under a cramped Per user column. */
+.plan-option .plan-facts {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 0;
+}
+
+.plan-option .plan-fact-value {
+  font-size: 14px;
 }
 
 /*
@@ -5650,7 +5659,8 @@ a.hours-person-name:hover {
 }
 
 @media (max-width: 560px) {
-  .hours-facts {
+  .hours-facts,
+  .plan-facts {
     grid-template-columns: 1fr;
   }
   .hours-person {
