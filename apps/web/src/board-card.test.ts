@@ -2,11 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { Feature, FeatureSpend } from "@bento/api-client";
+import type { Feature, FeatureSpend, Stage } from "@bento/api-client";
 import { Board } from "./components/Board.js";
 import { BetaTestersScope } from "./beta.js";
 
 const noop = () => {};
+
+/** Cards from `feature()` sit in this lane; without it they never render. */
+const stage: Stage = {
+  id: "s1",
+  pipelineId: "pipe",
+  position: 0,
+  name: "Build",
+  slug: "build",
+  description: "",
+  defaultAgentProfileId: null,
+  gateType: "manual",
+  gateCriteria: [],
+  createPr: false,
+};
 
 function feature(status: Feature["status"], id = "f1"): Feature {
   return {
@@ -37,7 +51,7 @@ function render(
   extra: { runStatusByFeature?: Record<string, string>; selectedId?: string; beta?: boolean } = {},
 ) {
   const board = createElement(Board, {
-    stages: [],
+    stages: [stage],
     features,
     profiles: [],
     runStatusByFeature: extra.runStatusByFeature ?? {},

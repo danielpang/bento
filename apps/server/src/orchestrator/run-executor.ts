@@ -1656,7 +1656,7 @@ async function resumeInterruptedRun(
     60_000,
     ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - (run.startedAt ? Date.now() - run.startedAt.getTime() : 0),
   );
-  if (hasGrant) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
+  if (grantServers.length > 0) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
 
   // Attach before touching shared state or the transcript, so a failed
   // attach leaves no misleading "reattached" line and no stale abort
