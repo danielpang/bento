@@ -53,6 +53,7 @@ RUN set -eu; \
     fetch_run claude https://claude.ai/install.sh bash; \
     fetch_run codex https://chatgpt.com/codex/install.sh sh; \
     fetch_run cursor https://cursor.com/install bash; \
+    fetch_run agy https://antigravity.google/cli/install.sh bash; \
     POOL_INSTALL_ACCEPT_EULA=1 fetch_run pool https://downloads.poolside.ai/pool/install.sh sh; \
     case "$(dpkg --print-architecture)" in arm64) target=linux-arm64 ;; *) target=linux-x64 ;; esac; \
     if [ "$target" = linux-x64 ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then target=linux-x64-baseline; fi; \
@@ -118,16 +119,25 @@ RUN arch="$(dpkg --print-architecture)" \
 # that ships without one of these produces no symptom until a card runs
 # that agent half an hour later, and then only "executable file
 # `opencode` not found in $PATH".
-RUN for tool in claude codex cursor-agent opencode pool; do \
-      for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin; do \
+RUN for tool in agy claude codex cursor-agent opencode pool; do \
+      for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin /root/.antigravity/bin; do \
         [ -x "$dir/$tool" ] && ln -sf "$dir/$tool" /usr/local/bin/"$tool" && break; \
       done; \
     done; \
     status=0; \
-    for tool in claude codex cursor-agent dsh opencode pi pool; do \
+    for tool in agy claude codex cursor-agent dsh opencode pi pool; do \
       command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is not on PATH"; status=1; }; \
     done; \
     exit $status
+
+# Antigravity signs in with a Google account, and a sandbox has no
+# browser to sign in with. modelProvider "gemini" is what makes
+# GEMINI_API_KEY the credential instead, and the CLI refuses to start
+# with one set and not the other. Same file, same reason, as
+# packages/sandbox/src/agent-toolchain.ts writes on a bare machine.
+RUN mkdir -p /root/.gemini/antigravity-cli \
+ && printf '%s\n' '{ "modelProvider": "gemini" }' \
+    > /root/.gemini/antigravity-cli/settings.json
 
 RUN git config --system user.email "no-reply@usebento.ai" \
     && git config --system user.name "Bento Agent" \

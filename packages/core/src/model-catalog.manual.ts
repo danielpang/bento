@@ -85,6 +85,44 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
     ],
   },
   {
+    id: "antigravity",
+    name: "Antigravity",
+    env: ["GEMINI_API_KEY"],
+    // No mark: there is none in the repository, and inventing a brand
+    // mark is worse than the empty slot ProviderMark already draws.
+    logo: "",
+    /**
+     * Antigravity's own model slugs, which is what its `--model`
+     * takes. They are not the Gemini API's ids: a slug names the model
+     * tier and the reasoning effort together, because effort is a
+     * variant of the model in Antigravity rather than a separate
+     * request field. That is why this is a provider of its own rather
+     * than ids appended to Google's; `google/gemini-3.1-pro-high` is
+     * not a thing pi or opencode could run.
+     *
+     * Only the ids that have been read back from Antigravity's own
+     * model list are here. Gemini 3.8 Flash and 3.7 Flash are served
+     * to a Gemini API key too, and they will join this list when
+     * somebody has confirmed how their slugs are spelled rather than
+     * from a guess at the pattern. Until then they stay typeable, like
+     * any unlisted id.
+     *
+     * Antigravity also serves Claude and GPT models on a signed-in
+     * Google account. A sandbox cannot sign in, so those are
+     * unreachable here and deliberately unlisted.
+     */
+    models: [
+      { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)" },
+      { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)" },
+      { id: "gemini-3.6-flash-high", name: "Gemini 3.6 Flash (High)" },
+      { id: "gemini-3.6-flash-medium", name: "Gemini 3.6 Flash (Medium)" },
+      { id: "gemini-3.6-flash-low", name: "Gemini 3.6 Flash (Low)" },
+      { id: "gemini-3.5-flash-high", name: "Gemini 3.5 Flash (High)" },
+      { id: "gemini-3.5-flash-medium", name: "Gemini 3.5 Flash (Medium)" },
+      { id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Low)" },
+    ],
+  },
+  {
     id: "poolside",
     name: "Poolside",
     env: ["POOLSIDE_API_KEY"],

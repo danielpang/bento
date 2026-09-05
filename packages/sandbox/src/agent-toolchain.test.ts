@@ -104,7 +104,7 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
       "BENTO_NODE_VERSION=22.22.2",
       "@deepseek-ai/dsh@0.1.1-rc.2",
       "exec /opt/bento/dsh/bin/dsh",
-      "for tool in claude codex cursor-agent dsh opencode pi pool",
+      "for tool in agy claude codex cursor-agent dsh opencode pi pool",
       "model: !!js process.env.DSH_MODEL",
       "provider: deepseek-official",
       "DSH_PERMISSION_MODE=danger-full-access",
@@ -123,6 +123,64 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
       assert.ok(image.includes(required), `the Docker image is missing ${required}`);
     }
     assert.doesNotMatch(image, /ENV PATH=.*\/opt\/bento\/node/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Antigravity's default credential is a Google account, and a sandbox
+ * has no browser to sign in with. `modelProvider: "gemini"` is what
+ * redirects it to GEMINI_API_KEY, and the CLI refuses to start with one
+ * of the two and not the other, so the setting has to be on disk before
+ * the first run rather than arriving with it.
+ *
+ * The file is written only when there is none. A local user who shares
+ * their own ~/.gemini has it mounted over this, read only, and their
+ * settings are the ones that should decide; overwriting it would also
+ * fail the exec on a mount nothing can write to.
+ */
+test("agy is installed with the settings that make an API key its credential", async () => {
+  const image = await readFile(dockerfile, "utf8");
+  for (const required of [
+    "https://antigravity.google/cli/install.sh",
+    '{ "modelProvider": "gemini" }',
+  ]) {
+    assert.ok(AGENT_TOOLCHAIN_SCRIPT.includes(required), `the Sprite script is missing ${required}`);
+    assert.ok(image.includes(required), `the Docker image is missing ${required}`);
+  }
+
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-agy-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    const first = sandbox.run();
+    assert.equal(first.status, 0, first.stderr);
+    const settings = path.join(root, "home/.gemini/antigravity-cli/settings.json");
+    assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), { modelProvider: "gemini" });
+
+    // A settings file already there is left exactly as it was, which is
+    // what makes a mounted ~/.gemini authoritative.
+    writeFileSync(settings, '{ "modelProvider": "signed-in" }');
+    rmSync(path.join(root, "usr/local/bin/agy"), { force: true });
+    rmSync(path.join(root, "home/.local/bin/agy"), { force: true });
+    const second = sandbox.run();
+    assert.equal(second.status, 0, second.stderr);
+    assert.ok(sandbox.published().includes("agy"), "agy was not reinstalled after being removed");
+    assert.equal(readFileSync(settings, "utf8"), '{ "modelProvider": "signed-in" }');
+
+    // Its installer documents ~/.local/bin, which is where the stub
+    // above puts it, but an installer that moves is the failure mode
+    // this whole file exists for: nothing shows a symptom until a card
+    // runs that agent. Its own directory is searched too, so a move
+    // there costs nothing.
+    rmSync(path.join(root, "usr/local/bin/agy"), { force: true });
+    rmSync(path.join(root, "home/.local/bin/agy"), { force: true });
+    mkdirSync(path.join(root, "home/.antigravity/bin"), { recursive: true });
+    writeFileSync(path.join(root, "home/.antigravity/bin/agy"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const third = sandbox.run();
+    assert.equal(third.status, 0, third.stderr);
+    assert.deepEqual(toolchainMissing(third.stdout), [], "agy in its own directory was not put on the PATH");
+    assert.deepEqual(sandbox.fetched(), [], "a binary already on the machine must not be downloaded again");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -181,7 +239,7 @@ test("an installer that fails once is retried on the next provision, and the res
     assert.equal(first.status, 0, first.stderr);
     assert.deepEqual(toolchainMissing(first.stdout), ["opencode"]);
     assert.match(first.stderr, /opencode install failed/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
     // Not once and given up on: a blip passes within seconds. Both
     // routes get their three, the release first and the installer only
     // once that has failed.
@@ -199,7 +257,7 @@ test("an installer that fails once is retried on the next provision, and the res
     // missing, by the route that does not need the API.
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
 
     // Third provision, with everything in place: no network at all.
     const third = sandbox.run();
@@ -229,7 +287,7 @@ test("a warm machine upgrades an old private Node while installing only missing 
       "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz",
     ]);
     assert.equal(spawnSync(node, ["--version"], { encoding: "utf8" }).stdout.trim(), "v22.22.2");
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -354,7 +412,7 @@ test("opencode comes from its release, never asking which version that is", () =
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
     assert.ok(
       sandbox.fetched().some((url) => url.includes("releases/latest/download/opencode-linux-")),
       `the release was never fetched: ${sandbox.fetched().join(" ")}`,
@@ -385,7 +443,7 @@ test("opencode falls back to its installer when the release download is gone", (
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
     assert.ok(sandbox.fetched().includes("https://opencode.ai/install"));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -430,7 +488,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.deepEqual(toolchainMissing(bumped.stdout), ["opencode"]);
     // The four that did install are still usable. A bump that fails
     // halfway must not take the working CLIs down with it.
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
 
     // The provision after the bump. This is the assertion that would
     // have caught the original bug: the new marker is on disk, and it
@@ -442,7 +500,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.equal(after.status, 0);
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -471,7 +529,7 @@ test("a bump that cannot reach a CLI keeps the copy the machine already had", ()
     const bumped = sandbox.runAfterVersionBump();
     assert.equal(bumped.status, 0, bumped.stderr);
     assert.deepEqual(toolchainMissing(bumped.stdout), [], "the previously installed copy is still there");
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -504,7 +562,7 @@ test("opencode is reported missing when the release and the installer are both u
     assert.deepEqual(toolchainMissing(result.stdout), ["opencode"]);
     assert.match(result.stderr, /opencode release download failed/);
     // And the other four are unharmed.
-    assert.deepEqual(sandbox.published(), ["claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -618,6 +676,7 @@ case "$url" in
   *claude*) tool=claude ;;
   *codex*) tool=codex ;;
   *cursor*) tool=cursor-agent ;;
+  *antigravity*) tool=agy ;;
   *poolside*) tool=pool ;;
   *) exit 22 ;;
 esac

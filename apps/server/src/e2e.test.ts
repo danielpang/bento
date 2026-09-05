@@ -58,7 +58,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 
@@ -2003,6 +2003,49 @@ test("a login token displaces the API key rather than joining it", async () => {
 });
 
 /**
+ * The path a person actually takes to run Antigravity: pick the tool,
+ * pick a Gemini model, paste a Gemini key. Antigravity's own default
+ * credential is a Google account, which no sandbox can sign in with,
+ * so the key is the whole of its authentication here and a leg of this
+ * chain that quietly broke would strand the tool with no way in.
+ *
+ * The key is saved the way the console saves it, so this covers the
+ * storage and the decryption rather than a value handed straight to
+ * the resolver, and the process environment is cleared first so the
+ * value proves it came from what was pasted.
+ */
+test("a pasted Gemini key is what reaches an Antigravity run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "GEMINI_API_KEY", value: "AIza-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ GEMINI_API_KEY: null, GOOGLE_GEMINI_BASE_URL: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high");
+      assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
+      assert.equal(env.GEMINI_API_KEY, "AIza-pasted-by-the-user");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+/**
+ * And with nothing pasted, the run stops before a sandbox is spent,
+ * naming the key rather than failing inside the CLI as an unreadable
+ * sign-in error.
+ */
+test("an Antigravity run with no Gemini key is missing it by name", async () => {
+  await withEnv({ GEMINI_API_KEY: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high");
+    assert.deepEqual(missing, ["GEMINI_API_KEY"]);
+  });
+});
+
+/**
  * The exception, and the reason this is not a plain preference: a login
  * token is only valid at Anthropic's own API. Once a base URL points
  * the tool at OpenRouter or a gateway, the key is the only credential
@@ -2935,6 +2978,16 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   const prefixedHarness = await post({ name: "prefixed harness", cli: "dsh", model: "deepseek/deepseek-v4-pro" });
   assert.equal(prefixedHarness.status, 400, "DeepSeek Harness cannot accept provider-prefixed model ids");
   assert.match(((await prefixedHarness.json()) as { error: string }).error, /bare model id/);
+
+  const antigravity = await post({ name: "Antigravity", cli: "antigravity", model: "gemini-3.1-pro-high" });
+  assert.equal(antigravity.status, 201, "the Antigravity CLI accepts its own model slug");
+  const prefixedSlug = await post({
+    name: "prefixed antigravity",
+    cli: "antigravity",
+    model: "google/gemini-3.1-pro-high",
+  });
+  assert.equal(prefixedSlug.status, 400, "an Antigravity slug carries no provider prefix");
+  assert.match(((await prefixedSlug.json()) as { error: string }).error, /bare model id/);
 
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.

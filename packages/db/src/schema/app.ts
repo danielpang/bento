@@ -157,7 +157,9 @@ export const agentProfiles = pgTable("agent_profiles", {
    */
   organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
-  cli: text("cli", { enum: ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"] }).notNull(),
+  cli: text("cli", {
+    enum: ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"],
+  }).notNull(),
   model: text("model").notNull(),
   /**
    * The agent's operating instructions, written by the user and fed

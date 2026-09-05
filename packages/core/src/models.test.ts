@@ -38,6 +38,29 @@ test("dsh only offers DeepSeek and requires its bare model ids", () => {
   });
 });
 
+/**
+ * Antigravity's slugs name a model tier and a reasoning effort
+ * together, so they are its own provider's ids rather than Google's.
+ * The pairing that has to be refused is the provider-prefixed one: it
+ * is what somebody used to pi or opencode types first, and agy takes
+ * only the bare slug.
+ */
+test("antigravity only offers its own slugs and requires them bare", () => {
+  assert.deepEqual(providersForCli("antigravity").map((provider) => provider.id), ["antigravity"]);
+  assert.equal(modelStringFor("antigravity", "antigravity", "gemini-3.1-pro-high"), "gemini-3.1-pro-high");
+  assert.equal(providerForProfile("antigravity", "gemini-3.1-pro-high")?.id, "antigravity");
+  assert.equal(providerForProfile("antigravity", "gemini-3.6-flash-medium")?.id, "antigravity");
+  assert.equal(checkAgentPairing("antigravity", "gemini-3.1-pro-high").status, "ok");
+  assert.deepEqual(checkAgentPairing("antigravity", "google/gemini-3.1-pro-high"), {
+    status: "impossible",
+    detail:
+      "Antigravity CLI takes a bare model id, for example gemini-3.1-pro-high, without a provider prefix.",
+  });
+  // A slug the hand-maintained list has not caught up with stays
+  // typeable, the same as any other unlisted id.
+  assert.equal(checkAgentPairing("antigravity", "gemini-3.8-flash-high").status, "unknown");
+});
+
 test("a bare model id is resolved against the tool's own providers", () => {
   assert.equal(providerForProfile("claude-code", "claude-sonnet-5")?.id, "anthropic");
 });
@@ -65,7 +88,7 @@ test("a tool's default model resolves even when the snapshot lacks it", () => {
  * whose logo was shown when it was created.
  */
 test("every string modelStringFor composes resolves back to its provider", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity"]) {
     for (const provider of providersForCli(cli)) {
       const model = provider.models[0];
       if (!model) continue;
