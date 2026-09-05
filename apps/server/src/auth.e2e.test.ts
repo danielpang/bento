@@ -30,6 +30,7 @@ import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { createAuth } from "./auth.js";
 import type { Analytics, ServerEvent } from "./analytics.js";
+import { userFromSessionCookie } from "./auth-events.js";
 import type { AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
@@ -2925,7 +2926,7 @@ test("the catalog's added flag does not cross organizations", async () => {
   assert.equal(leaked, undefined, "another organization's server must not read as added");
 });
 
-test("a refused sign in reaches PostHog as an event and an exception", async () => {
+test("sign in and sign up outcomes reach PostHog, and a refusal reaches error tracking", async () => {
   const events: ServerEvent[] = [];
   const exceptions: { error: Error; properties?: Record<string, unknown> }[] = [];
   const analytics: Analytics = {
@@ -2940,40 +2941,60 @@ test("a refused sign in reaches PostHog as an event and an exception", async () 
   ctx.analytics = analytics;
   try {
     const signUp = await jsonPost("/api/auth/sign-up/email", {
-      email: "failure-metrics@bento.test",
+      email: "outcome-metrics@bento.test",
       password: "correct-horse-battery",
       name: "Metrics",
     });
     assert.equal(signUp.status, 200);
-    assert.equal(events.length, 0, "a sign up that worked is not a failure");
+    const created = ((await signUp.json()) as { user: { id: string } }).user.id;
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event, "sign up succeeded");
+    // A success belongs to the person it signed in.
+    assert.equal(events[0].userId, created);
+    assert.equal(events[0].properties?.method, "email");
+    assert.equal(events[0].properties?.status, 200);
+    assert.equal(exceptions.length, 0, "a success is not an error");
 
     const wrong = await jsonPost("/api/auth/sign-in/email", {
-      email: "failure-metrics@bento.test",
+      email: "outcome-metrics@bento.test",
       password: "not-the-password",
     });
     assert.equal(wrong.status, 401);
-
-    assert.equal(events.length, 1);
-    assert.equal(events[0].event, "sign in failed");
-    assert.equal(events[0].userId, undefined);
-    assert.equal(events[0].properties?.method, "email");
-    assert.equal(events[0].properties?.code, "INVALID_EMAIL_OR_PASSWORD");
-    assert.equal(events[0].properties?.status, 401);
+    assert.equal(events.length, 2);
+    assert.equal(events[1].event, "sign in failed");
+    // A failure has no user, so it counts against the server.
+    assert.equal(events[1].userId, null);
+    assert.equal(events[1].properties?.method, "email");
+    assert.equal(events[1].properties?.code, "INVALID_EMAIL_OR_PASSWORD");
+    assert.equal(events[1].properties?.status, 401);
     // Nothing that identifies the person rides along.
-    assert.equal(JSON.stringify(events[0]).includes("failure-metrics"), false);
-
+    assert.equal(JSON.stringify(events[1]).includes("outcome-metrics"), false);
     assert.equal(exceptions.length, 1);
     assert.equal(exceptions[0].error.name, "AuthFailureError");
     assert.equal(exceptions[0].properties?.$exception_fingerprint, "sign in failed:email:INVALID_EMAIL_OR_PASSWORD");
 
+    const right = await jsonPost("/api/auth/sign-in/email", {
+      email: "outcome-metrics@bento.test",
+      password: "correct-horse-battery",
+    });
+    assert.equal(right.status, 200);
+    assert.equal(events[2]?.event, "sign in succeeded");
+    assert.equal(events[2]?.userId, created);
+
+    // The OAuth callback names nobody in its redirect, so the user is
+    // read back out of the session cookie the response set. The email
+    // sign in sets the same cookie, which makes it the stand-in here.
+    assert.equal(await userFromSessionCookie(ctx.auth!)(right), created);
+
     const duplicate = await jsonPost("/api/auth/sign-up/email", {
-      email: "failure-metrics@bento.test",
+      email: "outcome-metrics@bento.test",
       password: "correct-horse-battery",
       name: "Metrics",
     });
     assert.equal(duplicate.status, 422);
-    assert.equal(events[1]?.event, "sign up failed");
-    assert.equal(events[1]?.properties?.code, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
+    assert.equal(events[3]?.event, "sign up failed");
+    assert.equal(events[3]?.properties?.code, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
+    assert.equal(exceptions.length, 2);
   } finally {
     delete ctx.analytics;
   }

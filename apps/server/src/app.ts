@@ -31,7 +31,7 @@ import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
-import { reportAuthFailures } from "./auth-failures.js";
+import { reportAuthEvents, userFromSessionCookie } from "./auth-events.js";
 
 export interface AppExtras {
   /**
@@ -128,14 +128,14 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     const auth = ctx.auth;
     /**
      * Every auth request goes through this rather than auth.handler
-     * directly, so a refused sign in or sign up is counted in PostHog.
+     * directly, so every sign in and sign up outcome is counted in
+     * PostHog, and a refusal reaches error tracking.
      * The client is read per request: tests install one after the app
      * is built, and a deployment without a key pays only a path check.
      */
-    const authHandler = reportAuthFailures(
-      () => ctx.analytics,
-      (request) => auth.handler(request),
-    );
+    const authHandler = reportAuthEvents(() => ctx.analytics, (request) => auth.handler(request), {
+      userFromResponse: userFromSessionCookie(auth),
+    });
     /**
      * Owners cannot delete their account: that would leave a team
      * without anyone who can manage it. better-auth's own handler
