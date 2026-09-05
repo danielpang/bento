@@ -141,11 +141,6 @@ export function createAnalytics(env: Env): Analytics | null {
       organizationId?: string | null,
       properties?: Record<string, unknown>,
     ): void {
-      /**
-       * The same identity rule as capture. Left empty, the SDK invents
-       * a distinct id per exception, so an issue hit ten times by
-       * nobody in particular reported ten people affected.
-       */
       const distinctId = userId ?? (organizationId ? `organization:${organizationId}` : "bento-server");
       client.captureException(error instanceof Error ? error : new Error(String(error)), distinctId, {
         environment,
