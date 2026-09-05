@@ -162,6 +162,48 @@
       "when": 1788040409611,
       "tag": "0022_feature_events_completions_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1788539013322,
+      "tag": "0023_swarms",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788542593728,
+      "tag": "0024_agent_run_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1788545064032,
+      "tag": "0025_swarm_task_vocabulary",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1788546165736,
+      "tag": "0026_agent_run_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1788549364920,
+      "tag": "0027_swarm_task_node_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1788553543094,
+      "tag": "0028_run_artifact_type",
+      "breakpoints": true
     }
   ]
 }

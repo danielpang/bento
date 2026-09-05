@@ -127,6 +127,7 @@ before(async () => {
   const [runRow] = await db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature!.id,
       stageId: stage!.id,
       agentProfileId: profile!.id,

@@ -17,7 +17,7 @@ interface ClaimedRun {
     stageId: string;
     prompt: string;
     resumeSessionId: string | null;
-    kind?: string;
+    role?: string;
   };
   feature: { id: string; title: string; branchName: string | null };
   agent: { cli: string; model: string; extraArgs: string[] };
@@ -139,7 +139,7 @@ export class LocalRunner {
       );
       handle = await this.driver.provision({
         projectId: "runner",
-        featureId: feature.id,
+        workspaceKey: feature.id,
         hostWorkspacePath: this.worktrees.workspacePath(feature.id),
         /**
          * A worktree's .git is a file naming the source repository's
@@ -174,7 +174,7 @@ export class LocalRunner {
       stagePrompt,
       resume,
       compacted: claimed.compactedConversation ?? "",
-      ...(run.kind ? { kind: run.kind } : {}),
+      ...(run.role ? { role: run.role } : {}),
     });
 
     const commandInput = {

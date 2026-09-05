@@ -47,6 +47,7 @@ import {
   requeueMessages,
 } from "../orchestrator/messages.js";
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
+import { asPipelineRun } from "../orchestrator/pipeline-run.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { linkGitHubRemotes, refreshBaseBranches } from "../orchestrator/repo-remote.js";
 import { buildConflictResolutionPrompt } from "../orchestrator/prompt.js";
@@ -499,15 +500,16 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
       }
       const text = c.req.valid("json").text.trim();
-      const [latest] = await db(c, ctx)
+      const [newest] = await db(c, ctx)
         .select()
         .from(agentRuns)
-        .where(eq(agentRuns.featureId, feature.id))
+        .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.type, "pipeline")))
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
-      if (!latest) {
+      if (!newest) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
+      const latest = asPipelineRun(newest);
 
       /**
        * Durable before anything else: the row is the message's
@@ -558,6 +560,7 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ queued: true as const });
       }
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId: resumeFrom.stageId,
         agentProfileId: resumeFrom.agentProfileId,
@@ -1075,17 +1078,18 @@ export function featureRoutes(ctx: AppContext) {
       // card whose only runs are judge runs still resolves, as a fresh
       // run of whatever ran last, exactly like a follow-up message.
       const conversation = await latestConversationRun(db(c, ctx), feature.id);
-      const [latest] = conversation
+      const [newest] = conversation
         ? [conversation]
         : await db(c, ctx)
             .select()
             .from(agentRuns)
-            .where(eq(agentRuns.featureId, feature.id))
+            .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.type, "pipeline")))
             .orderBy(desc(agentRuns.queuedAt))
             .limit(1);
-      if (!latest) {
+      if (!newest) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
+      const latest = asPipelineRun(newest);
       const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
       /**
        * Runner-executed runs settle on the runner's machine, and the
@@ -1118,13 +1122,14 @@ export function featureRoutes(ctx: AppContext) {
         await refreshBaseBranches(repos);
       }
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId: resumeFrom.stageId,
         agentProfileId: resumeFrom.agentProfileId,
         prompt: buildConflictResolutionPrompt(feature.branchName, conflicted),
         cliSessionId: resumeFrom.cliSessionId,
         executor: resumeFrom.executor,
-        kind: "rebase",
+        role: "rebase",
         startedBy: actor(c),
       }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
@@ -1210,6 +1215,7 @@ export function featureRoutes(ctx: AppContext) {
       const executor = project?.executor ?? "server";
 
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId: feature.currentStageId,
         agentProfileId: profile.id,

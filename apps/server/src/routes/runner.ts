@@ -14,6 +14,7 @@ import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from ".
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { asPipelineRun, isPipelineRun } from "../orchestrator/pipeline-run.js";
 
 const claimInput = z.object({
   /** Identifies the machine claiming work, for display and debugging. */
@@ -62,7 +63,9 @@ async function authorizeReport(
   runnerId: string,
 ) {
   const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) return { error: "not found" as const, status: 404 as const };
+  // Runners execute the pipeline's runs. A run of the other board is
+  // refused as not found, like any other id that is not the caller's.
+  if (!run || !isPipelineRun(run)) return { error: "not found" as const, status: 404 as const };
 
   const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, run.featureId));
   if (!feature) return { error: "not found" as const, status: 404 as const };
@@ -99,6 +102,7 @@ export function runnerRoutes(ctx: AppContext) {
         .where(
           and(
             eq(agentRuns.status, "queued"),
+            eq(agentRuns.type, "pipeline"),
             eq(agentRuns.executor, "runner"),
             isNull(agentRuns.claimedBy),
             inArray(features.projectId, projectIds),
@@ -107,8 +111,11 @@ export function runnerRoutes(ctx: AppContext) {
         .orderBy(asc(agentRuns.queuedAt))
         .limit(1);
 
-      const candidate = candidates[0];
-      if (!candidate) return c.json({ run: null });
+      const found = candidates[0];
+      if (!found) return c.json({ run: null });
+      // The query already asked for the pipeline's; this is where that
+      // becomes the type everything below is handed.
+      const candidate = { ...found, run: asPipelineRun(found.run) };
 
       // Conditional update is the lock: a second runner racing for the
       // same row updates zero rows and simply polls again.
@@ -146,10 +153,29 @@ export function runnerRoutes(ctx: AppContext) {
       });
 
       const resume = Boolean(candidate.run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
-      // Same gate as the server executor: judge and rebase prompts are
-      // complete on their own and never take a compacted history.
+      /**
+       * What this run's role is given, decided from the run row.
+       *
+       * A stage prompt is what a stage run is told to do. A judge or a
+       * rebase run carries a complete instruction of its own, and
+       * putting the stage's in front of it tells the agent to do the
+       * stage's work again.
+       *
+       * That decision used to travel as `role` and be made again by the
+       * runner. A runner that does not read the field makes it wrongly
+       * and cannot know: the field was renamed from `kind` in this
+       * repository, so a machine still running the older build sends
+       * nothing on it and every judge it claimed was handed the stage's
+       * instructions. The server holds the run row, so it resolves the
+       * role itself and simply does not send what must not be
+       * prepended. `role` still travels, because a runner that does
+       * read it has more to say with it than this.
+       */
+      const takesStagePrompt = candidate.run.role === "stage";
+      // Same gate, for the same reason: judge and rebase prompts never
+      // take a compacted history either.
       const compacted =
-        candidate.run.prompt && candidate.run.kind === "task" && !resume
+        candidate.run.prompt && takesStagePrompt && !resume
           ? await compactedConversation(db(c, ctx), candidate.feature.id, candidate.run.id)
           : "";
 
@@ -160,7 +186,7 @@ export function runnerRoutes(ctx: AppContext) {
           stageId: stage.id,
           prompt: candidate.run.prompt,
           resumeSessionId: candidate.run.cliSessionId,
-          kind: candidate.run.kind,
+          role: candidate.run.role,
         },
         feature: { id: candidate.feature.id, title: candidate.feature.title, branchName: candidate.feature.branchName },
         agent: { cli: profile.cli, model: profile.model, extraArgs: profile.extraArgs },
@@ -169,8 +195,13 @@ export function runnerRoutes(ctx: AppContext) {
           localPath: r.localPath,
           defaultBranch: r.defaultBranch,
         })),
-        /** Used when the run carries no explicit prompt. */
-        stagePrompt: buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill }),
+        /**
+         * Used when the run carries no explicit prompt. Empty for a
+         * role that does not take one: see takesStagePrompt above.
+         */
+        stagePrompt: takesStagePrompt
+          ? buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill })
+          : "",
         /**
          * Prior turns, compacted, for a follow-up that cannot resume a
          * CLI session. Empty when the run resumes or there is nothing

@@ -43,6 +43,13 @@ const TENANT_TABLES = [
   "mcp_servers",
   "mcp_credentials",
   "mcp_run_grants",
+  "swarm_templates",
+  "swarms",
+  "swarm_tasks",
+  "swarm_task_events",
+  "swarm_landings",
+  "swarm_pull_requests",
+  "swarm_messages",
 ];
 
 let pool: pg.Pool;
@@ -242,14 +249,14 @@ test("a run cannot reference another tenant's stage or agent", async () => {
 
   await asOrg("org-a", async (client) => {
     await client.query(
-      `insert into agent_runs (feature_id,stage_id,agent_profile_id,prompt)
-       values ($1,$2,$3,'valid')`,
+      `insert into agent_runs (type,feature_id,stage_id,agent_profile_id,prompt)
+       values ('pipeline',$1,$2,$3,'valid')`,
       [featureA, stageA, profileA],
     );
     await assert.rejects(
       client.query(
-        `insert into agent_runs (feature_id,stage_id,agent_profile_id,prompt)
-         values ($1,$2,$3,'foreign')`,
+        `insert into agent_runs (type,feature_id,stage_id,agent_profile_id,prompt)
+         values ('pipeline',$1,$2,$3,'foreign')`,
         [featureA, stageB, profileB],
       ),
       /organization or pipeline boundary/,
@@ -286,15 +293,15 @@ test("run artifacts inherit their organization from the run", async () => {
     [feature, projectA, pipeline],
   );
   await pool.query(
-    `insert into agent_runs (id,feature_id,organization_id,stage_id,agent_profile_id,prompt)
-     values ($1,$2,'org-a',$3,$4,'work')`,
+    `insert into agent_runs (type,id,feature_id,organization_id,stage_id,agent_profile_id,prompt)
+     values ('pipeline',$1,$2,'org-a',$3,$4,'work')`,
     [run, feature, stage, profile],
   );
 
   const inherited = await asOrg("org-a", (client) =>
     client.query(
-      `insert into run_artifacts (run_id,feature_id,stage_slug,stage_name,path,kind,mime,size,content)
-       values ($1,$2,'design','Design','docs/bento/design.md','markdown','text/markdown',5,'hello')
+      `insert into run_artifacts (run_id,type,feature_id,stage_slug,stage_name,path,kind,mime,size,content)
+       values ($1,'pipeline',$2,'design','Design','docs/bento/design.md','markdown','text/markdown',5,'hello')
        returning organization_id`,
       [run, feature],
     ),
@@ -304,11 +311,37 @@ test("run artifacts inherit their organization from the run", async () => {
   // Exactly one of the inline body and the store key, never both.
   await assert.rejects(
     pool.query(
-      `insert into run_artifacts (run_id,feature_id,stage_slug,stage_name,path,kind,mime,size,content,storage_key)
-       values ($1,$2,'design','Design','both.png','image','image/png',5,'x','a/key')`,
+      `insert into run_artifacts (run_id,type,feature_id,stage_slug,stage_name,path,kind,mime,size,content,storage_key)
+       values ($1,'pipeline',$2,'design','Design','both.png','image','image/png',5,'x','a/key')`,
       [run, feature],
     ),
     /run_artifacts_content_or_key/,
+  );
+
+  /*
+   * And the board it names has to be the board its columns describe.
+   * A discriminator a row can disagree with is worse than none: every
+   * reader would have to decide which of the two to believe, and the
+   * access helper that serves these bytes to a browser believes the
+   * discriminator.
+   */
+  await assert.rejects(
+    pool.query(
+      `insert into run_artifacts (run_id,type,feature_id,stage_slug,stage_name,path,kind,mime,size,content)
+       values ($1,'swarm',$2,'design','Design','claims-a-swarm.md','markdown','text/markdown',5,'x')`,
+      [run, feature],
+    ),
+    /run_artifacts_swarm_shape/,
+    "a row cannot call itself a swarm's while naming a card",
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into run_artifacts (run_id,type,stage_slug,stage_name,path,kind,mime,size,content)
+       values ($1,'pipeline','design','Design','names-nobody.md','markdown','text/markdown',5,'x')`,
+      [run],
+    ),
+    /run_artifacts_pipeline_shape/,
+    "nor call itself a card's while naming none",
   );
 });
 
@@ -479,4 +512,402 @@ test("the tenant role cannot write MCP run grants", async () => {
     }
   });
   assert.match(denied?.message ?? "", /permission denied/);
+});
+
+/**
+ * Swarm rows under org-a, so the foreign-context sweep above has
+ * something to leak. A table nobody has written to reads as zero rows
+ * whether its policy works or not, which is the shape of a test that
+ * passes while isolating nothing.
+ */
+const SWARM = {
+  project: "00000001-0000-0000-0000-000000000000",
+  template: "60000001-0000-0000-0000-000000000000",
+  swarm: "61000001-0000-0000-0000-000000000000",
+  task: "62000001-0000-0000-0000-000000000000",
+  profile: "63000001-0000-0000-0000-000000000000",
+  run: "64000001-0000-0000-0000-000000000000",
+};
+
+test("a swarm and everything under it belongs to one organization", async () => {
+  await pool.query(
+    `insert into swarm_templates (id,owner_id,organization_id,name)
+     values ($1,'u1','org-a','Ship a feature')`,
+    [SWARM.template],
+  );
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,organization_id,name,cli,model)
+     values ($1,'u1','org-a','Swarm worker','fake','fake-1')`,
+    [SWARM.profile],
+  );
+  // Only the swarm names its organization. Everything below it is
+  // inserted without one, so the triggers have to derive it.
+  await pool.query(
+    `insert into swarms (id,project_id,organization_id,slug,title,template_id)
+     values ($1,$2,'org-a','ship','Ship it',$3)`,
+    [SWARM.swarm, SWARM.project, SWARM.template],
+  );
+  const task = await pool.query(
+    `insert into swarm_tasks (id,swarm_id,title) values ($1,$2,'Write the parser')
+     returning organization_id`,
+    [SWARM.task, SWARM.swarm],
+  );
+  assert.equal(task.rows[0].organization_id, "org-a", "a task must inherit its swarm's organization");
+
+  const event = await pool.query(
+    `insert into swarm_task_events (task_id,kind,to_status) values ($1,'status_changed','working')
+     returning organization_id`,
+    [SWARM.task],
+  );
+  assert.equal(event.rows[0].organization_id, "org-a");
+
+  const landing = await pool.query(
+    `insert into swarm_landings (swarm_id,task_id,position) values ($1,$2,0)
+     returning organization_id`,
+    [SWARM.swarm, SWARM.task],
+  );
+  assert.equal(landing.rows[0].organization_id, "org-a");
+
+  const pr = await pool.query(
+    `insert into swarm_pull_requests (swarm_id,repo_url,number,url)
+     values ($1,'https://github.com/x/y',7,'https://github.com/x/y/pull/7')
+     returning organization_id`,
+    [SWARM.swarm],
+  );
+  assert.equal(pr.rows[0].organization_id, "org-a");
+
+  const message = await pool.query(
+    `insert into swarm_messages (swarm_id,text) values ($1,'split that task further')
+     returning organization_id`,
+    [SWARM.swarm],
+  );
+  assert.equal(message.rows[0].organization_id, "org-a", "a null task_id is the planner, not a missing tenant");
+});
+
+test("another organization reads nothing of a swarm", async () => {
+  // Runs after the seeding test, so every one of these tables has rows
+  // to withhold. The policy is the only thing between them and org-b.
+  const tables = [
+    "swarm_templates",
+    "swarms",
+    "swarm_tasks",
+    "swarm_task_events",
+    "swarm_landings",
+    "swarm_pull_requests",
+    "swarm_messages",
+  ];
+  const owner = await pool.query(
+    `select count(*)::int as n from swarm_tasks where organization_id = 'org-a'`,
+  );
+  assert.ok(owner.rows[0].n > 0, "the fixtures must exist, or this test proves nothing");
+
+  await asOrg("org-b", async (client) => {
+    for (const table of tables) {
+      const { rows } = await client.query(`select count(*)::int as n from ${table}`);
+      assert.equal(rows[0].n, 0, `${table} leaked ${rows[0].n} row(s) to another organization`);
+    }
+  });
+  // And the owner can still read its own, so the policy is confining
+  // rather than simply denying.
+  const mine = await asOrg("org-a", (client) => client.query("select title from swarm_tasks"));
+  assert.deepEqual(mine.rows.map((r) => r.title), ["Write the parser"]);
+});
+
+test("a swarm task cannot be smuggled into another organization", async () => {
+  await assert.rejects(
+    asOrg("org-a", (client) =>
+      client.query(
+        `insert into swarm_tasks (swarm_id,organization_id,title) values ($1,'org-b','smuggled')`,
+        [SWARM.swarm],
+      ),
+    ),
+    /row-level security/,
+  );
+});
+
+test("one swarm lands one branch at a time", async () => {
+  // The merge queue's whole promise. A job option can be forgotten by
+  // the next caller; a partial unique index cannot.
+  await pool.query(
+    `insert into swarm_landings (swarm_id,task_id,position,status) values ($1,$2,1,'landing')`,
+    [SWARM.swarm, SWARM.task],
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into swarm_landings (swarm_id,task_id,position,status) values ($1,$2,2,'landing')`,
+      [SWARM.swarm, SWARM.task],
+    ),
+    /swarm_landings_one_in_flight_idx/,
+    "two landings must not be in flight on one swarm",
+  );
+  // Anything else queues freely: the index is on the in-flight state,
+  // not on the queue.
+  await pool.query(
+    `insert into swarm_landings (swarm_id,task_id,position,status) values ($1,$2,3,'queued')`,
+    [SWARM.swarm, SWARM.task],
+  );
+});
+
+test("the discriminator and the columns have to agree", async () => {
+  const featureA = "40000001-0000-0000-0000-000000000000";
+  const stageA = "20000001-0000-0000-0000-000000000000";
+
+  // A swarm's run calling itself a card's. Refused, and this is the
+  // case a foreign key pair alone could never catch: without the
+  // discriminator both of these rows are simply "a run with one owner".
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,swarm_id,agent_profile_id,organization_id,prompt,role)
+       values ('pipeline',$1,$2,'org-a','mislabelled','worker')`,
+      [SWARM.swarm, SWARM.profile],
+    ),
+    /a pipeline agent run must name its card and its stage/,
+  );
+  // And a card's run calling itself a swarm's.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,feature_id,stage_id,agent_profile_id,organization_id,prompt,role)
+       values ('swarm',$1,$2,$3,'org-a','mislabelled','worker')`,
+      [featureA, stageA, SWARM.profile],
+    ),
+    /a swarm agent run must name its swarm/,
+  );
+  // A run that names both boards is refused by the shape constraint,
+  // which is the backstop behind the trigger's presence checks.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,feature_id,stage_id,swarm_id,agent_profile_id,organization_id,prompt,role)
+       values ('swarm',$1,$2,$3,$4,'org-a','both boards','worker')`,
+      [featureA, stageA, SWARM.swarm, SWARM.profile],
+    ),
+    /agent_runs_swarm_shape/,
+  );
+  // A card run with a swarm task hanging off it is refused too: the
+  // pipeline shape is a card and a stage and nothing of the other board.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,feature_id,stage_id,swarm_task_id,agent_profile_id,organization_id,prompt)
+       values ('pipeline',$1,$2,$3,$4,'org-a','half and half')`,
+      [featureA, stageA, SWARM.task, SWARM.profile],
+    ),
+    /agent_runs_pipeline_shape/,
+  );
+});
+
+test("a role has to belong to its board", async () => {
+  const featureA = "40000001-0000-0000-0000-000000000000";
+  const stageA = "20000001-0000-0000-0000-000000000000";
+  // "stage" is the value every pipeline query filters on, so a swarm
+  // run must not be able to claim it.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,swarm_id,agent_profile_id,organization_id,prompt,role)
+       values ('swarm',$1,$2,'org-a','pretending','stage')`,
+      [SWARM.swarm, SWARM.profile],
+    ),
+    /agent_runs_role_for_type/,
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,feature_id,stage_id,agent_profile_id,organization_id,prompt,role)
+       values ('pipeline',$1,$2,$3,'org-a','pretending','worker')`,
+      [featureA, stageA, SWARM.profile],
+    ),
+    /agent_runs_role_for_type/,
+  );
+  // Judging is the exception, and the reason type and role are two
+  // columns: both boards do it, so neither owns the role.
+  await pool.query(
+    `insert into agent_runs (type,feature_id,stage_id,agent_profile_id,organization_id,prompt,role)
+     values ('pipeline',$1,$2,$3,'org-a','judge the card','judge')`,
+    [featureA, stageA, SWARM.profile],
+  );
+  await pool.query(
+    `insert into agent_runs (type,swarm_id,agent_profile_id,organization_id,prompt,role)
+     values ('swarm',$1,$2,'org-a','judge the swarm','judge')`,
+    [SWARM.swarm, SWARM.profile],
+  );
+});
+
+test("an insert has to say which board it is for", async () => {
+  // The column was added with a default so the backfill was cheap, and
+  // the default was dropped in the same migration. This is that drop:
+  // without it a swarm run that forgot to say so would file itself as
+  // a card's and be picked up by every pipeline query.
+  const { rows } = await pool.query(
+    `select column_default from information_schema.columns
+     where table_name = 'agent_runs' and column_name = 'type'`,
+  );
+  assert.equal(rows[0].column_default, null, "agent_runs.type must have no default");
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (feature_id,stage_id,agent_profile_id,organization_id,prompt)
+       values ($1,$2,$3,'org-a','no board')`,
+      [
+        "40000001-0000-0000-0000-000000000000",
+        "20000001-0000-0000-0000-000000000000",
+        SWARM.profile,
+      ],
+    ),
+    /null value in column "type"/,
+  );
+});
+
+test("every run that existed before the discriminator is a card's", async () => {
+  // The backfill, checked the way the migration checks it: nothing in
+  // the table names no card, so 'pipeline' was right for all of them.
+  const { rows } = await pool.query(
+    `select count(*)::int as n from agent_runs
+     where type = 'pipeline' and (feature_id is null or stage_id is null)`,
+  );
+  assert.equal(rows[0].n, 0);
+});
+
+test("a swarm run passes the tenant check in multi mode", async () => {
+  /**
+   * The reason this test is here at all. The run tenant trigger used to
+   * dereference feature_id and stage_id unconditionally, which a swarm
+   * run leaves null. With an organization set, the derived feature
+   * organization came back null, IS DISTINCT FROM was true, and every
+   * swarm run was refused at the database edge. Locally the same insert
+   * succeeded, because there everything compared is null.
+   */
+  const inserted = await pool.query(
+    `insert into agent_runs (type,id,swarm_id,swarm_task_id,agent_profile_id,organization_id,prompt,role)
+     values ('swarm',$1,$2,$3,$4,'org-a','work the leaf','worker')
+     returning organization_id, role`,
+    [SWARM.run, SWARM.swarm, SWARM.task, SWARM.profile],
+  );
+  assert.equal(inserted.rows[0].organization_id, "org-a");
+  assert.equal(inserted.rows[0].role, "worker");
+
+  // A planner run names no task, and is still a swarm run.
+  const planner = await pool.query(
+    `insert into agent_runs (type,swarm_id,agent_profile_id,organization_id,prompt,role)
+     values ('swarm',$1,$2,'org-a','plan the goal','planner') returning organization_id`,
+    [SWARM.swarm, SWARM.profile],
+  );
+  assert.equal(planner.rows[0].organization_id, "org-a");
+});
+
+test("a swarm run derives its organization when the insert omits one", async () => {
+  const derived = await asOrg("org-a", (client) =>
+    client.query(
+      `insert into agent_runs (type,swarm_id,agent_profile_id,prompt,role)
+       values ('swarm',$1,$2,'derive me','worker') returning organization_id`,
+      [SWARM.swarm, SWARM.profile],
+    ),
+  );
+  assert.equal(derived.rows[0].organization_id, "org-a", "the inherit trigger must read whichever parent is set");
+});
+
+test("a swarm run cannot reference another tenant's swarm, task or agent", async () => {
+  const projectB = "00000002-0000-0000-0000-000000000000";
+  const swarmB = "61000002-0000-0000-0000-000000000000";
+  const taskB = "62000002-0000-0000-0000-000000000000";
+  const profileB = "63000002-0000-0000-0000-000000000000";
+  await pool.query(
+    `insert into swarms (id,project_id,organization_id,slug,title) values ($1,$2,'org-b','ship','Ship it too')`,
+    [swarmB, projectB],
+  );
+  await pool.query(`insert into swarm_tasks (id,swarm_id,title) values ($1,$2,'Theirs')`, [taskB, swarmB]);
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,organization_id,name,cli,model)
+     values ($1,'u1','org-b','Theirs','fake','fake-1')`,
+    [profileB],
+  );
+
+  // Their agent on our swarm.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,swarm_id,agent_profile_id,organization_id,prompt,role)
+       values ('swarm',$1,$2,'org-a','borrowed agent','worker')`,
+      [SWARM.swarm, profileB],
+    ),
+    /organization or swarm boundary/,
+  );
+  // Their task on our swarm.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,swarm_id,swarm_task_id,agent_profile_id,organization_id,prompt,role)
+       values ('swarm',$1,$2,$3,'org-a','borrowed task','worker')`,
+      [SWARM.swarm, taskB, SWARM.profile],
+    ),
+    /organization or swarm boundary/,
+  );
+  // Our swarm, claimed for their organization.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,swarm_id,agent_profile_id,organization_id,prompt,role)
+       values ('swarm',$1,$2,'org-b','wrong tenant','worker')`,
+      [SWARM.swarm, SWARM.profile],
+    ),
+    /organization or swarm boundary/,
+  );
+});
+
+test("a swarm run passes the tenant check in local mode", async () => {
+  /**
+   * Local mode is the other half, and the half a swarm test suite would
+   * be tempted to stop at: no organizations, so every column compared
+   * is null. The same rows still have to insert, and a run that reaches
+   * across into an organization's agent still has to be refused, or
+   * "works locally" would mean nothing at all.
+   */
+  const project = "00000009-0000-0000-0000-000000000000";
+  const swarm = "61000009-0000-0000-0000-000000000000";
+  const task = "62000009-0000-0000-0000-000000000000";
+  const profile = "63000009-0000-0000-0000-000000000000";
+  await pool.query(
+    `insert into projects (id,owner_id,organization_id,name,default_branch)
+     values ($1,'u1',null,'local project','main')`,
+    [project],
+  );
+  await pool.query(
+    `insert into swarms (id,project_id,slug,title) values ($1,$2,'local','Local swarm')`,
+    [swarm, project],
+  );
+  const localSwarm = await pool.query("select organization_id from swarms where id = $1", [swarm]);
+  assert.equal(localSwarm.rows[0].organization_id, null, "local mode has no organization to inherit");
+
+  await pool.query(`insert into swarm_tasks (id,swarm_id,title) values ($1,$2,'Local leaf')`, [task, swarm]);
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,name,cli,model) values ($1,'u1','Local','fake','fake-1')`,
+    [profile],
+  );
+
+  const run = await pool.query(
+    `insert into agent_runs (type,swarm_id,swarm_task_id,agent_profile_id,prompt,role)
+     values ('swarm',$1,$2,$3,'work locally','worker') returning organization_id, feature_id, stage_id`,
+    [swarm, task, profile],
+  );
+  assert.equal(run.rows[0].organization_id, null);
+  assert.equal(run.rows[0].feature_id, null);
+  assert.equal(run.rows[0].stage_id, null);
+
+  // Local rows and a tenant's rows still may not be mixed, in either
+  // direction: nulls compare with IS DISTINCT FROM, not with =.
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,swarm_id,agent_profile_id,prompt,role)
+       values ('swarm',$1,$2,'local swarm, tenant agent','worker')`,
+      [swarm, SWARM.profile],
+    ),
+    /organization or swarm boundary/,
+  );
+});
+
+test("a card run still has to name its stage", async () => {
+  // stage_id lost its NOT NULL so a swarm run could leave it empty. The
+  // pipeline's own requirement moved into the trigger and the shape
+  // constraint rather than being dropped.
+  const featureA = "40000001-0000-0000-0000-000000000000";
+  await assert.rejects(
+    pool.query(
+      `insert into agent_runs (type,feature_id,agent_profile_id,organization_id,prompt)
+       values ('pipeline',$1,$2,'org-a','no stage')`,
+      [featureA, SWARM.profile],
+    ),
+    /must name its card and its stage/,
+  );
 });

@@ -15,6 +15,7 @@ import {
   projects,
   runArtifacts,
   runMigrations,
+  swarmTasks,
   user,
   verification,
 } from "@bento/db";
@@ -344,6 +345,7 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
       await jsonPost("/api/features", { projectId: project.id, title }, token)
     ).json()) as { id: string };
     await ctx.db.insert(agentRuns).values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: pipeline.stages[0]!.id,
       agentProfileId: profileId,
@@ -360,6 +362,7 @@ test("team hours ranks cards for the active org and 404s a foreign tenant", asyn
   await board(strangerToken, "Foreign board", "Secret card", 10);
   await board(ownerToken, "Hours old", "Last month leftover", 8, new Date("2026-08-10T12:00:00.000Z"));
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: heavy.featureId,
     stageId: heavy.stageId,
     agentProfileId: heavy.profileId,
@@ -664,6 +667,66 @@ test("the verification email returns an invitee to the invitation", async () => 
 });
 
 /**
+ * A swarm started by a team, in multi mode, under row-level security.
+ *
+ * This is the case the run tenant trigger was rewritten for, and the
+ * one a locally-run suite cannot see. In local mode every organization
+ * involved is null, so nothing is ever distinct from anything and the
+ * inserts pass whatever the rules say. Here the swarm, its planner run
+ * and its agent profile all carry a real organization, the request runs
+ * as bento_user inside the tenant transaction, and a rule that does not
+ * hold refuses the insert rather than quietly writing the wrong tenant.
+ */
+test("a team's swarm and its planner run carry the team, under RLS", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "swarm-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Swarm Owner",
+  });
+  const token = owner.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Swarm Team", slug: "swarm-team" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const project = (await (
+    await jsonPost("/api/projects", { name: "Team swarms", localPath: "/tmp" }, token)
+  ).json()) as { id: string; organizationId: string };
+  assert.equal(project.organizationId, org.id);
+
+  const flagsBefore = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(
+    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
+    false,
+  );
+  try {
+    const created = await jsonPost("/api/swarms", { projectId: project.id, title: "Team goal", goal: "ship it" }, token);
+    assert.equal(created.status, 201, await created.clone().text());
+    const swarm = (await created.json()) as { id: string; plannerRunId: string; organizationId: string | null };
+    assert.equal(swarm.organizationId, org.id, "the insert trigger derived the team from the project");
+    assert.ok(swarm.plannerRunId, "and a planner was started");
+
+    const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+    assert.equal(run?.organizationId, org.id, "the run carries the same team");
+    assert.equal(run?.type, "swarm");
+    assert.equal(run?.role, "planner");
+    assert.equal(run?.featureId, null, "and no card, which is what its shape constraint says");
+
+    const [profile] = await ctx.db
+      .select({ organizationId: agentProfiles.organizationId })
+      .from(agentProfiles)
+      .where(eq(agentProfiles.id, run!.agentProfileId));
+    assert.equal(
+      profile?.organizationId,
+      org.id,
+      "the seeded planner agent belongs to the team too, which the run tenant trigger requires",
+    );
+  } finally {
+    ctx.featureFlags = flagsBefore;
+  }
+});
+
+/**
  * The authorization matrix: every route that acts on a feature, run,
  * stage, or project must refuse a token from a different tenant. This
  * exists because the earlier "scoped to owner" test only covered
@@ -727,6 +790,7 @@ test("every entity route refuses a foreign tenant", async () => {
     .insert(runArtifacts)
     .values({
       runId: run.id,
+      type: "pipeline",
       featureId: feature.id,
       stageSlug: "matrix",
       stageName: "Matrix",
@@ -757,6 +821,32 @@ test("every entity route refuses a foreign tenant", async () => {
     })
     .returning({ id: mcpServers.id });
   assert.ok(mcpServer!.id, "the owner's MCP server must exist for the MCP routes to be probed");
+
+  /**
+   * Swarms sit behind the beta testers flag, which answers 404 for
+   * everybody without a PostHog key. Turned on for both users here, so
+   * what the matrix measures is the tenant check rather than the flag:
+   * a route that refuses because the feature is hidden proves nothing
+   * about whether it would refuse a foreign tenant once it is not.
+   */
+  const flagsBefore = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(
+    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
+    false,
+  );
+  const swarm = (await (
+    await asOwner("/api/swarms", { method: "POST", body: JSON.stringify({ projectId: project.id, title: "Mine" }) })
+  ).json()) as { id: string };
+  assert.ok(swarm.id, "the owner's swarm must exist for the swarm routes to be probed");
+  const [swarmTask] = await ctx.db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Leaf" })
+    .returning({ id: swarmTasks.id });
+  assert.ok(swarmTask?.id, "with a node, so start has a plan to refuse over rather than a missing one");
+  const template = (await (
+    await asOwner("/api/swarm-templates", { method: "POST", body: JSON.stringify({ name: "Mine" }) })
+  ).json()) as { id: string };
+  assert.ok(template.id, "the owner's swarm template must exist for its routes to be probed");
 
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
@@ -856,6 +946,25 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/mcp/${mcpServer!.id}/connect`],
     ["DELETE", `/api/mcp/${mcpServer!.id}/user-credential`],
     ["DELETE", `/api/mcp/${mcpServer!.id}`],
+    // The list is not here: it is scoped to the caller, so it answers
+    // 200 with the intruder's own templates, which is checked below.
+    ["GET", `/api/swarm-templates/${template.id}`],
+    ["PATCH", `/api/swarm-templates/${template.id}`, { body: JSON.stringify({ name: "stolen" }) }],
+    ["POST", "/api/swarms", { body: JSON.stringify({ projectId: project.id, title: "Injected" }) }],
+    ["GET", `/api/swarms?projectId=${project.id}`],
+    ["GET", `/api/swarms/${swarm.id}`],
+    ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ title: "Stolen" }) }],
+    ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ maxWorkers: 32 }) }],
+    ["POST", `/api/swarms/${swarm.id}/start`],
+    ["POST", `/api/swarms/${swarm.id}/pause`],
+    ["POST", `/api/swarms/${swarm.id}/cancel`],
+    ["GET", `/api/swarms/${swarm.id}/messages`],
+    ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
+    // The stream, for the reason the run stream is here: it must refuse
+    // before it streams anything.
+    ["GET", `/api/swarms/${swarm.id}/events`],
+    ["DELETE", `/api/swarm-templates/${template.id}`],
+    ["DELETE", `/api/swarms/${swarm.id}`],
     ["DELETE", `/api/features/${feature.id}`],
     // Last: a delete that went through would refuse everything after it
     // for the wrong reason. The project last, because it would take the
@@ -877,6 +986,29 @@ test("every entity route refuses a foreign tenant", async () => {
   // cannot show.
   const stillThere = await asOwner(`/api/features/${feature.id}`);
   assert.equal(stillThere.status, 200, "the intruder's DELETE must not have removed the owner's card");
+
+  // The swarm is still the owner's, under its own name and its own
+  // ceilings. A refusal that answered 404 and wrote anyway would pass
+  // the loop above and quietly hand somebody else's agents a bigger
+  // budget to spend.
+  const swarmAfter = await asOwner(`/api/swarms/${swarm.id}`);
+  assert.equal(swarmAfter.status, 200, "the intruder must not have deleted the owner's swarm");
+  const swarmBody = (await swarmAfter.json()) as { swarm: { title: string; maxWorkers: number; status: string } };
+  assert.equal(swarmBody.swarm.title, "Mine", "nor renamed it");
+  assert.equal(swarmBody.swarm.maxWorkers, 4, "nor raised how many agents it may run at once");
+  assert.equal(swarmBody.swarm.status, "planning", "nor started its work");
+  const templateAfter = await asOwner(`/api/swarm-templates/${template.id}`);
+  assert.equal(templateAfter.status, 200, "the intruder must not have deleted the owner's swarm template");
+  assert.equal(((await templateAfter.json()) as { name: string }).name, "Mine");
+  // The list route is scoped rather than refused, so it is checked by
+  // what it contains: the intruder sees their own templates and none of
+  // the owner's.
+  const intruderTemplates = (await (await asIntruder("/api/swarm-templates")).json()) as { id: string }[];
+  assert.ok(
+    !intruderTemplates.some((row) => row.id === template.id),
+    "a foreign tenant's template list must not carry the owner's",
+  );
+  ctx.featureFlags = flagsBefore;
 
   // The MCP server row survived, under its own name. Read through
   // ctx.db because the org-less owner cannot use the routes either.

@@ -4,6 +4,7 @@ import { mcpCredentials, mcpServers, member } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { credentialHeader } from "../mcp/client.js";
 import { resolveGrant, recordGrantUse, type ResolvedGrant } from "../mcp/grants.js";
+import { BENTO_SWARM_SERVER_ID, handleSwarmMcp, resolveSwarmCaller } from "../mcp/swarm-server.js";
 import { refreshCredential } from "../mcp/refresh.js";
 import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../mcp/safe-fetch.js";
 
@@ -88,6 +89,15 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     if (!grant) return null;
     const serverId = c.req.param("serverId");
     if (!serverId || !grant.serverIds.includes(serverId)) return null;
+    /**
+     * Bento's own tools are not a row in this table and have no
+     * upstream to proxy to. The POST handler answers them before it
+     * gets here; every other method (the server-initiated stream, the
+     * session delete, the SSE transport's message path) has nothing to
+     * answer, and looking the id up would ask Postgres to read a
+     * non-uuid as a uuid.
+     */
+    if (serverId === BENTO_SWARM_SERVER_ID) return null;
 
     const [server] = await ctx.db
       .select()
@@ -273,9 +283,52 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     return Buffer.concat(chunks).toString("utf8");
   }
 
+  /**
+   * The grant on its own, for Bento's own tools.
+   *
+   * The swarm server has no upstream and no credential, so it stops
+   * before resolveTarget's server and credential reads. Everything else
+   * is deliberately identical to a proxied server: the same bearer
+   * token, the same 404 for a server the grant does not list, the same
+   * rate limit, and the same usage counter. The only difference is
+   * where the request goes after that.
+   */
+  async function resolveOwnGrant(c: Context): Promise<ResolvedGrant | null> {
+    const auth = c.req.header("authorization") ?? "";
+    if (!auth.startsWith("Bearer ")) return null;
+    const grant = await resolveGrant(ctx, auth.slice("Bearer ".length).trim());
+    if (!grant) return null;
+    if (!grant.serverIds.includes(BENTO_SWARM_SERVER_ID)) return null;
+    return grant;
+  }
+
   // Streamable HTTP: POST carries JSON-RPC, GET opens the
   // server-initiated stream, DELETE ends the session.
   routes.post("/:serverId", async (c) => {
+    if (c.req.param("serverId") === BENTO_SWARM_SERVER_ID) {
+      const grant = await resolveOwnGrant(c);
+      if (!grant) return notFound(c);
+      if (!takeToken(grant.id)) return c.json({ error: "slow down" }, 429);
+      recordGrantUse(ctx, grant.id);
+      const body = await readBody(c);
+      if (body === null) return c.json({ error: "body too large" }, 413);
+      // The caller is read from the run behind the grant, never from
+      // the body: the swarm, the task and the role are facts about the
+      // run, and an agent naming its own is an agent choosing its own
+      // authority.
+      const caller = await resolveSwarmCaller(ctx, grant);
+      if (!caller) return notFound(c);
+      let message: unknown;
+      try {
+        message = JSON.parse(body || "{}");
+      } catch {
+        return c.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, 400);
+      }
+      const answer = await handleSwarmMcp(ctx, caller, message);
+      for (const event of answer.events) ctx.bus.emitBoardEvent(event);
+      if (answer.body === null) return c.body(null, 202);
+      return c.json(answer.body);
+    }
     const target = await resolveTarget(c);
     if (!target) return notFound(c);
     if (!takeToken(target.grant.id)) return c.json({ error: "slow down" }, 429);

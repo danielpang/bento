@@ -22,7 +22,7 @@ export function attachLiveConversation(input: {
   ctx: AppContext;
   runId: string;
   featureId: string;
-  kind: string;
+  role: string;
   gateType: string;
   idleSec: number;
   live: LiveSession;
@@ -68,7 +68,7 @@ export function attachLiveConversation(input: {
 
     if (
       liveChannel.pending === 0 &&
-      shouldHoldLiveSession({ ok, kind: input.kind, gateType: input.gateType, idleSec: input.idleSec })
+      shouldHoldLiveSession({ ok, role: input.role, gateType: input.gateType, idleSec: input.idleSec })
     ) {
       if (!announcedWait) {
         announcedWait = true;

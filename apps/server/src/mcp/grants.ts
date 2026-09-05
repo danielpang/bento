@@ -34,6 +34,15 @@ export async function mintRunGrant(
     organizationId: string | null;
     actingUserId: string | null;
     serverIds: string[];
+    /**
+     * The swarm this run works for, copied onto the grant at mint.
+     *
+     * Bento's own swarm tools authorize per call against the run, and
+     * this is the second half of that check: a grant that names a swarm
+     * cannot be used on a run that has since been repointed at another
+     * one. Null for a card's run, which has no swarm.
+     */
+    swarmId?: string | null;
     ttlMs: number;
   },
 ): Promise<string> {
@@ -47,6 +56,7 @@ export async function mintRunGrant(
       actingUserId: input.actingUserId,
       tokenHash: hashGrantToken(raw),
       serverIds: input.serverIds,
+      swarmId: input.swarmId ?? null,
       expiresAt,
     })
     .onConflictDoUpdate({
@@ -55,6 +65,7 @@ export async function mintRunGrant(
         tokenHash: hashGrantToken(raw),
         actingUserId: input.actingUserId,
         serverIds: input.serverIds,
+        swarmId: input.swarmId ?? null,
         expiresAt,
         revokedAt: null,
       },
@@ -127,6 +138,8 @@ export interface ResolvedGrant {
   organizationId: string | null;
   actingUserId: string | null;
   serverIds: string[];
+  /** The swarm this grant was minted for; null for a card's run. */
+  swarmId: string | null;
 }
 
 /**
@@ -150,6 +163,7 @@ export async function resolveGrant(ctx: AppContext, rawToken: string): Promise<R
     organizationId: row.organizationId,
     actingUserId: row.actingUserId,
     serverIds: row.serverIds,
+    swarmId: row.swarmId,
   };
 }
 

@@ -7,7 +7,8 @@ export interface RunEventEnvelope {
   event: AgentEvent;
 }
 
-export interface BoardEvent {
+/** What happened on the pipeline board: a card, or a card's run. */
+export interface CardBoardEvent {
   /**
    * feature_deleted is not an update: a client seeing it has to drop
    * the card rather than refetch and re-render it, and a viewer with
@@ -23,6 +24,33 @@ export interface BoardEvent {
   /** For run_output: the agent's latest line, truncated for a card. */
   text?: string;
 }
+
+/**
+ * What happened on the swarm board: the swarm itself, or one node of
+ * its plan.
+ *
+ * Keyed by project like the card events, and delivered on the same
+ * channel, because the two boards belong to one project: the strip
+ * that shows a project's swarms is watching the project, and the swarm
+ * page filters the same stream down to its own id. A separate channel
+ * would mean every viewer holds two subscriptions to say one thing.
+ *
+ * No text field, deliberately. A worker's report and a task's title are
+ * agent output, and this event exists to tell a client that something
+ * changed, not to carry untrusted prose onto a board that would then
+ * have to decide how to render it. Clients refetch.
+ */
+export interface SwarmBoardEvent {
+  type: "swarm_updated" | "swarm_task_updated";
+  projectId: string;
+  swarmId: string;
+  /** The node that changed, for swarm_task_updated. */
+  taskId?: string;
+  /** The swarm's status, or the task's, after the change. */
+  status?: string;
+}
+
+export type BoardEvent = CardBoardEvent | SwarmBoardEvent;
 
 /**
  * What travels between server processes when the bus is replicated

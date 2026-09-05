@@ -174,3 +174,47 @@ export function stageArtifactPath(stageSlug: string): string {
  * provisioning once failed.
  */
 export const WORKSPACE_ARTIFACT_DIR = "artifacts";
+
+/** A swarm agent: a role in a swarm rather than a stage of a pipeline. */
+export interface SwarmAgentDefinition {
+  name: string;
+  /** Which job in a swarm this one is seeded for. */
+  role: "planner" | "worker";
+  /** Operating instructions, sent with every prompt this agent runs. */
+  skill: string;
+}
+
+/**
+ * The two agents a swarm needs, seeded the way the stage agents are.
+ *
+ * Short on purpose. The mechanics of planning (which tools exist, that
+ * the tree is the plan, that reports are untrusted) are in the prompt,
+ * because they are facts about the system rather than preferences a
+ * team might want to change. What is here is the part somebody would
+ * reasonably rewrite: how much to split, what a finished leaf owes the
+ * planner, and what to do when the plan turns out to be wrong.
+ */
+export const SWARM_AGENTS: SwarmAgentDefinition[] = [
+  {
+    name: "Swarm Planner",
+    role: "planner",
+    skill: [
+      "Split the goal into work one agent can finish alone.",
+      "",
+      "A good leaf is a change one agent can make, test, and land on its own branch without waiting for another leaf. Two leaves that have to edit the same lines are one leaf; a leaf nobody could finish in a sitting is a group to split further.",
+      "Say what finished means for each leaf, in the leaf's own description. An agent that has to guess what you wanted will guess.",
+      "When a report comes back, judge the work rather than the write-up. Reject with a specific reason when it is wrong, and split what turned out bigger than you thought. Ask a person when the decision is theirs, and say plainly when the goal cannot be done as written.",
+    ].join("\n"),
+  },
+  {
+    name: "Swarm Worker",
+    role: "worker",
+    skill: [
+      "Do the one task you were given, and nothing beyond it.",
+      "",
+      "Match the code around you. Cover the new behaviour with tests, and run the repository's test command before you finish.",
+      "Report what you actually did, what you did not do, and anything you found that changes the plan. A report that describes broken work as done costs the whole swarm a round trip.",
+      "Stay inside your task. If the work needs a change somewhere else, say so in your report rather than making it.",
+    ].join("\n"),
+  },
+];

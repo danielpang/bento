@@ -1,8 +1,20 @@
 import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
-import { agentRuns, features, member, pipelines, projects, runArtifacts, stages } from "@bento/db";
+import {
+  agentRuns,
+  features,
+  member,
+  pipelines,
+  projects,
+  runArtifacts,
+  stages,
+  swarmTasks,
+  swarmTemplates,
+  swarms,
+} from "@bento/db";
 import type { Context } from "hono";
 import type { AppContext } from "./context.js";
 import { actor, activeOrg } from "./middleware/actor.js";
+import { isPipelineRun } from "./orchestrator/pipeline-run.js";
 import { tenantDb as db } from "./middleware/tenant.js";
 
 /**
@@ -82,16 +94,31 @@ export async function getAccessibleFeature(ctx: AppContext, c: Context, featureI
   return (await canAccessProject(ctx, c, feature.projectId)) ? feature : null;
 }
 
+/**
+ * A card's run. A swarm run answers null here: it has no feature, and
+ * the card routes resolve everything through one. Reaching a swarm run
+ * is the swarm routes' job, through its own helper.
+ */
 export async function getAccessibleRun(ctx: AppContext, c: Context, runId: string) {
   const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) return null;
+  if (!run || !isPipelineRun(run)) return null;
   const feature = await getAccessibleFeature(ctx, c, run.featureId);
   return feature ? { run, feature } : null;
 }
 
+/**
+ * The same, for an artifact: a swarm's artifact is not a card's.
+ *
+ * Read off the row's own discriminator rather than off which id
+ * happens to be set, the way getAccessibleRun reads a run's. Both
+ * halves are checked, for the reason isPipelineRun checks both: the
+ * shape constraint makes them agree, and the featureId check is what
+ * narrows the type so the caller is handed a card's artifact rather
+ * than one that might name no card.
+ */
 export async function getAccessibleArtifact(ctx: AppContext, c: Context, artifactId: string) {
   const [artifact] = await db(c, ctx).select().from(runArtifacts).where(eq(runArtifacts.id, artifactId));
-  if (!artifact) return null;
+  if (artifact?.type !== "pipeline" || !artifact.featureId) return null;
   const feature = await getAccessibleFeature(ctx, c, artifact.featureId);
   return feature ? artifact : null;
 }
@@ -102,6 +129,43 @@ export async function getAccessibleStage(ctx: AppContext, c: Context, stageId: s
     .from(stages)
     .innerJoin(pipelines, eq(pipelines.id, stages.pipelineId))
     .where(eq(stages.id, stageId));
+  if (!row) return null;
+  return (await canAccessProject(ctx, c, row.projectId)) ? row : null;
+}
+
+/**
+ * A swarm template, which is owner keyed rather than parented by a
+ * project: the same rule canAccessProject applies, read off the
+ * template's own row.
+ */
+export async function getAccessibleSwarmTemplate(ctx: AppContext, c: Context, templateId: string) {
+  const [template] = await db(c, ctx).select().from(swarmTemplates).where(eq(swarmTemplates.id, templateId));
+  if (!template) return null;
+  const userId = actor(c);
+  if (ctx.env.BENTO_MODE !== "multi") return template.ownerId === userId ? template : null;
+  if (!template.organizationId) return template.ownerId === userId ? template : null;
+
+  const [membership] = await db(c, ctx)
+    .select()
+    .from(member)
+    .where(and(eq(member.userId, userId), eq(member.organizationId, template.organizationId)));
+  return membership ? template : null;
+}
+
+/** A swarm, resolved through the project it belongs to. */
+export async function getAccessibleSwarm(ctx: AppContext, c: Context, swarmId: string) {
+  const [swarm] = await db(c, ctx).select().from(swarms).where(eq(swarms.id, swarmId));
+  if (!swarm) return null;
+  return (await canAccessProject(ctx, c, swarm.projectId)) ? swarm : null;
+}
+
+/** A task, resolved through its swarm, which is resolved through its project. */
+export async function getAccessibleSwarmTask(ctx: AppContext, c: Context, taskId: string) {
+  const [row] = await db(c, ctx)
+    .select({ task: swarmTasks, projectId: swarms.projectId })
+    .from(swarmTasks)
+    .innerJoin(swarms, eq(swarms.id, swarmTasks.swarmId))
+    .where(eq(swarmTasks.id, taskId));
   if (!row) return null;
   return (await canAccessProject(ctx, c, row.projectId)) ? row : null;
 }

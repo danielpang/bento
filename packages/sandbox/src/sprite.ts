@@ -18,15 +18,15 @@ import {
 import { holdSpriteAwake } from "./keep-awake.js";
 
 /**
- * The machine a feature's work happens on. Exported because a test that
- * provisions a real sprite has to be able to delete it by name even
- * when provisioning threw halfway, and guessing the convention in two
- * places is how a leaked machine goes on being billed.
+ * The machine one workspace's work happens on. Exported because a test
+ * that provisions a real sprite has to be able to delete it by name
+ * even when provisioning threw halfway, and guessing the convention in
+ * two places is how a leaked machine goes on being billed.
  *
  * Sprite names are DNS-ish; a uuid with dashes is fine.
  */
-export function spriteName(featureId: string): string {
-  return `bento-${featureId}`;
+export function spriteName(workspaceKey: string): string {
+  return `bento-${workspaceKey}`;
 }
 
 /**
@@ -104,12 +104,12 @@ export class SpriteDriver implements SandboxDriver {
     this.workdir = options.workdir ?? "/workspace";
   }
 
-  private spriteName(featureId: string): string {
-    return spriteName(featureId);
+  private spriteName(workspaceKey: string): string {
+    return spriteName(workspaceKey);
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
-    const name = this.spriteName(spec.featureId);
+    const name = this.spriteName(spec.workspaceKey);
     const say = async (message: string) => {
       await spec.onProgress?.(message);
     };
