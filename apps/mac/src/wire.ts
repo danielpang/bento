@@ -240,6 +240,61 @@ export function jsonObject3(
   return concat3(concat3(head, second, asciiBytes(",")), third, asciiBytes("}"));
 }
 
+/** Toggle whether a successful run on this stage opens a pull request. */
+export function stageCreatePrPatch(createPr: boolean): Uint8Array {
+  return createPr ? asciiBytes("{\"createPr\":true}") : asciiBytes("{\"createPr\":false}");
+}
+
+/** A JSON value that is either a string or null. Empty means clear. */
+export function jsonNullable(value: Uint8Array): Uint8Array {
+  return value.length === 0 ? asciiBytes("null") : jsonString(value);
+}
+
+/** The setup and test commands, written together so one save is one write. */
+export function repoCommandsPatch(setup: Uint8Array, test: Uint8Array): Uint8Array {
+  const first = concat3(asciiBytes("{\"setupCommand\":"), jsonNullable(setup), asciiBytes(","));
+  return concat3(first, asciiBytes("\"testCommand\":"), concat2(jsonNullable(test), asciiBytes("}")));
+}
+
+/** Enable or disable an MCP server. */
+export function mcpEnabledPatch(enabled: boolean): Uint8Array {
+  return enabled ? asciiBytes("{\"enabled\":true}") : asciiBytes("{\"enabled\":false}");
+}
+
+/**
+ * Create an MCP server from a name, slug, url, and auth type.
+ * Four fields, so this cannot go through jsonObject3.
+ */
+export function mcpCreateBody(
+  name: Uint8Array,
+  slug: Uint8Array,
+  url: Uint8Array,
+  authType: Uint8Array,
+): Uint8Array {
+  const first = concat3(jsonString(asciiBytes("name")), asciiBytes(":"), jsonString(name));
+  const second = concat3(jsonString(asciiBytes("slug")), asciiBytes(":"), jsonString(slug));
+  const third = concat3(jsonString(asciiBytes("url")), asciiBytes(":"), jsonString(url));
+  const fourth = concat3(jsonString(asciiBytes("authType")), asciiBytes(":"), jsonString(authType));
+  const head = concat3(asciiBytes("{"), first, asciiBytes(","));
+  const mid = concat3(head, second, asciiBytes(","));
+  return concat3(concat3(mid, third, asciiBytes(",")), fourth, asciiBytes("}"));
+}
+
+/**
+ * The pipeline id the Mac app needs to append a stage. The board
+ * snapshot never carries it: adding a stage is rare, and the board
+ * polls every three seconds.
+ */
+export function parsePipelineId(body: Uint8Array): Uint8Array {
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("pipeline");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length >= 2 && bytesEq(fields[0], tag)) return fields[1];
+  }
+  return new Uint8Array(0);
+}
+
 /**
  * A stage patch naming its default agent. Null clears the assignment,
  * which is how a stage goes back to running nothing on its own, and
@@ -253,7 +308,8 @@ export function stageAgentPatch(profileId: Uint8Array): Uint8Array {
 /**
  * A stage patch replacing the gate: its type, plus a criteria array
  * built from the parts the panel edits. `manual` carries no fields;
- * `command` carries the shell line and a timeout.
+ * `command` carries the shell line and a timeout; a judge is a second
+ * agent named by id.
  */
 export function stageGatePatch(
   gateType: Uint8Array,
@@ -262,6 +318,7 @@ export function stageGatePatch(
   prComments: boolean,
   cmd: Uint8Array,
   timeoutSec: number,
+  judgeId: Uint8Array,
 ): Uint8Array {
   // Built by direct concatenation rather than an array of parts joined
   // at the end: a local Uint8Array[] does not lower cleanly here, and
@@ -290,6 +347,14 @@ export function stageGatePatch(
     const head = concat2(asciiBytes("{\"type\":\"command\",\"cmd\":"), jsonString(cmd));
     const tail = concat2(numberBytes(timeoutSec), asciiBytes("}"));
     items = appendItem(items, count, concat3(head, asciiBytes(",\"timeoutSec\":"), tail));
+    count = count + 1;
+  }
+  if (judgeId.length > 0) {
+    items = appendItem(
+      items,
+      count,
+      concat3(asciiBytes("{\"type\":\"agent_judge\",\"agentProfileId\":"), jsonString(judgeId), asciiBytes("}")),
+    );
     count = count + 1;
   }
   const list = concat3(asciiBytes("["), items, asciiBytes("]"));
@@ -370,6 +435,12 @@ export interface Card {
    */
   readonly canBack: boolean;
   readonly canFwd: boolean;
+  /**
+   * Finished or cancelled. Those cards leave their stage column for
+   * Completed, the way the web console's lane does, because they keep
+   * the stage they ended in and would otherwise inflate that queue.
+   */
+  readonly finished: boolean;
   /** The agent's latest spoken line, while the card is being worked. */
   readonly output: Uint8Array;
   readonly hasOutput: boolean;
@@ -418,12 +489,16 @@ export interface StageConfig {
   readonly gateCmd: Uint8Array;
   readonly gateTimeoutSec: number;
   /**
-   * A requirement this app has no control for, such as a judge agent.
-   * Saving rebuilds the whole list from the switches below, so a stage
-   * carrying one of these must not be saved from here: it would drop
-   * the requirement someone configured in the web console.
+   * A requirement this app has no control for. Saving rebuilds the
+   * whole list from the switches below, so a stage carrying one of
+   * these must not be saved from here: it would drop the requirement
+   * someone configured in the web console. A judge is not foreign:
+   * this editor names the agent that rules on the work.
    */
   readonly gateForeign: boolean;
+  readonly gateJudgeId: Uint8Array;
+  readonly gateJudgeLabel: Uint8Array;
+  readonly hasJudge: boolean;
   /** Whether a successful run here opens the pull request. */
   readonly createPr: boolean;
   readonly name: Uint8Array;
@@ -449,11 +524,54 @@ export interface Secret {
   readonly index: number;
 }
 
-/** A checkout the pipeline works in. Each becomes its own worktree. */
+/** A checkout the pipeline works in. */
 export interface Repo {
   readonly id: Uint8Array;
   readonly name: Uint8Array;
   readonly localPath: Uint8Array;
+  readonly setupCommand: Uint8Array;
+  readonly testCommand: Uint8Array;
+  readonly hasSetup: boolean;
+  readonly hasTest: boolean;
+  readonly index: number;
+}
+
+/** One card's spend, as the spend panel lists it. */
+export interface SpendCard {
+  readonly featureId: Uint8Array;
+  readonly runs: Uint8Array;
+  readonly cost: Uint8Array;
+  readonly runsWithoutCost: Uint8Array;
+  readonly title: Uint8Array;
+  readonly hasCost: boolean;
+  readonly hasRuns: boolean;
+  readonly index: number;
+}
+
+/** One conversation, as the sessions panel lists it. */
+export interface SessionRow {
+  readonly featureId: Uint8Array;
+  readonly runCount: Uint8Array;
+  readonly cost: Uint8Array;
+  readonly status: Uint8Array;
+  readonly statusLabel: Uint8Array;
+  readonly queuedAt: Uint8Array;
+  readonly agentName: Uint8Array;
+  readonly title: Uint8Array;
+  readonly hasCost: boolean;
+  readonly index: number;
+}
+
+/** An MCP server the organization has added. */
+export interface McpServer {
+  readonly id: Uint8Array;
+  readonly slug: Uint8Array;
+  readonly authType: Uint8Array;
+  readonly scope: Uint8Array;
+  readonly enabled: boolean;
+  readonly connected: boolean;
+  readonly isOauth: boolean;
+  readonly name: Uint8Array;
   readonly index: number;
 }
 
@@ -571,6 +689,7 @@ export function parseCards(body: Uint8Array): readonly Card[] {
       index: out.length,
       canBack: stagePos >= 0 && !terminal,
       canFwd: !terminal,
+      finished: terminal,
       runFailed: !isDash(fields[5]) && bytesEq(fields[4], asciiBytes("failed")),
       isGated: bytesEq(fields[3], asciiBytes("gated")),
     });
@@ -686,15 +805,52 @@ export function parseCatalog(body: Uint8Array): readonly CatalogModel[] {
   return out;
 }
 
-/** Lines are repo|<id>|<name>|<localPath>. */
+/**
+ * Lines are repo|<id>|<name>|<localPath>, then optional
+ * setup|<id>|<command> and test|<id>|<command>. Commands live on their
+ * own lines so a path or a shell line can contain pipes without
+ * colliding.
+ */
 export function parseRepos(body: Uint8Array): readonly Repo[] {
   const out: Repo[] = [];
   const lines = body.split(asciiBytes("\n"));
-  const tag = asciiBytes("repo");
+  const repoTag = asciiBytes("repo");
+  const setupTag = asciiBytes("setup");
+  const testTag = asciiBytes("test");
   for (let i = 0; i < lines.length; i++) {
     const fields = lines[i].split(asciiBytes("|"));
-    if (fields.length < 4 || !bytesEq(fields[0], tag)) continue;
-    out.push({ id: fields[1], name: fields[2], localPath: joinRest(fields, 3), index: out.length });
+    if (fields.length < 4 || !bytesEq(fields[0], repoTag)) continue;
+    out.push({
+      id: fields[1],
+      name: fields[2],
+      localPath: joinRest(fields, 3),
+      setupCommand: new Uint8Array(0),
+      testCommand: new Uint8Array(0),
+      hasSetup: false,
+      hasTest: false,
+      index: out.length,
+    });
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length < 3) continue;
+    const isSetup = bytesEq(fields[0], setupTag);
+    const isTest = bytesEq(fields[0], testTag);
+    if (!isSetup && !isTest) continue;
+    for (let r = 0; r < out.length; r++) {
+      if (!bytesEq(out[r].id, fields[1])) continue;
+      const command = joinRest(fields, 2);
+      out[r] = {
+        id: out[r].id,
+        name: out[r].name,
+        localPath: out[r].localPath,
+        setupCommand: isSetup ? command : out[r].setupCommand,
+        testCommand: isTest ? command : out[r].testCommand,
+        hasSetup: isSetup ? command.length > 0 : out[r].hasSetup,
+        hasTest: isTest ? command.length > 0 : out[r].hasTest,
+        index: out[r].index,
+      };
+    }
   }
   return out;
 }
@@ -729,6 +885,21 @@ export function parseCredentials(body: Uint8Array): readonly Credential[] {
     });
   }
   return out;
+}
+
+/**
+ * Lines are pr|<state>|<number>|<name>. Only "conflicted" asks for the
+ * resolve button; anything else is treated as not known to conflict.
+ */
+export function parseHasConflicts(body: Uint8Array): boolean {
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("pr");
+  const conflicted = asciiBytes("conflicted");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length >= 3 && bytesEq(fields[0], tag) && bytesEq(fields[1], conflicted)) return true;
+  }
+  return false;
 }
 
 /** Lines are gate|<status>|<stageId> then check|<type>|<status>|<detail>. */
@@ -785,6 +956,9 @@ export function parsePipeline(body: Uint8Array, profiles: readonly Profile[]): r
         gateCmd: new Uint8Array(0),
         gateTimeoutSec: DEFAULT_GATE_TIMEOUT,
         gateForeign: false,
+        gateJudgeId: new Uint8Array(0),
+        gateJudgeLabel: asciiBytes("no judge"),
+        hasJudge: false,
         createPr: bytesEq(fields[5], asciiBytes("1")),
         name: joinRest(fields, 6),
         index: stages.length,
@@ -796,8 +970,10 @@ export function parsePipeline(body: Uint8Array, profiles: readonly Profile[]): r
       if (!bytesEq(current.id, fields[1])) continue;
       const type = fields[3];
       const isCommand = bytesEq(type, asciiBytes("command"));
+      const isJudge = bytesEq(type, asciiBytes("agent_judge"));
       const cmd = isCommand ? joinRest(fields, 5) : current.gateCmd;
       const timeout = isCommand && !isDash(fields[4]) ? parseNumber(fields[4]) : current.gateTimeoutSec;
+      const judgeId = isJudge && !isDash(fields[5]) ? fields[5] : current.gateJudgeId;
       stages[at] = {
         id: current.id,
         position: current.position,
@@ -813,6 +989,9 @@ export function parsePipeline(body: Uint8Array, profiles: readonly Profile[]): r
         gateCmd: cmd,
         gateTimeoutSec: timeout,
         gateForeign: current.gateForeign || isForeignCriterion(type),
+        gateJudgeId: judgeId,
+        gateJudgeLabel: isJudge ? agentLabelFor(judgeId, profiles) : current.gateJudgeLabel,
+        hasJudge: isJudge ? judgeId.length > 0 : current.hasJudge,
         createPr: current.createPr,
         name: current.name,
         index: current.index,
@@ -825,9 +1004,16 @@ export function parsePipeline(body: Uint8Array, profiles: readonly Profile[]): r
 /**
  * A requirement with no control in this app. Saving would drop it, so
  * the editor refuses instead of quietly rewriting someone's pipeline.
+ * A judge is edited here; anything else unknown is not.
  */
 function isForeignCriterion(type: Uint8Array): boolean {
-  return bytesEq(type, asciiBytes("agent_judge"));
+  if (bytesEq(type, asciiBytes("command"))) return false;
+  if (bytesEq(type, asciiBytes("checks_pass"))) return false;
+  if (bytesEq(type, asciiBytes("pr_comments_resolved"))) return false;
+  if (bytesEq(type, asciiBytes("agent_judge"))) return false;
+  if (bytesEq(type, asciiBytes("manual"))) return false;
+  if (bytesEq(type, asciiBytes("run_succeeded"))) return false;
+  return true;
 }
 
 /**
@@ -946,6 +1132,117 @@ export function parseInvitations(body: Uint8Array): readonly Invitation[] {
       status: fields[2],
       role: fields[3],
       email: joinRest(fields, 4),
+      index: out.length,
+    });
+  }
+  return out;
+}
+
+/** The spend total line: total|<usd>|<runs>|<missing>. */
+export function parseSpendTotalUsd(body: Uint8Array): Uint8Array {
+  return spendTotalField(body, 1);
+}
+
+export function parseSpendTotalRuns(body: Uint8Array): Uint8Array {
+  return spendTotalField(body, 2);
+}
+
+export function parseSpendMissing(body: Uint8Array): Uint8Array {
+  return spendTotalField(body, 3);
+}
+
+function spendTotalField(body: Uint8Array, at: number): Uint8Array {
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("total");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length >= 4 && bytesEq(fields[0], tag)) return fields[at];
+  }
+  return asciiBytes("0");
+}
+
+/** Lines are card|<featureId>|<runs>|<cost or ->|<runsWithoutCost>|<title>. */
+export function parseSpendCards(body: Uint8Array): readonly SpendCard[] {
+  const out: SpendCard[] = [];
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("card");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length < 6 || !bytesEq(fields[0], tag)) continue;
+    out.push({
+      featureId: fields[1],
+      runs: fields[2],
+      cost: isDash(fields[3]) ? new Uint8Array(0) : fields[3],
+      runsWithoutCost: fields[4],
+      title: joinRest(fields, 5),
+      hasCost: !isDash(fields[3]),
+      hasRuns: !bytesEq(fields[2], asciiBytes("0")),
+      index: out.length,
+    });
+  }
+  return out;
+}
+
+/**
+ * Lines are session|<featureId>|<runCount>|<cost or ->|<status>|<queuedAt>|<agentName>|<title>.
+ * Title is last. Agent names rarely contain pipes; a name that does
+ * will join into the title, which is still readable.
+ */
+export function parseSessions(body: Uint8Array): readonly SessionRow[] {
+  const out: SessionRow[] = [];
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("session");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length < 8 || !bytesEq(fields[0], tag)) continue;
+    out.push({
+      featureId: fields[1],
+      runCount: fields[2],
+      cost: isDash(fields[3]) ? new Uint8Array(0) : fields[3],
+      status: fields[4],
+      statusLabel: runWords(fields[4]),
+      queuedAt: fields[5],
+      agentName: isDash(fields[6]) ? asciiBytes("no agent") : fields[6],
+      title: joinRest(fields, 7),
+      hasCost: !isDash(fields[3]),
+      index: out.length,
+    });
+  }
+  return out;
+}
+
+/** Whether the caller can add or remove team MCP servers. */
+export function parseMcpCanManage(body: Uint8Array): boolean {
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("access");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length >= 2 && bytesEq(fields[0], tag)) return bytesEq(fields[1], asciiBytes("1"));
+  }
+  return false;
+}
+
+/** Lines are mcp|<id>|<slug>|<authType>|<scope>|<enabled>|<connected>|<name>. */
+export function parseMcpServers(body: Uint8Array): readonly McpServer[] {
+  const out: McpServer[] = [];
+  const lines = body.split(asciiBytes("\n"));
+  const tag = asciiBytes("mcp");
+  const trueTag = asciiBytes("true");
+  const one = asciiBytes("1");
+  for (let i = 0; i < lines.length; i++) {
+    const fields = lines[i].split(asciiBytes("|"));
+    if (fields.length < 7 || !bytesEq(fields[0], tag)) continue;
+    const enabled = bytesEq(fields[5], trueTag) || bytesEq(fields[5], one);
+    const connected = bytesEq(fields[6], trueTag) || bytesEq(fields[6], one);
+    out.push({
+      id: fields[1],
+      slug: fields[2],
+      authType: fields[3],
+      scope: fields[4],
+      enabled,
+      connected,
+      isOauth: bytesEq(fields[3], asciiBytes("oauth")),
+      name: fields.length > 7 ? joinRest(fields, 7) : fields[2],
       index: out.length,
     });
   }

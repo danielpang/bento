@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createDb, createPool, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
+import { createDb, createPool, pgBossDatabase, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -10,6 +10,7 @@ import PgBoss from "pg-boss";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
 import { createAuth, type AuthHooks } from "./auth.js";
+import { reportAuthEvent } from "./auth-events.js";
 import { createMailer, noticeMessage, type NoticeEmailInput } from "./mail.js";
 import { SecretBox } from "./secrets.js";
 import { createHash } from "node:crypto";
@@ -19,8 +20,9 @@ import { and, eq } from "drizzle-orm";
 import { member, user } from "@bento/db";
 import { createDriver, createGitHubApp, ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
-import { loadEnv, type Env } from "./env.js";
+import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
+import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
 
 export interface StartOptions {
   /** Overrides applied on top of the process environment. */
@@ -80,14 +82,26 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const pool = createPool(env.DATABASE_URL, { max: poolMax });
     const db = createDb(pool);
 
-    const boss = new PgBoss({
-      connectionString: env.DATABASE_URL,
-      schema: "pgboss",
+    // pg-boss 10 would otherwise `new pg.Pool(config)` with only a
+    // connection string, which is how Timekeeper.onCron reused a
+    // Neon-dropped socket and surfaced `read ETIMEDOUT`. This pool
+    // is the same factory as `pool` above. pg-boss will not close it.
+    const bossPool = createPool(env.DATABASE_URL, {
       // Polling does not need one connection per worker. Enough that a
       // burst of completions is not queued behind the default 10.
       max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
     });
-    boss.on("error", (err) => console.error("pg-boss error:", err));
+    const boss = new PgBoss({
+      db: pgBossDatabase(bossPool),
+      schema: "pgboss",
+      // Idle workers poll slowly so an idle database can be idle; see
+      // orchestrator/queue.ts for why, and for the run workers' own pace.
+      pollingIntervalSeconds: QUEUE_POLL_SECONDS,
+    });
+    boss.on("error", (err) => {
+      console.error("pg-boss error:", err);
+      analytics?.captureException(err, null, null, { source: "pg-boss" });
+    });
     await boss.start();
 
     // Local mode has a single implicit user; multi mode uses better-auth.
@@ -124,12 +138,22 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
                 userId: u.id,
                 properties: { $set: { email: u.email, name: u.name } },
               });
+              // Counted here, on a row that exists: the after hook
+              // cannot tell a hosted duplicate from a real sign up.
+              reportAuthEvent(posthog, {
+                flow: "sign up",
+                outcome: "succeeded",
+                userId: u.id,
+                properties: { method: u.method, route: u.route },
+              });
             })
             .catch((err: unknown) => {
               console.warn("could not record the sign up:", err);
+              posthog.captureException(err, u.id, null, { source: "signup_capture" });
             });
         }, SIGNUP_CONFIRM_DELAY_MS).unref();
       };
+      authHooks.onAuthEvent = (event) => reportAuthEvent(posthog, event);
     }
     const auth = createAuth(env, db, mailer, authHooks);
 
@@ -154,8 +178,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     // Beside the artifact warning and at the same level, because it is
     // the same kind of news: an optional service a hosted deployment
     // probably wanted is off. Local installs and the TUI stay quiet;
-    // measuring a laptop was never the point.
-    if (env.BENTO_MODE === "multi" && !env.POSTHOG_API_KEY && !options.quiet) {
+    // measuring a laptop was never the point, and a leftover key must
+    // not start sending.
+    if (env.BENTO_MODE === "multi" && !posthogApiKey(env) && !options.quiet) {
       console.warn(
         "POSTHOG_API_KEY variable required by PostHog is missing or un-configured, this causes events to be silently missed. This warning stops appearing once POSTHOG_API_KEY is configured.",
       );
@@ -334,10 +359,12 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         await analytics?.shutdown().catch(() => {});
         await featureFlags.shutdown().catch(() => {});
         await logExport?.stop().catch(() => {});
+        await bossPool.end().catch(() => {});
         await pool.end().catch(() => {});
       },
     };
   } catch (err) {
+    analytics?.captureException(err, null, null, { source: "boot" });
     await analytics?.shutdown().catch(() => {});
     await featureFlags.shutdown().catch(() => {});
     await logExport?.stop().catch(() => {});

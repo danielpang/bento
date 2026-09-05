@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import { and, asc, eq, isNull } from "drizzle-orm";
@@ -17,6 +18,7 @@ import {
   verification,
   type Db,
 } from "@bento/db";
+import { authEventHook, methodFor, type AuthEvent } from "./auth-events.js";
 import type { Env } from "./env.js";
 import {
   deleteAccountMessage,
@@ -31,6 +33,56 @@ const INVITATION_DAYS = 7;
 
 /** Long enough to survive a mail queue, short enough to be a poor stolen token. */
 const LINK_HOURS = 24;
+
+/**
+ * Whether a membership holds the owner role.
+ *
+ * Roles arrive as a comma separated string, so this parses the way the
+ * rest of the server does rather than comparing the whole field.
+ */
+function roleHasOwner(role: string): boolean {
+  return role.split(",").map((part) => part.trim()).includes("owner");
+}
+
+/**
+ * Names of organizations this person still owns. Deleting the account
+ * would leave those teams without an owner, so both the confirmation
+ * email and the actual delete refuse until each one has another, or is
+ * itself deleted.
+ */
+async function ownedOrganizationNames(db: Db, userId: string): Promise<string[]> {
+  const rows = await db
+    .select({ name: organizationTable.name, role: member.role })
+    .from(member)
+    .innerJoin(organizationTable, eq(organizationTable.id, member.organizationId))
+    .where(eq(member.userId, userId));
+  return rows.filter((row) => roleHasOwner(row.role)).map((row) => row.name);
+}
+
+function ownerDeletionMessage(names: string[]): string {
+  if (names.length === 1) {
+    return `You own ${names[0]}. Make someone else an owner first, or delete that organization.`;
+  }
+  return `You own ${names.length} organizations. Make someone else an owner in each, or delete them, before deleting your account.`;
+}
+
+async function refuseIfOwnsOrganization(db: Db, userId: string): Promise<void> {
+  const reason = await accountDeletionBlockedReason(db, userId);
+  if (!reason) return;
+  throw new APIError("BAD_REQUEST", { message: reason });
+}
+
+/**
+ * Why this account cannot be deleted right now, or null if it can.
+ *
+ * Exported so the HTTP layer can refuse the confirmation-mail request
+ * before better-auth answers 200 and sends the mail in the background.
+ */
+export async function accountDeletionBlockedReason(db: Db, userId: string): Promise<string | null> {
+  const names = await ownedOrganizationNames(db, userId);
+  if (names.length === 0) return null;
+  return ownerDeletionMessage(names);
+}
 
 /**
  * Sends one of the account emails, and never fails the request it was
@@ -69,7 +121,9 @@ export interface AuthHooks {
    * awaited into the sign up's fate: an analytics outage must not
    * refuse an account.
    */
-  onUserSignedUp?: (user: { id: string; email: string; name: string }) => void;
+  onUserSignedUp?: (user: { id: string; email: string; name: string; method: string; route: string }) => void;
+  /** A sign in or sign up outcome from better-auth's after hook. Sign up successes come through onUserSignedUp. */
+  onAuthEvent?: (event: AuthEvent) => void;
 }
 
 function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
@@ -99,6 +153,8 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
   /** Where the emails point back to, for their footer links. */
   const appUrl = env.BETTER_AUTH_URL.replace(/\/$/, "");
 
+  const report = authEventHook((event) => hooks.onAuthEvent?.(event));
+
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
@@ -120,6 +176,16 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       transaction: true,
     }),
     trustedOrigins: env.BENTO_TRUSTED_ORIGINS,
+    // Sign in and sign up outcomes, for PostHog. See auth-events.ts.
+    ...(hooks.onAuthEvent
+      ? {
+          hooks: {
+            after: createAuthMiddleware(async (ctx) => {
+              report(ctx);
+            }),
+          },
+        }
+      : {}),
     /**
      * Every new session starts in the user's first organization.
      *
@@ -138,9 +204,15 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
     databaseHooks: {
       user: {
         create: {
-          async after(newUser) {
+          async after(newUser, ctx) {
             try {
-              hooks.onUserSignedUp?.({ id: newUser.id, email: newUser.email, name: newUser.name });
+              hooks.onUserSignedUp?.({
+                id: newUser.id,
+                email: newUser.email,
+                name: newUser.name,
+                method: methodFor(ctx),
+                route: ctx?.path ?? "",
+              });
             } catch (err) {
               console.warn("sign up hook failed:", err);
             }
@@ -229,9 +301,16 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
         enabled: true,
         // Confirmed by email rather than executed on the click: this
         // is irreversible, and a session someone left open on a shared
-        // machine must not be enough to erase an account.
+        // machine must not be enough to erase an account. An owner is
+        // refused before the mail goes out, and again before the row
+        // is deleted, so a link from an earlier attempt cannot land
+        // once they have become an owner in the meantime.
         async sendDeleteAccountVerification({ user, url }) {
+          await refuseIfOwnsOrganization(db, user.id);
           await sendOrLog(mailer, deleteAccountMessage({ email: user.email, url, expiresInHours: LINK_HOURS, appUrl }), url);
+        },
+        async beforeDelete(user) {
+          await refuseIfOwnsOrganization(db, user.id);
         },
         deleteTokenExpiresIn: LINK_HOURS * 60 * 60,
       },

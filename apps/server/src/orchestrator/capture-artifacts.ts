@@ -110,6 +110,11 @@ export async function captureRunArtifacts(ctx: AppContext, args: CaptureArgs): P
     // The run's work is done and recorded; losing its attachments is
     // worth a line, not a failure.
     console.error(`artifact capture failed for run ${args.runId}:`, err);
+    ctx.analytics?.captureException(err, null, args.organizationId, {
+      run_id: args.runId,
+      feature_id: args.featureId,
+      source: "artifact_capture",
+    });
     await args.say(`Could not save this run's artifacts: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
   }
 }

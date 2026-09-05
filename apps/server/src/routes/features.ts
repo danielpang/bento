@@ -3,7 +3,14 @@ import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
-import { actorDisplayName, agentCli, checkAgentPairing, gateCriterion, historyTriggerLabel } from "@bento/core";
+import {
+  actorDisplayName,
+  agentCli,
+  checkAgentPairing,
+  gateCriterion,
+  historyTriggerLabel,
+  parentDeleteRefusal,
+} from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -26,6 +33,8 @@ import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
+import { childCount, parentRefusal, relatedGroup } from "../feature-tree.js";
+import { getBetaTester } from "../feature-flags.js";
 import {
   advanceFeature,
   evaluateFeatureGate,
@@ -38,6 +47,7 @@ import {
   activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
 import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, startRunIfIdle } from "../orchestrator/start-run.js";
+import { enqueueRun } from "../orchestrator/queue.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
   claimQueuedMessages,
@@ -46,9 +56,10 @@ import {
   requeueMessages,
 } from "../orchestrator/messages.js";
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
+import { buildCiFixPrompt, buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
-import { linkGitHubRemotes, refreshBaseBranches } from "../orchestrator/repo-remote.js";
-import { buildConflictResolutionPrompt } from "../orchestrator/prompt.js";
+import { startFeatureFollowUpRun, startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
+import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
 import { githubConnectionFor } from "../github.js";
 import { featurePullRequestTargets, type FeaturePullRequestTarget } from "../feature-prs.js";
@@ -59,6 +70,12 @@ const createFeature = z.object({
   projectId: z.string().uuid(),
   title: z.string().min(1),
   description: z.string().default(""),
+  /**
+   * The card this one was split out of. Optional and rare: it is how a
+   * person, the TUI, or the agent-facing MCP tool files one part of a
+   * task that was judged too large for a single branch.
+   */
+  parentId: z.string().uuid().optional(),
 });
 
 /**
@@ -160,6 +177,19 @@ interface PullRequestMergeRow {
   state: "clean" | "conflicted" | "unknown";
 }
 
+interface PullRequestCheckRow {
+  name: string;
+  number: number;
+  url: string;
+  /**
+   * "failed" when GitHub reports at least one failing check on the pull
+   * request head. "pending" when checks are still running. "passed" when
+   * every check succeeded or none are configured. "unknown" covers every
+   * unreadable case, same as merge-status.
+   */
+  state: "passed" | "pending" | "failed" | "unknown";
+}
+
 /**
  * A slow GitHub answer must not hold this request open indefinitely:
  * in multi mode the whole handler runs inside the tenant transaction,
@@ -193,6 +223,37 @@ async function readMergeStates(
           connection.mergeState({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
         );
         return { ...base, state: summary.state };
+      } catch {
+        return { ...base, state: "unknown" };
+      }
+    }),
+  );
+}
+
+/**
+ * Asks GitHub how CI checks on each pull request head are doing. One
+ * failing read does not spoil the others.
+ */
+async function readCheckStates(
+  connection: (GitHubClient & GitHubPublisher) | undefined,
+  rows: FeaturePullRequestTarget[],
+): Promise<PullRequestCheckRow[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const base: Omit<PullRequestCheckRow, "state"> = {
+        name: row.name ?? repoNameFromUrl(row.repoUrl),
+        number: row.number,
+        url: row.url,
+      };
+      const parsed = parseRepoUrl(row.repoUrl);
+      if (!connection || !parsed) return { ...base, state: "unknown" };
+      try {
+        const checks = await boundedRead(
+          connection.checks({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
+        );
+        if (checks.failed > 0) return { ...base, state: "failed" };
+        if (checks.pending > 0) return { ...base, state: "pending" };
+        return { ...base, state: "passed" };
       } catch {
         return { ...base, state: "unknown" };
       }
@@ -239,6 +300,21 @@ export function featureRoutes(ctx: AppContext) {
         .from(pipelines)
         .where(eq(pipelines.projectId, body.projectId));
       if (!pipeline) return c.json({ error: "project has no pipeline" }, 400);
+      /**
+       * The parent has to be one the caller can already see, in this
+       * same project, and not at the bottom of a chain of splits. The
+       * access check comes first and answers the same 404 a bad id
+       * would, so naming another tenant's card teaches nothing.
+       */
+      if (body.parentId) {
+        const parent = await getAccessibleFeature(ctx, c, body.parentId);
+        if (!parent) return c.json({ error: "not found" }, 404);
+        const refusal = await parentRefusal(db(c, ctx), {
+          parentId: body.parentId,
+          projectId: body.projectId,
+        });
+        if (refusal) return c.json({ error: refusal }, 400);
+      }
       const [feature] = await db(c, ctx)
         .insert(features)
         .values({
@@ -246,6 +322,7 @@ export function featureRoutes(ctx: AppContext) {
           pipelineId: pipeline.id,
           title: body.title,
           description: body.description,
+          ...(body.parentId ? { parentId: body.parentId } : {}),
         })
         .returning();
       if (!feature) return c.json({ error: "something went wrong saving the card; try again" }, 500);
@@ -309,6 +386,12 @@ export function featureRoutes(ctx: AppContext) {
      * What survives is the user's: the branch in every source
      * repository, and any pull request opened from it. Bento stops
      * tracking those, it does not close them.
+     *
+     * A card that spawned others is refused instead. The foreign key
+     * has no cascade on purpose: the parts of a split are ordinary
+     * cards with their own branches and pull requests, and one click
+     * on the card they came from must not take all of them. Delete or
+     * finish the children first.
      */
     .delete("/:id", async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
@@ -329,6 +412,13 @@ export function featureRoutes(ctx: AppContext) {
             .where(eq(features.id, feature.id))
             .for("update");
           if (!locked) return "gone" as const;
+
+          // After the lock, so a part filed in the same instant is
+          // counted rather than surfacing a foreign key violation as
+          // a 500. The console disables the button from the same fact;
+          // this is the door, not the hint.
+          const children = await childCount(tx, feature.id);
+          if (children > 0) return { refused: parentDeleteRefusal(children) };
 
           const [active] = await tx
             .select({ id: agentRuns.id })
@@ -416,6 +506,9 @@ export function featureRoutes(ctx: AppContext) {
       // same thing to "deleted it already" and to "that is not yours".
       if (outcome === "gone") return c.json({ error: "not found" }, 404);
       if (outcome === "busy") return c.json({ error: CARD_BUSY_DELETE }, 409);
+      if (typeof outcome === "object" && "refused" in outcome) {
+        return c.json({ error: outcome.refused }, 409);
+      }
 
       ctx.bus.emitBoardEvent({
         type: "feature_deleted",
@@ -585,7 +678,7 @@ export function featureRoutes(ctx: AppContext) {
       // The run's prompt now carries them, so they are delivered rather
       // than in flight: a run that fails is resumed, not redelivered.
       await markMessagesDelivered(db(c, ctx), claimed.map((m) => m.id), run.id);
-      if (resumeFrom.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      if (resumeFrom.executor === "server") await enqueueRun(ctx, run.id);
       return c.json({ queued: false as const, run }, 201);
     })
     /**
@@ -627,6 +720,29 @@ export function featureRoutes(ctx: AppContext) {
         .orderBy(desc(runArtifacts.createdAt))
         .limit(200);
       return c.json(rows);
+    })
+    /**
+     * The group this card belongs to: the card a split started from,
+     * and every card that split produced.
+     *
+     * One endpoint for both ends of the relationship. Opened from a
+     * child it resolves upward first, so the parent and the child
+     * answer with the same group and the view reads the same from
+     * either. The rows come from the database rather than from the
+     * caller's board, which is what keeps a finished part, or one that
+     * has been moved to another lane, in the picture.
+     *
+     * Null for a card that is neither a parent nor a child, which is
+     * most cards: the console draws nothing rather than an empty view.
+     */
+    .get("/:id/related", async (c) => {
+      // Unfinished product, so a non-tester must not learn the route
+      // exists. The access check still runs after it: the flag is not
+      // an authorization boundary.
+      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      return c.json(await relatedGroup(db(c, ctx), feature));
     })
     /**
      * The same, pre-rendered as display lines: the Mac app has no JSON
@@ -971,7 +1087,35 @@ export function featureRoutes(ctx: AppContext) {
         branch: feature.branchName,
         repositories: publishable,
       }, { includeStageNotes });
-      if (published.length > 0) {
+      const rebaseTargets: RebaseTarget[] = failures.map((f) => ({
+        name: f.name,
+        defaultBranch: publishable.find((r) => r.name === f.name)?.defaultBranch ?? "main",
+      }));
+      const recovery = await recoverAncestryPublishFailures(
+        ctx,
+        db(c, ctx),
+        feature,
+        failures,
+        rebaseTargets,
+        {
+          publisher,
+          branch: feature.branchName,
+          repositories: publishable,
+          includeStageNotes,
+        },
+        actor(c),
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      const ancestryNames = new Set(
+        failures.filter((f) => recovery.draftPublished.some((p) => p.name === f.name)).map((f) => f.name),
+      );
+      const allPublished = [...published, ...recovery.draftPublished];
+      const remainingFailures = [
+        ...failures.filter((f) => !ancestryNames.has(f.name)),
+        ...recovery.draftFailures,
+      ];
+      const rebaseRun = recovery.rebaseRun;
+      if (allPublished.length > 0) {
         ctx.bus.emitBoardEvent({
           type: "feature_updated",
           projectId: feature.projectId,
@@ -980,7 +1124,16 @@ export function featureRoutes(ctx: AppContext) {
           currentStageId: feature.currentStageId,
         });
       }
-      return c.json({ published, failures });
+      if (rebaseRun) {
+        ctx.bus.emitBoardEvent({
+          type: "run_updated",
+          projectId: feature.projectId,
+          featureId: feature.id,
+          runId: rebaseRun.id,
+          status: "queued",
+        });
+      }
+      return c.json({ published: allPublished, failures: remainingFailures, rebaseRun: rebaseRun ?? null });
     })
     /**
      * Where each of the card's pull requests stands against its base:
@@ -999,6 +1152,94 @@ export function featureRoutes(ctx: AppContext) {
       // drawer's; dropped by rest-destructuring so a field added to the
       // row later travels without anyone remembering this projection.
       return c.json(states.map(({ defaultBranch, ...pr }) => pr));
+    })
+    /**
+     * How CI checks on each pull request head are doing: passed,
+     * pending, failed, or unknown. Separate from merge-status because
+     * most card opens do not need a GitHub round trip to render.
+     */
+    .get("/:id/check-status", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) return c.json([]);
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      const states = await readCheckStates(connection, rows);
+      return c.json(states);
+    })
+    /**
+     * Starts a run that fixes failing CI checks GitHub is reporting.
+     *
+     * Checks are re-read here rather than trusted from the button, so a
+     * stale drawer cannot start a fix run nothing needs.
+     */
+    .post("/:id/fix-ci-tests", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      if (feature.status === "done" || feature.status === "cancelled") {
+        return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
+      }
+      if (!feature.branchName) {
+        return c.json({ error: "this card has no branch yet; run an agent on it first" }, 409);
+      }
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) {
+        return c.json({ error: "this card has no pull request yet; publish it first" }, 409);
+      }
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      if (!connection) {
+        return c.json({ error: GITHUB_NOT_CONNECTED }, 409);
+      }
+      const states = await readCheckStates(connection, rows);
+      const failing = states.filter((pr) => pr.state === "failed");
+      if (failing.length === 0) {
+        return c.json(
+          {
+            error: states.some((pr) => pr.state === "unknown")
+              ? "GitHub check status could not be read for this card's pull requests. Try again in a moment."
+              : states.some((pr) => pr.state === "pending")
+                ? "CI checks are still running on this card's pull requests."
+                : "GitHub reports no failing CI checks on this card's pull requests",
+          },
+          409,
+        );
+      }
+
+      const result = await startFeatureFollowUpRun(
+        ctx,
+        db(c, ctx),
+        feature,
+        buildCiFixPrompt(failing),
+        actor(c),
+        "task",
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      if (!result.ok) {
+        return c.json(
+          { error: result.error, ...(result.code ? { code: result.code } : {}) },
+          result.status,
+        );
+      }
+      return c.json(result.run, 201);
+    })
+    /**
+     * The same merge status in line form, for the Mac app.
+     *
+     *   pr|<state>|<number>|<name>
+     *
+     * Name is last because a repository name may contain pipes. "conflicted"
+     * is the only state that asks for a button; the others are listed so
+     * a later client can show clean pull requests without a new route.
+     */
+    .get("/:id/merge-status/plain", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.text("error|not found", 404);
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) return c.text("");
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      const states = await readMergeStates(connection, rows);
+      const lines = states.map((pr) => `pr|${pr.state}|${pr.number}|${pr.name}`);
+      return c.text(lines.join("\n"));
     })
     /**
      * Starts a run that rebases the card's branch onto the latest base
@@ -1049,69 +1290,21 @@ export function featureRoutes(ctx: AppContext) {
         );
       }
 
-      // The conversation the rebase continues is the card's own work,
-      // never a judge's: same rule as the message route, because the
-      // resolving agent needs the context of the changes it made. A
-      // card whose only runs are judge runs still resolves, as a fresh
-      // run of whatever ran last, exactly like a follow-up message.
-      const conversation = await latestConversationRun(db(c, ctx), feature.id);
-      const [latest] = conversation
-        ? [conversation]
-        : await db(c, ctx)
-            .select()
-            .from(agentRuns)
-            .where(eq(agentRuns.featureId, feature.id))
-            .orderBy(desc(agentRuns.queuedAt))
-            .limit(1);
-      if (!latest) {
-        return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
-      }
-      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
-      /**
-       * Runner-executed runs settle on the runner's machine, and the
-       * server has no way to read that checkout, so the promise this
-       * run is built on (the server pushes the rebased branch) cannot
-       * be kept. Refusing honestly beats burning an agent run whose
-       * work goes nowhere.
-       */
-      if (resumeFrom.executor !== "server") {
+      const result = await startFeatureRebaseRun(
+        ctx,
+        db(c, ctx),
+        feature,
+        buildConflictResolutionPrompt(feature.branchName, conflicted),
+        actor(c),
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      if (!result.ok) {
         return c.json(
-          {
-            error:
-              "this project's agents run on a runner, and the server cannot push a branch it never sees. Rebase and push from the runner's checkout, or switch the project to server execution.",
-          },
-          409,
+          { error: result.error, ...(result.code ? { code: result.code } : {}) },
+          result.status,
         );
       }
-      /**
-       * Bring origin/<base> up to date where the server can: sprite
-       * sandboxes re-seed on provision, but docker and local worktrees
-       * share the host checkout, whose origin/<base> is only as fresh
-       * as the last fetch. Best effort, before the run is created, so
-       * the rebase has the real base to land on.
-       */
-      if (ctx.driver.provider !== "sprite") {
-        const repos = await db(c, ctx)
-          .select({ localPath: repositories.localPath, defaultBranch: repositories.defaultBranch })
-          .from(repositories)
-          .where(eq(repositories.projectId, feature.projectId));
-        await refreshBaseBranches(repos);
-      }
-      const run = await startRunIfIdle(db(c, ctx), {
-        featureId: feature.id,
-        stageId: resumeFrom.stageId,
-        agentProfileId: resumeFrom.agentProfileId,
-        prompt: buildConflictResolutionPrompt(feature.branchName, conflicted),
-        cliSessionId: resumeFrom.cliSessionId,
-        executor: resumeFrom.executor,
-        kind: "rebase",
-        startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
-      if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
-      if (run === "gone") return c.json({ error: "not found" }, 404);
-      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      await ctx.boss.send("run.execute", { runId: run.id });
-      return c.json(run, 201);
+      return c.json(result.run, 201);
     })
     /** Links a pull request so PR based gate criteria can evaluate. */
     .post("/:id/link-pr", zValidator("json", z.object({ prNumber: z.number().int().positive() })), async (c) => {
@@ -1200,7 +1393,7 @@ export function featureRoutes(ctx: AppContext) {
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      if (executor === "server") await enqueueRun(ctx, run.id);
       return c.json(run, 201);
     })
     /** Full history: stage moves and status changes, oldest first. */

@@ -10,7 +10,11 @@ import type { CatalogProvider } from "./models.js";
  * described nowhere the generator looks. Nor does it have a Poolside
  * provider: it lists Laguna under OpenRouter, which is a different
  * endpoint, a different key and different ids from Poolside's own
- * inference. Those are the entries here.
+ * inference. Those are the entries here, plus any model a provider has
+ * shipped since the snapshot was taken: models.dev trails releases by
+ * days or weeks, and a model missing from the picker cannot be chosen
+ * for Claude Code in the console at all, because the field is a select
+ * whenever the provider is known.
  *
  * Kept in a separate file because `pnpm models:update` overwrites the
  * generated one wholesale. Anything added there by hand disappears the
@@ -32,6 +36,26 @@ import type { CatalogProvider } from "./models.js";
  * nothing, so the agent still lists and runs; only the logo is missing.
  */
 export const MANUAL_CATALOG: readonly CatalogProvider[] = [
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    env: ["ANTHROPIC_API_KEY"],
+    // The generated entry supplies the mark and comes first in the
+    // merge, so only the model ids below are ever read from here.
+    logo: "",
+    /**
+     * Models Anthropic serves that the 2026-08-19 snapshot predates.
+     * The id is the one the Claude API takes, with no date suffix.
+     * Claude Mythos 5.1 is deliberately absent: it is served only to
+     * organizations in Project Glasswing, so listing it would put a
+     * model most keys cannot use in front of everybody. It stays
+     * typeable through the API and the TUI, like any unlisted id.
+     *
+     * Delete this entry once `pnpm models:update` brings the id in;
+     * until then the merge keeps it from duplicating.
+     */
+    models: [{ id: "claude-fable-5-1", name: "Claude Fable 5.1" }],
+  },
   {
     id: "deepseek",
     name: "DeepSeek",
@@ -58,6 +82,44 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
       { id: "composer-2-fast", name: "Composer 2 Fast" },
       { id: "composer-1", name: "Composer 1" },
       { id: "auto", name: "Auto (Cursor picks per request)" },
+    ],
+  },
+  {
+    id: "antigravity",
+    name: "Antigravity",
+    env: ["GEMINI_API_KEY"],
+    // No mark: there is none in the repository, and inventing a brand
+    // mark is worse than the empty slot ProviderMark already draws.
+    logo: "",
+    /**
+     * Antigravity's own model slugs, which is what its `--model`
+     * takes. They are not the Gemini API's ids: a slug names the model
+     * tier and the reasoning effort together, because effort is a
+     * variant of the model in Antigravity rather than a separate
+     * request field. That is why this is a provider of its own rather
+     * than ids appended to Google's; `google/gemini-3.1-pro-high` is
+     * not a thing pi or opencode could run.
+     *
+     * Only the ids that have been read back from Antigravity's own
+     * model list are here. Gemini 3.8 Flash and 3.7 Flash are served
+     * to a Gemini API key too, and they will join this list when
+     * somebody has confirmed how their slugs are spelled rather than
+     * from a guess at the pattern. Until then they stay typeable, like
+     * any unlisted id.
+     *
+     * Antigravity also serves Claude and GPT models on a signed-in
+     * Google account. A sandbox cannot sign in, so those are
+     * unreachable here and deliberately unlisted.
+     */
+    models: [
+      { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)" },
+      { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)" },
+      { id: "gemini-3.6-flash-high", name: "Gemini 3.6 Flash (High)" },
+      { id: "gemini-3.6-flash-medium", name: "Gemini 3.6 Flash (Medium)" },
+      { id: "gemini-3.6-flash-low", name: "Gemini 3.6 Flash (Low)" },
+      { id: "gemini-3.5-flash-high", name: "Gemini 3.5 Flash (High)" },
+      { id: "gemini-3.5-flash-medium", name: "Gemini 3.5 Flash (Medium)" },
+      { id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Low)" },
     ],
   },
   {

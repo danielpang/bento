@@ -107,6 +107,26 @@ with 409 and `CARD_BUSY`; the auto-start paths skip quietly, because
 the active run's finish queues the evaluation that looks at the new
 stage.
 
+The run then goes to the queue through `enqueueRun` in
+`apps/server/src/orchestrator/queue.ts`, not a bare
+`boss.send("run.execute")`. The `run.execute` workers poll every
+thirty seconds, because one worker per slot polling every two seconds
+kept the hosted database busy enough to never scale down; `enqueueRun`
+wakes them, so a run queued in-process still starts at once. A bare
+send works, and waits for the next poll.
+
+## Queue workers poll slowly on purpose
+
+pg-boss has no push, so every idle worker costs a query per poll. The
+default interval is ten seconds (`QUEUE_POLL_SECONDS`) and the run
+workers use thirty. Before that, the server issued about seventeen
+transactions a second on an empty queue, and Neon billed the compute
+as busy around the clock. Give a new queue the faster
+`INTERACTIVE_POLL_SECONDS` (two seconds) only when a person is
+waiting on its jobs and one worker covers it. Today that is
+`gate.evaluate`, `slack.inbound`, `slack.notify`, `linear.inbound`,
+`linear.create-issue`, and `linear.outbound`.
+
 ## Agent credentials belong to the organization, never the server
 
 `resolveAgentEnv` reads keys from the organization's encrypted secrets.
@@ -127,6 +147,14 @@ always on.
   `getBetaTester`, the same convention as the access helpers.
 - Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
   `useBetaTesters()` is the boolean for lighter checks.
+- Orchestrator: a run has no session, and not always a person. The
+  console and the API start one as somebody; the gate evaluator and the
+  schedules start one as nobody. `isBetaRun` asks about the acting
+  member when there is one and the project's owner when there is not,
+  so a team's auto-started stages behave like the runs it starts by
+  hand. A capability given to an agent (the card tools on the MCP
+  gateway) belongs behind the same flag as the console that shows what
+  the agent did with it.
 
 Do not mint a second flag for "show this to testers". This is that flag.
 

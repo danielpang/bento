@@ -1,5 +1,5 @@
 import { PostHog } from "posthog-node";
-import type { Env } from "./env.js";
+import { posthogApiKey, type Env } from "./env.js";
 
 /**
  * A product event on its way to PostHog.
@@ -64,7 +64,7 @@ export function captureJobErrors<Args extends unknown[]>(
 }
 
 /**
- * Builds the PostHog client, or null when no key is configured.
+ * Builds the PostHog client, or null when this process must not send.
  *
  * Null rather than a stub, so `ctx.analytics?.capture(...)` reads the
  * same as the other optional context members (auth, githubApp) and a
@@ -72,10 +72,11 @@ export function captureJobErrors<Args extends unknown[]>(
  * Quietly null: the announcement that analytics is off belongs to
  * server.ts beside the artifact-bucket warning, where it can respect
  * the deployment mode and the quiet flag, which this factory cannot
- * see.
+ * see. Local mode is always null, even with a leftover key.
  */
 export function createAnalytics(env: Env): Analytics | null {
-  if (!env.POSTHOG_API_KEY) return null;
+  const apiKey = posthogApiKey(env);
+  if (!apiKey) return null;
 
   /**
    * Exception autocapture registers process-level listeners that the
@@ -87,7 +88,7 @@ export function createAnalytics(env: Env): Analytics | null {
   const beforeException = new Set(process.listeners("uncaughtException"));
   const beforeRejection = new Set(process.listeners("unhandledRejection"));
 
-  const client = new PostHog(env.POSTHOG_API_KEY, {
+  const client = new PostHog(apiKey, {
     host: env.POSTHOG_HOST,
     // Uncaught exceptions, captured before the process goes down.
     enableExceptionAutocapture: true,
@@ -140,9 +141,11 @@ export function createAnalytics(env: Env): Analytics | null {
       organizationId?: string | null,
       properties?: Record<string, unknown>,
     ): void {
-      client.captureException(error instanceof Error ? error : new Error(String(error)), userId ?? undefined, {
+      const distinctId = userId ?? (organizationId ? `organization:${organizationId}` : "bento-server");
+      client.captureException(error instanceof Error ? error : new Error(String(error)), distinctId, {
         environment,
         bento_mode: mode,
+        ...(userId ? {} : { $process_person_profile: false }),
         // The event-level group property, so error tracking can answer
         // "which tenant is this hitting".
         ...(organizationId ? { $groups: { organization: organizationId } } : {}),

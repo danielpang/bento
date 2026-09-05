@@ -5,6 +5,7 @@ import { loadEnv } from "./env.js";
 
 /** An unroutable host, so flushes fail fast and nothing ever sends. */
 const FAKE_ENV = {
+  BENTO_MODE: "multi",
   POSTHOG_API_KEY: "phc_test_key_never_sent_anywhere",
   POSTHOG_HOST: "http://127.0.0.1:1",
 };
@@ -12,6 +13,16 @@ const FAKE_ENV = {
 test("no key means no export and an untouched console", () => {
   const before = console.log;
   assert.equal(startLogExport(loadEnv({})), null);
+  assert.equal(startLogExport(loadEnv({ BENTO_MODE: "multi" })), null);
+  assert.equal(console.log, before);
+});
+
+test("local mode never wraps the console, even with a leftover key", () => {
+  const before = console.log;
+  assert.equal(
+    startLogExport(loadEnv({ BENTO_MODE: "local", POSTHOG_API_KEY: "phc_leftover_from_hosted" })),
+    null,
+  );
   assert.equal(console.log, before);
 });
 

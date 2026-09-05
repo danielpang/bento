@@ -1,3 +1,6 @@
+import { stat } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
@@ -104,6 +107,56 @@ const createProject = z.object({
   repositories: z.array(repositoryInput).max(20).optional(),
 });
 
+/**
+ * Resolves a checkout path a person typed, or says why it cannot be used.
+ *
+ * Only a shell expands tildes, so `~/projects/app` stored as typed made
+ * every sandbox provision fail on a directory literally named `~`. But
+ * expanding it is only correct when the server shares a home with the
+ * person typing. In a container `~` is /root, and silently resolving to
+ * /root/projects/app trades one wrong path for a more confusing one,
+ * because it names a directory nobody typed.
+ *
+ * So expand, then require the result to exist. What resolves to a real
+ * directory is stored; anything else is refused here, while a person is
+ * still looking at the field, rather than at the first run half an hour
+ * later.
+ *
+ * Local mode only. A path in any other mode names a directory on the
+ * runner, which this process cannot see and must not judge.
+ */
+async function resolveLocalCheckout(input: string): Promise<{ path: string } | { error: string }> {
+  const trimmed = input.trim();
+  const expanded =
+    trimmed === "~"
+      ? os.homedir()
+      : trimmed.startsWith("~/")
+        ? path.join(os.homedir(), trimmed.slice(2))
+        : trimmed;
+
+  if (!path.isAbsolute(expanded)) {
+    return { error: `Use the full path to the checkout, starting at the root, rather than ${trimmed}.` };
+  }
+  if (!(await isDirectory(expanded))) {
+    // The tilde case names both halves. The server's home is the
+    // surprise, and it is not the home the person typing has in mind.
+    return {
+      error: trimmed.startsWith("~")
+        ? `The server's home is ${os.homedir()}, so ${trimmed} means ${expanded}, and nothing is there. Type the full path to the checkout instead.`
+        : `${expanded} does not exist on the machine running the server. If the server runs in a container, use the path the checkout is mounted at inside it.`,
+    };
+  }
+  return { path: expanded };
+}
+
+async function isDirectory(target: string): Promise<boolean> {
+  try {
+    return (await stat(target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Derives a workspace directory name from a repository path. */
 function repoNameFromPath(localPath: string): string {
   const base = localPath.replace(/\/+$/, "").split("/").pop() ?? "repo";
@@ -155,24 +208,41 @@ function uniqueNames(names: string[]): string[] {
 
 type RepositoryInput = z.infer<typeof repositoryInput>;
 
+type ResolvedRepository = Omit<RepositoryInput, "localPath" | "githubRepoId" | "repoUrl"> & {
+  localPath: string;
+  githubRepoId: string | null;
+  repoUrl: string | null;
+};
+
+/**
+ * A resolution carries its own refusal, because the two ways this can
+ * fail want different words. "Not available to this organization" tells
+ * someone nothing about a path that is merely misspelled.
+ */
+type RepositoryResolution = { ok: true; repo: ResolvedRepository } | { ok: false; error: string };
+
+const UNAVAILABLE = "repository is not available to this organization";
+
 async function resolveRepositoryInput(
   ctx: AppContext,
   c: Context,
   input: RepositoryInput,
   organizationId: string | null,
-): Promise<
-  (Omit<RepositoryInput, "localPath" | "githubRepoId" | "repoUrl"> & {
-    localPath: string;
-    githubRepoId: string | null;
-    repoUrl: string | null;
-  }) | null
-> {
+): Promise<RepositoryResolution> {
   if (!input.githubRepoId) {
-    if (ctx.driver.provider === "sprite") return null;
+    if (ctx.driver.provider === "sprite") return { ok: false, error: UNAVAILABLE };
     // A hosted installation token must never be selected from a URL the
     // caller supplied. Runner/local paths carry no server credential.
-    if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return null;
-    if (!input.localPath) return null;
+    if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return { ok: false, error: UNAVAILABLE };
+    if (!input.localPath) return { ok: false, error: UNAVAILABLE };
+
+    let localPath = input.localPath;
+    if (ctx.env.BENTO_MODE === "local") {
+      const resolved = await resolveLocalCheckout(input.localPath);
+      if ("error" in resolved) return { ok: false, error: resolved.error };
+      localPath = resolved.path;
+    }
+
     // The checkout usually knows its GitHub remote already, and a person
     // who picked a directory should not have to type a URL git recorded
     // when they cloned. Local mode only, for the same reason as above: a
@@ -180,22 +250,25 @@ async function resolveRepositoryInput(
     // chosen through a caller supplied path.
     const repoUrl =
       input.repoUrl ??
-      (ctx.env.BENTO_MODE === "multi" ? null : await githubRemoteOf(input.localPath));
-    return { ...input, localPath: input.localPath, githubRepoId: null, repoUrl };
+      (ctx.env.BENTO_MODE === "multi" ? null : await githubRemoteOf(localPath));
+    return { ok: true, repo: { ...input, localPath, githubRepoId: null, repoUrl } };
   }
 
   const github = await githubForOrganization(ctx, organizationId);
-  if (!github) return null;
+  if (!github) return { ok: false, error: UNAVAILABLE };
   const allowed = await github.listRepositories();
   const selected = allowed.find((repo) => String(repo.id) === input.githubRepoId);
-  if (!selected) return null;
+  if (!selected) return { ok: false, error: UNAVAILABLE };
   return {
-    ...input,
-    name: input.name ?? selected.name,
-    localPath: selected.fullName,
-    repoUrl: selected.url,
-    githubRepoId: String(selected.id),
-    defaultBranch: selected.defaultBranch,
+    ok: true,
+    repo: {
+      ...input,
+      name: input.name ?? selected.name,
+      localPath: selected.fullName,
+      repoUrl: selected.url,
+      githubRepoId: String(selected.id),
+      defaultBranch: selected.defaultBranch,
+    },
   };
 }
 
@@ -247,8 +320,8 @@ export function projectRoutes(ctx: AppContext) {
       const repoInputs = [];
       for (const requested of requestedInputs) {
         const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
-        if (!resolved) return c.json({ error: "repository is not available to this organization" }, 400);
-        repoInputs.push(resolved);
+        if (!resolved.ok) return c.json({ error: resolved.error }, 400);
+        repoInputs.push(resolved.repo);
       }
 
       const names = uniqueNames(repoInputs.map((r) => r.name ?? repoNameFromPath(r.localPath)));
@@ -307,8 +380,14 @@ export function projectRoutes(ctx: AppContext) {
       return c.json(rows);
     })
     /**
-     * Line format: repo|<id>|<name>|<localPath>
-     * The path is last because it may contain anything a path may.
+     * Line format:
+     *   repo|<id>|<name>|<localPath>
+     *   setup|<id>|<command>
+     *   test|<id>|<command>
+     * Path and commands are last on their own lines because each may
+     * contain pipes. A missing command is a missing line, not a dash
+     * on the repo row: that kept a path from being mistaken for a
+     * command, and a command from being mistaken for a path.
      */
     .get("/:id/repositories/plain", async (c) => {
       if (!(await canAccessProject(ctx, c, c.req.param("id")))) return c.text("error|not found", 404);
@@ -317,7 +396,13 @@ export function projectRoutes(ctx: AppContext) {
         .from(repositories)
         .where(eq(repositories.projectId, c.req.param("id")))
         .orderBy(asc(repositories.position));
-      return c.text(rows.map((r) => `repo|${r.id}|${r.name}|${r.localPath}`).join("\n"));
+      const lines: string[] = [];
+      for (const r of rows) {
+        lines.push(`repo|${r.id}|${r.name}|${r.localPath}`);
+        if (r.setupCommand) lines.push(`setup|${r.id}|${r.setupCommand}`);
+        if (r.testCommand) lines.push(`test|${r.id}|${r.testCommand}`);
+      }
+      return c.text(lines.join("\n"));
     })
     .post("/:id/repositories", zValidator("json", repositoryInput), async (c) => {
       const projectId = c.req.param("id");
@@ -327,8 +412,9 @@ export function projectRoutes(ctx: AppContext) {
         return c.json({ error: "not found" }, 404);
       }
       const requested = c.req.valid("json");
-      const body = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
-      if (!body) return c.json({ error: "repository is not available to this organization" }, 400);
+      const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
+      if (!resolved.ok) return c.json({ error: resolved.error }, 400);
+      const body = resolved.repo;
 
       const existing = await db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId));
       const wanted = body.name ?? repoNameFromPath(body.localPath);
@@ -475,6 +561,65 @@ export function projectRoutes(ctx: AppContext) {
         .filter((s) => s.latestRun !== undefined)
         .sort((a, b) => b.latestRun.queuedAt.getTime() - a.latestRun.queuedAt.getTime());
       return c.json({ sessions });
+    })
+    /**
+     * Line format: session|<featureId>|<runCount>|<cost or ->|<status>|<queuedAt>|<agentName>|<title>
+     * Title is last because it may contain pipes. Names are resolved
+     * here: the Mac app cannot join a profile id to a name.
+     */
+    .get("/:id/sessions/plain", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
+
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const [totals, latest] = await Promise.all([
+        db(c, ctx)
+          .select({
+            featureId: agentRuns.featureId,
+            title: features.title,
+            runCount: count(agentRuns.id),
+            totalCostUsd: sum(agentRuns.costUsd),
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .groupBy(agentRuns.featureId, features.title),
+        db(c, ctx)
+          .selectDistinctOn([agentRuns.featureId], {
+            featureId: agentRuns.featureId,
+            status: agentRuns.status,
+            agentProfileId: agentRuns.agentProfileId,
+            queuedAt: agentRuns.queuedAt,
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .orderBy(agentRuns.featureId, desc(agentRuns.queuedAt)),
+      ]);
+
+      const profileIds = [...new Set(latest.map((row) => row.agentProfileId).filter((id): id is string => Boolean(id)))];
+      const profiles = profileIds.length
+        ? await db(c, ctx)
+            .select({ id: agentProfiles.id, name: agentProfiles.name })
+            .from(agentProfiles)
+            .where(inArray(agentProfiles.id, profileIds))
+        : [];
+      const nameById = new Map(profiles.map((row) => [row.id, row.name]));
+      const latestByFeature = new Map(latest.map((row) => [row.featureId, row]));
+      const lines = totals
+        .map((row) => {
+          const run = latestByFeature.get(row.featureId);
+          if (!run) return null;
+          return { row, run };
+        })
+        .filter((entry): entry is { row: (typeof totals)[number]; run: (typeof latest)[number] } => entry !== null)
+        .sort((a, b) => b.run.queuedAt.getTime() - a.run.queuedAt.getTime())
+        .map(({ row, run }) => {
+          const cost = row.totalCostUsd === null ? "-" : Number(row.totalCostUsd).toFixed(2);
+          const agent = (run.agentProfileId && nameById.get(run.agentProfileId)) || "-";
+          return `session|${row.featureId}|${Number(row.runCount)}|${cost}|${run.status}|${run.queuedAt.toISOString()}|${agent}|${row.title}`;
+        });
+      return c.text(lines.join("\n"));
     })
     /**
      * The name, and whether an arriving Linear issue starts the
@@ -631,6 +776,7 @@ export function projectRoutes(ctx: AppContext) {
      * polls every three seconds, and gate criteria would be a payload
      * nobody reads on all but one screen.
      *
+     *   pipeline|<id>
      *   stage|<id>|<position>|<agentProfileId or ->|<gateType>|<createPr 1 or 0>|<name>
      *   criterion|<stageId>|<index>|<type>|<timeoutSec or ->|<cmd or ->
      *
@@ -650,7 +796,7 @@ export function projectRoutes(ctx: AppContext) {
         .where(eq(stages.pipelineId, pipeline.id))
         .orderBy(stages.position);
 
-      const lines: string[] = [];
+      const lines: string[] = [`pipeline|${pipeline.id}`];
       for (const s of stageRows) {
         lines.push(
           `stage|${s.id}|${s.position}|${s.defaultAgentProfileId ?? "-"}|${s.gateType}|${s.createPr ? "1" : "0"}|${s.name}`,
@@ -659,8 +805,13 @@ export function projectRoutes(ctx: AppContext) {
         if (!criteria.success) continue;
         for (const [index, criterion] of criteria.data.entries()) {
           const timeout = criterion.type === "command" ? String(criterion.timeoutSec) : "-";
-          const cmd = criterion.type === "command" ? criterion.cmd : "-";
-          lines.push(`criterion|${s.id}|${index}|${criterion.type}|${timeout}|${cmd}`);
+          const extra =
+            criterion.type === "command"
+              ? criterion.cmd
+              : criterion.type === "agent_judge"
+                ? criterion.agentProfileId
+                : "-";
+          lines.push(`criterion|${s.id}|${index}|${criterion.type}|${timeout}|${extra}`);
         }
       }
       return c.text(lines.join("\n"));
@@ -743,6 +894,67 @@ export function projectRoutes(ctx: AppContext) {
           runsWithoutCost: Number(row.runsWithoutCost),
         })),
       });
+    })
+    /**
+     * Line format:
+     *   total|<totalUsd>|<totalRuns>|<runsWithoutCost>
+     *   card|<featureId>|<runs>|<cost or ->|<runsWithoutCost>|<title>
+     * Title is last because it may contain pipes. Cost is a dash when
+     * nothing on the card reported a figure, which is not zero.
+     */
+    .get("/:id/usage/plain", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
+      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const rows = await db(c, ctx)
+        .select({
+          stageId: agentRuns.stageId,
+          agentProfileId: agentRuns.agentProfileId,
+          runs: count(agentRuns.id),
+          costUsd: sum(agentRuns.costUsd),
+        })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(and(eq(features.projectId, projectId), spendRun))
+        .groupBy(agentRuns.stageId, agentRuns.agentProfileId);
+
+      const [silent] = await db(c, ctx)
+        .select({ runs: count(agentRuns.id) })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(and(eq(features.projectId, projectId), spendRun, isNull(agentRuns.costUsd)));
+
+      const cards = await db(c, ctx)
+        .select({
+          featureId: features.id,
+          title: features.title,
+          runs: count(agentRuns.id),
+          costUsd: sum(agentRuns.costUsd),
+          runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${isNull(agentRuns.costUsd)})`,
+        })
+        .from(features)
+        .leftJoin(agentRuns, and(eq(agentRuns.featureId, features.id), spendRun))
+        .where(eq(features.projectId, projectId))
+        .groupBy(features.id, features.title);
+
+      const totalUsd = rows.reduce((sum, row) => sum + Number(row.costUsd ?? 0), 0);
+      const lines = [
+        `total|${totalUsd.toFixed(2)}|${rows.reduce((sum, row) => sum + Number(row.runs), 0)}|${Number(silent?.runs ?? 0)}`,
+      ];
+      const sorted = [...cards].sort((a, b) => {
+        if (a.costUsd === null && b.costUsd === null) return a.title.localeCompare(b.title);
+        if (a.costUsd === null) return 1;
+        if (b.costUsd === null) return -1;
+        const diff = Number(b.costUsd) - Number(a.costUsd);
+        return diff !== 0 ? diff : a.title.localeCompare(b.title);
+      });
+      for (const row of sorted) {
+        const cost = row.costUsd === null ? "-" : Number(row.costUsd).toFixed(2);
+        lines.push(
+          `card|${row.featureId}|${Number(row.runs)}|${cost}|${Number(row.runsWithoutCost)}|${row.title}`,
+        );
+      }
+      return c.text(lines.join("\n"));
     })
     /**
      * Cards completed over time, bucketed to fit the asked-for window.

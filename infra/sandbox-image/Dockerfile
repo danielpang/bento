@@ -53,6 +53,7 @@ RUN set -eu; \
     fetch_run claude https://claude.ai/install.sh bash; \
     fetch_run codex https://chatgpt.com/codex/install.sh sh; \
     fetch_run cursor https://cursor.com/install bash; \
+    fetch_run agy https://antigravity.google/cli/install.sh bash; \
     POOL_INSTALL_ACCEPT_EULA=1 fetch_run pool https://downloads.poolside.ai/pool/install.sh sh; \
     case "$(dpkg --print-architecture)" in arm64) target=linux-arm64 ;; *) target=linux-x64 ;; esac; \
     if [ "$target" = linux-x64 ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then target=linux-x64-baseline; fi; \
@@ -84,19 +85,19 @@ RUN arch="$(dpkg --print-architecture)" \
     @deepseek-ai/dsh@0.1.1-rc.2 \
  && printf '#!/bin/sh\nPATH=/opt/bento/node/bin:$PATH\nexport PATH\nexec /opt/bento/pi/bin/pi "$@"\n' \
     > /usr/local/bin/pi \
- && cat > /usr/local/bin/dsh <<'BENTO_DSH_SHIM'
-#!/bin/sh
-set -eu
-PATH=/opt/bento/node/bin:$PATH
-export PATH
-if [ -z "${DSH_HOME:-}" ]; then
-  mkdir -p /opt/bento/dsh-runs
-  DSH_HOME=$(mktemp -d /opt/bento/dsh-runs/XXXXXX)
-  cp -a /opt/bento/dsh-home/. "$DSH_HOME"/
-fi
-export DSH_HOME
-exec /opt/bento/dsh/bin/dsh "$@"
-BENTO_DSH_SHIM
+ && printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    'PATH=/opt/bento/node/bin:$PATH' \
+    'export PATH' \
+    'if [ -z "${DSH_HOME:-}" ]; then' \
+    '  mkdir -p /opt/bento/dsh-runs' \
+    '  DSH_HOME=$(mktemp -d /opt/bento/dsh-runs/XXXXXX)' \
+    '  cp -a /opt/bento/dsh-home/. "$DSH_HOME"/' \
+    'fi' \
+    'export DSH_HOME' \
+    'exec /opt/bento/dsh/bin/dsh "$@"' \
+    > /usr/local/bin/dsh \
  && chmod +x /usr/local/bin/pi /usr/local/bin/dsh \
  && mkdir -p /opt/bento/dsh-home \
  && printf '%s\n' \
@@ -118,18 +119,27 @@ BENTO_DSH_SHIM
 # that ships without one of these produces no symptom until a card runs
 # that agent half an hour later, and then only "executable file
 # `opencode` not found in $PATH".
-RUN for tool in claude codex cursor-agent opencode pool; do \
-      for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin; do \
+RUN for tool in agy claude codex cursor-agent opencode pool; do \
+      for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin /root/.antigravity/bin; do \
         [ -x "$dir/$tool" ] && ln -sf "$dir/$tool" /usr/local/bin/"$tool" && break; \
       done; \
     done; \
     status=0; \
-    for tool in claude codex cursor-agent dsh opencode pi pool; do \
+    for tool in agy claude codex cursor-agent dsh opencode pi pool; do \
       command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is not on PATH"; status=1; }; \
     done; \
     exit $status
 
-RUN git config --system user.email "agent@bento.dev" \
+# Antigravity signs in with a Google account, and a sandbox has no
+# browser to sign in with. modelProvider "gemini" is what makes
+# GEMINI_API_KEY the credential instead, and the CLI refuses to start
+# with one set and not the other. Same file, same reason, as
+# packages/sandbox/src/agent-toolchain.ts writes on a bare machine.
+RUN mkdir -p /root/.gemini/antigravity-cli \
+ && printf '%s\n' '{ "modelProvider": "gemini" }' \
+    > /root/.gemini/antigravity-cli/settings.json
+
+RUN git config --system user.email "no-reply@usebento.ai" \
     && git config --system user.name "Bento Agent" \
     && git config --system --add safe.directory /workspace
 

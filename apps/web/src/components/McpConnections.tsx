@@ -61,7 +61,9 @@ export function McpConnectionsSection({ client }: { client: BentoClient }) {
       <p className="muted">
         Bento is itself an MCP server. An outside agent (Claude Code, Cursor, anything that speaks
         MCP) can connect with a token from here, create feature cards, and follow their progress.
-        Point it at <code>{endpoint}</code> with the token as a bearer Authorization header.
+        The token stays valid until you disconnect it; you do not need to sign in again on a
+        schedule. Point the agent at <code>{endpoint}</code> with the token as a bearer
+        Authorization header.
       </p>
       {status.connections.length === 0 && <p className="muted">No connections yet.</p>}
       {status.connections.map((connection) => (
@@ -108,14 +110,14 @@ function ConnectionCard({
       </div>
       <div className="actions">
         <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(true)}>
-          Revoke
+          Disconnect
         </button>
       </div>
       {removing && (
         <ConfirmDialog
-          title={`Revoke ${connection.name}?`}
+          title={`Disconnect ${connection.name}?`}
           description="The agent holding this token loses access immediately. This cannot be undone; a new connection mints a new token."
-          confirmLabel="Revoke"
+          confirmLabel="Disconnect"
           destructive
           onClose={() => setRemoving(false)}
           onConfirm={() => act(() => client.deleteMcpConnection(connection.id))}
@@ -270,7 +272,7 @@ function TokenDialog({
   return (
     <Modal
       title={`${created.name} is ready`}
-      description="Copy the token now. It is stored hashed, so it cannot be shown again; a lost token means revoking this connection and creating a new one."
+      description="Copy the token now. It is stored hashed, so it cannot be shown again. It stays valid until you disconnect this connection; a lost token means disconnecting and creating a new one."
       onClose={onClose}
       actions={
         <>

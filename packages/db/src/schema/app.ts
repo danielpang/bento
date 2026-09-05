@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   bigserial,
   boolean,
   check,
@@ -156,7 +157,9 @@ export const agentProfiles = pgTable("agent_profiles", {
    */
   organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
-  cli: text("cli", { enum: ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"] }).notNull(),
+  cli: text("cli", {
+    enum: ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"],
+  }).notNull(),
   model: text("model").notNull(),
   /**
    * The agent's operating instructions, written by the user and fed
@@ -267,11 +270,29 @@ export const features = pgTable(
    * requests; this is the one to show when there is only room for one.
    */
   prNumber: integer("pr_number"),
+  /**
+   * The card this one was split out of, when the agent working that
+   * card judged the task large and worth dividing.
+   *
+   * Null is an ordinary card, which is nearly every card: there is no
+   * container type and no join table, and the edge means "that card
+   * spawned this one" and nothing else. Not a dependency, not a
+   * blocker, not an ordering.
+   *
+   * No cascade, matching current_stage_id: deleting a parent that
+   * still has children is refused rather than silently taking a group
+   * of cards with it. Parent and child must share a project, which the
+   * write path enforces, because the board query, the related view and
+   * the tenant column all assume a group lives in one project.
+   */
+  parentId: uuid("parent_id").references((): AnyPgColumn => features.id),
   ...timestamps,
   },
   // Postgres does not index FK columns on its own, and every board,
   // run, and session query starts from "the cards of this project".
-  (t) => [index("features_project_idx").on(t.projectId)],
+  // The parent index is what makes "the children of these cards" one
+  // grouped scan rather than a sequential read per board paint.
+  (t) => [index("features_project_idx").on(t.projectId), index("features_parent_idx").on(t.parentId)],
 );
 
 /**
@@ -1065,7 +1086,8 @@ export const mcpRunGrants = pgTable(
  * was authorized: the whole organization, or a pinned selection of
  * projects (the mcp_run_grants serverIds precedent). Only the sha256
  * of the token is stored; the raw value is shown once at creation and
- * never again.
+ * never again. There is no expiry: the token stays valid until it is
+ * disconnected or its owner leaves the organization.
  */
 export const mcpConnections = pgTable(
   "mcp_connections",

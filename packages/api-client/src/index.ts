@@ -17,6 +17,8 @@ export {
   type TokenStore,
   type SlackConnection,
   type McpStatus,
+  type McpCatalog,
+  type McpCatalogEntry,
   type McpServerStatus,
   type McpServerInput,
   type McpServerPatch,

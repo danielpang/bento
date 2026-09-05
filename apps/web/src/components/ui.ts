@@ -118,14 +118,53 @@ export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
 /** Tools whose upstream interface is explicitly unstable. */
 export const PREVIEW_TOOLS: Record<string, true | undefined> = { dsh: true };
 
+/**
+ * The two facts worth knowing before assigning a coding agent to a
+ * stage: whether you can talk to it mid-run, and whether it says what
+ * it spent.
+ *
+ * Returned as data rather than a sentence, because these read as chips.
+ * Three sentences of prose here described a tool nobody was reading
+ * about; an icon and two words are seen while the tool is being picked.
+ * The full sentence survives as `detail`, on hover and for screen
+ * readers, so nothing that was said before is now unsayable.
+ */
+export interface ToolCapability {
+  icon: "steer" | "queue" | "between-runs" | "cost" | "no-cost";
+  label: string;
+  detail: string;
+}
+
+export function toolCapabilities(cli: string): ToolCapability[] {
+  const messaging: ToolCapability =
+    LIVE_TOOLS[cli] === "steer"
+      ? { icon: "steer", label: "Steer mid-run", detail: "Messages steer it while it works." }
+      : LIVE_TOOLS[cli] === "queue"
+        ? {
+            icon: "queue",
+            label: "Queues mid-run",
+            detail: "Messages queue behind the current step, in the same conversation.",
+          }
+        : {
+            icon: "between-runs",
+            label: "Between runs",
+            detail: forgetsBetweenRuns(cli)
+              ? "Messages are delivered when the run ends, as a new run."
+              : "Messages are delivered when the run ends, resuming the same session.",
+          };
+
+  const cost: ToolCapability = reportsCost(cli)
+    ? { icon: "cost", label: "Reports cost", detail: "Reports what a run cost." }
+    : { icon: "no-cost", label: "No cost", detail: "Cost is not reported." };
+
+  return [messaging, cost];
+}
+
+/**
+ * The same two facts as one sentence, for anywhere a chip does not fit.
+ * Kept beside the chips so the two can never drift apart.
+ */
 export function toolCapability(cli: string): string {
-  const output = hasNoLiveTranscript(cli) ? "Prints nothing until the run ends." : "Streams as it works.";
-  const delivery = LIVE_TOOLS[cli]
-    ? LIVE_TOOLS[cli] === "steer"
-      ? "Messages steer it while it works."
-      : "Messages queue behind the current step, in the same conversation."
-    : forgetsBetweenRuns(cli)
-      ? "Messages are delivered when the run ends, as a new run."
-      : "Messages are delivered when the run ends, resuming the same session.";
-  return `${output} ${delivery} ${reportsCost(cli) ? "Reports what a run cost." : "Cost is not reported."}`;
+  const quiet = hasNoLiveTranscript(cli) ? "Prints nothing until the run ends. " : "";
+  return quiet + toolCapabilities(cli).map((c) => c.detail).join(" ");
 }

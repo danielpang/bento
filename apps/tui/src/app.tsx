@@ -7,7 +7,10 @@ import {
   type AgentRun,
   type Feature,
   type FeatureEvent,
+  type FeatureMergeStatus,
   type GateState,
+  type ProjectSession,
+  type ProjectUsage,
   type Stage,
 } from "@bento/api-client";
 import { actorDisplayName, forgetsBetweenRuns, hasNoLiveTranscript, historyTriggerLabel } from "@bento/core";
@@ -231,6 +234,7 @@ function Console({
   const [error, setError] = useState("");
 
   const [projectName, setProjectName] = useState("");
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
   const [features, setFeatures] = useState<Feature[]>([]);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
@@ -270,9 +274,20 @@ function Console({
   // When set, keystrokes compose a follow-up prompt instead of driving
   // the board. This is how a person takes over from an agent.
   const [takeover, setTakeover] = useState<string | null>(null);
+  // Same composer shape for a new card: the title is one line, and the
+  // board keys have to stand down while it is being typed.
+  const [newCard, setNewCard] = useState<string | null>(null);
+  // A second D confirms. One press that removed a card (and its
+  // sandbox) would be the wrong moment to learn there is no undo.
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [overlay, setOverlay] = useState<"none" | "spend" | "sessions">("none");
+  const [overlayIndex, setOverlayIndex] = useState(0);
+  const [usage, setUsage] = useState<ProjectUsage | null>(null);
+  const [sessionRows, setSessionRows] = useState<ProjectSession[] | null>(null);
   const [latestRunId, setLatestRunId] = useState<string | null>(null);
   const [cardRuns, setCardRuns] = useState<AgentRun[]>([]);
   const [latestRunStatus, setLatestRunStatus] = useState<string>("");
+  const [mergeStates, setMergeStates] = useState<FeatureMergeStatus[]>([]);
 
   // Where to land once the server is reachable and, in multi mode,
   // signed in: the board normally, the credentials wizard for `setup`.
@@ -308,6 +323,7 @@ function Console({
       return;
     }
     setProjectName(project.name);
+    setProjectId(project.id);
     const [pipeline, featureRows, profileRows, statuses] = await Promise.all([
       client.getPipeline(project.id),
       client.listFeatures(project.id),
@@ -331,9 +347,7 @@ function Console({
     } else if (!pipeline.stages.some((stage) => stage.defaultAgentProfileId)) {
       setNotice("No stage has an agent. Run `bento setup` to assign one.");
     } else if (featureRows.length === 0) {
-      // A configured board with nothing on it looks broken, and the
-      // terminal cannot add a card, so name the place that can.
-      setNotice(`No cards yet. Add one in the web console at ${baseUrl}.`);
+      setNotice("No cards yet. Press n to add one.");
     }
   };
 
@@ -419,6 +433,37 @@ function Console({
   const cardAgent = profiles.find((profile) => profile.id === cardRuns[0]?.agentProfileId);
   const runActive = Boolean(latestRunStatus) && !["succeeded", "failed", "cancelled"].includes(latestRunStatus);
   const quietLine = quietRunStatus(cardAgent?.cli, runActive);
+  const latestSettledRunId =
+    latestRunId && ["succeeded", "failed", "cancelled"].includes(latestRunStatus) ? latestRunId : null;
+  const hasConflicts = mergeStates.some((state) => state.state === "conflicted");
+  const canResolveConflicts =
+    hasConflicts && current?.status !== "done" && current?.status !== "cancelled";
+
+  /**
+   * Merge state on its own cadence: when the selected card changes, and
+   * again when a run settles. The 3s board refresh must not ask GitHub;
+   * that is a round trip per pull request per viewer. No pull requests
+   * answers [] without a GitHub call.
+   */
+  useEffect(() => {
+    if (!current) {
+      setMergeStates([]);
+      return;
+    }
+    let cancelled = false;
+    setMergeStates([]);
+    void client
+      .getMergeStatus(current.id)
+      .then((states) => {
+        if (!cancelled) setMergeStates(states);
+      })
+      .catch(() => {
+        if (!cancelled) setMergeStates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, current?.id, latestSettledRunId]);
 
   // Follow the selected card's newest run.
   useEffect(() => {
@@ -588,6 +633,79 @@ function Console({
       }
       if (screen !== "board") return;
 
+      if (overlay !== "none") {
+        if (key.escape || input === "q") {
+          setOverlay("none");
+          return;
+        }
+        const rows =
+          overlay === "spend" ? (usage?.byFeature.length ?? 0) : (sessionRows?.length ?? 0);
+        if (key.downArrow || input === "j") {
+          setOverlayIndex((i) => Math.min(i + 1, Math.max(0, rows - 1)));
+          return;
+        }
+        if (key.upArrow || input === "k") {
+          setOverlayIndex((i) => Math.max(i - 1, 0));
+          return;
+        }
+        if (key.return) {
+          const featureId =
+            overlay === "spend" ? usage?.byFeature[overlayIndex]?.featureId : sessionRows?.[overlayIndex]?.featureId;
+          if (featureId) {
+            setSelectedFeatureId(featureId);
+            setOverlay("none");
+          }
+          return;
+        }
+        return;
+      }
+
+      if (newCard !== null) {
+        if (key.escape) {
+          setNewCard(null);
+          return;
+        }
+        if (key.return) {
+          const title = newCard.trim();
+          setNewCard(null);
+          if (!title || !projectId) return;
+          void client
+            .createFeature({ projectId, title })
+            .then((created) => {
+              setSelectedFeatureId(created.id);
+              setNotice(`Added ${created.title}`);
+            })
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setNewCard(newCard.slice(0, -1));
+          return;
+        }
+        if (input) setNewCard(newCard + input);
+        return;
+      }
+
+      if (deleteConfirm) {
+        if (input === "y" || input === "D") {
+          setDeleteConfirm(false);
+          if (!current) return;
+          void client
+            .deleteFeature(current.id)
+            .then(() => setNotice(`Deleted ${current.title}`))
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+          return;
+        }
+        if (key.escape || input === "n") {
+          setDeleteConfirm(false);
+          setNotice("Kept the card.");
+          return;
+        }
+        return;
+      }
+
       // Composing a follow-up prompt: everything goes into the text.
       if (takeover !== null) {
         if (key.escape) {
@@ -628,8 +746,23 @@ function Console({
         return;
       }
       if (input === "q") quit();
-      if (key.downArrow || input === "j") setSelectedFeatureId(ordered[Math.min(selected + 1, ordered.length - 1)]?.id ?? null);
-      if (key.upArrow || input === "k") setSelectedFeatureId(ordered[Math.max(selected - 1, 0)]?.id ?? null);
+      if (key.downArrow || input === "j") {
+        setDeleteConfirm(false);
+        setSelectedFeatureId(ordered[Math.min(selected + 1, ordered.length - 1)]?.id ?? null);
+      }
+      if (key.upArrow || input === "k") {
+        setDeleteConfirm(false);
+        setSelectedFeatureId(ordered[Math.max(selected - 1, 0)]?.id ?? null);
+      }
+      if (input === "n") {
+        if (!projectId) {
+          setNotice("No project yet. Run `bento setup` to connect a repository.");
+          return;
+        }
+        setDeleteConfirm(false);
+        setNewCard("");
+        return;
+      }
       if (!current) return;
       /**
        * Three places a card can be, and the keys mean different things
@@ -672,7 +805,7 @@ function Console({
         } else {
           void client
             .recheckGate(current.id)
-            .then(() => setNotice("Re-checked the gate"))
+            .then(() => setNotice("Re-checked the requirements"))
             .then(refresh)
             .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
         }
@@ -715,6 +848,74 @@ function Console({
             .then(refresh)
             .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
         }
+      }
+      if (input === "f") {
+        if (isDone) {
+          setNotice(finishedHint);
+        } else if (current.status === "cancelled") {
+          setNotice("This card was cancelled. It has no further actions.");
+        } else {
+          void client
+            .finishFeature(current.id)
+            .then(() => setNotice(`Marked ${current.title} completed`))
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        }
+      }
+      if (input === "D") {
+        if (latestRunId && !["succeeded", "failed", "cancelled"].includes(latestRunStatus)) {
+          setNotice("An agent is working this card. Stop it (x) or wait for it to finish.");
+          return;
+        }
+        setDeleteConfirm(true);
+        return;
+      }
+      if (input === "m") {
+        if (isDone) {
+          setNotice(finishedHint);
+        } else if (current.status === "cancelled") {
+          setNotice("This card was cancelled. It has no further actions.");
+        } else if (!canResolveConflicts) {
+          setNotice("GitHub reports no merge conflicts on this card's pull requests.");
+        } else if (runActive) {
+          setNotice("An agent is working this card. Resolve conflicts when it finishes.");
+        } else {
+          void client
+            .resolveConflicts(current.id)
+            .then(() =>
+              setNotice(
+                "Resolving conflicts. The stage agent rebases the branch, and the pull request updates when it finishes.",
+              ),
+            )
+            .then(refresh)
+            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        }
+      }
+      if (input === "u") {
+        if (!projectId) {
+          setNotice("No project yet. Run `bento setup` to connect a repository.");
+          return;
+        }
+        setOverlayIndex(0);
+        setOverlay("spend");
+        void client
+          .getUsage(projectId)
+          .then(setUsage)
+          .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        return;
+      }
+      if (input === "e") {
+        if (!projectId) {
+          setNotice("No project yet. Run `bento setup` to connect a repository.");
+          return;
+        }
+        setOverlayIndex(0);
+        setOverlay("sessions");
+        void client
+          .listSessions(projectId)
+          .then((result) => setSessionRows(result.sessions))
+          .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
+        return;
       }
       if (input === "s") {
         if (!inAStage) {
@@ -803,14 +1004,68 @@ function Console({
 
       {options.mode === "runner" && <RunnerNotice server={options.server ?? baseUrl} sandbox={options.sandbox} />}
 
-      <Board
-        stages={stages}
-        features={features}
-        profiles={profiles}
-        selectedIndex={selected}
-        runStatus={runStatus}
-        gateWait={gateWait}
-      />
+      {overlay === "spend" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text bold>Spend</Text>
+          <Text color="gray">
+            Bento records the figure an agent CLI prints. It does not price tokens itself. Escape
+            goes back to the board.
+          </Text>
+          {usage ? (
+            usage.byFeature.length === 0 ? (
+              <Text color="gray">No cards yet. Add one from the board to start tracking spend.</Text>
+            ) : (
+              usage.byFeature.map((row, i) => (
+                <Text key={row.featureId} color={i === overlayIndex ? "cyan" : "white"}>
+                  {i === overlayIndex ? " > " : "   "}
+                  {row.title}{" "}
+                  {row.runs === 0
+                    ? "No runs"
+                    : row.costUsd === null
+                      ? "Not reported"
+                      : `$${row.costUsd.toFixed(2)}${row.runsWithoutCost > 0 ? "+" : ""}`}
+                </Text>
+              ))
+            )
+          ) : (
+            <Text color="gray">Loading spend...</Text>
+          )}
+        </Box>
+      )}
+
+      {overlay === "sessions" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text bold>Sessions</Text>
+          <Text color="gray">
+            Every conversation in this project. Enter opens the card. Escape goes back.
+          </Text>
+          {sessionRows ? (
+            sessionRows.length === 0 ? (
+              <Text color="gray">No sessions yet. Start an agent from the board to begin a conversation.</Text>
+            ) : (
+              sessionRows.map((row, i) => (
+                <Text key={row.featureId} color={i === overlayIndex ? "cyan" : "white"}>
+                  {i === overlayIndex ? " > " : "   "}
+                  {row.title} {row.latestRun.status} {row.runCount} runs
+                </Text>
+              ))
+            )
+          ) : (
+            <Text color="gray">Loading sessions...</Text>
+          )}
+        </Box>
+      )}
+
+      {overlay === "none" && (
+        <Board
+          stages={stages}
+          features={features}
+          profiles={profiles}
+          selectedIndex={selected}
+          runStatus={runStatus}
+          gateWait={gateWait}
+        />
+      )}
 
       {current && (
         <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
@@ -819,6 +1074,14 @@ function Console({
             <Text color={statusColor(current.status)}> {current.status}</Text>
             {spend && <Text color="gray"> {spend}</Text>}
           </Box>
+          {canResolveConflicts && (
+            <Text color="yellow">
+              GitHub cannot merge {mergeStates.filter((s) => s.state === "conflicted").length === 1
+                ? "this card's pull request"
+                : "some of this card's pull requests"}
+              : the base branch has moved and the changes collide. Press m to resolve conflicts.
+            </Text>
+          )}
           <Text bold color="gray">{showChanges ? "Changes" : showHistory ? "History" : "Agent logs"}</Text>
           {showChanges ? (
             <>
@@ -864,6 +1127,21 @@ function Console({
         </Box>
       )}
 
+      {newCard !== null && (
+        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="cyan">New card. Enter to add it to the backlog, Escape to cancel.</Text>
+          <Text>{newCard}▊</Text>
+        </Box>
+      )}
+      {deleteConfirm && current && (
+        <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
+          <Text color="red">Delete {current.title}?</Text>
+          <Text color="gray">
+            It leaves the board for everyone. The branch and any pull request stay. There is no undo.
+          </Text>
+          <Text color="gray">y delete · n cancel</Text>
+        </Box>
+      )}
       {takeover !== null && (
         <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
           <Text color="cyan">{takeoverTitle(cardAgent?.cli, runActive, cardAgent?.name ?? "The agent")}</Text>
@@ -881,10 +1159,13 @@ function Console({
       {isRawModeSupported ? (
         <Box flexDirection="column">
           <Text color="gray">
-            look: j/k move · h {showHistory ? "logs" : "history"} · d {showChanges ? "logs" : "changes"} · r recheck · q
-            quit
+            look: j/k move · h {showHistory ? "logs" : "history"} · d {showChanges ? "logs" : "changes"} · r recheck ·
+            u spend · e sessions · q quit
           </Text>
-          <Text color="gray">act: s start · x stop · c message · a approve · shift+R reject · b send back</Text>
+          <Text color="gray">
+            act: n new card · s start · x stop · c message · a approve · shift+R reject · b send back · f completed ·
+            m resolve · shift+D delete
+          </Text>
         </Box>
       ) : (
         <Text color="gray">read only: no terminal input available</Text>

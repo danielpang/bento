@@ -9,6 +9,9 @@ import { tenantDb as db } from "../middleware/tenant.js";
 import { maskSecret } from "../secrets.js";
 import { pingMcpServer } from "../mcp/client.js";
 import { safeFetchPolicy } from "../mcp/safe-fetch.js";
+import { fetchCatalog, featuredEntries, slugFor } from "../mcp/catalog.js";
+import { allowIconHosts, fetchServiceIcon, isIconHostAllowed } from "../mcp/icons.js";
+import { detectAuthType } from "../mcp/detect-auth.js";
 import { discoverOAuth, registerClient, DiscoveryError } from "../mcp/discovery.js";
 import {
   buildAuthorizeUrl,
@@ -72,7 +75,8 @@ const createServer = z.object({
   slug: z.string().regex(SLUG_PATTERN, "slugs are lowercase letters, digits, and dashes"),
   url: urlField,
   transport: z.enum(["http", "sse"]).default("http"),
-  authType: z.enum(["none", "api_key", "oauth"]),
+  /** Omitted means Bento probes the server and decides. */
+  authType: z.enum(["none", "api_key", "oauth"]).optional(),
   credentialScope: z.enum(["org", "user"]).default("org"),
   /** A member's own server: only their runs get it, any member may add one. */
   personal: z.boolean().default(false),
@@ -153,6 +157,9 @@ export function mcpRoutes(ctx: AppContext) {
         apiKeyHeader: server.apiKeyHeader,
         oauthClientConfigured: Boolean(server.clientId),
         orgCredential:
+          // A stored credential is connected. Access-token expiry is
+          // the gateway's problem (it refreshes); the console must not
+          // ask the member to sign in again until they disconnect.
           perUser || personal ? null : org && { connected: true, hint: org.hint, expiresAt: org.expiresAt },
         userCredential:
           personal && mineServer
@@ -170,10 +177,103 @@ export function mcpRoutes(ctx: AppContext) {
   });
 
   /**
+   * The browsable catalog: what a team can connect, before anyone has
+   * to know a URL. Public registry data, so it needs a signed-in caller
+   * and nothing more, but it does mark which entries this organization
+   * already has so the list reads as a state rather than a menu.
+   *
+   * A registry that will not load answers reachable:false with an empty
+   * list; the console then offers the custom URL form on its own.
+   */
+  routes.get("/catalog", async (c) => {
+    const access = await requireAccess(ctx, c);
+    if (!access.ok) return c.json({ error: "not found" }, 404);
+    const search = c.req.query("search") ?? "";
+    const policy = safeFetchPolicy(ctx.env);
+    const { entries: found, reachable } = await fetchCatalog(policy, {
+      registryUrl: ctx.env.BENTO_MCP_REGISTRY_URL,
+      search,
+    });
+
+    // Browsing leads with the curated set; a search is answered with
+    // what was asked for, in the registry's own order. The curated set
+    // needs no registry, so it still leads when the registry is down.
+    let entries = found;
+    if (!search.trim()) {
+      const featured = featuredEntries();
+      const pinned = new Set(featured.map((entry) => entry.name));
+      entries = [...featured, ...found.filter((entry) => !pinned.has(entry.name))];
+    }
+
+    // Mark what is already here, by URL: the same server added by hand
+    // and picked from the catalog is one server, not two.
+    const existing = await db(c, ctx)
+      .select({ url: mcpServers.url, userId: mcpServers.userId })
+      .from(mcpServers)
+      .where(orgFilter(access.organizationId));
+    const me = actor(c);
+    const mine = new Set(
+      existing.filter((row) => !row.userId || row.userId === me).map((row) => normalizeUrl(row.url)),
+    );
+
+    // Only hosts the catalog actually offered may be fetched for an
+    // icon, so the icon route cannot be pointed anywhere.
+    allowIconHosts(entries.map((entry) => entry.iconHost));
+
+    return c.json({
+      reachable,
+      canManage: access.canManage,
+      entries: entries.map((entry) => ({
+        ...entry,
+        slug: slugFor(entry),
+        added: mine.has(normalizeUrl(entry.url)),
+        iconUrl: entry.iconHost ? `/api/mcp/catalog/icon/${encodeURIComponent(entry.iconHost)}` : null,
+      })),
+    });
+  });
+
+  /**
+   * A service's own icon, fetched and cached by the server so the
+   * console never calls a vendor's domain itself. Only hosts the
+   * catalog has offered are fetchable, and anything that is not a small
+   * image answers 404, which the console renders as a monogram.
+   */
+  routes.get("/catalog/icon/:host", async (c) => {
+    const access = await requireAccess(ctx, c);
+    if (!access.ok) return c.json({ error: "not found" }, 404);
+    const host = decodeURIComponent(c.req.param("host") ?? "").toLowerCase();
+    // The allow list is filled by a catalog read, which happens in
+    // whichever process served it. Another process (or one restarted
+    // since) has an empty list, so fill it from the cached catalog
+    // before refusing, rather than 404ing an icon that is legitimately
+    // on offer.
+    if (!isIconHostAllowed(host)) {
+      const { entries } = await fetchCatalog(safeFetchPolicy(ctx.env), {
+        registryUrl: ctx.env.BENTO_MCP_REGISTRY_URL,
+      });
+      allowIconHosts(entries.map((entry) => entry.iconHost));
+    }
+    if (!isIconHostAllowed(host)) return c.json({ error: "not found" }, 404);
+    const icon = await fetchServiceIcon(host, safeFetchPolicy(ctx.env));
+    if (!icon) return c.json({ error: "not found" }, 404);
+    c.header("content-type", icon.contentType);
+    // Immutable enough: a favicon changing is not worth a revalidation
+    // on every settings visit.
+    c.header("cache-control", "private, max-age=86400");
+    // Agent-adjacent bytes from a third party: never let them be
+    // interpreted as anything but an image on our origin.
+    c.header("content-security-policy", "sandbox; default-src 'none'");
+    c.header("x-content-type-options", "nosniff");
+    return c.body(icon.body as unknown as ArrayBuffer);
+  });
+
+  /**
    * Line format for the TUI and Mac app, which cannot import the typed
-   * client: mcp|<id>|<slug>|<authType>|<scope>|<enabled>|<connected>.
-   * connected reflects the org credential, or the caller's own for a
-   * per-user server. No route returns a secret; this is no exception.
+   * client: access|<canManage> then
+   * mcp|<id>|<slug>|<authType>|<scope>|<enabled>|<connected>|<name>.
+   * Name is last because it may contain pipes. connected reflects the
+   * org credential, or the caller's own for a per-user server. No
+   * route returns a secret; this is no exception.
    */
   routes.get("/plain", async (c) => {
     const access = await requireAccess(ctx, c);
@@ -188,20 +288,22 @@ export function mcpRoutes(ctx: AppContext) {
           : isNull(mcpCredentials.organizationId),
       );
     const me = actor(c);
-    const lines = servers
-      .filter((server) => !server.userId || server.userId === me)
-      .map((server) => {
-        const personal = server.userId !== null;
-        const perUser = personal || (server.authType === "oauth" && server.credentialScope === "user");
-        const connected =
-          server.authType === "none"
-            ? true
-            : perUser
-              ? credentials.some((r) => r.serverId === server.id && r.userId === me)
-              : credentials.some((r) => r.serverId === server.id && r.userId === null);
-        const scope = personal ? "personal" : server.credentialScope;
-        return `mcp|${server.id}|${server.slug}|${server.authType}|${scope}|${server.enabled}|${connected}`;
-      });
+    const lines = [`access|${access.canManage ? "1" : "0"}`];
+    for (const server of servers) {
+      if (server.userId && server.userId !== me) continue;
+      const personal = server.userId !== null;
+      const perUser = personal || (server.authType === "oauth" && server.credentialScope === "user");
+      const connected =
+        server.authType === "none"
+          ? true
+          : perUser
+            ? credentials.some((r) => r.serverId === server.id && r.userId === me)
+            : credentials.some((r) => r.serverId === server.id && r.userId === null);
+      const scope = personal ? "personal" : server.credentialScope;
+      lines.push(
+        `mcp|${server.id}|${server.slug}|${server.authType}|${scope}|${server.enabled}|${connected}|${server.name}`,
+      );
+    }
     return c.text(lines.join("\n"));
   });
 
@@ -216,6 +318,9 @@ export function mcpRoutes(ctx: AppContext) {
     if (!body.personal && !access.canManage) {
       return c.json({ error: "organization admin required" }, 403);
     }
+    // Adding from the catalog says nothing about auth, because the
+    // server itself knows. Ask it rather than making somebody guess.
+    const authType = body.authType ?? (await detectAuthType(body.url, body.transport, safeFetchPolicy(ctx.env)));
     try {
       const [row] = await db(c, ctx)
         .insert(mcpServers)
@@ -227,10 +332,9 @@ export function mcpRoutes(ctx: AppContext) {
           slug: body.slug,
           url: body.url,
           transport: body.transport,
-          authType: body.authType,
-          // A personal oauth server is always the owner's own sign in.
-          credentialScope:
-            body.authType === "oauth" ? (body.personal ? "user" : body.credentialScope) : "org",
+          authType,
+          // A personal server is always its owner's own credential.
+          credentialScope: body.personal ? "user" : authType === "oauth" ? body.credentialScope : "org",
           apiKeyHeader: body.apiKeyHeader,
           clientId: body.clientId ?? null,
           encryptedClientSecret: body.clientSecret ? ctx.secretBox.encrypt(body.clientSecret) : null,
@@ -621,7 +725,15 @@ export function mcpRoutes(ctx: AppContext) {
         safeFetchPolicy(ctx.env),
       );
     } catch (err) {
-      if (err instanceof OAuthError) return outcome(c, "failed");
+      if (err instanceof OAuthError) {
+        // The message carries the provider's own error code and no
+        // secret, and without it a failed connect is undiagnosable:
+        // the console can only say the sign in did not complete.
+        console.warn(
+          `[mcp] token exchange failed for ${server.name} at ${new URL(server.tokenEndpoint).host}: ${err.message}`,
+        );
+        return outcome(c, "failed");
+      }
       throw err;
     }
 
@@ -725,6 +837,16 @@ function callbackUrl(ctx: AppContext, serverId: string): string {
 
 function outcome(c: Parameters<typeof actor>[0], result: string) {
   return c.redirect(`/settings?tab=mcp&mcp=${result}`);
+}
+
+/** Compares server URLs ignoring a trailing slash and case in the host. */
+function normalizeUrl(value: string): string {
+  try {
+    const u = new URL(value);
+    return `${u.protocol}//${u.host.toLowerCase()}${u.pathname.replace(/\/$/, "")}${u.search}`;
+  } catch {
+    return value.trim().toLowerCase();
+  }
 }
 
 function orgFilter(organizationId: string | null) {

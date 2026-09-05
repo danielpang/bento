@@ -4,6 +4,7 @@ import {
   agentRunPrompt,
   forgetsBetweenRuns,
   modelGuidanceFor,
+  withProviderOutageAdvice,
   type RunOutcome,
 } from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
@@ -24,7 +25,9 @@ import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
+import { syncPullRequestsFromRun } from "./sync-pr-from-run.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
+import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
@@ -32,10 +35,13 @@ import { buildStagePrompt } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
-import { extendRunGrant, revokeRunGrant, runHasActiveMcp, sweepExpiredGrants } from "../mcp/grants.js";
+import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
+import { isBetaRun } from "../feature-flags.js";
+import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
@@ -292,6 +298,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
+    ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+      run_id: runId,
+      feature_id: feature.id,
+      source: "sandbox_provision",
+    });
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
@@ -301,7 +312,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP servers are attached before the command is built, so the
   // gateway flags can join the argv. Never fails the run: an
   // unattachable server is left out with a transcript note.
-  const { extraArgs: mcpArgs } = await prepareRunMcp(ctx, {
+  const { extraArgs: mcpArgs, cardTools } = await prepareRunMcp(ctx, {
     runId,
     organizationId: feature.organizationId,
     actingUserId: run.startedBy,
@@ -309,6 +320,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     handle,
     restrictNetwork,
     mountedConfigPaths: authMounts.map((m) => m.containerPath),
+    // Splitting a card is unfinished product, and the console that
+    // shows a group is behind the same flag. An auto-started run has
+    // nobody acting, so the project's owner answers for it.
+    cardTools: await isBetaRun(ctx, {
+      actingUserId: run.startedBy,
+      projectOwnerId: project.ownerId,
+    }),
     say: saySystem,
   });
 
@@ -323,6 +341,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     handle,
     sendInitialPrompt: true,
     mcpArgs,
+    cardTools,
   });
 
   // Credentials come from the owning organization, never from the
@@ -376,6 +395,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     } catch (err) {
       // A missing snapshot costs rollback, not the run.
       console.error(`could not snapshot before run ${runId}:`, err);
+      ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+        run_id: runId,
+        source: "sandbox_snapshot",
+      });
     }
   }
 
@@ -670,12 +693,16 @@ export function dshFailureAdvice(error: string): string | null {
  * up tool-specific advice on their own. Same sentences, same place the
  * hosted board reads the error from, for every runner client.
  */
-export function runnerReportedError(cli: string | undefined, error: string | undefined): string | null {
+export function runnerReportedError(
+  cli: string | undefined,
+  error: string | undefined,
+  model?: string,
+): string | null {
   const base = error ?? null;
   if (!base) return null;
   const advice = cli === "pool" ? poolFailureAdvice(base) : cli === "dsh" ? dshFailureAdvice(base) : null;
   if (advice) return `${base} ${advice}`;
-  return base;
+  return withProviderOutageAdvice(base, { cli, model });
 }
 
 export function mergeAgentExecEnv(
@@ -749,7 +776,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
             runId: next.id,
             status: "queued",
           });
-          if (runRow.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+          if (runRow.executor === "server") await enqueueRun(ctx, next.id);
           return;
         }
       }
@@ -780,6 +807,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
         : profile.cli === "dsh"
           ? dshFailureAdvice(outcome.error ?? "")
           : null;
+    const providerAdvice = toolAdvice
+      ? `${outcome.error} ${toolAdvice}`
+      : withProviderOutageAdvice(outcome.error ?? "", { cli: profile.cli, model: profile.model });
     const enriched =
       authDead && profile.cli === "claude-code"
         ? {
@@ -791,8 +821,8 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
               ...outcome,
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
             }
-          : toolAdvice
-            ? { ...outcome, error: `${outcome.error} ${toolAdvice}` }
+          : providerAdvice !== (outcome.error ?? "")
+            ? { ...outcome, error: providerAdvice }
             : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");
@@ -850,34 +880,80 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   }
   if (mustPublish && publisher) {
     const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
+    const publishables = repoRows.map((row) => {
+      const preparedRepo = prepared.find((p) => p.name === row.name);
+      const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
+      return {
+        id: row.id,
+        name: row.name,
+        repoUrl: row.repoUrl,
+        githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
+        defaultBranch: row.defaultBranch,
+        ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
+        ...(ctx.driver.exportRepository
+          ? {
+              exportBundle: () =>
+                ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
+            }
+          : {}),
+      };
+    });
     const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
       featureId: feature.id,
       featureTitle: feature.title,
       branch,
-      repositories: repoRows.map((row) => {
-        const preparedRepo = prepared.find((p) => p.name === row.name);
-        const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-        return {
-          id: row.id,
-          name: row.name,
-          repoUrl: row.repoUrl,
-          githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
-          defaultBranch: row.defaultBranch,
-          ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
-          ...(ctx.driver.exportRepository
-            ? {
-                exportBundle: () =>
-                  ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
-              }
-            : {}),
-        };
-      }),
+      repositories: publishables,
     }, { includeStageNotes });
+    const [runRow] = await ctx.db
+      .select({ startedBy: agentRuns.startedBy })
+      .from(agentRuns)
+      .where(eq(agentRuns.id, runId))
+      .limit(1);
+    const recovery = await recoverAncestryPublishFailures(
+      ctx,
+      ctx.db,
+      feature,
+      failures,
+      failures.map((f) => ({
+        name: f.name,
+        defaultBranch: publishables.find((r) => r.name === f.name)?.defaultBranch ?? "main",
+      })),
+      {
+        publisher,
+        branch,
+        repositories: publishables,
+        includeStageNotes,
+      },
+      runRow?.startedBy ?? "system",
+    );
+    const allPublished = [...published, ...recovery.draftPublished];
+    if (allPublished.length > 0 && runKind !== "rebase") {
+      await syncPullRequestsFromRun(ctx.db, publisher, {
+        runId,
+        stageSlug: stage.slug,
+        stageName: stage.name,
+        published: allPublished,
+        say: saySystem,
+      });
+    }
     publishNotes.push(
       ...published.map((pr) => `Opened pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}`),
-      ...failures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
+      ...recovery.draftPublished.map(
+        (pr) =>
+          `Opened draft pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}. The branch may have merge conflicts until it is rebased.`,
+      ),
+      ...(recovery.rebaseRun
+        ? [
+            "The branch is behind the base branch. A rebase run was started; the pull request will publish when it finishes.",
+          ]
+        : [
+            ...failures
+              .filter((f) => !recovery.draftPublished.some((p) => p.name === f.name))
+              .map((f) => `Could not publish ${f.name}: ${f.reason}`),
+            ...recovery.draftFailures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
+          ]),
     );
-    if (published.length === 0 && failures.length === 0) {
+    if (published.length === 0 && failures.length === 0 && recovery.draftPublished.length === 0) {
       publishNotes.push(wording.noCommits);
     }
   }
@@ -929,6 +1005,11 @@ async function buildRunCommand(
     sendInitialPrompt: boolean;
     /** Gateway flags for the org's MCP servers, after the profile args. */
     mcpArgs?: string[];
+    /**
+     * Whether Bento's own tools reached the sandbox. The prompt only
+     * mentions splitting a card when the tool that does it is there.
+     */
+    cardTools?: boolean;
   },
 ): Promise<{
   argv: string[];
@@ -966,6 +1047,7 @@ async function buildRunCommand(
     mounted,
     { name: profile.name, skill: profile.skill },
     `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
+    input.cardTools ?? false,
   );
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
   // Only ordinary work compacts: judge and rebase prompts are complete
@@ -1217,7 +1299,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     runId: next.id,
     status: "queued",
   });
-  if (source.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+  if (source.executor === "server") await enqueueRun(ctx, next.id);
 }
 
 /**
@@ -1357,6 +1439,7 @@ async function announceRunFinished(
   if (announce) {
     void announce(runId).catch((err: unknown) => {
       console.warn(`could not record what run ${runId} cost:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "billing_on_run_finished" });
     });
   }
   await captureRunFinished(ctx, runId, status);
@@ -1439,10 +1522,18 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
      */
     void resumeInterruptedRun(ctx, orphan, sandbox).catch(async (err) => {
       console.error(`could not resume run ${orphan.id} after the restart:`, err);
+      ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
+        run_id: orphan.id,
+        source: "resume_interrupted",
+      });
       try {
         await failRunAsInterrupted(ctx, orphan);
       } catch (inner) {
         console.error(`could not close run ${orphan.id} as interrupted either:`, inner);
+        ctx.analytics?.captureException(inner, orphan.startedBy, orphan.organizationId, {
+          run_id: orphan.id,
+          source: "resume_interrupted_close",
+        });
       }
     });
   }
@@ -1584,8 +1675,8 @@ async function resumeInterruptedRun(
   // extended to cover the rest of the budget. A grant revoked or
   // expired during the outage stays dead, and the run's tools answer
   // 404, which is honest.
-  const hasGrant = adapter.mcp ? await runHasActiveMcp(ctx, run.id) : false;
-  const mcpArgs = hasGrant ? adapter.mcp?.extraArgs?.() ?? [] : [];
+  const grantServers = adapter.mcp ? await runGrantServerIds(ctx, run.id) : [];
+  const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
   const { argv, live, liveChannel } = await buildRunCommand(ctx, {
     run,
@@ -1600,6 +1691,10 @@ async function resumeInterruptedRun(
     // would replay the whole task as a new user turn.
     sendInitialPrompt: false,
     mcpArgs,
+    // Reproduced from the grant, never re-decided: a resumed run has to
+    // be told exactly what its first life was told, or the two halves
+    // of one session disagree about what tools exist.
+    cardTools: grantServers.includes(BENTO_SERVER_ID),
   });
 
   // What is left of the run's budget, not a fresh one: the agent has
@@ -1609,7 +1704,7 @@ async function resumeInterruptedRun(
     60_000,
     ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - (run.startedAt ? Date.now() - run.startedAt.getTime() : 0),
   );
-  if (hasGrant) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
+  if (grantServers.length > 0) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
 
   // Attach before touching shared state or the transcript, so a failed
   // attach leaves no misleading "reattached" line and no stale abort
@@ -1777,7 +1872,7 @@ async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
     .from(agentRuns)
     .where(and(eq(agentRuns.executor, "server"), eq(agentRuns.status, "queued")));
   for (const row of parked) {
-    await ctx.boss.send("run.execute", { runId: row.id });
+    await enqueueRun(ctx, row.id);
   }
 }
 
@@ -1818,9 +1913,14 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * slots idle. Independent single-job workers free each slot the moment
    * its run finishes. The count is this process's capacity, not a plan
    * limit: hosted Fly raises it, a laptop stays at the default of 4.
+   *
+   * The workers poll slowly and are woken by enqueueRun instead, so
+   * their ids are kept on the context for it. A run queued through a
+   * bare boss.send still runs, on the next poll.
    */
+  ctx.runWorkers = [];
   for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
-    await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1 }, async (jobs) => {
+    const workerId = await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1, pollingIntervalSeconds: RUN_WORKER_POLL_SECONDS }, async (jobs) => {
       for (const job of jobs) {
         try {
           await executeRun(ctx, job.data.runId);
@@ -1835,6 +1935,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
         }
       }
     });
+    ctx.runWorkers.push(workerId);
   }
 
   /**
@@ -1880,7 +1981,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     }
   }));
 
-  await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5 }, async (jobs) => {
+  // Polled at the interactive pace rather than the slow default: this
+  // is what moves a card once its run ends, and one worker every two
+  // seconds is cheap where a worker per slot was not.
+  await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     await Promise.all(
       jobs.map(async (job) => {
         try {
@@ -1923,13 +2027,15 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   }));
 
   /**
-   * A once-a-minute PostHog gauge of runs waiting for a `run.execute`
-   * worker. Skipped when analytics is off: the only consumer is the
-   * dashboard that decides whether to add workers.
+   * A PostHog gauge of runs waiting for a `run.execute` worker, every
+   * five minutes. Skipped when analytics is off: the only consumer is
+   * the dashboard that decides whether to add workers, and a queue
+   * that backs up does so over hours, so minute resolution bought
+   * nothing but a job, an archive row, and a query per minute.
    */
   if (ctx.analytics) {
     await ctx.boss.createQueue("run.queue-snapshot");
-    await ctx.boss.schedule("run.queue-snapshot", "* * * * *");
+    await ctx.boss.schedule("run.queue-snapshot", "*/5 * * * *");
     await ctx.boss.work(
       "run.queue-snapshot",
       captureJobErrors(ctx.analytics, "run.queue-snapshot", async () => {
@@ -1953,7 +2059,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
  * driver raised it, and the server does not import their SDKs.
  */
 function describeSandboxError(err: unknown): string {
-  const base = String(err);
+  // A plain Error carrying a written sentence is that sentence. The
+  // "Error:" String() puts in front of it says nothing a reader wants,
+  // while a driver's own subclass names who failed and is kept.
+  const base = err instanceof Error && err.name === "Error" ? err.message : String(err);
   if (typeof err !== "object" || err === null) return base;
   const { stderr, stdout } = err as { stderr?: unknown; stdout?: unknown };
   const output = [stderr, stdout].find((value) => typeof value === "string" && value.trim() !== "");

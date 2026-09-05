@@ -40,11 +40,16 @@ export function Board({
   gateWait: Record<string, string | undefined>;
 }) {
   const ordered = orderFeatures(stages, features);
+  const finished = features.filter(isFinished);
 
   return (
     <Box flexDirection="column">
       {[{ id: null, name: "Backlog" }, ...stages].map((stage) => {
-        const inStage = features.filter((f) => (f.currentStageId ?? null) === (stage.id ?? null));
+        const inStage = features.filter((f) =>
+          stage.id
+            ? inLane(f, stage.id)
+            : inBacklog(f),
+        );
         const agent = "id" in stage && stage.id ? profiles.find((p) => p.id === findStage(stages, stage.id)?.defaultAgentProfileId) : undefined;
         return (
           <Box key={stage.id ?? "backlog"} flexDirection="column" marginBottom={1}>
@@ -56,27 +61,73 @@ export function Board({
               {agent && <Text color="magenta"> [{agent.cli}]</Text>}
             </Box>
             {inStage.length === 0 && <Text color="gray"> empty</Text>}
-            {inStage.map((feature) => {
-              const index = ordered.findIndex((f) => f.id === feature.id);
-              const selected = index === selectedIndex;
-              const state = cardState(feature, runStatus[feature.id]);
-              const waiting = feature.status === "gated" ? gateWait[feature.id] : undefined;
-              const detail = waiting ?? "";
-              return (
-                <Box key={feature.id} flexDirection="column">
-                  <Box>
-                    <Text color={selected ? "cyan" : "gray"}>{selected ? " > " : "   "}</Text>
-                    <Text color={statusColor(state)}>●</Text>
-                    <Text color={selected ? "cyan" : "white"}> {feature.title}</Text>
-                    <Text color="gray"> {state}</Text>
-                  </Box>
-                  {detail && <Text color="gray">{"     "}{detail}</Text>}
-                </Box>
-              );
-            })}
+            {inStage.map((feature) => (
+              <CardRow
+                key={feature.id}
+                feature={feature}
+                ordered={ordered}
+                selectedIndex={selectedIndex}
+                runStatus={runStatus[feature.id]}
+                waiting={feature.status === "gated" ? gateWait[feature.id] : undefined}
+              />
+            ))}
           </Box>
         );
       })}
+      {/*
+        Finished work leaves its stage, the way the web console's
+        Completed lane does. A shipped card sitting in Review next to
+        work still being reviewed made the count lie about the queue.
+      */}
+      <Box flexDirection="column" marginBottom={1}>
+        <Box>
+          <Text bold color="white">
+            Completed
+          </Text>
+          <Text color="gray"> ({finished.length})</Text>
+          <Text color="gray"> finished work</Text>
+        </Box>
+        {finished.length === 0 && <Text color="gray"> empty</Text>}
+        {finished.map((feature) => (
+          <CardRow
+            key={feature.id}
+            feature={feature}
+            ordered={ordered}
+            selectedIndex={selectedIndex}
+            runStatus={runStatus[feature.id]}
+          />
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+function CardRow({
+  feature,
+  ordered,
+  selectedIndex,
+  runStatus,
+  waiting,
+}: {
+  feature: Feature;
+  ordered: Feature[];
+  selectedIndex: number;
+  runStatus: string | undefined;
+  waiting?: string | undefined;
+}) {
+  const index = ordered.findIndex((f) => f.id === feature.id);
+  const selected = index === selectedIndex;
+  const state = cardState(feature, runStatus);
+  const detail = waiting ?? "";
+  return (
+    <Box flexDirection="column">
+      <Box>
+        <Text color={selected ? "cyan" : "gray"}>{selected ? " > " : "   "}</Text>
+        <Text color={statusColor(state)}>●</Text>
+        <Text color={selected ? "cyan" : "white"}> {feature.title}</Text>
+        <Text color="gray"> {state}</Text>
+      </Box>
+      {detail && <Text color="gray">{"     "}{detail}</Text>}
     </Box>
   );
 }
@@ -100,11 +151,25 @@ export function cardState(feature: Feature, runStatus: string | undefined): stri
   return runStatus ?? "idle";
 }
 
-/** Flattened order used for keyboard selection: backlog first, then stages. */
+/** A card whose work is over: finished or abandoned, either way not moving. */
+export function isFinished(feature: Pick<Feature, "status">): boolean {
+  return feature.status === "done" || feature.status === "cancelled";
+}
+
+const inBacklog = (feature: Feature) => !feature.currentStageId && !isFinished(feature);
+const inLane = (feature: Feature, stageId: string) => feature.currentStageId === stageId && !isFinished(feature);
+
+/**
+ * Flattened order used for keyboard selection: backlog, then stages,
+ * then completed. Finished cards keep the stage they ended in, so
+ * leaving them in that lane would put the highlight on a shipped card
+ * while j/k walked what looked like the review queue.
+ */
 export function orderFeatures(stages: Stage[], features: Feature[]): Feature[] {
-  const backlog = features.filter((f) => !f.currentStageId);
-  const staged = stages.flatMap((stage) => features.filter((f) => f.currentStageId === stage.id));
-  return [...backlog, ...staged];
+  const backlog = features.filter(inBacklog);
+  const staged = stages.flatMap((stage) => features.filter((f) => inLane(f, stage.id)));
+  const finished = features.filter(isFinished);
+  return [...backlog, ...staged, ...finished];
 }
 
 function findStage(stages: Stage[], id: string | null): Stage | undefined {

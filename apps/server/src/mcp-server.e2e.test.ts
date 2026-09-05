@@ -368,6 +368,55 @@ test("authorization refuses projects the caller's organization does not hold", a
   assert.equal(empty.status, 400, "project scope with no projects is a mistake worth naming");
 });
 
+test("a connection stays authorized until it is disconnected", async () => {
+  const token = await signUp("mcp-inbound-persist@bento.test", "Persister");
+  await makeOrg(token, "Persist", "mcp-persist");
+  await makeProject(token, "Board");
+
+  const created = await jsonPost("/api/mcp-connections", { name: "Laptop", scope: "organization" }, token);
+  assert.equal(created.status, 201);
+  const connection = (await created.json()) as { id: string; token: string };
+
+  const cols = await ctx.pool.query<{ column_name: string }>(
+    `select column_name from information_schema.columns
+     where table_schema = 'public' and table_name = 'mcp_connections'`,
+  );
+  assert.equal(
+    cols.rows.some((row) => row.column_name === "expires_at"),
+    false,
+    "inbound connections must not expire; disconnect is what ends them",
+  );
+
+  const first = await rpc(connection.token, "ping");
+  assert.equal(first.status, 200);
+  const later = await rpc(connection.token, "tools/list");
+  assert.equal(later.status, 200, "a later call with the same token must still be authorized");
+
+  // Spec-following MCP clients treat 401 as a cue to start OAuth. This
+  // endpoint has no authorization server, so a missing token is 404
+  // with no WWW-Authenticate, the same as a bad one.
+  const anon = await app.request("/api/mcp-server", {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } },
+    }),
+  });
+  assert.equal(anon.status, 404);
+  assert.equal(anon.headers.get("www-authenticate"), null);
+
+  const gone = await app.request(`/api/mcp-connections/${connection.id}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(gone.status, 200);
+  const dead = await rpc(connection.token, "ping");
+  assert.equal(dead.status, 404, "disconnect is what ends the token");
+});
+
 test("a revoked connection stops serving immediately", async () => {
   const token = await signUp("mcp-inbound-revoke@bento.test", "Revoker");
   await makeOrg(token, "Revoke", "mcp-revoke");

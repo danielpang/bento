@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BentoClient, Project } from "@bento/api-client";
+import { RenameButton } from "./IconButtons.js";
 import { Modal } from "./Modal.js";
 import { ProjectSettings } from "./ProjectSettings.js";
 import { PromptDialog } from "./PromptDialog.js";
@@ -71,10 +72,6 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Projects</h3>
-      <p className="muted">
-        Every board belongs to a project. Open one to change how it works with Linear. Removing one
-        takes its cards, runs, and pipeline with it.
-      </p>
 
       {failed ? (
         <p className="error">Could not load the projects. Retry once the server is reachable.</p>
@@ -87,6 +84,11 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
           <div key={project.id} className="gate-check">
             <span className="gate-check-text">
               <span className="gate-check-name">{project.name}</span>
+              <RenameButton
+                label={`Rename ${project.name}`}
+                disabled={busy}
+                onClick={() => setRenaming(project)}
+              />
               {/* A project can exist before its code does, so this is often absent. */}
               {project.localPath && (
                 <>
@@ -95,13 +97,10 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
                 </>
               )}
             </span>
-            {/* One slot for all three, so they stay together as a path wraps. */}
+            {/* One slot for both, so they stay together as a path wraps. */}
             <span className="member-action">
               <button className="btn btn-ghost" disabled={busy} onClick={() => show(project.id)}>
                 Settings
-              </button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setRenaming(project)}>
-                Rename
               </button>
               <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(project)}>
                 Remove

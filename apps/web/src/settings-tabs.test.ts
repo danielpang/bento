@@ -24,3 +24,19 @@ test("local mode has no Billing, even if the address asked for it", () => {
   assert.ok(!sections.some((t) => t.id === "billing"));
   assert.equal(resolveSettingsTab(sections, "billing"), "appearance");
 });
+
+test("local mode has no Slack, which is an organization's to install", () => {
+  const sections = settingsSections("local", { hasBilling: false, requested: "slack" });
+  assert.ok(!sections.some((t) => t.id === "slack"));
+  assert.equal(resolveSettingsTab(sections, "slack"), "appearance");
+});
+
+test("a hosted team keeps Slack, in its place between Linear and MCP", () => {
+  const sections = settingsSections("multi", { hasBilling: false, requested: "appearance" });
+  const ids = sections.map((t) => t.id);
+  assert.deepEqual(ids.slice(ids.indexOf("linear"), ids.indexOf("linear") + 3), [
+    "linear",
+    "slack",
+    "mcp",
+  ]);
+});

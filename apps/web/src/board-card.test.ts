@@ -2,10 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { Feature, FeatureSpend } from "@bento/api-client";
+import type { Feature, FeatureSpend, Stage } from "@bento/api-client";
 import { Board } from "./components/Board.js";
+import { BetaTestersScope } from "./beta.js";
 
 const noop = () => {};
+
+/** Cards from `feature()` sit in this lane; without it they never render. */
+const stage: Stage = {
+  id: "s1",
+  pipelineId: "pipe",
+  position: 0,
+  name: "Build",
+  slug: "build",
+  description: "",
+  defaultAgentProfileId: null,
+  gateType: "manual",
+  gateCriteria: [],
+  createPr: false,
+};
 
 function feature(status: Feature["status"], id = "f1"): Feature {
   return {
@@ -30,23 +45,30 @@ function spend(costUsd: number | null, extra: Partial<FeatureSpend> = {}): Featu
   };
 }
 
-function render(features: Feature[], spendByFeature: Record<string, FeatureSpend> = {}) {
+function render(
+  features: Feature[],
+  spendByFeature: Record<string, FeatureSpend> = {},
+  extra: { runStatusByFeature?: Record<string, string>; selectedId?: string; beta?: boolean } = {},
+) {
+  const board = createElement(Board, {
+    stages: [stage],
+    features,
+    profiles: [],
+    runStatusByFeature: extra.runStatusByFeature ?? {},
+    lastOutputByFeature: {},
+    pulses: {},
+    spendByFeature,
+    selectedId: extra.selectedId ?? null,
+    onSelect: noop,
+    onMove: noop,
+    onFinish: noop,
+    onNewCard: noop,
+    drawerOpen: false,
+  });
+  // Groups are behind the beta flag, and the flag defaults to off with
+  // no provider, which is what keeps every other test here unchanged.
   return renderToStaticMarkup(
-    createElement(Board, {
-      stages: [],
-      features,
-      profiles: [],
-      runStatusByFeature: {},
-      lastOutputByFeature: {},
-      pulses: {},
-      spendByFeature,
-      selectedId: null,
-      onSelect: noop,
-      onMove: noop,
-      onFinish: noop,
-      onNewCard: noop,
-      drawerOpen: false,
-    }),
+    extra.beta ? createElement(BetaTestersScope, { enabled: true, children: board }) : board,
   );
 }
 
@@ -85,4 +107,89 @@ test("spend sits in the existing meta row next to a PR chip", () => {
   assert.match(html, /class="card-meta-end"/);
   assert.match(html, /class="card-spend"[^>]*>\$4\.20/);
   assert.match(html, /PR #12/);
+});
+
+test("a card with a description still shows only its title on the board", () => {
+  const html = render([
+    {
+      ...feature("done"),
+      title: "Rework the mobile topbar",
+      description: "The chrome wraps below 720px. Search for Eircode finds this card.",
+    },
+  ]);
+  assert.match(html, /Rework the mobile topbar/);
+  assert.doesNotMatch(html, /The chrome wraps below 720px/);
+  assert.doesNotMatch(html, /Eircode/);
+  assert.doesNotMatch(html, /card-description/);
+});
+
+test("a card that was split wears a chip counting its parts", () => {
+  const html = render(
+    [feature("active", "parent"), { ...feature("active", "a"), parentId: "parent" }],
+    {},
+    { beta: true },
+  );
+  assert.match(html, /class="chip chip-parts" data-tone="idle"[^>]*>1 part</);
+});
+
+test("a card that was never split gets no new chip", () => {
+  // Acceptance check 8: a team that only files small cards sees no new
+  // ceremony, so the ordinary card's markup must be untouched.
+  const html = render([feature("active", "solo")], {}, { beta: true });
+  assert.doesNotMatch(html, /chip-parts/);
+});
+
+test("the chip takes its tone from the worst news in the group", () => {
+  const cards = [
+    feature("active", "parent"),
+    { ...feature("active", "a"), parentId: "parent" },
+    { ...feature("active", "b"), parentId: "parent" },
+  ];
+  const running = render(cards, {}, { beta: true, runStatusByFeature: { a: "running" } });
+  assert.match(running, /data-tone="running"[^>]*>2 parts, 1 running</);
+  const failed = render(cards, {}, { beta: true, runStatusByFeature: { a: "running", b: "failed" } });
+  assert.match(failed, /data-tone="failed"[^>]*>2 parts, 1 failed</);
+});
+
+test("groups are invisible to anybody not on the beta flag", () => {
+  const html = render([feature("active", "parent"), { ...feature("active", "a"), parentId: "parent" }]);
+  assert.doesNotMatch(html, /chip-parts/);
+  assert.doesNotMatch(html, /data-grouped/);
+});
+
+test("selecting one card of a group rings the rest and dims the board", () => {
+  const html = render(
+    [
+      feature("active", "parent"),
+      { ...feature("active", "a"), parentId: "parent" },
+      feature("active", "unrelated"),
+    ],
+    {},
+    { beta: true, selectedId: "a" },
+  );
+  assert.match(html, /class="board" data-grouped=""/);
+  // The parent and the selected part are related; the stranger is not.
+  assert.equal(html.match(/data-related=""/g)?.length, 2);
+});
+
+test("selecting a mid-level parent rings its parts, not only the card it came from", () => {
+  const html = render(
+    [
+      feature("active", "root"),
+      { ...feature("active", "mid"), parentId: "root" },
+      { ...feature("active", "leaf"), parentId: "mid" },
+    ],
+    {},
+    { beta: true, selectedId: "mid" },
+  );
+  assert.match(html, /data-grouped=""/);
+  // The mid-level card and the part it spawned — not the grandparent.
+  assert.equal(html.match(/data-related=""/g)?.length, 2);
+  assert.match(html, /data-feature="mid"[^>]*data-related=""/);
+  assert.match(html, /data-feature="leaf"[^>]*data-related=""/);
+});
+
+test("an ordinary selection does not dim the board", () => {
+  const html = render([feature("active", "solo")], {}, { beta: true, selectedId: "solo" });
+  assert.doesNotMatch(html, /data-grouped/);
 });

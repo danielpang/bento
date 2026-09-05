@@ -31,6 +31,8 @@ import { mcpConnectionRoutes } from "./routes/mcp-connections.js";
 import { mcpEndpointRoutes } from "./routes/mcp-endpoint.js";
 import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
+import { posthogApiKey } from "./env.js";
+import { accountDeletionBlockedReason } from "./auth.js";
 
 export interface AppExtras {
   /**
@@ -92,6 +94,9 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   app.get("/api/health", async (c) => {
     try {
       await ping(ctx.db);
+      // Null in local mode and whenever the key is unset, so a laptop
+      // never phones home, leftover env vars included.
+      const posthogKey = posthogApiKey(ctx.env);
       return c.json({
         ok: true,
         mode: ctx.env.BENTO_MODE,
@@ -102,6 +107,17 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
           github: Boolean(ctx.env.GITHUB_CLIENT_ID && ctx.env.GITHUB_CLIENT_SECRET),
           google: Boolean(ctx.env.GOOGLE_CLIENT_ID && ctx.env.GOOGLE_CLIENT_SECRET),
         },
+        // The project token is a public phc_ key. The console uses it
+        // to init posthog-js for exception capture.
+        ...(posthogKey
+          ? {
+              posthog: {
+                apiKey: posthogKey,
+                host: ctx.env.POSTHOG_HOST,
+                environment: ctx.env.BENTO_ENVIRONMENT,
+              },
+            }
+          : {}),
       });
     } catch (err) {
       return c.json({ ok: false, error: String(err) }, 503);
@@ -111,6 +127,21 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // better-auth owns sign in, social login, and the device flow.
   if (ctx.auth) {
     const auth = ctx.auth;
+    /**
+     * Owners cannot delete their account: that would leave a team
+     * without anyone who can manage it. better-auth's own handler
+     * answers 200 and then sends the confirmation mail in the
+     * background, so the refusal has to happen in front of it, the
+     * same way a plan limit sits in front of invite-member.
+     */
+    app.post("/api/auth/delete-user", async (c) => {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (session) {
+        const reason = await accountDeletionBlockedReason(ctx.db, session.user.id);
+        if (reason) return c.json({ message: reason, error: reason }, 400);
+      }
+      return handleAuth(c);
+    });
     /**
      * The one auth endpoint with a plan limit on it. better-auth owns
      * invitation creation, so the check happens in front of it.

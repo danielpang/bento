@@ -166,9 +166,8 @@ export function StageConfig({
           </button>
         </div>
         <p className="muted">
-          Cards move left to right through these stages. Each stage decides which agent runs it and
-          how a card leaves: waiting for you, or advancing when its requirements pass. Drag a stage
-          by its handle to reorder them, or focus a handle and use the arrow keys.
+          Cards move left to right through these stages, each with its own agent and exit rule.
+          Drag to re-order.
         </p>
       </header>
 
@@ -195,57 +194,86 @@ export function StageConfig({
                 void commitDrag();
               }}
             >
-              <div className="stage-card-head">
-                {/* The handle is the only draggable part: a card that
-                    drags from anywhere makes selecting its text
-                    impossible, and it is focusable so the order can be
-                    changed without a mouse. */}
-                <button
-                  type="button"
-                  className="drag-handle"
-                  draggable
-                  aria-label={`Reorder ${stage.name}. Position ${index + 1} of ${order.length}. Use the arrow keys.`}
-                  title="Drag to reorder, or focus and use the arrow keys"
-                  disabled={busy}
-                  onDragStart={(e) => {
-                    e.dataTransfer.effectAllowed = "move";
-                    // Firefox starts no drag at all without payload.
-                    e.dataTransfer.setData("text/plain", stage.id);
-                    /**
-                     * The whole stage travels with the cursor, held at
-                     * the point on the grip where it was picked up.
-                     * Without this the browser drags a picture of the
-                     * grip alone, so nothing appears to move.
-                     */
-                    const card = e.currentTarget.closest(".stage-card");
-                    if (card instanceof HTMLElement) {
-                      const box = card.getBoundingClientRect();
-                      e.dataTransfer.setDragImage(card, e.clientX - box.left, e.clientY - box.top);
-                    }
-                    baseline.current = order;
-                    dropped.current = false;
-                    // After the browser has taken its snapshot, or the
-                    // card that follows the cursor is the faded one.
-                    const id = stage.id;
-                    setTimeout(() => setDragging(id), 0);
-                  }}
-                  onDragEnd={() => {
-                    setDragging(null);
-                    // Released over nothing: the preview was a proposal,
-                    // not a change, so it goes back.
-                    if (!dropped.current) setOrder(baseline.current);
-                  }}
-                  onKeyDown={(e) => {
-                    const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
-                    if (delta === 0) return;
-                    e.preventDefault();
-                    void move(index, index + delta);
-                  }}
-                >
-                  <GripMark />
-                </button>
-                <span className="lane-ord">{String(index + 1).padStart(2, "0")}</span>
-                <span className="stage-card-name">{stage.name}</span>
+              {/*
+                Grip, summary, and actions sit as three columns of one
+                row so Edit and Remove centre on the card rather than
+                riding the title line while the agent and exit rule
+                drop below them. The handle is still the only draggable
+                part: a card that drags from anywhere makes selecting
+                its text impossible, and it is focusable so the order
+                can be changed without a mouse.
+              */}
+              <button
+                type="button"
+                className="drag-handle"
+                draggable
+                aria-label={`Reorder ${stage.name}. Position ${index + 1} of ${order.length}. Use the arrow keys.`}
+                title="Drag to reorder, or focus and use the arrow keys"
+                disabled={busy}
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "move";
+                  // Firefox starts no drag at all without payload.
+                  e.dataTransfer.setData("text/plain", stage.id);
+                  /**
+                   * The whole stage travels with the cursor, held at
+                   * the point on the grip where it was picked up.
+                   * Without this the browser drags a picture of the
+                   * grip alone, so nothing appears to move.
+                   */
+                  const card = e.currentTarget.closest(".stage-card");
+                  if (card instanceof HTMLElement) {
+                    const box = card.getBoundingClientRect();
+                    e.dataTransfer.setDragImage(card, e.clientX - box.left, e.clientY - box.top);
+                  }
+                  baseline.current = order;
+                  dropped.current = false;
+                  // After the browser has taken its snapshot, or the
+                  // card that follows the cursor is the faded one.
+                  const id = stage.id;
+                  setTimeout(() => setDragging(id), 0);
+                }}
+                onDragEnd={() => {
+                  setDragging(null);
+                  // Released over nothing: the preview was a proposal,
+                  // not a change, so it goes back.
+                  if (!dropped.current) setOrder(baseline.current);
+                }}
+                onKeyDown={(e) => {
+                  const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
+                  if (delta === 0) return;
+                  e.preventDefault();
+                  void move(index, index + delta);
+                }}
+              >
+                <GripMark />
+              </button>
+              <div className="stage-card-main">
+                <div className="stage-card-head">
+                  <span className="lane-ord">{String(index + 1).padStart(2, "0")}</span>
+                  <span className="stage-card-name">{stage.name}</span>
+                </div>
+                <div className="stage-card-meta">
+                  {assigned ? (
+                    <span className="chip">
+                      <ProviderMark cli={assigned.cli} model={assigned.model} decorative />
+                      {assigned.name}
+                    </span>
+                  ) : (
+                    <span className="chip chip-empty">no agent</span>
+                  )}
+                  {assigned && PREVIEW_TOOLS[assigned.cli] && <span className="chip chip-soft">preview</span>}
+                  <span className="chip chip-soft">
+                    {stage.gateType === "manual" ? "Manual" : "Automatic"}
+                  </span>
+                  {stage.gateType === "auto" && criteria.length > 0 && (
+                    <span className="muted">
+                      {`${criteria.length} requirement${criteria.length === 1 ? "" : "s"}`}
+                    </span>
+                  )}
+                  {stage.createPr && <span className="chip chip-soft">PR enabled</span>}
+                </div>
+              </div>
+              <div className="stage-card-actions">
                 <button className="btn btn-ghost" disabled={busy} onClick={() => setEditing(stage)}>
                   Edit
                 </button>
@@ -258,28 +286,6 @@ export function StageConfig({
                   Remove
                 </button>
               </div>
-              <div className="stage-card-meta">
-                {assigned ? (
-                  <span className="chip">
-                    <ProviderMark cli={assigned.cli} model={assigned.model} decorative />
-                    {assigned.name}
-                  </span>
-                ) : (
-                  <span className="chip chip-empty">no agent</span>
-                )}
-                {assigned && PREVIEW_TOOLS[assigned.cli] && <span className="chip chip-soft">preview</span>}
-                <span className="muted">
-                  {stage.gateType === "manual" ? "waits for your approval" : "advances on its requirements"}
-                </span>
-                {stage.gateType === "auto" && (
-                  <span className="muted">
-                    {criteria.length === 0
-                      ? "when the agent finishes"
-                      : `${criteria.length} requirement${criteria.length === 1 ? "" : "s"}`}
-                  </span>
-                )}
-                {stage.createPr && <span className="muted">opens a pull request</span>}
-              </div>
             </div>
           );
         })}
@@ -290,8 +296,8 @@ export function StageConfig({
         <section className="section">
           <span className="label">Pipeline file</span>
           <p className="muted">
-            The stages, their requirements, the agents behind them, and each repository's commands,
-            as one YAML file. Import it into another project instead of building it again.
+            Your stages, agents, and commands as one YAML file. Import it into another project
+            instead of rebuilding it.
           </p>
           <YamlFileActions
             busy={busy}
@@ -488,9 +494,9 @@ function StageEditor({
             onChange={(e) => setDraft((d) => ({ ...d, createPr: e.target.checked }))}
           />
           <span className="gate-check-text">
-            Create a pull request when the agent finishes. The server pushes the card's branch and
-            opens the pull request, or updates the one already open.
-            {canPublish === false && " No GitHub connection is set up yet, so add a token under Settings, GitHub before this can run."}
+            Push the card's branch and open a pull request when the agent finishes, or update the
+            one already open.
+            {canPublish === false && " Connect GitHub under Settings first."}
           </span>
         </label>
       </div>
@@ -503,9 +509,7 @@ function StageEditor({
           onChange={(criteria) => setDraft((d) => ({ ...d, criteria }))}
         />
       ) : (
-        <p className="muted">
-          You decide on the card: Approve moves it on, Reject sends it back. No requirements apply.
-        </p>
+        <p className="muted">Manual approval.</p>
       )}
     </Modal>
   );
@@ -613,8 +617,8 @@ function CriteriaEditor({
         </button>
       </div>
       <p className="muted">
-        A judge is a second agent that reviews the work and rules on it. It works best with its own
-        skill saying what complete means here, on a different model from the agent doing the work.
+        A judge is a second agent that reviews the work and rules on it. Give it its own skill and
+        a different model from the agent doing the work.
       </p>
       <div className="actions">
         <input

@@ -166,8 +166,15 @@
     {
       "idx": 23,
       "version": "7",
-      "when": 1788121561682,
-      "tag": "0023_mcp_connections",
+      "when": 1788300000000,
+      "tag": "0023_feature_parent",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788300000001,
+      "tag": "0024_mcp_connections",
       "breakpoints": true
     }
   ]

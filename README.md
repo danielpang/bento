@@ -1,80 +1,83 @@
-<h1 align="center">Bento</h1>
+# Bento
 
-<p align="center">Agents Features Coordinator</p>
+Kanban for Agents.
 
-A command centre for coordinating AI coding agents through your product development pipeline. As agents have made shipping faster, keeping track of what's in progress is harder, bento makes it clear by showing you what features you are building and what their status is.
+Bento is a platform for running AI coding agents across your software development pipeline. Agents ship code faster than anyone can track by hand. Bento puts every feature on one board and shows you where each one is so you don't lose context or lose track of them.
 
-Define your pipeline stages (product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering). Assign an agent and model to each stage (Claude Code, Codex CLI, Cursor CLI, opencode, or pi). Watch features move across a board while agents run concurrently in isolated sandboxes.
+You define the stages of your software development process, for example: product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering. Each stage gets an agent and a model, from Claude Code, Codex CLI, Cursor CLI, opencode, pi, Poolside, DeepSeek Harness, or the Antigravity CLI. Cards move across the board as agents work on them, each in its own sandbox.
 
 ## Local setup
 
-Docker is the only thing you need installed. One value has to be set first, because it is a bind mount rather than a setting: where your checkouts live.
+You will need Docker installed to run Bento.
 
 ```bash
-echo 'BENTO_REPOS=/Users/you/code' >> .env
+echo 'BENTO_REPOS=/Users/your/repositories' >> .env # Mounts directory into docker container
 docker compose up --build
 ```
 
-Open **http://localhost:4400**.
+Open **[http://localhost:4400](http://localhost:4400)**.
 
-That builds the server, the console, and the sandbox image agents run in, brings up Postgres, applies migrations, and starts serving. Everything else is configured in the console.
+That builds the server, the console, and the sandbox image agents run in, starts Postgres, applies migrations, and serves. Everything else you configure in the console.
 
-`BENTO_REPOS` is the exception because agents work in sandboxes the server creates through the host's Docker daemon, so your code has to be visible at the same path inside the server container, and nothing can mount a directory into a container that is already running.
+Agents work in sandboxes that the server creates through your Docker daemon, so each repository has to exist inside the server container at the same path it has on your machine. You cannot mount a directory into a container that is already running. Set `BENTO_REPOS` so your code can be accessed in the container.
 
-## Build your first feature
+## Building your first feature
 
 ### 1. Point Bento at a repository
 
-Create a project and give it a checkout under `BENTO_REPOS`. A project can span several repositories, and each gets its own worktree inside a card's workspace, so a change touching a frontend and a backend stays one card.
+Create a project and add your repositories (ensure you set `BENTO_REPOS` and your repos live within that directory). A project can span several repositories and each repository gets its own worktree inside the card's workspace. A card can work on multiple repositories in a project.
 
-### 2. Give the agents a key
+### 2. Give the agents a model API key
 
-Under **Settings**, save a provider API key, or under **Agents** paste a Claude subscription token from `claude setup-token`. Stored encrypted, never shown again. Which tools need which credential: [docs/agents.md](./docs/agents.md).
+Under **Settings**, save a provider API key. Or under **Agents**, paste a Claude subscription token from `claude setup-token`. Either is stored encrypted and never shown again. For which tool needs which credential, see [docs/agents.md](./docs/agents.md).
 
-### 3. Look at the agents you already have
+### 3. Check the existing agents
 
-A new project arrives with six stages and an agent on each, so it can run without you inventing six job titles first. Open **Agents** to see them.
+A new project starts with six default stages and an agent on each. Open the **Agents** tab to see them.
 
-Each is a coding tool paired with a model, plus a **skill**: the operating instructions sent with every prompt it runs, saying what its write-up must contain. The seeded ones are deliberately short, and editing them is the highest-leverage thing you can do, because a stage's value is what it hands the next stage.
+An agent is a harness, model, and a **skill**. The skill is its standing instructions, sent with every agent start. Use it to say what the stage's write-up must contain and what outcome or actions the agent must produce. The defaults are short on purpose so that you can start immediately, but over time you will want to fine tune the skills for your own process.
 
-They run Claude Code on the cheaper default model rather than the best one, since nothing should start spending on a model nobody chose. Point them somewhere else whenever you like; every stage assigned to an agent follows it.
+The defaults use Claude Code on Sonnet. Updating an agent is reflected in every stage that uses the agent.
 
 ### 4. Shape the pipeline
 
-Open **Pipeline**. Each stage decides which agent runs it and how a card leaves: waiting for you, or advancing on its own when its requirements pass. Drag a stage by its grip to reorder.
+Open **Pipeline**. Each stage sets which agent runs it, and how a card advances from the stage: either manual approval or automatic once the requirements you define pass. You can reorder the stages by dragging a stage by its grip.
 
-Every stage starts manual, so the first card stops at each one for you to look at. Turn a stage automatic once you trust it, and cards flow through unattended. Gate criteria, judge agents, and the pipeline as a portable YAML file: [docs/pipeline.md](./docs/pipeline.md).
+All stages start out manual, so your first card stops at each one and waits for you to look. Once you trust a stage and the agent output you can make it automatic and cards advance automatically. For more on pipelines like gate criteria, judge agents, and exporting a pipeline as YAML, see [docs/pipeline.md](./docs/pipeline.md).
 
-### 5. Tell each repository how to build itself
+### 5. Give agents the context to build your application
 
-Under **Repositories**, give the checkout a **setup command** and a **test command**. Sandboxes carry git and the coding agents and no language runtime, so this is where a project says it needs Node, or Go, or `npm ci`. The test command is handed to the agent so it can check its own work while it can still fix what it broke.
+Under **Repositories**, give each checkout a **setup command** and a **test command**. Sandboxes ship with git and the coding agents but no language runtime, so this is where a project asks for Node, or Go, or `npm ci`. The test command goes to the agent, which runs it to check its own work before the stage ends.
 
 ### 6. Run a feature through it
 
-Add a card, describe the feature, and advance it. The stage's agent starts, and its transcript streams into the card's drawer while it works. Approve it and the card moves on, where a different agent picks it up with the previous stage's write-up already committed on the branch.
+Add a card, describe the feature, and advance it. The stage's agent starts and its transcript streams into the card's drawer. Approve it and the card moves to the next stage, where a different agent picks it up. The previous stage's write-up is already committed to the branch.
 
-Turn on "Create a pull request" on any stage and a successful run there pushes the branch and opens one per repository the agent touched: [docs/pull-requests.md](./docs/pull-requests.md).
+Turn on "Create a pull request" for a stage and a successful run there pushes the branch and opens a PR for each repository the agent touched. See [docs/pull-requests.md](./docs/pull-requests.md).
 
 ## Going deeper
 
-| | |
-| --- | --- |
-| [Pipelines](./docs/pipeline.md) | Stages, gates, judge agents, the pipeline file, repository commands |
-| [Coding agents](./docs/agents.md) | What each tool can do, how each authenticates, talking to a working agent |
-| [Pull requests](./docs/pull-requests.md) | Publishing, what stays out of the diff, connecting GitHub |
-| [Slack](./docs/slack.md) | Installing the app, @bento mentions, review buttons in the thread |
-| [How it works](./docs/concepts.md) | Cards, sandboxes, worktrees, spend, tenancy |
-| [Web app setup](./docs/web-app.md) | Running it for a team, multi mode, troubleshooting, contributing |
-| [Other clients](./docs/clients.md) | The terminal and macOS apps, both in progress |
-| [Architecture](./docs/architecture.md) | System diagrams, and the [database schema](./docs/diagrams/database_schema.md) |
+
+|                                            |                                                                                |
+| ----------------------------------------   | ------------------------------------------------------------------------------ |
+| [Bento Quick Overview](./docs/concepts.md) | Cards, sandboxes, worktrees, spend, tenancy                            |
+| [Pipelines](./docs/pipeline.md)            | Stages, gates, judge agents, the pipeline file, repository commands            |
+| [Coding agents](./docs/agents.md)          | What each tool can do, how each authenticates, talking to a working agent      |
+| [Pull requests](./docs/pull-requests.md)   | Publishing, what stays out of the diff, connecting GitHub                      |
+| [Web app setup](./docs/web-app.md)         | Running it for a team, multi mode, troubleshooting, contributing               |
+| [Other clients](./docs/clients.md)         | The terminal and macOS apps, both in progress                                  |
 
 ## Security model
 
-The sandbox is the boundary. Agents run inside it with their own CLI permission prompts disabled, so:
+The sandbox is the security model. Agents can run any command they generate but the sandbox prevents any rogue action from being defective. Here are some good practices to ensure the agent stays within the sandbox:
 
 - Never expose the host Docker socket, host SSH keys, or host git config to a sandbox.
 - Git access uses short-lived GitHub App installation tokens, scoped to one repository.
 - Prefer API keys over mounting subscription credential files. A prompt-injected agent can read anything the sandbox can.
+
+## Report an issue
+
+Found a bug? Open an issue at [github.com/danielpang/bento/issues](https://github.com/danielpang/bento/issues).
 
 ## License
 

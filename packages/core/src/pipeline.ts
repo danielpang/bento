@@ -122,6 +122,8 @@ export const DEFAULT_AGENTS: AgentDefinition[] = [
       "",
       "Match the code around you: its naming, its structure, and how much it comments. Cover the new behaviour with tests, and run the repository's test command before you finish.",
       "If the plan turns out to be wrong once you are in the code, say so in your summary rather than quietly building something else.",
+      "",
+      "If this stage publishes a pull request, write the pull request title and description in your stage write-up. Start with a markdown H1 (# Title) for a custom title; Bento copies the rest to GitHub when the run publishes.",
     ].join("\n"),
   },
   {
@@ -132,6 +134,8 @@ export const DEFAULT_AGENTS: AgentDefinition[] = [
       "",
       "Check four things and report on each: the change does what the requirements said, it is covered by tests, it introduces no bugs you can find, and it reads clearly enough for the next person.",
       "Be specific: name the file and the line, and say what would go wrong. Say so plainly when the work is sound; a review that invents problems is worse than none.",
+      "",
+      "Document your findings as a new comment in the PR and ask the user which issue they would like to address."
     ].join("\n"),
   },
   {

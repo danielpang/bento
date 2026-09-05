@@ -39,7 +39,7 @@ export const PROVIDER_TABS = [
   { id: "openai", label: "OpenAI", keys: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
   { id: "openrouter", label: "OpenRouter", keys: ["OPENROUTER_API_KEY"] },
   { id: "cursor", label: "Cursor", keys: ["CURSOR_API_KEY"] },
-  { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY"] },
+  { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"] },
   { id: "poolside", label: "Poolside", keys: ["POOLSIDE_API_KEY"] },
   { id: "deepseek", label: "DeepSeek", keys: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"] },
 ] as const;
@@ -113,8 +113,7 @@ export function ProviderKeysCard({ client }: { client: BentoClient }) {
     <section className="section settings-card">
       <h3 className="settings-title">Model provider keys</h3>
       <p className="muted">
-        API keys for the providers your agents' models run on, stored encrypted. A green dot means
-        that provider is already set.
+        API keys for the providers your agents' models run on, stored encrypted.
       </p>
       {loadFailed && (
         <p className="error">
@@ -259,10 +258,8 @@ export function GitHubTokenCard({ client }: { client: BentoClient }) {
     <section className="section settings-card">
       <h3 className="settings-title">GitHub</h3>
       <p className="muted">
-        Powers pull requests: stages with "Create a pull request" enabled and the button on each card
-        push the branch and open the pull request through this token. Use a fine grained personal
-        access token with Contents and Pull requests write access on the repositories your pipelines
-        work in. It stays on the server and is never given to an agent.
+        Pushes branches and opens pull requests, using a fine grained token with Contents and Pull
+        requests write access that stays on the server.
       </p>
       {loadFailed ? (
         <p className="error">Could not load saved credentials, so this cannot say whether a token is set.</p>
@@ -276,7 +273,7 @@ export function GitHubTokenCard({ client }: { client: BentoClient }) {
           )}
         </div>
       ) : (
-        <p className="muted">No token saved yet. Creating a pull request will refuse until one is here.</p>
+        <p className="muted">No token saved yet, so creating a pull request will refuse.</p>
       )}
       {canManage ? (
         <SecretField
@@ -379,9 +376,8 @@ function StageNotesSetting({ client }: { client: BentoClient }) {
         <span className="gate-check-text">Include Bento's stage write-ups in pull requests</span>
       </label>
       <p className="muted">
-        Each stage commits a summary under docs/bento/ so the next one can read it. They are left out
-        of the pull request, so a reviewer sees the code rather than six generated files. Turn this
-        on to send them along too.
+        Stage write-ups are committed under docs/bento/ but kept out of pull requests unless this is
+        on.
       </p>
       {!canManage && <p className="muted">Only an owner or admin can change this.</p>}
     </div>
@@ -438,7 +434,6 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
   if (!ready) return <SettingsCardSkeleton rows={3} />;
   if (!machine) return null;
 
-  const pinned = machine.gitIdentityPinnedByEnv === true;
   const dirty = name !== (machine.gitAuthorName ?? "") || email !== (machine.gitAuthorEmail ?? "");
 
   async function save() {
@@ -457,17 +452,15 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Commit identity</h3>
-      <p className="muted">
-        The name and email on commits your agents make. A server in a container has no git config to
-        read, so without this the work arrives as Bento Agent.
-      </p>
+      <p className="muted">The name and email on commits your agents make.</p>
       {/* What a commit would actually say, which is not always what is
-          stored here: an environment variable outranks it, and this
-          machine's own git config stands in when neither is set. */}
+          stored here: this machine's own git config stands in when the
+          fields are blank, and the sandbox image's placeholder stands in
+          when nothing resolves at all. */}
       <p className="muted">
         {machine.gitIdentity
           ? `Commits are currently attributed to ${machine.gitIdentity.name} <${machine.gitIdentity.email}>.`
-          : "No identity resolves yet, so commits will say Bento Agent <agent@bento.dev>."}
+          : "Commits are currently attributed to Bento Agent <no-reply@usebento.ai>."}
       </p>
       <label className="field">
         <span className="label">Name</span>
@@ -476,7 +469,7 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Ada Lovelace"
-          disabled={busy || pinned}
+          disabled={busy}
           autoComplete="name"
         />
       </label>
@@ -488,16 +481,16 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           placeholder="ada@example.com"
-          disabled={busy || pinned}
+          disabled={busy}
           autoComplete="email"
           spellCheck={false}
         />
       </label>
       <div className="actions">
-        <button className="btn btn-primary" disabled={busy || pinned || !dirty} onClick={() => void save()}>
+        <button className="btn btn-primary" disabled={busy || !dirty} onClick={() => void save()}>
           Save identity
         </button>
-        {dirty && !pinned && (
+        {dirty && (
           <button
             className="btn btn-ghost"
             disabled={busy}
@@ -510,14 +503,7 @@ export function GitIdentityCard({ client }: { client: BentoClient }) {
           </button>
         )}
       </div>
-      {pinned ? (
-        <p className="muted">
-          GIT_AUTHOR_NAME or GIT_AUTHOR_EMAIL is set in this server's environment, which wins over
-          anything saved here. Clear it to edit this.
-        </p>
-      ) : (
-        <p className="muted">Leave both blank to fall back to this machine's own git config.</p>
-      )}
+      <p className="muted">Leave both blank to fall back to this machine's own git config.</p>
     </section>
   );
 }

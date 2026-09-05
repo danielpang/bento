@@ -6,6 +6,7 @@ import type {
   CompletionRange,
   Feature,
   FeatureChanges,
+  FeatureCheckStatus,
   FeatureMergeStatus,
   FeaturePullRequest,
   FeatureEvent,
@@ -15,6 +16,7 @@ import type {
   ProjectCompletions,
   ProjectSession,
   ProjectUsage,
+  RelatedGroup,
   Repository,
   RunArtifact,
   Stage,
@@ -98,6 +100,34 @@ export interface SlackConnection {
   interactivityUrl?: string | null;
 }
 
+export interface McpCatalogEntry {
+  /** Reverse-DNS registry name, stable across versions. */
+  name: string;
+  title: string;
+  description: string;
+  url: string;
+  transport: "http" | "sse";
+  /** Publishing namespace, so a wrapper does not read as the vendor. */
+  publisher: string;
+  /** Suggested tool name, derived from the registry name. */
+  slug: string;
+  /** Icon served from Bento's own origin, or null when the service has none. */
+  iconUrl: string | null;
+  /** On the curated list, so the console leads with it. */
+  featured: boolean;
+  /** Curated category, or null when this server is not mapped. */
+  category: string | null;
+  /** Already in this team's registry (or the caller's own servers). */
+  added: boolean;
+}
+
+export interface McpCatalog {
+  /** False when the registry could not be read; the list is then empty. */
+  reachable: boolean;
+  canManage: boolean;
+  entries: McpCatalogEntry[];
+}
+
 export interface McpServerStatus {
   id: string;
   name: string;
@@ -133,7 +163,8 @@ export interface McpServerInput {
   slug: string;
   url: string;
   transport?: "http" | "sse";
-  authType: "none" | "api_key" | "oauth";
+  /** Omitted lets Bento probe the server and decide. */
+  authType?: "none" | "api_key" | "oauth";
   credentialScope?: "org" | "user";
   /** A server only the creator's own runs get; any member may add one. */
   personal?: boolean;
@@ -412,6 +443,14 @@ export class BentoClient {
       driver: string;
       /** Which social logins the server is configured for (multi mode). */
       social?: { github: boolean; google: boolean };
+      /**
+       * Public PostHog project token. Present only in multi mode when
+       * the server has a key. The console uses it for exception
+       * capture. A project token is designed to be in the browser; it
+       * is not a secret. Local mode omits this so the console never
+       * phones home.
+       */
+      posthog?: { apiKey: string; host: string; environment: string };
     }>("/api/health");
   }
 
@@ -640,6 +679,11 @@ export class BentoClient {
     return this.request<{ ok: boolean }>("/api/linear/sync", { method: "POST" });
   }
 
+  mcpCatalog(search?: string) {
+    const query = search ? `?search=${encodeURIComponent(search)}` : "";
+    return this.request<McpCatalog>(`/api/mcp/catalog${query}`);
+  }
+
   mcpStatus() {
     return this.request<McpStatus>("/api/mcp/status");
   }
@@ -760,8 +804,22 @@ export class BentoClient {
     return (await this.getBoardSnapshot(projectId)).statuses;
   }
 
-  createFeature(input: { projectId: string; title: string; description?: string }) {
+  /**
+   * `parentId` files the card as a part of another one, which is what
+   * a split produces. Refused with 400 when that card is in another
+   * project, already at the depth limit, or already full.
+   */
+  createFeature(input: { projectId: string; title: string; description?: string; parentId?: string }) {
     return this.request<Feature>("/api/features", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /**
+   * The group a card belongs to: the card a split started from, and
+   * every card it produced. Null when this card is neither, which is
+   * most cards. Answers 404 for users not on the beta flag.
+   */
+  relatedFeatures(featureId: string) {
+    return this.request<RelatedGroup | null>(`/api/features/${featureId}/related`);
   }
 
   getFeature(featureId: string) {
@@ -912,8 +970,9 @@ export class BentoClient {
   /** Pushes the card's branch and opens (or updates) its pull requests. */
   publishFeature(featureId: string) {
     return this.request<{
-      published: { name: string; repoUrl: string; prNumber: number; url: string }[];
+      published: { name: string; repoUrl: string; prNumber: number; url: string; draft?: boolean }[];
       failures: { name: string; reason: string }[];
+      rebaseRun: AgentRun | null;
     }>(`/api/features/${featureId}/publish`, { method: "POST" });
   }
 
@@ -924,6 +983,20 @@ export class BentoClient {
   /** Asks GitHub whether each of the card's pull requests merges cleanly. */
   getMergeStatus(featureId: string) {
     return this.request<FeatureMergeStatus[]>(`/api/features/${featureId}/merge-status`);
+  }
+
+  /** Asks GitHub how CI checks on each pull request head are doing. */
+  getCheckStatus(featureId: string) {
+    return this.request<FeatureCheckStatus[]>(`/api/features/${featureId}/check-status`);
+  }
+
+  /**
+   * Starts a run that fixes failing CI checks GitHub is reporting; the
+   * server publishes when the run finishes. Refused with 409 when no
+   * checks are failing or an agent is already working the card.
+   */
+  fixCiTests(featureId: string) {
+    return this.request<AgentRun>(`/api/features/${featureId}/fix-ci-tests`, { method: "POST" });
   }
 
   /**
@@ -978,8 +1051,14 @@ export class BentoClient {
       gitAuthorEmail?: string;
       /** What a commit would actually say, from whichever source wins. */
       gitIdentity?: { name: string; email: string } | null;
-      gitIdentityPinnedByEnv?: boolean;
       logins: { cli: string; signedIn: boolean }[];
+      /**
+       * Whether the server can offer its machine's login at all. False
+       * when the server runs in a container, whose home holds nobody's
+       * login. Optional: an older server does not send it, and the
+       * console treats only an explicit false as "hide".
+       */
+      canShareMachineLogin?: boolean;
       claude?: { loggedIn: boolean; subscriptionType?: string; email?: string } | null;
     }>("/api/settings");
   }

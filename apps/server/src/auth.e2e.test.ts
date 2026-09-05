@@ -17,6 +17,7 @@ import {
   runArtifacts,
   runMigrations,
   user,
+  verification,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
@@ -28,7 +29,9 @@ import pg from "pg";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
-import { createAuth } from "./auth.js";
+import { createAuth, type AuthHooks } from "./auth.js";
+import { reportAuthEvent } from "./auth-events.js";
+import { recordingAnalytics } from "./test-analytics.js";
 import type { AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
@@ -294,6 +297,114 @@ test("organization members share projects, outsiders do not", async () => {
   ).json()) as { name: string }[];
   assert.equal(afterInvite.length, 1);
   assert.equal(afterInvite[0]?.name, "Team board");
+});
+
+/**
+ * Billing's hours breakdown is by card for the billing month, not by
+ * person. Hours before period start do not count, two runs on one
+ * card add up, and a probe of another team's period 404s.
+ */
+test("team hours ranks cards for the active org and 404s a foreign tenant", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Owner",
+  });
+  const stranger = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-stranger@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Stranger",
+  });
+  const ownerToken = owner.headers.get("set-auth-token")!;
+  const strangerToken = stranger.headers.get("set-auth-token")!;
+
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Hours Co", slug: "hours-co" }, ownerToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, ownerToken);
+
+  const foreignOrg = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Hours Foreign", slug: "hours-foreign" }, strangerToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: foreignOrg.id }, strangerToken);
+
+  async function board(
+    token: string,
+    name: string,
+    title: string,
+    hours: number,
+    startedAt = new Date("2026-09-10T12:00:00.000Z"),
+  ) {
+    const project = (await (
+      await jsonPost("/api/projects", { name, localPath: "/tmp" }, token)
+    ).json()) as { id: string };
+    const pipeline = (await (
+      await app.request(`/api/projects/${project.id}/pipeline`, { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { stages: { id: string; defaultAgentProfileId: string | null }[] };
+    const profileId = pipeline.stages[0]?.defaultAgentProfileId;
+    assert.ok(profileId, "a new project ships with an agent on the first stage");
+    const feature = (await (
+      await jsonPost("/api/features", { projectId: project.id, title }, token)
+    ).json()) as { id: string };
+    await ctx.db.insert(agentRuns).values({
+      featureId: feature.id,
+      stageId: pipeline.stages[0]!.id,
+      agentProfileId: profileId,
+      prompt: "work",
+      status: "succeeded",
+      startedAt,
+      endedAt: new Date(startedAt.getTime() + hours * 3_600_000),
+    });
+    return { featureId: feature.id, stageId: pipeline.stages[0]!.id, profileId };
+  }
+
+  const heavy = await board(ownerToken, "Hours board", "Rate limit", 3);
+  await board(ownerToken, "Hours board 2", "Login polish", 1);
+  await board(strangerToken, "Foreign board", "Secret card", 10);
+  await board(ownerToken, "Hours old", "Last month leftover", 8, new Date("2026-08-10T12:00:00.000Z"));
+  await ctx.db.insert(agentRuns).values({
+    featureId: heavy.featureId,
+    stageId: heavy.stageId,
+    agentProfileId: heavy.profileId,
+    prompt: "more work",
+    status: "succeeded",
+    startedAt: new Date("2026-09-20T12:00:00.000Z"),
+    endedAt: new Date("2026-09-20T14:00:00.000Z"),
+  });
+
+  const from = "2026-09-01T00:00:00.000Z";
+  const to = "2026-10-01T00:00:00.000Z";
+  const missingWindow = await app.request("/api/team/hours", {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(missingWindow.status, 400);
+
+  const mine = await app.request(`/api/team/hours?from=${from}&to=${to}`, {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(mine.status, 200);
+  const body = (await mine.json()) as { features: { featureId: string; title: string; agentHours: number }[] };
+  assert.deepEqual(
+    [...body.features].sort((a, b) => b.agentHours - a.agentHours).map((row) => [row.title, row.agentHours]),
+    [
+      ["Rate limit", 5],
+      ["Login polish", 1],
+    ],
+  );
+  assert.ok(body.features.some((row) => row.featureId === heavy.featureId));
+  assert.ok(!body.features.some((row) => row.title === "Secret card"));
+  assert.ok(!body.features.some((row) => row.title === "Last month leftover"));
+
+  const outsider = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-outsider@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Outsider",
+  });
+  const outsiderToken = outsider.headers.get("set-auth-token")!;
+  const refused = await app.request(`/api/team/hours?from=${from}&to=${to}`, {
+    headers: { authorization: `Bearer ${outsiderToken}` },
+  });
+  assert.equal(refused.status, 404);
 });
 
 /**
@@ -683,7 +794,9 @@ test("every entity route refuses a foreign tenant", async () => {
       { body: "version: 1\npipeline:\n  stages:\n    - name: Mine\n      slug: mine\n" },
     ],
     ["GET", `/api/projects/${project.id}/sessions`],
+    ["GET", `/api/projects/${project.id}/sessions/plain`],
     ["GET", `/api/projects/${project.id}/usage`],
+    ["GET", `/api/projects/${project.id}/usage/plain`],
     ["GET", `/api/projects/${project.id}/completions`],
     ["GET", `/api/projects/${project.id}/board/plain`],
     ["GET", `/api/projects/${project.id}/pipeline/plain`],
@@ -710,6 +823,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/features/${feature.id}/changes`],
     ["GET", `/api/features/${feature.id}/changes/plain`],
     ["GET", `/api/features/${feature.id}/artifacts`],
+    ["GET", `/api/features/${feature.id}/related`],
     ["GET", `/api/artifacts/${artifact!.id}`],
     ["GET", `/api/artifacts/${artifact!.id}/content`],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected" }) }],
@@ -719,10 +833,14 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/recheck`],
     ["POST", `/api/features/${feature.id}/publish`],
     ["GET", "/api/team/policy"],
+    ["GET", "/api/team/hours"],
     ["PATCH", "/api/team/policy", { body: JSON.stringify({ restrictNetwork: false }) }],
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
     ["GET", `/api/features/${feature.id}/merge-status`],
+    ["GET", `/api/features/${feature.id}/check-status`],
+    ["GET", `/api/features/${feature.id}/merge-status/plain`],
     ["POST", `/api/features/${feature.id}/resolve-conflicts`],
+    ["POST", `/api/features/${feature.id}/fix-ci-tests`],
     ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
     ["GET", `/api/features/${feature.id}/history`],
@@ -2186,6 +2304,133 @@ test("deleting an organization removes its projects and notifies the deployment"
 });
 
 /**
+ * An owner cannot delete their account while they still own a team:
+ * that would leave the organization without anyone who can manage it.
+ * A member can still request the confirmation email.
+ */
+test("an owner cannot delete their account while they still own an organization", async () => {
+  const sent: string[] = [];
+  const hookedAuth = createAuth(ctx.env, ctx.db, {
+    description: "test",
+    async send(message) {
+      sent.push(message.subject);
+    },
+  });
+  assert.ok(hookedAuth);
+  const hookedApp = createApp({ ...ctx, auth: hookedAuth });
+
+  const ownerSignUp = await hookedApp.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "owner-stay@bento.test",
+      password: "correct-horse-battery",
+      name: "Owner Stay",
+    }),
+  });
+  const ownerToken = ownerSignUp.headers.get("set-auth-token")!;
+  const ownerAuth = { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" };
+
+  const org = (await (
+    await hookedApp.request("/api/auth/organization/create", {
+      method: "POST",
+      headers: ownerAuth,
+      body: JSON.stringify({ name: "Stay Co", slug: "stay-co" }),
+    })
+  ).json()) as { id: string };
+  await hookedApp.request("/api/auth/organization/set-active", {
+    method: "POST",
+    headers: ownerAuth,
+    body: JSON.stringify({ organizationId: org.id }),
+  });
+
+  const ownerDelete = await hookedApp.request("/api/auth/delete-user", {
+    method: "POST",
+    headers: ownerAuth,
+    body: JSON.stringify({ callbackURL: "/" }),
+  });
+  assert.equal(ownerDelete.status, 400, "owning a team blocks account deletion");
+  const ownerBody = (await ownerDelete.json()) as { message?: string; error?: { message?: string } | string };
+  const ownerMessage =
+    ownerBody.message ??
+    (typeof ownerBody.error === "string" ? ownerBody.error : ownerBody.error?.message) ??
+    JSON.stringify(ownerBody);
+  assert.match(ownerMessage, /Stay Co/);
+  assert.equal(
+    sent.filter((subject) => subject.includes("deleting your Bento account")).length,
+    0,
+    "no deletion mail for an owner",
+  );
+
+  const [ownerUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "owner-stay@bento.test"));
+  assert.ok(ownerUser);
+  const ownerTokens = await ctx.db.select().from(verification).where(eq(verification.value, ownerUser.id));
+  assert.equal(
+    ownerTokens.filter((row) => row.identifier.startsWith("delete-account-")).length,
+    0,
+    "no deletion token is stored for an owner",
+  );
+
+  const memberSignUp = await hookedApp.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "member-leave@bento.test",
+      password: "correct-horse-battery",
+      name: "Member Leave",
+    }),
+  });
+  const memberToken = memberSignUp.headers.get("set-auth-token")!;
+  const invite = (await (
+    await hookedApp.request("/api/auth/organization/invite-member", {
+      method: "POST",
+      headers: ownerAuth,
+      body: JSON.stringify({
+        email: "member-leave@bento.test",
+        role: "member",
+        organizationId: org.id,
+      }),
+    })
+  ).json()) as { id: string };
+  await hookedApp.request("/api/auth/organization/accept-invitation", {
+    method: "POST",
+    headers: { authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ invitationId: invite.id }),
+  });
+
+  sent.length = 0;
+  const memberDelete = await hookedApp.request("/api/auth/delete-user", {
+    method: "POST",
+    headers: { authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ callbackURL: "/" }),
+  });
+  assert.equal(memberDelete.status, 200, "a member may request the confirmation mail");
+  const memberBody = (await memberDelete.json()) as { success?: boolean; message?: string };
+  assert.equal(memberBody.message, "Verification email sent");
+
+  const [memberUser] = await ctx.db
+    .select({ id: user.id })
+    .from(user)
+    .where(eq(user.email, "member-leave@bento.test"));
+  assert.ok(memberUser);
+  const memberTokens = await ctx.db.select().from(verification).where(eq(verification.value, memberUser.id));
+  assert.ok(
+    memberTokens.some((row) => row.identifier.startsWith("delete-account-")),
+    "a confirmation token is stored for a member",
+  );
+
+  // The mail is sent after the 200, as a background task.
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !sent.includes("Confirm deleting your Bento account")) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(
+    sent.includes("Confirm deleting your Bento account"),
+    `a member is emailed the confirmation link, got ${JSON.stringify(sent)}`,
+  );
+});
+
+/**
  * Bring your own key, structurally.
  *
  * A tenant's agents run on that tenant's credentials and nothing else:
@@ -2660,5 +2905,171 @@ test("the Slack webhook demands a valid signature", async () => {
   } finally {
     if (original === undefined) delete mutableEnv.SLACK_SIGNING_SECRET;
     else mutableEnv.SLACK_SIGNING_SECRET = original;
+  }
+});
+
+/**
+ * The catalog is public data, but the "added" flag beside each entry is
+ * not: it says what this team already runs. One org's additions must
+ * never show as added to another, or the list quietly reports a
+ * neighbour's tooling.
+ */
+test("the catalog's added flag does not cross organizations", async () => {
+  const one = await jsonPost("/api/auth/sign-up/email", {
+    email: "cat-one@bento.test",
+    password: "correct-horse-battery",
+    name: "One",
+  });
+  const two = await jsonPost("/api/auth/sign-up/email", {
+    email: "cat-two@bento.test",
+    password: "correct-horse-battery",
+    name: "Two",
+  });
+  const oneToken = one.headers.get("set-auth-token")!;
+  const twoToken = two.headers.get("set-auth-token")!;
+  for (const [slug, token] of [["cat-org-one", oneToken], ["cat-org-two", twoToken]] as const) {
+    const org = (await (
+      await jsonPost("/api/auth/organization/create", { name: slug, slug }, token)
+    ).json()) as { id: string };
+    await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  }
+  const as = (token: string) => (path: string, init: RequestInit = {}) =>
+    app.request(path, {
+      ...init,
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+    });
+
+  const url = "https://catalog-shared.example.test/mcp";
+  const added = await as(oneToken)("/api/mcp", {
+    method: "POST",
+    body: JSON.stringify({ name: "Shared", slug: "shared", url, authType: "none" }),
+  });
+  assert.equal(added.status, 201);
+
+  // The catalog answers for both, and neither 500s when the registry is
+  // absent in this harness; the flag is what is under test.
+  const seenByTwo = await as(twoToken)("/api/mcp/catalog");
+  assert.equal(seenByTwo.status, 200, "any member may browse the catalog");
+  const body = (await seenByTwo.json()) as { entries: { url: string; added: boolean }[] };
+  const leaked = body.entries.find((e) => e.url === url && e.added);
+  assert.equal(leaked, undefined, "another organization's server must not read as added");
+});
+
+test("sign in and sign up outcomes reach PostHog through better-auth's own hooks", async () => {
+  const { analytics, events, exceptions } = recordingAnalytics();
+  const hooks: AuthHooks = {
+    onAuthEvent: (event) => reportAuthEvent(analytics, event),
+    onUserSignedUp: (u) =>
+      reportAuthEvent(analytics, {
+        flow: "sign up",
+        outcome: "succeeded",
+        userId: u.id,
+        properties: { method: u.method, route: u.route },
+      }),
+  };
+  // GitHub configured, so a social flow can start; nothing real behind
+  // it, so its callback can only refuse.
+  const socialEnv = loadEnv({
+    BENTO_MODE: "multi",
+    DATABASE_URL: testUrl,
+    BENTO_DATA_DIR: "/tmp",
+    BENTO_SANDBOX_DRIVER: "local-process",
+    BETTER_AUTH_SECRET: "test-secret-that-is-long-enough-for-hmac",
+    BETTER_AUTH_URL: "http://localhost:4400",
+    BENTO_RATE_LIMIT: "false",
+    GITHUB_CLIENT_ID: "test-client",
+    GITHUB_CLIENT_SECRET: "test-secret",
+  } as NodeJS.ProcessEnv);
+  const socialAuth = createAuth(socialEnv, ctx.db, { description: "test", async send() {} }, hooks);
+  assert.ok(socialAuth);
+  const socialApp = createApp({ ...ctx, env: socialEnv, auth: socialAuth });
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    socialApp.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  const email = "outcome-metrics@bento.test";
+  const password = "correct-horse-battery";
+
+  const signUp = await post("/api/auth/sign-up/email", { email, password, name: "Metrics" });
+  assert.equal(signUp.status, 200);
+  const created = ((await signUp.json()) as { user: { id: string } }).user.id;
+  assert.equal(events.length, 1, "one event for a sign up, not one per session it minted");
+  assert.equal(events[0].event, "sign up succeeded");
+  assert.equal(events[0].userId, created);
+  assert.deepEqual(events[0].properties, { method: "email", route: "/sign-up/email" });
+  assert.equal(exceptions.length, 0);
+
+  const wrong = await post("/api/auth/sign-in/email", { email, password: "not-the-password" });
+  assert.equal(wrong.status, 401);
+  assert.equal(events[1]?.event, "sign in failed");
+  // A failure has no user, so it counts against the server.
+  assert.equal(events[1]?.userId, null);
+  assert.deepEqual(events[1]?.properties, {
+    method: "email",
+    route: "/sign-in/email",
+    status: 401,
+    code: "INVALID_EMAIL_OR_PASSWORD",
+  });
+  assert.equal(exceptions.length, 0, "a wrong password is not a fault of the server");
+
+  const right = await post("/api/auth/sign-in/email", { email, password });
+  assert.equal(right.status, 200);
+  assert.equal(events[2]?.event, "sign in succeeded");
+  assert.equal(events[2]?.userId, created);
+  assert.deepEqual(events[2]?.properties, { method: "email", route: "/sign-in/email" });
+
+  const duplicate = await post("/api/auth/sign-up/email", { email, password, name: "Metrics" });
+  assert.equal(duplicate.status, 422);
+  assert.equal(events[3]?.event, "sign up failed");
+  assert.equal(events[3]?.properties?.code, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
+  assert.equal(exceptions.length, 0);
+
+  const started = await post("/api/auth/sign-in/social", { provider: "github", callbackURL: "/" });
+  assert.equal(started.status, 200);
+  assert.equal(events[4]?.event, "sign in started");
+  assert.deepEqual(events[4]?.properties, { method: "github", route: "/sign-in/social" });
+
+  // A provider nobody configured is a fault, and its name is not a property value.
+  const missing = await post("/api/auth/sign-in/social", { provider: "gitlab", callbackURL: "/" });
+  assert.equal(missing.status, 404);
+  assert.equal(events[5]?.event, "sign in failed");
+  assert.equal(events[5]?.properties?.method, "unknown");
+  assert.equal(events[5]?.properties?.code, "PROVIDER_NOT_FOUND");
+  assert.equal(exceptions.length, 1);
+  assert.equal(exceptions[0].error.name, "AuthFailureError");
+  assert.equal(exceptions[0].userId, null);
+  assert.equal(exceptions[0].properties?.$exception_fingerprint, "sign in failed:unknown:PROVIDER_NOT_FOUND");
+
+  // Coming back from GitHub with a state nobody issued: better-auth
+  // redirects to its error page, and that is a failed sign in.
+  const callback = await socialApp.request("/api/auth/callback/github?code=abc&state=nope");
+  assert.equal(callback.status, 302);
+  assert.match(callback.headers.get("location") ?? "", /error=state_mismatch/);
+  assert.equal(events[6]?.event, "sign in failed");
+  assert.deepEqual(events[6]?.properties, { method: "github", route: "/callback/:id", status: 302, code: "state_mismatch" });
+  assert.equal(exceptions.length, 2);
+  assert.equal(exceptions[1].properties?.$exception_fingerprint, "sign in failed:github:state_mismatch");
+
+  // The same refusal while signed in is the account-link flow, which is not a sign in.
+  const sessionCookie = right.headers
+    .getSetCookie()
+    .map((header) => header.split(";")[0])
+    .find((pair) => pair.includes("session_token="));
+  assert.ok(sessionCookie, "signing in sets the session cookie");
+  const linking = await socialApp.request("/api/auth/callback/github?code=abc&state=nope", { headers: { cookie: sessionCookie } });
+  assert.equal(linking.status, 302);
+  assert.equal(events.length, 7, "a refused link is not a failed sign in");
+
+  // Reading the session is not signing in.
+  const token = right.headers.get("set-auth-token")!;
+  const session = await socialApp.request("/api/auth/get-session", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(session.status, 200);
+  assert.equal(events.length, 7);
+
+  // Nothing that identifies the person rides along on a failure.
+  for (const event of events) {
+    if (event.event.endsWith("failed")) assert.equal(JSON.stringify(event).includes("outcome-metrics"), false);
   }
 });

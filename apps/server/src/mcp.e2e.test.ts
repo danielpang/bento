@@ -15,6 +15,7 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
+import { clearCatalogCache } from "./mcp/catalog.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "mcp_test";
@@ -31,6 +32,7 @@ let app: ReturnType<typeof createApp>;
  */
 let upstream: Server;
 let upstreamUrl: string;
+let catalogRegistry: Server;
 const GOOD_KEY = "mcp-key-correct";
 let upstreamRequests: { authorization: string | null; header: Record<string, string | undefined> }[] = [];
 
@@ -42,12 +44,36 @@ before(async () => {
   await admin.end();
   await runMigrations(testUrl);
 
+  // A fixture MCP registry, so the catalog test never depends on the
+  // live public one.
+  catalogRegistry = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        servers: [
+          {
+            server: {
+              name: "com.fixture/docs",
+              title: "Fixture Docs",
+              description: "A catalog fixture",
+              remotes: [{ type: "streamable-http", url: "https://fixture.test/mcp" }],
+            },
+          },
+          { server: { name: "io.github.x/stdio", title: "Stdio only" } },
+        ],
+      }),
+    );
+  });
+  await new Promise<void>((r) => catalogRegistry.listen(0, "127.0.0.1", r));
+  const registryUrl = `http://127.0.0.1:${(catalogRegistry.address() as { port: number }).port}`;
+
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-mcp-"));
   const env = loadEnv({
     BENTO_MODE: "local",
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
+    BENTO_MCP_REGISTRY_URL: registryUrl,
     // The OAuth flow tests below sign a state blob with this.
     BENTO_SECRET_KEY: "mcp-test-state-signing-key-32-chars-min",
   } as NodeJS.ProcessEnv);
@@ -120,6 +146,7 @@ before(async () => {
 
 after(async () => {
   upstream?.close();
+  catalogRegistry?.close();
   await ctx.boss.stop({ close: true, timeout: 1000 });
   await ctx.pool.end();
 });
@@ -174,6 +201,8 @@ test("the plain route lists servers as pipe-delimited lines for the TUI", async 
   assert.equal(authType, "api_key");
   assert.equal(scope, "org");
   assert.equal(enabled, "true");
+  assert.match(text, /^access\|[01]/);
+  assert.ok(line!.split("|").at(-1), "the display name is last so it may contain pipes");
 });
 
 test("a reserved API key header is refused at write time", async () => {
@@ -421,6 +450,46 @@ test("the callback exchanges the code and stores the tokens encrypted", async ()
   assert.ok(!JSON.stringify(status).includes("flow-access"), "no route returns the access token");
 });
 
+test("a stored OAuth sign-in stays connected after the access token expires", async () => {
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "Durable OAuth",
+    slug: "durable-oauth",
+    url: "https://mcp.durable.test/mcp",
+    authType: "oauth",
+    credentialScope: "user",
+    personal: true,
+  });
+  assert.equal(created.status, 201);
+  const { id } = (await created.json()) as { id: string };
+
+  await ctx.db.insert(mcpCredentials).values({
+    serverId: id,
+    organizationId: null,
+    userId: ctx.userId,
+    kind: "oauth",
+    encryptedSecret: ctx.secretBox.encrypt("stale-access"),
+    encryptedRefreshToken: ctx.secretBox.encrypt("refresh-still-good"),
+    expiresAt: new Date(Date.now() - 60_000),
+    hint: "…oken",
+  });
+
+  const status = (await (await app.request("/api/mcp/status")).json()) as {
+    servers: { id: string; userCredential: { connected: boolean } | null }[];
+  };
+  const row = status.servers.find((s) => s.id === id);
+  assert.equal(row?.userCredential?.connected, true, "expiry must not force a new sign in");
+
+  const gone = await jsonRequest(`/api/mcp/${id}/user-credential`, "DELETE");
+  assert.equal(gone.status, 200);
+  const after = (await (await app.request("/api/mcp/status")).json()) as {
+    servers: { id: string; userCredential: { connected: boolean } | null }[];
+  };
+  const disconnected = after.servers.find((s) => s.id === id);
+  assert.equal(disconnected?.userCredential?.connected, false, "disconnect is what ends the sign in");
+
+  await jsonRequest(`/api/mcp/${id}`, "DELETE");
+});
+
 test("the callback rejects a tampered state, a wrong issuer, and a mismatched server id", async () => {
   const id = await makeOAuthServer("org");
   const connect = await jsonRequest(`/api/mcp/${id}/connect`, "POST");
@@ -456,4 +525,120 @@ test("the callback rejects a missing iss when the authorization server advertise
   assert.equal(server!.issParamSupported, true, "discovery persisted the iss support flag");
   const noIss = await app.request(`/api/mcp/callback/${id}?state=${encodeURIComponent(state)}&code=the-auth-code`);
   assert.match(noIss.headers.get("location") ?? "", /mcp=invalid/, "an omitted iss is refused when advertised");
+});
+
+test("the catalog lists only remote servers, and marks what is already added", async () => {
+  clearCatalogCache();
+  const res = await app.request("/api/mcp/catalog");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    reachable: boolean;
+    entries: { name: string; slug: string; url: string; transport: string; added: boolean; featured: boolean }[];
+  };
+  assert.equal(body.reachable, true);
+  // The stdio-only fixture entry must not be offered.
+  assert.ok(
+    !body.entries.some((e) => e.name === "io.github.x/stdio"),
+    "a stdio-only server is not offered",
+  );
+  // Browsing leads with the curated set; the registry's entries follow.
+  assert.ok(body.entries.length > 1, "the curated set is offered alongside the registry");
+  assert.ok(body.entries[0]!.featured, "the curated set leads the browse view");
+  const entry = body.entries.find((e) => e.name === "com.fixture/docs");
+  assert.ok(entry, "the registry's remote entry is offered");
+  assert.equal(entry!.slug, "docs");
+  assert.equal(entry!.transport, "http");
+  assert.equal(entry!.added, false, "not added yet");
+
+  // Add it, and the same entry now reads as added rather than offering
+  // a second copy of the same server.
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "Fixture Docs",
+    slug: "docs",
+    url: entry!.url,
+    authType: "none",
+  });
+  assert.equal(created.status, 201);
+  clearCatalogCache();
+  const again = (await (await app.request("/api/mcp/catalog")).json()) as {
+    entries: { name: string; added: boolean }[];
+  };
+  const marked = again.entries.find((e) => e.name === "com.fixture/docs");
+  assert.equal(marked!.added, true, "an added server is marked, not offered twice");
+});
+
+test("the catalog search reaches the registry", async () => {
+  clearCatalogCache();
+  const res = await app.request("/api/mcp/catalog?search=docs");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { entries: unknown[] };
+  assert.equal(body.entries.length, 1);
+});
+
+test("adding without an auth type asks the server, and lands as the member's own", async () => {
+  // An open server: answers initialize with no credential at all.
+  const open = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18", capabilities: {} } }));
+    });
+  });
+  await new Promise<void>((r) => open.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(open.address() as { port: number }).port}/mcp`;
+  try {
+    const created = await jsonRequest("/api/mcp", "POST", {
+      name: "Probed",
+      slug: "probed",
+      url,
+      personal: true,
+    });
+    assert.equal(created.status, 201);
+    const { id } = (await created.json()) as { id: string };
+    const [row] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+    assert.equal(row!.authType, "none", "an open server is detected as needing no credential");
+    assert.equal(row!.userId, ctx.userId, "a catalog add belongs to the member who made it");
+    assert.equal(row!.credentialScope, "user");
+  } finally {
+    open.close();
+  }
+});
+
+test("a server that demands a credential without naming an authorization server wants a key", async () => {
+  // The upstream fixture 401s with no WWW-Authenticate, which is what a
+  // key-based server looks like.
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "Keyed",
+    slug: "keyed",
+    url: upstreamUrl,
+    personal: true,
+  });
+  assert.equal(created.status, 201);
+  const { id } = (await created.json()) as { id: string };
+  const [row] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+  assert.equal(row!.authType, "api_key");
+});
+
+test("a server that refuses without a bearer is detected as OAuth", async () => {
+  const guarded = createServer((_req, res) => {
+    res.writeHead(401, { "www-authenticate": 'Bearer resource_metadata="https://x.test/.well-known/oauth-protected-resource"' });
+    res.end();
+  });
+  await new Promise<void>((r) => guarded.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(guarded.address() as { port: number }).port}/mcp`;
+  try {
+    const created = await jsonRequest("/api/mcp", "POST", {
+      name: "Guarded",
+      slug: "guarded",
+      url,
+      personal: true,
+    });
+    assert.equal(created.status, 201);
+    const { id } = (await created.json()) as { id: string };
+    const [row] = await ctx.db.select().from(mcpServers).where(eq(mcpServers.id, id));
+    assert.equal(row!.authType, "oauth", "an RFC 9728 challenge means a sign in, not a key");
+  } finally {
+    guarded.close();
+  }
 });

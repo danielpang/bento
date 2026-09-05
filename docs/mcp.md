@@ -1,71 +1,92 @@
 # MCP servers
 
-An organization defines its remote MCP servers once, and every agent Bento runs gets them, on every harness that supports MCP. Agents never hold the real credential: each run reaches a server through Bento's gateway with a token that lives only as long as the run.
-
-Bento also works in the other direction: it is itself an MCP server that outside agents can connect to. That is the last section of this page.
+An organization defines remote MCP servers once. Every supported harness receives them on each run. Agents never hold upstream credentials. Each run uses a gateway token scoped to that run.
 
 ## What an agent sees
 
-Nothing about the real server. At run start Bento writes each harness's MCP config pointing every enabled server at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway authenticates that token, attaches the organization's (or the acting member's) real credential, and proxies the traffic upstream. When the run settles the token is revoked. So a prompt injection that reads the config out of the sandbox gets a token that dies with the run and never leaves the gateway, not an API key or an OAuth token.
+At run start, Bento writes MCP config for the harness. Each enabled server points at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway validates the token, attaches the organization or member credential, and proxies upstream. The token is revoked when the run ends.
+
+Credentials are not exposed in the sandbox config.
+
+## Adding a server
+
+**Settings → MCP** lists servers from the public MCP registry (`BENTO_MCP_REGISTRY_URL` overrides the source). Search and add in one click. The registry supplies name, URL, transport, and tool name. Bento probes auth requirements (RFC 9728 metadata, initialize handshake).
+
+Registry-added servers start as personal connections. The member who adds them supplies credentials or OAuth.
+
+Stdio (local command) servers are not supported. Bento requires network-reachable servers.
+
+**Custom URL** (below the registry list): for servers not in the registry or for team-wide servers.
+
+Icons are fetched and cached by the server, not the browser. Services without an icon get a monogram.
+
+The registry catalog is cached server-side for a few minutes. If the registry is unreachable, the UI reports the error; custom URL entry still works.
 
 ## Team servers and personal servers
 
-Settings, then MCP. Remote servers only: a URL the sandbox can reach over the gateway, streamable HTTP or SSE. The slug is the tool name agents see (lowercase letters, digits, dashes).
+Remote servers only (streamable HTTP or SSE). The slug is the tool name agents see (`[a-z0-9-]+`).
 
-A server is either the team's or a member's own:
+| Scope | Who defines it | Who gets it | Credential |
+| --- | --- | --- | --- |
+| Team | Owner or admin | Every agent run in the org | Shared org credential or org OAuth |
+| Personal | Any member | Runs that member starts | That member's credential or OAuth |
 
-- **Team servers** are the shared registry. An owner or admin defines them, and every agent the team runs gets them. This is where a shared docs or search server, or an internal company MCP server, belongs.
-- **Personal servers** are one member's own. Any member may add one from the "Your servers and sign-ins" section; only runs that member starts get it, and only their own credential is ever attached. A teammate never sees another member's personal server. An admin can see one (named by its owner) and turn it off or remove it as governance, but cannot read or store its credentials.
+If a personal slug collides with a team slug, the team server wins for that run.
 
-If a personal server's slug matches a team server's, the team server wins for that run and the transcript says so.
+Admins can disable or remove a member's personal server but cannot read its credentials.
 
-## Authenticating a server
+## Authentication
 
-Authentication is one of:
+| Method | Team server | Personal server |
+| --- | --- | --- |
+| None | No credential stored | No credential stored |
+| API key | Admin stores shared key; validated via MCP initialize | Member stores own key |
+| OAuth | Org-wide (admin connects once) or per member (run uses starter's token) | Owner's OAuth only |
 
-- **No auth.** The server needs no credential.
-- **API key.** For a team server an admin pastes the shared key; for a personal server the member pastes their own. Bento validates it against the server with an MCP initialize handshake before storing it, then keeps it encrypted and shows only a masked tail.
-- **Sign in (OAuth).** For a team server, either one sign in for the whole organization (an admin connects once) or one per member (each person connects their own account, and a run uses whichever member started it). A personal server's OAuth is always the owner's own sign in. A member who has not connected a server that needs their sign in sees it listed with a prompt, and their runs simply run without it.
+Members without a required OAuth connection see the server listed with a connect prompt. Their runs proceed without that server.
 
-Auto-started runs (a gate evaluator, a judge, auto-start pipeline) have no acting member, so they get the team servers only.
+Auto-started runs (gate evaluator, judge, pipeline auto-start) have no acting member and receive team servers only.
 
-## How OAuth discovery works
+## OAuth
 
-When you connect an OAuth server, Bento discovers its authorization server from the MCP URL (RFC 9728 protected resource metadata, then RFC 8414 authorization server metadata), registers a client if the server offers dynamic registration (RFC 7591), and runs the authorization code flow with PKCE and the RFC 8707 resource indicator. If a server does not offer dynamic registration, the panel asks for a client id and secret to enter by hand.
+Bento discovers authorization metadata from the MCP URL (RFC 9728, RFC 8414), registers a client when dynamic registration is available (RFC 7591), and runs authorization code + PKCE with the RFC 8707 resource indicator. Manual client id/secret entry is available when dynamic registration is not offered.
 
-Each server has its own callback path (`/api/mcp/callback/<serverId>`) and registers its own redirect URI. The gateway refreshes an expired access token on the fly, so a long run does not lose access mid-flight.
+Callback path: `/api/mcp/callback/<serverId>`. The gateway refreshes expired access tokens during long runs, so a connected server stays connected until someone disconnects it or removes it. You do not sign in again on a schedule.
 
-## Changing or removing a server
+Changing URL origin, auth type, or credential scope clears stored credentials for that server. Disconnecting drops the stored sign in and leaves the server in the list. Removing a server deletes it and its credentials. Removing a member deletes that member's personal connections.
 
-Changing a server's URL origin, its auth type, or its credential scope clears its stored credentials: a credential is bound to the endpoints it was issued for, so a repointed server must be reconnected. Removing a server deletes its credentials. Removing a member deletes that member's own connections.
+## Harness support
 
-## Which harnesses use MCP
-
-Claude Code, Cursor, opencode, and Codex consume remote MCP servers. A run on a harness without MCP support, or in a sandbox that cannot reach the gateway, says so in the transcript and runs without the servers rather than failing.
+Claude Code, Cursor, opencode, Codex, and Antigravity consume remote MCP servers. Unsupported harnesses or unreachable gateways log a notice in the transcript and run without MCP.
 
 MCP is not attached when:
 
-- the organization restricts sandbox network access (there is no egress to reach the gateway),
-- the run uses the local-process driver (its home is the real user's, not Bento's),
-- a per-user server has no credential for the member who started the run, or
-- the deployment has no gateway URL a sandbox can reach.
+- the organization blocks sandbox egress,
+- the run uses the `local-process` driver,
+- a personal server has no credential for the run's starter, or
+- no gateway URL reachable from the sandbox is configured.
 
 ## Configuration
 
-The gateway is reached at `BENTO_MCP_GATEWAY_URL`, which defaults to `BETTER_AUTH_URL`. Set it explicitly when a sandbox cannot reach that address:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BENTO_MCP_GATEWAY_URL` | `BETTER_AUTH_URL` | Gateway base URL seen by sandboxes |
+| `BENTO_MCP_REGISTRY_URL` | public registry | Catalog source |
 
-- The Docker driver rewrites a localhost base to `host.docker.internal` automatically and adds the host alias to each sandbox.
-- A remote sandbox fleet (Fly Sprites) cannot reach the server's own loopback, so `BENTO_MCP_GATEWAY_URL` must be an address the sandbox can open.
+Set `BENTO_MCP_GATEWAY_URL` explicitly when sandboxes cannot reach `BETTER_AUTH_URL`:
 
-OAuth state is signed with `BENTO_SECRET_KEY` (or `BETTER_AUTH_SECRET`), the same key that encrypts stored credentials. Callback and authorize URLs are built from `BETTER_AUTH_URL`.
+- Docker driver rewrites `localhost` to `host.docker.internal`.
+- Remote sandboxes (Fly Sprites) cannot use the server's loopback.
 
-## What is not here yet
+OAuth state is signed with `BENTO_SECRET_KEY` (or `BETTER_AUTH_SECRET`). Callback and authorize URLs use `BETTER_AUTH_URL`.
 
-Per-project server enablement (a server is available to every project in the organization), stdio (command) servers, and delivering MCP servers to runner-executed runs on a member's own machine. See the plan for the follow-ups.
+## Limitations
+
+Not yet supported: per-project server enablement (org-wide only), stdio servers, MCP on `--run-agents local` runner execution.
 
 ## Bento as an MCP server
 
-The mirror image of everything above: an agent running outside Bento (Claude Code on a laptop, an agent in some other product) connects to `/api/mcp-server` and can put cards on the board and follow what happens to them. Currently behind the beta testers flag.
+The other direction: an agent running outside Bento (Claude Code on a laptop, an agent in some other product) connects to `/api/mcp-server` and can put cards on the board and follow what happens to them. Currently behind the beta testers flag.
 
 ### Authorizing a connection
 
@@ -74,7 +95,7 @@ Settings, then MCP, under "Connect an agent to Bento". Any member may authorize 
 - **A name**, so the row means something later ("Claude Code on my laptop").
 - **What the agent can reach.** Either the whole team (every project the organization has, including ones created later), or a selection of projects, one or several, pinned at authorization. A pinned project that later leaves the organization drops out of reach on its own.
 
-The create hands back a token once. Only its hash is stored, so a lost token means revoking the connection and making a new one. Revoking takes effect on the connection's next request, as does removal from the organization: membership is re-read live, and leaving the team also deletes the member's connections. Owners and admins see every connection and can revoke any of them; members see and revoke their own.
+The create hands back a token once. Only its hash is stored, so a lost token means disconnecting and making a new one. The token does not expire. It stays valid until it is disconnected, or until its owner leaves the organization. Disconnecting takes effect on the connection's next request; membership is re-read live, and leaving the team also deletes the member's connections. Owners and admins see every connection and can disconnect any of them; members see and disconnect their own.
 
 ### Connecting an agent
 
@@ -84,6 +105,8 @@ The transport is Streamable HTTP, stateless, with the token as a bearer Authoriz
 claude mcp add --transport http bento https://your-bento/api/mcp-server \
   --header "Authorization: Bearer bmcp_..."
 ```
+
+A bad or missing token answers 404, not 401, so MCP clients do not start an OAuth sign-in this endpoint does not offer.
 
 ### What the agent gets
 

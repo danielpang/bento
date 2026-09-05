@@ -29,6 +29,8 @@ import { ensureLocalUser, type AppContext } from "../context.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { mintRunGrant, revokeRunGrant, runHasActiveMcp } from "./grants.js";
+import { BENTO_SERVER_ID } from "./bento-tools.js";
+import { MAX_CHILDREN_PER_CARD } from "../feature-tree.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "mcp_gateway_test";
@@ -357,8 +359,8 @@ test("an oversized chunked body is refused before it is buffered", async () => {
 });
 
 test("runHasActiveMcp is true only for a live grant that pinned a server", async () => {
-  // No servers attached: no grant is what prepareRunMcp mints, but even a
-  // grant with an empty server set must not count.
+  // A grant with an empty server set must not count as attached: the
+  // resume path keys the MCP flags off this.
   const empty = await mintRunGrant(ctx, {
     runId,
     organizationId: null,
@@ -550,4 +552,195 @@ test("two concurrent 401s do a single refresh (advisory lock)", async () => {
     rotating.close();
     tokenEndpoint.close();
   }
+});
+
+/**
+ * Bento's own tools: a server id the gateway answers itself.
+ *
+ * The run behind the grant is the whole address space. There is no
+ * card id to pass, so these check that the card created is the run's
+ * own child, that everything about who and where comes from the grant,
+ * and that a revoked grant closes the door with everything else.
+ */
+
+async function bentoCall(token: string, method: string, params?: unknown) {
+  return app.request(`/api/mcp-gateway/${BENTO_SERVER_ID}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, ...(params ? { params } : {}) }),
+  });
+}
+
+async function bentoGrant() {
+  return mintRunGrant(ctx, {
+    runId,
+    organizationId: null,
+    actingUserId: null,
+    serverIds: [BENTO_SERVER_ID],
+    ttlMs: 60_000,
+  });
+}
+
+function toolText(body: unknown): string {
+  const result = (body as { result?: { content?: { text?: string }[]; isError?: boolean } }).result;
+  return result?.content?.map((c) => c.text ?? "").join("\n") ?? "";
+}
+
+test("the bento server lists its two tools and nothing else", async () => {
+  const token = await bentoGrant();
+  const res = await bentoCall(token, "tools/list");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { result: { tools: { name: string; description: string }[] } };
+  assert.deepEqual(
+    body.result.tools.map((t) => t.name).sort(),
+    ["create_card", "list_child_cards"],
+    "no update and no delete tool exists to be talked into using",
+  );
+  // The efficiency gate lives in the description, because code cannot
+  // judge whether a task deserves splitting.
+  const create = body.result.tools.find((t) => t.name === "create_card")!;
+  assert.match(create.description, /Only do this when both are true/);
+});
+
+test("a card the agent creates is a child of the card its run is working", async () => {
+  const token = await bentoGrant();
+  const res = await bentoCall(token, "tools/call", {
+    name: "create_card",
+    arguments: { title: "A part of the work", description: "filed by an agent" },
+  });
+  assert.equal(res.status, 200);
+  const text = toolText(await res.json());
+  assert.match(text, /Created card /);
+
+  const [feature] = await ctx.db
+    .select()
+    .from(features)
+    .where(eq(features.title, "A part of the work"))
+    .limit(1);
+  assert.ok(feature, "the row is really there, not only in the answer");
+  const [parentRun] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+  assert.equal(feature.parentId, parentRun!.featureId, "parented to the run's own card, not to anything named");
+  assert.equal(feature.status, "backlog", "and it is filed, not started");
+  assert.equal(feature.currentStageId, null);
+
+  // Nothing was started: children go through the ordinary activation
+  // path, so the spawn tool must never have queued a run.
+  const runsOnChild = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(eq(agentRuns.featureId, feature.id));
+  assert.equal(runsOnChild.length, 0, "the tool does not start the cards it files");
+});
+
+test("the agent can read back what it already created", async () => {
+  const token = await bentoGrant();
+  await bentoCall(token, "tools/call", {
+    name: "create_card",
+    arguments: { title: "Something to find again" },
+  });
+  const res = await bentoCall(token, "tools/call", { name: "list_child_cards" });
+  assert.match(toolText(await res.json()), /Something to find again/);
+});
+
+test("a card with no title is refused rather than filed blank", async () => {
+  const token = await bentoGrant();
+  const res = await bentoCall(token, "tools/call", { name: "create_card", arguments: { title: "   " } });
+  const body = (await res.json()) as { result: { isError?: boolean } };
+  assert.equal(body.result.isError, true);
+  assert.match(toolText(body), /needs a title/);
+});
+
+test("an unknown tool is refused, not guessed at", async () => {
+  const token = await bentoGrant();
+  const res = await bentoCall(token, "tools/call", { name: "delete_card", arguments: { id: "x" } });
+  const body = (await res.json()) as { error?: { code: number } };
+  assert.equal(body.error?.code, -32602);
+});
+
+test("a grant that never attached the bento server cannot reach it", async () => {
+  // The gateway's whole authorization story: the grant pins which
+  // servers a run may reach, and the virtual one is no different.
+  const server = await makeServer("none", null);
+  const token = await mintRunGrant(ctx, {
+    runId,
+    organizationId: null,
+    actingUserId: null,
+    serverIds: [server.id],
+    ttlMs: 60_000,
+  });
+  assert.equal((await bentoCall(token, "tools/list")).status, 404);
+});
+
+test("the bento server dies with its run", async () => {
+  const token = await bentoGrant();
+  assert.equal((await bentoCall(token, "tools/list")).status, 200);
+  await revokeRunGrant(ctx, runId);
+  assert.equal((await bentoCall(token, "tools/list")).status, 404, "a revoked grant reaches nothing");
+});
+
+test("the cap on parts holds at the tool, not only at the route", async () => {
+  const token = await bentoGrant();
+  const [parentRun] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+  const parentId = parentRun!.featureId;
+  // Fill the card to its limit directly, so the test costs one insert
+  // rather than twenty tool calls.
+  const [parent] = await ctx.db.select().from(features).where(eq(features.id, parentId)).limit(1);
+  const existing = await ctx.db
+    .select({ id: features.id })
+    .from(features)
+    .where(eq(features.parentId, parentId));
+  for (let i = existing.length; i < MAX_CHILDREN_PER_CARD; i += 1) {
+    await ctx.db.insert(features).values({
+      projectId: parent!.projectId,
+      pipelineId: parent!.pipelineId,
+      title: `filler ${i}`,
+      parentId,
+    });
+  }
+  const res = await bentoCall(token, "tools/call", {
+    name: "create_card",
+    arguments: { title: "One too many" },
+  });
+  const body = (await res.json()) as { result: { isError?: boolean } };
+  assert.equal(body.result.isError, true);
+  assert.match(toolText(body), /is the limit/);
+});
+
+test("a notification is acknowledged with no body, and initialize answers a version", async () => {
+  const token = await bentoGrant();
+  const init = await bentoCall(token, "initialize", { protocolVersion: "2025-06-18" });
+  const body = (await init.json()) as { result: { protocolVersion: string; capabilities: { tools: unknown } } };
+  assert.equal(body.result.protocolVersion, "2025-06-18");
+  assert.ok(body.result.capabilities.tools);
+
+  const notified = await app.request(`/api/mcp-gateway/${BENTO_SERVER_ID}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+  });
+  assert.equal(notified.status, 202);
+  assert.equal(await notified.text(), "", "a notification gets no JSON-RPC answer");
+});
+
+test("the SSE transport's paths refuse the virtual server rather than reading its id as a uuid", async () => {
+  // "bento" is in the grant like any other server id, but it names no
+  // row. The streaming paths have to answer 404 rather than hand a
+  // non-uuid to Postgres and turn a probe into a 500.
+  const token = await bentoGrant();
+  const sse = await app.request(`/api/mcp-gateway/${BENTO_SERVER_ID}/sse`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(sse.status, 404);
+  const message = await app.request(`/api/mcp-gateway/${BENTO_SERVER_ID}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: "{}",
+  });
+  assert.equal(message.status, 404);
+  // The stream a streamable-HTTP client would open: nothing to stream,
+  // said as 405 rather than left hanging.
+  const stream = await app.request(`/api/mcp-gateway/${BENTO_SERVER_ID}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(stream.status, 405);
 });

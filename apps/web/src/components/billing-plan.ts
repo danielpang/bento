@@ -76,6 +76,15 @@ export interface PlanState {
    * them.
    */
   usageByMember: { userId: string | null; name: string | null; agentHours: number }[];
+  /**
+   * Which cards spent the hours this billing month. Prefer this over
+   * usageByMember: a team of forty people is still a handful of cards
+   * doing the work, and "who used it" on a board is the card.
+   *
+   * Absent when the billing module has not started sending it; the
+   * console then rolls the period (from periodStart) up from runs.
+   */
+  usageByFeature?: { featureId: string; title: string; agentHours: number }[];
   seats: { held: number; billable: number; monthlyTotalUsd: number | null; billed: boolean };
   catalog: PlanOffer[];
   activity?: {
@@ -146,6 +155,178 @@ export function resetsOn(state: PlanState): string {
   });
 }
 
+/**
+ * When this billing month began, as a date.
+ *
+ * The ranking is hours since this instant, not since the first of the
+ * calendar month. Printing it next to "By card" is what keeps those
+ * two from being mistaken for each other.
+ */
+export function startedOn(periodStart: string): string {
+  return new Date(periodStart).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "long",
+  });
+}
+
+/**
+ * A hours figure as people read it: whole when the tenth is zero,
+ * one decimal otherwise. The meter and the per-card rows have to
+ * agree, and 12.00 on a billing card looks like a bug.
+ */
+export function formatHours(n: number): string {
+  if (!Number.isFinite(n)) return "0";
+  const rounded = Math.round(n * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+/** "1 hour" or "12.4 hours", for a row that would otherwise say "1 hours". */
+export function formatHoursPhrase(n: number): string {
+  return `${formatHours(n)} ${Math.round(n * 10) / 10 === 1 ? "hour" : "hours"}`;
+}
+
+export type HoursUsage = {
+  used: number;
+  included: number;
+  remaining: number;
+  overage: number;
+  /** 0 to 1, against the included allowance, never past full. */
+  fillRatio: number;
+};
+
+/**
+ * The allowance broken into the numbers the hours card prints.
+ *
+ * Remaining and overage are mutually exclusive: a team still inside
+ * the pool has leftover hours, and a team past it has overage, never
+ * both. The fill is capped at the included hours so a paying overage
+ * does not blow the meter past the track.
+ */
+export function hoursUsage(hours: PlanState["agentHours"]): HoursUsage {
+  const included = Math.max(0, hours.included);
+  const used = Math.max(0, hours.used);
+  return {
+    used,
+    included,
+    remaining: Math.max(0, included - used),
+    overage: Math.max(0, used - included),
+    fillRatio: included === 0 ? (used > 0 ? 1 : 0) : Math.min(1, used / included),
+  };
+}
+
+/**
+ * How the hours meter should colour.
+ *
+ * Stopped is the wall the gate already hit. Overage is a team that
+ * chose to pay past the pool. Warn is the same three-quarters line
+ * the usage email already sends, so the card and the inbox agree.
+ */
+export function hoursMeterState(
+  usage: HoursUsage,
+  stopped: PlanState["stopped"],
+): "stopped" | "over" | "warn" | undefined {
+  if (stopped) return "stopped";
+  if (usage.overage > 0) return "over";
+  if (usage.fillRatio >= 0.75) return "warn";
+  return undefined;
+}
+
+/** How many spenders the hours card shows before collapsing the rest. */
+export const HOURS_PREVIEW = 5;
+
+/** Matches shown for a title filter. The rest ask for a longer query. */
+export const HOURS_MATCH_CAP = 20;
+
+export type HoursEntry = { id: string; name: string; agentHours: number };
+
+export type RankedHoursEntries = {
+  ranked: HoursEntry[];
+  preview: HoursEntry[];
+  rest: HoursEntry[];
+  restHours: number;
+};
+
+/**
+ * Who spent hours, heaviest first, with the card's preview cut.
+ *
+ * Zero-hour rows are dropped: a board of forty cards would otherwise
+ * be a directory, and Billing is answering which cards used the pool,
+ * not which ones could have. The rest are summarised, not listed,
+ * because mounting every title (even behind a "show all") is what
+ * fails to scale.
+ */
+export function rankHoursEntries(
+  entries: HoursEntry[],
+  preview = HOURS_PREVIEW,
+): RankedHoursEntries {
+  const ranked = [...entries]
+    .filter((entry) => entry.agentHours > 0)
+    .sort((a, b) => b.agentHours - a.agentHours || a.name.localeCompare(b.name));
+  const rest = ranked.slice(preview);
+  return {
+    ranked,
+    preview: ranked.slice(0, preview),
+    rest,
+    restHours: rest.reduce((sum, entry) => sum + entry.agentHours, 0),
+  };
+}
+
+/** A title filter over the ranked spenders. */
+export function filterHoursEntries(ranked: HoursEntry[], query: string): HoursEntry[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return ranked;
+  return ranked.filter((entry) => entry.name.toLowerCase().includes(needle));
+}
+
+export function hoursEntriesFromFeatures(
+  features: { featureId: string; title: string; agentHours: number }[],
+): HoursEntry[] {
+  return features.map((entry) => ({
+    id: entry.featureId,
+    name: entry.title,
+    agentHours: entry.agentHours,
+  }));
+}
+
+/**
+ * Width of a row's bar, 0 to 1, against the heaviest spender.
+ *
+ * Scaling to the included pool draws a 12 hour row as a sliver on a
+ * 500 hour Business allowance, which is exactly when a team is large
+ * enough to need the breakdown. The heaviest row is full; everyone
+ * else is relative to them.
+ */
+export function hoursBarFill(hours: number, heaviest: number): number {
+  if (heaviest <= 0 || hours <= 0) return 0;
+  return Math.min(1, hours / heaviest);
+}
+
+/** Share of a whole, as people read a percentage. Null when there is nothing to say. */
+export function formatHoursShare(part: number, whole: number): string | null {
+  if (whole <= 0 || part <= 0) return null;
+  const pct = Math.round((part / whole) * 100);
+  if (pct < 1) return "<1%";
+  return `${pct}%`;
+}
+
+/**
+ * The collapsed tail of the hours list, in one sentence.
+ *
+ * Naming the count and the hours is what makes the preview honest:
+ * the top five are not "the team".
+ */
+export function hoursRestCopy(
+  count: number,
+  hours: number,
+  used: number,
+  noun: { singular: string; plural: string },
+): string {
+  const who = count === 1 ? `and 1 more ${noun.singular} used` : `and ${count} more ${noun.plural} used`;
+  const body = `${who} ${formatHoursPhrase(hours)} this period`;
+  const share = formatHoursShare(hours, used);
+  return share ? `${body} (${share}).` : `${body}.`;
+}
+
 /** Whole dollars, because every price on the ladder is one. */
 export function money(usd: number): string {
   return `$${usd % 1 === 0 ? usd.toFixed(0) : usd.toFixed(2)}`;
@@ -199,27 +380,38 @@ export function displayHighlights(highlights: string[]): string[] {
   return out;
 }
 
-/** What a plan costs per seat, in words, including the plans that have no price. */
-export function seatPrice(pricing: PlanPricing): string {
-  if (pricing.perSeatUsd === null) return "Talk to us";
-  if (pricing.perSeatUsd === 0) return "Free";
-  const price = `${money(pricing.perSeatUsd)} per user a month`;
-  return pricing.fromPrice ? `From ${price}` : price;
+/**
+ * The per-user figure on a paid plan, without the "per user" that the
+ * label already says. Null when there is no rate to put in that slot.
+ */
+export function seatRate(pricing: PlanPricing): string | null {
+  if (pricing.perSeatUsd === null || pricing.perSeatUsd === 0) return null;
+  const amount = `${money(pricing.perSeatUsd)} a month`;
+  return pricing.fromPrice ? `From ${amount}` : amount;
 }
 
+export type MonthlyTotalParts = {
+  /** "$58 a month", or Free. */
+  amount: string;
+  /** Who that number is for. Null on Free, where seats are not the bill. */
+  seats: string | null;
+};
+
 /**
- * What a team pays on a plan, said once so every surface says it the
- * same way. The seat minimum is named whenever it is what decides the
- * number, since a team of two on a five seat plan should meet that fact
- * here rather than on the invoice.
+ * What a team pays on a plan, as the figures the card prints.
+ *
+ * Amount and seats are separate so the Plan card can label them
+ * rather than packing both into one sentence beside the name. The
+ * seat minimum is named whenever it is what decides the number.
  */
-export function monthlyTotal(offer: PlanOffer, held: number): string | null {
+export function monthlyTotalParts(offer: PlanOffer, held: number): MonthlyTotalParts | null {
   if (offer.monthlyTotalUsd === null) return null;
-  if (offer.monthlyTotalUsd === 0) return "Free";
-  const total = `${money(offer.monthlyTotalUsd)} a month`;
+  if (offer.monthlyTotalUsd === 0) return { amount: "Free", seats: null };
   const seats = `${offer.billableSeats} ${offer.billableSeats === 1 ? "seat" : "seats"}`;
-  if (offer.billableSeats > held) return `${total} (${seats} minimum, this team has ${held})`;
-  return `${total} for ${seats}`;
+  return {
+    amount: `${money(offer.monthlyTotalUsd)} a month`,
+    seats: offer.billableSeats > held ? `${seats} minimum, this team has ${held}` : seats,
+  };
 }
 
 /**

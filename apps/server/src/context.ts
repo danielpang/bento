@@ -119,6 +119,13 @@ export interface AppContext {
    */
   running: Map<string, AbortController>;
   /**
+   * pg-boss ids of this process's `run.execute` workers, set by
+   * registerJobs. enqueueRun wakes them, which is what lets idle
+   * workers poll slowly without a queued run waiting on the poll.
+   * Absent on a context that never registered jobs.
+   */
+  runWorkers?: string[];
+  /**
    * Live agent sessions by run id: a handle that delivers a user
    * message into the working process's stdin. Present only while the
    * process is alive and the adapter supports a live conversation.

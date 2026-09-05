@@ -493,14 +493,12 @@ function NetworkPolicyCard() {
     <section className="section settings-card">
       <h3 className="settings-title">Agent network access</h3>
       <p className="muted">
-        By default an agent can reach the internet from its sandbox, which is what lets it install
-        packages and read documentation. Locking it down runs every agent on a network with no route
-        out, for teams whose code should not leave the machine.
+        Agents can reach the internet from the sandbox, so they can install packages and read docs.
+        Block it to run them with no route out.
       </p>
       {!state.supported && (
         <p className="muted">
-          This deployment has no restricted network configured yet, so the setting cannot be turned
-          on. The server needs BENTO_SANDBOX_RESTRICTED_NETWORK.
+          This cannot be turned on until the server has BENTO_SANDBOX_RESTRICTED_NETWORK.
         </p>
       )}
       <label className="gate-check">
@@ -510,10 +508,7 @@ function NetworkPolicyCard() {
           disabled={busy || !state.canEdit || (!state.supported && !state.restrictNetwork)}
           onChange={(e) => void toggle(e.target.checked)}
         />
-        <span className="gate-check-text">
-          Block network access for every agent in this team. Runs that need the internet will fail
-          rather than reach it.
-        </span>
+        <span className="gate-check-text">Block network access for every agent in this team.</span>
       </label>
       {!state.canEdit && <p className="muted">Only an owner or admin can change this.</p>}
     </section>

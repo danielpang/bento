@@ -21,11 +21,13 @@ export interface CatalogProvider {
  * Every provider Bento knows, refreshed ones first.
  *
  * The generated half comes from models.dev. The manual half is what that
- * snapshot cannot describe, currently Cursor's own Composer ids and
- * Poolside's own inference. Where both halves name the same provider,
+ * snapshot cannot describe (Cursor's own Composer ids, Poolside's own
+ * inference) or does not describe yet (a model released after the
+ * snapshot was taken). Where both halves name the same provider,
  * generated models come first and manual ids that the snapshot missed
  * are appended, so Composer stays listed even after models.dev grows a
- * Cursor provider of its own.
+ * Cursor provider of its own, and a hand-added id drops out of the
+ * manual list's way once a refresh carries it.
  */
 export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(GENERATED_CATALOG, MANUAL_CATALOG);
 
@@ -83,6 +85,10 @@ const BY_CLI: Record<string, readonly string[]> = {
   pi: ["anthropic", "openai", "google", "deepseek", "openrouter"],
   pool: ["poolside"],
   dsh: ["deepseek"],
+  // Antigravity reaches Gemini and nothing else here, but under its own
+  // slugs rather than the Gemini API's ids, so it is its own provider.
+  // See model-catalog.manual.ts.
+  antigravity: ["antigravity"],
   fake: [],
 };
 

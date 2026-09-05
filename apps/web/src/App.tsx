@@ -36,6 +36,7 @@ import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
+import { identifyUser, resetUser } from "./posthog.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -121,7 +122,15 @@ const client = new BentoClient({ baseUrl: window.location.origin });
 const PROJECT_KEY = "bento:projectId";
 
 export function App() {
-  const { data: session } = useSession();
+  const { data: session, isPending } = useSession();
+  useEffect(() => {
+    if (isPending) return;
+    if (session?.user) {
+      identifyUser(session.user.id, { email: session.user.email, name: session.user.name });
+    } else {
+      resetUser();
+    }
+  }, [isPending, session]);
   return (
     <BetaTestersProvider client={client} userId={session?.user.id}>
       <Suspense fallback={<RouteFallback />}>
@@ -1074,6 +1083,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             onChanged={refresh}
             onDeleting={handleDeleting}
             onDeleted={handleDeleted}
+            onSelectFeature={setSelectedId}
             onEvent={recordEvent}
           />
         )}

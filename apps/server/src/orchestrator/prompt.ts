@@ -17,6 +17,13 @@ export function buildStagePrompt(
   agent?: { name: string; skill: string | null },
   /** Workspace directory whose files are captured onto the card as artifacts. */
   artifactsDir?: string,
+  /**
+   * Whether this run actually got Bento's own MCP tools. Only then is
+   * the paragraph about splitting worth saying: telling an agent to
+   * create cards when it has no tool to do it with produces a run that
+   * writes the parts into prose and calls it done.
+   */
+  canSplitCard = false,
 ): string {
   const artifact = stageArtifactPath(stage.slug);
   const priorStages = allStages.filter((s) => s.position < stage.position);
@@ -83,6 +90,17 @@ export function buildStagePrompt(
       repositories.length > 1 ? " in every repository you changed" : ""
     }.`,
   );
+  if (stage.createPr) {
+    if (stage.slug === "implementation") {
+      lines.push(
+        "Bento copies this write-up to the pull request description when the run publishes. Start with a markdown H1 (# Title) when you want a custom pull request title; the rest becomes the description.",
+      );
+    } else if (stage.slug === "code-review") {
+      lines.push(
+        "Bento posts this write-up as a comment on the pull request when the run publishes. Put your full review here rather than only in the transcript.",
+      );
+    }
+  }
   if (repositories.length > 1) {
     // Said explicitly because the obvious reading of "commit your work"
     // in a workspace of several checkouts is to commit in one of them.
@@ -100,6 +118,24 @@ export function buildStagePrompt(
   if (artifactsDir) {
     lines.push(
       `If your work here produced something visual for people to review (a design mockup, an HTML preview, a screenshot, a diagram), save it under ${artifactsDir}. Files there are shown on the feature card. Keep each file self-contained: one HTML file with its styles, scripts, and images inlined; PNG, JPEG, or WebP images; Mermaid diagrams as .mmd files; or Markdown. Do not commit these files.`,
+    );
+  }
+  /**
+   * When a card is too big to be one change.
+   *
+   * The whole risk of giving an agent a card-creating tool is an agent
+   * that uses it, so the paragraph is written as a test to fail rather
+   * than a capability to enjoy: both conditions, an explicit "most
+   * cards are not this", and the file-contention case named outright,
+   * because "split this up" is advice that always sounds reasonable.
+   *
+   * Code cannot make this judgement, so this is where it lives. What
+   * the server enforces is only the shape: children of this card, in
+   * this project, up to a cap, none of them started by the tool.
+   */
+  if (canSplitCard) {
+    lines.push(
+      "If this task is too large to finish as one change on one branch, you can split it: the create_card tool files a part of it as its own card, belonging to this one. Only split when both are true: the task really is too large for one branch, and dividing it is more efficient than working it yourself, because the parts can run in separate sandboxes, or hold less context, or finish independently. Do not split parts that would edit the same files, and do not split work you could simply do. Most cards are one change and should end with no parts at all. When you do split, say so in your summary and keep working whatever scope you kept for yourself; the parts you filed start in the backlog and are picked up as ordinary cards.",
     );
   }
   /**
@@ -123,6 +159,17 @@ export interface ConflictedPullRequest {
   name: string;
   number: number;
   defaultBranch: string;
+}
+
+export interface RebaseTarget {
+  name: string;
+  defaultBranch: string;
+}
+
+export interface FailingPullRequestChecks {
+  name: string;
+  number: number;
+  url: string;
 }
 
 /**
@@ -152,5 +199,42 @@ export function buildConflictResolutionPrompt(branch: string, conflicted: Confli
     "3. Resolve each conflict so the result keeps both the base branch's changes and this card's intent. Read the surrounding code rather than picking a side mechanically.",
     "4. Stage each resolved file and run git rebase --continue until the rebase completes. If the project has a quick build or test command, run it to confirm the resolution holds together.",
     "5. Do not push and do not open pull requests. The server force pushes the rebased branch with lease protection when this run finishes, which updates the existing pull requests.",
+  ].join("\n");
+}
+
+/**
+ * Rebase prompt for cards that cannot publish because the feature
+ * branch is not based on the current default branch tip.
+ */
+/**
+ * What a fix-CI run asks its agent to do. Like conflict resolution,
+ * the agent commits and the server publishes; it never receives push
+ * credentials.
+ */
+export function buildCiFixPrompt(failing: FailingPullRequestChecks[]): string {
+  return [
+    "GitHub reports failing CI checks on this card's pull requests:",
+    ...failing.map((pr) => `- ${pr.name}: pull request #${pr.number} (${pr.url})`),
+    "",
+    "Fix the failing checks with the smallest change that makes CI pass:",
+    "1. Read the check output on GitHub, or run the same commands locally in the repository.",
+    "2. Fix every failure. Run the repository's test command before you finish.",
+    "3. Commit your fixes with a descriptive message.",
+    "4. Do not push and do not open pull requests. The server publishes the branch when this run finishes.",
+  ].join("\n");
+}
+
+export function buildRebaseForPublishPrompt(branch: string, targets: RebaseTarget[]): string {
+  const bases = [...new Set(targets.map((t) => t.defaultBranch))];
+  return [
+    "This card's branch is behind the base branch and cannot be published until it is rebased.",
+    ...targets.map((t) => `- ${t.name}: rebase onto ${t.defaultBranch}.`),
+    "",
+    "In each repository named above, rebase the feature branch onto the newest base branch commit and resolve any conflicts:",
+    `1. Bring the base branch up to date: git fetch origin ${bases.join(" ")}. If the fetch fails (this sandbox may have no credentials for the remote), continue with origin/<base branch> as it is and say so in your summary.`,
+    `2. On branch ${branch}, run: git rebase origin/<base branch>.`,
+    "3. Resolve each conflict so the result keeps both the base branch's changes and this card's intent. Read the surrounding code rather than picking a side mechanically.",
+    "4. Stage each resolved file and run git rebase --continue until the rebase completes. If the project has a quick build or test command, run it to confirm the resolution holds together.",
+    "5. Do not push and do not open pull requests. The server publishes the branch when this run finishes.",
   ].join("\n");
 }

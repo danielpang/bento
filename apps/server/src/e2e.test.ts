@@ -1,8 +1,8 @@
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { and, eq, isNull, sql } from "drizzle-orm";
@@ -14,6 +14,7 @@ import {
   featureEvents,
   featurePullRequests,
   features,
+  gateChecks,
   githubInstallations,
   agentRuns,
   organization,
@@ -31,7 +32,7 @@ import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
-import { publishFeatureBranches } from "./orchestrator/publish.js";
+import { publishFeatureBranches, resolvePublishBaseSha } from "./orchestrator/publish.js";
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -46,12 +47,20 @@ import {
 } from "./orchestrator/run-executor.js";
 import { reapSandbox } from "./orchestrator/reap-sandbox.js";
 import { appendRunEvent } from "./orchestrator/transcript.js";
-import { JUDGE_PROMPT_PREFIX, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
+import {
+  JUDGE_PROMPT_PREFIX,
+  advanceFeature,
+  evaluateFeatureGate,
+  finishFeature,
+  moveFeatureTo,
+} from "./orchestrator/gate-evaluator.js";
 import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
+import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
+import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 
 const run = promisify(execFile);
 
@@ -186,9 +195,10 @@ async function waitForStage(featureId: string, stageId: string, timeoutMs = 60_0
 /**
  * The last transition on a card, once it reads as `expected`.
  *
- * advanceFeature commits the stage move before writing the history row,
- * so a card can reach its next stage a moment before the transition
- * that moved it exists; reading once sees the previous one. Returns the
+ * The move and the history row commit together, so a card that has
+ * already reached its next stage already has the transition that put
+ * it there. This still waits because the evaluator is a background
+ * job, and the test can get here before that job has run. Returns the
  * last trigger seen on timeout, so a real regression fails on the real
  * value rather than a throw.
  */
@@ -1512,7 +1522,7 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
       executor: "server",
     })
     .returning();
-  await ctx.boss.send("run.execute", { runId: running!.id });
+  await enqueueRun(ctx, running!.id);
 
   const deadline = Date.now() + 30_000;
   let seen: { status: string; cliSessionId: string | null } | null = null;
@@ -1556,7 +1566,7 @@ test("two messages racing into the parking slot both survive", { timeout: 60_000
       executor: "server",
     })
     .returning();
-  await ctx.boss.send("run.execute", { runId: running!.id });
+  await enqueueRun(ctx, running!.id);
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const run = await json<{ status: string }>(await app.request(`/api/runs/${running!.id}`));
@@ -1990,6 +2000,49 @@ test("a login token displaces the API key rather than joining it", async () => {
       assert.equal(env.ANTHROPIC_API_KEY, undefined, "and the key it supersedes is withheld");
     },
   );
+});
+
+/**
+ * The path a person actually takes to run Antigravity: pick the tool,
+ * pick a Gemini model, paste a Gemini key. Antigravity's own default
+ * credential is a Google account, which no sandbox can sign in with,
+ * so the key is the whole of its authentication here and a leg of this
+ * chain that quietly broke would strand the tool with no way in.
+ *
+ * The key is saved the way the console saves it, so this covers the
+ * storage and the decryption rather than a value handed straight to
+ * the resolver, and the process environment is cleared first so the
+ * value proves it came from what was pasted.
+ */
+test("a pasted Gemini key is what reaches an Antigravity run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "GEMINI_API_KEY", value: "AIza-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ GEMINI_API_KEY: null, GOOGLE_GEMINI_BASE_URL: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high");
+      assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
+      assert.equal(env.GEMINI_API_KEY, "AIza-pasted-by-the-user");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+/**
+ * And with nothing pasted, the run stops before a sandbox is spent,
+ * naming the key rather than failing inside the CLI as an unreadable
+ * sign-in error.
+ */
+test("an Antigravity run with no Gemini key is missing it by name", async () => {
+  await withEnv({ GEMINI_API_KEY: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high");
+    assert.deepEqual(missing, ["GEMINI_API_KEY"]);
+  });
 });
 
 /**
@@ -2926,6 +2979,16 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   assert.equal(prefixedHarness.status, 400, "DeepSeek Harness cannot accept provider-prefixed model ids");
   assert.match(((await prefixedHarness.json()) as { error: string }).error, /bare model id/);
 
+  const antigravity = await post({ name: "Antigravity", cli: "antigravity", model: "gemini-3.1-pro-high" });
+  assert.equal(antigravity.status, 201, "the Antigravity CLI accepts its own model slug");
+  const prefixedSlug = await post({
+    name: "prefixed antigravity",
+    cli: "antigravity",
+    model: "google/gemini-3.1-pro-high",
+  });
+  assert.equal(prefixedSlug.status, 400, "an Antigravity slug carries no provider prefix");
+  assert.match(((await prefixedSlug.json()) as { error: string }).error, /bare model id/);
+
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
   const unknown = await post({ name: "next week's model", cli: "claude-code", model: "claude-opus-9" });
@@ -3115,6 +3178,16 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   const line = board.split("\n").find((l) => l.startsWith(`feature|${feature.id}|`))!;
   const cost = line.split("|")[6]!;
   assert.match(cost, /^\d+\.\d\d$/, `expected a cost field on the board line, got ${cost}`);
+
+  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
+  assert.match(plain, /^total\|/);
+  const billedLine = plain.split("\n").find((l) => l.startsWith(`card|${feature.id}|`));
+  assert.ok(billedLine, "the spend rollup lists the card that ran");
+  assert.match(billedLine, new RegExp(`\\|${cost}\\|`));
+  assert.ok(
+    plain.split("\n").some((l) => l.startsWith(`card|${idle.id}|`)),
+    "a card that never ran still belongs on the spend page",
+  );
 });
 
 /**
@@ -3184,6 +3257,12 @@ test("usage ignores judge runs and in-flight runs", async () => {
   assert.ok(untouched);
   assert.equal(untouched.runs, 0);
   assert.equal(untouched.costUsd, null);
+
+  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
+  const [tag, totalUsd, totalRuns] = plain.split("\n")[0]!.split("|");
+  assert.equal(tag, "total");
+  assert.equal(totalUsd, "4.20");
+  assert.equal(totalRuns, "1");
 });
 
 /**
@@ -3632,6 +3711,9 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.equal(status[0]?.number, 41);
     assert.equal(status[0]?.state, "conflicted");
 
+    const plain = await (await app.request(`/api/features/${feature.id}/merge-status/plain`)).text();
+    assert.match(plain, /^pr\|conflicted\|41\|/);
+
     // A conflict with no conversation: there is no agent to hand it to.
     const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
     assert.equal(noRun.status, 400);
@@ -3794,6 +3876,12 @@ test("a judge agent rules on the work before an automatic stage advances", { tim
     defaultAgentProfileId: worker.id,
     gateCriteria: [{ type: "agent_judge", agentProfileId: rejecter.id }],
   });
+  const pipelinePlain = await (await app.request(`/api/projects/${project.id}/pipeline/plain`)).text();
+  assert.match(
+    pipelinePlain,
+    new RegExp(`criterion\\|${first.id}\\|\\d+\\|agent_judge\\|-\\|${rejecter.id}`),
+    "the judge's agent id is on the wire so a client can edit it",
+  );
 
   // Advancing starts the worker; its finish starts the judge; the
   // judge's INCOMPLETE verdict holds the card where its reason shows.
@@ -3938,7 +4026,7 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
     });
     const res = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { published: [], failures: [] });
+    assert.deepEqual(await res.json(), { published: [], failures: [], rebaseRun: null });
     assert.deepEqual(exported, [`sprite-publish-test:/workspace:${repo!.name}->main`]);
 
     // A sandbox that went away surfaces as a named failure, not a
@@ -4213,6 +4301,22 @@ test("starting a run on a card that was deleted answers gone, not a foreign key 
 });
 
 /**
+ * Sharing carries the login of the machine the SERVER runs on into each
+ * sandbox, so a containerised server has nothing to offer however its
+ * sandboxes run. The console reads this to hide the control rather than
+ * show one that can only report failure.
+ *
+ * This suite runs the server as a host process, which is the case that
+ * must stay visible: hiding a working control is the worse mistake,
+ * because the person looking at it cannot recover from it.
+ */
+test("the settings route says whether a machine login can be shared", { timeout: 60_000 }, async () => {
+  const settings = await json<{ canShareMachineLogin: boolean }>(await app.request("/api/settings"));
+  assert.equal(typeof settings.canShareMachineLogin, "boolean", "the console gets an answer, not undefined");
+  assert.equal(settings.canShareMachineLogin, true, "a server running on the host can offer its own login");
+});
+
+/**
  * The identity on agent commits had no home in the product: a server in
  * a container has no git config to read, so every commit arrived as the
  * sandbox image's placeholder and the only fix was an env var set
@@ -4241,14 +4345,15 @@ test("the commit identity can be set from the settings route", { timeout: 60_000
   assert.equal(identity.GIT_AUTHOR_EMAIL, "ada@example.com");
   assert.equal(identity.GIT_COMMITTER_NAME, "Ada Lovelace", "the committer is set too, not just the author");
 
-  // The environment outranks it, so a .env that already worked keeps working.
+  // The setting is the only thing that sets this. The environment used
+  // to outrank it, which left the console showing a field that changed
+  // nothing while the real value lived somewhere it could not edit.
   process.env.GIT_AUTHOR_NAME = "CI Runner";
   process.env.GIT_AUTHOR_EMAIL = "ci@example.com";
   try {
-    const pinned = await gitIdentityEnv(ctx);
-    assert.equal(pinned.GIT_AUTHOR_NAME, "CI Runner");
-    const reported = await json<{ gitIdentityPinnedByEnv: boolean }>(await app.request("/api/settings"));
-    assert.equal(reported.gitIdentityPinnedByEnv, true, "and the console is told, so it can say why the field is inert");
+    const ignored = await gitIdentityEnv(ctx);
+    assert.equal(ignored.GIT_AUTHOR_NAME, "Ada Lovelace", "the environment does not override the setting");
+    assert.equal(ignored.GIT_AUTHOR_EMAIL, "ada@example.com");
   } finally {
     delete process.env.GIT_AUTHOR_NAME;
     delete process.env.GIT_AUTHOR_EMAIL;
@@ -4333,6 +4438,10 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ setupCommand: "npm ci", testCommand: "npm test" }),
   });
+  const repoPlain = await (await app.request(`/api/projects/${source.project.id}/repositories/plain`)).text();
+  assert.match(repoPlain, new RegExp(`^repo\\|${repo!.id}\\|`, "m"));
+  assert.match(repoPlain, new RegExp(`^setup\\|${repo!.id}\\|npm ci$`, "m"));
+  assert.match(repoPlain, new RegExp(`^test\\|${repo!.id}\\|npm test$`, "m"));
 
   const exported = await app.request(`/api/projects/${source.project.id}/pipeline/export`);
   assert.equal(exported.status, 200);
@@ -4802,6 +4911,55 @@ test("the server pushes each repository the agent committed in", { timeout: 90_0
   assert.equal(mirrored?.prNumber, 42);
 });
 
+test("publish succeeds when the feature branch forked before main moved forward", { timeout: 90_000 }, async () => {
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-remote-behind-"));
+  await run("git", ["-C", bare, "init", "--bare", "-b", "main"]);
+  const work = await fixtureRepo("publishing-behind");
+  await run("git", ["-C", work, "push", bare, "main"]);
+
+  const branch = "feature/behind-main";
+  await run("git", ["-C", work, "checkout", "-q", "-b", branch]);
+  await writeFile(path.join(work, "feature.txt"), "feature work\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "feature work",
+  ]);
+
+  await run("git", ["-C", work, "checkout", "-q", "main"]);
+  await writeFile(path.join(work, "main-moved.txt"), "main moved\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "main moved",
+  ]);
+  await run("git", ["-C", work, "checkout", "-q", branch]);
+
+  const baseSha = await resolvePublishBaseSha(work, "main");
+  const { stdout: fork } = await run("git", ["-C", work, "merge-base", "main", branch]);
+  assert.equal(baseSha, fork.trim());
+
+  const publisher = {
+    async pushToken() {
+      return "unused";
+    },
+    async ensurePullRequest(input: { owner: string; repo: string; head: string; base: string }) {
+      return { prNumber: 51, url: `https://github.com/${input.owner}/${input.repo}/pull/51` };
+    },
+  };
+  const { project } = await setupProject("Behind main");
+  const feature = await createFeature(project.id, "Behind main");
+  const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
+    featureId: feature.id,
+    featureTitle: "Behind main",
+    branch,
+    repositories: [
+      { id: null, name: "app", repoUrl: "https://github.com/acme/app", defaultBranch: "main", worktreePath: work },
+    ],
+  }, { remoteUrl: () => bare });
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(published.map((p) => p.name), ["app"]);
+});
+
 /**
  * The rule an agent must never break, enforced where it cannot be
  * talked out of it. The prompt says so too, but a prompt is a request.
@@ -4840,6 +4998,64 @@ test("publishing refuses to push to a protected branch", { timeout: 60_000 }, as
   assert.equal(pushed, false, "it refuses before asking for a credential, let alone using one");
 });
 
+/**
+ * A repository connected before its first commit has no branches at
+ * all, and one whose default branch was renamed no longer has the name
+ * Bento recorded. Both reach git as "fatal: Remote branch main not
+ * found in upstream origin", wrapped in a command line and a temporary
+ * path nobody typed, which is the whole reason a run failed and told
+ * the person nothing they could act on.
+ */
+test("a base branch the remote does not have is reported in words", { timeout: 60_000 }, async () => {
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-no-main-remote-"));
+  await run("git", ["-C", bare, "init", "--bare", "-b", "trunk"]);
+  const work = await fixtureRepo("no-main");
+  // The remote carries the same history under another name, which is
+  // what a rename leaves behind.
+  await run("git", ["-C", work, "push", "-q", bare, "main:trunk"]);
+
+  const branch = "feature/no-base";
+  await run("git", ["-C", work, "checkout", "-q", "-b", branch]);
+  await writeFile(path.join(work, "done.md"), "the agent's work\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "work",
+  ]);
+
+  const { project } = await setupProject("No base branch");
+  const feature = await createFeature(project.id, "Nowhere to open it");
+  const { published, failures } = await publishFeatureBranches(
+    ctx.db,
+    {
+      async pushToken() {
+        return "unused by a path remote";
+      },
+      async ensurePullRequest() {
+        return { prNumber: 1, url: "u" };
+      },
+    },
+    {
+      featureId: feature.id,
+      featureTitle: "Nowhere to open it",
+      branch,
+      repositories: [
+        { id: null, name: "site", repoUrl: "https://github.com/acme/site", defaultBranch: "main", worktreePath: work },
+      ],
+    },
+    { remoteUrl: () => bare },
+  );
+
+  assert.deepEqual(published, []);
+  const reason = failures[0]?.reason ?? "";
+  assert.match(reason, /acme\/site has no branch named main/, "it names the repository and the branch it looked for");
+  assert.match(reason, /push a first commit/, "and what to do about it");
+  assert.doesNotMatch(
+    reason,
+    /fatal:|credential\.helper|bento-publish-/,
+    "git's own words, the credential helper and the temporary path stay out of it",
+  );
+});
+
 /** A throwaway git repository, for tests that need several. */
 async function fixtureRepo(label: string): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), `bento-fixture-${label}-`));
@@ -4849,6 +5065,81 @@ async function fixtureRepo(label: string): Promise<string> {
   await run("git", ["-C", dir, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "init"]);
   return dir;
 }
+
+/**
+ * A path typed with a leading `~` used to be stored exactly as typed.
+ * Only a shell expands tildes, so provisioning later stat'd a directory
+ * literally named `~` and every run on that project died with
+ * "repository path ~/... does not exist on the machine running the
+ * server". The TUI expanded before sending; the console did not, and
+ * nothing between them did either.
+ */
+test("a repository path is stored expanded, not with the tilde as typed", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("tilde");
+  mock.method(os, "homedir", () => path.dirname(checkout));
+  try {
+    const project = await json<{ id: string; localPath: string }>(
+      await app.request("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Tilde", localPath: `~/${path.basename(checkout)}` }),
+      }),
+    );
+    assert.equal(project.localPath, checkout, "the project mirrors the expanded path");
+
+    const [repo] = await json<{ localPath: string }[]>(
+      await app.request(`/api/projects/${project.id}/repositories`),
+    );
+    assert.equal(repo?.localPath, checkout, "the repository stores a path the filesystem can find");
+
+    // The second door in, which takes the same input and once skipped
+    // the same step.
+    const added = await json<{ localPath: string }>(
+      await app.request(`/api/projects/${project.id}/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "again", localPath: `~/${path.basename(checkout)}` }),
+      }),
+    );
+    assert.equal(added.localPath, checkout, "adding a repository expands it too");
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+/**
+ * Expanding a tilde is only right when the server shares a home with
+ * the person typing. Inside a container `~` is /root, so expanding
+ * quietly would store /root/projects/app: still wrong, and now naming a
+ * directory nobody typed. A path that resolves to nothing is refused
+ * while the field is still on screen.
+ */
+test("a checkout path that resolves to nothing is refused at once", { timeout: 60_000 }, async () => {
+  const elsewhere = await mkdtemp(path.join(tmpdir(), "bento-not-home-"));
+  mock.method(os, "homedir", () => elsewhere);
+  try {
+    const res = await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Nowhere", localPath: "~/projects/absent" }),
+    });
+    assert.equal(res.status, 400, "a path pointing at nothing does not become a project");
+    const { error } = (await res.json()) as { error: string };
+    assert.match(error, /home/, "the refusal names the home the server actually has");
+    assert.match(error, /~\/projects\/absent/, "and the path as it was typed");
+
+    // A relative path is refused for the same reason: nothing here
+    // should be resolved against whatever directory the server started in.
+    const relative = await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Relative", localPath: "projects/app" }),
+    });
+    assert.equal(relative.status, 400, "a relative path is refused");
+  } finally {
+    mock.restoreAll();
+  }
+});
 
 const repoNames = async (projectId: string) =>
   (await json<{ name: string; position: number }[]>(await app.request(`/api/projects/${projectId}/repositories`))).map(
@@ -5624,7 +5915,393 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
   assert.equal(byHand.status, 201, "a person can always start it themselves");
 });
 
+test("a move that cannot be recorded does not happen", async () => {
+  const { project } = await setupProject("Atomic advance");
+  const feature = await createFeature(project.id, "Stay put");
+
+  /**
+   * actor_user_id is a foreign key, so a stranger's id fails the history
+   * insert while the stage update on its own would have succeeded. The
+   * two share a transaction, so neither lands: before they did, this
+   * left a card sitting on a stage with nothing saying how it got there.
+   */
+  await assert.rejects(() => advanceFeature(ctx, feature.id, "manual", "no-such-user", null));
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.currentStageId, null, "the card must still be in the backlog");
+  const history = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(eq(featureEvents.featureId, feature.id));
+  assert.deepEqual(history, [], "a move that did not happen writes no history");
+});
+
+/**
+ * Puts a card on a stage without going through advanceFeature, which
+ * would queue a gate job. These tests call evaluateFeatureGate
+ * themselves, so a job racing them would write the hold they are
+ * trying to control.
+ */
+async function placeOnStage(featureId: string, stageId: string) {
+  await ctx.db
+    .update(features)
+    .set({ status: "active", currentStageId: stageId, updatedAt: new Date() })
+    .where(eq(features.id, featureId));
+}
+
+test("a failed gate holds the card, writes the reason, and records history", async () => {
+  const { project, stages } = await setupProject("Failed gate hold");
+  const feature = await createFeature(project.id, "Hold me");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("failed-gate-hold");
+  await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "failed",
+    executor: "server",
+    error: "the agent failed",
+  });
+
+  await evaluateFeatureGate(ctx, feature.id);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "gated");
+  assert.equal(row?.currentStageId, stage.id, "the card stays on the stage that failed");
+
+  const checks = await ctx.db
+    .select({ status: gateChecks.status, criterion: gateChecks.criterion })
+    .from(gateChecks)
+    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]?.status, "failed");
+  assert.equal((checks[0]?.criterion as { type?: string } | null)?.type, "run_succeeded");
+
+  const history = await ctx.db
+    .select()
+    .from(featureEvents)
+    .where(eq(featureEvents.featureId, feature.id));
+  const held = history.find((e) => e.kind === "status_changed" && e.toStatus === "gated");
+  assert.ok(held, "the hold must appear in the history");
+  assert.deepEqual((held.detail as { failedCriteria?: string[] } | null)?.failedCriteria, ["run_succeeded"]);
+});
+
+test("a late failed gate does not drag a finished card back to gated", async () => {
+  const { project, stages } = await setupProject("Late gate vs done");
+  const feature = await createFeature(project.id, "Already finished");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("late-gate-done");
+  /**
+   * Sleeps inside evaluateGate so finishFeature can commit after this
+   * evaluation has already read the card as active, and before it
+   * writes gated. The early "feature is done" return would not be
+   * the race; this is.
+   */
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "sleep 2; exit 1", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "late-gate-done",
+    status: "ready",
+    workdir: path.dirname(repoDir),
+  });
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+    executor: "server",
+  });
+
+  const evaluation = evaluateFeatureGate(ctx, feature.id);
+  await new Promise((r) => setTimeout(r, 400));
+  await finishFeature(ctx, feature.id, ctx.userId);
+  await evaluation;
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "done", "a late gate must not drag a finished card back to gated");
+  const held = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(and(eq(featureEvents.featureId, feature.id), eq(featureEvents.toStatus, "gated")));
+  assert.deepEqual(held, [], "a hold that did not happen writes no history");
+});
+
+test("a late failed gate does not hold a card that has already left the stage", async () => {
+  const { project, stages } = await setupProject("Late gate vs move");
+  const feature = await createFeature(project.id, "Already moved");
+  const stage = stages[0]!;
+  const next = stages[1]!;
+  const profile = await fakeProfile("late-gate-move");
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "sleep 2; exit 1", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "late-gate-move",
+    status: "ready",
+    workdir: path.dirname(repoDir),
+  });
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+    executor: "server",
+  });
+
+  const evaluation = evaluateFeatureGate(ctx, feature.id);
+  await new Promise((r) => setTimeout(r, 400));
+  /**
+   * A concurrent move, written directly so the destination stage does
+   * not start its own evaluation and hold the card for a different
+   * reason. The question is whether THIS evaluation still writes.
+   */
+  await ctx.db
+    .update(features)
+    .set({ status: "active", currentStageId: next.id, updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  await evaluation;
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.currentStageId, next.id, "the card stays on the stage it was moved to");
+  assert.equal(row?.status, "active", "a failure about the previous stage must not gate it");
+  const held = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(and(eq(featureEvents.featureId, feature.id), eq(featureEvents.toStatus, "gated")));
+  assert.deepEqual(held, [], "a hold that did not happen writes no history");
+});
+
+test("a hold that cannot be recorded does not happen", async () => {
+  const { project, stages } = await setupProject("Atomic hold");
+  const feature = await createFeature(project.id, "Stay active");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("atomic-hold");
+  await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "failed",
+    executor: "server",
+    error: "the agent failed",
+  });
+
+  /**
+   * The history insert fails while the status update and the check
+   * rows on their own would have succeeded. They share a transaction,
+   * so none of them land: before they did, this left failed checks on
+   * a card that was still active, with nothing saying it was held.
+   */
+  await ctx.db.execute(sql`
+    create or replace function bento_test_reject_feature_events() returns trigger as $$
+    begin
+      raise exception 'test: history insert rejected';
+    end;
+    $$ language plpgsql
+  `);
+  await ctx.db.execute(sql`
+    create trigger bento_test_reject_feature_events
+    before insert on feature_events
+    for each row execute function bento_test_reject_feature_events()
+  `);
+  try {
+    await assert.rejects(() => evaluateFeatureGate(ctx, feature.id));
+
+    const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+    assert.equal(row?.status, "active", "the card must still be active");
+    assert.equal(row?.currentStageId, stage.id);
+    const checks = await ctx.db
+      .select({ id: gateChecks.id })
+      .from(gateChecks)
+      .where(eq(gateChecks.featureId, feature.id));
+    assert.deepEqual(checks, [], "a hold that did not happen writes no checks");
+    const history = await ctx.db
+      .select({ id: featureEvents.id })
+      .from(featureEvents)
+      .where(eq(featureEvents.featureId, feature.id));
+    assert.deepEqual(history, [], "a hold that did not happen writes no history");
+  } finally {
+    await ctx.db.execute(sql`drop trigger if exists bento_test_reject_feature_events on feature_events`);
+    await ctx.db.execute(sql`drop function if exists bento_test_reject_feature_events()`);
+  }
+});
+
 async function runCount(featureId: string): Promise<number> {
   const rows = await ctx.db.select({ id: agentRuns.id }).from(agentRuns).where(eq(agentRuns.featureId, featureId));
   return rows.length;
 }
+
+/**
+ * Large tasks, modelled as a card that spawned other cards.
+ *
+ * The relationship is one column; what these pin down is what the
+ * column is not allowed to do. A group lives in one project, it cannot
+ * grow without bound, and the card the parts came from cannot be
+ * deleted out from under them.
+ */
+
+async function createPart(projectId: string, title: string, parentId: string) {
+  return app.request("/api/features", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId, title, description: "a part", parentId }),
+  });
+}
+
+type RelatedPayload = {
+  parent: { id: string; title: string };
+  children: { id: string; title: string; status: string; stageName: string | null; costUsd: number | null }[];
+  partOf?: { id: string; title: string } | null;
+} | null;
+
+test("a card can be split, and the group reads the same from either end", async () => {
+  const { project } = await setupProject("split-group");
+  const parent = await createFeature(project.id, "The large one");
+  const first = await json<{ id: string; parentId: string | null }>(
+    await createPart(project.id, "Part one", parent.id),
+  );
+  const second = await json<{ id: string }>(await createPart(project.id, "Part two", parent.id));
+  assert.equal(first.parentId, parent.id, "the part remembers where it came from");
+
+  const fromParent = await json<RelatedPayload>(await app.request(`/api/features/${parent.id}/related`));
+  assert.ok(fromParent);
+  assert.equal(fromParent.parent.id, parent.id);
+  assert.deepEqual(
+    fromParent.children.map((c) => c.id),
+    [first.id, second.id],
+    "in the order they were created",
+  );
+
+  // Opened from a part, the same group: a child resolves upward first,
+  // so both ends of the relationship draw the same picture.
+  const fromChild = await json<RelatedPayload>(await app.request(`/api/features/${first.id}/related`));
+  assert.deepEqual(fromChild, fromParent);
+
+  // A card that is neither a parent nor a part has no group at all,
+  // which is what lets the console draw nothing for ordinary cards.
+  const alone = await createFeature(project.id, "An ordinary card");
+  assert.equal(await json<RelatedPayload>(await app.request(`/api/features/${alone.id}/related`)), null);
+});
+
+test("a part that itself split is the parent of its own group", async () => {
+  // Depth is allowed; the view is one level. Walking up from a
+  // mid-level parent used to hide the parts the badge was counting.
+  const { project } = await setupProject("split-mid-level");
+  const root = await createFeature(project.id, "The large one");
+  const mid = await json<{ id: string }>(await createPart(project.id, "A part that grew", root.id));
+  const leaf = await json<{ id: string }>(await createPart(project.id, "A part of the part", mid.id));
+
+  const fromMid = await json<RelatedPayload>(await app.request(`/api/features/${mid.id}/related`));
+  assert.equal(fromMid?.parent.id, mid.id);
+  assert.deepEqual(fromMid?.children.map((c) => c.id), [leaf.id]);
+  assert.equal(fromMid?.partOf?.id, root.id, "and the card it came from is still named");
+
+  const fromLeaf = await json<RelatedPayload>(await app.request(`/api/features/${leaf.id}/related`));
+  assert.equal(fromLeaf?.parent.id, mid.id);
+  assert.deepEqual(fromLeaf?.children.map((c) => c.id), [leaf.id]);
+});
+
+test("a finished part is still in the group", async () => {
+  // The check the investigation calls out by name: missing a child in
+  // the related view is a bug even when that child has already
+  // finished, which is exactly what reading from the board would do.
+  const { project } = await setupProject("split-finished");
+  const parent = await createFeature(project.id, "The large one");
+  const part = await json<{ id: string }>(await createPart(project.id, "Part one", parent.id));
+  await app.request(`/api/features/${part.id}/finish`, { method: "POST" });
+
+  const group = await json<RelatedPayload>(await app.request(`/api/features/${parent.id}/related`));
+  assert.equal(group?.children.length, 1);
+  assert.equal(group?.children[0]?.status, "done");
+});
+
+test("a part cannot belong to a card in another project", async () => {
+  const a = await setupProject("split-here");
+  const b = await setupProject("split-elsewhere");
+  const parent = await createFeature(a.project.id, "The large one");
+  const res = await createPart(b.project.id, "A part somewhere else", parent.id);
+  assert.equal(res.status, 400);
+  assert.match(((await res.json()) as { error: string }).error, /not in this project/);
+});
+
+test("a parent nobody can see is a 404, not a hint that it exists", async () => {
+  const { project } = await setupProject("split-unknown-parent");
+  const res = await createPart(project.id, "An orphan", "00000000-0000-0000-0000-000000000000");
+  assert.equal(res.status, 404);
+});
+
+test("splitting stops at a depth, and the chain cannot run away", async () => {
+  const { project } = await setupProject("split-depth");
+  const root = await createFeature(project.id, "Root");
+  const child = await json<{ id: string }>(await createPart(project.id, "Child", root.id));
+  const grandchild = await json<{ id: string }>(await createPart(project.id, "Grandchild", child.id));
+  const tooDeep = await createPart(project.id, "Great grandchild", grandchild.id);
+  assert.equal(tooDeep.status, 400);
+  assert.match(((await tooDeep.json()) as { error: string }).error, /levels deep/);
+});
+
+test("one card cannot spawn an unbounded number of parts", async () => {
+  const { project } = await setupProject("split-cap");
+  const parent = await createFeature(project.id, "The large one");
+  for (let i = 0; i < MAX_CHILDREN_PER_CARD; i += 1) {
+    const res = await createPart(project.id, `Part ${i}`, parent.id);
+    assert.equal(res.status, 201, `part ${i} should have been filed`);
+  }
+  const overflow = await createPart(project.id, "One too many", parent.id);
+  assert.equal(overflow.status, 400);
+  assert.match(((await overflow.json()) as { error: string }).error, /is the limit/);
+});
+
+test("deleting the card a split came from is refused, and the parts survive", async () => {
+  const { project } = await setupProject("split-delete");
+  const parent = await createFeature(project.id, "The large one");
+  const part = await json<{ id: string }>(await createPart(project.id, "Part one", parent.id));
+
+  const refused = await app.request(`/api/features/${parent.id}`, { method: "DELETE" });
+  assert.equal(refused.status, 409);
+  assert.match(((await refused.json()) as { error: string }).error, /split into 1 other card/);
+  assert.equal(
+    (await app.request(`/api/features/${part.id}`)).status,
+    200,
+    "the part is untouched by the refusal",
+  );
+
+  // The escape hatch: the parts go first, and then the card they came
+  // from deletes like any other.
+  assert.equal((await app.request(`/api/features/${part.id}`, { method: "DELETE" })).status, 200);
+  assert.equal((await app.request(`/api/features/${parent.id}`, { method: "DELETE" })).status, 200);
+});
+
+test("finishing the card a split came from leaves its parts alone", async () => {
+  // "Keep going": spawning has no effect on the parent's pipeline, and
+  // the parent reaching the end has none on the parts. They are
+  // ordinary cards with their own branches.
+  const { project } = await setupProject("split-finish-parent");
+  const parent = await createFeature(project.id, "The large one");
+  const part = await json<{ id: string }>(await createPart(project.id, "Part one", parent.id));
+  await app.request(`/api/features/${parent.id}/finish`, { method: "POST" });
+
+  const stillThere = await json<{ status: string; parentId: string | null }>(
+    await app.request(`/api/features/${part.id}`),
+  );
+  assert.notEqual(stillThere.status, "done", "the part did not finish because the parent did");
+  assert.equal(stillThere.parentId, parent.id, "and it still knows where it came from");
+});

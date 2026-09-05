@@ -2,7 +2,7 @@ import { PostHog } from "posthog-node";
 import { eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { user } from "@bento/db";
-import type { Env } from "./env.js";
+import { posthogApiKey, type Env } from "./env.js";
 import type { AppContext } from "./context.js";
 import { actor } from "./middleware/actor.js";
 
@@ -50,6 +50,11 @@ export class FeatureFlags {
     private readonly budgetMs = FeatureFlags.EVALUATE_BUDGET_MS,
   ) {}
 
+  /** True when this instance holds a PostHog client. */
+  usesPostHog(): boolean {
+    return this.evaluator !== null;
+  }
+
   /** Whether this user is on the permanent beta-testers allowlist. */
   isBetaTester(userId: string, person?: { email?: string | null }): Promise<boolean> {
     return this.isEnabled(FLAGS.BETA_TESTERS, userId, person);
@@ -87,15 +92,17 @@ export class FeatureFlags {
 /**
  * Builds the evaluator, or a flags object that never calls PostHog.
  *
- * Local mode is always on. Multi mode without a key fails closed, so a
- * hosted deployment that has not configured PostHog does not leak
- * unfinished UI to every signed-in user.
+ * Local mode is always on and never constructs a client, even if a
+ * leftover POSTHOG_API_KEY is in the environment. Multi mode without
+ * a key fails closed, so a hosted deployment that has not configured
+ * PostHog does not leak unfinished UI to every signed-in user.
  */
 export function createFeatureFlags(env: Env): FeatureFlags {
   const alwaysOn = env.BENTO_MODE !== "multi";
-  if (!env.POSTHOG_API_KEY) return new FeatureFlags(null, alwaysOn);
+  const apiKey = posthogApiKey(env);
+  if (!apiKey) return new FeatureFlags(null, alwaysOn);
 
-  const client = new PostHog(env.POSTHOG_API_KEY, {
+  const client = new PostHog(apiKey, {
     host: env.POSTHOG_HOST,
   });
   client.on("error", (err) => {
@@ -127,6 +134,34 @@ export async function getBetaTester(
     : ctx.env.BENTO_MODE !== "multi";
   if (!allowed) return null;
   return { userId, email };
+}
+
+/**
+ * Whether unfinished product is on for one agent run.
+ *
+ * A run has no session and not always a person: the console and the
+ * API start one as somebody, the gate evaluator and the schedules
+ * start one as nobody. So it asks about the acting member when there
+ * is one, and about the project's owner when there is not. It is their
+ * board either way, and it means a team's auto-started stages behave
+ * the same as the runs they start by hand, which is the whole point of
+ * a per-team allowlist.
+ *
+ * Fails closed, like every other flag read: a run that cannot reach
+ * PostHog runs without the unfinished capability rather than with it.
+ */
+export async function isBetaRun(
+  ctx: AppContext,
+  input: { actingUserId: string | null; projectOwnerId: string },
+): Promise<boolean> {
+  if (!ctx.featureFlags) return ctx.env.BENTO_MODE !== "multi";
+  const userId = input.actingUserId ?? input.projectOwnerId;
+  const [row] = await ctx.db
+    .select({ email: user.email })
+    .from(user)
+    .where(eq(user.id, userId))
+    .limit(1);
+  return ctx.featureFlags.isBetaTester(userId, { email: row?.email ?? null });
 }
 
 function withBudget<T>(promise: Promise<T>, ms: number): Promise<T | null> {

@@ -7,10 +7,18 @@ import type {
   GitHubRepository,
   MergeStateSummary,
   OpenPullRequest,
+  PullRequestDetails,
   PullRequestInput,
   PullRequestRef,
+  PullRequestUpdateInput,
   ReviewThreadSummary,
 } from "./client.js";
+import {
+  createPullRequestCommentVia,
+  getPullRequestVia,
+  pullRequestHasRunCommentVia,
+  updatePullRequestVia,
+} from "./pr-sync.js";
 
 export interface AppConfig {
   appId: string;
@@ -167,6 +175,7 @@ export async function ensurePullRequestVia(octokit: Octokit, input: PullRequestI
     base: input.base,
     title: input.title,
     body: input.body,
+    ...(input.draft ? { draft: true } : {}),
   });
   return { prNumber: created.data.number, url: created.data.html_url };
 }
@@ -200,6 +209,22 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
 
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest> {
     return ensurePullRequestVia(this.octokit, input);
+  }
+
+  getPullRequest(ref: PullRequestRef): Promise<PullRequestDetails> {
+    return getPullRequestVia(this.octokit, ref);
+  }
+
+  updatePullRequest(input: PullRequestUpdateInput): Promise<void> {
+    return updatePullRequestVia(this.octokit, input);
+  }
+
+  pullRequestHasRunComment(ref: PullRequestRef, runId: string): Promise<boolean> {
+    return pullRequestHasRunCommentVia(this.octokit, ref, runId);
+  }
+
+  createPullRequestComment(ref: PullRequestRef, body: string): Promise<void> {
+    return createPullRequestCommentVia(this.octokit, ref, body);
   }
 
   async listRepositories(): Promise<GitHubRepository[]> {
