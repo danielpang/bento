@@ -53,19 +53,19 @@ export function McpConnectionsSection({ client }: { client: BentoClient }) {
     return loadFailed ? null : <SettingsCardSkeleton rows={1} />;
   }
 
-  const endpoint = `${window.location.origin}/api/mcp-server`;
+  const endpoint = `${window.location.origin}/mcp`;
 
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Connect an agent to Bento</h3>
       <p className="muted">
-        Bento is itself an MCP server. An outside agent (Claude Code, Cursor, anything that speaks
-        MCP) can connect with a token from here, create feature cards, and follow their progress.
-        The token stays valid until you disconnect it; you do not need to sign in again on a
-        schedule. Point the agent at <code>{endpoint}</code> with the token as a bearer
-        Authorization header.
+        Add <code>{endpoint}</code> as a custom MCP server in Claude or Cursor. The app opens a
+        Bento page to approve access, then returns to the app with a token. The connection stays
+        valid until you disconnect it; you do not sign in again on a schedule.
       </p>
-      {status.connections.length === 0 && <p className="muted">No connections yet.</p>}
+      {status.connections.length === 0 && (
+        <p className="muted">No connections yet. Add the URL above in your agent, or mint a token by hand.</p>
+      )}
       {status.connections.map((connection) => (
         <ConnectionCard key={connection.id} connection={connection} busy={busy} act={act} client={client} />
       ))}
@@ -156,7 +156,7 @@ function AddConnectionCard({
     return (
       <div className="actions" style={{ marginTop: 4 }}>
         <button className="btn" onClick={() => setOpen(true)}>
-          New connection
+          New token
         </button>
       </div>
     );

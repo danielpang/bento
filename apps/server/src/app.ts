@@ -29,6 +29,8 @@ import { mcpRoutes } from "./routes/mcp.js";
 import { mcpGatewayRoutes } from "./routes/mcp-gateway.js";
 import { mcpConnectionRoutes } from "./routes/mcp-connections.js";
 import { mcpEndpointRoutes } from "./routes/mcp-endpoint.js";
+import { mcpOAuthConsentRoutes, mcpOAuthPublicRoutes } from "./routes/mcp-oauth.js";
+import { mcpWellKnownRoutes } from "./routes/mcp-well-known.js";
 import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
@@ -272,10 +274,26 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // and holds no database connection across its proxied streams.
   app.route("/api/mcp-gateway", mcpGatewayRoutes(ctx));
 
-  // Bento's own MCP server, the inbound mirror of the gateway. The
-  // caller is an outside agent holding a connection token, not a
-  // session, so it too sits outside the actor and tenant middleware
-  // and scopes every query by hand.
+  // Bento as an MCP server. Hosts (Claude, Cursor) discover OAuth from
+  // a 401 on /mcp, then talk to the well-known documents and
+  // /mcp-oauth/*. Those callers are not a session, so this sits outside
+  // actor and tenant middleware. CORS is open: the host is a desktop
+  // app, not a trusted web origin.
+  const mcpCors = cors({
+    origin: "*",
+    allowHeaders: ["Content-Type", "Authorization", "MCP-Protocol-Version", "Last-Event-ID"],
+    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+    exposeHeaders: ["WWW-Authenticate", "MCP-Protocol-Version"],
+    maxAge: 600,
+  });
+  app.use("/mcp", mcpCors);
+  app.use("/mcp/*", mcpCors);
+  app.use("/mcp-oauth/*", mcpCors);
+  app.use("/.well-known/*", mcpCors);
+  app.route("/.well-known", mcpWellKnownRoutes(ctx));
+  app.route("/mcp", mcpEndpointRoutes(ctx));
+  app.route("/mcp-oauth", mcpOAuthPublicRoutes(ctx));
+  // Kept as an alias of /mcp so an already-configured PAT still works.
   app.route("/api/mcp-server", mcpEndpointRoutes(ctx));
 
   // The model catalog is the same for everyone and carries no tenant
@@ -314,6 +332,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/slack", slackRoutes(ctx))
     .route("/mcp", mcpRoutes(ctx))
     .route("/mcp-connections", mcpConnectionRoutes(ctx))
+    .route("/mcp-oauth", mcpOAuthConsentRoutes(ctx))
     .route("/team", teamRoutes(ctx))
     .route("/contact", contactRoutes(ctx))
     .route("/settings", settingsRoutes(ctx));
@@ -362,6 +381,9 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     // /accept-invitation survive a hard refresh.
     app.get("*", async (c, next) => {
       if (c.req.path.startsWith("/api/")) return next();
+      if (c.req.path.startsWith("/.well-known/")) return next();
+      if (c.req.path === "/mcp" || c.req.path === "/mcp/") return next();
+      if (c.req.path.startsWith("/mcp-oauth/")) return next();
       const index = await readFile(path.join(webDir, "index.html"), "utf8").catch(() => null);
       if (index === null) return next();
       return c.html(index);

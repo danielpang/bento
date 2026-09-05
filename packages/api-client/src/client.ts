@@ -228,6 +228,12 @@ export interface McpConnectionCreated {
   token: string;
 }
 
+export interface McpOAuthConsent {
+  request: string;
+  clientName: string;
+  redirectUri: string;
+}
+
 export interface LinearTeamOption {
   id: string;
   key: string;
@@ -740,6 +746,29 @@ export class BentoClient {
 
   deleteMcpConnection(id: string) {
     return this.request<{ ok: boolean }>(`/api/mcp-connections/${id}`, { method: "DELETE" });
+  }
+
+  mcpOAuthConsent(request: string) {
+    return this.request<McpOAuthConsent>(`/api/mcp-oauth/consent?request=${encodeURIComponent(request)}`);
+  }
+
+  approveMcpOAuthConsent(input: {
+    request: string;
+    name?: string;
+    scope: "organization" | "projects";
+    projectIds?: string[];
+  }) {
+    return this.request<{ redirect: string }>("/api/mcp-oauth/consent", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  denyMcpOAuthConsent(request: string) {
+    return this.request<{ redirect: string }>("/api/mcp-oauth/deny", {
+      method: "POST",
+      body: JSON.stringify({ request }),
+    });
   }
 
   slackStatus() {

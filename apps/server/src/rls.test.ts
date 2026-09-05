@@ -44,6 +44,7 @@ const TENANT_TABLES = [
   "mcp_credentials",
   "mcp_run_grants",
   "mcp_connections",
+  "mcp_oauth_codes",
 ];
 
 let pool: pg.Pool;
@@ -465,6 +466,21 @@ test("an MCP credential inherits its organization and stays unique per scope", a
     client.query("select count(*)::int as n from mcp_credentials"),
   );
   assert.equal(foreign.rows[0].n, 0, "another organization must not read an MCP credential");
+});
+
+test("the tenant role cannot write MCP OAuth codes", async () => {
+  const denied = await asOrg("org-a", async (client) => {
+    try {
+      await client.query(
+        `insert into mcp_oauth_codes (code_hash, client_id, redirect_uri, code_challenge, resource, connection_id, token_bundle, expires_at)
+         values ('h','c','http://127.0.0.1/cb','ch','http://localhost/mcp','00000000-0000-0000-0000-000000000000','bundle',now())`,
+      );
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  });
+  assert.match(denied?.message ?? "", /permission denied/);
 });
 
 test("the tenant role cannot write MCP run grants", async () => {

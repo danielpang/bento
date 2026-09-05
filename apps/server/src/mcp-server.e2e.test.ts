@@ -1,5 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { createDb, createPool, features, mcpConnections, runMigrations } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
@@ -20,7 +21,7 @@ import { FeatureFlags } from "./feature-flags.js";
 /**
  * Bento's own MCP server, end to end: a member authorizes a connection
  * in the console routes, an outside agent presents its token to
- * /api/mcp-server, and the scope chosen at authorization is what the
+ * /mcp, and the scope chosen at authorization is what the
  * agent can reach. Cross-tenant refusals for the management routes also
  * live in auth.e2e.test.ts's matrix; this file owns the token-auth
  * endpoint, which that matrix (built on sessions) cannot probe.
@@ -392,10 +393,8 @@ test("a connection stays authorized until it is disconnected", async () => {
   const later = await rpc(connection.token, "tools/list");
   assert.equal(later.status, 200, "a later call with the same token must still be authorized");
 
-  // Spec-following MCP clients treat 401 as a cue to start OAuth. This
-  // endpoint has no authorization server, so a missing token is 404
-  // with no WWW-Authenticate, the same as a bad one.
-  const anon = await app.request("/api/mcp-server", {
+  // Spec-following MCP clients treat 401 as a cue to start OAuth.
+  const anon = await app.request("http://localhost:4400/api/mcp-server", {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({
@@ -405,8 +404,8 @@ test("a connection stays authorized until it is disconnected", async () => {
       params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } },
     }),
   });
-  assert.equal(anon.status, 404);
-  assert.equal(anon.headers.get("www-authenticate"), null);
+  assert.equal(anon.status, 401);
+  assert.match(anon.headers.get("www-authenticate") ?? "", /resource_metadata=/);
 
   const gone = await app.request(`/api/mcp-connections/${connection.id}`, {
     method: "DELETE",
@@ -414,7 +413,7 @@ test("a connection stays authorized until it is disconnected", async () => {
   });
   assert.equal(gone.status, 200);
   const dead = await rpc(connection.token, "ping");
-  assert.equal(dead.status, 404, "disconnect is what ends the token");
+  assert.equal(dead.status, 401, "disconnect is what ends the token");
 });
 
 test("a revoked connection stops serving immediately", async () => {
@@ -433,10 +432,10 @@ test("a revoked connection stops serving immediately", async () => {
   assert.equal(revoked.status, 200);
 
   const dead = await rpc(connection.token, "tools/list");
-  assert.equal(dead.status, 404, "a revoked token reads the same as one that never existed");
+  assert.equal(dead.status, 401, "a revoked token reads the same as one that never existed");
 
   const garbage = await rpc("bmcp_not-a-real-token", "tools/list");
-  assert.equal(garbage.status, 404);
+  assert.equal(garbage.status, 401);
 });
 
 test("a departed member's connections stop serving and are deleted", async () => {
@@ -467,7 +466,7 @@ test("a departed member's connections stop serving and are deleted", async () =>
   );
 
   const dead = await rpc(connection.token, "tools/list");
-  assert.equal(dead.status, 404, "a removed member's token must stop resolving");
+  assert.equal(dead.status, 401, "a removed member's token must stop resolving");
   const rows = await ctx.db.select().from(mcpConnections).where(eq(mcpConnections.id, connection.id));
   assert.equal(rows.length, 0, "the removal hook deletes the departed member's connections");
 });
@@ -534,6 +533,11 @@ test("non-testers hear 404 from the management routes", async () => {
     assert.equal(listed.status, 404, "off the flag, the routes do not exist");
     const created = await jsonPost("/api/mcp-connections", { name: "X", scope: "organization" }, token);
     assert.equal(created.status, 404);
+    const consent = await app.request(
+      "/api/mcp-oauth/consent?request=00000000-0000-0000-0000-000000000000",
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    assert.equal(consent.status, 404, "consent is behind the same flag");
   } finally {
     ctx.featureFlags = flags;
   }
@@ -550,7 +554,7 @@ test("the endpoint speaks only stateless Streamable HTTP", async () => {
   });
   assert.equal(get.status, 405, "there is no server-initiated stream");
   const getAnon = await app.request("/api/mcp-server", { headers: { accept: "text/event-stream" } });
-  assert.equal(getAnon.status, 404, "no token, no acknowledgement the endpoint exists");
+  assert.equal(getAnon.status, 401, "no token starts OAuth discovery");
 
   const unknown = await rpc(connection.token, "resources/list");
   const unknownBody = (await unknown.json()) as { error: { code: number } };
@@ -563,4 +567,238 @@ test("the endpoint speaks only stateless Streamable HTTP", async () => {
   });
   const batchBody = (await batch.json()) as { error: { code: number } };
   assert.equal(batchBody.error.code, -32600, "batches are refused in one message");
+});
+
+function pkcePair() {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+test("Claude and Cursor connect through OAuth on /mcp", async () => {
+  const origin = "http://localhost:4400";
+  const redirectUri = "http://127.0.0.1:9876/callback";
+  const token = await signUp("mcp-oauth-host@bento.test", "OAuth Host");
+  await makeOrg(token, "OAuth", "mcp-oauth");
+  await makeProject(token, "Board");
+
+  const resourceDoc = await app.request(`${origin}/.well-known/oauth-protected-resource/mcp`);
+  assert.equal(resourceDoc.status, 200);
+  const resourceBody = (await resourceDoc.json()) as {
+    resource: string;
+    authorization_servers: string[];
+  };
+  assert.equal(resourceBody.resource, `${origin}/mcp`);
+  assert.deepEqual(resourceBody.authorization_servers, [origin]);
+
+  const asDoc = await app.request(`${origin}/.well-known/oauth-authorization-server`);
+  assert.equal(asDoc.status, 200);
+  const asBody = (await asDoc.json()) as {
+    issuer: string;
+    authorization_endpoint: string;
+    token_endpoint: string;
+    registration_endpoint: string;
+    code_challenge_methods_supported: string[];
+  };
+  assert.equal(asBody.issuer, origin);
+  assert.equal(asBody.authorization_endpoint, `${origin}/mcp-oauth/authorize`);
+  assert.equal(asBody.token_endpoint, `${origin}/mcp-oauth/token`);
+  assert.equal(asBody.registration_endpoint, `${origin}/mcp-oauth/register`);
+  assert.deepEqual(asBody.code_challenge_methods_supported, ["S256"]);
+
+  const unauth = await app.request(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "cursor", version: "0" } },
+    }),
+  });
+  assert.equal(unauth.status, 401);
+  assert.equal(
+    unauth.headers.get("www-authenticate"),
+    `Bearer realm="mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`,
+  );
+
+  const registered = await app.request(`${origin}/mcp-oauth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ client_name: "Cursor", redirect_uris: [redirectUri] }),
+  });
+  assert.equal(registered.status, 201);
+  const client = (await registered.json()) as { client_id: string; token_endpoint_auth_method: string };
+  assert.match(client.client_id, /^mcp_/);
+  assert.equal(client.token_endpoint_auth_method, "none");
+
+  const { challenge } = pkcePair();
+  const authorize = await app.request(
+    `${origin}/mcp-oauth/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: client.client_id,
+      redirect_uri: redirectUri,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      resource: `${origin}/mcp`,
+      state: "cursor-state",
+    })}`,
+  );
+  assert.equal(authorize.status, 302, "Hono must not follow the consent redirect");
+  const consentUrl = new URL(authorize.headers.get("location") ?? "", origin);
+  assert.equal(consentUrl.pathname, "/connect-mcp");
+  const requestId = consentUrl.searchParams.get("request");
+  assert.ok(requestId, "authorize must hand the consent page a request id");
+
+  const preview = await app.request(`${origin}/api/mcp-oauth/consent?request=${requestId}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(preview.status, 200);
+  const previewBody = (await preview.json()) as { clientName: string; redirectUri: string };
+  assert.equal(previewBody.clientName, "Cursor");
+  assert.equal(previewBody.redirectUri, redirectUri);
+
+  const denied = await jsonPost("/api/mcp-oauth/deny", { request: requestId }, token);
+  assert.equal(denied.status, 200);
+  const deniedBody = (await denied.json()) as { redirect: string };
+  const deniedRedirect = new URL(deniedBody.redirect);
+  assert.equal(deniedRedirect.origin, "http://127.0.0.1:9876");
+  assert.equal(deniedRedirect.searchParams.get("error"), "access_denied");
+  assert.equal(deniedRedirect.searchParams.get("state"), "cursor-state");
+  assert.equal(deniedRedirect.searchParams.get("iss"), origin);
+
+  const { verifier: verifier2, challenge: challenge2 } = pkcePair();
+  const authorize2 = await app.request(
+    `${origin}/mcp-oauth/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: client.client_id,
+      redirect_uri: redirectUri,
+      code_challenge: challenge2,
+      code_challenge_method: "S256",
+      resource: `${origin}/mcp`,
+      state: "ok",
+    })}`,
+  );
+  const requestId2 = new URL(authorize2.headers.get("location") ?? "", origin).searchParams.get("request");
+  assert.ok(requestId2);
+
+  const approved = await jsonPost(
+    "/api/mcp-oauth/consent",
+    { request: requestId2, scope: "organization" },
+    token,
+  );
+  assert.equal(approved.status, 200);
+  const approvedBody = (await approved.json()) as { redirect: string };
+  const codeRedirect = new URL(approvedBody.redirect);
+  assert.equal(codeRedirect.searchParams.get("state"), "ok");
+  assert.equal(codeRedirect.searchParams.get("iss"), origin);
+  const code = codeRedirect.searchParams.get("code");
+  assert.match(code ?? "", /^bmcc_/);
+
+  const badPkce = await app.request(`${origin}/mcp-oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: code!,
+      redirect_uri: redirectUri,
+      client_id: client.client_id,
+      code_verifier: "wrong-verifier-value-that-is-long-enough",
+    }).toString(),
+  });
+  assert.equal(badPkce.status, 400);
+  assert.equal(((await badPkce.json()) as { error: string }).error, "invalid_grant");
+
+  const exchanged = await app.request(`${origin}/mcp-oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: code!,
+      redirect_uri: redirectUri,
+      client_id: client.client_id,
+      code_verifier: verifier2,
+    }).toString(),
+  });
+  assert.equal(exchanged.status, 200);
+  const tokens = (await exchanged.json()) as {
+    access_token: string;
+    refresh_token: string;
+    token_type: string;
+    expires_in: number;
+  };
+  assert.match(tokens.access_token, /^bmcp_/);
+  assert.match(tokens.refresh_token, /^bmcr_/);
+  assert.equal(tokens.token_type, "bearer");
+  assert.equal(tokens.expires_in, 315_360_000);
+
+  const replay = await app.request(`${origin}/mcp-oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: code!,
+      redirect_uri: redirectUri,
+      client_id: client.client_id,
+      code_verifier: verifier2,
+    }).toString(),
+  });
+  assert.equal(replay.status, 400, "an authorization code is single-use");
+
+  const init = await app.request(`${origin}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${tokens.access_token}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "cursor", version: "0" } },
+    }),
+  });
+  assert.equal(init.status, 200);
+  const initBody = (await init.json()) as { result: { serverInfo: { name: string } } };
+  assert.equal(initBody.result.serverInfo.name, "bento");
+
+  const refreshed = await app.request(`${origin}/mcp-oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: tokens.refresh_token,
+      client_id: client.client_id,
+    }),
+  });
+  assert.equal(refreshed.status, 200);
+  const next = (await refreshed.json()) as { access_token: string; refresh_token: string };
+  assert.match(next.access_token, /^bmcp_/);
+  assert.notEqual(next.access_token, tokens.access_token);
+  assert.notEqual(next.refresh_token, tokens.refresh_token);
+
+  const oldAccess = await app.request(`${origin}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${tokens.access_token}`,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }),
+  });
+  assert.equal(oldAccess.status, 401, "refresh rotates the access token");
+
+  const newAccess = await rpc(next.access_token, "tools/list");
+  assert.equal(newAccess.status, 200, "the new access token serves /mcp");
+
+  const oldRefresh = await app.request(`${origin}/mcp-oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: tokens.refresh_token,
+      client_id: client.client_id,
+    }),
+  });
+  assert.equal(oldRefresh.status, 400, "the previous refresh token is spent");
 });

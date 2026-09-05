@@ -11,6 +11,7 @@ import {
   resolveConnection,
   type ResolvedConnection,
 } from "../mcp/connections.js";
+import { requestOrigin } from "../mcp/oauth-as.js";
 import { activationRefusal, advanceFeature } from "../orchestrator/gate-evaluator.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 
@@ -20,8 +21,10 @@ import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
  * the same way: the caller is an agent holding a connection token, not
  * a session, so this sits outside the actor and tenant middleware, runs
  * every query by hand on the owner pool filtered by the connection's
- * scope, and answers every refusal with the same 404 so a probe learns
- * nothing.
+ * scope, and answers a missing or bad token with 401 plus resource
+ * metadata so Claude and Cursor start OAuth. Tool refusals inside an
+ * authenticated call stay the same "not found" the rest of the API
+ * speaks.
  *
  * The transport is Streamable HTTP in its stateless shape: each POST
  * carries one JSON-RPC message and is answered with JSON. No session id
@@ -205,6 +208,15 @@ export function mcpEndpointRoutes(ctx: AppContext) {
   const routes = new Hono();
   const notFound = (c: Context) => c.json({ error: NOT_FOUND }, 404);
 
+  function unauthorized(c: Context) {
+    const origin = requestOrigin(c, ctx.env.BETTER_AUTH_URL);
+    c.header(
+      "WWW-Authenticate",
+      `Bearer realm="mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`,
+    );
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
   async function authenticate(c: Context): Promise<ResolvedConnection | null> {
     const auth = c.req.header("authorization") ?? "";
     if (!auth.startsWith("Bearer ")) return null;
@@ -212,12 +224,8 @@ export function mcpEndpointRoutes(ctx: AppContext) {
   }
 
   routes.post("/", async (c) => {
-    // 404 rather than 401 for a bad token, the repository's refusal
-    // convention: this endpoint must not confirm it exists, and a 401
-    // would also send spec-following clients hunting for an OAuth
-    // authorization server this endpoint does not have.
     const conn = await authenticate(c);
-    if (!conn) return notFound(c);
+    if (!conn) return unauthorized(c);
     if (!takeToken(conn.id)) return c.json({ error: "slow down" }, 429);
     recordConnectionUse(ctx, conn.id);
 
@@ -284,13 +292,13 @@ export function mcpEndpointRoutes(ctx: AppContext) {
   // server answers 405 for both, which Streamable HTTP clients accept.
   routes.get("/", async (c) => {
     const conn = await authenticate(c);
-    if (!conn) return notFound(c);
+    if (!conn) return unauthorized(c);
     c.header("allow", "POST");
     return c.json({ error: "this MCP server does not open a server stream" }, 405);
   });
   routes.delete("/", async (c) => {
     const conn = await authenticate(c);
-    if (!conn) return notFound(c);
+    if (!conn) return unauthorized(c);
     c.header("allow", "POST");
     return c.json({ error: "this MCP server is stateless; there is no session to end" }, 405);
   });

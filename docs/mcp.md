@@ -86,27 +86,28 @@ Not yet supported: per-project server enablement (org-wide only), stdio servers,
 
 ## Bento as an MCP server
 
-The other direction: an agent running outside Bento (Claude Code on a laptop, an agent in some other product) connects to `/api/mcp-server` and can put cards on the board and follow what happens to them. Currently behind the beta testers flag.
-
-### Authorizing a connection
-
-Settings, then MCP, under "Connect an agent to Bento". Any member may authorize a connection; it acts as them. Creating one asks two things:
-
-- **A name**, so the row means something later ("Claude Code on my laptop").
-- **What the agent can reach.** Either the whole team (every project the organization has, including ones created later), or a selection of projects, one or several, pinned at authorization. A pinned project that later leaves the organization drops out of reach on its own.
-
-The create hands back a token once. Only its hash is stored, so a lost token means disconnecting and making a new one. The token does not expire. It stays valid until it is disconnected, or until its owner leaves the organization. Disconnecting takes effect on the connection's next request; membership is re-read live, and leaving the team also deletes the member's connections. Owners and admins see every connection and can disconnect any of them; members see and disconnect their own.
+The other direction: an agent running outside Bento (Claude Code on a laptop, Cursor, anything that speaks MCP) connects to `/mcp` and can put cards on the board and follow what happens to them. Currently behind the beta testers flag.
 
 ### Connecting an agent
 
-The transport is Streamable HTTP, stateless, with the token as a bearer Authorization header:
+In Claude or Cursor, add a custom MCP server URL:
 
 ```
-claude mcp add --transport http bento https://your-bento/api/mcp-server \
+https://your-bento/mcp
+```
+
+The host fetches that URL, sees it needs OAuth, and opens a Bento page. Sign in if needed, choose what the agent can reach (the whole team, or selected projects), and Allow. Bento redirects back to the host with an authorization code; the host exchanges it for a token. You do not paste a token by hand.
+
+The connection does not expire. It stays valid until it is disconnected, or until its owner leaves the organization. The host may refresh the access token on its own; that is not a new sign-in.
+
+A missing or bad token answers 401 with a `WWW-Authenticate` resource-metadata pointer, which is how the host finds the OAuth endpoints. Tool refusals after a valid token still answer "not found".
+
+Settings, MCP, "Connect an agent to Bento" lists the connections and is where you disconnect one. "New token" is the fallback for a client that cannot do OAuth: it mints a `bmcp_…` bearer token shown once.
+
+```
+claude mcp add --transport http bento https://your-bento/mcp \
   --header "Authorization: Bearer bmcp_..."
 ```
-
-A bad or missing token answers 404, not 401, so MCP clients do not start an OAuth sign-in this endpoint does not offer.
 
 ### What the agent gets
 
@@ -118,4 +119,4 @@ Five tools, scoped to the connection:
 - `list_features`: a project's board, filterable by status.
 - `search_features`: cards whose title or description carries the words you are looking for, across every project the connection reaches, or inside one you name. Each match comes back with its project, status and stage, so finding a card and reading where it stands is one call rather than two. Most recently updated first, and the answer says when the limit cut it short.
 
-Every refusal, including a bad token, answers the same "not found" the rest of the API speaks, so a probe learns nothing about what exists.
+Every tool refusal after a valid token answers the same "not found" the rest of the API speaks.

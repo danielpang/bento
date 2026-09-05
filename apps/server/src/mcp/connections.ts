@@ -13,15 +13,33 @@ import type { AppContext } from "../context.js";
  */
 
 const TOKEN_PREFIX = "bmcp_";
+const REFRESH_PREFIX = "bmcr_";
+const CODE_PREFIX = "bmcc_";
 
 export function hashConnectionToken(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
 }
 
-/** A fresh token. The raw value is shown once and never stored. */
-export function mintConnectionToken(): { raw: string; hash: string; hint: string } {
-  const raw = TOKEN_PREFIX + randomBytes(32).toString("base64url");
+function mintPrefixed(prefix: string): { raw: string; hash: string; hint: string } {
+  const raw = prefix + randomBytes(32).toString("base64url");
   return { raw, hash: hashConnectionToken(raw), hint: `…${raw.slice(-4)}` };
+}
+
+/** A fresh access token. The raw value is shown once and never stored. */
+export function mintConnectionToken(): { raw: string; hash: string; hint: string } {
+  return mintPrefixed(TOKEN_PREFIX);
+}
+
+/** A fresh refresh token. Used only on the OAuth token endpoint. */
+export function mintRefreshToken(): { raw: string; hash: string } {
+  const minted = mintPrefixed(REFRESH_PREFIX);
+  return { raw: minted.raw, hash: minted.hash };
+}
+
+/** A fresh authorization code. Single use, exchanged for the token pair. */
+export function mintAuthorizationCode(): { raw: string; hash: string } {
+  const minted = mintPrefixed(CODE_PREFIX);
+  return { raw: minted.raw, hash: minted.hash };
 }
 
 export interface ResolvedConnection {

@@ -875,6 +875,13 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", "/api/mcp-connections"],
     ["POST", "/api/mcp-connections", { body: JSON.stringify({ name: "Injected", scope: "organization" }) }],
     ["DELETE", `/api/mcp-connections/${mcpConnection!.id}`],
+    ["GET", "/api/mcp-oauth/consent?request=00000000-0000-0000-0000-000000000000"],
+    [
+      "POST",
+      "/api/mcp-oauth/consent",
+      { body: JSON.stringify({ request: "00000000-0000-0000-0000-000000000000", scope: "organization" }) },
+    ],
+    ["POST", "/api/mcp-oauth/deny", { body: JSON.stringify({ request: "00000000-0000-0000-0000-000000000000" }) }],
     ["PATCH", `/api/mcp/${mcpServer!.id}`, { body: JSON.stringify({ name: "stolen" }) }],
     ["POST", `/api/mcp/${mcpServer!.id}/api-key`, { body: JSON.stringify({ value: "sk-injected" }) }],
     ["DELETE", `/api/mcp/${mcpServer!.id}/credential`],
