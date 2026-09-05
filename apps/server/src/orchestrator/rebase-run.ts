@@ -3,6 +3,7 @@ import { agentRuns, repositories, type Db } from "@bento/db";
 import type { GitHubPublisher } from "@bento/github";
 import type { AppContext } from "../context.js";
 import { CARD_BUSY, startRunIfIdle } from "./start-run.js";
+import { enqueueRun } from "./queue.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { refreshBaseBranches } from "./repo-remote.js";
 import { isAncestryPublishFailure, publishFeatureBranches, type PublishedPullRequest, type PublishableRepository } from "./publish.js";
@@ -98,7 +99,7 @@ export async function startFeatureFollowUpRun(
   if (run === "gone") return { ok: false, status: 404, error: "not found" };
   if ("outOfCompute" in run) return { ok: false, status: 402, error: run.outOfCompute, code: "PLAN_LIMIT" };
 
-  await ctx.boss.send("run.execute", { runId: run.id });
+  await enqueueRun(ctx, run.id);
   return { ok: true, run };
 }
 

@@ -3972,7 +3972,7 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
     });
     const res = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { published: [], failures: [] });
+    assert.deepEqual(await res.json(), { published: [], failures: [], rebaseRun: null });
     assert.deepEqual(exported, [`sprite-publish-test:/workspace:${repo!.name}->main`]);
 
     // A sandbox that went away surfaces as a named failure, not a
