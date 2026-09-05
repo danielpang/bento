@@ -29,6 +29,7 @@ import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { createAuth } from "./auth.js";
+import type { Analytics, ServerEvent } from "./analytics.js";
 import type { AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
@@ -2922,4 +2923,58 @@ test("the catalog's added flag does not cross organizations", async () => {
   const body = (await seenByTwo.json()) as { entries: { url: string; added: boolean }[] };
   const leaked = body.entries.find((e) => e.url === url && e.added);
   assert.equal(leaked, undefined, "another organization's server must not read as added");
+});
+
+test("a refused sign in reaches PostHog as an event and an exception", async () => {
+  const events: ServerEvent[] = [];
+  const exceptions: { error: Error; properties?: Record<string, unknown> }[] = [];
+  const analytics: Analytics = {
+    capture: (event) => {
+      events.push(event);
+    },
+    captureException: (error, _userId, _organizationId, properties) => {
+      exceptions.push({ error: error as Error, properties });
+    },
+    shutdown: async () => {},
+  };
+  ctx.analytics = analytics;
+  try {
+    const signUp = await jsonPost("/api/auth/sign-up/email", {
+      email: "failure-metrics@bento.test",
+      password: "correct-horse-battery",
+      name: "Metrics",
+    });
+    assert.equal(signUp.status, 200);
+    assert.equal(events.length, 0, "a sign up that worked is not a failure");
+
+    const wrong = await jsonPost("/api/auth/sign-in/email", {
+      email: "failure-metrics@bento.test",
+      password: "not-the-password",
+    });
+    assert.equal(wrong.status, 401);
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event, "sign in failed");
+    assert.equal(events[0].userId, undefined);
+    assert.equal(events[0].properties?.method, "email");
+    assert.equal(events[0].properties?.code, "INVALID_EMAIL_OR_PASSWORD");
+    assert.equal(events[0].properties?.status, 401);
+    // Nothing that identifies the person rides along.
+    assert.equal(JSON.stringify(events[0]).includes("failure-metrics"), false);
+
+    assert.equal(exceptions.length, 1);
+    assert.equal(exceptions[0].error.name, "AuthFailureError");
+    assert.equal(exceptions[0].properties?.$exception_fingerprint, "sign in failed:email:INVALID_EMAIL_OR_PASSWORD");
+
+    const duplicate = await jsonPost("/api/auth/sign-up/email", {
+      email: "failure-metrics@bento.test",
+      password: "correct-horse-battery",
+      name: "Metrics",
+    });
+    assert.equal(duplicate.status, 422);
+    assert.equal(events[1]?.event, "sign up failed");
+    assert.equal(events[1]?.properties?.code, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
+  } finally {
+    delete ctx.analytics;
+  }
 });
