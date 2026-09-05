@@ -121,13 +121,7 @@ export interface AuthHooks {
    * refuse an account.
    */
   onUserSignedUp?: (user: { id: string; email: string; name: string; method: string; route: string }) => void;
-  /**
-   * A sign in or sign up outcome, from better-auth's after hook: a
-   * success, a refusal, or a social flow leaving for its provider.
-   * Sign up successes are not among them, since on a deployment that
-   * requires confirmation better-auth answers a duplicate exactly like
-   * a real one; onUserSignedUp is that signal.
-   */
+  /** A sign in or sign up outcome from better-auth's after hook. Sign up successes come through onUserSignedUp. */
   onAuthEvent?: (event: AuthEvent) => void;
 }
 
@@ -181,11 +175,7 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       transaction: true,
     }),
     trustedOrigins: env.BENTO_TRUSTED_ORIGINS,
-    /**
-     * Sign in and sign up outcomes, for PostHog. See auth-events.ts for
-     * why this is a hook inside better-auth rather than a wrapper
-     * around it.
-     */
+    // Sign in and sign up outcomes, for PostHog. See auth-events.ts.
     ...(hooks.onAuthEvent
       ? {
           hooks: {

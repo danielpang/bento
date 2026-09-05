@@ -1,9 +1,6 @@
 import type { Analytics, ServerEvent } from "./analytics.js";
 
-/**
- * An Analytics that remembers instead of sending, for tests that assert
- * what would have reached PostHog.
- */
+/** An Analytics that records instead of sending, for tests. */
 export function recordingAnalytics() {
   const events: ServerEvent[] = [];
   const exceptions: { error: Error; userId?: string | null | undefined; properties?: Record<string, unknown> | undefined }[] = [];

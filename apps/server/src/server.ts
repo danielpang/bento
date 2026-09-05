@@ -138,8 +138,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
                 userId: u.id,
                 properties: { $set: { email: u.email, name: u.name } },
               });
-              // The funnel's half of the same fact: counted here, on a
-              // row that exists, rather than in the after hook, which
+              // Counted here, on a row that exists: the after hook
               // cannot tell a hosted duplicate from a real sign up.
               reportAuthEvent(posthog, {
                 flow: "sign up",

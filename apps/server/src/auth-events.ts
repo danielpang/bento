@@ -1,35 +1,15 @@
 import type { Analytics } from "./analytics.js";
 
 /**
- * Sign in and sign up outcomes, reported to PostHog.
+ * Sign in and sign up outcomes, reported to PostHog from better-auth's
+ * after hook. The hook sees the session an endpoint minted and what it
+ * answered or threw, which is what decides an outcome: the OAuth
+ * callback also serves the account-link flow (no session, not a sign
+ * in), and a hosted duplicate sign up is answered like a real one, so
+ * sign ups are counted from the user row in auth.ts instead.
  *
- * better-auth owns these routes, and none of what happens on them is
- * an exception: a refusal is a JSON status, a failed OAuth callback is
- * a redirect carrying an `error` code, and a success is a session
- * cookie. So until this existed a broken sign in left a log line on
- * the machine and nothing anywhere else: the private GitHub App that
- * answered every outside user with a 404 was found by a user, not by
- * a chart. Successes are reported as well as failures, because a
- * failure count only means something next to the attempts, and a
- * sign in that worked belongs on the person's timeline.
- *
- * The facts come from better-auth's own after hook rather than from
- * the HTTP exchange. The hook runs after every endpoint with the
- * session it minted (`newSession`) and whatever it answered or threw
- * (`returned`), so nothing here parses a response body, sniffs a
- * redirect, or looks the session up a second time. Two things the
- * HTTP layer could not tell apart fall out of that: the OAuth
- * callback also serves the "connect your GitHub account" flow, which
- * mints no session and is not a sign in; and on the hosted deployment
- * a duplicate sign up is answered exactly like a real one, on
- * purpose, so a sign up counts only when a user row exists (the
- * database hook in auth.ts).
- *
- * A success is attributed to the user. A failure has no user, so it
- * counts against the server rather than a person, and nothing that
- * came from the request rides along beyond the error code, which is
- * checked against a short alphabet: no address, no password, no free
- * text from a provider.
+ * Successes are attributed to the user. Failures carry no user and no
+ * request text beyond a checked error code.
  */
 
 export type AuthFlow = "sign in" | "sign up";
@@ -38,31 +18,25 @@ export type AuthOutcome = "started" | "succeeded" | "failed";
 export interface AuthEvent {
   flow: AuthFlow;
   outcome: AuthOutcome;
-  /** The user a success signed in or created. Never set on a failure. */
+  /** Set on a success only. */
   userId?: string;
   properties: {
-    /** "email", "device", or the id of a configured social provider. */
+    /** "email", "device", or a configured social provider id. */
     method: string;
-    /** better-auth's route template, relative to its base path, such as "/callback/:id". */
+    /** better-auth's route template, such as "/callback/:id". */
     route: string;
-    /** On a failure: the HTTP status. */
+    /** Failures only. */
     status?: number;
-    /** On a failure: better-auth's error code, or the `error` a callback redirected with. */
     code?: string;
   };
 }
 
-/** The PostHog event name: "sign in failed", "sign up succeeded", and so on. */
+/** The PostHog event name, such as "sign in failed". */
 export function authEventName(event: AuthEvent): string {
   return `${event.flow} ${event.outcome}`;
 }
 
-/**
- * The slice of better-auth's endpoint context this reads. The after
- * hook and the database hooks both carry it; `path` is the route
- * template, so a callback reads "/callback/:id" with the provider in
- * `params`.
- */
+/** The slice of better-auth's endpoint context this reads. */
 export interface AuthHookContext {
   path?: string | undefined;
   params?: Record<string, unknown> | undefined;
@@ -77,12 +51,10 @@ export interface AuthHookContext {
 }
 
 /**
- * Routes where a minted session means somebody signed in. Not every
- * session does: a plain get-session past its update age, set-active
- * organization, and update-user all mint one too, and none of those
- * is anyone signing in. Device token is how the CLI and TUI sign in;
- * verify-email is the first sign in on a deployment that requires
- * confirmation, since sign up does not sign anyone in there.
+ * Routes where a minted session is a sign in. Session refreshes,
+ * set-active organization, and update-user mint sessions too and are
+ * not. Device token is the CLI sign in; verify-email is the first sign
+ * in when confirmation is required.
  */
 const SIGN_IN_ROUTES = new Set(["/callback/:id", "/verify-email", "/device/token"]);
 
@@ -90,26 +62,12 @@ function isSignInRoute(route: string): boolean {
   return route.startsWith("/sign-in/") || SIGN_IN_ROUTES.has(route);
 }
 
-/**
- * Sign in refusals worth counting. The device token route is left out:
- * the CLI polls it every few seconds and hears "authorization pending"
- * until the person approves, which is the protocol working, not a
- * failed sign in.
- */
+/** Device token is excluded: the CLI polls it and hears "pending" until approval. */
 function reportsRefusals(route: string): boolean {
   return route.startsWith("/sign-in/") || route.startsWith("/sign-up/") || route === "/callback/:id" || route === "/verify-email";
 }
 
-/**
- * Refusals that are the person's own doing, or the product working as
- * designed: they are counted, since a spike in any of them is worth a
- * chart, but they do not open error tracking issues. A wrong password
- * is not a fault of the server, and an unconfirmed address is the
- * state every new hosted account is in until the mail is clicked.
- * Everything else (a provider that is not configured, a state that
- * would not verify, a code the provider would not exchange, a 500)
- * is a fault, and reaches error tracking.
- */
+/** Counted, but not error tracking issues: the person's own doing, or the product as designed. */
 const EXPECTED_REFUSALS = new Set([
   "INVALID_EMAIL_OR_PASSWORD",
   "INVALID_EMAIL",
@@ -124,12 +82,7 @@ const EXPECTED_REFUSALS = new Set([
   "access_denied",
 ]);
 
-/**
- * What the endpoint that just ran means for sign in or sign up, or
- * null when it means nothing (any other route, a session refresh, a
- * social start that is on its way to the provider and has decided
- * nothing yet, the account-link flow).
- */
+/** What the endpoint that just ran means for sign in or sign up, or null. */
 export function describeAuthEvent(ctx: AuthHookContext): AuthEvent | null {
   const route = ctx.path ?? "";
   const flow: AuthFlow | null = route.startsWith("/sign-up/") ? "sign up" : isSignInRoute(route) ? "sign in" : null;
@@ -138,40 +91,26 @@ export function describeAuthEvent(ctx: AuthHookContext): AuthEvent | null {
 
   const session = ctx.context.newSession;
   if (session) {
-    // A sign up that also signed the person in (a deployment without
-    // the verification gate) is counted once, by its user row.
+    // A sign up that also signed the person in is counted once, by its user row.
     if (flow === "sign up") return null;
     return { flow, outcome: "succeeded", userId: session.user.id, properties: { method, route } };
   }
 
   const refusal = reportsRefusals(route) ? refusalFrom(ctx.context.returned) : null;
   if (refusal) {
-    // The callback with a session already in hand is the account-link
-    // flow (Settings, connect GitHub), and its refusals are not failed
-    // sign ins. A signed-in person signing in again loses a refusal
-    // here, which is rare enough to accept over mislabelling every
-    // link problem as a sign in problem.
+    // A callback with a session in hand is the account-link flow.
     if (route === "/callback/:id" && holdsSession(ctx)) return null;
     return { flow, outcome: "failed", properties: { method, route, ...refusal } };
   }
 
-  // The social start only sends the browser to the provider. Counted
-  // as a start so a provider that never sends anyone back (a private
-  // GitHub App answers outsiders with a 404 on its own site) shows up
-  // as starts with no outcome.
+  // A start, so a provider that never sends anyone back shows up as starts with no outcome.
   if (route === "/sign-in/social" && field(ctx.context.returned, "redirect") === true) {
     return { flow, outcome: "started", properties: { method, route } };
   }
   return null;
 }
 
-/**
- * How the person signed in or up. Provider ids are checked against the
- * configured providers: the callback path and the social start body
- * are both caller-supplied, and an unchecked value would let anyone
- * mint a new property value, and a new error tracking issue, per
- * request.
- */
+/** How the person signed in. Provider ids are checked against the configured providers: they are caller-supplied. */
 export function methodFor(ctx: AuthHookContext | null | undefined): string {
   const route = ctx?.path ?? "";
   if (route === "/callback/:id") return knownProvider(ctx, field(ctx?.params, "id"));
@@ -187,13 +126,9 @@ function knownProvider(ctx: AuthHookContext | null | undefined, id: unknown): st
 }
 
 /**
- * The refusal an endpoint threw, if it threw one. better-auth answers
- * a JSON route with an APIError carrying a code, and a browser route
- * (the callback, verify-email) with a redirect, since there is nobody
- * mid-navigation to hand a status to: a refusal there is a redirect
- * whose location carries `error`. The last `error` in the query is
- * the one better-auth appended; the page it appended it to may have
- * carried one of its own.
+ * The refusal an endpoint threw. JSON routes throw an APIError with a
+ * code; browser routes redirect with `error` in the query, and the last
+ * one is the one better-auth appended.
  */
 function refusalFrom(returned: unknown): { status: number; code: string } | null {
   if (!isApiError(returned)) return null;
@@ -222,12 +157,7 @@ function locationOf(headers: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-/**
- * Error codes are property values and issue fingerprints, so they are
- * held to the alphabet better-auth's own codes use. A provider's
- * `error` parameter is forwarded by better-auth verbatim, and this is
- * where anything else it might carry stops.
- */
+/** Codes are property values and fingerprints, so they are held to better-auth's own alphabet. */
 function safeCode(code: unknown): string {
   return typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : "other";
 }
@@ -242,12 +172,7 @@ function field(value: unknown, key: string): unknown {
   return value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
 }
 
-/**
- * The error that reaches error tracking for a failure. Its own class
- * so the issue list reads "AuthFailureError" rather than "Error", and
- * a message built from the stable parts so occurrences of one cause
- * read alike.
- */
+/** The error tracking entry for a failure, named by its stable parts. */
 export class AuthFailureError extends Error {
   constructor(event: AuthEvent) {
     super(`${authEventName(event)}: ${event.properties.code ?? "unknown"} (${event.properties.method})`);
@@ -260,18 +185,12 @@ export function reportAuthEvent(analytics: Analytics, event: AuthEvent): void {
   if (event.outcome !== "failed" || EXPECTED_REFUSALS.has(event.properties.code ?? "")) return;
   analytics.captureException(new AuthFailureError(event), null, null, {
     ...event.properties,
-    // One issue per cause. Without this the grouping would fall back to
-    // the stack, which is the same hook for every failure, so a broken
-    // provider and an expired state would land in one issue.
+    // One issue per cause, not one per stack.
     $exception_fingerprint: `${authEventName(event)}:${event.properties.method}:${event.properties.code}`,
   });
 }
 
-/**
- * The after hook body. Reporting never changes the response: whatever
- * the report does with the event, an error in it is logged and
- * better-auth's answer goes out as it was.
- */
+/** The after hook body. A failing report is logged and never changes the response. */
 export function authEventHook(onEvent: (event: AuthEvent) => void): (ctx: AuthHookContext) => void {
   return (ctx) => {
     try {
