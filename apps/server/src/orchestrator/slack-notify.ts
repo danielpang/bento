@@ -54,7 +54,7 @@ async function threadLinkFor(ctx: AppContext, featureId: string): Promise<Thread
 }
 
 /**
- * Called from recordFeatureEvent and every run-finish path. A quick
+ * Called from queueFeatureEventFollowUps and every run-finish path. A quick
  * link check keeps the queue quiet for cards that never came from Slack.
  *
  * Enqueue is retried here because the callers (a finished run, a gate
@@ -74,6 +74,7 @@ export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Pr
     }
   }
   console.error(`slack.notify enqueue for ${job.featureId} failed:`, lastErr);
+  ctx.analytics?.captureException(lastErr, null, null, { feature_id: job.featureId, queue: "slack.notify" });
 }
 
 /**

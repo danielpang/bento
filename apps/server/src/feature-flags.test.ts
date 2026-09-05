@@ -31,6 +31,19 @@ test("local mode is always on, even without a PostHog key", async () => {
   assert.deepEqual(await flags.snapshot("anyone"), { betaTesters: true });
 });
 
+test("local mode with a leftover key still never calls PostHog", async () => {
+  const flags = createFeatureFlags(
+    loadEnv({ BENTO_MODE: "local", POSTHOG_API_KEY: "phc_leftover_from_hosted" }),
+  );
+  assert.equal(flags.usesPostHog(), false);
+  assert.equal(await flags.isBetaTester("anyone"), true);
+});
+
+test("multi mode without a key does not construct a client", () => {
+  const flags = createFeatureFlags(loadEnv({ BENTO_MODE: "multi" }));
+  assert.equal(flags.usesPostHog(), false);
+});
+
 test("multi mode without a key fails closed", async () => {
   const flags = createFeatureFlags(loadEnv({ BENTO_MODE: "multi" }));
   assert.equal(await flags.isBetaTester("user-1", { email: "a@b.test" }), false);

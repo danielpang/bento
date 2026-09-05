@@ -2,7 +2,7 @@
 import { render } from "ink";
 import { App } from "./app.js";
 import { HELP, parseCliOptions } from "./cli-options.js";
-import { runAgents, runLogin, runPipeline, runRepos, runRunner, runServe } from "./headless.js";
+import { runAgents, runLogin, runMcp, runPipeline, runRepos, runRunner, runServe, runSessions, runSpend } from "./headless.js";
 
 let options;
 try {
@@ -41,6 +41,12 @@ if (options.command === "serve") {
   await runAgents(options);
 } else if (options.command === "pipeline") {
   await runPipeline(options);
+} else if (options.command === "spend") {
+  await runSpend(options);
+} else if (options.command === "sessions") {
+  await runSessions(options);
+} else if (options.command === "mcp") {
+  await runMcp(options);
 } else {
   await runBoard();
 }

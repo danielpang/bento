@@ -8,18 +8,28 @@ const ISSUES_URL = "https://github.com/danielpang/bento/issues";
  * The contact form: an issue report or a feature request, mailed to
  * the operator through the server.
  *
- * The GitHub issues link sits above the form rather than after it,
- * because the useful moment to check for an existing issue is before
- * writing the report, not after sending it.
+ * When reporting an issue, a GitHub link sits under the kind picker
+ * rather than after the form, because the useful moment to check for
+ * an existing issue is before writing the report, not after sending it.
  */
 export function ContactDialog({
   client,
   onClose,
+  initialKind = "issue",
+  featurePlaceholder,
 }: {
   client: BentoClient;
   onClose: () => void;
+  /**
+   * Preselect issue or feature. The Agents "request a new coding
+   * agent or model" control opens this as a feature request so the
+   * user does not have to flip the radio first.
+   */
+  initialKind?: "issue" | "feature";
+  /** Overrides the feature-request textarea hint when set. */
+  featurePlaceholder?: string;
 }) {
-  const [kind, setKind] = useState<"issue" | "feature">("issue");
+  const [kind, setKind] = useState<"issue" | "feature">(initialKind);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -95,13 +105,13 @@ export function ContactDialog({
             />
             <span className="gate-check-text">A feature request</span>
           </label>
-          <span className="muted">
-            Reporting an issue? Check the{" "}
-            <a href={ISSUES_URL} target="_blank" rel="noreferrer">
-              existing issues on GitHub
-            </a>{" "}
-            first, someone may have hit it already.
-          </span>
+          {kind === "issue" && (
+            <span className="muted">
+              <a href={ISSUES_URL} target="_blank" rel="noreferrer">
+                Check existing issues on GitHub
+              </a>
+            </span>
+          )}
         </div>
         <label className="field">
           <span className="label">Message</span>
@@ -112,7 +122,7 @@ export function ContactDialog({
             placeholder={
               kind === "issue"
                 ? "What happened, and what did you expect instead?"
-                : "What should Bento do, and what would it help you get done?"
+                : (featurePlaceholder ?? "What should Bento do, and what would it help you get done?")
             }
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={(e) => {

@@ -2,7 +2,7 @@ import { PostHog } from "posthog-node";
 import { eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { user } from "@bento/db";
-import type { Env } from "./env.js";
+import { posthogApiKey, type Env } from "./env.js";
 import type { AppContext } from "./context.js";
 import { actor } from "./middleware/actor.js";
 
@@ -50,6 +50,11 @@ export class FeatureFlags {
     private readonly budgetMs = FeatureFlags.EVALUATE_BUDGET_MS,
   ) {}
 
+  /** True when this instance holds a PostHog client. */
+  usesPostHog(): boolean {
+    return this.evaluator !== null;
+  }
+
   /** Whether this user is on the permanent beta-testers allowlist. */
   isBetaTester(userId: string, person?: { email?: string | null }): Promise<boolean> {
     return this.isEnabled(FLAGS.BETA_TESTERS, userId, person);
@@ -87,15 +92,17 @@ export class FeatureFlags {
 /**
  * Builds the evaluator, or a flags object that never calls PostHog.
  *
- * Local mode is always on. Multi mode without a key fails closed, so a
- * hosted deployment that has not configured PostHog does not leak
- * unfinished UI to every signed-in user.
+ * Local mode is always on and never constructs a client, even if a
+ * leftover POSTHOG_API_KEY is in the environment. Multi mode without
+ * a key fails closed, so a hosted deployment that has not configured
+ * PostHog does not leak unfinished UI to every signed-in user.
  */
 export function createFeatureFlags(env: Env): FeatureFlags {
   const alwaysOn = env.BENTO_MODE !== "multi";
-  if (!env.POSTHOG_API_KEY) return new FeatureFlags(null, alwaysOn);
+  const apiKey = posthogApiKey(env);
+  if (!apiKey) return new FeatureFlags(null, alwaysOn);
 
-  const client = new PostHog(env.POSTHOG_API_KEY, {
+  const client = new PostHog(apiKey, {
     host: env.POSTHOG_HOST,
   });
   client.on("error", (err) => {

@@ -201,6 +201,8 @@ test("the plain route lists servers as pipe-delimited lines for the TUI", async 
   assert.equal(authType, "api_key");
   assert.equal(scope, "org");
   assert.equal(enabled, "true");
+  assert.match(text, /^access\|[01]/);
+  assert.ok(line!.split("|").at(-1), "the display name is last so it may contain pipes");
 });
 
 test("a reserved API key header is refused at write time", async () => {

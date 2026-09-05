@@ -4,6 +4,7 @@ import {
   agentRunPrompt,
   forgetsBetweenRuns,
   modelGuidanceFor,
+  withProviderOutageAdvice,
   type RunOutcome,
 } from "@bento/core";
 import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
@@ -38,6 +39,7 @@ import { extendRunGrant, revokeRunGrant, runHasActiveMcp, sweepExpiredGrants } f
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
@@ -294,6 +296,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
+    ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+      run_id: runId,
+      feature_id: feature.id,
+      source: "sandbox_provision",
+    });
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
     emitBoard("failed");
     await ctx.boss.send("gate.evaluate", { featureId: feature.id });
@@ -378,6 +385,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     } catch (err) {
       // A missing snapshot costs rollback, not the run.
       console.error(`could not snapshot before run ${runId}:`, err);
+      ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+        run_id: runId,
+        source: "sandbox_snapshot",
+      });
     }
   }
 
@@ -672,12 +683,16 @@ export function dshFailureAdvice(error: string): string | null {
  * up tool-specific advice on their own. Same sentences, same place the
  * hosted board reads the error from, for every runner client.
  */
-export function runnerReportedError(cli: string | undefined, error: string | undefined): string | null {
+export function runnerReportedError(
+  cli: string | undefined,
+  error: string | undefined,
+  model?: string,
+): string | null {
   const base = error ?? null;
   if (!base) return null;
   const advice = cli === "pool" ? poolFailureAdvice(base) : cli === "dsh" ? dshFailureAdvice(base) : null;
   if (advice) return `${base} ${advice}`;
-  return base;
+  return withProviderOutageAdvice(base, { cli, model });
 }
 
 export function mergeAgentExecEnv(
@@ -751,7 +766,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
             runId: next.id,
             status: "queued",
           });
-          if (runRow.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+          if (runRow.executor === "server") await enqueueRun(ctx, next.id);
           return;
         }
       }
@@ -782,6 +797,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
         : profile.cli === "dsh"
           ? dshFailureAdvice(outcome.error ?? "")
           : null;
+    const providerAdvice = toolAdvice
+      ? `${outcome.error} ${toolAdvice}`
+      : withProviderOutageAdvice(outcome.error ?? "", { cli: profile.cli, model: profile.model });
     const enriched =
       authDead && profile.cli === "claude-code"
         ? {
@@ -793,8 +811,8 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
               ...outcome,
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
             }
-          : toolAdvice
-            ? { ...outcome, error: `${outcome.error} ${toolAdvice}` }
+          : providerAdvice !== (outcome.error ?? "")
+            ? { ...outcome, error: providerAdvice }
             : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");
@@ -1265,7 +1283,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     runId: next.id,
     status: "queued",
   });
-  if (source.executor === "server") await ctx.boss.send("run.execute", { runId: next.id });
+  if (source.executor === "server") await enqueueRun(ctx, next.id);
 }
 
 /**
@@ -1405,6 +1423,7 @@ async function announceRunFinished(
   if (announce) {
     void announce(runId).catch((err: unknown) => {
       console.warn(`could not record what run ${runId} cost:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "billing_on_run_finished" });
     });
   }
   await captureRunFinished(ctx, runId, status);
@@ -1487,10 +1506,18 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
      */
     void resumeInterruptedRun(ctx, orphan, sandbox).catch(async (err) => {
       console.error(`could not resume run ${orphan.id} after the restart:`, err);
+      ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
+        run_id: orphan.id,
+        source: "resume_interrupted",
+      });
       try {
         await failRunAsInterrupted(ctx, orphan);
       } catch (inner) {
         console.error(`could not close run ${orphan.id} as interrupted either:`, inner);
+        ctx.analytics?.captureException(inner, orphan.startedBy, orphan.organizationId, {
+          run_id: orphan.id,
+          source: "resume_interrupted_close",
+        });
       }
     });
   }
@@ -1825,7 +1852,7 @@ async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
     .from(agentRuns)
     .where(and(eq(agentRuns.executor, "server"), eq(agentRuns.status, "queued")));
   for (const row of parked) {
-    await ctx.boss.send("run.execute", { runId: row.id });
+    await enqueueRun(ctx, row.id);
   }
 }
 
@@ -1866,9 +1893,14 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * slots idle. Independent single-job workers free each slot the moment
    * its run finishes. The count is this process's capacity, not a plan
    * limit: hosted Fly raises it, a laptop stays at the default of 4.
+   *
+   * The workers poll slowly and are woken by enqueueRun instead, so
+   * their ids are kept on the context for it. A run queued through a
+   * bare boss.send still runs, on the next poll.
    */
+  ctx.runWorkers = [];
   for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
-    await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1 }, async (jobs) => {
+    const workerId = await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1, pollingIntervalSeconds: RUN_WORKER_POLL_SECONDS }, async (jobs) => {
       for (const job of jobs) {
         try {
           await executeRun(ctx, job.data.runId);
@@ -1883,6 +1915,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
         }
       }
     });
+    ctx.runWorkers.push(workerId);
   }
 
   /**
@@ -1928,7 +1961,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     }
   }));
 
-  await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5 }, async (jobs) => {
+  // Polled at the interactive pace rather than the slow default: this
+  // is what moves a card once its run ends, and one worker every two
+  // seconds is cheap where a worker per slot was not.
+  await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     await Promise.all(
       jobs.map(async (job) => {
         try {
@@ -1971,13 +2007,15 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   }));
 
   /**
-   * A once-a-minute PostHog gauge of runs waiting for a `run.execute`
-   * worker. Skipped when analytics is off: the only consumer is the
-   * dashboard that decides whether to add workers.
+   * A PostHog gauge of runs waiting for a `run.execute` worker, every
+   * five minutes. Skipped when analytics is off: the only consumer is
+   * the dashboard that decides whether to add workers, and a queue
+   * that backs up does so over hours, so minute resolution bought
+   * nothing but a job, an archive row, and a query per minute.
    */
   if (ctx.analytics) {
     await ctx.boss.createQueue("run.queue-snapshot");
-    await ctx.boss.schedule("run.queue-snapshot", "* * * * *");
+    await ctx.boss.schedule("run.queue-snapshot", "*/5 * * * *");
     await ctx.boss.work(
       "run.queue-snapshot",
       captureJobErrors(ctx.analytics, "run.queue-snapshot", async () => {
@@ -2001,7 +2039,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
  * driver raised it, and the server does not import their SDKs.
  */
 function describeSandboxError(err: unknown): string {
-  const base = String(err);
+  // A plain Error carrying a written sentence is that sentence. The
+  // "Error:" String() puts in front of it says nothing a reader wants,
+  // while a driver's own subclass names who failed and is kept.
+  const base = err instanceof Error && err.name === "Error" ? err.message : String(err);
   if (typeof err !== "object" || err === null) return base;
   const { stderr, stdout } = err as { stderr?: unknown; stdout?: unknown };
   const output = [stderr, stdout].find((value) => typeof value === "string" && value.trim() !== "");

@@ -2,7 +2,14 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
-import { forgetsBetweenRuns, hasNoLiveTranscript, modelGuidanceFor, type AgentEvent } from "@bento/core";
+import {
+  forgetsBetweenRuns,
+  hasNoLiveTranscript,
+  modelGuidanceFor,
+  withProviderOutageAdvice,
+  type AgentEvent,
+} from "@bento/core";
+import { linkifiedError } from "../error-text.js";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
@@ -349,9 +356,9 @@ export function AgentSession({
   const sections = useMemo(() => {
     const out: { key: string; runId: string; agentName: string; when: string; status: string; items: ChatItem[] }[] = [];
     const itemsFor = (runId: string, runEvents: AgentEvent[], agentName: string, prefix: string): ChatItem[] => {
-      const items = toChatItems(runEvents, agentName, prefix);
       const sourceRun = runs.find((run) => run.id === runId);
       const sourceAgent = profiles.find((profile) => profile.id === sourceRun?.agentProfileId);
+      const items = withProviderOutageErrors(toChatItems(runEvents, agentName, prefix), sourceAgent);
       if (
         sourceRun &&
         TERMINAL_RUN.has(sourceRun.status) &&
@@ -775,7 +782,7 @@ function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) 
       <span className="chat-result" data-ok={item.ok}>
         {item.ok
           ? `finished${item.costUsd !== undefined ? ` · $${item.costUsd.toFixed(2)}` : ""}`
-          : `failed: ${item.error ?? "no reason reported"}`}
+          : <>failed: {linkifiedError(item.error ?? "no reason reported")}</>}
       </span>
     </div>
   );
@@ -979,6 +986,22 @@ export function runDuration(startedAt: string | null, now: number): string {
 
 export function isLongQuietRun(startedAt: string | null, now: number): boolean {
   return elapsedMs(startedAt, now) >= 30 * 60 * 1000;
+}
+
+/**
+ * When a result is a model-provider outage, the status page rides on
+ * the same line the transcript already shows. Applied at display time
+ * so a result event that predates the server-side sentence still
+ * names the page.
+ */
+export function withProviderOutageErrors(
+  items: ChatItem[],
+  agent?: { cli: string; model: string } | undefined,
+): ChatItem[] {
+  return items.map((item) => {
+    if (item.kind !== "result" || item.ok || !item.error) return item;
+    return { ...item, error: withProviderOutageAdvice(item.error, agent) };
+  });
 }
 
 export function withNoLiveTranscriptNote(items: ChatItem[], prefix: string, toolLabel = "This tool"): ChatItem[] {

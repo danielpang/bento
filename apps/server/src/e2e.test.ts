@@ -14,6 +14,7 @@ import {
   featureEvents,
   featurePullRequests,
   features,
+  gateChecks,
   githubInstallations,
   agentRuns,
   organization,
@@ -46,8 +47,15 @@ import {
 } from "./orchestrator/run-executor.js";
 import { reapSandbox } from "./orchestrator/reap-sandbox.js";
 import { appendRunEvent } from "./orchestrator/transcript.js";
-import { JUDGE_PROMPT_PREFIX, moveFeatureTo } from "./orchestrator/gate-evaluator.js";
+import {
+  JUDGE_PROMPT_PREFIX,
+  advanceFeature,
+  evaluateFeatureGate,
+  finishFeature,
+  moveFeatureTo,
+} from "./orchestrator/gate-evaluator.js";
 import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
+import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
@@ -186,9 +194,10 @@ async function waitForStage(featureId: string, stageId: string, timeoutMs = 60_0
 /**
  * The last transition on a card, once it reads as `expected`.
  *
- * advanceFeature commits the stage move before writing the history row,
- * so a card can reach its next stage a moment before the transition
- * that moved it exists; reading once sees the previous one. Returns the
+ * The move and the history row commit together, so a card that has
+ * already reached its next stage already has the transition that put
+ * it there. This still waits because the evaluator is a background
+ * job, and the test can get here before that job has run. Returns the
  * last trigger seen on timeout, so a real regression fails on the real
  * value rather than a throw.
  */
@@ -1512,7 +1521,7 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
       executor: "server",
     })
     .returning();
-  await ctx.boss.send("run.execute", { runId: running!.id });
+  await enqueueRun(ctx, running!.id);
 
   const deadline = Date.now() + 30_000;
   let seen: { status: string; cliSessionId: string | null } | null = null;
@@ -1556,7 +1565,7 @@ test("two messages racing into the parking slot both survive", { timeout: 60_000
       executor: "server",
     })
     .returning();
-  await ctx.boss.send("run.execute", { runId: running!.id });
+  await enqueueRun(ctx, running!.id);
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const run = await json<{ status: string }>(await app.request(`/api/runs/${running!.id}`));
@@ -3115,6 +3124,16 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   const line = board.split("\n").find((l) => l.startsWith(`feature|${feature.id}|`))!;
   const cost = line.split("|")[6]!;
   assert.match(cost, /^\d+\.\d\d$/, `expected a cost field on the board line, got ${cost}`);
+
+  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
+  assert.match(plain, /^total\|/);
+  const billedLine = plain.split("\n").find((l) => l.startsWith(`card|${feature.id}|`));
+  assert.ok(billedLine, "the spend rollup lists the card that ran");
+  assert.match(billedLine, new RegExp(`\\|${cost}\\|`));
+  assert.ok(
+    plain.split("\n").some((l) => l.startsWith(`card|${idle.id}|`)),
+    "a card that never ran still belongs on the spend page",
+  );
 });
 
 /**
@@ -3184,6 +3203,12 @@ test("usage ignores judge runs and in-flight runs", async () => {
   assert.ok(untouched);
   assert.equal(untouched.runs, 0);
   assert.equal(untouched.costUsd, null);
+
+  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
+  const [tag, totalUsd, totalRuns] = plain.split("\n")[0]!.split("|");
+  assert.equal(tag, "total");
+  assert.equal(totalUsd, "4.20");
+  assert.equal(totalRuns, "1");
 });
 
 /**
@@ -3632,6 +3657,9 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.equal(status[0]?.number, 41);
     assert.equal(status[0]?.state, "conflicted");
 
+    const plain = await (await app.request(`/api/features/${feature.id}/merge-status/plain`)).text();
+    assert.match(plain, /^pr\|conflicted\|41\|/);
+
     // A conflict with no conversation: there is no agent to hand it to.
     const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
     assert.equal(noRun.status, 400);
@@ -3794,6 +3822,12 @@ test("a judge agent rules on the work before an automatic stage advances", { tim
     defaultAgentProfileId: worker.id,
     gateCriteria: [{ type: "agent_judge", agentProfileId: rejecter.id }],
   });
+  const pipelinePlain = await (await app.request(`/api/projects/${project.id}/pipeline/plain`)).text();
+  assert.match(
+    pipelinePlain,
+    new RegExp(`criterion\\|${first.id}\\|\\d+\\|agent_judge\\|-\\|${rejecter.id}`),
+    "the judge's agent id is on the wire so a client can edit it",
+  );
 
   // Advancing starts the worker; its finish starts the judge; the
   // judge's INCOMPLETE verdict holds the card where its reason shows.
@@ -4350,6 +4384,10 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ setupCommand: "npm ci", testCommand: "npm test" }),
   });
+  const repoPlain = await (await app.request(`/api/projects/${source.project.id}/repositories/plain`)).text();
+  assert.match(repoPlain, new RegExp(`^repo\\|${repo!.id}\\|`, "m"));
+  assert.match(repoPlain, new RegExp(`^setup\\|${repo!.id}\\|npm ci$`, "m"));
+  assert.match(repoPlain, new RegExp(`^test\\|${repo!.id}\\|npm test$`, "m"));
 
   const exported = await app.request(`/api/projects/${source.project.id}/pipeline/export`);
   assert.equal(exported.status, 200);
@@ -4904,6 +4942,64 @@ test("publishing refuses to push to a protected branch", { timeout: 60_000 }, as
     assert.match(failures[0]?.reason ?? "", /protected branch/);
   }
   assert.equal(pushed, false, "it refuses before asking for a credential, let alone using one");
+});
+
+/**
+ * A repository connected before its first commit has no branches at
+ * all, and one whose default branch was renamed no longer has the name
+ * Bento recorded. Both reach git as "fatal: Remote branch main not
+ * found in upstream origin", wrapped in a command line and a temporary
+ * path nobody typed, which is the whole reason a run failed and told
+ * the person nothing they could act on.
+ */
+test("a base branch the remote does not have is reported in words", { timeout: 60_000 }, async () => {
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-no-main-remote-"));
+  await run("git", ["-C", bare, "init", "--bare", "-b", "trunk"]);
+  const work = await fixtureRepo("no-main");
+  // The remote carries the same history under another name, which is
+  // what a rename leaves behind.
+  await run("git", ["-C", work, "push", "-q", bare, "main:trunk"]);
+
+  const branch = "feature/no-base";
+  await run("git", ["-C", work, "checkout", "-q", "-b", branch]);
+  await writeFile(path.join(work, "done.md"), "the agent's work\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "work",
+  ]);
+
+  const { project } = await setupProject("No base branch");
+  const feature = await createFeature(project.id, "Nowhere to open it");
+  const { published, failures } = await publishFeatureBranches(
+    ctx.db,
+    {
+      async pushToken() {
+        return "unused by a path remote";
+      },
+      async ensurePullRequest() {
+        return { prNumber: 1, url: "u" };
+      },
+    },
+    {
+      featureId: feature.id,
+      featureTitle: "Nowhere to open it",
+      branch,
+      repositories: [
+        { id: null, name: "site", repoUrl: "https://github.com/acme/site", defaultBranch: "main", worktreePath: work },
+      ],
+    },
+    { remoteUrl: () => bare },
+  );
+
+  assert.deepEqual(published, []);
+  const reason = failures[0]?.reason ?? "";
+  assert.match(reason, /acme\/site has no branch named main/, "it names the repository and the branch it looked for");
+  assert.match(reason, /push a first commit/, "and what to do about it");
+  assert.doesNotMatch(
+    reason,
+    /fatal:|credential\.helper|bento-publish-/,
+    "git's own words, the credential helper and the temporary path stay out of it",
+  );
 });
 
 /** A throwaway git repository, for tests that need several. */
@@ -5763,6 +5859,235 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
     body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, stageId: stage.id }),
   });
   assert.equal(byHand.status, 201, "a person can always start it themselves");
+});
+
+test("a move that cannot be recorded does not happen", async () => {
+  const { project } = await setupProject("Atomic advance");
+  const feature = await createFeature(project.id, "Stay put");
+
+  /**
+   * actor_user_id is a foreign key, so a stranger's id fails the history
+   * insert while the stage update on its own would have succeeded. The
+   * two share a transaction, so neither lands: before they did, this
+   * left a card sitting on a stage with nothing saying how it got there.
+   */
+  await assert.rejects(() => advanceFeature(ctx, feature.id, "manual", "no-such-user", null));
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.currentStageId, null, "the card must still be in the backlog");
+  const history = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(eq(featureEvents.featureId, feature.id));
+  assert.deepEqual(history, [], "a move that did not happen writes no history");
+});
+
+/**
+ * Puts a card on a stage without going through advanceFeature, which
+ * would queue a gate job. These tests call evaluateFeatureGate
+ * themselves, so a job racing them would write the hold they are
+ * trying to control.
+ */
+async function placeOnStage(featureId: string, stageId: string) {
+  await ctx.db
+    .update(features)
+    .set({ status: "active", currentStageId: stageId, updatedAt: new Date() })
+    .where(eq(features.id, featureId));
+}
+
+test("a failed gate holds the card, writes the reason, and records history", async () => {
+  const { project, stages } = await setupProject("Failed gate hold");
+  const feature = await createFeature(project.id, "Hold me");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("failed-gate-hold");
+  await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "failed",
+    executor: "server",
+    error: "the agent failed",
+  });
+
+  await evaluateFeatureGate(ctx, feature.id);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "gated");
+  assert.equal(row?.currentStageId, stage.id, "the card stays on the stage that failed");
+
+  const checks = await ctx.db
+    .select({ status: gateChecks.status, criterion: gateChecks.criterion })
+    .from(gateChecks)
+    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]?.status, "failed");
+  assert.equal((checks[0]?.criterion as { type?: string } | null)?.type, "run_succeeded");
+
+  const history = await ctx.db
+    .select()
+    .from(featureEvents)
+    .where(eq(featureEvents.featureId, feature.id));
+  const held = history.find((e) => e.kind === "status_changed" && e.toStatus === "gated");
+  assert.ok(held, "the hold must appear in the history");
+  assert.deepEqual((held.detail as { failedCriteria?: string[] } | null)?.failedCriteria, ["run_succeeded"]);
+});
+
+test("a late failed gate does not drag a finished card back to gated", async () => {
+  const { project, stages } = await setupProject("Late gate vs done");
+  const feature = await createFeature(project.id, "Already finished");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("late-gate-done");
+  /**
+   * Sleeps inside evaluateGate so finishFeature can commit after this
+   * evaluation has already read the card as active, and before it
+   * writes gated. The early "feature is done" return would not be
+   * the race; this is.
+   */
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "sleep 2; exit 1", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "late-gate-done",
+    status: "ready",
+    workdir: path.dirname(repoDir),
+  });
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+    executor: "server",
+  });
+
+  const evaluation = evaluateFeatureGate(ctx, feature.id);
+  await new Promise((r) => setTimeout(r, 400));
+  await finishFeature(ctx, feature.id, ctx.userId);
+  await evaluation;
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "done", "a late gate must not drag a finished card back to gated");
+  const held = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(and(eq(featureEvents.featureId, feature.id), eq(featureEvents.toStatus, "gated")));
+  assert.deepEqual(held, [], "a hold that did not happen writes no history");
+});
+
+test("a late failed gate does not hold a card that has already left the stage", async () => {
+  const { project, stages } = await setupProject("Late gate vs move");
+  const feature = await createFeature(project.id, "Already moved");
+  const stage = stages[0]!;
+  const next = stages[1]!;
+  const profile = await fakeProfile("late-gate-move");
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "sleep 2; exit 1", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "docker",
+    externalId: "late-gate-move",
+    status: "ready",
+    workdir: path.dirname(repoDir),
+  });
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+    executor: "server",
+  });
+
+  const evaluation = evaluateFeatureGate(ctx, feature.id);
+  await new Promise((r) => setTimeout(r, 400));
+  /**
+   * A concurrent move, written directly so the destination stage does
+   * not start its own evaluation and hold the card for a different
+   * reason. The question is whether THIS evaluation still writes.
+   */
+  await ctx.db
+    .update(features)
+    .set({ status: "active", currentStageId: next.id, updatedAt: new Date() })
+    .where(eq(features.id, feature.id));
+  await evaluation;
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.currentStageId, next.id, "the card stays on the stage it was moved to");
+  assert.equal(row?.status, "active", "a failure about the previous stage must not gate it");
+  const held = await ctx.db
+    .select({ id: featureEvents.id })
+    .from(featureEvents)
+    .where(and(eq(featureEvents.featureId, feature.id), eq(featureEvents.toStatus, "gated")));
+  assert.deepEqual(held, [], "a hold that did not happen writes no history");
+});
+
+test("a hold that cannot be recorded does not happen", async () => {
+  const { project, stages } = await setupProject("Atomic hold");
+  const feature = await createFeature(project.id, "Stay active");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("atomic-hold");
+  await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stage.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "failed",
+    executor: "server",
+    error: "the agent failed",
+  });
+
+  /**
+   * The history insert fails while the status update and the check
+   * rows on their own would have succeeded. They share a transaction,
+   * so none of them land: before they did, this left failed checks on
+   * a card that was still active, with nothing saying it was held.
+   */
+  await ctx.db.execute(sql`
+    create or replace function bento_test_reject_feature_events() returns trigger as $$
+    begin
+      raise exception 'test: history insert rejected';
+    end;
+    $$ language plpgsql
+  `);
+  await ctx.db.execute(sql`
+    create trigger bento_test_reject_feature_events
+    before insert on feature_events
+    for each row execute function bento_test_reject_feature_events()
+  `);
+  try {
+    await assert.rejects(() => evaluateFeatureGate(ctx, feature.id));
+
+    const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+    assert.equal(row?.status, "active", "the card must still be active");
+    assert.equal(row?.currentStageId, stage.id);
+    const checks = await ctx.db
+      .select({ id: gateChecks.id })
+      .from(gateChecks)
+      .where(eq(gateChecks.featureId, feature.id));
+    assert.deepEqual(checks, [], "a hold that did not happen writes no checks");
+    const history = await ctx.db
+      .select({ id: featureEvents.id })
+      .from(featureEvents)
+      .where(eq(featureEvents.featureId, feature.id));
+    assert.deepEqual(history, [], "a hold that did not happen writes no history");
+  } finally {
+    await ctx.db.execute(sql`drop trigger if exists bento_test_reject_feature_events on feature_events`);
+    await ctx.db.execute(sql`drop function if exists bento_test_reject_feature_events()`);
+  }
 });
 
 async function runCount(featureId: string): Promise<number> {

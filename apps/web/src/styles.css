@@ -1392,9 +1392,10 @@ select.input,
  * them apart, so each one is its own surface, the way a stage card and
  * a repository card already are elsewhere.
  *
- * The topbar and the actions keep their own treatment: the first block
- * is the one you act from, so it stays flush with the header rather
- * than floating as one panel among five.
+ * The topmost block keeps its own treatment: it stays flush with the
+ * header rather than floating as one panel among five. That is the
+ * actions on a card with no brief, and the description on one that has
+ * a brief, which is the thing the header is about either way.
  */
 .drawer-body-sectioned > .section {
   border: 1px solid var(--line);
@@ -1413,6 +1414,35 @@ select.input,
    the separation the rule was standing in for. */
 .drawer-body-sectioned > .section > .label::after {
   display: none;
+}
+
+/*
+ * The brief the card was filed with, as typed. Paragraphs are kept
+ * (pre-wrap) because Linear issue bodies and multi line requests are
+ * the normal input; the wrap rule is for the other normal input, a
+ * bare Slack permalink or Linear URL, which is one unbroken token long
+ * enough to push the whole drawer sideways without it.
+ */
+.card-description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * A long brief opens cut off, so the buttons stay on screen. Twelve
+ * lines, which is what needsClamp counts in card-description.ts: the two
+ * have to stay together, or Show more appears over text that was never
+ * cut and does nothing when pressed.
+ */
+.card-description.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 12;
+  line-clamp: 12;
+  overflow: hidden;
 }
 
 .section {
@@ -1519,6 +1549,15 @@ select.input,
   flex: none;
   align-self: center;
   width: 6px;
+}
+
+/*
+ * Provider logos in agent rows share the same two-line card as the
+ * requirement mark above. Left at flex-start they ride the title;
+ * centre them on the row so they sit in the middle of name + model.
+ */
+.gate-check > .provider-logo {
+  align-self: center;
 }
 
 .gate-tick {
@@ -1988,6 +2027,7 @@ a.pr-row:hover .pr-external {
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
+  overflow-wrap: anywhere;
 }
 
 .field {
@@ -2277,6 +2317,13 @@ a.pr-row:hover .pr-external {
   color: var(--failed);
   font-family: var(--sans);
   font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.error a,
+.chat-result a {
+  color: inherit;
+  text-decoration: underline;
 }
 
 /* Something is not right but nothing has failed: a tool that is not
@@ -4085,6 +4132,9 @@ button.session-expand[aria-pressed="true"] {
 
 /* Stage cards: each stage is a box you can tell from its neighbours. */
 .stage-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   border: 1px solid var(--line-bright);
   border-radius: var(--radius);
   background: var(--panel-raised);
@@ -4094,10 +4144,31 @@ button.session-expand[aria-pressed="true"] {
   min-width: 0;
   max-width: 100%;
 }
+.stage-card-main {
+  flex: 1;
+  min-width: 0;
+}
 .stage-card-head {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+/*
+ * Edit and Remove sit in their own column so they stay centred on the
+ * two-line card. Left in the title row they hugged the top edge while
+ * the agent and the exit rule filled the space below.
+ */
+.stage-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  gap: 2px;
+}
+.stage-card-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* The grip. Only this drags, so a card's text stays selectable, and it
@@ -5319,9 +5390,9 @@ button.session-expand[aria-pressed="true"] {
 }
 
 /*
- * One plan card. Lives inside the plans panel's row; the price and the
- * team's own total sit at the top because per seat pricing makes the
- * headline number the least useful one on the card.
+ * One plan card. Lives inside the plans panel's row. The team's monthly
+ * total and the per-user rate sit as two labeled facts, stacked, because
+ * four columns is too narrow to put them side by side.
  */
 .plan-option {
   display: flex;
@@ -5349,12 +5420,6 @@ button.session-expand[aria-pressed="true"] {
 .plan-option-price {
   font-size: 12px;
   color: var(--text-dim);
-}
-
-.plan-option-total {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 650;
 }
 
 .plan-option-list {
@@ -5467,20 +5532,13 @@ button.session-expand[aria-pressed="true"] {
 }
 
 /* The plan as a headline. The name is the one fact everyone opens the
-   Billing tab for, so it reads at a glance rather than mid-sentence;
-   the team's own total sits beside it, the per seat rate beneath. */
+   Billing tab for. The team's monthly total and the per-user rate sit
+   under it as two labeled figures, not a sentence beside the name. */
 .plan-head {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
   margin-bottom: 10px;
-}
-
-.plan-head-row {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  flex-wrap: wrap;
 }
 
 .plan-name {
@@ -5491,13 +5549,206 @@ button.session-expand[aria-pressed="true"] {
   line-height: 1.2;
 }
 
-.plan-total {
+.plan-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin-top: 4px;
+}
+
+.plan-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plan-fact-value {
   font-size: 15px;
   font-weight: 620;
 }
 
-.plan-rate {
+/* Comparison cards are a quarter of the panel. Stack the two prices
+   so "$4158 a month" does not wrap under a cramped Per user column. */
+.plan-option .plan-facts {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 0;
+}
+
+.plan-option .plan-fact-value {
+  font-size: 14px;
+}
+
+/*
+ * Agent hours on Billing. The allowance used to be a sentence under
+ * the plan name, so "how much is left" and "who spent it" had to be
+ * parsed out of prose. The meter, the three facts, and the per-person
+ * rows are the same numbers, at a glance.
+ *
+ * The fill uses the reserved status hues only when they mean a state:
+ * gold at three quarters (the same line the usage email already
+ * sends), coral when new agents have actually stopped. A paying
+ * overage is gold too: they chose to continue, they have not hit a
+ * wall. The track is a divider, not a control, so the brand accent
+ * stays off it.
+ */
+.hours-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.hours-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.hours-usage-count {
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.hours-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.hours-meter-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-dim);
+  max-width: 100%;
+}
+
+.hours-meter-fill[data-state="warn"],
+.hours-meter-fill[data-state="over"] {
+  background: var(--gated);
+}
+
+.hours-meter-fill[data-state="stopped"] {
+  background: var(--failed);
+}
+
+.hours-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin-top: 4px;
+}
+
+.hours-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hours-fact-value {
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.hours-person {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(64px, 2fr) auto;
+  gap: 10px;
+  align-items: center;
   font-size: 12.5px;
+  padding: 4px 0;
+}
+
+.hours-person-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+a.hours-person-name {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.hours-person-name:hover {
+  text-decoration: underline;
+}
+
+.hours-person-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.hours-person-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-dim);
+  max-width: 100%;
+}
+
+.hours-person-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  line-height: 1.25;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.hours-people-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hours-people-find {
+  font-family: var(--sans);
+  margin: 4px 0 2px;
+}
+
+.settings-page .input.hours-people-find {
+  font-family: var(--sans);
+  min-height: 32px;
+}
+
+.hours-people-find::-webkit-search-cancel-button,
+.hours-people-find::-webkit-search-decoration {
+  appearance: none;
+}
+
+.hours-people-rest {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.hours-people[data-scroll] {
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+@media (max-width: 560px) {
+  .hours-facts,
+  .plan-facts {
+    grid-template-columns: 1fr;
+  }
+  .hours-person {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .hours-person-track {
+    display: none;
+  }
 }
 
 /*

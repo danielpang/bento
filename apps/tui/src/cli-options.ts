@@ -13,7 +13,7 @@ import path from "node:path";
 export type Mode = "client" | "runner" | "local";
 
 /** A subcommand, or the interactive board when none is given. */
-export type Command = "board" | "serve" | "runner" | "login" | "setup" | "repos" | "agents" | "pipeline";
+export type Command = "board" | "serve" | "runner" | "login" | "setup" | "repos" | "agents" | "pipeline" | "spend" | "sessions" | "mcp";
 
 export interface CliOptions {
   command: Command;
@@ -48,6 +48,10 @@ export interface CliOptions {
   model?: string;
   /** New name for `agents edit`. */
   agentName?: string;
+  /** MCP server URL for `mcp add`. */
+  url?: string;
+  /** MCP API key for `mcp add`. */
+  mcpKey?: string;
   /** Silence the local stack's startup progress, for scripts. */
   quiet: boolean;
   help: boolean;
@@ -100,6 +104,13 @@ Commands
   pipeline import <file>
                        Apply one. Stages are matched by slug and updated in
                        place, so a live board keeps its cards where they are.
+  spend                Agent spend for the project, one line per card.
+  sessions             Conversations in the project, newest activity first.
+  mcp [list]           MCP servers agents can call, one per line.
+  mcp add <name> --url <url> [--key <value>]
+                       Add a custom server. Pass --key for API key auth.
+                       OAuth servers are connected in the web console.
+  mcp remove <name>    Remove one.
 
 Options
   --server <url>       Server holding your organization, projects, and history.
@@ -134,6 +145,8 @@ Options
                        opencode, pi, pool, dsh.
   --model <model>      Model for an agent.
   --name <name>        New name, when editing an agent.
+  --url <url>          MCP server URL, for mcp add.
+  --key <value>        MCP API key, for mcp add.
   --quiet              Drop the startup progress lines from repos and agents
                        commands, for scripts that only want the output.
   -h, --help           Show this message
@@ -179,10 +192,13 @@ export function parseCliOptions(argv: string[]): CliOptions {
       first !== "setup" &&
       first !== "repos" &&
       first !== "pipeline" &&
-      first !== "agents"
+      first !== "agents" &&
+      first !== "spend" &&
+      first !== "sessions" &&
+      first !== "mcp"
     ) {
       throw new Error(
-        `unknown command "${first}". Use setup, serve, runner, login, repos, pipeline, or agents, or no command for the board.`,
+        `unknown command "${first}". Use setup, serve, runner, login, repos, pipeline, agents, spend, sessions, or mcp, or no command for the board.`,
       );
     }
     command = first;
@@ -193,7 +209,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
   // consumed before flag parsing so a path or a name starting with "-"
   // cannot be read as a flag.
   const positionals: string[] = [];
-  if (command === "repos" || command === "agents" || command === "pipeline") {
+  if (command === "repos" || command === "agents" || command === "pipeline" || command === "mcp") {
     while (args[0] && !args[0].startsWith("-")) {
       positionals.push(args[0]);
       args = args.slice(1);
@@ -225,6 +241,8 @@ export function parseCliOptions(argv: string[]): CliOptions {
       skill: { type: "string" },
       setup: { type: "string" },
       test: { type: "string" },
+      url: { type: "string" },
+      key: { type: "string" },
     },
     allowPositionals: false,
   });
@@ -273,6 +291,8 @@ export function parseCliOptions(argv: string[]): CliOptions {
     ...(values.setup !== undefined ? { setupCommand: values.setup } : {}),
     ...(values.test !== undefined ? { testCommand: values.test } : {}),
     ...(values.name ? { agentName: values.name } : {}),
+    ...(values.url ? { url: values.url } : {}),
+    ...(values.key ? { mcpKey: values.key } : {}),
     positionals,
     quiet: values.quiet ?? false,
     help: values.help ?? false,

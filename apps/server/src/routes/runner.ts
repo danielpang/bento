@@ -270,7 +270,7 @@ export function runnerRoutes(ctx: AppContext) {
       if ("error" in authorized) return c.json({ error: authorized.error }, authorized.status);
       const { feature, run } = authorized;
       const [profile] = await db(c, ctx)
-        .select({ cli: agentProfiles.cli })
+        .select({ cli: agentProfiles.cli, model: agentProfiles.model })
         .from(agentProfiles)
         .where(eq(agentProfiles.id, run.agentProfileId));
 
@@ -294,7 +294,7 @@ export function runnerRoutes(ctx: AppContext) {
           ...(body.sessionId !== undefined ? { cliSessionId: body.sessionId } : {}),
           costUsd: body.costUsd !== undefined ? String(body.costUsd) : null,
           numTurns: body.numTurns ?? null,
-          error: body.ok ? (body.error ?? null) : runnerReportedError(profile?.cli, body.error),
+          error: body.ok ? (body.error ?? null) : runnerReportedError(profile?.cli, body.error, profile?.model),
         })
         .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
         .returning({ id: agentRuns.id });
