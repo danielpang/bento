@@ -97,6 +97,30 @@ export function outageProvider(
 }
 
 /**
+ * Whether the provider is turning the request away because the model
+ * is busy, rather than because the provider is broken.
+ *
+ * Google answers a capacity spike with a 503 whose message says so:
+ * "This model is currently experiencing high demand. Spikes in demand
+ * are usually temporary. Please try again later." That is one model
+ * running hot for a few minutes, so it never reaches a status page,
+ * which reports service health. Telling someone the provider is down
+ * and pointing them at a page that is green wastes the one minute
+ * they had, and hides the two things that do work: waiting, or
+ * running the card on another model.
+ *
+ * Matched on the provider saying it itself. A generic 503 stays an
+ * outage, because a provider that is actually failing does not
+ * explain why.
+ */
+export function looksLikeCapacityPressure(error: string): boolean {
+  if (!error) return false;
+  return /high demand|spikes? in demand|at capacity|out of capacity|no capacity|(?:model|service) is (?:currently )?overloaded/i.test(
+    error,
+  );
+}
+
+/**
  * Whether this failure looks like the model provider is unavailable,
  * rather than a refused key, a missing model, or a rate limit.
  *
@@ -104,6 +128,8 @@ export function outageProvider(
  * overloaded_error, OpenAI's "the server had an error", OpenRouter's
  * "provider returned error", and the 502/503 family. A 401 or 429 in
  * the same string is still not an outage; those have their own fixes.
+ * Google's UNAVAILABLE is here too, because its gRPC status is the
+ * only thing some of its errors carry a code in.
  */
 export function looksLikeProviderOutage(error: string): boolean {
   if (!error) return false;
@@ -112,6 +138,8 @@ export function looksLikeProviderOutage(error: string): boolean {
   }
   if (/\b(401|403|404|429)\b/.test(error) && !/\b(502|503|529)\b/.test(error)) return false;
   return (
+    looksLikeCapacityPressure(error) ||
+    /got status: UNAVAILABLE/i.test(error) ||
     /overloaded/i.test(error) ||
     /\b529\b/.test(error) ||
     /provider returned error/i.test(error) ||
@@ -126,9 +154,13 @@ export function looksLikeProviderOutage(error: string): boolean {
 }
 
 /**
- * The sentence to append when a run died because its model provider
- * is down. Null when the error is something else, or already names
- * the status page.
+ * The sentence to append when a run died on its model provider. Null
+ * when the error is something else, or already names the status page.
+ *
+ * A model at capacity gets its own sentence: it says the provider is
+ * busy rather than down, gives the two next steps that work, and says
+ * up front that the status page will not show this, so nobody spends
+ * their next minute confirming a green page.
  */
 export function providerOutageAdvice(
   error: string,
@@ -139,6 +171,9 @@ export function providerOutageAdvice(
   if (!provider) return null;
   const page = PROVIDER_STATUS_PAGES[provider];
   if (error.includes(page.url)) return null;
+  if (looksLikeCapacityPressure(error)) {
+    return `${page.name} is busy, not down: this model is out of capacity right now. Run the card again in a few minutes, or switch this agent to another model under Agents. A demand spike does not reach the status page (${page.url}), which stays green through it.`;
+  }
   return `${page.name} appears to be down. Check their status page: ${page.url}`;
 }
 
