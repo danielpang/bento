@@ -15,6 +15,7 @@ import {
 import { mentionTitle } from "@bento/slack";
 import type { AppContext } from "../context.js";
 import { LOCAL_USER_ID } from "../context.js";
+import { INTERACTIVE_POLL_SECONDS } from "./queue.js";
 import {
   cardUrl,
   slackClientFor,
@@ -727,23 +728,31 @@ export async function registerSlackJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("slack.inbound");
   await ctx.boss.createQueue("slack.notify");
 
-  await ctx.boss.work<SlackInboundJob>("slack.inbound", async (jobs) => {
+  // A person is waiting on the mention, the project picker, Approve,
+  // or Reject. One worker at two seconds is the pace from before the
+  // idle poll change; ten seconds would be a visible pause in Slack.
+  await ctx.boss.work<SlackInboundJob>("slack.inbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     for (const job of jobs) {
       try {
         await handleSlackInbound(ctx, job.data);
       } catch (err) {
         console.error("slack.inbound failed:", err);
+        ctx.analytics?.captureException(err, null, null, { queue: "slack.inbound" });
         throw err;
       }
     }
   });
 
-  await ctx.boss.work<SlackNotifyJob>("slack.notify", async (jobs) => {
+  await ctx.boss.work<SlackNotifyJob>("slack.notify", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
     for (const job of jobs) {
       try {
         await handleSlackNotify(ctx, job.data);
       } catch (err) {
         console.error(`slack.notify ${job.data.featureId} failed:`, err);
+        ctx.analytics?.captureException(err, null, null, {
+          queue: "slack.notify",
+          feature_id: job.data.featureId,
+        });
         throw err;
       }
     }

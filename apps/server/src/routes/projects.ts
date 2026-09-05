@@ -380,8 +380,14 @@ export function projectRoutes(ctx: AppContext) {
       return c.json(rows);
     })
     /**
-     * Line format: repo|<id>|<name>|<localPath>
-     * The path is last because it may contain anything a path may.
+     * Line format:
+     *   repo|<id>|<name>|<localPath>
+     *   setup|<id>|<command>
+     *   test|<id>|<command>
+     * Path and commands are last on their own lines because each may
+     * contain pipes. A missing command is a missing line, not a dash
+     * on the repo row: that kept a path from being mistaken for a
+     * command, and a command from being mistaken for a path.
      */
     .get("/:id/repositories/plain", async (c) => {
       if (!(await canAccessProject(ctx, c, c.req.param("id")))) return c.text("error|not found", 404);
@@ -390,7 +396,13 @@ export function projectRoutes(ctx: AppContext) {
         .from(repositories)
         .where(eq(repositories.projectId, c.req.param("id")))
         .orderBy(asc(repositories.position));
-      return c.text(rows.map((r) => `repo|${r.id}|${r.name}|${r.localPath}`).join("\n"));
+      const lines: string[] = [];
+      for (const r of rows) {
+        lines.push(`repo|${r.id}|${r.name}|${r.localPath}`);
+        if (r.setupCommand) lines.push(`setup|${r.id}|${r.setupCommand}`);
+        if (r.testCommand) lines.push(`test|${r.id}|${r.testCommand}`);
+      }
+      return c.text(lines.join("\n"));
     })
     .post("/:id/repositories", zValidator("json", repositoryInput), async (c) => {
       const projectId = c.req.param("id");
@@ -551,6 +563,65 @@ export function projectRoutes(ctx: AppContext) {
       return c.json({ sessions });
     })
     /**
+     * Line format: session|<featureId>|<runCount>|<cost or ->|<status>|<queuedAt>|<agentName>|<title>
+     * Title is last because it may contain pipes. Names are resolved
+     * here: the Mac app cannot join a profile id to a name.
+     */
+    .get("/:id/sessions/plain", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
+
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const [totals, latest] = await Promise.all([
+        db(c, ctx)
+          .select({
+            featureId: agentRuns.featureId,
+            title: features.title,
+            runCount: count(agentRuns.id),
+            totalCostUsd: sum(agentRuns.costUsd),
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .groupBy(agentRuns.featureId, features.title),
+        db(c, ctx)
+          .selectDistinctOn([agentRuns.featureId], {
+            featureId: agentRuns.featureId,
+            status: agentRuns.status,
+            agentProfileId: agentRuns.agentProfileId,
+            queuedAt: agentRuns.queuedAt,
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .orderBy(agentRuns.featureId, desc(agentRuns.queuedAt)),
+      ]);
+
+      const profileIds = [...new Set(latest.map((row) => row.agentProfileId).filter((id): id is string => Boolean(id)))];
+      const profiles = profileIds.length
+        ? await db(c, ctx)
+            .select({ id: agentProfiles.id, name: agentProfiles.name })
+            .from(agentProfiles)
+            .where(inArray(agentProfiles.id, profileIds))
+        : [];
+      const nameById = new Map(profiles.map((row) => [row.id, row.name]));
+      const latestByFeature = new Map(latest.map((row) => [row.featureId, row]));
+      const lines = totals
+        .map((row) => {
+          const run = latestByFeature.get(row.featureId);
+          if (!run) return null;
+          return { row, run };
+        })
+        .filter((entry): entry is { row: (typeof totals)[number]; run: (typeof latest)[number] } => entry !== null)
+        .sort((a, b) => b.run.queuedAt.getTime() - a.run.queuedAt.getTime())
+        .map(({ row, run }) => {
+          const cost = row.totalCostUsd === null ? "-" : Number(row.totalCostUsd).toFixed(2);
+          const agent = (run.agentProfileId && nameById.get(run.agentProfileId)) || "-";
+          return `session|${row.featureId}|${Number(row.runCount)}|${cost}|${run.status}|${run.queuedAt.toISOString()}|${agent}|${row.title}`;
+        });
+      return c.text(lines.join("\n"));
+    })
+    /**
      * The name, and whether an arriving Linear issue starts the
      * pipeline. Checkouts, branches and the pipeline itself are each
      * pointed at by something and change where they are configured.
@@ -705,6 +776,7 @@ export function projectRoutes(ctx: AppContext) {
      * polls every three seconds, and gate criteria would be a payload
      * nobody reads on all but one screen.
      *
+     *   pipeline|<id>
      *   stage|<id>|<position>|<agentProfileId or ->|<gateType>|<createPr 1 or 0>|<name>
      *   criterion|<stageId>|<index>|<type>|<timeoutSec or ->|<cmd or ->
      *
@@ -724,7 +796,7 @@ export function projectRoutes(ctx: AppContext) {
         .where(eq(stages.pipelineId, pipeline.id))
         .orderBy(stages.position);
 
-      const lines: string[] = [];
+      const lines: string[] = [`pipeline|${pipeline.id}`];
       for (const s of stageRows) {
         lines.push(
           `stage|${s.id}|${s.position}|${s.defaultAgentProfileId ?? "-"}|${s.gateType}|${s.createPr ? "1" : "0"}|${s.name}`,
@@ -733,8 +805,13 @@ export function projectRoutes(ctx: AppContext) {
         if (!criteria.success) continue;
         for (const [index, criterion] of criteria.data.entries()) {
           const timeout = criterion.type === "command" ? String(criterion.timeoutSec) : "-";
-          const cmd = criterion.type === "command" ? criterion.cmd : "-";
-          lines.push(`criterion|${s.id}|${index}|${criterion.type}|${timeout}|${cmd}`);
+          const extra =
+            criterion.type === "command"
+              ? criterion.cmd
+              : criterion.type === "agent_judge"
+                ? criterion.agentProfileId
+                : "-";
+          lines.push(`criterion|${s.id}|${index}|${criterion.type}|${timeout}|${extra}`);
         }
       }
       return c.text(lines.join("\n"));
@@ -817,6 +894,67 @@ export function projectRoutes(ctx: AppContext) {
           runsWithoutCost: Number(row.runsWithoutCost),
         })),
       });
+    })
+    /**
+     * Line format:
+     *   total|<totalUsd>|<totalRuns>|<runsWithoutCost>
+     *   card|<featureId>|<runs>|<cost or ->|<runsWithoutCost>|<title>
+     * Title is last because it may contain pipes. Cost is a dash when
+     * nothing on the card reported a figure, which is not zero.
+     */
+    .get("/:id/usage/plain", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
+      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const rows = await db(c, ctx)
+        .select({
+          stageId: agentRuns.stageId,
+          agentProfileId: agentRuns.agentProfileId,
+          runs: count(agentRuns.id),
+          costUsd: sum(agentRuns.costUsd),
+        })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(and(eq(features.projectId, projectId), spendRun))
+        .groupBy(agentRuns.stageId, agentRuns.agentProfileId);
+
+      const [silent] = await db(c, ctx)
+        .select({ runs: count(agentRuns.id) })
+        .from(agentRuns)
+        .innerJoin(features, eq(features.id, agentRuns.featureId))
+        .where(and(eq(features.projectId, projectId), spendRun, isNull(agentRuns.costUsd)));
+
+      const cards = await db(c, ctx)
+        .select({
+          featureId: features.id,
+          title: features.title,
+          runs: count(agentRuns.id),
+          costUsd: sum(agentRuns.costUsd),
+          runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${isNull(agentRuns.costUsd)})`,
+        })
+        .from(features)
+        .leftJoin(agentRuns, and(eq(agentRuns.featureId, features.id), spendRun))
+        .where(eq(features.projectId, projectId))
+        .groupBy(features.id, features.title);
+
+      const totalUsd = rows.reduce((sum, row) => sum + Number(row.costUsd ?? 0), 0);
+      const lines = [
+        `total|${totalUsd.toFixed(2)}|${rows.reduce((sum, row) => sum + Number(row.runs), 0)}|${Number(silent?.runs ?? 0)}`,
+      ];
+      const sorted = [...cards].sort((a, b) => {
+        if (a.costUsd === null && b.costUsd === null) return a.title.localeCompare(b.title);
+        if (a.costUsd === null) return 1;
+        if (b.costUsd === null) return -1;
+        const diff = Number(b.costUsd) - Number(a.costUsd);
+        return diff !== 0 ? diff : a.title.localeCompare(b.title);
+      });
+      for (const row of sorted) {
+        const cost = row.costUsd === null ? "-" : Number(row.costUsd).toFixed(2);
+        lines.push(
+          `card|${row.featureId}|${Number(row.runs)}|${cost}|${Number(row.runsWithoutCost)}|${row.title}`,
+        );
+      }
+      return c.text(lines.join("\n"));
     })
     /**
      * Cards completed over time, bucketed to fit the asked-for window.

@@ -10,6 +10,7 @@ import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
+import { enqueueRun } from "../orchestrator/queue.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun } from "../access.js";
 
 const createRun = z.object({
@@ -63,7 +64,7 @@ export function runRoutes(ctx: AppContext) {
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
 
       // Runner-executed runs stay queued until a machine claims them.
-      if (executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      if (executor === "server") await enqueueRun(ctx, run.id);
       return c.json(run, 201);
     })
     .get("/:id", async (c) => {
@@ -103,7 +104,7 @@ export function runRoutes(ctx: AppContext) {
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      if (previous.executor === "server") await ctx.boss.send("run.execute", { runId: run.id });
+      if (previous.executor === "server") await enqueueRun(ctx, run.id);
       return c.json(run, 201);
     })
     /**
@@ -163,6 +164,10 @@ export function runRoutes(ctx: AppContext) {
           run.checkpointId,
         );
       } catch (err) {
+        ctx.analytics?.captureException(err, actor(c), run.organizationId, {
+          run_id: run.id,
+          source: "sandbox_rollback",
+        });
         return c.json({ error: `the sandbox could not be restored (${String(err)}). The run's work may be partly in place, so check the card's changes before retrying` }, 502);
       }
 

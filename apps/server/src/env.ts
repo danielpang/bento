@@ -202,10 +202,13 @@ const envSchema = z.object({
   /**
    * PostHog: product analytics, error tracking, log export, and the
    * beta-testers feature flag. All four read the same project token.
-   * Without a key nothing is sent and nothing breaks; in multi mode
-   * the server says so once at boot, because events silently missed
-   * are worse than a line of noise. New product that is not ready
-   * for every signed-in user is gated on `beta-testers`.
+   * The console also reads it from /api/health to capture browser
+   * exceptions. Local mode never sends, even if a leftover key is in
+   * the environment: a laptop is not a telemetry source. Multi mode
+   * without a key also sends nothing, and the server says so once at
+   * boot, because events silently missed are worse than a line of
+   * noise. New product that is not ready for every signed-in user is
+   * gated on `beta-testers`.
    */
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),
@@ -248,6 +251,21 @@ export type Env = z.infer<typeof envSchema>;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   return envSchema.parse(withoutEmpty(source));
+}
+
+/**
+ * The project token when this process should talk to PostHog.
+ *
+ * Null in local mode, even if POSTHOG_API_KEY is set: people running
+ * Bento on a laptop often have a leftover key from hosted work, and
+ * that must not ship console errors or product events into the real
+ * project. Null in multi mode when the key is missing or whitespace,
+ * so a hosted deploy without PostHog configured also sends nothing.
+ */
+export function posthogApiKey(env: Env): string | null {
+  if (env.BENTO_MODE !== "multi") return null;
+  const key = env.POSTHOG_API_KEY?.trim();
+  return key ? key : null;
 }
 
 /**

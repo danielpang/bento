@@ -16,6 +16,7 @@ import {
   runArtifacts,
   runMigrations,
   user,
+  verification,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
@@ -293,6 +294,114 @@ test("organization members share projects, outsiders do not", async () => {
   ).json()) as { name: string }[];
   assert.equal(afterInvite.length, 1);
   assert.equal(afterInvite[0]?.name, "Team board");
+});
+
+/**
+ * Billing's hours breakdown is by card for the billing month, not by
+ * person. Hours before period start do not count, two runs on one
+ * card add up, and a probe of another team's period 404s.
+ */
+test("team hours ranks cards for the active org and 404s a foreign tenant", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Owner",
+  });
+  const stranger = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-stranger@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Stranger",
+  });
+  const ownerToken = owner.headers.get("set-auth-token")!;
+  const strangerToken = stranger.headers.get("set-auth-token")!;
+
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Hours Co", slug: "hours-co" }, ownerToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, ownerToken);
+
+  const foreignOrg = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Hours Foreign", slug: "hours-foreign" }, strangerToken)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: foreignOrg.id }, strangerToken);
+
+  async function board(
+    token: string,
+    name: string,
+    title: string,
+    hours: number,
+    startedAt = new Date("2026-09-10T12:00:00.000Z"),
+  ) {
+    const project = (await (
+      await jsonPost("/api/projects", { name, localPath: "/tmp" }, token)
+    ).json()) as { id: string };
+    const pipeline = (await (
+      await app.request(`/api/projects/${project.id}/pipeline`, { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { stages: { id: string; defaultAgentProfileId: string | null }[] };
+    const profileId = pipeline.stages[0]?.defaultAgentProfileId;
+    assert.ok(profileId, "a new project ships with an agent on the first stage");
+    const feature = (await (
+      await jsonPost("/api/features", { projectId: project.id, title }, token)
+    ).json()) as { id: string };
+    await ctx.db.insert(agentRuns).values({
+      featureId: feature.id,
+      stageId: pipeline.stages[0]!.id,
+      agentProfileId: profileId,
+      prompt: "work",
+      status: "succeeded",
+      startedAt,
+      endedAt: new Date(startedAt.getTime() + hours * 3_600_000),
+    });
+    return { featureId: feature.id, stageId: pipeline.stages[0]!.id, profileId };
+  }
+
+  const heavy = await board(ownerToken, "Hours board", "Rate limit", 3);
+  await board(ownerToken, "Hours board 2", "Login polish", 1);
+  await board(strangerToken, "Foreign board", "Secret card", 10);
+  await board(ownerToken, "Hours old", "Last month leftover", 8, new Date("2026-08-10T12:00:00.000Z"));
+  await ctx.db.insert(agentRuns).values({
+    featureId: heavy.featureId,
+    stageId: heavy.stageId,
+    agentProfileId: heavy.profileId,
+    prompt: "more work",
+    status: "succeeded",
+    startedAt: new Date("2026-09-20T12:00:00.000Z"),
+    endedAt: new Date("2026-09-20T14:00:00.000Z"),
+  });
+
+  const from = "2026-09-01T00:00:00.000Z";
+  const to = "2026-10-01T00:00:00.000Z";
+  const missingWindow = await app.request("/api/team/hours", {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(missingWindow.status, 400);
+
+  const mine = await app.request(`/api/team/hours?from=${from}&to=${to}`, {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(mine.status, 200);
+  const body = (await mine.json()) as { features: { featureId: string; title: string; agentHours: number }[] };
+  assert.deepEqual(
+    [...body.features].sort((a, b) => b.agentHours - a.agentHours).map((row) => [row.title, row.agentHours]),
+    [
+      ["Rate limit", 5],
+      ["Login polish", 1],
+    ],
+  );
+  assert.ok(body.features.some((row) => row.featureId === heavy.featureId));
+  assert.ok(!body.features.some((row) => row.title === "Secret card"));
+  assert.ok(!body.features.some((row) => row.title === "Last month leftover"));
+
+  const outsider = await jsonPost("/api/auth/sign-up/email", {
+    email: "hours-outsider@bento.test",
+    password: "correct-horse-battery",
+    name: "Hours Outsider",
+  });
+  const outsiderToken = outsider.headers.get("set-auth-token")!;
+  const refused = await app.request(`/api/team/hours?from=${from}&to=${to}`, {
+    headers: { authorization: `Bearer ${outsiderToken}` },
+  });
+  assert.equal(refused.status, 404);
 });
 
 /**
@@ -666,7 +775,9 @@ test("every entity route refuses a foreign tenant", async () => {
       { body: "version: 1\npipeline:\n  stages:\n    - name: Mine\n      slug: mine\n" },
     ],
     ["GET", `/api/projects/${project.id}/sessions`],
+    ["GET", `/api/projects/${project.id}/sessions/plain`],
     ["GET", `/api/projects/${project.id}/usage`],
+    ["GET", `/api/projects/${project.id}/usage/plain`],
     ["GET", `/api/projects/${project.id}/completions`],
     ["GET", `/api/projects/${project.id}/board/plain`],
     ["GET", `/api/projects/${project.id}/pipeline/plain`],
@@ -702,9 +813,11 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/recheck`],
     ["POST", `/api/features/${feature.id}/publish`],
     ["GET", "/api/team/policy"],
+    ["GET", "/api/team/hours"],
     ["PATCH", "/api/team/policy", { body: JSON.stringify({ restrictNetwork: false }) }],
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
     ["GET", `/api/features/${feature.id}/merge-status`],
+    ["GET", `/api/features/${feature.id}/merge-status/plain`],
     ["POST", `/api/features/${feature.id}/resolve-conflicts`],
     ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
@@ -2157,6 +2270,133 @@ test("deleting an organization removes its projects and notifies the deployment"
 
   const [orphan] = await ctx.db.select().from(projects).where(eq(projects.id, project.id));
   assert.equal(orphan, undefined, "the organization's projects go with it");
+});
+
+/**
+ * An owner cannot delete their account while they still own a team:
+ * that would leave the organization without anyone who can manage it.
+ * A member can still request the confirmation email.
+ */
+test("an owner cannot delete their account while they still own an organization", async () => {
+  const sent: string[] = [];
+  const hookedAuth = createAuth(ctx.env, ctx.db, {
+    description: "test",
+    async send(message) {
+      sent.push(message.subject);
+    },
+  });
+  assert.ok(hookedAuth);
+  const hookedApp = createApp({ ...ctx, auth: hookedAuth });
+
+  const ownerSignUp = await hookedApp.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "owner-stay@bento.test",
+      password: "correct-horse-battery",
+      name: "Owner Stay",
+    }),
+  });
+  const ownerToken = ownerSignUp.headers.get("set-auth-token")!;
+  const ownerAuth = { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" };
+
+  const org = (await (
+    await hookedApp.request("/api/auth/organization/create", {
+      method: "POST",
+      headers: ownerAuth,
+      body: JSON.stringify({ name: "Stay Co", slug: "stay-co" }),
+    })
+  ).json()) as { id: string };
+  await hookedApp.request("/api/auth/organization/set-active", {
+    method: "POST",
+    headers: ownerAuth,
+    body: JSON.stringify({ organizationId: org.id }),
+  });
+
+  const ownerDelete = await hookedApp.request("/api/auth/delete-user", {
+    method: "POST",
+    headers: ownerAuth,
+    body: JSON.stringify({ callbackURL: "/" }),
+  });
+  assert.equal(ownerDelete.status, 400, "owning a team blocks account deletion");
+  const ownerBody = (await ownerDelete.json()) as { message?: string; error?: { message?: string } | string };
+  const ownerMessage =
+    ownerBody.message ??
+    (typeof ownerBody.error === "string" ? ownerBody.error : ownerBody.error?.message) ??
+    JSON.stringify(ownerBody);
+  assert.match(ownerMessage, /Stay Co/);
+  assert.equal(
+    sent.filter((subject) => subject.includes("deleting your Bento account")).length,
+    0,
+    "no deletion mail for an owner",
+  );
+
+  const [ownerUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "owner-stay@bento.test"));
+  assert.ok(ownerUser);
+  const ownerTokens = await ctx.db.select().from(verification).where(eq(verification.value, ownerUser.id));
+  assert.equal(
+    ownerTokens.filter((row) => row.identifier.startsWith("delete-account-")).length,
+    0,
+    "no deletion token is stored for an owner",
+  );
+
+  const memberSignUp = await hookedApp.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "member-leave@bento.test",
+      password: "correct-horse-battery",
+      name: "Member Leave",
+    }),
+  });
+  const memberToken = memberSignUp.headers.get("set-auth-token")!;
+  const invite = (await (
+    await hookedApp.request("/api/auth/organization/invite-member", {
+      method: "POST",
+      headers: ownerAuth,
+      body: JSON.stringify({
+        email: "member-leave@bento.test",
+        role: "member",
+        organizationId: org.id,
+      }),
+    })
+  ).json()) as { id: string };
+  await hookedApp.request("/api/auth/organization/accept-invitation", {
+    method: "POST",
+    headers: { authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ invitationId: invite.id }),
+  });
+
+  sent.length = 0;
+  const memberDelete = await hookedApp.request("/api/auth/delete-user", {
+    method: "POST",
+    headers: { authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ callbackURL: "/" }),
+  });
+  assert.equal(memberDelete.status, 200, "a member may request the confirmation mail");
+  const memberBody = (await memberDelete.json()) as { success?: boolean; message?: string };
+  assert.equal(memberBody.message, "Verification email sent");
+
+  const [memberUser] = await ctx.db
+    .select({ id: user.id })
+    .from(user)
+    .where(eq(user.email, "member-leave@bento.test"));
+  assert.ok(memberUser);
+  const memberTokens = await ctx.db.select().from(verification).where(eq(verification.value, memberUser.id));
+  assert.ok(
+    memberTokens.some((row) => row.identifier.startsWith("delete-account-")),
+    "a confirmation token is stored for a member",
+  );
+
+  // The mail is sent after the 200, as a background task.
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !sent.includes("Confirm deleting your Bento account")) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(
+    sent.includes("Confirm deleting your Bento account"),
+    `a member is emailed the confirmation link, got ${JSON.stringify(sent)}`,
+  );
 });
 
 /**

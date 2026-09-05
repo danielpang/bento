@@ -116,5 +116,9 @@ export async function captureStageSpend(
     });
   } catch (err) {
     console.warn(`could not record stage spend for feature ${args.feature.id}:`, err);
+    analytics.captureException(err, args.actorUserId ?? null, args.feature.organizationId, {
+      feature_id: args.feature.id,
+      source: "stage_spend",
+    });
   }
 }
