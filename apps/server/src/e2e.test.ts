@@ -4931,6 +4931,64 @@ test("publishing refuses to push to a protected branch", { timeout: 60_000 }, as
   assert.equal(pushed, false, "it refuses before asking for a credential, let alone using one");
 });
 
+/**
+ * A repository connected before its first commit has no branches at
+ * all, and one whose default branch was renamed no longer has the name
+ * Bento recorded. Both reach git as "fatal: Remote branch main not
+ * found in upstream origin", wrapped in a command line and a temporary
+ * path nobody typed, which is the whole reason a run failed and told
+ * the person nothing they could act on.
+ */
+test("a base branch the remote does not have is reported in words", { timeout: 60_000 }, async () => {
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-no-main-remote-"));
+  await run("git", ["-C", bare, "init", "--bare", "-b", "trunk"]);
+  const work = await fixtureRepo("no-main");
+  // The remote carries the same history under another name, which is
+  // what a rename leaves behind.
+  await run("git", ["-C", work, "push", "-q", bare, "main:trunk"]);
+
+  const branch = "feature/no-base";
+  await run("git", ["-C", work, "checkout", "-q", "-b", branch]);
+  await writeFile(path.join(work, "done.md"), "the agent's work\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "work",
+  ]);
+
+  const { project } = await setupProject("No base branch");
+  const feature = await createFeature(project.id, "Nowhere to open it");
+  const { published, failures } = await publishFeatureBranches(
+    ctx.db,
+    {
+      async pushToken() {
+        return "unused by a path remote";
+      },
+      async ensurePullRequest() {
+        return { prNumber: 1, url: "u" };
+      },
+    },
+    {
+      featureId: feature.id,
+      featureTitle: "Nowhere to open it",
+      branch,
+      repositories: [
+        { id: null, name: "site", repoUrl: "https://github.com/acme/site", defaultBranch: "main", worktreePath: work },
+      ],
+    },
+    { remoteUrl: () => bare },
+  );
+
+  assert.deepEqual(published, []);
+  const reason = failures[0]?.reason ?? "";
+  assert.match(reason, /acme\/site has no branch named main/, "it names the repository and the branch it looked for");
+  assert.match(reason, /push a first commit/, "and what to do about it");
+  assert.doesNotMatch(
+    reason,
+    /fatal:|credential\.helper|bento-publish-/,
+    "git's own words, the credential helper and the temporary path stay out of it",
+  );
+});
+
 /** A throwaway git repository, for tests that need several. */
 async function fixtureRepo(label: string): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), `bento-fixture-${label}-`));

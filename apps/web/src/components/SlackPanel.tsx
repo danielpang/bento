@@ -69,8 +69,7 @@ export function SlackPanel({ client }: { client: BentoClient }) {
       <section className="section settings-card">
         <h3 className="settings-title">Slack</h3>
         <p className="muted">
-          Slack is not configured on this server. An operator can set SLACK_CLIENT_ID,
-          SLACK_CLIENT_SECRET, and SLACK_SIGNING_SECRET. See docs/slack.md.
+          Slack is not configured on this server. Slack is available on usebento.ai.
         </p>
       </section>
     );
