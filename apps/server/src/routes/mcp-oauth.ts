@@ -124,7 +124,7 @@ export function mcpOAuthPublicRoutes(ctx: AppContext) {
     if (!params) return c.json({ error: "invalid_request" }, 400);
     const grant = params.grant_type;
     if (grant === "authorization_code") return exchangeCode(ctx, c, params);
-    if (grant === "refresh_token") return refreshGrant(ctx, params);
+    if (grant === "refresh_token") return refreshGrant(ctx, c, params);
     return c.json({ error: "unsupported_grant_type" }, 400);
   });
 
@@ -178,7 +178,7 @@ async function exchangeCode(ctx: AppContext, c: Context, params: Record<string, 
   });
 }
 
-async function refreshGrant(ctx: AppContext, params: Record<string, string>) {
+async function refreshGrant(ctx: AppContext, c: Context, params: Record<string, string>) {
   const refresh = params.refresh_token ?? "";
   const clientId = params.client_id ?? "";
   if (!refresh) return c.json({ error: "invalid_request" }, 400);
@@ -256,9 +256,11 @@ const denyBody = z.object({ request: z.string().uuid() });
 
 /**
  * The signed-in consent page. Creating the connection is the same act
- * as Settings → New connection, with the client name as the default
- * label. Mounted on the actor and tenant path. Authorization codes are
- * written on the owner pool: bento_user has no INSERT on that table.
+ * as Settings → New token, with the client name as the default label.
+ * Mounted on the actor and tenant path so membership is re-read. The
+ * connection row and the authorization code are written on the owner
+ * pool: bento_user has no INSERT on codes, and the code's foreign key
+ * must see the connection on the same connection.
  */
 export function mcpOAuthConsentRoutes(ctx: AppContext) {
   const routes = new Hono();
@@ -327,34 +329,41 @@ export function mcpOAuthConsentRoutes(ctx: AppContext) {
     const refreshToken = mintRefreshToken();
     const code = mintAuthorizationCode();
 
-    const [connection] = await db
-      .insert(mcpConnections)
-      .values({
-        ownerId: access.userId,
+    // Connection and code go on the owner pool together. The code
+    // insert cannot use the tenant transaction: bento_user has no
+    // INSERT on mcp_oauth_codes, and a second connection cannot see
+    // a row that transaction has not committed.
+    const [connection] = await ctx.db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(mcpConnections)
+        .values({
+          ownerId: access.userId,
+          organizationId: access.organizationId,
+          name,
+          scope: body.scope,
+          projectIds,
+          tokenHash: accessToken.hash,
+          tokenHint: accessToken.hint,
+          refreshTokenHash: refreshToken.hash,
+          oauthClientId: request.clientId,
+        })
+        .returning();
+      if (!row) return [];
+      await tx.insert(mcpOAuthCodes).values({
+        codeHash: code.hash,
+        clientId: request.clientId,
+        redirectUri: request.redirectUri,
+        codeChallenge: request.codeChallenge,
+        resource: request.resource,
+        connectionId: row.id,
         organizationId: access.organizationId,
-        name,
-        scope: body.scope,
-        projectIds,
-        tokenHash: accessToken.hash,
-        tokenHint: accessToken.hint,
-        refreshTokenHash: refreshToken.hash,
-        oauthClientId: request.clientId,
-      })
-      .returning();
-    if (!connection) return c.json({ error: "something went wrong saving the connection; try again" }, 500);
-
-    await ctx.db.insert(mcpOAuthCodes).values({
-      codeHash: code.hash,
-      clientId: request.clientId,
-      redirectUri: request.redirectUri,
-      codeChallenge: request.codeChallenge,
-      resource: request.resource,
-      connectionId: connection.id,
-      organizationId: access.organizationId,
-      tokenBundle: ctx.secretBox.encrypt(JSON.stringify({ access: accessToken.raw, refresh: refreshToken.raw })),
-      expiresAt: new Date(Date.now() + AUTH_TTL_MS),
+        tokenBundle: ctx.secretBox.encrypt(JSON.stringify({ access: accessToken.raw, refresh: refreshToken.raw })),
+        expiresAt: new Date(Date.now() + AUTH_TTL_MS),
+      });
+      await tx.delete(mcpOAuthRequests).where(eq(mcpOAuthRequests.id, request.id));
+      return [row];
     });
-    await ctx.db.delete(mcpOAuthRequests).where(eq(mcpOAuthRequests.id, request.id));
+    if (!connection) return c.json({ error: "something went wrong saving the connection; try again" }, 500);
 
     return c.json({
       redirect: clientRedirect(request.redirectUri, {

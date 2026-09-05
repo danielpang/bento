@@ -62,4 +62,10 @@ CREATE POLICY mcp_oauth_codes_org_isolation ON mcp_oauth_codes
 CREATE TRIGGER mcp_oauth_codes_inherit_org BEFORE INSERT ON mcp_oauth_codes
   FOR EACH ROW EXECUTE FUNCTION bento_inherit_org('mcp_connections', 'connection_id');
 --> statement-breakpoint
+-- Default privileges grant DML on every new public table. Codes are
+-- minted only on the owner pool, the mcp_run_grants shape: the tenant
+-- role may SELECT (structural RLS tests) but must not insert or rewrite
+-- an authorization code.
+REVOKE INSERT, UPDATE, DELETE ON mcp_oauth_codes FROM bento_user;
+--> statement-breakpoint
 GRANT SELECT ON mcp_oauth_codes TO bento_user;

@@ -18,11 +18,29 @@ export function requestOrigin(c: Context, fallback: string): string {
   const url = new URL(c.req.url);
   const hostHeader = (c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "").split(",")[0]!.trim();
   const protoHeader = (c.req.header("x-forwarded-proto") ?? "").split(",")[0]!.trim();
-  const host = hostHeader || url.host;
+  let host = hostHeader || url.host;
   const proto = protoHeader || url.protocol.replace(":", "") || "http";
   if (proto !== "http" && proto !== "https") return fallbackOrigin;
   if (!host || /[\s/]/.test(host)) return fallbackOrigin;
-  return `${proto}://${host}`;
+  // Fetch and Hono's app.request often send Host without a port even
+  // when the URL has one. Keep the URL's port so local /mcp OAuth
+  // metadata is not issued for http://localhost/mcp.
+  if (!host.includes(":") && url.port && url.hostname === host.split(":")[0]) {
+    host = url.host;
+  }
+  const origin = `${proto}://${host}`;
+  try {
+    const built = new URL(origin);
+    const configured = new URL(fallbackOrigin);
+    // Relative app.request paths also lose the listen port. If the
+    // hostname still matches the public URL, take that URL's port.
+    if (!built.port && configured.port && built.hostname === configured.hostname && built.protocol === configured.protocol) {
+      return fallbackOrigin;
+    }
+  } catch {
+    return origin;
+  }
+  return origin;
 }
 
 export function canonicalResource(origin: string): string {

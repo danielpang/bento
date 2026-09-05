@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAllowedRedirectUri, pkceChallenge, pkceMatches, resourceAllowed } from "./oauth-as.js";
+import { isAllowedRedirectUri, pkceChallenge, pkceMatches, requestOrigin, resourceAllowed } from "./oauth-as.js";
 
 test("redirect URIs allow HTTPS, loopback HTTP, and desktop custom schemes", () => {
   assert.equal(isAllowedRedirectUri("https://claude.ai/api/mcp/auth_callback"), true);
@@ -26,4 +26,18 @@ test("the resource identifier accepts /mcp and the /api/mcp-server alias", () =>
   assert.equal(resourceAllowed("https://app.usebento.ai/mcp/", origin), true);
   assert.equal(resourceAllowed("https://app.usebento.ai/api/mcp-server", origin), true);
   assert.equal(resourceAllowed("https://evil.example/mcp", origin), false);
+});
+
+test("requestOrigin keeps a non-default port that Host omitted", async () => {
+  const { Hono } = await import("hono");
+  const app = new Hono();
+  app.get("/", (c) => c.text(requestOrigin(c, "http://localhost:4400")));
+  const res = await app.request("http://localhost:4400/", { headers: { host: "localhost" } });
+  assert.equal(await res.text(), "http://localhost:4400");
+  const relative = await app.request("/", { headers: { host: "localhost" } });
+  assert.equal(await relative.text(), "http://localhost:4400");
+  const forwarded = await app.request("http://127.0.0.1:4400/", {
+    headers: { host: "127.0.0.1:4400", "x-forwarded-host": "app.usebento.ai", "x-forwarded-proto": "https" },
+  });
+  assert.equal(await forwarded.text(), "https://app.usebento.ai");
 });
