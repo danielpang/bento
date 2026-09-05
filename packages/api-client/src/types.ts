@@ -48,6 +48,29 @@ export interface FeaturePullRequest {
 }
 
 /**
+ * One pull request the card has opened, live or landed.
+ *
+ * A card keeps every pull request it has opened: when one merges, the
+ * next message starts a new branch and opens another, so `current`
+ * says which belong to the branch the card is on now.
+ */
+export interface FeaturePullRequestRecord extends FeaturePullRequest {
+  branch: string;
+  current: boolean;
+}
+
+/**
+ * How one of the card's pull requests ended. "closed" is one closed
+ * without merging, whose work never shipped; "unknown" covers every
+ * unreadable case, including a card with no GitHub connection.
+ */
+export interface FeaturePullRequestStatus {
+  number: number;
+  url: string;
+  state: "merged" | "open" | "closed" | "unknown";
+}
+
+/**
  * Where one of the card's pull requests stands against its base branch.
  * "unknown" covers every unreadable case (no GitHub connection, GitHub
  * still computing, a closed pull request) and is treated as "not known

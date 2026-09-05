@@ -819,6 +819,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
     ["GET", `/api/features/${feature.id}/merge-status`],
     ["GET", `/api/features/${feature.id}/check-status`],
+    ["GET", `/api/features/${feature.id}/pull-request-status`],
     ["GET", `/api/features/${feature.id}/merge-status/plain`],
     ["POST", `/api/features/${feature.id}/resolve-conflicts`],
     ["POST", `/api/features/${feature.id}/fix-ci-tests`],

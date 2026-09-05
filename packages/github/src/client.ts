@@ -67,6 +67,14 @@ export interface OpenPullRequest {
 export interface PullRequestDetails {
   title: string;
   body: string | null;
+  /** GitHub's own word: "open" or "closed". A merged one is closed. */
+  state: string;
+  /**
+   * True only when GitHub says the branch was merged. A pull request
+   * someone closed without merging is closed and not merged, and the
+   * card's work is still unlanded, so the two are never conflated.
+   */
+  merged: boolean;
 }
 
 export interface PullRequestUpdateInput extends PullRequestRef {

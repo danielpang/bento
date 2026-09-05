@@ -80,7 +80,7 @@ test("draft publish opens a draft pull request", async () => {
       return { prNumber: 3, url: "https://github.com/acme/app/pull/3" };
     },
     async getPullRequest() {
-      return { title: "Draft me", body: null };
+      return { title: "Draft me", body: null, state: "open", merged: false };
     },
     async updatePullRequest() {},
     async pullRequestHasRunComment() {

@@ -169,6 +169,13 @@
       "when": 1788300000000,
       "tag": "0023_feature_parent",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788641432840,
+      "tag": "0024_pr_per_branch",
+      "breakpoints": true
     }
   ]
 }

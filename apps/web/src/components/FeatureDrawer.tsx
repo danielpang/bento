@@ -13,6 +13,8 @@ import type {
   FeatureEvent,
   FeatureCheckStatus,
   FeatureMergeStatus,
+  FeaturePullRequestRecord,
+  FeaturePullRequestStatus,
   FeaturePullRequest,
   GateState,
   Repository,
@@ -131,6 +133,15 @@ export function FeatureDrawer({
   const [publishing, setPublishing] = useState(false);
   /** The card's open pull requests, one per repository it was published to. */
   const [pullRequests, setPullRequests] = useState<FeaturePullRequest[]>([]);
+  /**
+   * Every pull request the card has opened, newest first, live and
+   * landed. A card that merges a branch and is asked for more opens
+   * another on a new branch, and the list is the only place that
+   * shows what it has shipped.
+   */
+  const [pullRequestHistory, setPullRequestHistory] = useState<FeaturePullRequestRecord[]>([]);
+  /** How each of those ended, fetched after the card's own detail. */
+  const [pullRequestStates, setPullRequestStates] = useState<FeaturePullRequestStatus[]>([]);
   /** Every linked repository in the project, for multi-repo publish state. */
   const [projectRepos, setProjectRepos] = useState<Repository[]>([]);
   /**
@@ -250,6 +261,7 @@ export function FeatureDrawer({
         if (cancelled) return;
         setRuns(detail.runs);
         setPullRequests(detail.pullRequests ?? []);
+        setPullRequestHistory(detail.pullRequestHistory ?? []);
         setProjectRepos(repos);
         setGate(gateState);
         setHistory(events);
@@ -312,6 +324,28 @@ export function FeatureDrawer({
       cancelled = true;
     };
   }, [client, feature.id, hasPullRequests, latestSettledRunId]);
+
+  /**
+   * How each pull request in the history ended, on the same cadence.
+   * Keyed on the history rather than the live list, because a card
+   * whose branch has merged has history and no live pull request, and
+   * that is exactly the card whose list needs the word "Merged" on it.
+   */
+  const historyCount = pullRequestHistory.length;
+  useEffect(() => {
+    if (historyCount === 0) return;
+    let cancelled = false;
+    setPullRequestStates([]);
+    void client
+      .getPullRequestStatus(feature.id)
+      .then((states) => {
+        if (!cancelled) setPullRequestStates(states);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, feature.id, historyCount, latestSettledRunId]);
 
 
   async function act(fn: () => Promise<unknown>) {
@@ -473,6 +507,7 @@ export function FeatureDrawer({
   const pullRequestByName = new Map(pullRequests.map((pr) => [pr.name, pr]));
   const mergeStateByUrl = new Map(mergeStates.map((state) => [state.url, state]));
   const checkStateByUrl = new Map(checkStates.map((state) => [state.url, state]));
+  const pullRequestStateByUrl = new Map(pullRequestStates.map((state) => [state.url, state.state]));
   const conflictedUrls = new Set(
     mergeStates.filter((s) => s.state === "conflicted").map((s) => s.url),
   );
@@ -1009,6 +1044,56 @@ export function FeatureDrawer({
                 {note.text}
               </p>
             ))}
+          </section>
+        )}
+
+        {/*
+          Everything this card has opened, live and landed.
+
+          A card is not one pull request. When one merges, the next
+          message it gets starts a new branch and opens another, and
+          without this the card showed only the newest and read as
+          though the earlier ones had never happened. Each row says
+          where it stands, because a merged pull request and an open
+          one are the difference between shipped and waiting.
+        */}
+        {pullRequestHistory.length > 0 && (
+          <section className="section">
+            <span className="label">Pull request history</span>
+            <div className="pr-list">
+              {pullRequestHistory.map((pr) => {
+                const state = pullRequestStateByUrl.get(pr.url);
+                return (
+                  <a
+                    key={pr.url}
+                    className="pr-row pr-row-with-actions pr-row-history"
+                    href={pr.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={`Open pull request #${pr.number} in ${pr.name} on GitHub`}
+                  >
+                    <span className="pr-repo">{pr.name}</span>
+                    <span className="pr-branch" title={pr.branch}>
+                      {pr.branch}
+                    </span>
+                    <div className="pr-row-actions">
+                      {/*
+                        No chip until GitHub has answered. A row that
+                        said "Open" while the read was still in flight
+                        would be wrong about exactly the pull requests
+                        this list exists to describe.
+                      */}
+                      {state && state !== "unknown" && (
+                        <span className="chip" data-status={`pr-${state}`}>
+                          {state === "merged" ? "Merged" : state === "open" ? "Open" : "Closed"}
+                        </span>
+                      )}
+                      <span className="pr-open">#{pr.number}</span>
+                    </div>
+                  </a>
+                );
+              })}
+            </div>
           </section>
         )}
 
