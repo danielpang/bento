@@ -69,19 +69,13 @@ export async function createRepositorySeed(
   await mkdir(home);
   const env = trustedGitEnv(home, token);
   try {
-    await run(
-      "git",
-      [
-        ...credentialArguments(),
-        "clone",
-        "--single-branch",
-        "--branch",
-        baseBranch,
-        remote,
-        checkout,
-      ],
-      { env },
-    );
+    await cloneBaseBranch({
+      remote,
+      label: `${parsed.owner}/${parsed.repo}`,
+      baseBranch,
+      checkout,
+      env,
+    });
     await run("git", ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${baseBranch}`], { env });
     return await readFile(bundlePath);
   } finally {
@@ -221,6 +215,7 @@ export async function publishFeatureBranches(
         .limit(1);
       const pushedHead = await pushBundle(bundle, remote, repo.defaultBranch, args.branch, token, {
         includeStageNotes: options.includeStageNotes === true,
+        label: `${parsed.owner}/${parsed.repo}`,
         expectedRemoteHead: known?.headSha ?? null,
       });
 
@@ -273,6 +268,8 @@ async function pushBundle(
   token: string,
   options: {
     includeStageNotes: boolean;
+    /** owner/repository, for anything this has to say about the remote. */
+    label: string;
     /** The commit Bento last pushed, when one is recorded; the lease to hold. */
     expectedRemoteHead?: string | null;
   },
@@ -287,20 +284,14 @@ async function pushBundle(
   const credentialArgs = credentialArguments();
 
   try {
-    await run(
-      "git",
-      [
-        ...credentialArgs,
-        "clone",
-        "--no-checkout",
-        "--single-branch",
-        "--branch",
-        baseBranch,
-        remote,
-        checkout,
-      ],
-      { env },
-    );
+    await cloneBaseBranch({
+      remote,
+      label: options.label,
+      baseBranch,
+      checkout,
+      env,
+      flags: ["--no-checkout"],
+    });
     await run("git", ["-C", checkout, "bundle", "verify", bundlePath], { env });
     await run("git", ["-C", checkout, "fetch", bundlePath, "HEAD"], { env });
     const { stdout: fetched } = await run("git", ["-C", checkout, "rev-parse", "FETCH_HEAD^{commit}"], { env });
@@ -402,6 +393,68 @@ async function withoutStageNotes(
     { env: stripEnv },
   );
   return commit.trim();
+}
+
+/**
+ * Clones the base branch, and says what to do when it is not there.
+ *
+ * git's own word for this is "fatal: Remote branch main not found in
+ * upstream origin", wrapped in a command line and a temporary path
+ * nobody typed, and it arrives as the whole reason a run failed or a
+ * pull request never appeared. Two repositories hit it: one connected
+ * before its first commit, which has no branches at all, and one whose
+ * default branch was renamed after it was connected. Both have a fix,
+ * so the fix is what gets said.
+ */
+async function cloneBaseBranch(args: {
+  remote: string;
+  /** owner/repository, because the run record does not name it otherwise. */
+  label: string;
+  baseBranch: string;
+  checkout: string;
+  env: NodeJS.ProcessEnv;
+  /** Clone flags this caller wants, ahead of the branch selection. */
+  flags?: string[];
+}): Promise<void> {
+  try {
+    await run(
+      "git",
+      [
+        ...credentialArguments(),
+        "clone",
+        ...(args.flags ?? []),
+        "--single-branch",
+        "--branch",
+        args.baseBranch,
+        args.remote,
+        args.checkout,
+      ],
+      { env: args.env },
+    );
+  } catch (err) {
+    if (!missingBranchFailure(err)) throw err;
+    // Chained, so git's own line is still in the server log and in the
+    // exception capture. It is only kept out of what the person reads.
+    throw new Error(
+      `${args.label} has no branch named ${args.baseBranch}. ` +
+        "A repository with no commits yet has no branches at all, so push a first commit. " +
+        "If its default branch was renamed after the repository was connected, remove the " +
+        "repository under Repositories and add it again to pick up the new name.",
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Whether a failed clone failed for want of the branch, rather than for
+ * a credential, a network, or a repository that is not there. git says
+ * so on stderr, which execFile also folds into the error message, so
+ * both are read: a driver that keeps only one of them still matches.
+ */
+function missingBranchFailure(err: unknown): boolean {
+  const stderr = typeof err === "object" && err !== null ? (err as { stderr?: unknown }).stderr : undefined;
+  const text = `${typeof stderr === "string" ? stderr : ""}\n${String(err)}`;
+  return /Remote branch .+ not found in upstream/i.test(text);
 }
 
 function credentialArguments(): string[] {

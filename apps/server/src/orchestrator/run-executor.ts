@@ -1991,7 +1991,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
  * driver raised it, and the server does not import their SDKs.
  */
 function describeSandboxError(err: unknown): string {
-  const base = String(err);
+  // A plain Error carrying a written sentence is that sentence. The
+  // "Error:" String() puts in front of it says nothing a reader wants,
+  // while a driver's own subclass names who failed and is kept.
+  const base = err instanceof Error && err.name === "Error" ? err.message : String(err);
   if (typeof err !== "object" || err === null) return base;
   const { stderr, stdout } = err as { stderr?: unknown; stdout?: unknown };
   const output = [stderr, stdout].find((value) => typeof value === "string" && value.trim() !== "");
