@@ -58,7 +58,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 
 const run = promisify(execFile);
@@ -1999,6 +1999,49 @@ test("a login token displaces the API key rather than joining it", async () => {
       assert.equal(env.ANTHROPIC_API_KEY, undefined, "and the key it supersedes is withheld");
     },
   );
+});
+
+/**
+ * The path a person actually takes to run Antigravity: pick the tool,
+ * pick a Gemini model, paste a Gemini key. Antigravity's own default
+ * credential is a Google account, which no sandbox can sign in with,
+ * so the key is the whole of its authentication here and a leg of this
+ * chain that quietly broke would strand the tool with no way in.
+ *
+ * The key is saved the way the console saves it, so this covers the
+ * storage and the decryption rather than a value handed straight to
+ * the resolver, and the process environment is cleared first so the
+ * value proves it came from what was pasted.
+ */
+test("a pasted Gemini key is what reaches an Antigravity run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "GEMINI_API_KEY", value: "AIza-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ GEMINI_API_KEY: null, GOOGLE_GEMINI_BASE_URL: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high");
+      assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
+      assert.equal(env.GEMINI_API_KEY, "AIza-pasted-by-the-user");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+/**
+ * And with nothing pasted, the run stops before a sandbox is spent,
+ * naming the key rather than failing inside the CLI as an unreadable
+ * sign-in error.
+ */
+test("an Antigravity run with no Gemini key is missing it by name", async () => {
+  await withEnv({ GEMINI_API_KEY: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high");
+    assert.deepEqual(missing, ["GEMINI_API_KEY"]);
+  });
 });
 
 /**
