@@ -6,6 +6,7 @@ import type {
   CompletionRange,
   Feature,
   FeatureChanges,
+  FeatureCheckStatus,
   FeatureMergeStatus,
   FeaturePullRequest,
   FeatureEvent,
@@ -898,8 +899,9 @@ export class BentoClient {
   /** Pushes the card's branch and opens (or updates) its pull requests. */
   publishFeature(featureId: string) {
     return this.request<{
-      published: { name: string; repoUrl: string; prNumber: number; url: string }[];
+      published: { name: string; repoUrl: string; prNumber: number; url: string; draft?: boolean }[];
       failures: { name: string; reason: string }[];
+      rebaseRun: AgentRun | null;
     }>(`/api/features/${featureId}/publish`, { method: "POST" });
   }
 
@@ -910,6 +912,20 @@ export class BentoClient {
   /** Asks GitHub whether each of the card's pull requests merges cleanly. */
   getMergeStatus(featureId: string) {
     return this.request<FeatureMergeStatus[]>(`/api/features/${featureId}/merge-status`);
+  }
+
+  /** Asks GitHub how CI checks on each pull request head are doing. */
+  getCheckStatus(featureId: string) {
+    return this.request<FeatureCheckStatus[]>(`/api/features/${featureId}/check-status`);
+  }
+
+  /**
+   * Starts a run that fixes failing CI checks GitHub is reporting; the
+   * server publishes when the run finishes. Refused with 409 when no
+   * checks are failing or an agent is already working the card.
+   */
+  fixCiTests(featureId: string) {
+    return this.request<AgentRun>(`/api/features/${featureId}/fix-ci-tests`, { method: "POST" });
   }
 
   /**

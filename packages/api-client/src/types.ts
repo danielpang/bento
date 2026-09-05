@@ -61,6 +61,17 @@ export interface FeatureMergeStatus {
 }
 
 /**
+ * How CI checks on one pull request head are doing. Only "failed" asks
+ * for anything in the drawer; "pending" and "unknown" stay silent.
+ */
+export interface FeatureCheckStatus {
+  name: string;
+  number: number;
+  url: string;
+  state: "passed" | "pending" | "failed" | "unknown";
+}
+
+/**
  * A coding agent, and whether this deployment can run it. `installed`
  * is null when the question could not be answered (no sandbox image
  * built, no daemon), which must not be shown as "missing".
