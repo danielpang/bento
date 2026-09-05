@@ -1083,6 +1083,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             onChanged={refresh}
             onDeleting={handleDeleting}
             onDeleted={handleDeleted}
+            onSelectFeature={setSelectedId}
             onEvent={recordEvent}
           />
         )}

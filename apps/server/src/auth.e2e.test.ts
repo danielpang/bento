@@ -804,6 +804,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/features/${feature.id}/changes`],
     ["GET", `/api/features/${feature.id}/changes/plain`],
     ["GET", `/api/features/${feature.id}/artifacts`],
+    ["GET", `/api/features/${feature.id}/related`],
     ["GET", `/api/artifacts/${artifact!.id}`],
     ["GET", `/api/artifacts/${artifact!.id}/content`],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected" }) }],

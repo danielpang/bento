@@ -75,3 +75,31 @@ test("the conflict prompt forbids pushing and repeats no base branch", () => {
   assert.match(prompt, /Do not push/);
   assert.match(prompt, /rebase/);
 });
+
+/**
+ * The efficiency gate. Code cannot judge whether a task deserves
+ * splitting, so the prompt is where the judgement is asked for, and
+ * the paragraph has to state both conditions rather than reading as an
+ * invitation to decompose everything.
+ */
+test("an agent with the card tools is told when not to split", () => {
+  const prompt = buildStagePrompt(feature, stage, [stage], [], undefined, undefined, true);
+  assert.match(prompt, /create_card/);
+  assert.match(prompt, /Only split when both are true/);
+  assert.match(prompt, /edit the same files/);
+  assert.match(prompt, /Most cards are one change/);
+});
+
+test("an agent without the tool is never told about splitting", () => {
+  // Telling an agent to create cards when it has no tool to do it with
+  // produces a run that writes the parts into prose and calls it done.
+  const prompt = buildStagePrompt(feature, stage, [stage]);
+  assert.doesNotMatch(prompt, /create_card/);
+  assert.doesNotMatch(prompt, /split/i);
+});
+
+test("the merge prohibition still comes last, after the split paragraph", () => {
+  const prompt = buildStagePrompt(feature, stage, [stage], [], undefined, undefined, true);
+  assert.ok(prompt.indexOf("create_card") < prompt.indexOf("Stay on your branch"));
+  assert.ok(prompt.trimEnd().endsWith("once this run finishes."));
+});

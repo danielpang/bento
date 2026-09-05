@@ -37,6 +37,7 @@ export { ProjectsSettings } from "./ProjectsSettings.js";
 export { ConfirmDialog, NewFeatureDialog, NewProjectDialog, PromptDialog } from "./PromptDialog.js";
 export { GitHubIcon, GoogleIcon } from "./ProviderIcons.js";
 export { ProviderMark } from "./ProviderMark.js";
+export { RelatedCardsDialog, RelatedGraph } from "./RelatedCards.js";
 export { RepositoriesPanel } from "./RepositoriesPanel.js";
 export { ResetPassword } from "./ResetPassword.js";
 export { SecretField } from "./SecretField.js";

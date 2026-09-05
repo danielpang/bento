@@ -16,6 +16,7 @@ import type {
   FeaturePullRequest,
   GateState,
   Repository,
+  RelatedGroup,
   RunArtifact,
   Stage,
 } from "@bento/api-client";
@@ -26,11 +27,17 @@ import type {
 const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
+// Same reason: the related view is geometry and an SVG layer, for the
+// rare card that was split.
+const RelatedCardsDialog = lazy(() =>
+  import("./RelatedCards.js").then((m) => ({ default: m.RelatedCardsDialog })),
+);
 import {
   actorDisplayName,
   historyTriggerLabel,
   isSpendRun,
   needsSendBackPrompt,
+  parentDeleteRefusal,
   SEND_BACK_NOTICE,
   spendCoverageNote,
   withProviderOutageAdvice,
@@ -39,6 +46,7 @@ import {
 import { linkifiedError } from "../error-text.js";
 import { deleteConsequences } from "./delete-consequences.js";
 import { descriptionText, hasDescription, needsClamp } from "../card-description.js";
+import { useBetaTesters } from "../beta.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 
 interface DrawerProps {
@@ -58,6 +66,12 @@ interface DrawerProps {
   onDeleting: (featureId: string | null) => void;
   /** The card is gone: drop the selection, refresh, and place focus. */
   onDeleted: (featureId: string) => void;
+  /**
+   * Opens another card in this drawer: how a part reaches the card it
+   * came from, and back. The board scrolls it into view, so a part in
+   * a lane off screen is still reachable from here.
+   */
+  onSelectFeature: (featureId: string) => void;
   onEvent: (featureId: string, event: AgentEvent) => void;
 }
 
@@ -97,9 +111,11 @@ export function FeatureDrawer({
   onChanged,
   onDeleting,
   onDeleted,
+  onSelectFeature,
   onEvent,
 }: DrawerProps) {
   const toast = useToast();
+  const beta = useBetaTesters();
   const [runs, setRuns] = useState<AgentRun[]>([]);
   const [dialog, setDialog] = useState<"none" | "rollback" | "reject" | "delete">("none");
   const [gate, setGate] = useState<GateState | null>(null);
@@ -129,6 +145,14 @@ export function FeatureDrawer({
    */
   const [checkStates, setCheckStates] = useState<FeatureCheckStatus[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
+  /**
+   * The group this card belongs to, when it belongs to one. Null for
+   * nearly every card, which is what keeps the drawer unchanged for
+   * teams that never split anything.
+   */
+  const [group, setGroup] = useState<RelatedGroup | null>(null);
+  /** True while the related-cards view is open over the drawer. */
+  const [showRelated, setShowRelated] = useState(false);
   /**
    * Which card's detail has actually arrived. The delete confirmation
    * is worded from the runs list, the branch and the pull requests, so
@@ -184,7 +208,31 @@ export function FeatureDrawer({
     setLoadFailed(false);
     setPublishNotes([]);
     setDescriptionOpen(false);
+    setGroup(null);
+    setShowRelated(false);
   }, [feature.id]);
+
+  /**
+   * Whether this card is part of a split, on its own request.
+   *
+   * Separate from the detail load because it must not be able to fail
+   * that load: a card whose group cannot be read is still a card, and
+   * the delete confirmation is worded from the detail. Only asked for
+   * people on the beta flag, where the endpoint exists at all.
+   */
+  useEffect(() => {
+    if (!beta) return;
+    let cancelled = false;
+    void client
+      .relatedFeatures(feature.id)
+      .then((result) => {
+        if (!cancelled) setGroup(result);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, beta, feature.id, runsVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -543,11 +591,22 @@ export function FeatureDrawer({
    * three runs and twelve dollars, and a destructive dialog that
    * guesses is a dialog that lies.
    */
+  /**
+   * The parts this card was split into, if it is the card they came
+   * from. A child's group has the same rows, but they are its siblings
+   * rather than its own, so only the parent counts them.
+   */
+  const ownChildren = group && group.parent.id === feature.id ? group.children : [];
+  const partOf = group?.partOf ?? (group && group.parent.id !== feature.id ? group.parent : null);
   const deleteBlocked = runActive
     ? "An agent is working this card. Stop it or wait for it to finish."
-    : loadFailed
-      ? "Reopen the card first. This cannot be done while its details are missing."
-      : null;
+    : ownChildren.length > 0
+      ? // The same sentence the server answers with. A button whose
+        // tooltip and the refusal behind it disagree reads as two rules.
+        parentDeleteRefusal(ownChildren.length)
+      : loadFailed
+        ? "Reopen the card first. This cannot be done while its details are missing."
+        : null;
   const deleteReasonId = useId();
   const descriptionId = useId();
   /**
@@ -796,6 +855,101 @@ export function FeatureDrawer({
           )}
         </section>
 
+        {/*
+          A card that was split, or a part of one. Nothing at all for
+          the cards that are neither, which is nearly all of them.
+
+          Two shapes, one section. On the card the split started from,
+          the parts and what they are doing. On a part, the card it came
+          from, which is the way back. Either opens the same view, drawn
+          from the same rows, so the parent and a part agree about the
+          group they are in.
+        */}
+        {group && (
+          <section className="section">
+            <span className="label">{ownChildren.length > 0 ? "Parts" : "Part of"}</span>
+            {ownChildren.length > 0 && (
+              <>
+                <p className="muted">
+                  This card was split into {ownChildren.length === 1 ? "1 part" : `${ownChildren.length} parts`}. Each
+                  part is an ordinary card with its own branch and its own agent.
+                </p>
+                {ownChildren.map((child) => (
+                  <button
+                    key={child.id}
+                    className="related-row"
+                    onClick={() => onSelectFeature(child.id)}
+                    title={`Open “${child.title}”`}
+                  >
+                    <span className="related-row-title">{child.title}</span>
+                    <span className="chip" data-status={child.status}>
+                      {statusWords(child.status)}
+                    </span>
+                    <span className="related-row-stage">{child.stageName ?? "Backlog"}</span>
+                  </button>
+                ))}
+              </>
+            )}
+            {partOf && (
+              <>
+                {ownChildren.length > 0 && <span className="label">Part of</span>}
+                <button
+                  className="related-row"
+                  onClick={() => onSelectFeature(partOf.id)}
+                  title={`Open “${partOf.title}”`}
+                >
+                  <span className="related-row-title">{partOf.title}</span>
+                  <span className="chip" data-status={partOf.status}>
+                    {statusWords(partOf.status)}
+                  </span>
+                  <span className="related-row-stage">{partOf.stageName ?? "Backlog"}</span>
+                </button>
+              </>
+            )}
+            <button className="btn btn-ghost" onClick={() => setShowRelated(true)}>
+              Show related cards
+            </button>
+          </section>
+        )}
+
+        {/* One row per repository this card was published to. Its own
+            section rather than a list inside Actions: these outlive the
+            button that made them, and nesting them there left nothing
+            to draw a line between. */}
+        {pullRequests.length > 0 && (
+          <section className="section">
+            <span className="label">Pull requests</span>
+            {/* Said above the rows, not only as a chip: the chip names
+                which repository, this says what to do about it. */}
+            {canResolve && (
+              <p className="warn">
+                GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
+                the base branch has moved and the changes collide. Resolve conflicts (under Actions) has the stage agent
+                rebase the branch and update the pull request.
+              </p>
+            )}
+            {pullRequests.map((pr) => (
+              <a
+                key={pr.url}
+                className="pr-row"
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                title={`Open pull request #${pr.number} in ${pr.name} on GitHub`}
+              >
+                <span className="pr-repo">{pr.name}</span>
+                <span className="pr-number">#{pr.number}</span>
+                {conflictedUrls.has(pr.url) && (
+                  <span className="chip" data-status="conflict">
+                    Merge conflict
+                  </span>
+                )}
+                <ExternalMark />
+              </a>
+            ))}
+          </section>
+        )}
+
         {/* Always rendered while the card is in a stage. Hiding it when
             there were no rows meant a manual stage, the commonest way a
             card waits, explained itself with blank space. */}
@@ -945,6 +1099,16 @@ export function FeatureDrawer({
         {openArtifact && (
           <Suspense fallback={null}>
             <ArtifactViewer client={client} artifact={openArtifact} onClose={() => setOpenArtifact(null)} />
+          </Suspense>
+        )}
+        {showRelated && (
+          <Suspense fallback={null}>
+            <RelatedCardsDialog
+              client={client}
+              featureId={feature.id}
+              onClose={() => setShowRelated(false)}
+              onSelect={onSelectFeature}
+            />
           </Suspense>
         )}
 

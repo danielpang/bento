@@ -16,6 +16,7 @@ import type {
   ProjectCompletions,
   ProjectSession,
   ProjectUsage,
+  RelatedGroup,
   Repository,
   RunArtifact,
   Stage,
@@ -747,8 +748,22 @@ export class BentoClient {
     return (await this.getBoardSnapshot(projectId)).statuses;
   }
 
-  createFeature(input: { projectId: string; title: string; description?: string }) {
+  /**
+   * `parentId` files the card as a part of another one, which is what
+   * a split produces. Refused with 400 when that card is in another
+   * project, already at the depth limit, or already full.
+   */
+  createFeature(input: { projectId: string; title: string; description?: string; parentId?: string }) {
     return this.request<Feature>("/api/features", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  /**
+   * The group a card belongs to: the card a split started from, and
+   * every card it produced. Null when this card is neither, which is
+   * most cards. Answers 404 for users not on the beta flag.
+   */
+  relatedFeatures(featureId: string) {
+    return this.request<RelatedGroup | null>(`/api/features/${featureId}/related`);
   }
 
   getFeature(featureId: string) {

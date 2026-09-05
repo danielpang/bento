@@ -17,6 +17,13 @@ export function buildStagePrompt(
   agent?: { name: string; skill: string | null },
   /** Workspace directory whose files are captured onto the card as artifacts. */
   artifactsDir?: string,
+  /**
+   * Whether this run actually got Bento's own MCP tools. Only then is
+   * the paragraph about splitting worth saying: telling an agent to
+   * create cards when it has no tool to do it with produces a run that
+   * writes the parts into prose and calls it done.
+   */
+  canSplitCard = false,
 ): string {
   const artifact = stageArtifactPath(stage.slug);
   const priorStages = allStages.filter((s) => s.position < stage.position);
@@ -111,6 +118,24 @@ export function buildStagePrompt(
   if (artifactsDir) {
     lines.push(
       `If your work here produced something visual for people to review (a design mockup, an HTML preview, a screenshot, a diagram), save it under ${artifactsDir}. Files there are shown on the feature card. Keep each file self-contained: one HTML file with its styles, scripts, and images inlined; PNG, JPEG, or WebP images; Mermaid diagrams as .mmd files; or Markdown. Do not commit these files.`,
+    );
+  }
+  /**
+   * When a card is too big to be one change.
+   *
+   * The whole risk of giving an agent a card-creating tool is an agent
+   * that uses it, so the paragraph is written as a test to fail rather
+   * than a capability to enjoy: both conditions, an explicit "most
+   * cards are not this", and the file-contention case named outright,
+   * because "split this up" is advice that always sounds reasonable.
+   *
+   * Code cannot make this judgement, so this is where it lives. What
+   * the server enforces is only the shape: children of this card, in
+   * this project, up to a cap, none of them started by the tool.
+   */
+  if (canSplitCard) {
+    lines.push(
+      "If this task is too large to finish as one change on one branch, you can split it: the create_card tool files a part of it as its own card, belonging to this one. Only split when both are true: the task really is too large for one branch, and dividing it is more efficient than working it yourself, because the parts can run in separate sandboxes, or hold less context, or finish independently. Do not split parts that would edit the same files, and do not split work you could simply do. Most cards are one change and should end with no parts at all. When you do split, say so in your summary and keep working whatever scope you kept for yourself; the parts you filed start in the backlog and are picked up as ordinary cards.",
     );
   }
   /**
