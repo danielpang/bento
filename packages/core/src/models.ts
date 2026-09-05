@@ -85,6 +85,10 @@ const BY_CLI: Record<string, readonly string[]> = {
   pi: ["anthropic", "openai", "google", "deepseek", "openrouter"],
   pool: ["poolside"],
   dsh: ["deepseek"],
+  // Antigravity reaches Gemini and nothing else here, but under its own
+  // slugs rather than the Gemini API's ids, so it is its own provider.
+  // See model-catalog.manual.ts.
+  antigravity: ["antigravity"],
   fake: [],
 };
 

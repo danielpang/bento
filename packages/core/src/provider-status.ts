@@ -32,6 +32,9 @@ const BY_ID: Record<string, StatusProvider> = {
   deepseek: "deepseek",
   google: "google",
   gemini: "google",
+  // Antigravity is a Gemini client: a sandbox reaches it with a Gemini
+  // API key, so an outage there is Gemini's to report.
+  antigravity: "google",
   poolside: "poolside",
 };
 
@@ -46,6 +49,7 @@ const BY_CLI: Record<string, StatusProvider> = {
   cursor: "cursor",
   dsh: "deepseek",
   pool: "poolside",
+  antigravity: "google",
 };
 
 /**
@@ -60,7 +64,7 @@ const MENTIONS: readonly [RegExp, StatusProvider][] = [
   [/\bcursor\b|\bcomposer\b/i, "cursor"],
   [/\bgrok\b|\bxai\b|x\.ai/i, "xai"],
   [/deepseek/i, "deepseek"],
-  [/gemini|aistudio\.google|generativelanguage\.googleapis|\bgoogle\b/i, "google"],
+  [/gemini|antigravity|aistudio\.google|generativelanguage\.googleapis|\bgoogle\b/i, "google"],
   [/poolside|\blaguna\b/i, "poolside"],
 ];
 
