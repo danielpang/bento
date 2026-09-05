@@ -167,6 +167,20 @@ test("agy is installed with the settings that make an API key its credential", a
     assert.equal(second.status, 0, second.stderr);
     assert.ok(sandbox.published().includes("agy"), "agy was not reinstalled after being removed");
     assert.equal(readFileSync(settings, "utf8"), '{ "modelProvider": "signed-in" }');
+
+    // Its installer documents ~/.local/bin, which is where the stub
+    // above puts it, but an installer that moves is the failure mode
+    // this whole file exists for: nothing shows a symptom until a card
+    // runs that agent. Its own directory is searched too, so a move
+    // there costs nothing.
+    rmSync(path.join(root, "usr/local/bin/agy"), { force: true });
+    rmSync(path.join(root, "home/.local/bin/agy"), { force: true });
+    mkdirSync(path.join(root, "home/.antigravity/bin"), { recursive: true });
+    writeFileSync(path.join(root, "home/.antigravity/bin/agy"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const third = sandbox.run();
+    assert.equal(third.status, 0, third.stderr);
+    assert.deepEqual(toolchainMissing(third.stdout), [], "agy in its own directory was not put on the PATH");
+    assert.deepEqual(sandbox.fetched(), [], "a binary already on the machine must not be downloaded again");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

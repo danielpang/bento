@@ -120,7 +120,7 @@ RUN arch="$(dpkg --print-architecture)" \
 # that agent half an hour later, and then only "executable file
 # `opencode` not found in $PATH".
 RUN for tool in agy claude codex cursor-agent opencode pool; do \
-      for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin; do \
+      for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin /root/.antigravity/bin; do \
         [ -x "$dir/$tool" ] && ln -sf "$dir/$tool" /usr/local/bin/"$tool" && break; \
       done; \
     done; \

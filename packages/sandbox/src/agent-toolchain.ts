@@ -119,7 +119,8 @@ mkdir -p /opt/bento /usr/local/bin
 publish() {
   command -v "$1" >/dev/null 2>&1 && return 0
   for dir in "$HOME/.local/bin" /root/.local/bin "$HOME/.opencode/bin" /root/.opencode/bin \\
-             "$HOME/.cursor/bin" /root/.cursor/bin /opt/bento/bin; do
+             "$HOME/.cursor/bin" /root/.cursor/bin "$HOME/.antigravity/bin" /root/.antigravity/bin \\
+             /opt/bento/bin; do
     if [ -x "$dir/$1" ]; then ln -sf "$dir/$1" /usr/local/bin/"$1"; return 0; fi
   done
   return 1
