@@ -86,3 +86,17 @@ test("spend sits in the existing meta row next to a PR chip", () => {
   assert.match(html, /class="card-spend"[^>]*>\$4\.20/);
   assert.match(html, /PR #12/);
 });
+
+test("a card with a description still shows only its title on the board", () => {
+  const html = render([
+    {
+      ...feature("done"),
+      title: "Rework the mobile topbar",
+      description: "The chrome wraps below 720px. Search for Eircode finds this card.",
+    },
+  ]);
+  assert.match(html, /Rework the mobile topbar/);
+  assert.doesNotMatch(html, /The chrome wraps below 720px/);
+  assert.doesNotMatch(html, /Eircode/);
+  assert.doesNotMatch(html, /card-description/);
+});
