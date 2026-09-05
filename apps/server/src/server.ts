@@ -10,6 +10,7 @@ import PgBoss from "pg-boss";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
 import { createAuth, type AuthHooks } from "./auth.js";
+import { reportAuthEvent } from "./auth-events.js";
 import { createMailer, noticeMessage, type NoticeEmailInput } from "./mail.js";
 import { SecretBox } from "./secrets.js";
 import { createHash } from "node:crypto";
@@ -137,6 +138,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
                 userId: u.id,
                 properties: { $set: { email: u.email, name: u.name } },
               });
+              // Counted here, on a row that exists: the after hook
+              // cannot tell a hosted duplicate from a real sign up.
+              reportAuthEvent(posthog, {
+                flow: "sign up",
+                outcome: "succeeded",
+                userId: u.id,
+                properties: { method: u.method, route: u.route },
+              });
             })
             .catch((err: unknown) => {
               console.warn("could not record the sign up:", err);
@@ -144,6 +153,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
             });
         }, SIGNUP_CONFIRM_DELAY_MS).unref();
       };
+      authHooks.onAuthEvent = (event) => reportAuthEvent(posthog, event);
     }
     const auth = createAuth(env, db, mailer, authHooks);
 

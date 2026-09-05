@@ -141,9 +141,11 @@ export function createAnalytics(env: Env): Analytics | null {
       organizationId?: string | null,
       properties?: Record<string, unknown>,
     ): void {
-      client.captureException(error instanceof Error ? error : new Error(String(error)), userId ?? undefined, {
+      const distinctId = userId ?? (organizationId ? `organization:${organizationId}` : "bento-server");
+      client.captureException(error instanceof Error ? error : new Error(String(error)), distinctId, {
         environment,
         bento_mode: mode,
+        ...(userId ? {} : { $process_person_profile: false }),
         // The event-level group property, so error tracking can answer
         // "which tenant is this hitting".
         ...(organizationId ? { $groups: { organization: organizationId } } : {}),
