@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import { and, asc, eq, isNull } from "drizzle-orm";
@@ -17,6 +17,7 @@ import {
   verification,
   type Db,
 } from "@bento/db";
+import { authEventHook, methodFor, type AuthEvent } from "./auth-events.js";
 import type { Env } from "./env.js";
 import {
   deleteAccountMessage,
@@ -119,7 +120,15 @@ export interface AuthHooks {
    * awaited into the sign up's fate: an analytics outage must not
    * refuse an account.
    */
-  onUserSignedUp?: (user: { id: string; email: string; name: string }) => void;
+  onUserSignedUp?: (user: { id: string; email: string; name: string; method: string; route: string }) => void;
+  /**
+   * A sign in or sign up outcome, from better-auth's after hook: a
+   * success, a refusal, or a social flow leaving for its provider.
+   * Sign up successes are not among them, since on a deployment that
+   * requires confirmation better-auth answers a duplicate exactly like
+   * a real one; onUserSignedUp is that signal.
+   */
+  onAuthEvent?: (event: AuthEvent) => void;
 }
 
 function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
@@ -149,6 +158,8 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
   /** Where the emails point back to, for their footer links. */
   const appUrl = env.BETTER_AUTH_URL.replace(/\/$/, "");
 
+  const report = authEventHook((event) => hooks.onAuthEvent?.(event));
+
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
@@ -171,6 +182,20 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
     }),
     trustedOrigins: env.BENTO_TRUSTED_ORIGINS,
     /**
+     * Sign in and sign up outcomes, for PostHog. See auth-events.ts for
+     * why this is a hook inside better-auth rather than a wrapper
+     * around it.
+     */
+    ...(hooks.onAuthEvent
+      ? {
+          hooks: {
+            after: createAuthMiddleware(async (ctx) => {
+              report(ctx);
+            }),
+          },
+        }
+      : {}),
+    /**
      * Every new session starts in the user's first organization.
      *
      * activeOrganizationId lives on the session and only setActive ever
@@ -188,9 +213,15 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
     databaseHooks: {
       user: {
         create: {
-          async after(newUser) {
+          async after(newUser, ctx) {
             try {
-              hooks.onUserSignedUp?.({ id: newUser.id, email: newUser.email, name: newUser.name });
+              hooks.onUserSignedUp?.({
+                id: newUser.id,
+                email: newUser.email,
+                name: newUser.name,
+                method: methodFor(ctx),
+                route: ctx?.path ?? "",
+              });
             } catch (err) {
               console.warn("sign up hook failed:", err);
             }

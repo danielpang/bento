@@ -28,9 +28,9 @@ import pg from "pg";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
-import { createAuth } from "./auth.js";
-import type { Analytics, ServerEvent } from "./analytics.js";
-import { userFromSessionCookie } from "./auth-events.js";
+import { createAuth, type AuthHooks } from "./auth.js";
+import { reportAuthEvent } from "./auth-events.js";
+import { recordingAnalytics } from "./test-analytics.js";
 import type { AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
@@ -2926,76 +2926,121 @@ test("the catalog's added flag does not cross organizations", async () => {
   assert.equal(leaked, undefined, "another organization's server must not read as added");
 });
 
-test("sign in and sign up outcomes reach PostHog, and a refusal reaches error tracking", async () => {
-  const events: ServerEvent[] = [];
-  const exceptions: { error: Error; properties?: Record<string, unknown> }[] = [];
-  const analytics: Analytics = {
-    capture: (event) => {
-      events.push(event);
-    },
-    captureException: (error, _userId, _organizationId, properties) => {
-      exceptions.push({ error: error as Error, properties });
-    },
-    shutdown: async () => {},
+test("sign in and sign up outcomes reach PostHog through better-auth's own hooks", async () => {
+  const { analytics, events, exceptions } = recordingAnalytics();
+  const hooks: AuthHooks = {
+    onAuthEvent: (event) => reportAuthEvent(analytics, event),
+    onUserSignedUp: (u) =>
+      reportAuthEvent(analytics, {
+        flow: "sign up",
+        outcome: "succeeded",
+        userId: u.id,
+        properties: { method: u.method, route: u.route },
+      }),
   };
-  ctx.analytics = analytics;
-  try {
-    const signUp = await jsonPost("/api/auth/sign-up/email", {
-      email: "outcome-metrics@bento.test",
-      password: "correct-horse-battery",
-      name: "Metrics",
+  // GitHub configured, so a social flow can start; nothing real behind
+  // it, so its callback can only refuse.
+  const socialEnv = loadEnv({
+    BENTO_MODE: "multi",
+    DATABASE_URL: testUrl,
+    BENTO_DATA_DIR: "/tmp",
+    BENTO_SANDBOX_DRIVER: "local-process",
+    BETTER_AUTH_SECRET: "test-secret-that-is-long-enough-for-hmac",
+    BETTER_AUTH_URL: "http://localhost:4400",
+    BENTO_RATE_LIMIT: "false",
+    GITHUB_CLIENT_ID: "test-client",
+    GITHUB_CLIENT_SECRET: "test-secret",
+  } as NodeJS.ProcessEnv);
+  const socialAuth = createAuth(socialEnv, ctx.db, { description: "test", async send() {} }, hooks);
+  assert.ok(socialAuth);
+  const socialApp = createApp({ ...ctx, env: socialEnv, auth: socialAuth });
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    socialApp.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
     });
-    assert.equal(signUp.status, 200);
-    const created = ((await signUp.json()) as { user: { id: string } }).user.id;
-    assert.equal(events.length, 1);
-    assert.equal(events[0].event, "sign up succeeded");
-    // A success belongs to the person it signed in.
-    assert.equal(events[0].userId, created);
-    assert.equal(events[0].properties?.method, "email");
-    assert.equal(events[0].properties?.status, 200);
-    assert.equal(exceptions.length, 0, "a success is not an error");
+  const email = "outcome-metrics@bento.test";
+  const password = "correct-horse-battery";
 
-    const wrong = await jsonPost("/api/auth/sign-in/email", {
-      email: "outcome-metrics@bento.test",
-      password: "not-the-password",
-    });
-    assert.equal(wrong.status, 401);
-    assert.equal(events.length, 2);
-    assert.equal(events[1].event, "sign in failed");
-    // A failure has no user, so it counts against the server.
-    assert.equal(events[1].userId, null);
-    assert.equal(events[1].properties?.method, "email");
-    assert.equal(events[1].properties?.code, "INVALID_EMAIL_OR_PASSWORD");
-    assert.equal(events[1].properties?.status, 401);
-    // Nothing that identifies the person rides along.
-    assert.equal(JSON.stringify(events[1]).includes("outcome-metrics"), false);
-    assert.equal(exceptions.length, 1);
-    assert.equal(exceptions[0].error.name, "AuthFailureError");
-    assert.equal(exceptions[0].properties?.$exception_fingerprint, "sign in failed:email:INVALID_EMAIL_OR_PASSWORD");
+  const signUp = await post("/api/auth/sign-up/email", { email, password, name: "Metrics" });
+  assert.equal(signUp.status, 200);
+  const created = ((await signUp.json()) as { user: { id: string } }).user.id;
+  assert.equal(events.length, 1, "one event for a sign up, not one per session it minted");
+  assert.equal(events[0].event, "sign up succeeded");
+  assert.equal(events[0].userId, created);
+  assert.deepEqual(events[0].properties, { method: "email", route: "/sign-up/email" });
+  assert.equal(exceptions.length, 0);
 
-    const right = await jsonPost("/api/auth/sign-in/email", {
-      email: "outcome-metrics@bento.test",
-      password: "correct-horse-battery",
-    });
-    assert.equal(right.status, 200);
-    assert.equal(events[2]?.event, "sign in succeeded");
-    assert.equal(events[2]?.userId, created);
+  const wrong = await post("/api/auth/sign-in/email", { email, password: "not-the-password" });
+  assert.equal(wrong.status, 401);
+  assert.equal(events[1]?.event, "sign in failed");
+  // A failure has no user, so it counts against the server.
+  assert.equal(events[1]?.userId, null);
+  assert.deepEqual(events[1]?.properties, {
+    method: "email",
+    route: "/sign-in/email",
+    status: 401,
+    code: "INVALID_EMAIL_OR_PASSWORD",
+  });
+  assert.equal(exceptions.length, 0, "a wrong password is not a fault of the server");
 
-    // The OAuth callback names nobody in its redirect, so the user is
-    // read back out of the session cookie the response set. The email
-    // sign in sets the same cookie, which makes it the stand-in here.
-    assert.equal(await userFromSessionCookie(ctx.auth!)(right), created);
+  const right = await post("/api/auth/sign-in/email", { email, password });
+  assert.equal(right.status, 200);
+  assert.equal(events[2]?.event, "sign in succeeded");
+  assert.equal(events[2]?.userId, created);
+  assert.deepEqual(events[2]?.properties, { method: "email", route: "/sign-in/email" });
 
-    const duplicate = await jsonPost("/api/auth/sign-up/email", {
-      email: "outcome-metrics@bento.test",
-      password: "correct-horse-battery",
-      name: "Metrics",
-    });
-    assert.equal(duplicate.status, 422);
-    assert.equal(events[3]?.event, "sign up failed");
-    assert.equal(events[3]?.properties?.code, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
-    assert.equal(exceptions.length, 2);
-  } finally {
-    delete ctx.analytics;
+  const duplicate = await post("/api/auth/sign-up/email", { email, password, name: "Metrics" });
+  assert.equal(duplicate.status, 422);
+  assert.equal(events[3]?.event, "sign up failed");
+  assert.equal(events[3]?.properties?.code, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
+  assert.equal(exceptions.length, 0);
+
+  const started = await post("/api/auth/sign-in/social", { provider: "github", callbackURL: "/" });
+  assert.equal(started.status, 200);
+  assert.equal(events[4]?.event, "sign in started");
+  assert.deepEqual(events[4]?.properties, { method: "github", route: "/sign-in/social" });
+
+  // A provider nobody configured is a fault, and its name is not a property value.
+  const missing = await post("/api/auth/sign-in/social", { provider: "gitlab", callbackURL: "/" });
+  assert.equal(missing.status, 404);
+  assert.equal(events[5]?.event, "sign in failed");
+  assert.equal(events[5]?.properties?.method, "unknown");
+  assert.equal(events[5]?.properties?.code, "PROVIDER_NOT_FOUND");
+  assert.equal(exceptions.length, 1);
+  assert.equal(exceptions[0].error.name, "AuthFailureError");
+  assert.equal(exceptions[0].userId, null);
+  assert.equal(exceptions[0].properties?.$exception_fingerprint, "sign in failed:unknown:PROVIDER_NOT_FOUND");
+
+  // Coming back from GitHub with a state nobody issued: better-auth
+  // redirects to its error page, and that is a failed sign in.
+  const callback = await socialApp.request("/api/auth/callback/github?code=abc&state=nope");
+  assert.equal(callback.status, 302);
+  assert.match(callback.headers.get("location") ?? "", /error=state_mismatch/);
+  assert.equal(events[6]?.event, "sign in failed");
+  assert.deepEqual(events[6]?.properties, { method: "github", route: "/callback/:id", status: 302, code: "state_mismatch" });
+  assert.equal(exceptions.length, 2);
+  assert.equal(exceptions[1].properties?.$exception_fingerprint, "sign in failed:github:state_mismatch");
+
+  // The same refusal while signed in is the account-link flow, which is not a sign in.
+  const sessionCookie = right.headers
+    .getSetCookie()
+    .map((header) => header.split(";")[0])
+    .find((pair) => pair.includes("session_token="));
+  assert.ok(sessionCookie, "signing in sets the session cookie");
+  const linking = await socialApp.request("/api/auth/callback/github?code=abc&state=nope", { headers: { cookie: sessionCookie } });
+  assert.equal(linking.status, 302);
+  assert.equal(events.length, 7, "a refused link is not a failed sign in");
+
+  // Reading the session is not signing in.
+  const token = right.headers.get("set-auth-token")!;
+  const session = await socialApp.request("/api/auth/get-session", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(session.status, 200);
+  assert.equal(events.length, 7);
+
+  // Nothing that identifies the person rides along on a failure.
+  for (const event of events) {
+    if (event.event.endsWith("failed")) assert.equal(JSON.stringify(event).includes("outcome-metrics"), false);
   }
 });
