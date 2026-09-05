@@ -25,6 +25,7 @@ import {
   jsonObject1,
   jsonObject2,
   jsonObject3,
+  extractJsonError,
   mcpCreateBody,
   mcpEnabledPatch,
   numberBytes,
@@ -127,6 +128,13 @@ export interface Model {
   readonly serverEdit: TextEditState;
   readonly setupDone: boolean;
   readonly helperState: HelperState;
+  /**
+   * Absolute path to the bundled helper binary. Set at launch from
+   * BENTO_HELPER when the .app launcher exports it. Empty falls back
+   * to `bento` on PATH, which is what `native dev` uses after a
+   * global link.
+   */
+  readonly helperPath: Uint8Array;
   /** Bearer token for a hosted server. Empty in local mode. */
   readonly token: Uint8Array;
   readonly verifyUrl: Uint8Array;
@@ -261,6 +269,8 @@ export type Msg =
   | { readonly kind: "choose_local" }
   | { readonly kind: "back_to_setup" }
   | { readonly kind: "server_edit"; readonly edit: TextInputEvent }
+  /** Absolute helper path from the BENTO_HELPER env at launch. */
+  | { readonly kind: "helper_path"; readonly path: Uint8Array }
   | { readonly kind: "helper_line"; readonly line: Uint8Array }
   | { readonly kind: "helper_exit"; readonly code: number }
   | { readonly kind: "helper_failed"; readonly reason: Uint8Array }
@@ -445,7 +455,15 @@ export type Msg =
 /** The system appearance arrives on this arm. */
 export const appearanceMsg = "appearance_changed";
 
+/**
+ * Packaged builds export BENTO_HELPER to the bundled helper so the app
+ * does not depend on a user-installed `bento` on PATH. Absent in
+ * `native dev` unless scripts/dev.sh set it.
+ */
+export const envMsgs = [{ env: "BENTO_HELPER", msg: "helper_path" }] as const;
+
 export const viewUnbound = [
+  "helper_path",
   "helper_line",
   "helper_exit",
   "helper_failed",
@@ -499,6 +517,7 @@ export const viewUnbound = [
   "selectCreatedProject",
   "token",
   "helperState",
+  "helperPath",
   "mode",
   "baseUrl",
   "verifyUrl",
@@ -686,6 +705,7 @@ export function initialModel(): Model {
     serverEdit: seedEdit(asciiBytes("https://")),
     setupDone: false,
     helperState: "idle",
+    helperPath: new Uint8Array(0),
     token: new Uint8Array(0),
     verifyUrl: new Uint8Array(0),
     verifyCode: new Uint8Array(0),
@@ -780,6 +800,12 @@ export function initialModel(): Model {
 
 function hasSelectedProject(model: Model): boolean {
   return model.selectedProject >= 0 && model.selectedProject < model.projects.length;
+}
+
+/** The helper executable: bundled path when set, otherwise `bento` on PATH. */
+function helperExe(model: Model): Uint8Array {
+  if (model.helperPath.length > 0) return model.helperPath;
+  return asciiBytes("bento");
 }
 
 function hasSelectedCard(model: Model): boolean {
@@ -897,11 +923,12 @@ function lineEventIs(line: Uint8Array, event: Uint8Array): boolean {
  * the server's own sentence, but there is no JSON parser here, and
  * "status 409" tells a person nothing they can act on.
  */
-function refusedWrite(model: Model, status: number): Model {
+function refusedWrite(model: Model, status: number, body: Uint8Array): Model {
+  const fromBody = extractJsonError(body);
   return {
     ...model,
     notice: new Uint8Array(0),
-    lastError: refusalText(status),
+    lastError: fromBody.length > 0 ? fromBody : refusalText(status),
   };
 }
 
@@ -1007,6 +1034,9 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "mcp_key_edit":
       return { ...model, mcpKeyEdit: applyEdit(model.mcpKeyEdit, msg.edit, SECRET_CAP) };
 
+    case "helper_path":
+      return { ...model, helperPath: msg.path };
+
     /**
      * A thin client still has to sign in: a hosted server rejects
      * unauthenticated requests. The helper runs the device flow and
@@ -1023,7 +1053,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       };
       return [
         next,
-        Cmd.spawn([asciiBytes("bento"), asciiBytes("login"), asciiBytes("--server"), model.serverEdit.text], {
+        Cmd.spawn([helperExe(next), asciiBytes("login"), asciiBytes("--server"), model.serverEdit.text], {
           key: "login",
           line: "helper_line",
           exit: "helper_exit",
@@ -1049,7 +1079,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return [
         next,
         // Sign in first: the runner helper needs credentials to claim work.
-        Cmd.spawn([asciiBytes("bento"), asciiBytes("login"), asciiBytes("--server"), model.serverEdit.text], {
+        Cmd.spawn([helperExe(next), asciiBytes("login"), asciiBytes("--server"), model.serverEdit.text], {
           key: "login",
           line: "helper_line",
           exit: "helper_exit",
@@ -1071,7 +1101,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           helperState: "starting",
           helperMessage: asciiBytes("Starting the local server..."),
         },
-        Cmd.spawn([asciiBytes("bento"), asciiBytes("serve"), asciiBytes("--port"), asciiBytes("4400")], {
+        Cmd.spawn([helperExe(model), asciiBytes("serve"), asciiBytes("--port"), asciiBytes("4400")], {
           key: "helper",
           line: "helper_line",
           exit: "helper_exit",
@@ -1142,7 +1172,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           return [
             authed,
             Cmd.batch([
-              Cmd.spawn([asciiBytes("bento"), asciiBytes("runner"), asciiBytes("--server"), authed.baseUrl], {
+              Cmd.spawn([helperExe(authed), asciiBytes("runner"), asciiBytes("--server"), authed.baseUrl], {
                 key: "helper",
                 line: "helper_line",
                 exit: "helper_exit",
@@ -1244,7 +1274,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return {
         ...model,
         helperState: "failed",
-        helperMessage: asciiBytes("The bento helper stopped. Check that bento is installed and on your PATH."),
+        helperMessage: asciiBytes("The local helper stopped. Quit and reopen the app, or check that Docker is running."),
       };
     }
 
@@ -1252,7 +1282,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return {
         ...model,
         helperState: "failed",
-        helperMessage: concat2(asciiBytes("Could not start bento: "), msg.reason),
+        helperMessage: concat2(asciiBytes("The local helper could not start: "), msg.reason),
       };
 
     // ---- loads ----
@@ -2123,7 +2153,21 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "open_pipeline": {
-      const next: Model = { ...closedDialog(model), panel: "pipeline", editingStage: -1 };
+      // Pipeline belongs to a project. On the project picker the board
+      // is not open yet, so pick the first project rather than hiding
+      // the control (the web console keeps a project selected in the
+      // picker and still offers Pipeline).
+      let base: Model = closedDialog(model);
+      if (!hasSelectedProject(base) && base.projects.length > 0) {
+        base = { ...base, selectedProject: 0, selectedCard: -1 };
+      }
+      if (!hasSelectedProject(base)) {
+        return {
+          ...model,
+          lastError: asciiBytes("Create a project first, then open Pipeline to set its stages and repositories."),
+        };
+      }
+      const next: Model = { ...base, panel: "pipeline", editingStage: -1 };
       return [
         next,
         Cmd.batch([
@@ -2140,29 +2184,30 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             { url: pipelineUrl(next), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(next) } },
             { key: "pipeline", ok: "pipeline_ok", err: "load_failed" },
           ),
-          hasSelectedProject(next)
-            ? Cmd.fetch(
-                {
-                  url: idUrl(
-                    next,
-                    asciiBytes("/api/projects/"),
-                    next.projects[next.selectedProject].id,
-                    asciiBytes("/repositories/plain"),
-                  ),
-                  method: "GET",
-                  timeoutMs: 5000,
-                  headers: { authorization: authHeader(next) },
-                },
-                { key: "repos", ok: "repos_ok", err: "load_failed" },
-              )
-            : Cmd.none,
+          Cmd.fetch(
+            {
+              url: reposUrl(next),
+              method: "GET",
+              timeoutMs: 5000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "repos", ok: "repos_ok", err: "load_failed" },
+          ),
+          Cmd.fetch(
+            { url: boardUrl(next), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(next) } },
+            { key: "board", ok: "board_ok", err: "load_failed" },
+          ),
         ]),
       ];
     }
 
     case "open_spend": {
-      if (!hasSelectedProject(model)) return { ...model, lastError: asciiBytes("Create a project first.") };
-      const next: Model = { ...closedDialog(model), panel: "spend", editingStage: -1, editingRepo: -1 };
+      let base: Model = model;
+      if (!hasSelectedProject(base) && base.projects.length > 0) {
+        base = { ...base, selectedProject: 0, selectedCard: -1 };
+      }
+      if (!hasSelectedProject(base)) return { ...model, lastError: asciiBytes("Create a project first.") };
+      const next: Model = { ...closedDialog(base), panel: "spend", editingStage: -1, editingRepo: -1 };
       return [
         next,
         Cmd.fetch(
@@ -2173,8 +2218,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "open_sessions": {
-      if (!hasSelectedProject(model)) return { ...model, lastError: asciiBytes("Create a project first.") };
-      const next: Model = { ...closedDialog(model), panel: "sessions", editingStage: -1, editingRepo: -1 };
+      let base: Model = model;
+      if (!hasSelectedProject(base) && base.projects.length > 0) {
+        base = { ...base, selectedProject: 0, selectedCard: -1 };
+      }
+      if (!hasSelectedProject(base)) return { ...model, lastError: asciiBytes("Create a project first.") };
+      const next: Model = { ...closedDialog(base), panel: "sessions", editingStage: -1, editingRepo: -1 };
       return [
         next,
         Cmd.fetch(
@@ -2287,19 +2336,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       const name = model.projectNameEdit.text.trim();
       const path = model.projectPathEdit.text.trim();
       if (name.length === 0 || path.length === 0) {
-        return { ...model, notice: asciiBytes("A project needs a name and a repository path.") };
+        return { ...model, lastError: asciiBytes("A project needs a name and a repository path.") };
       }
+      // Keep the dialog open until the server accepts the path. Closing
+      // first left a 400 looking like a successful create.
       return [
-        // Opens the pipeline panel, where repositories are added. A
-        // project spanning a frontend and a backend spans them from the
-        // start, and this core has no way to express a repeating field
-        // in one dialog, so the second one is added right after rather
-        // than being something to go looking for later.
-        {
-          ...closedDialog(model),
-          panel: "pipeline",
-          notice: asciiBytes("Created the project. Add another repository below if a change spans more than one."),
-        },
+        { ...model, notice: asciiBytes("Creating the project..."), lastError: new Uint8Array(0) },
         Cmd.fetch(
           {
             url: apiUrl(model, asciiBytes("/api/projects")),
@@ -2846,11 +2888,9 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       ];
     }
 
-    case "open_session":
-    case "open_spend_card": {
-      const rows = msg.kind === "open_session" ? model.sessions : model.spendCards;
-      if (msg.index < 0 || msg.index >= rows.length) return model;
-      const featureId = rows[msg.index].featureId;
+    case "open_session": {
+      if (msg.index < 0 || msg.index >= model.sessions.length) return model;
+      const featureId = model.sessions[msg.index].featureId;
       let cardIndex = -1;
       for (let i = 0; i < model.cards.length; i++) {
         if (bytesEq(model.cards[i].id, featureId)) cardIndex = i;
@@ -2858,7 +2898,114 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       if (cardIndex < 0) {
         return { ...model, panel: "none", lastError: asciiBytes("That card is not on the board.") };
       }
-      return update({ ...model, panel: "none", editingStage: -1, editingRepo: -1 }, { kind: "pick_card", index: cardIndex });
+      const cleared: Model = { ...model, panel: "none", editingStage: -1, editingRepo: -1 };
+      const next: Model = {
+        ...cleared,
+        lastError: new Uint8Array(0),
+        selectedCard: cardIndex,
+        transcript: new Uint8Array(0),
+        history: [],
+        gateChecks: [],
+        hasConflicts: false,
+        showHistory: false, showChanges: false, changes: new Uint8Array(0),
+        cursor: 0,
+        transcriptInFlight: selectedCardHasRun({ ...cleared, selectedCard: cardIndex }),
+      };
+      const card = next.cards[cardIndex];
+      return [
+        next,
+        Cmd.batch([
+          Cmd.fetch(
+            {
+              url: idUrl(next, asciiBytes("/api/features/"), card.id, asciiBytes("/gate/plain")),
+              method: "GET",
+              timeoutMs: 5000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "gate", ok: "gate_ok", err: "load_failed" },
+          ),
+          Cmd.fetch(
+            {
+              url: mergeStatusUrl(next),
+              method: "GET",
+              timeoutMs: 10000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "merge", ok: "merge_ok", err: "merge_failed" },
+          ),
+          next.transcriptInFlight
+            ? Cmd.fetch(
+                {
+                  url: transcriptUrl(next),
+                  method: "GET",
+                  timeoutMs: 5000,
+                  headers: { authorization: authHeader(next) },
+                },
+                { key: "transcript", ok: "transcript_ok", err: "load_failed" },
+              )
+            : Cmd.none,
+        ]),
+      ];
+    }
+
+    case "open_spend_card": {
+      if (msg.index < 0 || msg.index >= model.spendCards.length) return model;
+      const featureId = model.spendCards[msg.index].featureId;
+      let cardIndex = -1;
+      for (let i = 0; i < model.cards.length; i++) {
+        if (bytesEq(model.cards[i].id, featureId)) cardIndex = i;
+      }
+      if (cardIndex < 0) {
+        return { ...model, panel: "none", lastError: asciiBytes("That card is not on the board.") };
+      }
+      const cleared: Model = { ...model, panel: "none", editingStage: -1, editingRepo: -1 };
+      const next: Model = {
+        ...cleared,
+        lastError: new Uint8Array(0),
+        selectedCard: cardIndex,
+        transcript: new Uint8Array(0),
+        history: [],
+        gateChecks: [],
+        hasConflicts: false,
+        showHistory: false, showChanges: false, changes: new Uint8Array(0),
+        cursor: 0,
+        transcriptInFlight: selectedCardHasRun({ ...cleared, selectedCard: cardIndex }),
+      };
+      const card = next.cards[cardIndex];
+      return [
+        next,
+        Cmd.batch([
+          Cmd.fetch(
+            {
+              url: idUrl(next, asciiBytes("/api/features/"), card.id, asciiBytes("/gate/plain")),
+              method: "GET",
+              timeoutMs: 5000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "gate", ok: "gate_ok", err: "load_failed" },
+          ),
+          Cmd.fetch(
+            {
+              url: mergeStatusUrl(next),
+              method: "GET",
+              timeoutMs: 10000,
+              headers: { authorization: authHeader(next) },
+            },
+            { key: "merge", ok: "merge_ok", err: "merge_failed" },
+          ),
+          next.transcriptInFlight
+            ? Cmd.fetch(
+                {
+                  url: transcriptUrl(next),
+                  method: "GET",
+                  timeoutMs: 5000,
+                  headers: { authorization: authHeader(next) },
+                },
+                { key: "transcript", ok: "transcript_ok", err: "load_failed" },
+              )
+            : Cmd.none,
+        ]),
+      ];
     }
 
     // ---- team panel ----
@@ -3003,8 +3150,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "confirm_remove_member": {
-      const msg = { index: model.confirmIndex };
-      if (msg.index < 0 || msg.index >= model.members.length) return model;
+      const index = model.confirmIndex;
+      if (index < 0 || index >= model.members.length) return model;
       return [
         { ...closedDialog(model), notice: asciiBytes("Removed the member") },
         Cmd.fetch(
@@ -3013,7 +3160,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             method: "POST",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model), "content-type": "application/json" },
-            body: jsonObject1(asciiBytes("memberIdOrEmail"), model.members[msg.index].id),
+            body: jsonObject1(asciiBytes("memberIdOrEmail"), model.members[index].id),
           },
           { key: "act", ok: "team_changed", err: "act_failed" },
         ),
@@ -3111,8 +3258,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "confirm_delete_repo": {
-      const msg = { index: model.confirmIndex };
-      if (msg.index < 0 || msg.index >= model.repos.length || !hasSelectedProject(model)) return model;
+      const index = model.confirmIndex;
+      if (index < 0 || index >= model.repos.length || !hasSelectedProject(model)) return model;
       const base = concat2(
         concat2(model.baseUrl, asciiBytes("/api/projects/")),
         model.projects[model.selectedProject].id,
@@ -3121,7 +3268,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         { ...closedDialog(model), notice: asciiBytes("Removed the repository") },
         Cmd.fetch(
           {
-            url: concat3(base, asciiBytes("/repositories/"), model.repos[msg.index].id),
+            url: concat3(base, asciiBytes("/repositories/"), model.repos[index].id),
             method: "DELETE",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model) },
@@ -3226,7 +3373,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "repos_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       if (!hasSelectedProject(model)) return model;
       return [
         model,
@@ -3238,7 +3385,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "mcp_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       return [
         model,
         Cmd.fetch(
@@ -3254,7 +3401,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "yaml_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       const next: Model = {
         ...model,
         yamlImportEdit: emptyEdit(),
@@ -3311,13 +3458,13 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "confirm_delete_secret": {
-      const msg = { index: model.confirmIndex };
-      if (msg.index < 0 || msg.index >= model.secrets.length) return model;
+      const index = model.confirmIndex;
+      if (index < 0 || index >= model.secrets.length) return model;
       return [
         { ...closedDialog(model), notice: asciiBytes("Removed the credential") },
         Cmd.fetch(
           {
-            url: idUrl(model, asciiBytes("/api/secrets/"), model.secrets[msg.index].id, new Uint8Array(0)),
+            url: idUrl(model, asciiBytes("/api/secrets/"), model.secrets[index].id, new Uint8Array(0)),
             method: "DELETE",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model) },
@@ -3353,7 +3500,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     // ---- write results ----
 
     case "board_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       if (model.selectedProject < 0) return model;
       // Approve, reject, and re-check all change what the gate is
       // waiting on, which is the pane's whole point; fetched only on
@@ -3397,9 +3544,15 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "projects_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       return [
-        { ...model, selectCreatedProject: true },
+        {
+          ...closedDialog(model),
+          panel: "pipeline",
+          selectCreatedProject: true,
+          notice: asciiBytes("Created the project. Add another repository below if a change spans more than one."),
+          lastError: new Uint8Array(0),
+        },
         Cmd.fetch(
           { url: projectsUrl(model), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(model) } },
           { key: "projects", ok: "projects_ok", err: "load_failed" },
@@ -3408,7 +3561,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "profiles_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       return [
         model,
         Cmd.fetch(
@@ -3424,7 +3577,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "pipeline_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       return [
         { ...model, editingStage: -1 },
         Cmd.fetch(
@@ -3438,7 +3591,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       if (model.switchingOrganization) {
         const next: Model =
           msg.status >= 400
-            ? { ...refusedWrite(model, msg.status), switchingOrganization: false }
+            ? { ...refusedWrite(model, msg.status, msg.body), switchingOrganization: false }
             : {
                 ...model,
                 switchingOrganization: false,
@@ -3482,7 +3635,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           ]),
         ];
       }
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       return [
         model,
         Cmd.fetch(
@@ -3498,7 +3651,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "secrets_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWrite(model, msg.status, msg.body);
       return [
         model,
         Cmd.fetch(
@@ -3653,7 +3806,7 @@ export function helperFailed(model: Model): boolean {
  * off setup being done: a helper that is still starting, or that fell
  * over, leaves buttons whose every action would fail.
  */
-export function connected(model: Model): boolean {
+export function isConnected(model: Model): boolean {
   return model.setupDone && model.helperState === "ready";
 }
 
@@ -3673,6 +3826,11 @@ export function connectionText(model: Model): Uint8Array {
 
 export function hasProject(model: Model): boolean {
   return model.selectedProject >= 0;
+}
+
+/** Any project exists in the org, even if the board is not open yet. */
+export function hasProjects(model: Model): boolean {
+  return model.projects.length > 0;
 }
 
 export function hasCard(model: Model): boolean {
@@ -3716,6 +3874,11 @@ export function selRunStatus(model: Model): Uint8Array {
 /** Dark appearance, so the light ink renditions are the legible ones. */
 export function isDarkMode(model: Model): boolean {
   return model.colorScheme === "dark";
+}
+
+/** The bento plate mark registered as image id 9 in app.zon. */
+export function brandGlyph(_model: Model): number {
+  return 9;
 }
 
 /** Spend on the selected card, empty when nothing reported any. */
@@ -3875,10 +4038,6 @@ export function dialogConfirm(model: Model): boolean {
   return model.dialog === "confirm";
 }
 
-export function confirmText(model: Model): Uint8Array {
-  return model.confirmText;
-}
-
 /** Which pending action the confirm dialog's yes button fires. */
 export function confirmingProfile(model: Model): boolean {
   return bytesEq(model.confirmKind, asciiBytes("profile"));
@@ -4008,7 +4167,14 @@ export function needsSetupHint(model: Model): boolean {
 }
 
 function colCards(model: Model, position: number): readonly Card[] {
-  return model.cards.filter((c) => c.stagePos === position && !c.finished);
+  return withCardSelection(
+    model.cards.filter((c) => c.stagePos === position && !c.finished),
+    model.selectedCard,
+  );
+}
+
+function withCardSelection(cards: readonly Card[], selected: number): readonly Card[] {
+  return cards.map((c) => ({ ...c, isSelected: c.index === selected }));
 }
 
 function colName(model: Model, position: number): Uint8Array {
@@ -4027,12 +4193,18 @@ function colName(model: Model, position: number): Uint8Array {
  * be selected.
  */
 export function colBacklog(model: Model): readonly Card[] {
-  return model.cards.filter((c) => c.stagePos < 0 && !c.finished);
+  return withCardSelection(
+    model.cards.filter((c) => c.stagePos < 0 && !c.finished),
+    model.selectedCard,
+  );
 }
 
 /** Finished and cancelled cards, which keep their last stage but leave its column. */
 export function colCompleted(model: Model): readonly Card[] {
-  return model.cards.filter((c) => c.finished);
+  return withCardSelection(
+    model.cards.filter((c) => c.finished),
+    model.selectedCard,
+  );
 }
 
 /**
@@ -4047,7 +4219,12 @@ export function colCompleted(model: Model): readonly Card[] {
 const LAST_COLUMN = 9;
 
 function colCardsAt(model: Model, position: number): readonly Card[] {
-  if (position === LAST_COLUMN) return model.cards.filter((c) => c.stagePos >= LAST_COLUMN && !c.finished);
+  if (position === LAST_COLUMN) {
+    return withCardSelection(
+      model.cards.filter((c) => c.stagePos >= LAST_COLUMN && !c.finished),
+      model.selectedCard,
+    );
+  }
   return colCards(model, position);
 }
 
