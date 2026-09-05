@@ -912,44 +912,6 @@ export function FeatureDrawer({
           </section>
         )}
 
-        {/* One row per repository this card was published to. Its own
-            section rather than a list inside Actions: these outlive the
-            button that made them, and nesting them there left nothing
-            to draw a line between. */}
-        {pullRequests.length > 0 && (
-          <section className="section">
-            <span className="label">Pull requests</span>
-            {/* Said above the rows, not only as a chip: the chip names
-                which repository, this says what to do about it. */}
-            {canResolve && (
-              <p className="warn">
-                GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
-                the base branch has moved and the changes collide. Resolve conflicts (under Actions) has the stage agent
-                rebase the branch and update the pull request.
-              </p>
-            )}
-            {pullRequests.map((pr) => (
-              <a
-                key={pr.url}
-                className="pr-row"
-                href={pr.url}
-                target="_blank"
-                rel="noreferrer"
-                title={`Open pull request #${pr.number} in ${pr.name} on GitHub`}
-              >
-                <span className="pr-repo">{pr.name}</span>
-                <span className="pr-number">#{pr.number}</span>
-                {conflictedUrls.has(pr.url) && (
-                  <span className="chip" data-status="conflict">
-                    Merge conflict
-                  </span>
-                )}
-                <ExternalMark />
-              </a>
-            ))}
-          </section>
-        )}
-
         {/* Always rendered while the card is in a stage. Hiding it when
             there were no rows meant a manual stage, the commonest way a
             card waits, explained itself with blank space. */}
