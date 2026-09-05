@@ -14,6 +14,7 @@ import type {
   FeatureMergeStatus,
   FeaturePullRequest,
   GateState,
+  Repository,
   RunArtifact,
   Stage,
 } from "@bento/api-client";
@@ -110,6 +111,8 @@ export function FeatureDrawer({
   const [publishing, setPublishing] = useState(false);
   /** The card's open pull requests, one per repository it was published to. */
   const [pullRequests, setPullRequests] = useState<FeaturePullRequest[]>([]);
+  /** Every linked repository in the project, for multi-repo publish state. */
+  const [projectRepos, setProjectRepos] = useState<Repository[]>([]);
   /**
    * What GitHub says about each pull request's merge, fetched after the
    * card's own detail so the drawer never waits on GitHub to render.
@@ -158,6 +161,7 @@ export function FeatureDrawer({
     setChanges(null);
     setArtifacts([]);
     setPullRequests([]);
+    setProjectRepos([]);
     setMergeStates([]);
     setLoadedId(null);
     setLoadFailed(false);
@@ -168,17 +172,19 @@ export function FeatureDrawer({
     let cancelled = false;
     void (async () => {
       try {
-        const [detail, gateState, events, committed, github, produced] = await Promise.all([
+        const [detail, gateState, events, committed, github, produced, repos] = await Promise.all([
           client.getFeature(feature.id),
           client.getGate(feature.id),
           client.getHistory(feature.id),
           client.getChanges(feature.id).catch(() => null),
           client.githubStatus().catch(() => null),
           client.listArtifacts(feature.id).catch(() => []),
+          client.listRepositories(feature.projectId).catch(() => []),
         ]);
         if (cancelled) return;
         setRuns(detail.runs);
         setPullRequests(detail.pullRequests ?? []);
+        setProjectRepos(repos);
         setGate(gateState);
         setHistory(events);
         setChanges(committed);
@@ -249,7 +255,16 @@ export function FeatureDrawer({
     // button read as a dead one, and the repeat clicks queued nothing.
     toast.note("Creating the pull request. It will show up here shortly.");
     try {
-      const { published, failures } = await client.publishFeature(feature.id);
+      const { published, failures, rebaseRun } = await client.publishFeature(feature.id);
+      if (rebaseRun) {
+        toast.note(
+          "The branch is behind the base branch. A rebase run was started; the pull request will be created when it finishes.",
+        );
+      } else if (published.some((pr) => pr.draft)) {
+        toast.note(
+          "Opened draft pull requests for repositories that could not be rebased automatically. They may have merge conflicts until rebased.",
+        );
+      }
       // Successes are not reported in words: they appear as rows in the
       // Pull requests section, which is where they still are tomorrow.
       // Only what went wrong, or the fact that nothing happened, needs
@@ -290,7 +305,7 @@ export function FeatureDrawer({
     setBusy(true);
     try {
       await client.resolveConflicts(feature.id);
-      toast.note("Resolving conflicts. The stage agent rebases the branch, and the pull request updates when it finishes.");
+      toast.note("Fixing conflicts. The stage agent rebases the branch, and the pull request updates when it finishes.");
       onChanged();
     } catch (err) {
       toast.fail(err);
@@ -361,16 +376,88 @@ export function FeatureDrawer({
    * row below can wear its own warning. "unknown" and "clean" both stay
    * silent: only a conflict asks the user for anything.
    */
+  const pullRequestByName = new Map(pullRequests.map((pr) => [pr.name, pr]));
+  const mergeStateByUrl = new Map(mergeStates.map((state) => [state.url, state]));
   const conflictedUrls = new Set(
     mergeStates.filter((s) => s.state === "conflicted").map((s) => s.url),
   );
   const hasConflicts = conflictedUrls.size > 0;
-  /**
-   * One guard for the warning and the button both: a finished card
-   * cannot resolve (the server refuses with "reopen it first"), and a
-   * warning pointing at a button that is not on screen is a dead end.
-   */
-  const canResolve = hasConflicts && !finished;
+  /** Shown on stages that push a branch and open pull requests when work lands. */
+  const showPullRequests = stage?.createPr === true && !!feature.currentStageId;
+  const publishDisabled = busy || runActive || canPublish === false || !feature.branchName;
+  const publishDisabledReason = !feature.branchName
+    ? "Run an agent on this card first."
+    : canPublish === false
+      ? "Needs a GitHub connection. Save a GitHub token under Settings, GitHub."
+      : runActive
+        ? "An agent is working this card. Publish when it finishes."
+        : undefined;
+  const resolveDisabled = busy || runActive;
+  const resolveDisabledReason = runActive
+    ? "An agent is working this card. Fix conflicts when it finishes."
+    : undefined;
+  const orphanPullRequests = pullRequests.filter(
+    (pr) => !projectRepos.some((repo) => repo.name === pr.name),
+  );
+
+  function renderPullRequestRow(repo: Repository | { id: string; name: string; repoUrl: string | null }, pr?: FeaturePullRequest) {
+    const conflicted = pr ? mergeStateByUrl.get(pr.url)?.state === "conflicted" : false;
+    const rowPublishDisabled = publishDisabled || !repo.repoUrl;
+    const rowPublishReason = !feature.branchName
+      ? "Run an agent on this card first."
+      : !repo.repoUrl
+        ? "This repository has no GitHub remote configured."
+        : publishDisabledReason;
+    return (
+      <div key={repo.id} className="pr-row pr-row-with-actions">
+        <span className="pr-repo">{repo.name}</span>
+        <div className="pr-row-actions">
+          {pr ? (
+            <>
+              {conflicted && (
+                <span className="chip" data-status="conflict">
+                  Merge conflict
+                </span>
+              )}
+              <a
+                className="pr-open"
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                title={`Open pull request #${pr.number} in ${repo.name} on GitHub`}
+              >
+                #{pr.number} <ExternalMark />
+              </a>
+              {conflicted && !finished && (
+                <button
+                  type="button"
+                  className="btn btn-ghost pr-row-btn"
+                  disabled={resolveDisabled}
+                  title={
+                    resolveDisabledReason ??
+                    "The stage agent rebases the branch onto the latest base branch and resolves the conflicts."
+                  }
+                  onClick={() => void resolveConflictsNow()}
+                >
+                  Fix conflicts
+                </button>
+              )}
+            </>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-ghost pr-row-btn"
+              disabled={rowPublishDisabled}
+              title={rowPublishReason}
+              onClick={() => void publishNow()}
+            >
+              {publishing ? "Creating..." : "Create PR"}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
   /**
    * Why Delete cannot be pressed, in the words the button carries.
    *
@@ -522,74 +609,7 @@ export function FeatureDrawer({
                 Undo this run
               </button>
             )}
-            {/* Publish on demand, whatever the stage settings say. The
-                branch exists once the card has been worked, which is
-                also when there is something to publish. */}
-            {/* Shown even when it cannot run, disabled with the reason.
-                Hiding it meant somebody looking for the control could
-                not find out it existed, let alone what it wanted. */}
-            {feature.branchName && (
-              pullRequests.length > 0 ? (
-                /* Made, so the door becomes the destination. The Pull
-                    requests section lists every repository's; this leads
-                    to the first, mirroring the card's own pr_number. */
-                <>
-                  <a
-                    className="btn"
-                    href={pullRequests[0]!.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={`Open pull request #${pullRequests[0]!.number} in ${pullRequests[0]!.name} on GitHub`}
-                  >
-                    Open PR #{pullRequests[0]!.number} <ExternalMark />
-                  </a>
-                  {/* Only when GitHub reports a conflict: a rebase
-                      nothing needs is churn, and the server refuses it
-                      anyway. The stage's agent resolves in the card's
-                      own conversation; the server force pushes with
-                      lease when it finishes. */}
-                  {canResolve && (
-                    <button
-                      className="btn"
-                      disabled={busy || runActive}
-                      title={
-                        runActive
-                          ? "An agent is working this card. Resolve conflicts when it finishes."
-                          : "The stage agent rebases the branch onto the latest base branch and resolves the conflicts."
-                      }
-                      onClick={() => void resolveConflictsNow()}
-                    >
-                      Resolve conflicts
-                    </button>
-                  )}
-                </>
-              ) : (
-                <button
-                  className="btn"
-                  disabled={busy || runActive || canPublish === false}
-                  title={
-                    canPublish === false
-                      ? "Needs a GitHub connection. Save a GitHub token under Settings, GitHub."
-                      : runActive
-                        ? "An agent is working this card. Publish when it finishes."
-                        : undefined
-                  }
-                  onClick={() => void publishNow()}
-                >
-                  {publishing ? "Creating PR..." : "Create PR"}
-                </button>
-              )
-            )}
           </div>
-          {/* What publishing said this time: nothing to push, or a
-              repository that refused. The pull requests themselves are
-              a property of the card, not of the last button press, so
-              they have their own section below. */}
-          {publishNotes.map((note, i) => (
-            <p key={i} className={note.failed ? "warn" : "muted"}>
-              {note.text}
-            </p>
-          ))}
           {/* Why the last run failed, where the eye lands. The same
               sentence closes the transcript, but a person looking at a
               red card reads the actions first. */}
@@ -653,44 +673,6 @@ export function FeatureDrawer({
           )}
         </section>
 
-        {/* One row per repository this card was published to. Its own
-            section rather than a list inside Actions: these outlive the
-            button that made them, and nesting them there left nothing
-            to draw a line between. */}
-        {pullRequests.length > 0 && (
-          <section className="section">
-            <span className="label">Pull requests</span>
-            {/* Said above the rows, not only as a chip: the chip names
-                which repository, this says what to do about it. */}
-            {canResolve && (
-              <p className="warn">
-                GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
-                the base branch has moved and the changes collide. Resolve conflicts (under Actions) has the stage agent
-                rebase the branch and update the pull request.
-              </p>
-            )}
-            {pullRequests.map((pr) => (
-              <a
-                key={pr.url}
-                className="pr-row"
-                href={pr.url}
-                target="_blank"
-                rel="noreferrer"
-                title={`Open pull request #${pr.number} in ${pr.name} on GitHub`}
-              >
-                <span className="pr-repo">{pr.name}</span>
-                <span className="pr-number">#{pr.number}</span>
-                {conflictedUrls.has(pr.url) && (
-                  <span className="chip" data-status="conflict">
-                    Merge conflict
-                  </span>
-                )}
-                <ExternalMark />
-              </a>
-            ))}
-          </section>
-        )}
-
         {/* Always rendered while the card is in a stage. Hiding it when
             there were no rows meant a manual stage, the commonest way a
             card waits, explained itself with blank space. */}
@@ -748,6 +730,38 @@ export function FeatureDrawer({
                 when you press Re-check requirements.
               </p>
             )}
+          </section>
+        )}
+
+        {showPullRequests && (
+          <section className="section">
+            <span className="label">Pull requests</span>
+            {hasConflicts && !finished && (
+              <p className="warn">
+                GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
+                the base branch has moved and the changes collide. Use Fix conflicts on the row below.
+              </p>
+            )}
+            {detailsPending ? (
+              <div className="skeleton-stack">
+                <Skeleton height={36} />
+                <Skeleton height={36} />
+              </div>
+            ) : projectRepos.length === 0 ? (
+              <p className="muted">This project has no repositories yet. Add one under project settings.</p>
+            ) : (
+              <div className="pr-list">
+                {projectRepos.map((repo) => renderPullRequestRow(repo, pullRequestByName.get(repo.name)))}
+                {orphanPullRequests.map((pr) =>
+                  renderPullRequestRow({ id: pr.url, name: pr.name, repoUrl: pr.url }, pr),
+                )}
+              </div>
+            )}
+            {publishNotes.map((note, i) => (
+              <p key={i} className={note.failed ? "warn" : "muted"}>
+                {note.text}
+              </p>
+            ))}
           </section>
         )}
 

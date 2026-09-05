@@ -24,7 +24,9 @@ import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
+import { syncPullRequestsFromRun } from "./sync-pr-from-run.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
+import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
@@ -850,34 +852,80 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   }
   if (mustPublish && publisher) {
     const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
+    const publishables = repoRows.map((row) => {
+      const preparedRepo = prepared.find((p) => p.name === row.name);
+      const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
+      return {
+        id: row.id,
+        name: row.name,
+        repoUrl: row.repoUrl,
+        githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
+        defaultBranch: row.defaultBranch,
+        ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
+        ...(ctx.driver.exportRepository
+          ? {
+              exportBundle: () =>
+                ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
+            }
+          : {}),
+      };
+    });
     const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
       featureId: feature.id,
       featureTitle: feature.title,
       branch,
-      repositories: repoRows.map((row) => {
-        const preparedRepo = prepared.find((p) => p.name === row.name);
-        const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-        return {
-          id: row.id,
-          name: row.name,
-          repoUrl: row.repoUrl,
-          githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
-          defaultBranch: row.defaultBranch,
-          ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
-          ...(ctx.driver.exportRepository
-            ? {
-                exportBundle: () =>
-                  ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
-              }
-            : {}),
-        };
-      }),
+      repositories: publishables,
     }, { includeStageNotes });
+    const [runRow] = await ctx.db
+      .select({ startedBy: agentRuns.startedBy })
+      .from(agentRuns)
+      .where(eq(agentRuns.id, runId))
+      .limit(1);
+    const recovery = await recoverAncestryPublishFailures(
+      ctx,
+      ctx.db,
+      feature,
+      failures,
+      failures.map((f) => ({
+        name: f.name,
+        defaultBranch: publishables.find((r) => r.name === f.name)?.defaultBranch ?? "main",
+      })),
+      {
+        publisher,
+        branch,
+        repositories: publishables,
+        includeStageNotes,
+      },
+      runRow?.startedBy ?? "system",
+    );
+    const allPublished = [...published, ...recovery.draftPublished];
+    if (allPublished.length > 0 && runKind !== "rebase") {
+      await syncPullRequestsFromRun(ctx.db, publisher, {
+        runId,
+        stageSlug: stage.slug,
+        stageName: stage.name,
+        published: allPublished,
+        say: saySystem,
+      });
+    }
     publishNotes.push(
       ...published.map((pr) => `Opened pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}`),
-      ...failures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
+      ...recovery.draftPublished.map(
+        (pr) =>
+          `Opened draft pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}. The branch may have merge conflicts until it is rebased.`,
+      ),
+      ...(recovery.rebaseRun
+        ? [
+            "The branch is behind the base branch. A rebase run was started; the pull request will publish when it finishes.",
+          ]
+        : [
+            ...failures
+              .filter((f) => !recovery.draftPublished.some((p) => p.name === f.name))
+              .map((f) => `Could not publish ${f.name}: ${f.reason}`),
+            ...recovery.draftFailures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
+          ]),
     );
-    if (published.length === 0 && failures.length === 0) {
+    if (published.length === 0 && failures.length === 0 && recovery.draftPublished.length === 0) {
       publishNotes.push(wording.noCommits);
     }
   }

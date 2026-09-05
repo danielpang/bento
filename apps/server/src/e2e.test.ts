@@ -31,7 +31,7 @@ import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
-import { publishFeatureBranches } from "./orchestrator/publish.js";
+import { publishFeatureBranches, resolvePublishBaseSha } from "./orchestrator/publish.js";
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -4817,6 +4817,55 @@ test("the server pushes each repository the agent committed in", { timeout: 90_0
   // The feature's own pr_number mirrors the first repository's.
   const [mirrored] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
   assert.equal(mirrored?.prNumber, 42);
+});
+
+test("publish succeeds when the feature branch forked before main moved forward", { timeout: 90_000 }, async () => {
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-remote-behind-"));
+  await run("git", ["-C", bare, "init", "--bare", "-b", "main"]);
+  const work = await fixtureRepo("publishing-behind");
+  await run("git", ["-C", work, "push", bare, "main"]);
+
+  const branch = "feature/behind-main";
+  await run("git", ["-C", work, "checkout", "-q", "-b", branch]);
+  await writeFile(path.join(work, "feature.txt"), "feature work\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "feature work",
+  ]);
+
+  await run("git", ["-C", work, "checkout", "-q", "main"]);
+  await writeFile(path.join(work, "main-moved.txt"), "main moved\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "main moved",
+  ]);
+  await run("git", ["-C", work, "checkout", "-q", branch]);
+
+  const baseSha = await resolvePublishBaseSha(work, "main");
+  const { stdout: fork } = await run("git", ["-C", work, "merge-base", "main", branch]);
+  assert.equal(baseSha, fork.trim());
+
+  const publisher = {
+    async pushToken() {
+      return "unused";
+    },
+    async ensurePullRequest(input: { owner: string; repo: string; head: string; base: string }) {
+      return { prNumber: 51, url: `https://github.com/${input.owner}/${input.repo}/pull/51` };
+    },
+  };
+  const { project } = await setupProject("Behind main");
+  const feature = await createFeature(project.id, "Behind main");
+  const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
+    featureId: feature.id,
+    featureTitle: "Behind main",
+    branch,
+    repositories: [
+      { id: null, name: "app", repoUrl: "https://github.com/acme/app", defaultBranch: "main", worktreePath: work },
+    ],
+  }, { remoteUrl: () => bare });
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(published.map((p) => p.name), ["app"]);
 });
 
 /**

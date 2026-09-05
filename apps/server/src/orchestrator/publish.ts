@@ -12,6 +12,38 @@ import type { Db } from "@bento/db";
 
 const run = promisify(execFile);
 
+/** True when publish failed because the bundle base is not an ancestor of HEAD. */
+export function isAncestryPublishFailure(reason: string): boolean {
+  return /merge-base.*--is-ancestor/i.test(reason);
+}
+
+/**
+ * The fork point between the default branch and HEAD. Used as the
+ * bundle base so a feature branched before main moved forward still
+ * publishes; the default branch tip alone is not always an ancestor.
+ */
+export async function resolvePublishBaseSha(repoPath: string, defaultBranch: string): Promise<string> {
+  const baseRef = await resolveDefaultBranchRef(repoPath, defaultBranch);
+  try {
+    const { stdout } = await run("git", ["-C", repoPath, "merge-base", baseRef, "HEAD"]);
+    const sha = stdout.trim();
+    if (sha) return sha;
+  } catch {
+    // Fall back to the branch tip when histories do not share a merge-base.
+  }
+  const { stdout } = await run("git", ["-C", repoPath, "rev-parse", `${baseRef}^{commit}`]);
+  return stdout.trim();
+}
+
+async function resolveDefaultBranchRef(repoPath: string, defaultBranch: string): Promise<string> {
+  try {
+    await run("git", ["-C", repoPath, "rev-parse", "--verify", `${defaultBranch}^{commit}`]);
+    return defaultBranch;
+  } catch {
+    return `origin/${defaultBranch}`;
+  }
+}
+
 /**
  * Answers git's credential prompt from the environment.
  *
@@ -49,6 +81,8 @@ export interface PublishedPullRequest {
   repoUrl: string;
   prNumber: number;
   url: string;
+  /** True when opened as a draft because the branch could not be rebased cleanly. */
+  draft?: boolean;
 }
 
 /** Downloads a private repository on the trusted host and strips credentials before transfer. */
@@ -90,11 +124,10 @@ export async function createRepositorySeed(
 }
 
 /** Exports committed work without reading any remote or credential config. */
-async function bundleFromWorktree(worktreePath: string, base: string): Promise<RepositoryBundle | null> {
+async function bundleFromWorktree(worktreePath: string, defaultBranch: string): Promise<RepositoryBundle | null> {
   try {
-    const { stdout: baseOut } = await run("git", ["-C", worktreePath, "rev-parse", `${base}^{commit}`]);
+    const baseSha = await resolvePublishBaseSha(worktreePath, defaultBranch);
     const { stdout: headOut } = await run("git", ["-C", worktreePath, "rev-parse", "HEAD^{commit}"]);
-    const baseSha = baseOut.trim();
     const headSha = headOut.trim();
     if (baseSha === headSha) return null;
     const dir = await mkdtemp(path.join(tmpdir(), "bento-export-"));
@@ -145,6 +178,14 @@ export async function publishFeatureBranches(
      * generated markdown files in the diff.
      */
     includeStageNotes?: boolean;
+    /**
+     * Push the branch and open a draft pull request even when the
+     * bundle base is not an ancestor of HEAD. Used when a rebase run
+     * could not be started and something on GitHub is still useful.
+     */
+    draft?: boolean;
+    /** When set, only these repository names are published. */
+    onlyRepositories?: string[];
   } = {},
 ): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
   const published: PublishedPullRequest[] = [];
@@ -166,7 +207,10 @@ export async function publishFeatureBranches(
     };
   }
 
+  const only = options.onlyRepositories ? new Set(options.onlyRepositories) : null;
+
   for (const repo of args.repositories) {
+    if (only && !only.has(repo.name)) continue;
     // Publishing only happens when a stage asked for it, so a
     // repository that cannot be published is worth saying out loud
     // rather than skipping: the person who turned the mode on is
@@ -222,6 +266,7 @@ export async function publishFeatureBranches(
       const pushedHead = await pushBundle(bundle, remote, repo.defaultBranch, args.branch, token, {
         includeStageNotes: options.includeStageNotes === true,
         expectedRemoteHead: known?.headSha ?? null,
+        skipAncestryCheck: options.draft === true,
       });
 
       const pr = await publisher.ensurePullRequest({
@@ -230,7 +275,14 @@ export async function publishFeatureBranches(
         head: args.branch,
         base: repo.defaultBranch,
         title: args.featureTitle,
-        body: `Opened by Bento for "${args.featureTitle}".`,
+        body: options.draft
+          ? [
+              `Opened by Bento for "${args.featureTitle}".`,
+              "",
+              "This pull request is a draft because the branch could not be rebased onto the base branch automatically. It may have merge conflicts until the branch is rebased.",
+            ].join("\n")
+          : `Opened by Bento for "${args.featureTitle}".`,
+        draft: options.draft === true,
       });
 
       await db
@@ -248,7 +300,13 @@ export async function publishFeatureBranches(
           set: { number: pr.prNumber, url: pr.url, headSha: pushedHead, updatedAt: new Date() },
         });
 
-      published.push({ name: repo.name, repoUrl: repo.repoUrl, prNumber: pr.prNumber, url: pr.url });
+      published.push({
+        name: repo.name,
+        repoUrl: repo.repoUrl,
+        prNumber: pr.prNumber,
+        url: pr.url,
+        ...(options.draft ? { draft: true } : {}),
+      });
     } catch (err) {
       failures.push({ name: repo.name, reason: reasonOf(err) });
     }
@@ -275,6 +333,8 @@ async function pushBundle(
     includeStageNotes: boolean;
     /** The commit Bento last pushed, when one is recorded; the lease to hold. */
     expectedRemoteHead?: string | null;
+    /** Skip the bundle-base ancestry check and push HEAD anyway. */
+    skipAncestryCheck?: boolean;
   },
 ): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
@@ -305,8 +365,10 @@ async function pushBundle(
     await run("git", ["-C", checkout, "fetch", bundlePath, "HEAD"], { env });
     const { stdout: fetched } = await run("git", ["-C", checkout, "rev-parse", "FETCH_HEAD^{commit}"], { env });
     if (fetched.trim() !== bundle.headSha) throw new Error("exported Git bundle head did not match the declared commit");
-    await run("git", ["-C", checkout, "cat-file", "-e", `${bundle.baseSha}^{commit}`], { env });
-    await run("git", ["-C", checkout, "merge-base", "--is-ancestor", bundle.baseSha, bundle.headSha], { env });
+    if (!options.skipAncestryCheck) {
+      await run("git", ["-C", checkout, "cat-file", "-e", `${bundle.baseSha}^{commit}`], { env });
+      await run("git", ["-C", checkout, "merge-base", "--is-ancestor", bundle.baseSha, bundle.headSha], { env });
+    }
 
     const { stdout: remoteRef } = await run(
       "git",

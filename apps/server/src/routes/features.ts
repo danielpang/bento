@@ -46,9 +46,10 @@ import {
   requeueMessages,
 } from "../orchestrator/messages.js";
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
+import { buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
-import { linkGitHubRemotes, refreshBaseBranches } from "../orchestrator/repo-remote.js";
-import { buildConflictResolutionPrompt } from "../orchestrator/prompt.js";
+import { startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
+import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
 import { githubConnectionFor } from "../github.js";
 import { featurePullRequestTargets, type FeaturePullRequestTarget } from "../feature-prs.js";
@@ -971,7 +972,35 @@ export function featureRoutes(ctx: AppContext) {
         branch: feature.branchName,
         repositories: publishable,
       }, { includeStageNotes });
-      if (published.length > 0) {
+      const rebaseTargets: RebaseTarget[] = failures.map((f) => ({
+        name: f.name,
+        defaultBranch: publishable.find((r) => r.name === f.name)?.defaultBranch ?? "main",
+      }));
+      const recovery = await recoverAncestryPublishFailures(
+        ctx,
+        db(c, ctx),
+        feature,
+        failures,
+        rebaseTargets,
+        {
+          publisher,
+          branch: feature.branchName,
+          repositories: publishable,
+          includeStageNotes,
+        },
+        actor(c),
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      const ancestryNames = new Set(
+        failures.filter((f) => recovery.draftPublished.some((p) => p.name === f.name)).map((f) => f.name),
+      );
+      const allPublished = [...published, ...recovery.draftPublished];
+      const remainingFailures = [
+        ...failures.filter((f) => !ancestryNames.has(f.name)),
+        ...recovery.draftFailures,
+      ];
+      const rebaseRun = recovery.rebaseRun;
+      if (allPublished.length > 0) {
         ctx.bus.emitBoardEvent({
           type: "feature_updated",
           projectId: feature.projectId,
@@ -980,7 +1009,16 @@ export function featureRoutes(ctx: AppContext) {
           currentStageId: feature.currentStageId,
         });
       }
-      return c.json({ published, failures });
+      if (rebaseRun) {
+        ctx.bus.emitBoardEvent({
+          type: "run_updated",
+          projectId: feature.projectId,
+          featureId: feature.id,
+          runId: rebaseRun.id,
+          status: "queued",
+        });
+      }
+      return c.json({ published: allPublished, failures: remainingFailures, rebaseRun: rebaseRun ?? null });
     })
     /**
      * Where each of the card's pull requests stands against its base:
@@ -1049,69 +1087,21 @@ export function featureRoutes(ctx: AppContext) {
         );
       }
 
-      // The conversation the rebase continues is the card's own work,
-      // never a judge's: same rule as the message route, because the
-      // resolving agent needs the context of the changes it made. A
-      // card whose only runs are judge runs still resolves, as a fresh
-      // run of whatever ran last, exactly like a follow-up message.
-      const conversation = await latestConversationRun(db(c, ctx), feature.id);
-      const [latest] = conversation
-        ? [conversation]
-        : await db(c, ctx)
-            .select()
-            .from(agentRuns)
-            .where(eq(agentRuns.featureId, feature.id))
-            .orderBy(desc(agentRuns.queuedAt))
-            .limit(1);
-      if (!latest) {
-        return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
-      }
-      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
-      /**
-       * Runner-executed runs settle on the runner's machine, and the
-       * server has no way to read that checkout, so the promise this
-       * run is built on (the server pushes the rebased branch) cannot
-       * be kept. Refusing honestly beats burning an agent run whose
-       * work goes nowhere.
-       */
-      if (resumeFrom.executor !== "server") {
+      const result = await startFeatureRebaseRun(
+        ctx,
+        db(c, ctx),
+        feature,
+        buildConflictResolutionPrompt(feature.branchName, conflicted),
+        actor(c),
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      if (!result.ok) {
         return c.json(
-          {
-            error:
-              "this project's agents run on a runner, and the server cannot push a branch it never sees. Rebase and push from the runner's checkout, or switch the project to server execution.",
-          },
-          409,
+          { error: result.error, ...(result.code ? { code: result.code } : {}) },
+          result.status,
         );
       }
-      /**
-       * Bring origin/<base> up to date where the server can: sprite
-       * sandboxes re-seed on provision, but docker and local worktrees
-       * share the host checkout, whose origin/<base> is only as fresh
-       * as the last fetch. Best effort, before the run is created, so
-       * the rebase has the real base to land on.
-       */
-      if (ctx.driver.provider !== "sprite") {
-        const repos = await db(c, ctx)
-          .select({ localPath: repositories.localPath, defaultBranch: repositories.defaultBranch })
-          .from(repositories)
-          .where(eq(repositories.projectId, feature.projectId));
-        await refreshBaseBranches(repos);
-      }
-      const run = await startRunIfIdle(db(c, ctx), {
-        featureId: feature.id,
-        stageId: resumeFrom.stageId,
-        agentProfileId: resumeFrom.agentProfileId,
-        prompt: buildConflictResolutionPrompt(feature.branchName, conflicted),
-        cliSessionId: resumeFrom.cliSessionId,
-        executor: resumeFrom.executor,
-        kind: "rebase",
-        startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
-      if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
-      if (run === "gone") return c.json({ error: "not found" }, 404);
-      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      await ctx.boss.send("run.execute", { runId: run.id });
-      return c.json(run, 201);
+      return c.json(result.run, 201);
     })
     /** Links a pull request so PR based gate criteria can evaluate. */
     .post("/:id/link-pr", zValidator("json", z.object({ prNumber: z.number().int().positive() })), async (c) => {

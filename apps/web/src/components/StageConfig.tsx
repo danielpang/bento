@@ -175,7 +175,6 @@ export function StageConfig({
 
         {order.map((stage, index) => {
           const assigned = profiles.find((p) => p.id === stage.defaultAgentProfileId);
-          const criteria = Array.isArray(stage.gateCriteria) ? stage.gateCriteria : [];
           return (
             <div
               key={stage.id}
@@ -267,17 +266,10 @@ export function StageConfig({
                   <span className="chip chip-empty">no agent</span>
                 )}
                 {assigned && PREVIEW_TOOLS[assigned.cli] && <span className="chip chip-soft">preview</span>}
-                <span className="muted">
-                  {stage.gateType === "manual" ? "waits for your approval" : "advances on its requirements"}
+                <span className="chip chip-soft">
+                  {stage.gateType === "manual" ? "Manual" : "Automatic"}
                 </span>
-                {stage.gateType === "auto" && (
-                  <span className="muted">
-                    {criteria.length === 0
-                      ? "when the agent finishes"
-                      : `${criteria.length} requirement${criteria.length === 1 ? "" : "s"}`}
-                  </span>
-                )}
-                {stage.createPr && <span className="muted">opens a pull request</span>}
+                {stage.createPr && <span className="chip chip-soft">PR enabled</span>}
               </div>
             </div>
           );

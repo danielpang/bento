@@ -815,7 +815,7 @@ export class SpriteDriver implements SandboxDriver {
       `cd ${shellQuote(dir)}`,
       `base=${shellQuote(baseBranch)}`,
       'if ! git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then base="origin/$base"; fi',
-      'base_sha=$(git rev-parse "$base^{commit}")',
+      'base_sha=$(git merge-base "$base" HEAD 2>/dev/null || git rev-parse "$base^{commit}")',
       'head_sha=$(git rev-parse "HEAD^{commit}")',
       'if [ "$base_sha" = "$head_sha" ]; then exit 3; fi',
       'tmp=$(mktemp /tmp/bento-bundle.XXXXXX)',

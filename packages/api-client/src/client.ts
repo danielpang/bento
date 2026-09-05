@@ -890,8 +890,9 @@ export class BentoClient {
   /** Pushes the card's branch and opens (or updates) its pull requests. */
   publishFeature(featureId: string) {
     return this.request<{
-      published: { name: string; repoUrl: string; prNumber: number; url: string }[];
+      published: { name: string; repoUrl: string; prNumber: number; url: string; draft?: boolean }[];
       failures: { name: string; reason: string }[];
+      rebaseRun: AgentRun | null;
     }>(`/api/features/${featureId}/publish`, { method: "POST" });
   }
 
