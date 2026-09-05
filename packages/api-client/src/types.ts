@@ -133,6 +133,12 @@ export interface RelatedCard {
 export interface RelatedGroup {
   parent: RelatedCard;
   children: RelatedCard[];
+  /**
+   * The card this group’s parent was itself split from, when it was.
+   * Present only on a mid-level parent, so the drawer can show both
+   * "Parts" and "Part of" instead of picking one.
+   */
+  partOf?: RelatedCard | null;
 }
 
 export interface AgentRun {

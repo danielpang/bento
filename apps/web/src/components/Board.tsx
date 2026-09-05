@@ -1,6 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentProfile, Feature, FeatureSpend, Stage } from "@bento/api-client";
-import { childBadgeLabel, childStatsFrom, childTone, type ChildStats } from "@bento/core";
+import { childBadgeLabel, childStatsFrom, childTone, relatedRootId, type ChildStats } from "@bento/core";
 import { useBetaTesters } from "../beta.js";
 import { ProviderMark } from "./ProviderMark.js";
 import { formatCardSpend } from "./spend-format.js";
@@ -404,7 +404,7 @@ export function Board({
     if (!showGroups || !selectedId) return null;
     const card = features.find((f) => f.id === selectedId);
     if (!card) return null;
-    const rootId = card.parentId ?? card.id;
+    const rootId = relatedRootId(card, features);
     const group = features.filter((f) => f.id === rootId || f.parentId === rootId);
     // A card with no parent and no parts is not a group, and dimming
     // the whole board around an ordinary selection would be noise.

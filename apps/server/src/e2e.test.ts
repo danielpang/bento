@@ -6009,6 +6009,7 @@ async function createPart(projectId: string, title: string, parentId: string) {
 type RelatedPayload = {
   parent: { id: string; title: string };
   children: { id: string; title: string; status: string; stageName: string | null; costUsd: number | null }[];
+  partOf?: { id: string; title: string } | null;
 } | null;
 
 test("a card can be split, and the group reads the same from either end", async () => {
@@ -6038,6 +6039,24 @@ test("a card can be split, and the group reads the same from either end", async 
   // which is what lets the console draw nothing for ordinary cards.
   const alone = await createFeature(project.id, "An ordinary card");
   assert.equal(await json<RelatedPayload>(await app.request(`/api/features/${alone.id}/related`)), null);
+});
+
+test("a part that itself split is the parent of its own group", async () => {
+  // Depth is allowed; the view is one level. Walking up from a
+  // mid-level parent used to hide the parts the badge was counting.
+  const { project } = await setupProject("split-mid-level");
+  const root = await createFeature(project.id, "The large one");
+  const mid = await json<{ id: string }>(await createPart(project.id, "A part that grew", root.id));
+  const leaf = await json<{ id: string }>(await createPart(project.id, "A part of the part", mid.id));
+
+  const fromMid = await json<RelatedPayload>(await app.request(`/api/features/${mid.id}/related`));
+  assert.equal(fromMid?.parent.id, mid.id);
+  assert.deepEqual(fromMid?.children.map((c) => c.id), [leaf.id]);
+  assert.equal(fromMid?.partOf?.id, root.id, "and the card it came from is still named");
+
+  const fromLeaf = await json<RelatedPayload>(await app.request(`/api/features/${leaf.id}/related`));
+  assert.equal(fromLeaf?.parent.id, mid.id);
+  assert.deepEqual(fromLeaf?.children.map((c) => c.id), [leaf.id]);
 });
 
 test("a finished part is still in the group", async () => {

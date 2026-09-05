@@ -762,7 +762,7 @@ export class BentoClient {
    * most cards. Answers 404 for users not on the beta flag.
    */
   relatedFeatures(featureId: string) {
-    return this.request<RelatedGroup | null>(`/api/features//related`);
+    return this.request<RelatedGroup | null>(`/api/features/${featureId}/related`);
   }
 
   getFeature(featureId: string) {

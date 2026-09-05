@@ -352,13 +352,6 @@ export function featureRoutes(ctx: AppContext) {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
       if (!feature) return c.json({ error: "not found" }, 404);
 
-      // Before the transaction, so the answer names the count rather
-      // than surfacing a foreign key violation as a 500. The console
-      // disables the button for the same reason, from the same fact;
-      // this is the door, not the hint.
-      const children = await childCount(db(c, ctx), feature.id);
-      if (children > 0) return c.json({ error: parentDeleteRefusal(children) }, 409);
-
       const outcome = await db(c, ctx)
         .transaction(async (tx) => {
           /**
@@ -374,6 +367,13 @@ export function featureRoutes(ctx: AppContext) {
             .where(eq(features.id, feature.id))
             .for("update");
           if (!locked) return "gone" as const;
+
+          // After the lock, so a part filed in the same instant is
+          // counted rather than surfacing a foreign key violation as
+          // a 500. The console disables the button from the same fact;
+          // this is the door, not the hint.
+          const children = await childCount(tx, feature.id);
+          if (children > 0) return { refused: parentDeleteRefusal(children) };
 
           const [active] = await tx
             .select({ id: agentRuns.id })
@@ -461,6 +461,9 @@ export function featureRoutes(ctx: AppContext) {
       // same thing to "deleted it already" and to "that is not yours".
       if (outcome === "gone") return c.json({ error: "not found" }, 404);
       if (outcome === "busy") return c.json({ error: CARD_BUSY_DELETE }, 409);
+      if (typeof outcome === "object" && "refused" in outcome) {
+        return c.json({ error: outcome.refused }, 409);
+      }
 
       ctx.bus.emitBoardEvent({
         type: "feature_deleted",

@@ -158,6 +158,23 @@ test("selecting one card of a group rings the rest and dims the board", () => {
   assert.equal(html.match(/data-related=""/g)?.length, 2);
 });
 
+test("selecting a mid-level parent rings its parts, not only the card it came from", () => {
+  const html = render(
+    [
+      feature("active", "root"),
+      { ...feature("active", "mid"), parentId: "root" },
+      { ...feature("active", "leaf"), parentId: "mid" },
+    ],
+    {},
+    { beta: true, selectedId: "mid" },
+  );
+  assert.match(html, /data-grouped=""/);
+  // The mid-level card and the part it spawned — not the grandparent.
+  assert.equal(html.match(/data-related=""/g)?.length, 2);
+  assert.match(html, /data-feature="mid"[^>]*data-related=""/);
+  assert.match(html, /data-feature="leaf"[^>]*data-related=""/);
+});
+
 test("an ordinary selection does not dim the board", () => {
   const html = render([feature("active", "solo")], {}, { beta: true, selectedId: "solo" });
   assert.doesNotMatch(html, /data-grouped/);

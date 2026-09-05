@@ -83,7 +83,7 @@ export async function parentRefusal(
 }
 
 /** How many cards were spawned from this one. */
-export async function childCount(db: Db, featureId: string): Promise<number> {
+export async function childCount(db: Pick<Db, "select">, featureId: string): Promise<number> {
   const [row] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(features)
@@ -111,10 +111,14 @@ export interface RelatedCard {
  * everything it spawned.
  *
  * Resolved from the parent whichever end you open it from, so a child
- * and its parent answer with the same group. Read from the rows rather
- * than from whatever the caller's board happens to hold, which is what
- * keeps a finished child, or one that was dragged into another lane,
- * in the picture.
+ * and its parent answer with the same group. A card that has itself
+ * spawned parts is the root of *its* group even when it also has a
+ * parent: walking up would hide the parts the badge is counting, and
+ * the first-version view is one level, not the whole chain.
+ *
+ * Read from the rows rather than from whatever the caller's board
+ * happens to hold, which is what keeps a finished child, or one that
+ * was dragged into another lane, in the picture.
  *
  * Null when this card is neither a parent nor a child: there is no
  * group, which the console reads as "draw nothing".
@@ -122,18 +126,29 @@ export interface RelatedCard {
 export async function relatedGroup(
   db: Db,
   feature: { id: string; parentId: string | null },
-): Promise<{ parent: RelatedCard; children: RelatedCard[] } | null> {
-  const rootId = feature.parentId ?? feature.id;
+): Promise<{ parent: RelatedCard; children: RelatedCard[]; partOf: RelatedCard | null } | null> {
+  const spawned = await childCount(db, feature.id);
+  const rootId = spawned > 0 ? feature.id : (feature.parentId ?? feature.id);
+  // When this card is itself a parent, its own parent is not in the
+  // group — it is the way back. Pulled in the same read so the drawer
+  // can name it without a second round trip.
+  const ancestorId = spawned > 0 ? feature.parentId : null;
   const rows = await db
     .select({ feature: features, stageName: stages.name })
     .from(features)
     .leftJoin(stages, eq(stages.id, features.currentStageId))
-    .where(or(eq(features.id, rootId), eq(features.parentId, rootId)))
+    .where(
+      or(
+        eq(features.id, rootId),
+        eq(features.parentId, rootId),
+        ...(ancestorId ? [eq(features.id, ancestorId)] : []),
+      ),
+    )
     // Creation order, which is the order the agent decided the parts
     // in. Anything else would reshuffle the view between visits.
     .orderBy(asc(features.createdAt));
   const parentRow = rows.find((r) => r.feature.id === rootId);
-  const childRows = rows.filter((r) => r.feature.id !== rootId);
+  const childRows = rows.filter((r) => r.feature.parentId === rootId);
   // The card is a child whose parent has since been deleted, or a
   // parent nobody spawned from. Neither is a group worth drawing.
   if (!parentRow || childRows.length === 0) return null;
@@ -177,7 +192,12 @@ export async function relatedGroup(
     };
   };
 
-  return { parent: draw(parentRow), children: childRows.map(draw) };
+  const ancestorRow = ancestorId ? rows.find((r) => r.feature.id === ancestorId) : undefined;
+  return {
+    parent: draw(parentRow),
+    children: childRows.map(draw),
+    partOf: ancestorRow ? draw(ancestorRow) : null,
+  };
 }
 
 /**

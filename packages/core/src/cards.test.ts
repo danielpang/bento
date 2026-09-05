@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { childBadgeLabel, childStatsFrom, childTone, parentDeleteRefusal } from "./cards.js";
+import { childBadgeLabel, childStatsFrom, childTone, parentDeleteRefusal, relatedRootId } from "./cards.js";
 
 const card = (id: string, parentId: string | null, status = "active") => ({ id, parentId, status });
 
@@ -49,6 +49,15 @@ test("all done only when every part is", () => {
   const cards = [card("p", null), card("a", "p", "done"), card("b", "p")];
   assert.equal(childTone(childStatsFrom("p", cards, {})), "idle");
   assert.equal(childBadgeLabel(childStatsFrom("p", cards, {})), "2 parts");
+});
+
+test("a card that spawned parts is the root of its own group, even if it has a parent", () => {
+  // Depth is allowed; the first-version view is one level. Walking up
+  // from a mid-level parent hid the parts the badge was counting.
+  const cards = [card("a", null), card("b", "a"), card("c", "b")];
+  assert.equal(relatedRootId(cards[1]!, cards), "b");
+  assert.equal(relatedRootId(cards[2]!, cards), "b", "a leaf still walks up");
+  assert.equal(relatedRootId(cards[0]!, cards), "a");
 });
 
 test("the delete refusal names how many cards are in the way", () => {

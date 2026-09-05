@@ -446,6 +446,7 @@ export function FeatureDrawer({
    * rather than its own, so only the parent counts them.
    */
   const ownChildren = group && group.parent.id === feature.id ? group.children : [];
+  const partOf = group?.partOf ?? (group && group.parent.id !== feature.id ? group.parent : null);
   const deleteBlocked = runActive
     ? "An agent is working this card. Stop it or wait for it to finish."
     : ownChildren.length > 0
@@ -783,7 +784,7 @@ export function FeatureDrawer({
         {group && (
           <section className="section">
             <span className="label">{ownChildren.length > 0 ? "Parts" : "Part of"}</span>
-            {ownChildren.length > 0 ? (
+            {ownChildren.length > 0 && (
               <>
                 <p className="muted">
                   This card was split into {ownChildren.length === 1 ? "1 part" : `${ownChildren.length} parts`}. Each
@@ -804,18 +805,22 @@ export function FeatureDrawer({
                   </button>
                 ))}
               </>
-            ) : (
-              <button
-                className="related-row"
-                onClick={() => onSelectFeature(group.parent.id)}
-                title={`Open “${group.parent.title}”`}
-              >
-                <span className="related-row-title">{group.parent.title}</span>
-                <span className="chip" data-status={group.parent.status}>
-                  {statusWords(group.parent.status)}
-                </span>
-                <span className="related-row-stage">{group.parent.stageName ?? "Backlog"}</span>
-              </button>
+            )}
+            {partOf && (
+              <>
+                {ownChildren.length > 0 && <span className="label">Part of</span>}
+                <button
+                  className="related-row"
+                  onClick={() => onSelectFeature(partOf.id)}
+                  title={`Open “${partOf.title}”`}
+                >
+                  <span className="related-row-title">{partOf.title}</span>
+                  <span className="chip" data-status={partOf.status}>
+                    {statusWords(partOf.status)}
+                  </span>
+                  <span className="related-row-stage">{partOf.stageName ?? "Backlog"}</span>
+                </button>
+              </>
             )}
             <button className="btn btn-ghost" onClick={() => setShowRelated(true)}>
               Show related cards

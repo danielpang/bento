@@ -48,6 +48,22 @@ export function childBadgeLabel(stats: ChildStats): string {
 }
 
 /**
+ * Which card a one-level related view is rooted on.
+ *
+ * A card that spawned parts is a parent, even when it is also a part
+ * of something larger: the badge, the delete refusal and the arrows
+ * are about *its* children. A card that only belongs to a group walks
+ * up, so a part and its parent still draw the same picture.
+ */
+export function relatedRootId(
+  card: { id: string; parentId?: string | null },
+  cards: { id: string; parentId?: string | null }[],
+): string {
+  if (cards.some((other) => other.parentId === card.id)) return card.id;
+  return card.parentId ?? card.id;
+}
+
+/**
  * The counts behind the badge, from cards the caller already holds.
  *
  * Derived rather than fetched: every child of a card is a card in the
