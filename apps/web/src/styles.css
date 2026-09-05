@@ -1606,8 +1606,45 @@ select.input,
   border-radius: var(--radius);
   background: var(--bg);
   color: var(--text);
-  text-decoration: none;
   font-size: 12px;
+}
+
+.pr-row-with-actions {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pr-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
+}
+
+.pr-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  text-decoration: none;
+}
+
+.pr-open:hover {
+  color: var(--brand);
+}
+
+.pr-row-btn {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+a.pr-row {
+  text-decoration: none;
 }
 
 .pr-row:hover {
@@ -1641,7 +1678,7 @@ select.input,
   flex: none;
 }
 
-.pr-row:hover .pr-external {
+a.pr-row:hover .pr-external {
   color: var(--brand);
 }
 
@@ -2913,6 +2950,10 @@ select.input,
 }
 /* A pull request GitHub cannot merge wears its warning on the row. */
 .chip[data-status="conflict"] {
+  color: var(--failed);
+  border-color: var(--failed);
+}
+.chip[data-status="ci-failed"] {
   color: var(--failed);
   border-color: var(--failed);
 }

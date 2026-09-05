@@ -6,10 +6,18 @@ import type {
   GitHubPublisher,
   MergeStateSummary,
   OpenPullRequest,
+  PullRequestDetails,
   PullRequestInput,
   PullRequestRef,
+  PullRequestUpdateInput,
   ReviewThreadSummary,
 } from "./client.js";
+import {
+  createPullRequestCommentVia,
+  getPullRequestVia,
+  pullRequestHasRunCommentVia,
+  updatePullRequestVia,
+} from "./pr-sync.js";
 
 /**
  * A personal access token instead of a GitHub App.
@@ -43,6 +51,22 @@ export class GitHubTokenClient implements GitHubClient, GitHubPublisher {
 
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest> {
     return ensurePullRequestVia(this.octokit, input);
+  }
+
+  getPullRequest(ref: PullRequestRef): Promise<PullRequestDetails> {
+    return getPullRequestVia(this.octokit, ref);
+  }
+
+  updatePullRequest(input: PullRequestUpdateInput): Promise<void> {
+    return updatePullRequestVia(this.octokit, input);
+  }
+
+  pullRequestHasRunComment(ref: PullRequestRef, runId: string): Promise<boolean> {
+    return pullRequestHasRunCommentVia(this.octokit, ref, runId);
+  }
+
+  createPullRequestComment(ref: PullRequestRef, body: string): Promise<void> {
+    return createPullRequestCommentVia(this.octokit, ref, body);
   }
 
   /** The token itself: a PAT cannot be narrowed per push the way an installation token can. */

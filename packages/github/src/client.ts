@@ -55,11 +55,23 @@ export interface PullRequestInput {
   base: string;
   title: string;
   body: string;
+  /** When true, opens a draft pull request. Ignored when one is already open. */
+  draft?: boolean;
 }
 
 export interface OpenPullRequest {
   prNumber: number;
   url: string;
+}
+
+export interface PullRequestDetails {
+  title: string;
+  body: string | null;
+}
+
+export interface PullRequestUpdateInput extends PullRequestRef {
+  title?: string;
+  body?: string;
 }
 
 export interface GitHubRepository {
@@ -90,6 +102,11 @@ export interface GitHubPublisher {
    * this is called repeatedly and must not open a second.
    */
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest>;
+  getPullRequest(ref: PullRequestRef): Promise<PullRequestDetails>;
+  updatePullRequest(input: PullRequestUpdateInput): Promise<void>;
+  /** True when a comment from this run was already posted on the pull request. */
+  pullRequestHasRunComment(ref: PullRequestRef, runId: string): Promise<boolean>;
+  createPullRequestComment(ref: PullRequestRef, body: string): Promise<void>;
   /**
    * A short lived credential for pushing. Stays on the server and, when
    * GitHub supports narrowing the installation token, is limited to the
