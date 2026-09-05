@@ -31,6 +31,7 @@ import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
+import { reportAuthEvents, userFromSessionCookie } from "./auth-events.js";
 
 export interface AppExtras {
   /**
@@ -126,6 +127,16 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   if (ctx.auth) {
     const auth = ctx.auth;
     /**
+     * Every auth request goes through this rather than auth.handler
+     * directly, so every sign in and sign up outcome is counted in
+     * PostHog, and a refusal reaches error tracking.
+     * The client is read per request: tests install one after the app
+     * is built, and a deployment without a key pays only a path check.
+     */
+    const authHandler = reportAuthEvents(() => ctx.analytics, (request) => auth.handler(request), {
+      userFromResponse: userFromSessionCookie(auth),
+    });
+    /**
      * Owners cannot delete their account: that would leave a team
      * without anyone who can manage it. better-auth's own handler
      * answers 200 and then sends the confirmation mail in the
@@ -193,13 +204,13 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     async function handleAuth(c: { req: { url: string; raw: Request } }): Promise<Response> {
       const announce = ctx.entitlements?.onMembershipChanged;
       const action = membershipAction(new URL(c.req.url).pathname);
-      if (!announce || !action) return auth.handler(c.req.raw);
+      if (!announce || !action) return authHandler(c.req.raw);
 
       const body = (await c.req.raw.clone().json().catch(() => null)) as
         | { organizationId?: string; invitationId?: string }
         | null;
       const organizationId = await organizationForAction(c, body);
-      const response = await auth.handler(c.req.raw);
+      const response = await authHandler(c.req.raw);
       // Only a change that happened. A refused invitation moves no
       // seat, and billing for one would be charging for the error.
       if (organizationId && response.ok) {
