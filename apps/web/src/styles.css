@@ -2906,6 +2906,10 @@ a.pr-row:hover .pr-external {
   color: var(--failed);
   border-color: var(--failed);
 }
+.chip[data-status="ci-failed"] {
+  color: var(--failed);
+  border-color: var(--failed);
+}
 
 /* Card actions as an even grid rather than free-wrapping rows. */
 /*

@@ -46,9 +46,9 @@ import {
   requeueMessages,
 } from "../orchestrator/messages.js";
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
-import { buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
+import { buildCiFixPrompt, buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
-import { startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
+import { startFeatureFollowUpRun, startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
 import { githubConnectionFor } from "../github.js";
@@ -161,6 +161,19 @@ interface PullRequestMergeRow {
   state: "clean" | "conflicted" | "unknown";
 }
 
+interface PullRequestCheckRow {
+  name: string;
+  number: number;
+  url: string;
+  /**
+   * "failed" when GitHub reports at least one failing check on the pull
+   * request head. "pending" when checks are still running. "passed" when
+   * every check succeeded or none are configured. "unknown" covers every
+   * unreadable case, same as merge-status.
+   */
+  state: "passed" | "pending" | "failed" | "unknown";
+}
+
 /**
  * A slow GitHub answer must not hold this request open indefinitely:
  * in multi mode the whole handler runs inside the tenant transaction,
@@ -194,6 +207,37 @@ async function readMergeStates(
           connection.mergeState({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
         );
         return { ...base, state: summary.state };
+      } catch {
+        return { ...base, state: "unknown" };
+      }
+    }),
+  );
+}
+
+/**
+ * Asks GitHub how CI checks on each pull request head are doing. One
+ * failing read does not spoil the others.
+ */
+async function readCheckStates(
+  connection: (GitHubClient & GitHubPublisher) | undefined,
+  rows: FeaturePullRequestTarget[],
+): Promise<PullRequestCheckRow[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const base: Omit<PullRequestCheckRow, "state"> = {
+        name: row.name ?? repoNameFromUrl(row.repoUrl),
+        number: row.number,
+        url: row.url,
+      };
+      const parsed = parseRepoUrl(row.repoUrl);
+      if (!connection || !parsed) return { ...base, state: "unknown" };
+      try {
+        const checks = await boundedRead(
+          connection.checks({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
+        );
+        if (checks.failed > 0) return { ...base, state: "failed" };
+        if (checks.pending > 0) return { ...base, state: "pending" };
+        return { ...base, state: "passed" };
       } catch {
         return { ...base, state: "unknown" };
       }
@@ -1037,6 +1081,75 @@ export function featureRoutes(ctx: AppContext) {
       // drawer's; dropped by rest-destructuring so a field added to the
       // row later travels without anyone remembering this projection.
       return c.json(states.map(({ defaultBranch, ...pr }) => pr));
+    })
+    /**
+     * How CI checks on each pull request head are doing: passed,
+     * pending, failed, or unknown. Separate from merge-status because
+     * most card opens do not need a GitHub round trip to render.
+     */
+    .get("/:id/check-status", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) return c.json([]);
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      const states = await readCheckStates(connection, rows);
+      return c.json(states);
+    })
+    /**
+     * Starts a run that fixes failing CI checks GitHub is reporting.
+     *
+     * Checks are re-read here rather than trusted from the button, so a
+     * stale drawer cannot start a fix run nothing needs.
+     */
+    .post("/:id/fix-ci-tests", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      if (feature.status === "done" || feature.status === "cancelled") {
+        return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
+      }
+      if (!feature.branchName) {
+        return c.json({ error: "this card has no branch yet; run an agent on it first" }, 409);
+      }
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) {
+        return c.json({ error: "this card has no pull request yet; publish it first" }, 409);
+      }
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      if (!connection) {
+        return c.json({ error: GITHUB_NOT_CONNECTED }, 409);
+      }
+      const states = await readCheckStates(connection, rows);
+      const failing = states.filter((pr) => pr.state === "failed");
+      if (failing.length === 0) {
+        return c.json(
+          {
+            error: states.some((pr) => pr.state === "unknown")
+              ? "GitHub check status could not be read for this card's pull requests. Try again in a moment."
+              : states.some((pr) => pr.state === "pending")
+                ? "CI checks are still running on this card's pull requests."
+                : "GitHub reports no failing CI checks on this card's pull requests",
+          },
+          409,
+        );
+      }
+
+      const result = await startFeatureFollowUpRun(
+        ctx,
+        db(c, ctx),
+        feature,
+        buildCiFixPrompt(failing),
+        actor(c),
+        "task",
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      if (!result.ok) {
+        return c.json(
+          { error: result.error, ...(result.code ? { code: result.code } : {}) },
+          result.status,
+        );
+      }
+      return c.json(result.run, 201);
     })
     /**
      * Starts a run that rebases the card's branch onto the latest base

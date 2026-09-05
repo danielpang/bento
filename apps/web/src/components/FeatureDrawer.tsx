@@ -11,6 +11,7 @@ import type {
   Feature,
   FeatureChanges,
   FeatureEvent,
+  FeatureCheckStatus,
   FeatureMergeStatus,
   FeaturePullRequest,
   GateState,
@@ -119,6 +120,11 @@ export function FeatureDrawer({
    * Only "conflicted" changes anything on screen.
    */
   const [mergeStates, setMergeStates] = useState<FeatureMergeStatus[]>([]);
+  /**
+   * CI check state per pull request, fetched on the same cadence as
+   * merge state. Only "failed" changes anything on screen.
+   */
+  const [checkStates, setCheckStates] = useState<FeatureCheckStatus[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
   /**
    * Which card's detail has actually arrived. The delete confirmation
@@ -163,6 +169,7 @@ export function FeatureDrawer({
     setPullRequests([]);
     setProjectRepos([]);
     setMergeStates([]);
+    setCheckStates([]);
     setLoadedId(null);
     setLoadFailed(false);
     setPublishNotes([]);
@@ -226,6 +233,21 @@ export function FeatureDrawer({
         if (!cancelled) setMergeStates(states);
       })
       // Failure means "unknown", which shows nothing rather than lying.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, feature.id, hasPullRequests, latestSettledRunId]);
+
+  useEffect(() => {
+    if (!hasPullRequests) return;
+    let cancelled = false;
+    setCheckStates([]);
+    void client
+      .getCheckStatus(feature.id)
+      .then((states) => {
+        if (!cancelled) setCheckStates(states);
+      })
       .catch(() => {});
     return () => {
       cancelled = true;
@@ -314,6 +336,19 @@ export function FeatureDrawer({
     }
   }
 
+  async function fixCiTestsNow() {
+    setBusy(true);
+    try {
+      await client.fixCiTests(feature.id);
+      toast.note("Fixing CI. The stage agent will commit fixes, and the pull request updates when it finishes.");
+      onChanged();
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /**
    * Deleted directly rather than through `act`, because the outcomes
    * differ by status: a refusal while an agent works reads as its own
@@ -378,10 +413,15 @@ export function FeatureDrawer({
    */
   const pullRequestByName = new Map(pullRequests.map((pr) => [pr.name, pr]));
   const mergeStateByUrl = new Map(mergeStates.map((state) => [state.url, state]));
+  const checkStateByUrl = new Map(checkStates.map((state) => [state.url, state]));
   const conflictedUrls = new Set(
     mergeStates.filter((s) => s.state === "conflicted").map((s) => s.url),
   );
+  const failedCheckUrls = new Set(
+    checkStates.filter((s) => s.state === "failed").map((s) => s.url),
+  );
   const hasConflicts = conflictedUrls.size > 0;
+  const hasFailedChecks = failedCheckUrls.size > 0;
   /** Shown on stages that push a branch and open pull requests when work lands. */
   const showPullRequests = stage?.createPr === true && !!feature.currentStageId;
   const publishDisabled = busy || runActive || canPublish === false || !feature.branchName;
@@ -396,12 +436,17 @@ export function FeatureDrawer({
   const resolveDisabledReason = runActive
     ? "An agent is working this card. Fix conflicts when it finishes."
     : undefined;
+  const fixCiDisabled = busy || runActive;
+  const fixCiDisabledReason = runActive
+    ? "An agent is working this card. Fix CI tests when it finishes."
+    : undefined;
   const orphanPullRequests = pullRequests.filter(
     (pr) => !projectRepos.some((repo) => repo.name === pr.name),
   );
 
   function renderPullRequestRow(repo: Repository | { id: string; name: string; repoUrl: string | null }, pr?: FeaturePullRequest) {
     const conflicted = pr ? mergeStateByUrl.get(pr.url)?.state === "conflicted" : false;
+    const ciFailed = pr ? checkStateByUrl.get(pr.url)?.state === "failed" : false;
     const rowPublishDisabled = publishDisabled || !repo.repoUrl;
     const rowPublishReason = !feature.branchName
       ? "Run an agent on this card first."
@@ -417,6 +462,11 @@ export function FeatureDrawer({
               {conflicted && (
                 <span className="chip" data-status="conflict">
                   Merge conflict
+                </span>
+              )}
+              {ciFailed && (
+                <span className="chip" data-status="ci-failed">
+                  CI failing
                 </span>
               )}
               <a
@@ -440,6 +490,20 @@ export function FeatureDrawer({
                   onClick={() => void resolveConflictsNow()}
                 >
                   Fix conflicts
+                </button>
+              )}
+              {ciFailed && !finished && (
+                <button
+                  type="button"
+                  className="btn btn-ghost pr-row-btn"
+                  disabled={fixCiDisabled}
+                  title={
+                    fixCiDisabledReason ??
+                    "The stage agent fixes the failing CI checks and commits the result."
+                  }
+                  onClick={() => void fixCiTestsNow()}
+                >
+                  Fix CI Tests
                 </button>
               )}
             </>
@@ -740,6 +804,14 @@ export function FeatureDrawer({
               <p className="warn">
                 GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
                 the base branch has moved and the changes collide. Use Fix conflicts on the row below.
+              </p>
+            )}
+            {hasFailedChecks && !finished && (
+              <p className="warn">
+                {failedCheckUrls.size === 1
+                  ? "CI checks are failing on this card's pull request."
+                  : "CI checks are failing on some of this card's pull requests."}{" "}
+                Use Fix CI Tests on the row below.
               </p>
             )}
             {detailsPending ? (

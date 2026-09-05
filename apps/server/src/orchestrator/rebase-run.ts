@@ -20,10 +20,12 @@ export type StartRebaseResult =
   | { ok: false; status: 400 | 404 | 409 | 402; error: string; code?: string };
 
 /**
- * Starts a rebase run on the card's work agent. The server publishes
- * when the run finishes; the agent never receives push credentials.
+ * Starts a follow-up run on the card's work agent: rebase, CI fixes,
+ * or anything else that continues the same conversation. The server
+ * publishes when the run finishes; the agent never receives push
+ * credentials.
  */
-export async function startFeatureRebaseRun(
+export async function startFeatureFollowUpRun(
   ctx: AppContext,
   db: Db,
   feature: {
@@ -35,6 +37,7 @@ export async function startFeatureRebaseRun(
   },
   prompt: string,
   startedBy: string,
+  kind: "rebase" | "task",
   defer?: (task: () => void) => void,
 ): Promise<StartRebaseResult> {
   if (feature.status === "done" || feature.status === "cancelled") {
@@ -84,7 +87,7 @@ export async function startFeatureRebaseRun(
       prompt,
       cliSessionId: resumeFrom.cliSessionId,
       executor: resumeFrom.executor,
-      kind: "rebase",
+      kind,
       startedBy,
     },
     ctx.entitlements,
@@ -97,6 +100,24 @@ export async function startFeatureRebaseRun(
 
   await ctx.boss.send("run.execute", { runId: run.id });
   return { ok: true, run };
+}
+
+/** Starts a rebase run on the card's work agent. */
+export async function startFeatureRebaseRun(
+  ctx: AppContext,
+  db: Db,
+  feature: {
+    id: string;
+    projectId: string;
+    branchName: string | null;
+    status: string;
+    currentStageId: string | null;
+  },
+  prompt: string,
+  startedBy: string,
+  defer?: (task: () => void) => void,
+): Promise<StartRebaseResult> {
+  return startFeatureFollowUpRun(ctx, db, feature, prompt, startedBy, "rebase", defer);
 }
 
 /**

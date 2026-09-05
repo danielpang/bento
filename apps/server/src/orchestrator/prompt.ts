@@ -141,6 +141,12 @@ export interface RebaseTarget {
   defaultBranch: string;
 }
 
+export interface FailingPullRequestChecks {
+  name: string;
+  number: number;
+  url: string;
+}
+
 /**
  * What a resolve-conflicts run asks its agent to do. Lives here with
  * the other prompt builders because it encodes sandbox and publishing
@@ -175,6 +181,24 @@ export function buildConflictResolutionPrompt(branch: string, conflicted: Confli
  * Rebase prompt for cards that cannot publish because the feature
  * branch is not based on the current default branch tip.
  */
+/**
+ * What a fix-CI run asks its agent to do. Like conflict resolution,
+ * the agent commits and the server publishes; it never receives push
+ * credentials.
+ */
+export function buildCiFixPrompt(failing: FailingPullRequestChecks[]): string {
+  return [
+    "GitHub reports failing CI checks on this card's pull requests:",
+    ...failing.map((pr) => `- ${pr.name}: pull request #${pr.number} (${pr.url})`),
+    "",
+    "Fix the failing checks with the smallest change that makes CI pass:",
+    "1. Read the check output on GitHub, or run the same commands locally in the repository.",
+    "2. Fix every failure. Run the repository's test command before you finish.",
+    "3. Commit your fixes with a descriptive message.",
+    "4. Do not push and do not open pull requests. The server publishes the branch when this run finishes.",
+  ].join("\n");
+}
+
 export function buildRebaseForPublishPrompt(branch: string, targets: RebaseTarget[]): string {
   const bases = [...new Set(targets.map((t) => t.defaultBranch))];
   return [
