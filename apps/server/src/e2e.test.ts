@@ -2935,6 +2935,16 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   assert.equal(prefixedHarness.status, 400, "DeepSeek Harness cannot accept provider-prefixed model ids");
   assert.match(((await prefixedHarness.json()) as { error: string }).error, /bare model id/);
 
+  const antigravity = await post({ name: "Antigravity", cli: "antigravity", model: "gemini-3.1-pro-high" });
+  assert.equal(antigravity.status, 201, "the Antigravity CLI accepts its own model slug");
+  const prefixedSlug = await post({
+    name: "prefixed antigravity",
+    cli: "antigravity",
+    model: "google/gemini-3.1-pro-high",
+  });
+  assert.equal(prefixedSlug.status, 400, "an Antigravity slug carries no provider prefix");
+  assert.match(((await prefixedSlug.json()) as { error: string }).error, /bare model id/);
+
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
   const unknown = await post({ name: "next week's model", cli: "claude-code", model: "claude-opus-9" });

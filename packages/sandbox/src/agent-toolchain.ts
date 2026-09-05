@@ -9,7 +9,7 @@
  * on whatever version happened to be baked in, and every Go project
  * start by fighting it.
  *
- * Five of the seven CLIs ship standalone binaries, so they carry no
+ * Six of the eight CLIs ship standalone binaries, so they carry no
  * runtime of their own. pi and dsh are published only on npm, so they get a
  * private Node under /opt/bento that runs them and nothing else: it is
  * never placed on the PATH an agent's shell sees, so `node` in a
@@ -17,7 +17,7 @@
  */
 
 /** Binaries this script is responsible for putting on the PATH. */
-export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"] as const;
+export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"] as const;
 
 /**
  * Bumped whenever the script changes what it installs, or when the
@@ -38,7 +38,7 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "dsh", "openco
  * Bumping this is not free, and it is worth knowing why before you do.
  * Every warm sprite in the fleet reinstalls the whole set on its next
  * provision, so the next run of every card pays minutes it did not
- * expect, and five vendors' installers are all called at once from one
+ * expect, and six vendors' installers are all called at once from one
  * egress address. That is the condition that gets one of them
  * throttled, which means a bump is the change most likely to hit the
  * failure this version exists to fix: bumping to fix a rate limit feeds
@@ -55,9 +55,9 @@ export const AGENT_BINARIES = ["claude", "codex", "cursor-agent", "dsh", "openco
  * either, and for the same reason: a warm sprite holding the v3 marker
  * finds pool absent from the PATH, installs that one CLI, and leaves
  * the five it already has alone. Adding dsh is the same for a machine
- * that never had it. Warm sprites that already have pi or opencode too
- * old for native DeepSeek, or a dsh pin that has moved, are caught by
- * the version check below rather than a bump.
+ * that never had it, and so is adding agy. Warm sprites that already
+ * have pi or opencode too old for native DeepSeek, or a dsh pin that
+ * has moved, are caught by the version check below rather than a bump.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -194,7 +194,7 @@ cli_stale() {
 }
 
 # What a run can actually spawn decides the work, not the marker alone.
-# With the marker there this is seven builtin lookups and no network,
+# With the marker there this is eight builtin lookups and no network,
 # which is what makes the common case free; without it the whole set is
 # installed, because a version bump means the commands Bento builds now
 # want newer CLIs than the ones already here. A present CLI can still be
@@ -334,6 +334,23 @@ if wanted opencode; then
   fi
 fi
 if wanted cursor-agent; then install_from cursor https://cursor.com/install bash || true; fi
+
+# Antigravity signs in with a Google account, and a sandbox has no
+# browser to sign in with. modelProvider "gemini" is what makes
+# GEMINI_API_KEY the credential instead, and the CLI refuses to start
+# with one set and not the other, which is why the file is written here
+# rather than left to a run. Only when there is none: a local user who
+# shares their own ~/.gemini has it mounted over this, and their
+# settings, and their login, are the ones that should decide.
+if wanted agy; then
+  install_from agy https://antigravity.google/cli/install.sh bash || true
+  if [ ! -f "$HOME/.gemini/antigravity-cli/settings.json" ]; then
+    if mkdir -p "$HOME/.gemini/antigravity-cli" 2>/dev/null; then
+      printf '%s\n' '{ "modelProvider": "gemini" }' \
+        > "$HOME/.gemini/antigravity-cli/settings.json" 2>/dev/null || true
+    fi
+  fi
+fi
 
 # pool's installer refuses to run without a terminal unless the EULA is
 # accepted up front, so accepting it is what makes the install headless

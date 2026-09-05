@@ -47,7 +47,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "GEMINI_API_KEY",
     label: "Google Gemini",
-    help: "Used by opencode and pi when running Gemini models.",
+    help: "Used by opencode and pi when running Gemini models, and by the Antigravity CLI, which signs in with a Google account everywhere else and can only run headlessly against this key.",
     secret: true,
   },
   {
@@ -90,6 +90,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     name: "DEEPSEEK_BASE_URL",
     label: "DeepSeek base URL",
     help: "Point DeepSeek Harness at a compatible DeepSeek endpoint instead of the default API.",
+    secret: false,
+  },
+  {
+    name: "GOOGLE_GEMINI_BASE_URL",
+    label: "Gemini base URL",
+    help: "Point the Antigravity CLI at a Gemini compatible endpoint instead of the default API.",
     secret: false,
   },
 ];
@@ -204,6 +210,18 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     binary: "dsh",
     installUrl: "https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless",
     installCommand: "npm install -g @deepseek-ai/dsh@0.1.1-rc.2",
+  },
+  {
+    cli: "antigravity",
+    label: "Antigravity CLI",
+    defaultModel: "gemini-3.1-pro-high",
+    format:
+      "An Antigravity model slug, which names the model tier and its reasoning effort together. Only the Gemini ones are served to a Gemini API key.",
+    examples: ["gemini-3.1-pro-high", "gemini-3.1-pro-low", "gemini-3.6-flash-high", "gemini-3.5-flash-medium"],
+    bareModelId: true,
+    binary: "agy",
+    installUrl: "https://antigravity.google/docs/cli/overview",
+    installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
   },
   {
     cli: "fake",
