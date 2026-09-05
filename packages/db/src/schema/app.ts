@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   bigserial,
   boolean,
   check,
@@ -267,11 +268,29 @@ export const features = pgTable(
    * requests; this is the one to show when there is only room for one.
    */
   prNumber: integer("pr_number"),
+  /**
+   * The card this one was split out of, when the agent working that
+   * card judged the task large and worth dividing.
+   *
+   * Null is an ordinary card, which is nearly every card: there is no
+   * container type and no join table, and the edge means "that card
+   * spawned this one" and nothing else. Not a dependency, not a
+   * blocker, not an ordering.
+   *
+   * No cascade, matching current_stage_id: deleting a parent that
+   * still has children is refused rather than silently taking a group
+   * of cards with it. Parent and child must share a project, which the
+   * write path enforces, because the board query, the related view and
+   * the tenant column all assume a group lives in one project.
+   */
+  parentId: uuid("parent_id").references((): AnyPgColumn => features.id),
   ...timestamps,
   },
   // Postgres does not index FK columns on its own, and every board,
   // run, and session query starts from "the cards of this project".
-  (t) => [index("features_project_idx").on(t.projectId)],
+  // The parent index is what makes "the children of these cards" one
+  // grouped scan rather than a sequential read per board paint.
+  (t) => [index("features_project_idx").on(t.projectId), index("features_parent_idx").on(t.parentId)],
 );
 
 /**

@@ -5827,3 +5827,194 @@ a.hours-person-name:hover {
   background: var(--panel-raised);
   border: 1px solid var(--line);
 }
+
+/*
+ * Cards that were split into parts.
+ *
+ * A card that spawned others wears one chip in its existing meta row,
+ * and a card that spawned none wears nothing new: a board of teams
+ * that never split anything is byte for byte the board they had.
+ *
+ * The tone is the group's worst news first, which is what makes the
+ * chip worth glancing at rather than merely counting.
+ */
+.chip-parts {
+  font-family: var(--sans);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.chip-parts[data-tone="failed"] {
+  color: var(--failed);
+  border-color: color-mix(in srgb, var(--failed) 55%, var(--line-bright));
+}
+
+.chip-parts[data-tone="running"] {
+  color: var(--running);
+  border-color: color-mix(in srgb, var(--running) 55%, var(--line-bright));
+}
+
+.chip-parts[data-tone="done"] {
+  color: var(--succeeded);
+  border-color: color-mix(in srgb, var(--succeeded) 55%, var(--line-bright));
+}
+
+/*
+ * Selecting a card in a group rings the rest of it, wherever the parts
+ * sit, and dims everything else. This is the only thing the board does
+ * about a group: no arrow is ever drawn between lanes, because the
+ * lanes are the pipeline and a second graph over them reads as noise.
+ *
+ * Opacity rather than a filter, so a running card's halo dims with it
+ * instead of surviving on top of a faded card.
+ */
+.board[data-grouped] .card:not([data-related]) {
+  opacity: 0.42;
+  transition: opacity 160ms ease;
+}
+
+.board[data-grouped] .card[data-related] {
+  border-color: var(--line-bright);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 55%, transparent);
+}
+
+/* The selected card keeps its own stronger ring. */
+.board[data-grouped] .card[aria-pressed="true"] {
+  box-shadow: 0 0 0 1px var(--brand), 0 1px 2px var(--shadow-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board[data-grouped] .card:not([data-related]) {
+    transition: none;
+  }
+}
+
+/*
+ * One row per related card in the drawer: the parts of a split, or the
+ * one card a part came from. A button, because it opens that card.
+ */
+.related-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+@media (hover: hover) {
+  .related-row:hover {
+    border-color: var(--line-bright);
+  }
+}
+
+.related-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.related-row-stage {
+  flex: none;
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/*
+ * The related-cards view: the card a split started from, with an arrow
+ * to every part.
+ *
+ * Cards are absolutely positioned from a layout computed in JavaScript,
+ * and the arrows are drawn from the same numbers, so the two can never
+ * disagree. Every segment is horizontal or vertical by construction:
+ * the path data has no command that could draw a diagonal.
+ */
+.related-scroll {
+  overflow: auto;
+  padding: 4px;
+}
+
+.related-graph {
+  position: relative;
+  margin: 0 auto;
+}
+
+.related-links {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.related-link {
+  fill: none;
+  stroke: var(--line-bright);
+  stroke-width: 1.5;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+}
+
+.related-arrowhead {
+  fill: var(--line-bright);
+}
+
+.related-card {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  text-align: left;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  overflow: hidden;
+}
+
+.related-card[data-role="parent"] {
+  border-left: 2px solid var(--brand);
+}
+
+/* The card this view was opened from, so it is findable in its group. */
+.related-card[data-current] {
+  box-shadow: 0 0 0 1px var(--brand);
+}
+
+@media (hover: hover) {
+  .related-card:hover {
+    border-color: var(--line-bright);
+  }
+}
+
+.related-card-title {
+  font-size: 12px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.related-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.related-card-stage,
+.related-card-spend {
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}

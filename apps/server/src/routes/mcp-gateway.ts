@@ -2,6 +2,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { mcpCredentials, mcpServers, member } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { BENTO_SERVER_ID, handleBentoRpc } from "../mcp/bento-tools.js";
 import { credentialHeader } from "../mcp/client.js";
 import { resolveGrant, recordGrantUse, type ResolvedGrant } from "../mcp/grants.js";
 import { refreshCredential } from "../mcp/refresh.js";
@@ -73,6 +74,35 @@ export function mcpGatewayRoutes(ctx: AppContext) {
   const routes = new Hono();
   const notFound = (c: Context) => c.json({ error: "not found" }, 404);
 
+  /** The run behind the bearer token, or null. Every refusal is a 404. */
+  async function grantFor(c: Context): Promise<ResolvedGrant | null> {
+    const auth = c.req.header("authorization") ?? "";
+    if (!auth.startsWith("Bearer ")) return null;
+    return resolveGrant(ctx, auth.slice("Bearer ".length).trim());
+  }
+
+  /**
+   * Bento's own server, answered here rather than proxied anywhere.
+   *
+   * It reaches this function only when the grant pins it, so a token
+   * minted for a run that never attached the card tools cannot call it.
+   * Everything else about a gateway request still applies: the rate
+   * bucket, the body cap, and the usage counter.
+   */
+  async function bentoRequest(c: Context): Promise<Response> {
+    const grant = await grantFor(c);
+    if (!grant || !grant.serverIds.includes(BENTO_SERVER_ID)) return notFound(c);
+    if (!takeToken(grant.id)) return c.json({ error: "slow down" }, 429);
+    recordGrantUse(ctx, grant.id);
+    const body = await readBody(c);
+    if (body === null) return c.json({ error: "body too large" }, 413);
+    const answer = await handleBentoRpc(ctx, grant, body);
+    // 202 with no body is how the transport acknowledges a
+    // notification; a JSON body on it would be a protocol error.
+    if (answer.body === null) return new Response(null, { status: 202 });
+    return c.json(answer.body as Record<string, unknown>, answer.status as 200);
+  }
+
   /**
    * Setup for every gateway request: token, server, credential. All
    * refusals are 404. The per-user branch never falls back to the org
@@ -82,12 +112,15 @@ export function mcpGatewayRoutes(ctx: AppContext) {
    * prevent.
    */
   async function resolveTarget(c: Context): Promise<GatewayTarget | null> {
-    const auth = c.req.header("authorization") ?? "";
-    if (!auth.startsWith("Bearer ")) return null;
-    const grant = await resolveGrant(ctx, auth.slice("Bearer ".length).trim());
+    const grant = await grantFor(c);
     if (!grant) return null;
     const serverId = c.req.param("serverId");
     if (!serverId || !grant.serverIds.includes(serverId)) return null;
+    // Bento's own id is in the grant like any other, but it names no
+    // row: the routes that serve it answer before this, and the ones
+    // that do not (the SSE transport's paths) must refuse rather than
+    // ask Postgres to read "bento" as a uuid.
+    if (serverId === BENTO_SERVER_ID) return null;
 
     const [server] = await ctx.db
       .select()
@@ -276,6 +309,7 @@ export function mcpGatewayRoutes(ctx: AppContext) {
   // Streamable HTTP: POST carries JSON-RPC, GET opens the
   // server-initiated stream, DELETE ends the session.
   routes.post("/:serverId", async (c) => {
+    if (c.req.param("serverId") === BENTO_SERVER_ID) return bentoRequest(c);
     const target = await resolveTarget(c);
     if (!target) return notFound(c);
     if (!takeToken(target.grant.id)) return c.json({ error: "slow down" }, 429);
@@ -286,12 +320,27 @@ export function mcpGatewayRoutes(ctx: AppContext) {
   });
 
   routes.get("/:serverId", async (c) => {
+    // Bento's own server initiates nothing, so it has no stream to
+    // open. 405 is the spec's answer, and a client that hangs waiting
+    // for a stream that will never speak is the thing it prevents.
+    if (c.req.param("serverId") === BENTO_SERVER_ID) {
+      const grant = await grantFor(c);
+      if (!grant || !grant.serverIds.includes(BENTO_SERVER_ID)) return notFound(c);
+      return c.json({ error: "this server does not open a stream" }, 405);
+    }
     const target = await resolveTarget(c);
     if (!target) return notFound(c);
     return withStreamSlot(c, target, () => forward(c, target, target.server.url, { method: "GET" }));
   });
 
   routes.delete("/:serverId", async (c) => {
+    // Nothing to end: the virtual server holds no session, its whole
+    // state being the grant, which the run's finish revokes.
+    if (c.req.param("serverId") === BENTO_SERVER_ID) {
+      const grant = await grantFor(c);
+      if (!grant || !grant.serverIds.includes(BENTO_SERVER_ID)) return notFound(c);
+      return new Response(null, { status: 204 });
+    }
     const target = await resolveTarget(c);
     if (!target) return notFound(c);
     recordGrantUse(ctx, target.grant.id);

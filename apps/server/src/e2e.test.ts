@@ -60,6 +60,7 @@ import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
+import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 
 const run = promisify(execFile);
 
@@ -6045,3 +6046,160 @@ async function runCount(featureId: string): Promise<number> {
   const rows = await ctx.db.select({ id: agentRuns.id }).from(agentRuns).where(eq(agentRuns.featureId, featureId));
   return rows.length;
 }
+
+/**
+ * Large tasks, modelled as a card that spawned other cards.
+ *
+ * The relationship is one column; what these pin down is what the
+ * column is not allowed to do. A group lives in one project, it cannot
+ * grow without bound, and the card the parts came from cannot be
+ * deleted out from under them.
+ */
+
+async function createPart(projectId: string, title: string, parentId: string) {
+  return app.request("/api/features", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId, title, description: "a part", parentId }),
+  });
+}
+
+type RelatedPayload = {
+  parent: { id: string; title: string };
+  children: { id: string; title: string; status: string; stageName: string | null; costUsd: number | null }[];
+  partOf?: { id: string; title: string } | null;
+} | null;
+
+test("a card can be split, and the group reads the same from either end", async () => {
+  const { project } = await setupProject("split-group");
+  const parent = await createFeature(project.id, "The large one");
+  const first = await json<{ id: string; parentId: string | null }>(
+    await createPart(project.id, "Part one", parent.id),
+  );
+  const second = await json<{ id: string }>(await createPart(project.id, "Part two", parent.id));
+  assert.equal(first.parentId, parent.id, "the part remembers where it came from");
+
+  const fromParent = await json<RelatedPayload>(await app.request(`/api/features/${parent.id}/related`));
+  assert.ok(fromParent);
+  assert.equal(fromParent.parent.id, parent.id);
+  assert.deepEqual(
+    fromParent.children.map((c) => c.id),
+    [first.id, second.id],
+    "in the order they were created",
+  );
+
+  // Opened from a part, the same group: a child resolves upward first,
+  // so both ends of the relationship draw the same picture.
+  const fromChild = await json<RelatedPayload>(await app.request(`/api/features/${first.id}/related`));
+  assert.deepEqual(fromChild, fromParent);
+
+  // A card that is neither a parent nor a part has no group at all,
+  // which is what lets the console draw nothing for ordinary cards.
+  const alone = await createFeature(project.id, "An ordinary card");
+  assert.equal(await json<RelatedPayload>(await app.request(`/api/features/${alone.id}/related`)), null);
+});
+
+test("a part that itself split is the parent of its own group", async () => {
+  // Depth is allowed; the view is one level. Walking up from a
+  // mid-level parent used to hide the parts the badge was counting.
+  const { project } = await setupProject("split-mid-level");
+  const root = await createFeature(project.id, "The large one");
+  const mid = await json<{ id: string }>(await createPart(project.id, "A part that grew", root.id));
+  const leaf = await json<{ id: string }>(await createPart(project.id, "A part of the part", mid.id));
+
+  const fromMid = await json<RelatedPayload>(await app.request(`/api/features/${mid.id}/related`));
+  assert.equal(fromMid?.parent.id, mid.id);
+  assert.deepEqual(fromMid?.children.map((c) => c.id), [leaf.id]);
+  assert.equal(fromMid?.partOf?.id, root.id, "and the card it came from is still named");
+
+  const fromLeaf = await json<RelatedPayload>(await app.request(`/api/features/${leaf.id}/related`));
+  assert.equal(fromLeaf?.parent.id, mid.id);
+  assert.deepEqual(fromLeaf?.children.map((c) => c.id), [leaf.id]);
+});
+
+test("a finished part is still in the group", async () => {
+  // The check the investigation calls out by name: missing a child in
+  // the related view is a bug even when that child has already
+  // finished, which is exactly what reading from the board would do.
+  const { project } = await setupProject("split-finished");
+  const parent = await createFeature(project.id, "The large one");
+  const part = await json<{ id: string }>(await createPart(project.id, "Part one", parent.id));
+  await app.request(`/api/features/${part.id}/finish`, { method: "POST" });
+
+  const group = await json<RelatedPayload>(await app.request(`/api/features/${parent.id}/related`));
+  assert.equal(group?.children.length, 1);
+  assert.equal(group?.children[0]?.status, "done");
+});
+
+test("a part cannot belong to a card in another project", async () => {
+  const a = await setupProject("split-here");
+  const b = await setupProject("split-elsewhere");
+  const parent = await createFeature(a.project.id, "The large one");
+  const res = await createPart(b.project.id, "A part somewhere else", parent.id);
+  assert.equal(res.status, 400);
+  assert.match(((await res.json()) as { error: string }).error, /not in this project/);
+});
+
+test("a parent nobody can see is a 404, not a hint that it exists", async () => {
+  const { project } = await setupProject("split-unknown-parent");
+  const res = await createPart(project.id, "An orphan", "00000000-0000-0000-0000-000000000000");
+  assert.equal(res.status, 404);
+});
+
+test("splitting stops at a depth, and the chain cannot run away", async () => {
+  const { project } = await setupProject("split-depth");
+  const root = await createFeature(project.id, "Root");
+  const child = await json<{ id: string }>(await createPart(project.id, "Child", root.id));
+  const grandchild = await json<{ id: string }>(await createPart(project.id, "Grandchild", child.id));
+  const tooDeep = await createPart(project.id, "Great grandchild", grandchild.id);
+  assert.equal(tooDeep.status, 400);
+  assert.match(((await tooDeep.json()) as { error: string }).error, /levels deep/);
+});
+
+test("one card cannot spawn an unbounded number of parts", async () => {
+  const { project } = await setupProject("split-cap");
+  const parent = await createFeature(project.id, "The large one");
+  for (let i = 0; i < MAX_CHILDREN_PER_CARD; i += 1) {
+    const res = await createPart(project.id, `Part ${i}`, parent.id);
+    assert.equal(res.status, 201, `part ${i} should have been filed`);
+  }
+  const overflow = await createPart(project.id, "One too many", parent.id);
+  assert.equal(overflow.status, 400);
+  assert.match(((await overflow.json()) as { error: string }).error, /is the limit/);
+});
+
+test("deleting the card a split came from is refused, and the parts survive", async () => {
+  const { project } = await setupProject("split-delete");
+  const parent = await createFeature(project.id, "The large one");
+  const part = await json<{ id: string }>(await createPart(project.id, "Part one", parent.id));
+
+  const refused = await app.request(`/api/features/${parent.id}`, { method: "DELETE" });
+  assert.equal(refused.status, 409);
+  assert.match(((await refused.json()) as { error: string }).error, /split into 1 other card/);
+  assert.equal(
+    (await app.request(`/api/features/${part.id}`)).status,
+    200,
+    "the part is untouched by the refusal",
+  );
+
+  // The escape hatch: the parts go first, and then the card they came
+  // from deletes like any other.
+  assert.equal((await app.request(`/api/features/${part.id}`, { method: "DELETE" })).status, 200);
+  assert.equal((await app.request(`/api/features/${parent.id}`, { method: "DELETE" })).status, 200);
+});
+
+test("finishing the card a split came from leaves its parts alone", async () => {
+  // "Keep going": spawning has no effect on the parent's pipeline, and
+  // the parent reaching the end has none on the parts. They are
+  // ordinary cards with their own branches.
+  const { project } = await setupProject("split-finish-parent");
+  const parent = await createFeature(project.id, "The large one");
+  const part = await json<{ id: string }>(await createPart(project.id, "Part one", parent.id));
+  await app.request(`/api/features/${parent.id}/finish`, { method: "POST" });
+
+  const stillThere = await json<{ status: string; parentId: string | null }>(
+    await app.request(`/api/features/${part.id}`),
+  );
+  assert.notEqual(stillThere.status, "done", "the part did not finish because the parent did");
+  assert.equal(stillThere.parentId, parent.id, "and it still knows where it came from");
+});
