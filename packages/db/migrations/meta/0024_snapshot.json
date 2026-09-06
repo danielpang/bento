@@ -1,5 +1,5 @@
 {
-  "id": "2a06a118-6583-44b7-8b25-183b2487e6db",
+  "id": "030e6dee-679a-49c6-b267-d85d47ceeb63",
   "prevId": "3f0b1f5a-2d47-4f8c-9d1a-6c2b8a4e7d31",
   "version": "7",
   "dialect": "postgresql",
@@ -1590,6 +1590,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "branch": {
+          "name": "branch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "number": {
           "name": "number",
           "type": "integer",
@@ -1624,8 +1630,8 @@
         }
       },
       "indexes": {
-        "feature_pull_requests_feature_repo_idx": {
-          "name": "feature_pull_requests_feature_repo_idx",
+        "feature_pull_requests_feature_repo_branch_idx": {
+          "name": "feature_pull_requests_feature_repo_branch_idx",
           "columns": [
             {
               "expression": "feature_id",
@@ -1635,6 +1641,12 @@
             },
             {
               "expression": "repo_url",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "branch",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2909,157 +2921,6 @@
             "id"
           ],
           "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.mcp_connections": {
-      "name": "mcp_connections",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "owner_id": {
-          "name": "owner_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "scope": {
-          "name": "scope",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "project_ids": {
-          "name": "project_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "token_hash": {
-          "name": "token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "token_hint": {
-          "name": "token_hint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "last_used_at": {
-          "name": "last_used_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "request_count": {
-          "name": "request_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "mcp_connections_token_idx": {
-          "name": "mcp_connections_token_idx",
-          "columns": [
-            {
-              "expression": "token_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "mcp_connections_org_idx": {
-          "name": "mcp_connections_org_idx",
-          "columns": [
-            {
-              "expression": "organization_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "mcp_connections_owner_id_user_id_fk": {
-          "name": "mcp_connections_owner_id_user_id_fk",
-          "tableFrom": "mcp_connections",
-          "tableTo": "user",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "owner_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "mcp_connections_organization_id_organization_id_fk": {
-          "name": "mcp_connections_organization_id_organization_id_fk",
-          "tableFrom": "mcp_connections",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },

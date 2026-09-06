@@ -1,6 +1,6 @@
 {
-  "id": "7890762b-eac3-45c9-8bb0-9b27a6deb224",
-  "prevId": "2a06a118-6583-44b7-8b25-183b2487e6db",
+  "id": "80de5356-0f93-47db-b1e6-1c5e4498bec1",
+  "prevId": "030e6dee-679a-49c6-b267-d85d47ceeb63",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1590,6 +1590,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "branch": {
+          "name": "branch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "number": {
           "name": "number",
           "type": "integer",
@@ -1624,8 +1630,8 @@
         }
       },
       "indexes": {
-        "feature_pull_requests_feature_repo_idx": {
-          "name": "feature_pull_requests_feature_repo_idx",
+        "feature_pull_requests_feature_repo_branch_idx": {
+          "name": "feature_pull_requests_feature_repo_branch_idx",
           "columns": [
             {
               "expression": "feature_id",
@@ -1635,6 +1641,12 @@
             },
             {
               "expression": "repo_url",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "branch",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

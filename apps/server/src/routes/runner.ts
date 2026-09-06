@@ -9,11 +9,13 @@ import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { buildStagePrompt } from "../orchestrator/prompt.js";
 import { compactedConversation } from "../orchestrator/conversation-history.js";
-import { isUniqueViolation } from "../orchestrator/transcript.js";
+import { appendRunEvent, isUniqueViolation } from "../orchestrator/transcript.js";
 import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { branchForRun, cardBranch } from "../orchestrator/branch-rotation.js";
+import { githubConnectionFor } from "../github.js";
 
 const claimInput = z.object({
   /** Identifies the machine claiming work, for display and debugging. */
@@ -145,6 +147,40 @@ export function runnerRoutes(ctx: AppContext) {
         status: "starting",
       });
 
+      /**
+       * Same rotation as the server executor: a card whose pull request
+       * merged works its next message on a new branch off the base
+       * branch. Decided here rather than on the runner because the
+       * pull requests it reads are the server's rows, and because the
+       * two executors must not disagree about which branch a card is
+       * on.
+       */
+      const { branch, replaced } =
+        candidate.run.kind === "task"
+          ? await branchForRun(
+              db(c, ctx),
+              await githubConnectionFor(ctx, candidate.feature.organizationId, db(c, ctx)),
+              { featureId: candidate.feature.id, branch: cardBranch(candidate.feature) },
+            )
+          : { branch: cardBranch(candidate.feature), replaced: [] };
+      /**
+       * Said in the transcript here, because the runner has no idea
+       * why the branch it was handed is not the one the card had. The
+       * server executor says the same thing at the same moment.
+       */
+      if (replaced.length > 0) {
+        const numbers = replaced.map((pr) => `#${pr.number}`);
+        const landed =
+          numbers.length === 1
+            ? `Pull request ${numbers[0]} merged`
+            : `Pull requests ${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)} merged`;
+        await appendRunEvent(ctx, candidate.run.id, {
+          type: "message",
+          role: "system",
+          text: `${landed}, so this card continues on a new branch, ${branch}, started from the base branch. The next publish opens a new pull request.`,
+        });
+      }
+
       const resume = Boolean(candidate.run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
       // Same gate as the server executor: judge and rebase prompts are
       // complete on their own and never take a compacted history.
@@ -162,7 +198,17 @@ export function runnerRoutes(ctx: AppContext) {
           resumeSessionId: candidate.run.cliSessionId,
           kind: candidate.run.kind,
         },
-        feature: { id: candidate.feature.id, title: candidate.feature.title, branchName: candidate.feature.branchName },
+        feature: {
+          id: candidate.feature.id,
+          title: candidate.feature.title,
+          branchName: branch,
+          /**
+           * True when this branch was just started for the card, so
+           * the runner cuts it from the base branch rather than from
+           * wherever its checkout is standing.
+           */
+          startFromBase: replaced.length > 0,
+        },
         agent: { cli: profile.cli, model: profile.model, extraArgs: profile.extraArgs },
         repositories: repoRows.map((r) => ({
           name: r.name,

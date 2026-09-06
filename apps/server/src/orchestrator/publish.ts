@@ -255,7 +255,17 @@ export async function publishFeatureBranches(
       const [known] = await db
         .select({ headSha: featurePullRequests.headSha })
         .from(featurePullRequests)
-        .where(and(eq(featurePullRequests.featureId, args.featureId), eq(featurePullRequests.repoUrl, repo.repoUrl)))
+        .where(
+          and(
+            eq(featurePullRequests.featureId, args.featureId),
+            eq(featurePullRequests.repoUrl, repo.repoUrl),
+            // This branch's lease, not the card's. A card that merged
+            // one branch and started another has a row for each, and
+            // holding the old branch's head against a push to the new
+            // one would fail every publish after the first rotation.
+            eq(featurePullRequests.branch, args.branch),
+          ),
+        )
         .limit(1);
       const pushedHead = await pushBundle(bundle, remote, repo.defaultBranch, args.branch, token, {
         includeStageNotes: options.includeStageNotes === true,
@@ -286,12 +296,13 @@ export async function publishFeatureBranches(
           featureId: args.featureId,
           repositoryId: repo.id,
           repoUrl: repo.repoUrl,
+          branch: args.branch,
           number: pr.prNumber,
           url: pr.url,
           headSha: pushedHead,
         })
         .onConflictDoUpdate({
-          target: [featurePullRequests.featureId, featurePullRequests.repoUrl],
+          target: [featurePullRequests.featureId, featurePullRequests.repoUrl, featurePullRequests.branch],
           set: { number: pr.prNumber, url: pr.url, headSha: pushedHead, updatedAt: new Date() },
         });
 

@@ -318,6 +318,19 @@ export const featurePullRequests = pgTable(
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
     /** Denormalized so a row still names its repository after a removal. */
     repoUrl: text("repo_url").notNull(),
+    /**
+     * The branch this pull request was opened from.
+     *
+     * A card outlives its branches. When its pull request merges, the
+     * next message it gets starts a new branch, and that branch opens
+     * its own pull request in the same repository, so "the card's pull
+     * request in this repository" is a question with several answers
+     * and only one of them current. The branch is what tells them
+     * apart, and it is part of the key: a card keeps every pull
+     * request it has ever had, and anything asking for the live one
+     * asks by the branch the card is on now.
+     */
+    branch: text("branch").notNull(),
     number: integer("number").notNull(),
     url: text("url").notNull(),
     /**
@@ -331,7 +344,7 @@ export const featurePullRequests = pgTable(
     headSha: text("head_sha"),
     ...timestamps,
   },
-  (t) => [uniqueIndex("feature_pull_requests_feature_repo_idx").on(t.featureId, t.repoUrl)],
+  (t) => [uniqueIndex("feature_pull_requests_feature_repo_branch_idx").on(t.featureId, t.repoUrl, t.branch)],
 );
 
 /**

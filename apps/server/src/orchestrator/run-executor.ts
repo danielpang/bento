@@ -26,7 +26,8 @@ import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { syncPullRequestsFromRun } from "./sync-pr-from-run.js";
-import { linkGitHubRemotes } from "./repo-remote.js";
+import { linkGitHubRemotes, refreshBaseBranches } from "./repo-remote.js";
+import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
@@ -169,9 +170,37 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
-  // Named out here because publishing needs it again once the run ends.
-  const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
   const publisher = await githubConnectionFor(ctx, feature.organizationId);
+  /**
+   * Named out here because publishing needs it again once the run ends.
+   *
+   * A card whose pull request has been merged gets a new branch here,
+   * off the base branch, rather than going on committing to the one
+   * that landed. Only for work runs: a judge reads what a stage did,
+   * and a rebase run exists to fix a pull request that is still open,
+   * so neither is a card being asked for something new.
+   */
+  const fallbackBranch = cardBranch(feature);
+  const { branch, replaced } =
+    run.kind === "task"
+      ? await branchForRun(ctx.db, publisher, { featureId: feature.id, branch: fallbackBranch })
+      : { branch: fallbackBranch, replaced: [] };
+  if (replaced.length > 0) {
+    const numbers = replaced.map((pr) => `#${pr.number}`);
+    const landed =
+      numbers.length === 1
+        ? `Pull request ${numbers[0]} merged`
+        : `Pull requests ${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)} merged`;
+    await saySystem(
+      `${landed}, so this card continues on a new branch, ${branch}, started from the base branch. The next publish opens a new pull request.`,
+    );
+    // The new branch starts at origin/<base>, so origin/<base> had
+    // better be the merge. Sprites clone it fresh; the drivers that
+    // share a host checkout see only what was last fetched there.
+    if (ctx.driver.provider !== "sprite") {
+      await refreshBaseBranches(repoRows.map((r) => ({ localPath: r.localPath, defaultBranch: r.defaultBranch })));
+    }
+  }
   // Hoisted above provisioning because both the provision guard and the
   // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, feature.organizationId);
@@ -179,9 +208,25 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     prepared = ctx.driver.provider === "sprite"
       ? repoRows.map((r) => ({ name: r.name, localPath: r.localPath, worktreePath: "" }))
       : await ctx.worktrees.ensureAll(
-          repoRows.map((r) => ({ name: r.name, localPath: r.localPath })),
+          repoRows.map((r) => ({
+            name: r.name,
+            localPath: r.localPath,
+            /**
+             * From the base branch only where this card's work actually
+             * merged, which is the repositories it had a pull request
+             * in. A repository whose publish failed, or that the card
+             * never opened one in, still holds commits nobody has
+             * landed: its new branch starts where its old one stood, so
+             * that work travels with the card instead of being left on
+             * a branch the card has walked away from.
+             */
+            ...(replaced.some((pr) => pr.repoUrl === r.repoUrl)
+              ? { startFromBranch: r.defaultBranch }
+              : {}),
+          })),
           feature.id,
           branch,
+          { branchChanged: replaced.length > 0 },
         );
 
     /**
@@ -1652,7 +1697,7 @@ async function resumeInterruptedRun(
       runId: run.id,
       status,
     });
-  const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
+  const branch = cardBranch(feature);
   const publisher = await githubConnectionFor(ctx, feature.organizationId);
   const adapter = getAdapter(profile.cli);
 

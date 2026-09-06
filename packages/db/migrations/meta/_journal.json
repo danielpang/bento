@@ -173,15 +173,15 @@
     {
       "idx": 24,
       "version": "7",
-      "when": 1788300000001,
-      "tag": "0024_mcp_connections",
+      "when": 1788641432840,
+      "tag": "0024_pr_per_branch",
       "breakpoints": true
     },
     {
       "idx": 25,
       "version": "7",
-      "when": 1788646666056,
-      "tag": "0025_mcp_oauth",
+      "when": 1788669917315,
+      "tag": "0025_mcp_inbound",
       "breakpoints": true
     }
   ]

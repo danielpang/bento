@@ -62,7 +62,13 @@ import { startFeatureFollowUpRun, startFeatureRebaseRun, recoverAncestryPublishF
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
 import { githubConnectionFor } from "../github.js";
-import { featurePullRequestTargets, type FeaturePullRequestTarget } from "../feature-prs.js";
+import {
+  featurePullRequestHistory,
+  featurePullRequestTargets,
+  pullRequestStateOf,
+  type FeaturePullRequestRecord,
+  type FeaturePullRequestTarget,
+} from "../feature-prs.js";
 import { shouldIncludeStageNotes } from "../settings.js";
 import { collectFeatureChanges } from "../feature-changes.js";
 
@@ -144,9 +150,27 @@ async function withPullRequestUrls<T extends { id: string; prNumber: number | nu
     .from(featurePullRequests)
     .where(inArray(featurePullRequests.featureId, wanted))
     .orderBy(asc(featurePullRequests.createdAt));
-  const byFeature = new Map<string, string>();
-  for (const pr of prs) if (!byFeature.has(pr.featureId)) byFeature.set(pr.featureId, pr.url);
-  return rows.map((row) => ({ ...row, prUrl: byFeature.get(row.id) ?? null }));
+  /**
+   * Matched on the number the card mirrors, not on the oldest row. A
+   * card keeps a row per branch it has published from, so "the first
+   * one" is the pull request of a branch it may have left behind, and
+   * the link under a card has to be the link to the number beside it.
+   *
+   * First match wins, and the oldest row is still the fallback. Pull
+   * request numbers are per repository, so a card spanning two can
+   * hold two rows numbered the same and only the earlier one is the
+   * mirrored repository's; and a number that matches no row at all
+   * (linked by hand) kept its link before this and keeps it now.
+   */
+  const byNumber = new Map<string, string>();
+  const oldest = new Map<string, string>();
+  for (const pr of prs) {
+    const owner = rows.find((row) => row.id === pr.featureId);
+    if (!owner) continue;
+    if (!oldest.has(pr.featureId)) oldest.set(pr.featureId, pr.url);
+    if (owner.prNumber === pr.number && !byNumber.has(pr.featureId)) byNumber.set(pr.featureId, pr.url);
+  }
+  return rows.map((row) => ({ ...row, prUrl: byNumber.get(row.id) ?? oldest.get(row.id) ?? null }));
 }
 
 /** "acme/api" from a GitHub address, for a repository no longer in the project. */
@@ -225,6 +249,44 @@ async function readMergeStates(
         return { ...base, state: summary.state };
       } catch {
         return { ...base, state: "unknown" };
+      }
+    }),
+  );
+}
+
+interface PullRequestStateRow {
+  number: number;
+  url: string;
+  /**
+   * "merged" only when GitHub says the branch landed. "closed" is a
+   * pull request someone closed without merging, whose work never
+   * shipped, so the two are never shown as the same thing. "unknown"
+   * covers every unreadable case, same as merge-status.
+   */
+  state: "merged" | "open" | "closed" | "unknown";
+}
+
+/**
+ * Asks GitHub how each pull request ended. One failing read does not
+ * spoil the others, and a card with no GitHub connection still lists
+ * what it opened, marked unknown.
+ */
+async function readPullRequestStates(
+  connection: (GitHubClient & GitHubPublisher) | undefined,
+  rows: FeaturePullRequestRecord[],
+): Promise<PullRequestStateRow[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const base = { number: row.number, url: row.url };
+      const parsed = parseRepoUrl(row.repoUrl);
+      if (!connection || !parsed) return { ...base, state: "unknown" as const };
+      try {
+        const pr = await boundedRead(
+          connection.getPullRequest({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
+        );
+        return { ...base, state: pullRequestStateOf(pr) };
+      } catch {
+        return { ...base, state: "unknown" as const };
       }
     }),
   );
@@ -363,6 +425,16 @@ export function featureRoutes(ctx: AppContext) {
        * single link uses.
        */
       const pullRequests = await featurePullRequestTargets(db(c, ctx), feature);
+      /**
+       * And everything it opened before those, because a card that
+       * merges a branch and is asked for more opens another pull
+       * request on a new branch: what it has shipped is the list, and
+       * a card that showed only its live one looked like it had never
+       * shipped anything. Rows only, so opening a card still costs no
+       * GitHub round trip; whether each one merged comes from
+       * /pull-request-status.
+       */
+      const history = await featurePullRequestHistory(db(c, ctx), feature);
       return c.json({
         ...(withUrl ?? feature),
         runs,
@@ -373,6 +445,13 @@ export function featureRoutes(ctx: AppContext) {
           name: pr.name ?? repoNameFromUrl(pr.repoUrl),
           number: pr.number,
           url: pr.url,
+        })),
+        pullRequestHistory: history.map((pr) => ({
+          name: pr.name ?? repoNameFromUrl(pr.repoUrl),
+          number: pr.number,
+          url: pr.url,
+          branch: pr.branch,
+          current: pr.current,
         })),
       });
     })
@@ -1152,6 +1231,21 @@ export function featureRoutes(ctx: AppContext) {
       // drawer's; dropped by rest-destructuring so a field added to the
       // row later travels without anyone remembering this projection.
       return c.json(states.map(({ defaultBranch, ...pr }) => pr));
+    })
+    /**
+     * How each pull request the card has ever opened ended: merged,
+     * open, closed without merging, or unknown. Its own request for
+     * the same reason as merge-status, and asked of every row rather
+     * than the live ones, because the history is the part of the card
+     * that needs saying which is which.
+     */
+    .get("/:id/pull-request-status", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      const rows = await featurePullRequestHistory(db(c, ctx), feature);
+      if (rows.length === 0) return c.json([]);
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      return c.json(await readPullRequestStates(connection, rows));
     })
     /**
      * How CI checks on each pull request head are doing: passed,

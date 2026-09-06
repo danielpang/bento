@@ -9,6 +9,8 @@ import type {
   FeatureCheckStatus,
   FeatureMergeStatus,
   FeaturePullRequest,
+  FeaturePullRequestRecord,
+  FeaturePullRequestStatus,
   FeatureEvent,
   GateState,
   Pipeline,
@@ -852,9 +854,14 @@ export class BentoClient {
   }
 
   getFeature(featureId: string) {
-    return this.request<Feature & { runs: AgentRun[]; pullRequests: FeaturePullRequest[] }>(
-      `/api/features/${featureId}`,
-    );
+    return this.request<
+      Feature & {
+        runs: AgentRun[];
+        pullRequests: FeaturePullRequest[];
+        /** Every pull request the card has opened, newest first. */
+        pullRequestHistory: FeaturePullRequestRecord[];
+      }
+    >(`/api/features/${featureId}`);
   }
 
   /**
@@ -1012,6 +1019,14 @@ export class BentoClient {
   /** Asks GitHub whether each of the card's pull requests merges cleanly. */
   getMergeStatus(featureId: string) {
     return this.request<FeatureMergeStatus[]>(`/api/features/${featureId}/merge-status`);
+  }
+
+  /**
+   * Asks GitHub how each pull request the card has opened ended:
+   * merged, open, closed without merging, or unknown.
+   */
+  getPullRequestStatus(featureId: string) {
+    return this.request<FeaturePullRequestStatus[]>(`/api/features/${featureId}/pull-request-status`);
   }
 
   /** Asks GitHub how CI checks on each pull request head are doing. */
