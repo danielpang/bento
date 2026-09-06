@@ -1609,9 +1609,56 @@ select.input,
   font-size: 12px;
 }
 
-.pr-row-with-actions {
-  justify-content: space-between;
-  gap: 12px;
+/*
+ * One table, not a stack of independently sized rows.
+ *
+ * Each row used to lay itself out, so the number, the chips and the
+ * buttons landed wherever that row's own text ran out: two pull
+ * requests on the same card put their #numbers in different places and
+ * the eye had to hunt for each one. The list owns the columns and the
+ * rows borrow them, which is what subgrid is for, and the row stays a
+ * row so it keeps its border and its background.
+ *
+ * Guarded rather than assumed: without subgrid the declaration is
+ * dropped and every cell would stack, so the flex layout above stands
+ * as it always did.
+ */
+@supports (grid-template-columns: subgrid) {
+  .pr-list {
+    display: grid;
+    /*
+     * repository | state | actions | number
+     *
+     * The number last, hard against the right edge, because it is the
+     * one thing every row has and the thing people click: down a list
+     * of four it wants to be a straight edge, not a column that shifts
+     * left whenever a row happens to carry a button.
+     */
+    grid-template-columns: auto 1fr auto auto;
+  }
+
+  .pr-row {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    align-items: center;
+    row-gap: 2px;
+  }
+
+  /*
+   * The branch takes a line of its own under the repository it was
+   * opened in, rather than a column between them.
+   *
+   * Squeezed into the row it lost its ending to an ellipsis, and the
+   * ending is the whole of what distinguishes a card's second branch
+   * from its first. Underneath, it has the width of the row and needs
+   * no trimming, while the chips, the numbers and the buttons keep the
+   * columns they line up in.
+   */
+  .pr-branch {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
 }
 
 .pr-row-actions {
@@ -1623,27 +1670,26 @@ select.input,
   flex: none;
 }
 
-/*
- * On a history row the repository name is short and the branch is the
- * long half, so the name takes only what it needs. Sharing the row
- * evenly, as the action rows do, spent half the width on white space
- * and cut the branch off at the counter that tells two rows apart.
- */
-.pr-row-history .pr-repo {
-  flex: 0 0 auto;
+/* Holds its column open on a row with nothing to say in it. */
+.pr-flags {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 /*
- * The branch a pull request in the history came from, kept out of the
- * way but not cut short: what tells two rows apart is the counter on
- * the end of the name, so the row gives the branch the width left
- * over rather than a fixed box, and only a name too long for the
- * drawer ellipsizes.
+ * The branch a pull request came from, kept out of the way but not cut
+ * short: what tells two of them apart is the counter on the end of the
+ * name, so the branch takes the width the fixed columns leave and only
+ * a name too long for the drawer ellipsizes. Empty on the rows of the
+ * branch the card is on now, which the header already names.
  */
 .pr-branch {
   color: var(--text-faint);
   font-family: var(--mono);
   font-size: 11px;
+  /* For the flex fallback only; a grid item ignores it. */
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -1654,6 +1700,7 @@ select.input,
 .pr-open {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   color: var(--text-dim);
   font-family: var(--mono);
