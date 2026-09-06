@@ -176,6 +176,13 @@
       "when": 1788641432840,
       "tag": "0024_pr_per_branch",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1788669917315,
+      "tag": "0025_mcp_inbound",
+      "breakpoints": true
     }
   ]
 }

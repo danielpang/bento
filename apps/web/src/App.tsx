@@ -57,6 +57,7 @@ const ChangelogPage = lazy(() => import("./components/ChangelogPage.js").then((m
 const ContactDialog = lazy(() => import("./components/ContactDialog.js").then((m) => ({ default: m.ContactDialog })));
 const CreateTeam = lazy(() => import("./components/CreateTeam.js").then((m) => ({ default: m.CreateTeam })));
 const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then((m) => ({ default: m.DeviceApproval })));
+const McpAuthorize = lazy(() => import("./components/McpAuthorize.js").then((m) => ({ default: m.McpAuthorize })));
 const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m) => ({ default: m.FeatureDrawer })));
 const RepositoriesPanel = lazy(() => import("./components/RepositoriesPanel.js").then((m) => ({ default: m.RepositoriesPanel })));
 const ResetPassword = lazy(() => import("./components/ResetPassword.js").then((m) => ({ default: m.ResetPassword })));
@@ -77,7 +78,7 @@ const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) =>
 function RouteFallback() {
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
   if (path === "/settings") return <SettingsPageSkeleton />;
-  if (path === "/device" || path === "/accept-invitation" || path === "/reset-password") {
+  if (path === "/device" || path === "/accept-invitation" || path === "/reset-password" || path === "/connect-mcp") {
     return <CenteredPanelSkeleton />;
   }
   if (path.startsWith("/session/")) return <SessionPageSkeleton />;
@@ -142,6 +143,7 @@ export function App() {
 
 function Route() {
   if (window.location.pathname === "/device") return <DeviceApproval />;
+  if (window.location.pathname === "/connect-mcp") return <McpAuthorize client={client} />;
   if (window.location.pathname === "/accept-invitation") return <AcceptInvitation />;
   // Membership and billing are pages, not drawers: they have room,
   // and an address that survives reload.

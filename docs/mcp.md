@@ -51,9 +51,9 @@ Auto-started runs (gate evaluator, judge, pipeline auto-start) have no acting me
 
 Bento discovers authorization metadata from the MCP URL (RFC 9728, RFC 8414), registers a client when dynamic registration is available (RFC 7591), and runs authorization code + PKCE with the RFC 8707 resource indicator. Manual client id/secret entry is available when dynamic registration is not offered.
 
-Callback path: `/api/mcp/callback/<serverId>`. The gateway refreshes expired access tokens during long runs.
+Callback path: `/api/mcp/callback/<serverId>`. The gateway refreshes expired access tokens during long runs, so a connected server stays connected until someone disconnects it or removes it. You do not sign in again on a schedule.
 
-Changing URL origin, auth type, or credential scope clears stored credentials for that server. Removing a server deletes its credentials. Removing a member deletes that member's personal connections.
+Changing URL origin, auth type, or credential scope clears stored credentials for that server. Disconnecting drops the stored sign in and leaves the server in the list. Removing a server deletes it and its credentials. Removing a member deletes that member's personal connections.
 
 ## Harness support
 
@@ -83,3 +83,44 @@ OAuth state is signed with `BENTO_SECRET_KEY` (or `BETTER_AUTH_SECRET`). Callbac
 ## Limitations
 
 Not yet supported: per-project server enablement (org-wide only), stdio servers, MCP on `--run-agents local` runner execution.
+
+## Bento as an MCP server
+
+The other direction: an agent running outside Bento (Claude Code on a laptop, Cursor, anything that speaks MCP) connects to `/mcp` and can put cards on the board and follow what happens to them.
+
+This half is behind the `beta-testers` flag, and only this half. Everything above, the servers Bento's own agents call, ships to everyone. Being off the flag hides the "Connect an agent to Bento" section, answers 404 from the connection routes and the consent page, and refuses tool calls on `/mcp` for a connection whose owner is off it, so a token minted while somebody was on the flag stops working when they come off it. The flag gates the capability rather than revoking anything: put the member back on it and the same token serves again.
+
+The discovery documents under `/.well-known/` stay public. They carry no tenant data and grant nothing without a token, and there is no signed-in member to evaluate a flag against at that point in the handshake.
+
+### Connecting an agent
+
+In Claude or Cursor, add a custom MCP server URL:
+
+```
+https://your-bento/mcp
+```
+
+The host fetches that URL, sees it needs OAuth, and opens a Bento page. Sign in if needed, choose what the agent can reach (the whole team, or selected projects), and Allow. Bento redirects back to the host with an authorization code; the host exchanges it for a token. You do not paste a token by hand.
+
+The connection does not expire. It stays valid until it is disconnected, or until its owner leaves the organization. The host may refresh the access token on its own; that is not a new sign-in.
+
+A missing or bad token answers 401 with a `WWW-Authenticate` resource-metadata pointer, which is how the host finds the OAuth endpoints. Tool refusals after a valid token still answer "not found".
+
+Settings, MCP, "Connect an agent to Bento" lists the connections and is where you disconnect one. "New token" is the fallback for a client that cannot do OAuth: it mints a `bmcp_…` bearer token shown once.
+
+```
+claude mcp add --transport http bento https://your-bento/mcp \
+  --header "Authorization: Bearer bmcp_..."
+```
+
+### What the agent gets
+
+Five tools, scoped to the connection:
+
+- `list_projects`: the projects the connection reaches.
+- `create_feature`: a new card, in the backlog by default; `start: true` moves it into the first pipeline stage instead, exactly as a Slack mention does, so the project's agents can pick it up.
+- `get_feature_status`: one card's progress: status, current stage and position in the pipeline, the latest agent run, pull requests, and recent history.
+- `list_features`: a project's board, filterable by status.
+- `search_features`: cards whose title or description carries the words you are looking for, across every project the connection reaches, or inside one you name. Each match comes back with its project, status and stage, so finding a card and reading where it stands is one call rather than two. Most recently updated first, and the answer says when the limit cut it short.
+
+Every tool refusal after a valid token answers the same "not found" the rest of the API speaks.

@@ -43,6 +43,8 @@ const TENANT_TABLES = [
   "mcp_servers",
   "mcp_credentials",
   "mcp_run_grants",
+  "mcp_connections",
+  "mcp_oauth_codes",
 ];
 
 let pool: pg.Pool;
@@ -464,6 +466,58 @@ test("an MCP credential inherits its organization and stays unique per scope", a
     client.query("select count(*)::int as n from mcp_credentials"),
   );
   assert.equal(foreign.rows[0].n, 0, "another organization must not read an MCP credential");
+});
+
+test("the tenant role cannot write MCP OAuth codes", async () => {
+  const denied = await asOrg("org-a", async (client) => {
+    try {
+      await client.query(
+        `insert into mcp_oauth_codes (code_hash, client_id, redirect_uri, code_challenge, resource, connection_id, token_bundle, expires_at)
+         values ('h','c','http://127.0.0.1/cb','ch','http://localhost/mcp','00000000-0000-0000-0000-000000000000','bundle',now())`,
+      );
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  });
+  assert.match(denied?.message ?? "", /permission denied/);
+});
+
+test("the tenant role cannot update MCP connections", async () => {
+  // A GRANT does not undo what ALTER DEFAULT PRIVILEGES already gave,
+  // so this asserts the privilege itself rather than an RLS refusal:
+  // UPDATE is how a tenant-path bug would rewrite a token hash or
+  // widen a stored scope, which the migration promises it cannot.
+  const { rows } = await pool.query<{ upd: boolean; ins: boolean; del: boolean; sel: boolean }>(
+    `select has_table_privilege('bento_user','mcp_connections','UPDATE') as upd,
+            has_table_privilege('bento_user','mcp_connections','INSERT') as ins,
+            has_table_privilege('bento_user','mcp_connections','DELETE') as del,
+            has_table_privilege('bento_user','mcp_connections','SELECT') as sel`,
+  );
+  assert.equal(rows[0]?.upd, false, "bento_user must not hold UPDATE on mcp_connections");
+  assert.equal(rows[0]?.ins, true, "the management routes still create connections");
+  assert.equal(rows[0]?.del, true, "and still disconnect them");
+  assert.equal(rows[0]?.sel, true);
+});
+
+test("the tenant role cannot write OAuth requests or client registrations", async () => {
+  // Neither table is org-scoped (a pending authorization predates the
+  // sign in, a client registration is global), so least privilege is
+  // the only guard there is. Rewriting a pending request's redirect_uri
+  // is what this stops.
+  for (const table of ["mcp_oauth_requests", "mcp_oauth_clients"]) {
+    const { rows } = await pool.query<{ ins: boolean; upd: boolean; del: boolean; sel: boolean }>(
+      `select has_table_privilege('bento_user',$1,'INSERT') as ins,
+              has_table_privilege('bento_user',$1,'UPDATE') as upd,
+              has_table_privilege('bento_user',$1,'DELETE') as del,
+              has_table_privilege('bento_user',$1,'SELECT') as sel`,
+      [table],
+    );
+    assert.equal(rows[0]?.ins, false, `bento_user must not INSERT into ${table}`);
+    assert.equal(rows[0]?.upd, false, `bento_user must not UPDATE ${table}`);
+    assert.equal(rows[0]?.del, false, `bento_user must not DELETE from ${table}`);
+    assert.equal(rows[0]?.sel, true, `${table} stays readable for the structural checks`);
+  }
 });
 
 test("the tenant role cannot write MCP run grants", async () => {

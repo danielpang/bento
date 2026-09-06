@@ -95,6 +95,12 @@ export default defineConfig({
     port: 4401,
     proxy: {
       "/api": { target: "http://127.0.0.1:4400", changeOrigin: true },
+      // /mcp-oauth before /mcp: Vite matches prefixes, and /mcp would
+      // otherwise swallow /mcp-oauth. Both keep the inbound Host so
+      // local OAuth issuer URLs stay on 4401, not the API's 4400.
+      "/mcp-oauth": { target: "http://127.0.0.1:4400", changeOrigin: false },
+      "/mcp": { target: "http://127.0.0.1:4400", changeOrigin: false },
+      "/.well-known": { target: "http://127.0.0.1:4400", changeOrigin: false },
     },
   },
 });

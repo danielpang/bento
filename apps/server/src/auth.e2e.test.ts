@@ -9,6 +9,7 @@ import {
   createPool,
   invitation,
   linearConnections,
+  mcpConnections,
   mcpCredentials,
   mcpServers,
   member,
@@ -760,6 +761,22 @@ test("every entity route refuses a foreign tenant", async () => {
     .returning({ id: mcpServers.id });
   assert.ok(mcpServer!.id, "the owner's MCP server must exist for the MCP routes to be probed");
 
+  // Inserted directly for the same reason as the MCP server row above:
+  // the connection routes refuse org-less callers in multi mode (and
+  // non-testers besides), so the probes need a real id put there by
+  // hand. The happy paths live in mcp-server.e2e.test.ts.
+  const [mcpConnection] = await ctx.db
+    .insert(mcpConnections)
+    .values({
+      ownerId: ownerRow!.id,
+      organizationId: null,
+      name: "Matrix connection",
+      scope: "organization",
+      tokenHash: "matrix-hash",
+    })
+    .returning({ id: mcpConnections.id });
+  assert.ok(mcpConnection!.id, "the owner's MCP connection must exist for the connection routes to be probed");
+
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
     ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ name: "Stolen" }) }],
@@ -856,6 +873,16 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", "/api/linear/projects?teamId=team-x"],
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
     ["PATCH", "/api/slack/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
+    ["GET", "/api/mcp-connections"],
+    ["POST", "/api/mcp-connections", { body: JSON.stringify({ name: "Injected", scope: "organization" }) }],
+    ["DELETE", `/api/mcp-connections/${mcpConnection!.id}`],
+    ["GET", "/api/mcp-oauth/consent?request=00000000-0000-0000-0000-000000000000"],
+    [
+      "POST",
+      "/api/mcp-oauth/consent",
+      { body: JSON.stringify({ request: "00000000-0000-0000-0000-000000000000", scope: "organization" }) },
+    ],
+    ["POST", "/api/mcp-oauth/deny", { body: JSON.stringify({ request: "00000000-0000-0000-0000-000000000000" }) }],
     ["PATCH", `/api/mcp/${mcpServer!.id}`, { body: JSON.stringify({ name: "stolen" }) }],
     ["POST", `/api/mcp/${mcpServer!.id}/api-key`, { body: JSON.stringify({ value: "sk-injected" }) }],
     ["DELETE", `/api/mcp/${mcpServer!.id}/credential`],
@@ -891,6 +918,12 @@ test("every entity route refuses a foreign tenant", async () => {
     .from(mcpServers)
     .where(eq(mcpServers.id, mcpServer!.id));
   assert.equal(mcpAfter?.name, "Matrix MCP", "the intruder must not have renamed or deleted the MCP server");
+
+  const [connectionAfter] = await ctx.db
+    .select({ id: mcpConnections.id })
+    .from(mcpConnections)
+    .where(eq(mcpConnections.id, mcpConnection!.id));
+  assert.ok(connectionAfter, "the intruder must not have revoked the owner's MCP connection");
 
   // The project is still there, under its own name.
   const projectAfter = await asOwner(`/api/projects/${project.id}`);

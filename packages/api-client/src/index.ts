@@ -22,5 +22,10 @@ export {
   type McpServerStatus,
   type McpServerInput,
   type McpServerPatch,
+  type McpConnection,
+  type McpConnectionList,
+  type McpConnectionInput,
+  type McpConnectionCreated,
+  type McpOAuthConsent,
 } from "./client.js";
 export { DeviceFlow, type DeviceCodeResponse, type DeviceFlowOptions } from "./device-flow.js";

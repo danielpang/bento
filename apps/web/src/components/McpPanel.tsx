@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { BentoClient, McpCatalogEntry, McpServerStatus, McpStatus } from "@bento/api-client";
+import { BetaOnly } from "../beta.js";
 import { ConfirmDialog } from "./PromptDialog.js";
+import { McpConnectionsSection } from "./McpConnections.js";
 import { SecretField } from "./SecretField.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
@@ -180,6 +182,11 @@ export function McpPanel({ client, mode }: { client: BentoClient; mode: "local" 
           onOpenChange={setTeamCustomOpen}
         />
       )}
+      {/* The other direction: Bento as the MCP server outside agents
+          connect to. Beta while the surface settles. */}
+      <BetaOnly>
+        <McpConnectionsSection client={client} />
+      </BetaOnly>
     </>
   );
 }
@@ -257,6 +264,7 @@ function McpServerCard({
 }) {
   const toast = useToast();
   const [removing, setRemoving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
 
   const perMember = server.authType === "oauth" && server.credentialScope === "user";
@@ -329,21 +337,25 @@ function McpServerCard({
           />
         )}
       </div>
-      {/* One row, one place to look. Connecting is the viewer's own
-          action; enable/disable and remove belong to the owner of a
-          personal server or an admin of a team or teammate's. Remove
-          deletes the stored credential too, so it is also the way to
-          disconnect: two buttons for that was the thing nobody could
-          tell apart. */}
+      {/* Connecting is the viewer's own action. Once signed in, the
+          stored refresh token keeps the connection alive; Disconnect
+          is the only way to drop it without removing the server.
+          Enable/disable and remove belong to the owner of a personal
+          server or an admin of a team or teammate's. */}
       {(iConnect || canManage) && (
         <div className="actions">
-          {iConnect && server.authType === "oauth" && (
+          {iConnect && server.authType === "oauth" && !connected && (
             <button
-              className={connected ? "btn" : "btn btn-primary"}
+              className="btn btn-primary"
               disabled={busy}
               onClick={() => void connectTo(client, act, server.id)}
             >
-              {connected ? "Reconnect" : "Connect"}
+              Connect
+            </button>
+          )}
+          {iConnect && server.authType === "oauth" && connected && (
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setDisconnecting(true)}>
+              Disconnect
             </button>
           )}
           <button
@@ -357,6 +369,22 @@ function McpServerCard({
             Remove
           </button>
         </div>
+      )}
+      {disconnecting && (
+        <ConfirmDialog
+          title={`Disconnect ${server.name}?`}
+          description="This drops the stored sign in. Agents lose this server on their next run until you connect it again. The server itself stays in the list."
+          confirmLabel="Disconnect"
+          destructive
+          onClose={() => setDisconnecting(false)}
+          onConfirm={() =>
+            act(() =>
+              perMember || server.personal
+                ? client.disconnectMcpUserCredential(server.id)
+                : client.disconnectMcpCredential(server.id),
+            )
+          }
+        />
       )}
       {removing && (
         <ConfirmDialog
