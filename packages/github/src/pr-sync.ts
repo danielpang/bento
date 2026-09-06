@@ -1,15 +1,5 @@
 import type { Octokit } from "@octokit/rest";
-import type { PullRequestRef } from "./client.js";
-
-export interface PullRequestDetails {
-  title: string;
-  body: string | null;
-}
-
-export interface PullRequestUpdateInput extends PullRequestRef {
-  title?: string;
-  body?: string;
-}
+import type { PullRequestDetails, PullRequestRef, PullRequestUpdateInput } from "./client.js";
 
 /** Hidden marker so a re-run or republish does not post the same comment twice. */
 export function pullRequestRunMarker(runId: string): string {
@@ -47,7 +37,12 @@ export async function getPullRequestVia(octokit: Octokit, ref: PullRequestRef): 
     repo: ref.repo,
     pull_number: ref.prNumber,
   });
-  return { title: pr.data.title, body: pr.data.body };
+  return {
+    title: pr.data.title,
+    body: pr.data.body,
+    state: pr.data.state,
+    merged: pr.data.merged === true,
+  };
 }
 
 export async function updatePullRequestVia(octokit: Octokit, input: PullRequestUpdateInput): Promise<void> {

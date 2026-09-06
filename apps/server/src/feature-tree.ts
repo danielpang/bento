@@ -172,8 +172,22 @@ export async function relatedGroup(
       .orderBy(asc(featurePullRequests.createdAt)),
   ]);
 
-  const prByFeature = new Map<string, string>();
-  for (const pr of prRows) if (!prByFeature.has(pr.featureId)) prByFeature.set(pr.featureId, pr.url);
+  // By the number the card mirrors: a card that has published from
+  // more than one branch has a row per branch, and the oldest of them
+  // is not the pull request the card is showing. First match wins,
+  // because two repositories can hold the same number; the oldest row
+  // stays the fallback for a number no row carries.
+  const prByNumber = new Map<string, string>();
+  const oldestPr = new Map<string, string>();
+  for (const pr of prRows) {
+    const owner = rows.find((r) => r.feature.id === pr.featureId);
+    if (!owner) continue;
+    if (!oldestPr.has(pr.featureId)) oldestPr.set(pr.featureId, pr.url);
+    if (owner.feature.prNumber === pr.number && !prByNumber.has(pr.featureId)) {
+      prByNumber.set(pr.featureId, pr.url);
+    }
+  }
+  const prByFeature = new Map([...oldestPr, ...prByNumber]);
 
   const draw = (row: (typeof rows)[number]): RelatedCard => {
     const runs = runRows.filter((r) => r.featureId === row.feature.id);

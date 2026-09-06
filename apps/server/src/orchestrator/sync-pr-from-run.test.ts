@@ -13,7 +13,7 @@ test("syncPullRequestsFromRun updates description when body is still boilerplate
       return "token";
     },
     async getPullRequest() {
-      return { title: "Card title", body: 'Opened by Bento for "Card title".' };
+      return { title: "Card title", body: 'Opened by Bento for "Card title".', state: "open", merged: false };
     },
     async updatePullRequest(input) {
       calls.push(`update:${input.title}:${input.body}`);
@@ -71,7 +71,7 @@ test("syncPullRequestsFromRun posts a code review comment once per pull request"
       return "token";
     },
     async getPullRequest() {
-      return { title: "Card", body: "Custom body" };
+      return { title: "Card", body: "Custom body", state: "open", merged: false };
     },
     async updatePullRequest() {},
     async pullRequestHasRunComment(_ref, runId) {
@@ -133,7 +133,7 @@ test("syncPullRequestsFromRun skips unknown stage slugs", async () => {
     },
     async getPullRequest() {
       touched = true;
-      return { title: "t", body: "b" };
+      return { title: "t", body: "b", state: "open", merged: false };
     },
     async updatePullRequest() {
       touched = true;

@@ -1,3 +1,5 @@
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
 import { getAdapter, runAgent } from "@bento/agents";
 import { agentRunPrompt, forgetsBetweenRuns, type AgentEvent } from "@bento/core";
 import {
@@ -10,6 +12,8 @@ import {
 } from "@bento/sandbox";
 import type { TokenStore } from "@bento/api-client";
 
+const execFile = promisify(execFileCallback);
+
 interface ClaimedRun {
   run: {
     id: string;
@@ -19,7 +23,13 @@ interface ClaimedRun {
     resumeSessionId: string | null;
     kind?: string;
   };
-  feature: { id: string; title: string; branchName: string | null };
+  feature: {
+    id: string;
+    title: string;
+    branchName: string | null;
+    /** The branch is new for this card: cut it from the base branch. */
+    startFromBase?: boolean;
+  };
   agent: { cli: string; model: string; extraArgs: string[] };
   repositories: { name: string; localPath: string; defaultBranch: string }[];
   stagePrompt: string;
@@ -132,10 +142,28 @@ export class LocalRunner {
     try {
       if (repositories.length === 0) throw new Error("the project has no repositories");
       const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
+      /**
+       * The new branch starts at origin/<base>, and this machine's
+       * checkout only knows what it last fetched: without this the
+       * "fresh start off the base branch" would be cut from a base
+       * that predates the merge that caused it. Best effort, because a
+       * checkout that cannot fetch is still a checkout the run can
+       * work in.
+       */
+      if (feature.startFromBase) {
+        for (const repo of repositories) {
+          await execFile("git", ["-C", repo.localPath, "fetch", "origin", repo.defaultBranch]).catch(() => {});
+        }
+      }
       await this.worktrees.ensureAll(
-        repositories.map((r) => ({ name: r.name, localPath: r.localPath })),
+        repositories.map((r) => ({
+          name: r.name,
+          localPath: r.localPath,
+          ...(feature.startFromBase ? { startFromBranch: r.defaultBranch } : {}),
+        })),
         feature.id,
         branch,
+        { branchChanged: feature.startFromBase === true },
       );
       handle = await this.driver.provision({
         projectId: "runner",

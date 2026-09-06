@@ -1623,6 +1623,34 @@ select.input,
   flex: none;
 }
 
+/*
+ * On a history row the repository name is short and the branch is the
+ * long half, so the name takes only what it needs. Sharing the row
+ * evenly, as the action rows do, spent half the width on white space
+ * and cut the branch off at the counter that tells two rows apart.
+ */
+.pr-row-history .pr-repo {
+  flex: 0 0 auto;
+}
+
+/*
+ * The branch a pull request in the history came from, kept out of the
+ * way but not cut short: what tells two rows apart is the counter on
+ * the end of the name, so the row gives the branch the width left
+ * over rather than a fixed box, and only a name too long for the
+ * drawer ellipsizes.
+ */
+.pr-branch {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pr-open {
   display: inline-flex;
   align-items: center;
@@ -2956,6 +2984,19 @@ a.pr-row:hover .pr-external {
 .chip[data-status="ci-failed"] {
   color: var(--failed);
   border-color: var(--failed);
+}
+/* How a pull request in the card's history ended. */
+.chip[data-status="pr-merged"] {
+  color: var(--succeeded);
+  border-color: var(--succeeded);
+}
+.chip[data-status="pr-open"] {
+  color: var(--running);
+  border-color: var(--running);
+}
+.chip[data-status="pr-closed"] {
+  color: var(--text-faint);
+  border-color: var(--line);
 }
 
 /* Card actions as an even grid rather than free-wrapping rows. */
