@@ -100,7 +100,7 @@ export function RepositoriesPanel({
   }
 
   return (
-    <aside className="drawer" role="dialog" aria-label="Repositories" ref={panel}>
+    <aside className="drawer drawer-wide management-drawer repositories-drawer" role="dialog" aria-label="Repositories" ref={panel}>
       <header className="drawer-head">
         <div className="drawer-title-row">
           <h2 className="drawer-title">Repositories</h2>
@@ -111,8 +111,7 @@ export function RepositoriesPanel({
         {/* What the list below does not show: a sandbox is not a machine
             with everything already on it. */}
         <p className="muted">
-          Sandboxes carry no language runtime, so give each one a setup command to install what it
-          needs and a test command for the agent.
+          The code your agents work in, with setup and test commands for each checkout.
         </p>
       </header>
 
@@ -121,6 +120,10 @@ export function RepositoriesPanel({
         {!projectId && <p className="muted">Create a project first.</p>}
         {projectId && (
           <section className="section">
+            <div className="settings-title-row">
+              <h3 className="settings-title">Project repositories</h3>
+              {repos !== null && <span className="surface-count">{repos.length} connected</span>}
+            </div>
             {repos === null ? (
               <>
                 <RepoCardSkeleton />
@@ -159,6 +162,8 @@ export function RepositoriesPanel({
               </div>
             ))
             )}
+            <section className="section settings-card repository-add">
+              <h3 className="settings-title">Add a repository</h3>
             {!githubChecked ? (
               <div className="skeleton-stack">
                 <Skeleton height={12} width="70%" />
@@ -280,6 +285,7 @@ export function RepositoriesPanel({
                 </button>
               </div>
             )}
+            </section>
           </section>
         )}
 
@@ -327,6 +333,7 @@ function RepositoryCommands({
     <div className="repo-commands">
       <label className="field">
         <span className="label">Setup command</span>
+        <span className="field-help">Install the runtime and dependencies in a fresh sandbox.</span>
         <textarea
           className="input textarea-grow repo-command-input"
           value={setup}

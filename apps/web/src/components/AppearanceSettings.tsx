@@ -95,6 +95,7 @@ export function AppearanceSettings() {
     <>
       <div className="section settings-card">
         <h3 className="settings-title">Accent</h3>
+        <p className="muted">A highlight for selected items, progress, and primary actions.</p>
         <div className="accent-row" role="radiogroup" aria-label="Accent">
           {ACCENTS.map((option) => (
             <button
@@ -114,17 +115,22 @@ export function AppearanceSettings() {
 
       <div className="section settings-card">
         <h3 className="settings-title">Theme</h3>
-        <div className="accent-row" role="radiogroup" aria-label="Theme">
+        <p className="muted">Choose a palette, or follow your device's appearance.</p>
+        <div className="theme-options" role="radiogroup" aria-label="Theme">
           {THEMES.map((option) => (
             <button
               key={option.id}
-              className="accent-option"
+              className="theme-option"
               data-on={option.id === theme || undefined}
               role="radio"
               aria-checked={option.id === theme}
               onClick={() => chooseTheme(option.id)}
             >
-              {option.name}
+              <span className="theme-preview" data-palette={option.id} aria-hidden="true">
+                <span className="theme-preview-nav"><i /><i /><i /></span>
+                <span className="theme-preview-board"><i /><i /><i /></span>
+              </span>
+              <span className="theme-option-label">{option.name}<span className="theme-selected" aria-hidden="true">{option.id === theme ? "✓" : ""}</span></span>
             </button>
           ))}
         </div>

@@ -86,6 +86,7 @@ export function AgentSession({
   onQuoteClear,
   defaultShowDetail,
   showDetail: controlledShowDetail,
+  visible = true,
 }: {
   client: BentoClient;
   featureId: string;
@@ -109,6 +110,8 @@ export function AgentSession({
    * wins over both the saved preference and defaultShowDetail.
    */
   showDetail?: boolean;
+  /** Hidden drawer tabs keep the stream and draft, but defer scrolling. */
+  visible?: boolean;
 }) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   /**
@@ -192,7 +195,7 @@ export function AgentSession({
    */
   const readPosition = () => {
     const el = paneRef.current;
-    if (!el) return;
+    if (!el || el.clientHeight === 0) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < AT_BOTTOM_SLACK;
     stickToBottom.current = atBottom;
     setScrolledUp(!atBottom);
@@ -447,6 +450,7 @@ export function AgentSession({
     // parked at its oldest run. And only when pinned: reading history
     // must not be yanked back to the newest line on every event, and
     // the draft updates once per animation frame while text streams.
+    if (!visible) return;
     const frame = requestAnimationFrame(() => {
       const el = paneRef.current;
       if (!el) return;
@@ -458,7 +462,7 @@ export function AgentSession({
       readPosition();
     });
     return () => cancelAnimationFrame(frame);
-  }, [sections, visiblePending.length, draft]);
+  }, [sections, visiblePending.length, draft, visible]);
 
   /**
    * Fit the composer to what is typed, including a long line that
