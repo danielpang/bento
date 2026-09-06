@@ -6,6 +6,7 @@ import type { AppContext } from "../context.js";
 import { featurePullRequestTargets } from "../feature-prs.js";
 import { TokenBuckets } from "../mcp/rate-limit.js";
 import {
+  connectionOwnerIsBetaTester,
   connectionProjectFilter,
   projectForConnection,
   recordConnectionUse,
@@ -216,9 +217,24 @@ export function mcpEndpointRoutes(ctx: AppContext) {
     return resolveConnection(ctx, auth.slice("Bearer ".length).trim());
   }
 
+  /**
+   * Bento as an MCP server is beta, so a connection only serves while
+   * the member it acts as is on the flag. The refusal is 404 rather
+   * than the 401 a missing token gets: 401 carries the pointer that
+   * starts OAuth, and sending a host round that loop to a consent page
+   * that will refuse it is worse than saying the endpoint is not there.
+   * It is also what the rest of the codebase answers for beta surfaces
+   * a non-tester must not learn about.
+   */
+  async function beta(c: Context, conn: ResolvedConnection): Promise<Response | null> {
+    return (await connectionOwnerIsBetaTester(ctx, conn.ownerId)) ? null : notFound(c);
+  }
+
   routes.post("/", async (c) => {
     const conn = await authenticate(c);
     if (!conn) return unauthorized(c);
+    const off = await beta(c, conn);
+    if (off) return off;
     if (!takeToken(conn.id)) return c.json({ error: "slow down" }, 429);
     recordConnectionUse(ctx, conn.id);
 
@@ -286,12 +302,16 @@ export function mcpEndpointRoutes(ctx: AppContext) {
   routes.get("/", async (c) => {
     const conn = await authenticate(c);
     if (!conn) return unauthorized(c);
+    const off = await beta(c, conn);
+    if (off) return off;
     c.header("allow", "POST");
     return c.json({ error: "this MCP server does not open a server stream" }, 405);
   });
   routes.delete("/", async (c) => {
     const conn = await authenticate(c);
     if (!conn) return unauthorized(c);
+    const off = await beta(c, conn);
+    if (off) return off;
     c.header("allow", "POST");
     return c.json({ error: "this MCP server is stateless; there is no session to end" }, 405);
   });

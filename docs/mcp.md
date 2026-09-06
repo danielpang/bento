@@ -86,7 +86,11 @@ Not yet supported: per-project server enablement (org-wide only), stdio servers,
 
 ## Bento as an MCP server
 
-The other direction: an agent running outside Bento (Claude Code on a laptop, Cursor, anything that speaks MCP) connects to `/mcp` and can put cards on the board and follow what happens to them. Currently behind the beta testers flag.
+The other direction: an agent running outside Bento (Claude Code on a laptop, Cursor, anything that speaks MCP) connects to `/mcp` and can put cards on the board and follow what happens to them.
+
+This half is behind the `beta-testers` flag, and only this half. Everything above, the servers Bento's own agents call, ships to everyone. Being off the flag hides the "Connect an agent to Bento" section, answers 404 from the connection routes and the consent page, and refuses tool calls on `/mcp` for a connection whose owner is off it, so a token minted while somebody was on the flag stops working when they come off it. The flag gates the capability rather than revoking anything: put the member back on it and the same token serves again.
+
+The discovery documents under `/.well-known/` stay public. They carry no tenant data and grant nothing without a token, and there is no signed-in member to evaluate a flag against at that point in the handshake.
 
 ### Connecting an agent
 

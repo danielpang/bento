@@ -14,6 +14,7 @@ import {
   runMigrations,
 } from "@bento/db";
 import { sweepExpiredOAuth } from "./mcp/oauth-sweep.js";
+import { clearBetaCache } from "./mcp/connections.js";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -553,6 +554,68 @@ test("non-testers hear 404 from the management routes", async () => {
     assert.equal(consent.status, 404, "consent is behind the same flag");
   } finally {
     ctx.featureFlags = flags;
+  }
+});
+
+test("a live token stops serving tools when its owner comes off the flag", async () => {
+  const token = await signUp("mcp-flagoff@bento.test", "Flagged");
+  await makeOrg(token, "Flagged", "mcp-flagged");
+  await makeProject(token, "Board");
+
+  // Authorized while on the flag, the way a beta tester connects.
+  const created = await jsonPost("/api/mcp-connections", { name: "Laptop", scope: "organization" }, token);
+  assert.equal(created.status, 201);
+  const connection = (await created.json()) as { token: string };
+  assert.equal((await callTool(connection.token, "list_projects", {})).isError, false);
+
+  const flags = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(null, false);
+  clearBetaCache();
+  try {
+    // The token is still valid and the connection row is untouched, but
+    // Bento as an MCP server is not on for this member any more, so
+    // there is nothing here to call. 404 rather than the 401 a missing
+    // token gets: 401 would send the host into an OAuth loop that ends
+    // at a consent page which refuses it.
+    const listed = await rpc(connection.token, "tools/list");
+    assert.equal(listed.status, 404, "tool calls stop the moment the owner is off the flag");
+    assert.equal(listed.headers.get("www-authenticate"), null, "and it does not invite a fresh OAuth attempt");
+
+    const stream = await app.request("/api/mcp-server", {
+      headers: { authorization: `Bearer ${connection.token}`, accept: "text/event-stream" },
+    });
+    assert.equal(stream.status, 404, "the GET and DELETE verbs answer the same way");
+  } finally {
+    ctx.featureFlags = flags;
+    clearBetaCache();
+  }
+
+  // Back on the flag, the same token works again: the flag gates the
+  // capability, it does not revoke the connection.
+  assert.equal((await callTool(connection.token, "list_projects", {})).isError, false);
+});
+
+test("the flag hides Bento's own MCP server without touching the servers Bento consumes", async () => {
+  const token = await signUp("mcp-outbound-stays@bento.test", "Outbound");
+  await makeOrg(token, "Outbound", "mcp-outbound-stays");
+
+  const flags = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(null, false);
+  clearBetaCache();
+  try {
+    // Inbound: gone.
+    const inbound = await app.request("/api/mcp-connections", { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(inbound.status, 404);
+
+    // Outbound: the registry of servers Bento's own agents call is a
+    // separate, shipped feature and must stay reachable for everyone.
+    const outbound = await app.request("/api/mcp/status", { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(outbound.status, 200, "adding MCP servers to Bento is not behind this flag");
+    const body = (await outbound.json()) as { servers: unknown[] };
+    assert.ok(Array.isArray(body.servers), "and it still answers with the team's registry");
+  } finally {
+    ctx.featureFlags = flags;
+    clearBetaCache();
   }
 });
 
