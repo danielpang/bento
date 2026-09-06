@@ -52,7 +52,3 @@ export async function sweepExpiredOAuth(ctx: AppContext): Promise<void> {
       ),
     );
 }
-
-/** Exported for the tests, which need to age a row past the grace. */
-export const OAUTH_SWEEP_GRACE_MS = GRACE_MS;
-export const OAUTH_SWEEP_UNUSED_CLIENT_MS = UNUSED_CLIENT_MS;
