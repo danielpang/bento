@@ -51,6 +51,31 @@ export const POOL_MAX_LIFETIME_SECONDS = 240;
 export const POOL_KEEPALIVE_INITIAL_DELAY_MS = 10_000;
 
 /**
+ * Node error codes for a pooled socket the peer has already dropped.
+ *
+ * Neon's PgBouncer, a Fly proxy, or an idle NAT can close a TCP session
+ * without a RST. The next read from that socket surfaces `ETIMEDOUT`
+ * (the `read ETIMEDOUT` pg-boss cron sees) or `ECONNRESET`.
+ */
+const TRANSIENT_CONNECTION_ERROR_CODES = new Set(["ETIMEDOUT", "ECONNRESET"]);
+
+/**
+ * Whether this error is a dropped-socket failure the pool recovers from
+ * on its own.
+ *
+ * pg-pool discards the dead client and the next checkout opens a fresh
+ * one, so the caller (a pg-boss cron tick, an HTTP query) retries and
+ * nothing downstream breaks. Each drop still arrives as a distinct
+ * error with its own message and stack, so error tracking fingerprints
+ * every one separately unless the reporter groups them; this predicate
+ * is how a reporter tells the recoverable drops apart from real faults.
+ */
+export function isTransientConnectionError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && TRANSIENT_CONNECTION_ERROR_CODES.has(code);
+}
+
+/**
  * Pool options shared by the app pool and pg-boss. pg-boss builds its
  * own `pg.Pool` from the constructor config (`new pg.Pool(config)`),
  * so Timekeeper cron and the HTTP pool have to be configured the same

@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createDb, createPool, pgBossDatabase, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
+import { createDb, createPool, isTransientConnectionError, pgBossDatabase, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -100,7 +100,17 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     });
     boss.on("error", (err) => {
       console.error("pg-boss error:", err);
-      analytics?.captureException(err, null, null, { source: "pg-boss" });
+      analytics?.captureException(err, null, null, {
+        source: "pg-boss",
+        // A dropped socket the pool recycles on its own arrives with a
+        // fresh message and stack each time, so error tracking would
+        // open a new issue per drop. One stable fingerprint groups the
+        // recurring cause into a single issue; real pg-boss faults keep
+        // their own fingerprints.
+        ...(isTransientConnectionError(err)
+          ? { $exception_fingerprint: "pg-boss transient database connection drop" }
+          : {}),
+      });
     });
     await boss.start();
 
