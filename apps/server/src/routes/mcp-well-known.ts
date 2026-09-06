@@ -12,7 +12,7 @@ export function mcpWellKnownRoutes(ctx: AppContext) {
   const routes = new Hono();
 
   function originOf(c: Context) {
-    return requestOrigin(c, ctx.env.BETTER_AUTH_URL);
+    return requestOrigin(c, ctx.env);
   }
 
   const protectedResource = (c: Context) => {

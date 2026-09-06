@@ -26,9 +26,12 @@ ALTER TABLE mcp_connections FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 CREATE POLICY mcp_connections_org_isolation ON mcp_connections
   USING (organization_id IS NOT DISTINCT FROM bento_current_org())
   WITH CHECK (organization_id IS NOT DISTINCT FROM bento_current_org());--> statement-breakpoint
+-- Default privileges grant DML on every new public table, so a GRANT
+-- alone leaves UPDATE in place: it has to be taken back by name.
 -- The management routes create, list, and delete connections on the
 -- tenant path. UPDATE stays off it: the only updates are the usage
 -- counters, written by the MCP endpoint on the owner pool, and a
 -- tenant-path bug must not be able to rewrite a token hash or widen a
 -- stored scope.
+REVOKE UPDATE ON mcp_connections FROM bento_user;--> statement-breakpoint
 GRANT SELECT, INSERT, DELETE ON mcp_connections TO bento_user;

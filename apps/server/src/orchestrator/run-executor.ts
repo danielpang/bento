@@ -38,6 +38,7 @@ import { prepareRunMcp } from "./mcp-run.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { isBetaRun } from "../feature-flags.js";
 import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
+import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
@@ -2022,6 +2023,13 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     // run's terminal paths already ended them; this only reclaims rows.
     await sweepExpiredGrants(ctx).catch((err: unknown) => {
       console.warn("the expired MCP grant sweep did not finish:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
+    });
+    // Codes and authorization requests nobody finished, and client
+    // registrations that never became a connection. /register takes no
+    // session, so this is the only thing bounding that table.
+    await sweepExpiredOAuth(ctx).catch((err: unknown) => {
+      console.warn("the expired MCP OAuth sweep did not finish:", err);
       ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
     });
   }));

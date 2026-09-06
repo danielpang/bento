@@ -29,6 +29,7 @@ export { DiffReview } from "./DiffReview.js";
 export { FeatureDrawer } from "./FeatureDrawer.js";
 export { SignOutButton, StopButton } from "./IconButtons.js";
 export { Markdown, MermaidDiagram } from "./Markdown.js";
+export { Modal } from "./Modal.js";
 export { McpAuthorize } from "./McpAuthorize.js";
 export { NavMenu, type NavAction } from "./NavMenu.js";
 export { OutOfCompute } from "./OutOfCompute.js";

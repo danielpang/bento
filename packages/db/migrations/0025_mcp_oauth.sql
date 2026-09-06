@@ -69,3 +69,16 @@ CREATE TRIGGER mcp_oauth_codes_inherit_org BEFORE INSERT ON mcp_oauth_codes
 REVOKE INSERT, UPDATE, DELETE ON mcp_oauth_codes FROM bento_user;
 --> statement-breakpoint
 GRANT SELECT ON mcp_oauth_codes TO bento_user;
+--> statement-breakpoint
+-- mcp_oauth_requests and mcp_oauth_clients are not tenant rows: a
+-- pending authorization exists before anyone has signed in, so it has
+-- no organization to key a policy on, and a client registration is
+-- global. Row-level security therefore has nothing to say about them,
+-- and least privilege is the whole protection: both are written only
+-- by the OAuth routes on the owner pool, so the tenant role keeps
+-- SELECT and loses the rest. Without this a tenant-path bug could
+-- rewrite a pending request's redirect_uri and steer the resulting
+-- authorization code somewhere else.
+REVOKE INSERT, UPDATE, DELETE ON mcp_oauth_requests FROM bento_user;--> statement-breakpoint
+REVOKE INSERT, UPDATE, DELETE ON mcp_oauth_clients FROM bento_user;--> statement-breakpoint
+GRANT SELECT ON mcp_oauth_requests, mcp_oauth_clients TO bento_user;

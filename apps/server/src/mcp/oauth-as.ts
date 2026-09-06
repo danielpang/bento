@@ -13,15 +13,52 @@ export const ACCESS_TOKEN_EXPIRES_IN = 315_360_000;
 
 export const AUTH_TTL_MS = 10 * 60_000;
 
-export function requestOrigin(c: Context, fallback: string): string {
-  const fallbackOrigin = fallback.replace(/\/$/, "");
-  const url = new URL(c.req.url);
+/**
+ * The origin this deployment answers on, for the issuer, the resource
+ * identifier, the resource-metadata pointer and the consent redirect.
+ *
+ * Configuration decides, not the caller. This used to prefer
+ * X-Forwarded-Host (then Host) over BETTER_AUTH_URL, which made it the
+ * one origin in the server a request header could choose: a forged Host
+ * put an attacker's hostname into the 401's resource_metadata pointer
+ * and into the authorization and token endpoints a client discovers
+ * from it, which is a redirect to somewhere else wearing Bento's name.
+ *
+ * Headers still get a say, because a deployment legitimately answers on
+ * more than one name and local development answers on a port the Host
+ * header drops. They only get to select among origins the operator has
+ * already named: BETTER_AUTH_URL and BENTO_TRUSTED_ORIGINS. Anything
+ * else falls back to the configured URL rather than being honoured.
+ */
+export interface OriginConfig {
+  BETTER_AUTH_URL: string;
+  BENTO_TRUSTED_ORIGINS: string[];
+}
+
+export function requestOrigin(c: Context, env: OriginConfig): string {
+  const stripSlash = (value: string) => value.replace(/\/$/, "");
+  const configured = stripSlash(env.BETTER_AUTH_URL);
+  const claimed = claimedOrigin(c, configured);
+  if (!claimed) return configured;
+
+  const allowed = new Set([configured, ...env.BENTO_TRUSTED_ORIGINS.map(stripSlash)]);
+  return allowed.has(claimed) ? claimed : configured;
+}
+
+/** The origin the request says it reached, before it is checked. */
+function claimedOrigin(c: Context, configured: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(c.req.url);
+  } catch {
+    return null;
+  }
   const hostHeader = (c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "").split(",")[0]!.trim();
   const protoHeader = (c.req.header("x-forwarded-proto") ?? "").split(",")[0]!.trim();
   let host = hostHeader || url.host;
   const proto = protoHeader || url.protocol.replace(":", "") || "http";
-  if (proto !== "http" && proto !== "https") return fallbackOrigin;
-  if (!host || /[\s/]/.test(host)) return fallbackOrigin;
+  if (proto !== "http" && proto !== "https") return null;
+  if (!host || /[\s/]/.test(host)) return null;
   // Fetch and Hono's app.request often send Host without a port even
   // when the URL has one. Keep the URL's port so local /mcp OAuth
   // metadata is not issued for http://localhost/mcp.
@@ -31,11 +68,11 @@ export function requestOrigin(c: Context, fallback: string): string {
   const origin = `${proto}://${host}`;
   try {
     const built = new URL(origin);
-    const configured = new URL(fallbackOrigin);
+    const known = new URL(configured);
     // Relative app.request paths also lose the listen port. If the
     // hostname still matches the public URL, take that URL's port.
-    if (!built.port && configured.port && built.hostname === configured.hostname && built.protocol === configured.protocol) {
-      return fallbackOrigin;
+    if (!built.port && known.port && built.hostname === known.hostname && built.protocol === known.protocol) {
+      return configured;
     }
   } catch {
     return origin;

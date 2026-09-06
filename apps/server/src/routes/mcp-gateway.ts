@@ -7,6 +7,7 @@ import { credentialHeader } from "../mcp/client.js";
 import { resolveGrant, recordGrantUse, type ResolvedGrant } from "../mcp/grants.js";
 import { refreshCredential } from "../mcp/refresh.js";
 import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../mcp/safe-fetch.js";
+import { TokenBuckets } from "../mcp/rate-limit.js";
 
 /**
  * The MCP gateway: what agents talk to instead of the real servers.
@@ -34,29 +35,13 @@ const FORWARD_HEADERS = ["content-type", "accept", "mcp-session-id", "last-event
 const RETURN_HEADERS = ["content-type", "mcp-session-id", "mcp-protocol-version"];
 
 /** 30 requests per 10 seconds per grant; an agent's tool calls fit, a loop does not. */
-const BUCKET_CAPACITY = 30;
-const BUCKET_REFILL_PER_MS = 3 / 1000;
 const MAX_STREAMS_PER_GRANT = 3;
 
-const buckets = new Map<string, { tokens: number; at: number }>();
+const buckets = new TokenBuckets({ capacity: 30, refillPerMs: 3 / 1000 });
 const openStreams = new Map<string, number>();
 
 function takeToken(grantId: string): boolean {
-  const now = Date.now();
-  const bucket = buckets.get(grantId) ?? { tokens: BUCKET_CAPACITY, at: now };
-  bucket.tokens = Math.min(BUCKET_CAPACITY, bucket.tokens + (now - bucket.at) * BUCKET_REFILL_PER_MS);
-  bucket.at = now;
-  if (bucket.tokens < 1) {
-    buckets.set(grantId, bucket);
-    return false;
-  }
-  bucket.tokens -= 1;
-  // A bucket that has refilled to full is indistinguishable from a fresh
-  // one, so drop it rather than retain an entry per grant that ever ran.
-  // Only a grant still under rate pressure (tokens below full) is kept.
-  if (bucket.tokens >= BUCKET_CAPACITY - 1) buckets.delete(grantId);
-  else buckets.set(grantId, bucket);
-  return true;
+  return buckets.take(grantId);
 }
 
 interface GatewayTarget {

@@ -76,7 +76,7 @@ export function mcpOAuthPublicRoutes(ctx: AppContext) {
   });
 
   routes.get("/authorize", async (c) => {
-    const origin = requestOrigin(c, ctx.env.BETTER_AUTH_URL);
+    const origin = requestOrigin(c, ctx.env);
     const iss = origin;
     const clientId = c.req.query("client_id") ?? "";
     const redirectUri = c.req.query("redirect_uri") ?? "";
@@ -132,7 +132,7 @@ export function mcpOAuthPublicRoutes(ctx: AppContext) {
 }
 
 async function exchangeCode(ctx: AppContext, c: Context, params: Record<string, string>) {
-  const origin = requestOrigin(c, ctx.env.BETTER_AUTH_URL);
+  const origin = requestOrigin(c, ctx.env);
   const code = params.code ?? "";
   const verifier = params.code_verifier ?? "";
   const redirectUri = params.redirect_uri ?? "";
@@ -168,7 +168,20 @@ async function exchangeCode(ctx: AppContext, c: Context, params: Record<string, 
     return c.json({ error: "invalid_grant" }, 400);
   }
 
-  await ctx.db.delete(mcpOAuthCodes).where(eq(mcpOAuthCodes.id, row.id));
+  /**
+   * The code is spent here, and the delete is what decides the winner.
+   * Reading the row and then deleting it in a later statement let two
+   * concurrent exchanges both pass the read before either delete
+   * landed, and both were handed the same token pair: the replay a
+   * single-use code exists to prevent. Deleting by id and requiring a
+   * row back means the loser of that race is told invalid_grant, and
+   * the sequential e2e assertion could never have caught it.
+   */
+  const consumed = await ctx.db.delete(mcpOAuthCodes).where(eq(mcpOAuthCodes.id, row.id)).returning({
+    id: mcpOAuthCodes.id,
+  });
+  if (consumed.length === 0) return c.json({ error: "invalid_grant" }, 400);
+
   return c.json({
     access_token: bundle.access,
     token_type: "bearer",
@@ -301,7 +314,7 @@ export function mcpOAuthConsentRoutes(ctx: AppContext) {
     if (!request) return notFound(c);
     if (request.userId && request.userId !== access.userId) return notFound(c);
 
-    const origin = requestOrigin(c, ctx.env.BETTER_AUTH_URL);
+    const origin = requestOrigin(c, ctx.env);
     const db = tenantDb(c, ctx);
     const projectIds = body.scope === "projects" ? [...new Set(body.projectIds)] : [];
     if (projectIds.length > 0) {
@@ -382,7 +395,7 @@ export function mcpOAuthConsentRoutes(ctx: AppContext) {
     const request = await loadRequest(ctx, parsed.data.request);
     if (!request) return notFound(c);
     if (request.userId && request.userId !== access.userId) return notFound(c);
-    const origin = requestOrigin(c, ctx.env.BETTER_AUTH_URL);
+    const origin = requestOrigin(c, ctx.env);
     await ctx.db.delete(mcpOAuthRequests).where(eq(mcpOAuthRequests.id, request.id));
     return c.json({
       redirect: oauthErrorRedirect(request.redirectUri, "access_denied", request.state, origin),

@@ -2,7 +2,18 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { createDb, createPool, features, mcpConnections, runMigrations } from "@bento/db";
+import {
+  createDb,
+  createPool,
+  features,
+  mcpConnections,
+  mcpOAuthClients,
+  mcpOAuthCodes,
+  mcpOAuthRequests,
+  pipelines,
+  runMigrations,
+} from "@bento/db";
+import { sweepExpiredOAuth } from "./mcp/oauth-sweep.js";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -123,6 +134,8 @@ async function makeProject(token: string, name: string): Promise<string> {
   assert.equal(res.status, 201, `project ${name} must be created`);
   return ((await res.json()) as { id: string }).id;
 }
+
+const hashOf = (raw: string) => createHash("sha256").update(raw).digest("hex");
 
 let rpcId = 0;
 
@@ -801,4 +814,162 @@ test("Claude and Cursor connect through OAuth on /mcp", async () => {
     }),
   });
   assert.equal(oldRefresh.status, 400, "the previous refresh token is spent");
+});
+
+test("two concurrent exchanges of one code cannot both succeed", async () => {
+  const token = await signUp("mcp-race@bento.test", "Racer");
+  await makeOrg(token, "Race", "mcp-race");
+  await makeProject(token, "Board");
+  const origin = "http://localhost:4400";
+
+  const registered = await app.request(`${origin}/mcp-oauth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ client_name: "Racer", redirect_uris: ["http://127.0.0.1:9911/cb"] }),
+  });
+  assert.equal(registered.status, 201);
+  const client = (await registered.json()) as { client_id: string };
+
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const authorize = await app.request(
+    `${origin}/mcp-oauth/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id: client.client_id,
+      redirect_uri: "http://127.0.0.1:9911/cb",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      resource: `${origin}/mcp`,
+      state: "race",
+    })}`,
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+  assert.equal(authorize.status, 302);
+  const requestId = new URL(authorize.headers.get("location")!, origin).searchParams.get("request");
+  assert.ok(requestId);
+
+  const consented = await jsonPost("/api/mcp-oauth/consent", { request: requestId, scope: "organization" }, token);
+  assert.equal(consented.status, 200);
+  const code = new URL(((await consented.json()) as { redirect: string }).redirect).searchParams.get("code");
+  assert.ok(code);
+
+  // Both requests are in flight before either finishes, which is what
+  // a select-then-delete could not survive: both read the row, both
+  // validated, and both were handed the same token pair.
+  const exchange = () =>
+    app.request(`${origin}/mcp-oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code!,
+        redirect_uri: "http://127.0.0.1:9911/cb",
+        client_id: client.client_id,
+        code_verifier: verifier,
+      }).toString(),
+    });
+  const [a, b] = await Promise.all([exchange(), exchange()]);
+  const statuses = [a.status, b.status].sort();
+  assert.deepEqual(statuses, [200, 400], "exactly one exchange may win the code");
+
+  const bodies = await Promise.all([a.json(), b.json()]);
+  const tokens = bodies.filter((body) => (body as { access_token?: string }).access_token);
+  assert.equal(tokens.length, 1, "only one token pair is ever issued for a code");
+  const left = await ctx.db.select().from(mcpOAuthCodes).where(eq(mcpOAuthCodes.codeHash, hashOf(code!)));
+  assert.equal(left.length, 0, "the code is gone either way");
+});
+
+test("the sweep reclaims abandoned OAuth rows and leaves live ones alone", async () => {
+  const token = await signUp("mcp-sweep@bento.test", "Sweeper");
+  await makeOrg(token, "Sweep", "mcp-sweep");
+
+  // An authorization nobody finished, expired well past the grace.
+  const stale = new Date(Date.now() - 4 * 60 * 60_000);
+  await ctx.db.insert(mcpOAuthRequests).values({
+    clientId: "abandoned-client",
+    redirectUri: "http://127.0.0.1:9912/cb",
+    codeChallenge: "challenge",
+    resource: "http://localhost:4400/mcp",
+    expiresAt: stale,
+  });
+  // A live one, still inside its ten minutes.
+  await ctx.db.insert(mcpOAuthRequests).values({
+    clientId: "live-client",
+    redirectUri: "http://127.0.0.1:9913/cb",
+    codeChallenge: "challenge",
+    resource: "http://localhost:4400/mcp",
+    expiresAt: new Date(Date.now() + 5 * 60_000),
+  });
+  // A registration old enough to be abandoned, with nothing pointing at it.
+  await ctx.db.insert(mcpOAuthClients).values({
+    clientId: "never-used-client",
+    clientName: "Never used",
+    redirectUris: ["http://127.0.0.1:9914/cb"],
+    createdAt: new Date(Date.now() - 60 * 24 * 60 * 60_000),
+  });
+
+  await sweepExpiredOAuth(ctx);
+
+  const requests = await ctx.db.select().from(mcpOAuthRequests);
+  const clientIds = requests.map((row) => row.clientId);
+  assert.ok(!clientIds.includes("abandoned-client"), "an expired request is reclaimed");
+  assert.ok(clientIds.includes("live-client"), "a request still inside its window is left alone");
+
+  const clients = await ctx.db.select().from(mcpOAuthClients);
+  const names = clients.map((row) => row.clientId);
+  assert.ok(!names.includes("never-used-client"), "an old registration with no connection is reclaimed");
+});
+
+test("create_feature says backlog when the project has no stages to start", async () => {
+  const token = await signUp("mcp-nostages@bento.test", "Stageless");
+  await makeOrg(token, "Stageless", "mcp-stageless");
+  const projectId = await makeProject(token, "Empty");
+
+  // A project ships with a pipeline and stages; emptying it is the
+  // condition advanceFeature answers null for.
+  const [pipeline] = await ctx.db.select().from(pipelines).where(eq(pipelines.projectId, projectId));
+  assert.ok(pipeline);
+  await ctx.pool.query("delete from stages where pipeline_id = $1", [pipeline!.id]);
+
+  const created = await jsonPost("/api/mcp-connections", { name: "Stageless", scope: "organization" }, token);
+  const connection = (await created.json()) as { token: string };
+
+  const card = await callTool(connection.token, "create_feature", {
+    projectId,
+    title: "Nowhere to go",
+    start: true,
+  });
+  assert.equal(card.isError, false);
+  assert.equal(card.data!.status, "backlog", "the card did not start, so it must not be reported as active");
+  assert.equal(card.data!.inBacklog, true);
+  assert.match(String(card.data!.note ?? ""), /no stages/, "and the agent is told why");
+
+  const status = await callTool(connection.token, "get_feature_status", {
+    featureId: card.data!.featureId as string,
+  });
+  assert.equal(status.data!.status, "backlog", "the card really is in the backlog");
+});
+
+test("list_features caps what it returns and says when it did", async () => {
+  const token = await signUp("mcp-listcap@bento.test", "Capper");
+  await makeOrg(token, "Cap", "mcp-cap");
+  const projectId = await makeProject(token, "Busy");
+  const created = await jsonPost("/api/mcp-connections", { name: "Cap", scope: "organization" }, token);
+  const connection = (await created.json()) as { token: string };
+
+  for (let i = 0; i < 5; i += 1) {
+    const made = await callTool(connection.token, "create_feature", { projectId, title: `Card ${i}` });
+    assert.equal(made.isError, false);
+  }
+
+  const capped = await callTool(connection.token, "list_features", { projectId, limit: 2 });
+  assert.equal((capped.data!.features as unknown[]).length, 2);
+  assert.equal(capped.data!.truncated, true, "a full page says so rather than looking complete");
+
+  const all = await callTool(connection.token, "list_features", { projectId });
+  assert.equal((all.data!.features as unknown[]).length, 5);
+  assert.equal(all.data!.truncated, false);
+
+  const tooMany = await callTool(connection.token, "list_features", { projectId, limit: 500 });
+  assert.equal(tooMany.isError, true, "a limit beyond the cap is refused rather than honoured");
 });

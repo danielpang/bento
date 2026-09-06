@@ -4,6 +4,7 @@ import { z } from "zod";
 import { agentRuns, featureEvents, features, pipelines, projects, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { featurePullRequestTargets } from "../feature-prs.js";
+import { TokenBuckets } from "../mcp/rate-limit.js";
 import {
   connectionProjectFilter,
   projectForConnection,
@@ -42,23 +43,10 @@ const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_PROTOCOL_VERSION = "2025-06-18";
 
 /** 30 requests per 10 seconds per connection, the gateway's budget. */
-const BUCKET_CAPACITY = 30;
-const BUCKET_REFILL_PER_MS = 3 / 1000;
-const buckets = new Map<string, { tokens: number; at: number }>();
+const buckets = new TokenBuckets({ capacity: 30, refillPerMs: 3 / 1000 });
 
 function takeToken(connectionId: string): boolean {
-  const now = Date.now();
-  const bucket = buckets.get(connectionId) ?? { tokens: BUCKET_CAPACITY, at: now };
-  bucket.tokens = Math.min(BUCKET_CAPACITY, bucket.tokens + (now - bucket.at) * BUCKET_REFILL_PER_MS);
-  bucket.at = now;
-  if (bucket.tokens < 1) {
-    buckets.set(connectionId, bucket);
-    return false;
-  }
-  bucket.tokens -= 1;
-  if (bucket.tokens >= BUCKET_CAPACITY - 1) buckets.delete(connectionId);
-  else buckets.set(connectionId, bucket);
-  return true;
+  return buckets.take(connectionId);
 }
 
 type JsonRpcId = string | number;
@@ -147,6 +135,10 @@ const TOOLS = [
           enum: ["backlog", "active", "gated", "done", "cancelled"],
           description: "Only cards in this status.",
         },
+        limit: {
+          type: "number",
+          description: "How many cards to return, 1 to 100. Defaults to 50, newest first.",
+        },
       },
       required: ["projectId"],
       additionalProperties: false,
@@ -195,6 +187,7 @@ const getFeatureStatusArgs = z.object({ featureId: z.string() });
 const listFeaturesArgs = z.object({
   projectId: z.string(),
   status: z.enum(["backlog", "active", "gated", "done", "cancelled"]).optional(),
+  limit: z.number().int().min(1).max(100).default(50),
 });
 
 const searchFeaturesArgs = z.object({
@@ -209,7 +202,7 @@ export function mcpEndpointRoutes(ctx: AppContext) {
   const notFound = (c: Context) => c.json({ error: NOT_FOUND }, 404);
 
   function unauthorized(c: Context) {
-    const origin = requestOrigin(c, ctx.env.BETTER_AUTH_URL);
+    const origin = requestOrigin(c, ctx.env);
     c.header(
       "WWW-Authenticate",
       `Bearer realm="mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`,
@@ -407,8 +400,14 @@ async function createFeature(ctx: AppContext, conn: ResolvedConnection, args: Re
     // backlog with the reason, rather than failing the create.
     note = await activationRefusal(ctx, feature);
     if (!note) {
-      await advanceFeature(ctx, feature.id, "manual", conn.ownerId);
-      started = true;
+      // advanceFeature answers null when the project has no stages to
+      // move into, which the console's own advance route refuses with
+      // a 400. Reporting "active" on that answer told the calling
+      // agent its card had started and left it polling a card sitting
+      // in the backlog, so the return decides what is reported.
+      const moved = await advanceFeature(ctx, feature.id, "manual", conn.ownerId);
+      started = moved !== null;
+      if (!moved) note = "this project has no stages yet, so the card is waiting in the backlog";
     }
   }
   return toolResult({
@@ -495,12 +494,17 @@ async function listFeatures(ctx: AppContext, conn: ResolvedConnection, args: Rec
         ...(parsed.data.status ? [eq(features.status, parsed.data.status)] : []),
       ),
     )
-    .orderBy(desc(features.createdAt));
+    .orderBy(desc(features.createdAt))
+    .limit(parsed.data.limit);
   const stageIds = [...new Set(rows.map((row) => row.currentStageId).filter((id): id is string => id !== null))];
   const stageRows = stageIds.length
     ? await ctx.db.select({ id: stages.id, name: stages.name }).from(stages).where(inArray(stages.id, stageIds))
     : [];
   return toolResult({
+    count: rows.length,
+    // Said plainly, the way search_features does: a full page and a
+    // complete board look identical to a caller that cannot see the cap.
+    truncated: rows.length === parsed.data.limit,
     features: rows.map((row) => ({
       id: row.id,
       title: row.title,
