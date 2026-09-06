@@ -37,11 +37,25 @@ import {
  */
 type Tab = SettingsTab;
 
+const SECTION_DESCRIPTIONS: Record<Tab, string> = {
+  appearance: "Make this workspace feel like yours.",
+  projects: "Manage the projects your agents work on.",
+  config: "Keep your agents and pipelines portable with YAML files.",
+  github: "Connect the identity and credentials agents use with GitHub.",
+  linear: "Bring issues into your pipeline and keep progress in sync.",
+  slack: "Connect your team and follow the work from Slack.",
+  mcp: "Give agents access to the tools and services they need.",
+  team: "Manage membership and shared access for your organization.",
+  billing: "Manage your plan and workspace billing.",
+  account: "Manage your personal account and organization ownership.",
+};
+
 export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
   const [mode, setMode] = useState<"local" | "multi" | "unknown">("unknown");
   const [social, setSocial] = useState<{ github: boolean; google: boolean } | undefined>(undefined);
   const [hasBilling, setHasBilling] = useState(false);
+  const [wideNavigation, setWideNavigation] = useState(() => window.matchMedia("(min-width: 801px)").matches);
   const [tab, setTab] = useState<Tab>(() => {
     const wanted = new URLSearchParams(window.location.search).get("tab");
     return KNOWN_SETTINGS_TABS.find((id) => id === wanted) ?? "appearance";
@@ -50,6 +64,14 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   // A GitHub connection started from this page comes back to it, so the
   // outcome is said here rather than only on the board.
   useGitHubOutcome();
+
+  // Keep Radix's arrow-key behavior aligned with the visible navigation.
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 801px)");
+    const update = () => setWideNavigation(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
 
   // Per-user MCP servers each member must connect for themselves: the
   // count drives a dot on the MCP tab so the prompt is visible without a
@@ -85,7 +107,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
         <BrandLockup />
         <span className="topbar-spacer" />
         <a className="btn btn-ghost" href="/">
-          Back
+          Back to board
         </a>
       </header>
 
@@ -96,6 +118,8 @@ export function SettingsPage({ client }: { client: BentoClient }) {
             keys that role promises, so assistive tech announced a tab
             strip that could not be operated as one. */}
         <Tabs.Root
+          className="settings-layout"
+          orientation={wideNavigation ? "vertical" : "horizontal"}
           value={active}
           onValueChange={(next) => {
             setTab(next as Tab);
@@ -107,6 +131,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
           {/* Same overflow cue as the provider tabs: on a phone the
               strip runs off the right edge, and a clipped label reads
               as a truncated name rather than as a row you can slide. */}
+          <div className="settings-navigation">
           <TabScroll active={active}>
             <Tabs.List className="tab-row" aria-label="Settings sections">
               {tabs.map((entry) => (
@@ -129,7 +154,13 @@ export function SettingsPage({ client }: { client: BentoClient }) {
               ))}
             </Tabs.List>
           </TabScroll>
+          </div>
 
+          <div className="settings-content">
+            <header className="settings-section-heading">
+              <h2>{tabs.find((entry) => entry.id === active)?.label}</h2>
+              <p>{SECTION_DESCRIPTIONS[active]}</p>
+            </header>
           <Tabs.Content value="appearance" className="settings-body">
             <AppearanceSettings />
           </Tabs.Content>
@@ -162,6 +193,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
           <Tabs.Content value="billing" className="settings-body">
             <BillingCard />
           </Tabs.Content>
+          </div>
         </Tabs.Root>
       </div>
     </div>

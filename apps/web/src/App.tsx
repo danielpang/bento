@@ -112,6 +112,14 @@ function RouteFallback() {
         <BrandLockup />
         <span className="topbar-spacer" />
       </header>
+      <div className="workspace-toolbar" aria-hidden="true">
+        <Skeleton className="skeleton-picker" />
+        <span className="topbar-spacer" />
+        <div className="workspace-tools">
+          <Skeleton className="skeleton-search" />
+          <Skeleton className="skeleton-btn" />
+        </div>
+      </div>
       <BoardSkeleton />
     </div>
   );
@@ -935,8 +943,12 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             </button>
           }
         />
-        <div className="empty-state">
-          <p className="muted">No projects yet. Point Bento at a git repository to start a board.</p>
+        <div className="empty-state empty-project">
+          <div className="empty-pipeline" aria-hidden="true">
+            <span>Brief</span><span>Build</span><span>Review</span><span>Ship</span>
+          </div>
+          <h1>Your next feature starts here.</h1>
+          <p className="muted">Connect a repository, describe the work, and let your agents take it through the pipeline. You decide when it moves forward.</p>
           <button className="btn btn-primary" onClick={() => setDialog("project")}>
             New project
           </button>
@@ -1175,19 +1187,9 @@ function TopBar({
   ];
 
   return (
-    <header className="topbar">
+    <>
+    <header className="topbar workspace-nav">
       <BrandLockup />
-      {/* One block, so it can drop to a row of its own on a phone
-          without the picker and the field being separated by whatever
-          happened to wrap between them. */}
-      {(picker || search) && (
-        <div className="topbar-lead">
-          {picker}
-          {search}
-        </div>
-      )}
-      <span className="topbar-spacer" />
-      {meta}
       <nav className="topbar-nav" aria-label="Board">
         {actions.map((action) =>
           action.href === undefined ? (
@@ -1207,14 +1209,25 @@ function TopBar({
             </a>
           ),
         )}
-        <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
-          <GearMark />
-        </a>
-        {showSignOut && <SignOutButton onClick={() => signOut()} />}
       </nav>
-      {primary}
+      <span className="topbar-spacer" />
+      {meta}
+      <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
+        <GearMark />
+      </a>
+      {showSignOut && <SignOutButton onClick={() => signOut()} />}
       <NavMenu actions={entries} />
     </header>
+    {(picker || search || primary) && (
+      <div className="workspace-toolbar">
+        {picker}
+        <span className="topbar-spacer" />
+        <div className="workspace-tools">
+          {search}
+          {primary}
+        </div>
+      </div>
+    )}
+    </>
   );
 }
-

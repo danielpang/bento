@@ -202,7 +202,7 @@ export function SessionPage({
       <header className="session-head">
         <h1 title={feature.title}>{feature.title}</h1>
         <span className="chip" data-status={feature.status}>
-          {feature.status === "done" ? "completed" : feature.status}
+          {feature.status === "done" ? "completed" : feature.status === "gated" ? "pending approval" : feature.status}
         </span>
         {exit}
       </header>
