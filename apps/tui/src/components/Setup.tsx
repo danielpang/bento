@@ -1,9 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useKeyboardInput as useInput } from "../mouse.js";
+import {
+  Children,
+  cloneElement,
+  createContext,
+  useContext,
+  isValidElement,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { Box, Text, useInput, useStdin } from "ink";
+import { Box, Text, useStdin, useWindowSize, usePaste } from "ink";
 import {
   AGENT_CREDENTIALS,
   MODEL_GUIDANCE,
@@ -14,14 +24,21 @@ import {
 } from "@bento/core";
 import type { GateCriteria, GateCriterion } from "@bento/core";
 import { getAdapter } from "@bento/agents";
-import type { AgentProfile, AgentTool, BentoClient, McpServerStatus, Project, Repository, Stage } from "@bento/api-client";
+import { terminalText } from "../terminal.js";
+import type {
+  AgentProfile,
+  AgentTool,
+  BentoClient,
+  McpServerStatus,
+  Project,
+  Repository,
+  Stage,
+} from "@bento/api-client";
+import { useMouseTarget, useSuspendMouse } from "../mouse.js";
+import { MouseActions, MouseButton } from "./MouseControls.js";
 import { TextInput } from "./TextInput.js";
 import { CRITERION_KINDS, describeCriterion } from "../criteria.js";
-import {
-  prepareRepositoryPath,
-  repositoryNameHint,
-  type RepositoryPathOwner,
-} from "../repository-path.js";
+import { prepareRepositoryPath, repositoryNameHint, type RepositoryPathOwner } from "../repository-path.js";
 
 /**
  * Everything needed before a board can do any work: the repositories
@@ -61,7 +78,11 @@ type Screen =
   | { name: "mcpKey"; serverName: string; url: string; value: string }
   | { name: "yamlAgents" }
   | { name: "yamlPipeline" }
-  | { name: "yamlPath"; kind: "agents-export" | "agents-import" | "pipeline-export" | "pipeline-import"; value: string }
+  | {
+      name: "yamlPath";
+      kind: "agents-export" | "agents-import" | "pipeline-export" | "pipeline-import";
+      value: string;
+    }
   | { name: "repoSetup"; repoId: string; value: string }
   | { name: "repoTest"; repoId: string; setupCommand: string; value: string };
 
@@ -114,10 +135,22 @@ export const PROVIDER_KEYS = [
   { label: "DeepSeek", name: "DEEPSEEK_API_KEY" },
 ] as const;
 
+type SetupPointer = {
+  pick: (index: number) => void;
+  move: (delta: number) => void;
+  key: (input: string) => void;
+  back: () => void;
+  typing: boolean;
+  busy: boolean;
+  actions: { label: string; key: string }[];
+};
+const SetupMouse = createContext<SetupPointer | null>(null);
+
 export function Setup({
   client,
   repositoryPathOwner,
   agentsRunLocally,
+  selectedProjectId,
   onDone,
 }: {
   client: BentoClient;
@@ -125,6 +158,7 @@ export function Setup({
   repositoryPathOwner: RepositoryPathOwner;
   /** Whether agents execute on this machine, which is what makes its logins usable. */
   agentsRunLocally: boolean;
+  selectedProjectId?: string | undefined;
   onDone: () => void;
 }) {
   const [screen, setScreen] = useState<Screen>({ name: "hub" });
@@ -166,9 +200,13 @@ export function Setup({
    */
   const [editingAgent, setEditingAgent] = useState<{ id: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [loading, setLoading] = useState(true);
   const { setRawMode, isRawModeSupported } = useStdin();
+  const suspendMouse = useSuspendMouse();
 
-  const project = projects[0] ?? null;
+  const project =
+    projects.find((p) => p.id === selectedProjectId || p.name === selectedProjectId) ?? projects[0] ?? null;
   const existingAgents = profiles;
   const hints: Record<string, string> = Object.fromEntries(secrets.map((row) => [row.name, row.hint]));
 
@@ -197,12 +235,17 @@ export function Setup({
     // server's own are none of this machine's business.
     setLogins(
       machineRow && machineRow.mode === "local" && machineRow.logins.length > 0
-        ? machineRow.logins.map((row) => ({ cli: row.cli, label: toolLabel(row.cli), signedIn: row.signedIn }))
+        ? machineRow.logins.map((row) => ({
+            cli: row.cli,
+            label: toolLabel(row.cli),
+            signedIn: row.signedIn,
+          }))
         : agentsRunLocally
           ? localLogins()
           : [],
     );
-    const first = projectRows[0];
+    const first =
+      projectRows.find((p) => p.id === selectedProjectId || p.name === selectedProjectId) ?? projectRows[0];
     if (first) {
       const [pipeline, repoRows] = await Promise.all([
         client.getPipeline(first.id),
@@ -219,7 +262,9 @@ export function Setup({
   }
 
   useEffect(() => {
-    void load().catch((err: unknown) => setError(message(err)));
+    void load()
+      .catch((err: unknown) => setError(message(err)))
+      .finally(() => setLoading(false));
   }, []);
 
   /**
@@ -235,6 +280,7 @@ export function Setup({
   async function signInToClaude(): Promise<void> {
     setBusy(true);
     setError("");
+    const restoreMouse = suspendMouse();
     try {
       if (isRawModeSupported) setRawMode(false);
       await new Promise<void>((resolve, reject) => {
@@ -242,13 +288,16 @@ export function Setup({
         child.on("error", () =>
           reject(new Error("could not run `claude`. Install Claude Code, or check it is on your PATH.")),
         );
-        child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`claude auth login exited ${code}`))));
+        child.on("exit", (code) =>
+          code === 0 ? resolve() : reject(new Error(`claude auth login exited ${code}`)),
+        );
       });
       setNotice("Signed in to Claude Code.");
     } catch (err) {
       setError(message(err));
     } finally {
       if (isRawModeSupported) setRawMode(true);
+      restoreMouse();
       setBusy(false);
       await load().catch(() => {});
     }
@@ -260,6 +309,8 @@ export function Setup({
    * screens clears the error that explains a failure.
    */
   async function act(what: string, fn: () => Promise<unknown>): Promise<boolean> {
+    if (busyRef.current) return false;
+    busyRef.current = true;
     setBusy(true);
     setError("");
     try {
@@ -271,6 +322,7 @@ export function Setup({
       setError(message(err));
       return false;
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
@@ -357,9 +409,7 @@ export function Setup({
     },
     {
       label: "Stages",
-      status: !project
-        ? "connect a repository first"
-        : `${assigned} of ${stages.length} have an agent`,
+      status: !project ? "connect a repository first" : `${assigned} of ${stages.length} have an agent`,
       open: () => (project ? go({ name: "stages" }) : setNotice("Connect a repository first.")),
     },
     // Logins on this machine are worth offering exactly when this
@@ -401,160 +451,162 @@ export function Setup({
     { label: "Finish and open the board", status: "", open: onDone },
   ];
 
-  useInput(
-    (input, key) => {
-      // Moving and leaving stay responsive while a save is in flight;
-      // only the actions that would start a second one are held back.
-      if (key.downArrow || input === "j") moveBy(1);
-      if (key.upArrow || input === "k") moveBy(-1);
+  usePaste(() => setNotice("Choose a text field before pasting."), {
+    isActive: isRawModeSupported === true && !TYPING.has(screen.name),
+  });
 
-      if (key.escape || (input === "q" && screen.name === "hub")) {
-        if (screen.name === "hub") onDone();
-        else go({ name: "hub" });
+  const handleSetupInput = (input: string, key: Partial<import("ink").Key> = {}) => {
+    // Moving and leaving stay responsive while a save is in flight;
+    // only the actions that would start a second one are held back.
+    if (key.downArrow || input === "j") moveBy(1);
+    if (key.upArrow || input === "k") moveBy(-1);
+
+    if (key.escape || (input === "q" && screen.name === "hub")) {
+      if (screen.name === "hub") onDone();
+      else go({ name: "hub" });
+      return;
+    }
+
+    if (busy || loading) return;
+
+    if (screen.name === "subscription") {
+      if (input === "s") {
+        if (machine?.mode !== "local") {
+          setNotice("The board is on a server, so this is chosen at launch: pass --share-agent-auth.");
+          return;
+        }
+        if (machine.pinnedByEnv) {
+          setNotice("BENTO_SHARE_AGENT_AUTH is set, so this is decided at launch.");
+          return;
+        }
+        const next = !(machine?.shareAgentAuth ?? false);
+        void act(next ? "Sharing this machine's logins with runs" : "No longer sharing logins", () =>
+          client.setShareAgentAuth(next),
+        );
         return;
       }
+      if (input === "l") {
+        void signInToClaude();
+        return;
+      }
+      return;
+    }
 
-      if (busy) return;
+    if (screen.name === "stages" && stages[indexRef.current]) {
+      const stage = stages[indexRef.current]!;
+      if (input === "g") {
+        const gateType = stage.gateType === "manual" ? "auto" : "manual";
+        void act(
+          `${stage.name} advances ${gateType === "auto" ? "once its requirements pass" : "when you approve"}`,
+          () => client.updateStage(stage.id, { gateType }),
+        );
+        return;
+      }
+      if (input === "r") {
+        go({ name: "stageName", stageId: stage.id, value: stage.name });
+        return;
+      }
+      if (input === "c") {
+        go({ name: "criteria", stageId: stage.id });
+        return;
+      }
+      // The stage that opens the pull request is a decision people
+      // make once per pipeline, and it was only reachable from the
+      // console even though the field has always been here.
+      if (input === "p") {
+        const createPr = !stage.createPr;
+        void act(
+          createPr
+            ? `${stage.name} opens a pull request when its agent finishes`
+            : `${stage.name} no longer opens a pull request`,
+          () => client.updateStage(stage.id, { createPr }),
+        );
+        return;
+      }
+    }
 
-      if (screen.name === "subscription") {
-        if (input === "s") {
-          if (machine?.mode !== "local") {
-            setNotice("The board is on a server, so this is chosen at launch: pass --share-agent-auth.");
-            return;
-          }
-          if (machine.pinnedByEnv) {
-            setNotice("BENTO_SHARE_AGENT_AUTH is set, so this is decided at launch.");
-            return;
-          }
-          const next = !(machine?.shareAgentAuth ?? false);
-          void act(next ? "Sharing this machine's logins with runs" : "No longer sharing logins", () =>
-            client.setShareAgentAuth(next),
+    // Deleting is a d away wherever a saved thing is listed.
+    if (input === "d") {
+      if (screen.name === "criteria") {
+        const current = criteriaOf(screen.stageId);
+        const doomed = current[indexRef.current];
+        if (doomed) {
+          const next = current.filter((_, i) => i !== indexRef.current);
+          void act("Removed the requirement", () =>
+            client.updateStage(screen.stageId, { gateCriteria: next as GateCriteria }),
           );
           return;
         }
-        if (input === "l") {
-          void signInToClaude();
+      }
+      if (screen.name === "stages") {
+        const stage = stages[indexRef.current];
+        if (stage) {
+          // The server refuses while cards are in the stage, and its
+          // refusal names the fix, so it is shown rather than
+          // second-guessed here.
+          void act(`Removed ${stage.name}`, () => client.deleteStage(stage.id));
           return;
         }
+      }
+      if (screen.name === "agents" && existingAgents[indexRef.current]) {
+        const profile = existingAgents[indexRef.current]!;
+        void act(`Removed ${profile.name}`, () => client.deleteProfile(profile.id));
         return;
       }
-
-      if (screen.name === "stages" && stages[indexRef.current]) {
-        const stage = stages[indexRef.current]!;
-        if (input === "g") {
-          const gateType = stage.gateType === "manual" ? "auto" : "manual";
-          void act(
-            `${stage.name} advances ${gateType === "auto" ? "once its requirements pass" : "when you approve"}`,
-            () => client.updateStage(stage.id, { gateType }),
-          );
+      if (screen.name === "keys" || screen.name === "github") {
+        if (!canManageCredentials) {
+          setNotice("Only owners and admins can change credentials.");
           return;
         }
-        if (input === "r") {
-          go({ name: "stageName", stageId: stage.id, value: stage.name });
-          return;
-        }
-        if (input === "c") {
-          go({ name: "criteria", stageId: stage.id });
-          return;
-        }
-        // The stage that opens the pull request is a decision people
-        // make once per pipeline, and it was only reachable from the
-        // console even though the field has always been here.
-        if (input === "p") {
-          const createPr = !stage.createPr;
-          void act(
-            createPr
-              ? `${stage.name} opens a pull request when its agent finishes`
-              : `${stage.name} no longer opens a pull request`,
-            () => client.updateStage(stage.id, { createPr }),
-          );
+        const credential =
+          screen.name === "github" ? GITHUB_CREDENTIAL : PROVIDER_CREDENTIALS[indexRef.current];
+        const saved = credential && secrets.find((s) => s.name === credential.name);
+        if (saved) {
+          void act(`Removed ${saved.name}`, () => client.deleteSecret(saved.id));
           return;
         }
       }
-
-      // Deleting is a d away wherever a saved thing is listed.
-      if (input === "d") {
-        if (screen.name === "criteria") {
-          const current = criteriaOf(screen.stageId);
-          const doomed = current[indexRef.current];
-          if (doomed) {
-            const next = current.filter((_, i) => i !== indexRef.current);
-            void act("Removed the requirement", () =>
-              client.updateStage(screen.stageId, { gateCriteria: next as GateCriteria }),
-            );
-            return;
-          }
-        }
-        if (screen.name === "stages") {
-          const stage = stages[indexRef.current];
-          if (stage) {
-            // The server refuses while cards are in the stage, and its
-            // refusal names the fix, so it is shown rather than
-            // second-guessed here.
-            void act(`Removed ${stage.name}`, () => client.deleteStage(stage.id));
-            return;
-          }
-        }
-        if (screen.name === "agents" && existingAgents[indexRef.current]) {
-          const profile = existingAgents[indexRef.current]!;
-          void act(`Removed ${profile.name}`, () => client.deleteProfile(profile.id));
+      if (screen.name === "repos" && project && repos[indexRef.current]) {
+        const repo = repos[indexRef.current]!;
+        if (repos.length === 1) {
+          setNotice("A project keeps at least one repository.");
           return;
         }
-        if (screen.name === "keys" || screen.name === "github") {
-          if (!canManageCredentials) {
-            setNotice("Only owners and admins can change credentials.");
-            return;
-          }
-          const credential =
-            screen.name === "github" ? GITHUB_CREDENTIAL : PROVIDER_CREDENTIALS[indexRef.current];
-          const saved = credential && secrets.find((s) => s.name === credential.name);
-          if (saved) {
-            void act(`Removed ${saved.name}`, () => client.deleteSecret(saved.id));
-            return;
-          }
-        }
-        if (screen.name === "repos" && project && repos[indexRef.current]) {
-          const repo = repos[indexRef.current]!;
-          if (repos.length === 1) {
-            setNotice("A project keeps at least one repository.");
-            return;
-          }
-          void act(`Removed ${repo.name}`, () => client.removeRepository(project.id, repo.id));
-          return;
-        }
-        if (screen.name === "mcp") {
-          const server = mcpServers[indexRef.current];
-          if (server) {
-            if (!mcpCanManage) {
-              setNotice("Only owners and admins can remove a team MCP server.");
-              return;
-            }
-            void act(`Removed ${server.name}`, () => client.deleteMcpServer(server.id));
-            return;
-          }
-        }
-        // A screen whose hint advertises d owes an answer on every row,
-        // including the ones with nothing behind them.
-        if (REMOVABLE.has(screen.name)) setNotice("Nothing saved here yet.");
+        void act(`Removed ${repo.name}`, () => client.removeRepository(project.id, repo.id));
         return;
       }
-
-      // Editing runs through the same tool, provider and model screens
-      // adding does, so it starts by staying put and asking for a tool.
-      if (input === "e" && screen.name === "agents") {
-        const profile = existingAgents[indexRef.current];
-        if (profile) {
-          setEditingAgent({ id: profile.id, name: profile.name });
-          setNotice(`Editing ${profile.name}. Choose the tool it should run.`);
+      if (screen.name === "mcp") {
+        const server = mcpServers[indexRef.current];
+        if (server) {
+          if (!mcpCanManage) {
+            setNotice("Only owners and admins can remove a team MCP server.");
+            return;
+          }
+          void act(`Removed ${server.name}`, () => client.deleteMcpServer(server.id));
           return;
         }
       }
+      // A screen whose hint advertises d owes an answer on every row,
+      // including the ones with nothing behind them.
+      if (REMOVABLE.has(screen.name)) setNotice("Nothing saved here yet.");
+      return;
+    }
 
-      if (!key.return) return;
-      choose();
-    },
-    { isActive: !TYPING.has(screen.name) },
-  );
+    // Editing runs through the same tool, provider and model screens
+    // adding does, so it starts by staying put and asking for a tool.
+    if (input === "e" && screen.name === "agents") {
+      const profile = existingAgents[indexRef.current];
+      if (profile) {
+        setEditingAgent({ id: profile.id, name: profile.name });
+        setNotice(`Editing ${profile.name}. Choose the tool it should run.`);
+        return;
+      }
+    }
+
+    if (!key.return) return;
+    choose();
+  };
+  useInput(handleSetupInput, { isActive: !TYPING.has(screen.name) && isRawModeSupported === true });
 
   /** How many selectable rows the current screen shows. */
   function rowCount(): number {
@@ -568,7 +620,9 @@ export function Setup({
       case "criteria":
         // A manual stage consults no requirements, so it offers none:
         // only the way back.
-        return isAutomatic(screen.stageId) ? criteriaOf(screen.stageId).length + CRITERION_KINDS.length + 1 : 1;
+        return isAutomatic(screen.stageId)
+          ? criteriaOf(screen.stageId).length + CRITERION_KINDS.length + 1
+          : 1;
       case "judge":
         return profiles.length + 1; // judges, then back
       case "agentProvider":
@@ -623,7 +677,11 @@ export function Setup({
           return;
         }
         const server = mcpServers[index];
-        if (server?.authType === "oauth" && !server.userCredential?.connected && !server.orgCredential?.connected) {
+        if (
+          server?.authType === "oauth" &&
+          !server.userCredential?.connected &&
+          !server.orgCredential?.connected
+        ) {
           setNotice("Connect this server in the web console. OAuth needs a browser.");
         }
         return;
@@ -774,7 +832,9 @@ export function Setup({
             ? `${stage?.name ?? "Stage"} runs ${profile?.cli} ${profile?.model}`
             : `${stage?.name ?? "Stage"} has no agent`,
           () => client.updateStage(stageId, { defaultAgentProfileId }),
-        ).then((ok) => { if (ok) go({ name: "stages" }); });
+        ).then((ok) => {
+          if (ok) go({ name: "stages" });
+        });
         return;
       }
       case "keys": {
@@ -807,870 +867,991 @@ export function Setup({
     }
   }
 
-  if (error && screen.name === "hub" && projects.length === 0 && profiles.length === 0) {
-    return <Text color="red">{error}</Text>;
-  }
+  const mouseActions = [
+    ...(screen.name === "agents" ? [{ label: "Edit", key: "e" }] : []),
+    ...(screen.name === "stages"
+      ? [
+          { label: "Rename", key: "r" },
+          { label: "Gate", key: "g" },
+          { label: "Requirements", key: "c" },
+          { label: "Auto PR", key: "p" },
+        ]
+      : []),
+    ...(REMOVABLE.has(screen.name) ? [{ label: "Remove", key: "d" }] : []),
+    ...(screen.name === "subscription"
+      ? [
+          { label: "Toggle sharing", key: "s" },
+          { label: "Sign in", key: "l" },
+        ]
+      : []),
+  ];
+  return (
+    <SetupMouse.Provider
+      key={screen.name}
+      value={{
+        pick: (row) => {
+          if (busy || loading) return;
+          indexRef.current = row;
+          setIndex(row);
+          choose();
+        },
+        move: (delta) => {
+          if (!TYPING.has(screen.name)) moveBy(delta);
+        },
+        key: (input) => handleSetupInput(input),
+        back: () => handleSetupInput("", { escape: true }),
+        typing: TYPING.has(screen.name),
+        busy: busy || loading,
+        actions: mouseActions,
+      }}
+    >
+      {renderScreen()}
+    </SetupMouse.Provider>
+  );
 
-  // Typing screens each own the keyboard while they are up.
-  if (screen.name === "repoPath") {
-    const pathLocation = repositoryPathOwner === "client" ? "this machine" : "the server";
-    return (
-      <Frame title="Connect a repository" hint="Enter to continue, Escape to go back">
-        <Text color="gray">
-          Path on {pathLocation} to the git checkout agents will use. Several can share one project.
-        </Text>
-        <Box marginTop={1}>
-          <Text>{repositoryPathOwner === "client" ? "Path" : "Server path"}: </Text>
-          <TextInput
-            value={screen.value}
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "repos" })}
-            onSubmit={(raw) => {
-              const dir = prepareRepositoryPath(raw, repositoryPathOwner);
-              if (!dir) return;
-              const problem = repositoryPathOwner === "client" ? pathProblem(dir) : null;
-              if (problem) {
-                setError(problem);
-                return;
-              }
-              setError("");
-              if (!project) {
-                go({ name: "projectName", repoPath: dir, value: repositoryNameHint(dir) });
-                return;
-              }
-              void act(`Added ${repositoryNameHint(dir)}`, () => client.addRepository(project.id, { localPath: dir })).then(
-                (ok) => {
-                  if (ok) go({ name: "repos" });
-                },
-              );
-            }}
-          />
-        </Box>
-        {error && <Text color="red">{error}</Text>}
-      </Frame>
-    );
-  }
-
-  if (screen.name === "projectName") {
-    return (
-      <Frame title="Name this project" hint="Enter to create, Escape to go back">
-        <Text color="gray">The board is named after it. {screen.repoPath}</Text>
-        <Box marginTop={1}>
-          <Text>Name: </Text>
-          <TextInput
-            value={screen.value}
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "repos" })}
-            onSubmit={(name) => {
-              const trimmed = name.trim();
-              if (!trimmed) return;
-              // Lands on the repository list rather than the hub: a
-              // project spanning a frontend and a backend spans them
-              // from the start, and this is where the second one is
-              // added. From the hub it looks like editing a mistake.
-              void act(`Connected ${trimmed}. Add another repository, or go back.`, () =>
-                client.createProject({ name: trimmed, localPath: screen.repoPath }),
-              ).then((ok) => { if (ok) go({ name: "repos" }); });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "agentProvider") {
-    const options = providersForCli(screen.cli);
-    const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
-    return (
-      <Frame title={`${tool?.label ?? screen.cli}: which provider?`} hint="j/k move · Enter choose · Escape back">
-        <Text color="gray">Only providers this tool can reach are listed.</Text>
-        <Box flexDirection="column" marginTop={1}>
-          {options.map((provider, i) => (
-            <Row
-              key={provider.id}
-              selected={i === index}
-              label={provider.name}
-              status={`${provider.models.length} models`}
-            />
-          ))}
-          <Row selected={index === options.length} label="Type a model id myself" />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "agentModelList") {
-    const models = modelsFor(screen.cli, screen.providerId);
-    const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
-    // A provider can list hundreds, so show a window around the cursor.
-    const size = 12;
-    const start = Math.max(0, Math.min(index - Math.floor(size / 2), models.length - size));
-    const visible = models.slice(Math.max(0, start), Math.max(0, start) + size);
-    return (
-      <Frame
-        title={`${tool?.label ?? screen.cli}: which model?`}
-        hint="j/k move · Enter choose · Escape back"
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">
-          {models.length} models, {index + 1} of {models.length + 1}
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          {visible.map((model, i) => (
-            <Row
-              key={model.id}
-              selected={Math.max(0, start) + i === index}
-              label={model.name.slice(0, 28)}
-              status={model.id}
-            />
-          ))}
-          <Row selected={index === models.length} label="Type a model id myself" />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "agentModel") {
-    const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli)!;
-    return (
-      <Frame title={`${tool.label}: which model?`} hint="Enter to save, Escape to go back" error={error}>
-        <Text color="gray">{tool.format}</Text>
-        <Text color="gray">For example {tool.examples.join(", ")}</Text>
-        <Box marginTop={1}>
-          <Text>Model: </Text>
-          <TextInput
-            value={screen.value}
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "agents" })}
-            onSubmit={(model) => saveAgent(screen.cli, model)}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "agentName") {
-    const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
-    return (
-      <Frame title="Name this agent" hint="Enter to save, Escape to go back">
-        <Text color="gray">
-          {tool?.label ?? screen.cli} on {screen.model}
-        </Text>
-        <Text color="gray">Every stage using this agent follows the change.</Text>
-        <Box marginTop={1}>
-          <Text>Name: </Text>
-          <TextInput
-            value={screen.value}
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "agents" })}
-            onSubmit={(raw) => {
-              const name = raw.trim();
-              if (!name) return;
-              void act(`Updated ${name}`, () =>
-                client.updateProfile(screen.editingId, { name, cli: screen.cli, model: screen.model }),
-              ).then((ok) => {
-                if (ok) go({ name: "agents" });
-              });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "stageName") {
-    return (
-      <Frame title="Rename this stage" hint="Enter to save, Escape to go back">
-        <Box marginTop={1}>
-          <Text>Name: </Text>
-          <TextInput
-            value={screen.value}
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "stages" })}
-            onSubmit={(name) => {
-              const trimmed = name.trim();
-              if (!trimmed) return;
-              void act(`Renamed to ${trimmed}`, () => client.updateStage(screen.stageId, { name: trimmed })).then(
-                // Leaving on failure would clear the error and make a
-                // failed rename look like it just did not stick.
-                (ok) => {
-                  if (ok) go({ name: "stages" });
-                },
-              );
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "keyValue") {
-    const credential = AGENT_CREDENTIALS.find((row) => row.name === screen.credential)!;
-    const back: Screen = { name: screen.from };
-    return (
-      <Frame title={credential.label} hint="Enter to save, Escape to go back" error={error}>
-        <Text color="gray">{credential.help}</Text>
-        {hints[credential.name] && (
-          <Text color="gray">Currently {hints[credential.name]}. Saving replaces it.</Text>
-        )}
-        <Box marginTop={1}>
-          <Text>{credential.secret ? "Paste the key: " : "Value: "}</Text>
-          <TextInput
-            value={screen.value}
-            mask={credential.secret}
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go(back)}
-            onSubmit={(raw) => {
-              const value = raw.trim();
-              if (!value) {
-                go(back);
-                return;
-              }
-              void act(`Saved ${credential.name}`, () =>
-                client.createSecret({ name: credential.name, value }),
-              ).then((ok) => { if (ok) go(back); });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "newStage") {
-    return (
-      <Frame title="Add a stage" hint="Enter to add, Escape to go back" error={error}>
-        <Text color="gray">
-          It joins the end of the pipeline, waiting for your approval and with no agent, until you
-          say otherwise.
-        </Text>
-        <Box marginTop={1}>
-          <Text>Name: </Text>
-          <TextInput
-            value={screen.value}
-            placeholder="Security review"
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "stages" })}
-            onSubmit={(raw) => {
-              const name = raw.trim();
-              if (!name || !pipelineId) return;
-              void act(`Added ${name}`, () => client.createStage(pipelineId, name)).then((ok) => {
-                if (ok) go({ name: "stages" });
-              });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "subscription") {
-    const claude = machine?.claude ?? null;
-    const sharing = machine?.shareAgentAuth === true;
-    const pinned = machine?.pinnedByEnv === true;
-    /** The sharing setting lives on the machine the server runs on. */
-    const settable = machine?.mode === "local";
-
-    return (
-      <Frame
-        title="Subscriptions on this machine"
-        hint="l sign in to Claude · s share on/off · Escape back"
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">
-          Agents can use the logins already on this machine instead of an API key, so a subscription
-          you already pay for drives the run.
-        </Text>
-
-        <Box marginTop={1} flexDirection="column">
-          {logins.map((tool) => (
-            <Box key={tool.cli}>
-              <Text color={tool.signedIn ? "green" : "gray"}>{tool.signedIn ? "●" : "○"}</Text>
-              <Text> {tool.label.padEnd(14)}</Text>
-              <Text color="gray">{tool.signedIn ? "signed in" : "not signed in"}</Text>
-            </Box>
-          ))}
-          {logins.length === 0 && <Text color="gray">No coding tool on this machine has a login.</Text>}
-        </Box>
-
-        {claude && (
-          <Box marginTop={1}>
-            <Text color={claude.loggedIn ? "green" : "yellow"}>
-              {claude.loggedIn
-                ? `Claude Code is signed in${claude.email ? ` as ${claude.email}` : ""}${
-                    claude.subscriptionType ? ` on a ${claude.subscriptionType} plan` : ""
-                  }.`
-                : "Claude Code is installed but not signed in yet."}
-            </Text>
-          </Box>
-        )}
-
-        <Box marginTop={1}>
-          {settable ? (
-            <Text>
-              Sharing is <Text color={sharing ? "green" : "gray"}>{sharing ? "on" : "off"}</Text>
-              {pinned ? " and pinned by BENTO_SHARE_AGENT_AUTH, so it cannot be changed here." : "."}
-            </Text>
-          ) : (
-            <Text color="gray">
-              The board is on a server, so sharing is decided when this machine starts: pass
-              --share-agent-auth to use these logins for runs here.
-            </Text>
-          )}
-        </Box>
-
-        <Box marginTop={1} flexDirection="column">
-          <Text color="gray">
-            l  sign in to Claude Code ({"claude auth login"}), which opens your browser
-          </Text>
-          {settable && <Text color="gray">s  turn sharing {sharing ? "off" : "on"} for runs on this machine</Text>}
-        </Box>
-
-        <Box marginTop={1}>
-          <Text color="yellow">
-            These are long lived credentials for a paid account, and an agent can read anything its
-            sandbox can. Use it on repositories you trust.
-          </Text>
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "repos") {
-    return (
-      <Frame title="Repositories" hint="j/k move · Enter commands · d remove · Escape back" notice={notice} error={error}>
-        <Text color="gray">
-          Sandboxes carry no language runtime, so give each one a setup command to install what it
-          needs and a test command for the agent.
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          {repos.map((repo, i) => (
-            <Row
-              key={repo.id}
-              selected={i === index}
-              label={repo.name}
-              status={`${repo.localPath}${repo.setupCommand ? ` · setup: ${repo.setupCommand}` : ""}${repo.testCommand ? ` · test: ${repo.testCommand}` : ""}`}
-            />
-          ))}
-          <Row selected={index === repos.length} label={project ? "Add another repository" : "Connect a repository"} />
-          <Row selected={index === repos.length + 1} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "repoSetup") {
-    return (
-      <Frame title="Setup command" hint="Enter to continue, Escape to go back">
-        <Text color="gray">
-          Shell run once in a fresh sandbox, before any agent starts. Leave it empty for none.
-        </Text>
-        <Box marginTop={1}>
-          <Text>Setup: </Text>
-          <TextInput
-            value={screen.value}
-            placeholder="npm ci"
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "repos" })}
-            onSubmit={(setupCommand) => {
-              const repo = repos.find((r) => r.id === screen.repoId);
-              go({ name: "repoTest", repoId: screen.repoId, setupCommand, value: repo?.testCommand ?? "" });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "repoTest") {
-    return (
-      <Frame title="Test command" hint="Enter to save, Escape to go back" error={error}>
-        <Text color="gray">Shell the agent is told to run to check its work. Leave it empty for none.</Text>
-        <Box marginTop={1}>
-          <Text>Test: </Text>
-          <TextInput
-            value={screen.value}
-            placeholder="npm test"
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "repos" })}
-            onSubmit={(testCommand) => {
-              if (!project) return;
-              void act("Saved the commands", () =>
-                client.updateRepository(project.id, screen.repoId, {
-                  setupCommand: screen.setupCommand.trim() || null,
-                  testCommand: testCommand.trim() || null,
-                }),
-              ).then((ok) => {
-                if (ok) go({ name: "repos" });
-              });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "mcp") {
-    return (
-      <Frame title="MCP servers" hint="j/k move · Enter add · d remove · Escape back" notice={notice} error={error}>
-        <Text color="gray">
-          Servers agents can call during a run. OAuth servers have to be connected in the web
-          console.
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          {mcpServers.map((server, i) => {
-            const connected =
-              server.authType === "none" ||
-              server.orgCredential?.connected === true ||
-              server.userCredential?.connected === true;
-            return (
-              <Row
-                key={server.id}
-                selected={i === index}
-                label={server.name}
-                status={`${server.authType} · ${server.enabled ? "on" : "off"} · ${connected ? "connected" : "not connected"}`}
-              />
-            );
-          })}
-          <Row selected={index === mcpServers.length} label="Add a custom URL" />
-          <Row selected={index === mcpServers.length + 1} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "mcpName") {
-    return (
-      <Frame title="Name this MCP server" hint="Enter to continue, Escape to go back">
-        <Box marginTop={1}>
-          <Text>Name: </Text>
-          <TextInput
-            value={screen.value}
-            placeholder="Docs"
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "mcp" })}
-            onSubmit={(name) => {
-              const trimmed = name.trim();
-              if (!trimmed) return;
-              go({ name: "mcpUrl", serverName: trimmed, value: "" });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "mcpUrl") {
-    return (
-      <Frame title={`URL for ${screen.serverName}`} hint="Enter to continue, Escape to go back">
-        <Box marginTop={1}>
-          <Text>URL: </Text>
-          <TextInput
-            value={screen.value}
-            placeholder="https://example.test/mcp"
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "mcp" })}
-            onSubmit={(url) => {
-              const trimmed = url.trim();
-              if (!trimmed) return;
-              go({ name: "mcpKey", serverName: screen.serverName, url: trimmed, value: "" });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "mcpKey") {
-    return (
-      <Frame title="API key (optional)" hint="Enter to save, Escape to go back" error={error}>
-        <Text color="gray">Leave empty for a server that needs no auth.</Text>
-        <Box marginTop={1}>
-          <Text>Key: </Text>
-          <TextInput
-            value={screen.value}
-            mask
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "mcp" })}
-            onSubmit={(raw) => {
-              const key = raw.trim();
-              const slug = screen.serverName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "server";
-              void act(`Added ${screen.serverName}`, async () => {
-                const created = await client.createMcpServer({
-                  name: screen.serverName,
-                  slug,
-                  url: screen.url,
-                  authType: key ? "api_key" : "none",
-                });
-                if (key) await client.setMcpApiKey(created.id, key);
-              }).then((ok) => {
-                if (ok) go({ name: "mcp" });
-              });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "yamlAgents") {
-    return (
-      <Frame title="Agents file" hint="j/k move · Enter choose · Escape back" notice={notice} error={error}>
-        <Text color="gray">
-          Every named agent: the tool, the model, and the skill. Importing matches by name, so
-          importing twice edits rather than duplicating.
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          <Row selected={index === 0} label="Export to a file" />
-          <Row selected={index === 1} label="Import from a file" />
-          <Row selected={index === 2} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "yamlPipeline") {
-    return (
-      <Frame title="Pipeline file" hint="j/k move · Enter choose · Escape back" notice={notice} error={error}>
-        <Text color="gray">
-          Your stages, agents, and commands as one YAML file. Import it into another project
-          instead of rebuilding it.
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          <Row selected={index === 0} label="Export to a file" />
-          <Row selected={index === 1} label="Import from a file" />
-          <Row selected={index === 2} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "yamlPath") {
-    const exporting = screen.kind.endsWith("export");
-    const agents = screen.kind.startsWith("agents");
-    return (
-      <Frame
-        title={exporting ? "Write the YAML where?" : "Read the YAML from where?"}
-        hint="Enter to continue, Escape to go back"
-        error={error}
-      >
-        <Box marginTop={1}>
-          <Text>Path: </Text>
-          <TextInput
-            value={screen.value}
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: agents ? "yamlAgents" : "yamlPipeline" })}
-            onSubmit={(raw) => {
-              const file = raw.trim();
-              if (!file) return;
-              if (exporting) {
-                void act(`Wrote ${file}`, async () => {
-                  const yaml = agents ? await client.exportAgents() : await client.exportPipeline(project!.id);
-                  await fs.promises.writeFile(file, yaml, "utf8");
-                }).then((ok) => {
-                  if (ok) go({ name: agents ? "yamlAgents" : "yamlPipeline" });
-                });
-                return;
-              }
-              void act(`Imported ${file}`, async () => {
-                const yaml = await fs.promises.readFile(file, "utf8");
-                if (agents) await client.importAgents(yaml);
-                else await client.importPipeline(project!.id, yaml);
-              }).then((ok) => {
-                if (ok) go({ name: agents ? "yamlAgents" : "yamlPipeline" });
-              });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "agents") {
-    return (
-      <Frame
-        title="Coding agents"
-        hint="j/k move · Enter add · e edit · d remove · Escape back"
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">A coding agent is a tool paired with a model. Stages point at one.</Text>
-        <Box flexDirection="column" marginTop={1}>
-          {existingAgents.map((profile, i) => (
-            <Row
-              key={profile.id}
-              selected={i === index}
-              label={profile.name}
-              // The skill is the difference between two agents on the
-              // same tool and model, and it was set here but readable
-              // nowhere: the row that hid it is the row that needs it.
-              status={`${profile.cli} ${profile.model}${
-                profile.skill ? ` · skill: ${skillPreview(profile.skill)}` : " · no skill"
-              }`}
-            />
-          ))}
-          {existingAgents.length > 0 && <Text color="gray"> </Text>}
-          {MODEL_GUIDANCE.map((tool, i) => {
-            const missing = tools.find((t) => t.cli === tool.cli)?.installed === false;
-            return (
-              <Row
-                key={tool.cli}
-                selected={existingAgents.length + i === index}
-                label={`Add ${tool.label}`}
-                // Said on the row that offers it, so a tool this machine
-                // cannot start is visible before it is picked rather
-                // than when a queued run fails.
-                status={missing ? `${tool.defaultModel} · not installed` : tool.defaultModel}
-              />
-            );
-          })}
-          <Row selected={index === existingAgents.length + MODEL_GUIDANCE.length} label="Back" />
-        </Box>
-        {(() => {
-          const at = index - existingAgents.length;
-          const selected = at >= 0 && at < MODEL_GUIDANCE.length ? MODEL_GUIDANCE[at] : undefined;
-          const missing = selected && tools.find((t) => t.cli === selected.cli)?.installed === false;
-          if (!selected || !missing) return null;
-          const entry = tools.find((t) => t.cli === selected.cli)!;
-          return (
-            <Box flexDirection="column" marginTop={1}>
-              <Text color="yellow">
-                {selected.label} is not installed where agents run. Install it first:
-              </Text>
-              <Text color="gray">  {entry.installCommand}</Text>
-              <Text color="gray">  {entry.installUrl}</Text>
-            </Box>
-          );
-        })()}
-      </Frame>
-    );
-  }
-
-  if (screen.name === "criteria") {
-    const stage = stages.find((s) => s.id === screen.stageId);
-    const current = criteriaOf(screen.stageId);
-    // Requirements belong to automatic stages: a manual one consults
-    // none of them, so offering the list here would be adding rows
-    // that quietly do nothing.
-    if (!isAutomatic(screen.stageId)) {
+  function renderScreen(): React.ReactNode {
+    if (error && screen.name === "hub" && projects.length === 0 && profiles.length === 0) {
       return (
-        <Frame
-          title={`Requirements for ${stage?.name ?? "this stage"}`}
-          hint="Enter or Escape to go back"
-          notice={notice}
-          error={error}
-        >
+        <Box flexDirection="column">
+          <Text color="red">{error}</Text>
+          <MouseActions>
+            <MouseButton
+              label="Retry"
+              onClick={() => {
+                setError("");
+                setLoading(true);
+                void load()
+                  .catch((err: unknown) => setError(message(err)))
+                  .finally(() => setLoading(false));
+              }}
+            />
+            <MouseButton label="Back" onClick={onDone} />
+          </MouseActions>
+        </Box>
+      );
+    }
+
+    // Typing screens each own the keyboard while they are up.
+    if (loading)
+      return (
+        <Box flexDirection="column">
+          <Text color="gray">Loading project settings…</Text>
+          <MouseButton label="Back" onClick={onDone} />
+        </Box>
+      );
+
+    if (screen.name === "repoPath") {
+      const pathLocation = repositoryPathOwner === "client" ? "this machine" : "the server";
+      return (
+        <Frame title="Connect a repository" hint="Enter to continue, Escape to go back">
           <Text color="gray">
-            You decide on the card: Approve moves it on, Reject sends it back. No requirements apply.
+            Path on {pathLocation} to the git checkout agents will use. Several can share one project.
           </Text>
           <Box marginTop={1}>
-            <Text color="gray">Press g on the stage list to make this stage advance on its requirements.</Text>
+            <Text>{repositoryPathOwner === "client" ? "Path" : "Server path"}: </Text>
+            <TextInput
+              value={screen.value}
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "repos" })}
+              onSubmit={(raw) => {
+                const dir = prepareRepositoryPath(raw, repositoryPathOwner);
+                if (!dir) return;
+                const problem = repositoryPathOwner === "client" ? pathProblem(dir) : null;
+                if (problem) {
+                  setError(problem);
+                  return;
+                }
+                setError("");
+                if (!project) {
+                  go({ name: "projectName", repoPath: dir, value: repositoryNameHint(dir) });
+                  return;
+                }
+                void act(`Added ${repositoryNameHint(dir)}`, () =>
+                  client.addRepository(project.id, { localPath: dir }),
+                ).then((ok) => {
+                  if (ok) go({ name: "repos" });
+                });
+              }}
+            />
+          </Box>
+          {error && <Text color="red">{error}</Text>}
+        </Frame>
+      );
+    }
+
+    if (screen.name === "projectName") {
+      return (
+        <Frame title="Name this project" hint="Enter to create, Escape to go back">
+          <Text color="gray">The board is named after it. {screen.repoPath}</Text>
+          <Box marginTop={1}>
+            <Text>Name: </Text>
+            <TextInput
+              value={screen.value}
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "repos" })}
+              onSubmit={(name) => {
+                const trimmed = name.trim();
+                if (!trimmed) return;
+                // Lands on the repository list rather than the hub: a
+                // project spanning a frontend and a backend spans them
+                // from the start, and this is where the second one is
+                // added. From the hub it looks like editing a mistake.
+                void act(`Connected ${trimmed}. Add another repository, or go back.`, () =>
+                  client.createProject({ name: trimmed, localPath: screen.repoPath }),
+                ).then((ok) => {
+                  if (ok) go({ name: "repos" });
+                });
+              }}
+            />
           </Box>
         </Frame>
       );
     }
-    return (
-      <Frame
-        title={`Requirements for ${stage?.name ?? "this stage"}`}
-        hint="j/k move · Enter add · d remove · Escape back"
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">
-          Every requirement has to pass. With none, the stage advances as soon as its agent finishes.
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          {current.map((criterion, i) => (
-            <Row
-              key={`${criterion.type}-${i}`}
-              selected={i === index}
-              label={describeCriterion(criterion, profiles)}
-              status="on this stage"
-            />
-          ))}
-          {current.length > 0 && <Text color="gray"> </Text>}
-          {CRITERION_KINDS.map((kind, i) => (
-            <Row
-              key={kind.type}
-              selected={current.length + i === index}
-              label={`Add: ${kind.label}`}
-            />
-          ))}
-          <Row selected={index === current.length + CRITERION_KINDS.length} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
 
-  if (screen.name === "judge") {
-    const stage = stages.find((s) => s.id === screen.stageId);
-    return (
-      <Frame
-        title={`Which agent rules on ${stage?.name ?? "this stage"}?`}
-        hint="j/k move · Enter choose · Escape back"
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">
-          A judge is a second agent that reads the work and says whether it is complete. It works
-          best with its own skill saying what complete means here, on a different model from the
-          agent doing the work.
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          {profiles.map((profile, i) => (
-            <Row
-              key={profile.id}
-              selected={i === index}
-              label={profile.name}
-              status={`${profile.cli} ${profile.model}`}
-            />
-          ))}
-          <Row selected={index === profiles.length} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "criterionCmd") {
-    return (
-      <Frame title="Which command has to succeed?" hint="Enter to save, Escape to go back">
-        <Text color="gray">Run inside the sandbox. It passes when the command exits 0.</Text>
-        <Box marginTop={1}>
-          <Text>Command: </Text>
-          <TextInput
-            value={screen.value}
-            placeholder="pnpm test"
-            onChange={(value) => setScreen({ ...screen, value })}
-            onCancel={() => go({ name: "criteria", stageId: screen.stageId })}
-            onSubmit={(raw) => {
-              const cmd = raw.trim();
-              if (!cmd) return;
-              const next = [...criteriaOf(screen.stageId), { type: "command" as const, cmd, timeoutSec: 600 }];
-              void act(`Added ${cmd}`, () =>
-                client.updateStage(screen.stageId, { gateCriteria: next as GateCriteria }),
-              ).then((ok) => {
-                if (ok) go({ name: "criteria", stageId: screen.stageId });
-              });
-            }}
-          />
-        </Box>
-      </Frame>
-    );
-  }
-
-  if (screen.name === "stages") {
-    return (
-      <Frame
-        title="Stages"
-        hint="j/k move · Enter agent · c requirements · g advance · p pull request · r rename · d remove · Escape back"
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">A card entering a stage starts that stage's agent.</Text>
-        <Box flexDirection="column" marginTop={1}>
-          {stages.map((stage, i) => {
-            const agent = profiles.find((p) => p.id === stage.defaultAgentProfileId);
-            return (
+    if (screen.name === "agentProvider") {
+      const options = providersForCli(screen.cli);
+      const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
+      return (
+        <Frame
+          title={`${tool?.label ?? screen.cli}: which provider?`}
+          hint="j/k move · Enter choose · Escape back"
+        >
+          <Text color="gray">Only providers this tool can reach are listed.</Text>
+          <Box flexDirection="column" marginTop={1}>
+            {options.map((provider, i) => (
               <Row
-                key={stage.id}
+                key={provider.id}
                 selected={i === index}
-                label={`${stage.position + 1}. ${stage.name}`}
-                status={`${agent ? `${agent.cli} ${agent.model}` : "no agent"} · ${
-                  stage.gateType === "auto" ? "advances on its requirements" : "waits for your approval"
-                }${stage.createPr ? " · opens a PR" : ""}`}
+                label={provider.name}
+                status={`${provider.models.length} models`}
               />
-            );
-          })}
-          <Row selected={index === stages.length} label="Add stage" />
-          <Row selected={index === stages.length + 1} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
+            ))}
+            <Row selected={index === options.length} label="Type a model id myself" />
+          </Box>
+        </Frame>
+      );
+    }
 
-  if (screen.name === "assign") {
-    const stage = stages.find((s) => s.id === screen.stageId);
-    return (
-      <Frame title={`Which agent runs ${stage?.name ?? "this stage"}?`} hint="Enter to choose · Escape back">
-        <Box flexDirection="column" marginTop={1}>
-          {profiles.map((profile, i) => (
-            <Row key={profile.id} selected={i === index} label={profile.name} status={`${profile.cli} ${profile.model}`} />
-          ))}
-          <Row selected={index === profiles.length} label="No agent (start runs by hand)" />
-        </Box>
-      </Frame>
-    );
-  }
+    if (screen.name === "agentModelList") {
+      const models = modelsFor(screen.cli, screen.providerId);
+      const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
+      // A provider can list hundreds, so show a window around the cursor.
+      const size = 12;
+      const start = Math.max(0, Math.min(index - Math.floor(size / 2), models.length - size));
+      const visible = models.slice(Math.max(0, start), Math.max(0, start) + size);
+      return (
+        <Frame
+          title={`${tool?.label ?? screen.cli}: which model?`}
+          hint="j/k move · Enter choose · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            {models.length} models, {index + 1} of {models.length + 1}
+          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            {visible.map((model, i) => (
+              <Row
+                key={model.id}
+                selected={Math.max(0, start) + i === index}
+                label={model.name.slice(0, 28)}
+                status={model.id}
+              />
+            ))}
+            <Row selected={index === models.length} label="Type a model id myself" />
+          </Box>
+        </Frame>
+      );
+    }
 
-  if (screen.name === "keys") {
-    return (
-      <Frame
-        title="Model provider keys"
-        hint={
-          canManageCredentials ? "j/k move · Enter choose · d remove · Escape back" : "j/k move · Escape back"
-        }
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">
-          Keys for the providers your agents' models run on. Stored encrypted. Nothing reads a key
-          back, only a masked tail.
-        </Text>
-        {!canManageCredentials && <Text color="gray">Only owners and admins can change credentials.</Text>}
-        <Box flexDirection="column" marginTop={1}>
-          {PROVIDER_CREDENTIALS.map((credential, i) => (
-            <Row
-              key={credential.name}
-              selected={i === index}
-              label={credential.label}
-              status={hints[credential.name] ?? "not set"}
+    if (screen.name === "agentModel") {
+      const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli)!;
+      return (
+        <Frame title={`${tool.label}: which model?`} hint="Enter to save, Escape to go back" error={error}>
+          <Text color="gray">{tool.format}</Text>
+          <Text color="gray">For example {tool.examples.join(", ")}</Text>
+          <Box marginTop={1}>
+            <Text>Model: </Text>
+            <TextInput
+              value={screen.value}
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "agents" })}
+              onSubmit={(model) => saveAgent(screen.cli, model)}
             />
-          ))}
-          <Row selected={index === PROVIDER_CREDENTIALS.length} label="Back" />
-        </Box>
-      </Frame>
-    );
-  }
+          </Box>
+        </Frame>
+      );
+    }
 
-  if (screen.name === "github") {
+    if (screen.name === "agentName") {
+      const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
+      return (
+        <Frame title="Name this agent" hint="Enter to save, Escape to go back">
+          <Text color="gray">
+            {tool?.label ?? screen.cli} on {screen.model}
+          </Text>
+          <Text color="gray">Every stage using this agent follows the change.</Text>
+          <Box marginTop={1}>
+            <Text>Name: </Text>
+            <TextInput
+              value={screen.value}
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "agents" })}
+              onSubmit={(raw) => {
+                const name = raw.trim();
+                if (!name) return;
+                void act(`Updated ${name}`, () =>
+                  client.updateProfile(screen.editingId, { name, cli: screen.cli, model: screen.model }),
+                ).then((ok) => {
+                  if (ok) go({ name: "agents" });
+                });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "stageName") {
+      return (
+        <Frame title="Rename this stage" hint="Enter to save, Escape to go back">
+          <Box marginTop={1}>
+            <Text>Name: </Text>
+            <TextInput
+              value={screen.value}
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "stages" })}
+              onSubmit={(name) => {
+                const trimmed = name.trim();
+                if (!trimmed) return;
+                void act(`Renamed to ${trimmed}`, () =>
+                  client.updateStage(screen.stageId, { name: trimmed }),
+                ).then(
+                  // Leaving on failure would clear the error and make a
+                  // failed rename look like it just did not stick.
+                  (ok) => {
+                    if (ok) go({ name: "stages" });
+                  },
+                );
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "keyValue") {
+      const credential = AGENT_CREDENTIALS.find((row) => row.name === screen.credential)!;
+      const back: Screen = { name: screen.from };
+      return (
+        <Frame title={credential.label} hint="Enter to save, Escape to go back" error={error}>
+          <Text color="gray">{credential.help}</Text>
+          {hints[credential.name] && (
+            <Text color="gray">Currently {hints[credential.name]}. Saving replaces it.</Text>
+          )}
+          <Box marginTop={1}>
+            <Text>{credential.secret ? "Paste the key: " : "Value: "}</Text>
+            <TextInput
+              value={screen.value}
+              mask={credential.secret}
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go(back)}
+              onSubmit={(raw) => {
+                const value = raw.trim();
+                if (!value) {
+                  go(back);
+                  return;
+                }
+                void act(`Saved ${credential.name}`, () =>
+                  client.createSecret({ name: credential.name, value }),
+                ).then((ok) => {
+                  if (ok) go(back);
+                });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "newStage") {
+      return (
+        <Frame title="Add a stage" hint="Enter to add, Escape to go back" error={error}>
+          <Text color="gray">
+            It joins the end of the pipeline, waiting for your approval and with no agent, until you say
+            otherwise.
+          </Text>
+          <Box marginTop={1}>
+            <Text>Name: </Text>
+            <TextInput
+              value={screen.value}
+              placeholder="Security review"
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "stages" })}
+              onSubmit={(raw) => {
+                const name = raw.trim();
+                if (!name || !pipelineId) return;
+                void act(`Added ${name}`, () => client.createStage(pipelineId, name)).then((ok) => {
+                  if (ok) go({ name: "stages" });
+                });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "subscription") {
+      const claude = machine?.claude ?? null;
+      const sharing = machine?.shareAgentAuth === true;
+      const pinned = machine?.pinnedByEnv === true;
+      /** The sharing setting lives on the machine the server runs on. */
+      const settable = machine?.mode === "local";
+
+      return (
+        <Frame
+          title="Subscriptions on this machine"
+          hint="l sign in to Claude · s share on/off · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            Agents can use the logins already on this machine instead of an API key, so a subscription you
+            already pay for drives the run.
+          </Text>
+
+          <Box marginTop={1} flexDirection="column">
+            {logins.map((tool) => (
+              <Box key={tool.cli}>
+                <Text color={tool.signedIn ? "green" : "gray"}>{tool.signedIn ? "●" : "○"}</Text>
+                <Text> {tool.label.padEnd(14)}</Text>
+                <Text color="gray">{tool.signedIn ? "signed in" : "not signed in"}</Text>
+              </Box>
+            ))}
+            {logins.length === 0 && <Text color="gray">No coding tool on this machine has a login.</Text>}
+          </Box>
+
+          {claude && (
+            <Box marginTop={1}>
+              <Text color={claude.loggedIn ? "green" : "yellow"}>
+                {claude.loggedIn
+                  ? `Claude Code is signed in${claude.email ? ` as ${claude.email}` : ""}${
+                      claude.subscriptionType ? ` on a ${claude.subscriptionType} plan` : ""
+                    }.`
+                  : "Claude Code is installed but not signed in yet."}
+              </Text>
+            </Box>
+          )}
+
+          <Box marginTop={1}>
+            {settable ? (
+              <Text>
+                Sharing is <Text color={sharing ? "green" : "gray"}>{sharing ? "on" : "off"}</Text>
+                {pinned ? " and pinned by BENTO_SHARE_AGENT_AUTH, so it cannot be changed here." : "."}
+              </Text>
+            ) : (
+              <Text color="gray">
+                The board is on a server, so sharing is decided when this machine starts: pass
+                --share-agent-auth to use these logins for runs here.
+              </Text>
+            )}
+          </Box>
+
+          <Box marginTop={1} flexDirection="column">
+            <Text color="gray">
+              l sign in to Claude Code ({"claude auth login"}), which opens your browser
+            </Text>
+            {settable && (
+              <Text color="gray">s turn sharing {sharing ? "off" : "on"} for runs on this machine</Text>
+            )}
+          </Box>
+
+          <Box marginTop={1}>
+            <Text color="yellow">
+              These are long lived credentials for a paid account, and an agent can read anything its sandbox
+              can. Use it on repositories you trust.
+            </Text>
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "repos") {
+      return (
+        <Frame
+          title="Repositories"
+          hint="j/k move · Enter commands · d remove · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            Sandboxes carry no language runtime, so give each one a setup command to install what it needs and
+            a test command for the agent.
+          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            {repos.map((repo, i) => (
+              <Row
+                key={repo.id}
+                selected={i === index}
+                label={repo.name}
+                status={`${repo.localPath}${repo.setupCommand ? ` · setup: ${repo.setupCommand}` : ""}${repo.testCommand ? ` · test: ${repo.testCommand}` : ""}`}
+              />
+            ))}
+            <Row
+              selected={index === repos.length}
+              label={project ? "Add another repository" : "Connect a repository"}
+            />
+            <Row selected={index === repos.length + 1} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "repoSetup") {
+      return (
+        <Frame title="Setup command" hint="Enter to continue, Escape to go back">
+          <Text color="gray">
+            Shell run once in a fresh sandbox, before any agent starts. Leave it empty for none.
+          </Text>
+          <Box marginTop={1}>
+            <Text>Setup: </Text>
+            <TextInput
+              value={screen.value}
+              placeholder="npm ci"
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "repos" })}
+              onSubmit={(setupCommand) => {
+                const repo = repos.find((r) => r.id === screen.repoId);
+                go({ name: "repoTest", repoId: screen.repoId, setupCommand, value: repo?.testCommand ?? "" });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "repoTest") {
+      return (
+        <Frame title="Test command" hint="Enter to save, Escape to go back" error={error}>
+          <Text color="gray">Shell the agent is told to run to check its work. Leave it empty for none.</Text>
+          <Box marginTop={1}>
+            <Text>Test: </Text>
+            <TextInput
+              value={screen.value}
+              placeholder="npm test"
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "repos" })}
+              onSubmit={(testCommand) => {
+                if (!project) return;
+                void act("Saved the commands", () =>
+                  client.updateRepository(project.id, screen.repoId, {
+                    setupCommand: screen.setupCommand.trim() || null,
+                    testCommand: testCommand.trim() || null,
+                  }),
+                ).then((ok) => {
+                  if (ok) go({ name: "repos" });
+                });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "mcp") {
+      return (
+        <Frame
+          title="MCP servers"
+          hint="j/k move · Enter add · d remove · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            Servers agents can call during a run. OAuth servers have to be connected in the web console.
+          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            {mcpServers.map((server, i) => {
+              const connected =
+                server.authType === "none" ||
+                server.orgCredential?.connected === true ||
+                server.userCredential?.connected === true;
+              return (
+                <Row
+                  key={server.id}
+                  selected={i === index}
+                  label={server.name}
+                  status={`${server.authType} · ${server.enabled ? "on" : "off"} · ${connected ? "connected" : "not connected"}`}
+                />
+              );
+            })}
+            <Row selected={index === mcpServers.length} label="Add a custom URL" />
+            <Row selected={index === mcpServers.length + 1} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "mcpName") {
+      return (
+        <Frame title="Name this MCP server" hint="Enter to continue, Escape to go back">
+          <Box marginTop={1}>
+            <Text>Name: </Text>
+            <TextInput
+              value={screen.value}
+              placeholder="Docs"
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "mcp" })}
+              onSubmit={(name) => {
+                const trimmed = name.trim();
+                if (!trimmed) return;
+                go({ name: "mcpUrl", serverName: trimmed, value: "" });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "mcpUrl") {
+      return (
+        <Frame title={`URL for ${screen.serverName}`} hint="Enter to continue, Escape to go back">
+          <Box marginTop={1}>
+            <Text>URL: </Text>
+            <TextInput
+              value={screen.value}
+              placeholder="https://example.test/mcp"
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "mcp" })}
+              onSubmit={(url) => {
+                const trimmed = url.trim();
+                if (!trimmed) return;
+                go({ name: "mcpKey", serverName: screen.serverName, url: trimmed, value: "" });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "mcpKey") {
+      return (
+        <Frame title="API key (optional)" hint="Enter to save, Escape to go back" error={error}>
+          <Text color="gray">Leave empty for a server that needs no auth.</Text>
+          <Box marginTop={1}>
+            <Text>Key: </Text>
+            <TextInput
+              value={screen.value}
+              mask
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "mcp" })}
+              onSubmit={(raw) => {
+                const key = raw.trim();
+                const slug =
+                  screen.serverName
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, "-")
+                    .replace(/^-+|-+$/g, "")
+                    .slice(0, 64) || "server";
+                void act(`Added ${screen.serverName}`, async () => {
+                  const created = await client.createMcpServer({
+                    name: screen.serverName,
+                    slug,
+                    url: screen.url,
+                    authType: key ? "api_key" : "none",
+                  });
+                  if (key) await client.setMcpApiKey(created.id, key);
+                }).then((ok) => {
+                  if (ok) go({ name: "mcp" });
+                });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "yamlAgents") {
+      return (
+        <Frame title="Agents file" hint="j/k move · Enter choose · Escape back" notice={notice} error={error}>
+          <Text color="gray">
+            Every named agent: the tool, the model, and the skill. Importing matches by name, so importing
+            twice edits rather than duplicating.
+          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            <Row selected={index === 0} label="Export to a file" />
+            <Row selected={index === 1} label="Import from a file" />
+            <Row selected={index === 2} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "yamlPipeline") {
+      return (
+        <Frame
+          title="Pipeline file"
+          hint="j/k move · Enter choose · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            Your stages, agents, and commands as one YAML file. Import it into another project instead of
+            rebuilding it.
+          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            <Row selected={index === 0} label="Export to a file" />
+            <Row selected={index === 1} label="Import from a file" />
+            <Row selected={index === 2} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "yamlPath") {
+      const exporting = screen.kind.endsWith("export");
+      const agents = screen.kind.startsWith("agents");
+      return (
+        <Frame
+          title={exporting ? "Write the YAML where?" : "Read the YAML from where?"}
+          hint="Enter to continue, Escape to go back"
+          error={error}
+        >
+          <Box marginTop={1}>
+            <Text>Path: </Text>
+            <TextInput
+              value={screen.value}
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: agents ? "yamlAgents" : "yamlPipeline" })}
+              onSubmit={(raw) => {
+                const file = raw.trim();
+                if (!file) return;
+                if (exporting) {
+                  void act(`Wrote ${file}`, async () => {
+                    const yaml = agents
+                      ? await client.exportAgents()
+                      : await client.exportPipeline(project!.id);
+                    await fs.promises.writeFile(file, yaml, "utf8");
+                  }).then((ok) => {
+                    if (ok) go({ name: agents ? "yamlAgents" : "yamlPipeline" });
+                  });
+                  return;
+                }
+                void act(`Imported ${file}`, async () => {
+                  const yaml = await fs.promises.readFile(file, "utf8");
+                  if (agents) await client.importAgents(yaml);
+                  else await client.importPipeline(project!.id, yaml);
+                }).then((ok) => {
+                  if (ok) go({ name: agents ? "yamlAgents" : "yamlPipeline" });
+                });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "agents") {
+      return (
+        <Frame
+          title="Coding agents"
+          hint="j/k move · Enter add · e edit · d remove · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">A coding agent is a tool paired with a model. Stages point at one.</Text>
+          <Box flexDirection="column" marginTop={1}>
+            {existingAgents.map((profile, i) => (
+              <Row
+                key={profile.id}
+                selected={i === index}
+                label={profile.name}
+                // The skill is the difference between two agents on the
+                // same tool and model, and it was set here but readable
+                // nowhere: the row that hid it is the row that needs it.
+                status={`${profile.cli} ${profile.model}${
+                  profile.skill ? ` · skill: ${skillPreview(profile.skill)}` : " · no skill"
+                }`}
+              />
+            ))}
+            {existingAgents.length > 0 && <Text color="gray"> </Text>}
+            {MODEL_GUIDANCE.map((tool, i) => {
+              const missing = tools.find((t) => t.cli === tool.cli)?.installed === false;
+              return (
+                <Row
+                  key={tool.cli}
+                  selected={existingAgents.length + i === index}
+                  label={`Add ${tool.label}`}
+                  // Said on the row that offers it, so a tool this machine
+                  // cannot start is visible before it is picked rather
+                  // than when a queued run fails.
+                  status={missing ? `${tool.defaultModel} · not installed` : tool.defaultModel}
+                />
+              );
+            })}
+            <Row selected={index === existingAgents.length + MODEL_GUIDANCE.length} label="Back" />
+          </Box>
+          {(() => {
+            const at = index - existingAgents.length;
+            const selected = at >= 0 && at < MODEL_GUIDANCE.length ? MODEL_GUIDANCE[at] : undefined;
+            const missing = selected && tools.find((t) => t.cli === selected.cli)?.installed === false;
+            if (!selected || !missing) return null;
+            const entry = tools.find((t) => t.cli === selected.cli)!;
+            return (
+              <Box flexDirection="column" marginTop={1}>
+                <Text color="yellow">
+                  {selected.label} is not installed where agents run. Install it first:
+                </Text>
+                <Text color="gray"> {entry.installCommand}</Text>
+                <Text color="gray"> {entry.installUrl}</Text>
+              </Box>
+            );
+          })()}
+        </Frame>
+      );
+    }
+
+    if (screen.name === "criteria") {
+      const stage = stages.find((s) => s.id === screen.stageId);
+      const current = criteriaOf(screen.stageId);
+      // Requirements belong to automatic stages: a manual one consults
+      // none of them, so offering the list here would be adding rows
+      // that quietly do nothing.
+      if (!isAutomatic(screen.stageId)) {
+        return (
+          <Frame
+            title={`Requirements for ${stage?.name ?? "this stage"}`}
+            hint="Enter or Escape to go back"
+            notice={notice}
+            error={error}
+          >
+            <Text color="gray">
+              You decide on the card: Approve moves it on, Reject sends it back. No requirements apply.
+            </Text>
+            <Box marginTop={1}>
+              <Text color="gray">
+                Press g on the stage list to make this stage advance on its requirements.
+              </Text>
+            </Box>
+          </Frame>
+        );
+      }
+      return (
+        <Frame
+          title={`Requirements for ${stage?.name ?? "this stage"}`}
+          hint="j/k move · Enter add · d remove · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            Every requirement has to pass. With none, the stage advances as soon as its agent finishes.
+          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            {current.map((criterion, i) => (
+              <Row
+                key={`${criterion.type}-${i}`}
+                selected={i === index}
+                label={describeCriterion(criterion, profiles)}
+                status="on this stage"
+              />
+            ))}
+            {current.length > 0 && <Text color="gray"> </Text>}
+            {CRITERION_KINDS.map((kind, i) => (
+              <Row key={kind.type} selected={current.length + i === index} label={`Add: ${kind.label}`} />
+            ))}
+            <Row selected={index === current.length + CRITERION_KINDS.length} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "judge") {
+      const stage = stages.find((s) => s.id === screen.stageId);
+      return (
+        <Frame
+          title={`Which agent rules on ${stage?.name ?? "this stage"}?`}
+          hint="j/k move · Enter choose · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            A judge is a second agent that reads the work and says whether it is complete. It works best with
+            its own skill saying what complete means here, on a different model from the agent doing the work.
+          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            {profiles.map((profile, i) => (
+              <Row
+                key={profile.id}
+                selected={i === index}
+                label={profile.name}
+                status={`${profile.cli} ${profile.model}`}
+              />
+            ))}
+            <Row selected={index === profiles.length} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "criterionCmd") {
+      return (
+        <Frame title="Which command has to succeed?" hint="Enter to save, Escape to go back">
+          <Text color="gray">Run inside the sandbox. It passes when the command exits 0.</Text>
+          <Box marginTop={1}>
+            <Text>Command: </Text>
+            <TextInput
+              value={screen.value}
+              placeholder="pnpm test"
+              onChange={(value) => setScreen({ ...screen, value })}
+              onCancel={() => go({ name: "criteria", stageId: screen.stageId })}
+              onSubmit={(raw) => {
+                const cmd = raw.trim();
+                if (!cmd) return;
+                const next = [
+                  ...criteriaOf(screen.stageId),
+                  { type: "command" as const, cmd, timeoutSec: 600 },
+                ];
+                void act(`Added ${cmd}`, () =>
+                  client.updateStage(screen.stageId, { gateCriteria: next as GateCriteria }),
+                ).then((ok) => {
+                  if (ok) go({ name: "criteria", stageId: screen.stageId });
+                });
+              }}
+            />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "stages") {
+      return (
+        <Frame
+          title="Stages"
+          hint="j/k move · Enter agent · c requirements · g advance · p pull request · r rename · d remove · Escape back"
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">A card entering a stage starts that stage's agent.</Text>
+          <Box flexDirection="column" marginTop={1}>
+            {stages.map((stage, i) => {
+              const agent = profiles.find((p) => p.id === stage.defaultAgentProfileId);
+              return (
+                <Row
+                  key={stage.id}
+                  selected={i === index}
+                  label={`${stage.position + 1}. ${stage.name}`}
+                  status={`${agent ? `${agent.cli} ${agent.model}` : "no agent"} · ${
+                    stage.gateType === "auto" ? "advances on its requirements" : "waits for your approval"
+                  }${stage.createPr ? " · opens a PR" : ""}`}
+                />
+              );
+            })}
+            <Row selected={index === stages.length} label="Add stage" />
+            <Row selected={index === stages.length + 1} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "assign") {
+      const stage = stages.find((s) => s.id === screen.stageId);
+      return (
+        <Frame
+          title={`Which agent runs ${stage?.name ?? "this stage"}?`}
+          hint="Enter to choose · Escape back"
+        >
+          <Box flexDirection="column" marginTop={1}>
+            {profiles.map((profile, i) => (
+              <Row
+                key={profile.id}
+                selected={i === index}
+                label={profile.name}
+                status={`${profile.cli} ${profile.model}`}
+              />
+            ))}
+            <Row selected={index === profiles.length} label="No agent (start runs by hand)" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "keys") {
+      return (
+        <Frame
+          title="Model provider keys"
+          hint={
+            canManageCredentials
+              ? "j/k move · Enter choose · d remove · Escape back"
+              : "j/k move · Escape back"
+          }
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            Keys for the providers your agents' models run on. Stored encrypted. Nothing reads a key back,
+            only a masked tail.
+          </Text>
+          {!canManageCredentials && <Text color="gray">Only owners and admins can change credentials.</Text>}
+          <Box flexDirection="column" marginTop={1}>
+            {PROVIDER_CREDENTIALS.map((credential, i) => (
+              <Row
+                key={credential.name}
+                selected={i === index}
+                label={credential.label}
+                status={hints[credential.name] ?? "not set"}
+              />
+            ))}
+            <Row selected={index === PROVIDER_CREDENTIALS.length} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
+    if (screen.name === "github") {
+      return (
+        <Frame
+          title="GitHub (pull requests)"
+          hint={
+            canManageCredentials
+              ? "j/k move · Enter choose · d remove · Escape back"
+              : "j/k move · Escape back"
+          }
+          notice={notice}
+          error={error}
+        >
+          <Text color="gray">
+            A stage with a pull request turned on pushes the card's branch and opens the pull request. Without
+            the GitHub App, that needs a token here.
+          </Text>
+          {!canManageCredentials && <Text color="gray">Only owners and admins can change credentials.</Text>}
+          <Box flexDirection="column" marginTop={1}>
+            <Row
+              selected={index === 0}
+              label={GITHUB_CREDENTIAL.label}
+              status={hints[GITHUB_CREDENTIAL.name] ?? "not set"}
+            />
+            <Row selected={index === 1} label="Back" />
+          </Box>
+        </Frame>
+      );
+    }
+
     return (
       <Frame
-        title="GitHub (pull requests)"
-        hint={
-          canManageCredentials ? "j/k move · Enter choose · d remove · Escape back" : "j/k move · Escape back"
-        }
+        title="Bento setup"
+        hint="j/k move · Enter choose · q open the board"
         notice={notice}
         error={error}
       >
-        <Text color="gray">
-          A stage with a pull request turned on pushes the card's branch and opens the pull request.
-          Without the GitHub App, that needs a token here.
-        </Text>
-        {!canManageCredentials && <Text color="gray">Only owners and admins can change credentials.</Text>}
+        <Text color="gray">Everything a board needs before agents can work.</Text>
         <Box flexDirection="column" marginTop={1}>
-          <Row
-            selected={index === 0}
-            label={GITHUB_CREDENTIAL.label}
-            status={hints[GITHUB_CREDENTIAL.name] ?? "not set"}
-          />
-          <Row selected={index === 1} label="Back" />
+          {hubRows.map((row, i) => (
+            <Row key={row.label} selected={i === index} label={row.label} status={row.status} />
+          ))}
         </Box>
+        {busy && <Text color="yellow">Working...</Text>}
       </Frame>
     );
   }
-
-  return (
-    <Frame title="Bento setup" hint="j/k move · Enter choose · q open the board" notice={notice} error={error}>
-      <Text color="gray">Everything a board needs before agents can work.</Text>
-      <Box flexDirection="column" marginTop={1}>
-        {hubRows.map((row, i) => (
-          <Row key={row.label} selected={i === index} label={row.label} status={row.status} />
-        ))}
-      </Box>
-      {busy && <Text color="yellow">Working...</Text>}
-    </Frame>
-  );
 }
 
 function Frame({
@@ -1686,18 +1867,98 @@ function Frame({
   error?: string;
   children: React.ReactNode;
 }) {
+  const controls = useContext(SetupMouse);
+  const mouse = useMouseTarget({
+    onScroll: (event) => {
+      if (event.kind === "up" || event.kind === "down") controls?.move(event.kind === "up" ? -1 : 1);
+    },
+  });
   return (
-    <Box flexDirection="column" paddingX={1} paddingY={1}>
-      <Text bold color="magenta">
+    <Box ref={mouse} flexDirection="column" paddingX={1} paddingY={1}>
+      <Text bold color="magenta" wrap="truncate-end">
         {title}
       </Text>
-      {children}
+      <SettingsRows>{children}</SettingsRows>
       {notice ? <Text color="yellow">{notice}</Text> : null}
       {error ? <Text color="red">{error}</Text> : null}
       <Box marginTop={1}>
-        <Text color="gray">{hint}</Text>
+        <Text color="gray" wrap="truncate-end">
+          {hint}
+        </Text>
       </Box>
+      {controls && !controls.typing && (
+        <MouseActions>
+          <MouseButton label="Back" onClick={controls.back} />
+          {controls.actions.map((action) => (
+            <MouseButton
+              key={action.key}
+              label={action.label}
+              onClick={() => controls.key(action.key)}
+              disabled={controls.busy}
+              danger={action.key === "d"}
+            />
+          ))}
+        </MouseActions>
+      )}
     </Box>
+  );
+}
+
+/** Window the existing setup lists around the highlighted row at any terminal size. */
+export function SettingsRows({ children }: { children: React.ReactNode }) {
+  const { rows } = useWindowSize();
+  const controls = useContext(SetupMouse);
+  const windowStart = useRef(0);
+  const entries: React.ReactElement<{ selected?: boolean }>[] = [];
+  function collect(nodes: React.ReactNode) {
+    Children.forEach(nodes, (node) => {
+      if (!isValidElement<{ children?: React.ReactNode; selected?: boolean }>(node)) return;
+      if (node.type === Row) entries.push(node);
+      else if (node.props.children) collect(node.props.children);
+    });
+  }
+  collect(children);
+  const height = Math.max(1, rows - 14);
+  const selected = Math.max(
+    0,
+    entries.findIndex((entry) => entry.props.selected),
+  );
+  const start = Math.max(
+    0,
+    Math.min(
+      selected < windowStart.current
+        ? selected
+        : selected >= windowStart.current + height
+          ? selected - height + 1
+          : windowStart.current,
+      entries.length - height,
+    ),
+  );
+  windowStart.current = start;
+  const visible = new Set(entries.slice(start, start + height));
+  function window(nodes: React.ReactNode): React.ReactNode {
+    return Children.map(nodes, (node) => {
+      if (!isValidElement<{ children?: React.ReactNode; selected?: boolean }>(node)) return node;
+      if (node.type === Row)
+        return visible.has(node)
+          ? cloneElement(node as React.ReactElement<{ onClick?: () => void }>, {
+              onClick: () => controls?.pick(entries.indexOf(node)),
+            })
+          : null;
+      if (node.type === TextInput && controls?.typing)
+        return cloneElement(node as React.ReactElement<{ showActions?: boolean }>, { showActions: true });
+      return node.props.children ? cloneElement(node, {}, window(node.props.children)) : node;
+    });
+  }
+  return (
+    <>
+      {window(children)}
+      {entries.length > height && (
+        <Text dimColor>
+          {start + 1} to {Math.min(start + height, entries.length)} of {entries.length} · ↑/↓ scroll
+        </Text>
+      )}
+    </>
   );
 }
 
@@ -1755,14 +2016,25 @@ function skillPreview(skill: string | null | undefined): string {
   return oneLine.length > 40 ? `${oneLine.slice(0, 39)}...` : oneLine;
 }
 
-function Row({ selected, label, status }: { selected: boolean; label: string; status?: string }) {
+export function Row({
+  selected,
+  label,
+  status,
+  onClick,
+}: {
+  selected: boolean;
+  label: string;
+  status?: string;
+  onClick?: () => void;
+}) {
+  const ref = useMouseTarget({ onClick: () => onClick?.(), priority: 1 });
   return (
-    <Box>
-      <Text {...(selected ? { color: "cyan" } : {})}>
+    <Box ref={ref} height={1}>
+      <Text wrap="truncate-end" {...(selected ? { color: "cyan" } : {})}>
         {selected ? "› " : "  "}
-        {label.padEnd(30)}
+        {terminalText(label)}
+        {status ? <Text dimColor> · {terminalText(status)}</Text> : null}
       </Text>
-      {status ? <Text color="gray">{status}</Text> : null}
     </Box>
   );
 }
