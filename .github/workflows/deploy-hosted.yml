@@ -21,6 +21,9 @@ name: Deploy hosted
 #                      (non-pooler) URL: migrations take a session
 #                      advisory lock, which transaction-mode pooling
 #                      silently breaks
+#   POSTHOG_CLI_API_KEY
+#                      repository secret, with the POSTHOG_PROJECT_ID
+#                      variable. The image build uploads source maps
 #
 # Order: migrate development, deploy development, then (unless the
 # payload's target is "development") migrate production, deploy
@@ -97,7 +100,14 @@ jobs:
           ref: ${{ github.event.client_payload.ref || inputs.cloud_ref || 'main' }}
 
       - name: Build the public image
-        run: docker build -f infra/docker/Dockerfile -t bento-server:ci .
+        env:
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+        run: >
+          docker build -f infra/docker/Dockerfile
+          --secret id=posthog_api_key,env=POSTHOG_CLI_API_KEY
+          --build-arg POSTHOG_PROJECT_ID=${{ vars.POSTHOG_PROJECT_ID }}
+          --build-arg SOURCE_COMMIT=${{ github.sha }}
+          -t bento-server:ci .
 
       # Context is the bento-cloud checkout: the overlay sees only the
       # module it is layering, never the monorepo.
