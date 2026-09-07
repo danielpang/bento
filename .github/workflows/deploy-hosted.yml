@@ -96,8 +96,20 @@ jobs:
           path: bento-cloud
           ref: ${{ github.event.client_payload.ref || inputs.cloud_ref || 'main' }}
 
+      # POSTHOG_CLI_API_KEY passes as a BuildKit secret so the key never
+      # lands in image history; the project id and commit are plain build
+      # metadata. When the secret and variable are unset the image build
+      # simply skips the source map upload (see infra/docker/Dockerfile).
       - name: Build the public image
-        run: docker build -f infra/docker/Dockerfile -t bento-server:ci .
+        env:
+          DOCKER_BUILDKIT: "1"
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+        run: >
+          docker build -f infra/docker/Dockerfile -t bento-server:ci
+          --secret id=posthog_cli_api_key,env=POSTHOG_CLI_API_KEY
+          --build-arg POSTHOG_CLI_PROJECT_ID=${{ vars.POSTHOG_CLI_PROJECT_ID }}
+          --build-arg RELEASE_VERSION=${{ github.sha }}
+          .
 
       # Context is the bento-cloud checkout: the overlay sees only the
       # module it is layering, never the monorepo.
