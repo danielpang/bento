@@ -92,10 +92,8 @@ function stampIcons(): Plugin {
 export default defineConfig({
   plugins: [react(), stampIcons()],
   build: {
-    // Maps written but not linked: no `sourceMappingURL` comment, so no
-    // browser fetches them. The deploy build uploads them to PostHog and
-    // deletes them, which is what turns a frame like `Nk` at line 226 of
-    // `/` into a file and a line.
+    // Written but not linked, so no browser fetches them. The deploy
+    // build uploads them to PostHog and deletes them.
     sourcemap: "hidden",
   },
   server: {

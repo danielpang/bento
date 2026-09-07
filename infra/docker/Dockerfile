@@ -15,12 +15,10 @@ COPY apps/web ./apps/web
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
 
-# Source maps to PostHog, then deleted. Without them a browser
-# exception names nothing: the console's one so far reads "Maximum call
-# stack size exceeded" at `Nk`, line 226 of `/`. The delete runs even
-# when the upload is skipped, because the final stage copies this one
-# whole and the server serves /assets: a shipped .map publishes the
-# source. POSTHOG_HOST is only for a deployment off PostHog US cloud.
+# Upload the maps, then delete them even if the upload was skipped: the
+# final stage copies this one whole and the server serves /assets, so a
+# shipped .map publishes the source.
+# POSTHOG_HOST only for a deployment off PostHog US cloud.
 ARG POSTHOG_HOST
 ARG POSTHOG_PROJECT_ID
 ARG SOURCE_COMMIT
