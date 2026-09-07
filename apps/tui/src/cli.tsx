@@ -1,8 +1,19 @@
 #!/usr/bin/env node
 import { render } from "ink";
 import { App } from "./app.js";
+import { MouseProvider } from "./mouse.js";
 import { HELP, parseCliOptions } from "./cli-options.js";
-import { runAgents, runLogin, runMcp, runPipeline, runRepos, runRunner, runServe, runSessions, runSpend } from "./headless.js";
+import {
+  runAgents,
+  runLogin,
+  runMcp,
+  runPipeline,
+  runRepos,
+  runRunner,
+  runServe,
+  runSessions,
+  runSpend,
+} from "./headless.js";
 
 let options;
 try {
@@ -52,7 +63,16 @@ if (options.command === "serve") {
 }
 
 async function runBoard() {
-  const { waitUntilExit } = render(<App options={options!} />);
+  // Mouse coordinates are relative to the viewport. Keep the app at a stable origin
+  // and restore the user's shell screen when it exits.
+  const { waitUntilExit } = render(
+    <MouseProvider>
+      <App options={options!} />
+    </MouseProvider>,
+    {
+      alternateScreen: process.env.INK_SCREEN_READER !== "true",
+    },
+  );
   await waitUntilExit();
   // The embedded server keeps handles open; leaving is the user's intent.
   process.exit(0);

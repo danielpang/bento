@@ -65,6 +65,10 @@ Usage
   bento --server <url>                     Use a server for both data and agents
   bento --server <url> --run-agents local  Use a server for data, run agents here
 
+Interactive keys
+  : or Ctrl+P commands   / find card   p projects   , setup
+  Enter conversation    n new card    ? help       q quit
+
 Commands
   setup                Connect repositories, add coding agents, assign them to
                        stages, and save provider keys. Everything a board needs
@@ -132,8 +136,8 @@ Options
                        this on repositories you trust.
   --runner-id <name>   Name this machine reports when claiming work
                        (default: this computer's hostname)
-  --project <name>     Project a command acts on, by name or id. Only needed
-                       when there is more than one.
+  --project <name>     Initial board or setup project, or the project a
+                       command acts on. Accepts a name or id.
   --setup <cmd>        Shell run once in a fresh sandbox, before any agent
                        starts. Sandboxes carry git and the coding agents
                        and no language runtime, so this is where a
