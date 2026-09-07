@@ -67,6 +67,55 @@ test("the first created project is selected and loaded", () => {
   assert.ok(result.commands.some((line) => line.includes("/api/projects/project-1/repositories/plain")));
 });
 
+test("creating a project keeps the dialog open until the server accepts", () => {
+  const result = runCore([
+    { kind: "open_new_project" },
+    { kind: "project_name_edit", edit: insert("Missing path") },
+    { kind: "project_path_edit", edit: insert("/Users/you/code/checkout") },
+    { kind: "submit_project" },
+  ]);
+
+  const afterSubmit = result.models.at(-1);
+  assert.equal(afterSubmit.dialog, "new_project");
+  assert.match(afterSubmit.notice.$bytes, /Creating/);
+  assert.ok(result.commands.some((line) => line.includes("/api/projects") && line.includes('method="POST"')));
+});
+
+test("a refused project create shows the server error and leaves the dialog open", () => {
+  const result = runCore([
+    { kind: "open_new_project" },
+    { kind: "project_name_edit", edit: insert("Missing path") },
+    { kind: "project_path_edit", edit: insert("/Users/you/code/checkout") },
+    { kind: "submit_project" },
+    {
+      kind: "projects_changed",
+      status: 400,
+      body: bytes('{"error":"/Users/you/code/checkout does not exist on the machine running the server."}'),
+    },
+  ]);
+
+  const model = result.models.at(-1);
+  assert.equal(model.dialog, "new_project");
+  assert.equal(
+    model.lastError.$bytes,
+    "/Users/you/code/checkout does not exist on the machine running the server.",
+  );
+  assert.equal(model.notice.$bytes, "");
+});
+
+test("Pipeline opens from the project picker by selecting the first project", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|First project") },
+    { kind: "open_pipeline" },
+  ]);
+
+  const model = result.models.at(-1);
+  assert.equal(model.panel, "pipeline");
+  assert.equal(model.selectedProject, 0);
+  assert.ok(result.commands.some((line) => line.includes("/api/projects/project-1/pipeline/plain")));
+  assert.ok(result.commands.some((line) => line.includes("/api/projects/project-1/repositories/plain")));
+});
+
 test("switching organizations drops stale project state and reloads scoped data", () => {
   const result = runCore([
     { kind: "projects_ok", status: 200, body: bytes("project|old-project|Old project") },
@@ -324,4 +373,17 @@ test("resolve-conflicts stays quiet when GitHub reports no conflict", () => {
   ]);
 
   assert.ok(!result.commands.some((line) => line.includes("/resolve-conflicts")));
+});
+
+test("local mode spawns the bundled helper path when set", () => {
+  const result = runCore([
+    { kind: "helper_path", path: bytes("/Applications/Bento.app/Contents/Resources/helper/bento") },
+    { kind: "choose_local" },
+  ]);
+
+  const spawn = result.commands.find((line) => line.includes("spawn") || line.includes("serve"));
+  assert.ok(spawn, `expected a helper spawn, got: ${result.commands.join("\n")}`);
+  assert.match(spawn, /Resources\/helper\/bento/);
+  assert.match(spawn, /serve/);
+  assert.doesNotMatch(spawn, /"bento" "serve"/);
 });

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Dev helper the Mac app spawns when BENTO_HELPER points here.
+# Rebuilds workspace packages the CLI imports, then runs from TypeScript.
+set -euo pipefail
+exec "$(cd "$(dirname "$0")/../../.." && pwd)/scripts/dev-cli.sh" "$@"

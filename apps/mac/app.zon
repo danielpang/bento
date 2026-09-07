@@ -4,9 +4,9 @@
     .display_name = "Bento",
     .description = "Command centre for coordinating AI coding agents.",
     .version = "0.1.0",
-    // Bento orange, matching the web console's default accent. The SDK
-    // takes one accent per app, so the web's accent picker has no
-    // native counterpart; this keeps the two apps on the same brand.
+    // Geist matches the web console typeface. Orange is the web default
+    // accent; the SDK allows one accent per app.
+    .theme = "geist",
     .theme_accent = "#ff8a3d",
     .icons = .{"assets/icon.png"},
     // Provider marks, read once at launch and registered under these
@@ -23,6 +23,7 @@
             .{ .id = 6, .path = "assets/providers/google-dark.png" },
             .{ .id = 7, .path = "assets/providers/openrouter-light.png" },
             .{ .id = 8, .path = "assets/providers/openrouter-dark.png" },
+            .{ .id = 9, .path = "assets/brand-glyph.png" },
         },
     },
     .platforms = .{"macos"},
