@@ -14,6 +14,37 @@ COPY apps/web ./apps/web
 
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
+
+# Give PostHog the web build's source maps, then throw them away.
+#
+# A browser reports a minified stack: the console's one captured
+# exception so far reads "RangeError: Maximum call stack size exceeded"
+# at `Nk` and `Pk`, line 226 of `/`, which names nothing. PostHog can
+# only undo that if it holds the maps, matched to the shipped chunks by
+# an id stamped into both. `sourcemap process` does all three steps:
+# stamp the chunks, upload chunks and maps, delete the maps.
+#
+# The maps are deleted whether or not the upload ran, because the final
+# stage copies this one wholesale and the server serves /assets as
+# static files: a shipped .map is the whole source, published.
+# POSTHOG_HOST only for a deployment that is not on PostHog US cloud;
+# empty leaves the CLI on its own default.
+ARG POSTHOG_HOST
+ARG POSTHOG_PROJECT_ID
+ARG SOURCE_COMMIT
+RUN --mount=type=secret,id=posthog_api_key \
+    set -eu; \
+    if [ -s /run/secrets/posthog_api_key ] && [ -n "${POSTHOG_PROJECT_ID:-}" ]; then \
+      POSTHOG_CLI_API_KEY="$(cat /run/secrets/posthog_api_key)" \
+      POSTHOG_CLI_PROJECT_ID="${POSTHOG_PROJECT_ID}" \
+      npx --yes @posthog/cli@0.18.1 ${POSTHOG_HOST:+--host "${POSTHOG_HOST}"} \
+        sourcemap process --directory apps/web/dist/assets --delete-after \
+        --release-name bento-web --release-version "${SOURCE_COMMIT:-unknown}"; \
+    else \
+      echo "No PostHog credentials for this build: browser exceptions from it will stay minified."; \
+    fi; \
+    find apps/web/dist -name '*.map' -delete
+
 RUN pnpm prune --prod
 
 FROM node:22-slim
