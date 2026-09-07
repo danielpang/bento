@@ -85,13 +85,22 @@ export interface PublishedPullRequest {
   draft?: boolean;
 }
 
-/** Downloads a private repository on the trusted host and strips credentials before transfer. */
+/**
+ * Downloads a private repository on the trusted host and strips
+ * credentials before transfer.
+ *
+ * Returns the branch the bundle carries alongside the bytes. It is
+ * usually the branch asked for, but when the stored default branch no
+ * longer exists on the remote the clone falls back to the remote's real
+ * default, so the caller must record which branch it got and hand that
+ * name to the sandbox.
+ */
 export async function createRepositorySeed(
   publisher: GitHubPublisher,
   repoUrl: string,
   githubRepoId: number | undefined,
   baseBranch: string,
-): Promise<Buffer> {
+): Promise<{ bundle: Buffer; baseBranch: string }> {
   const parsed = parseRepoUrl(repoUrl);
   if (!parsed) throw new Error(`not a GitHub remote: ${repoUrl}`);
   const remote = `https://github.com/${parsed.owner}/${parsed.repo}.git`;
@@ -103,15 +112,15 @@ export async function createRepositorySeed(
   await mkdir(home);
   const env = trustedGitEnv(home, token);
   try {
-    await cloneBaseBranch({
+    const resolvedBranch = await cloneBaseBranch({
       remote,
       label: `${parsed.owner}/${parsed.repo}`,
       baseBranch,
       checkout,
       env,
     });
-    await run("git", ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${baseBranch}`], { env });
-    return await readFile(bundlePath);
+    await run("git", ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${resolvedBranch}`], { env });
+    return { bundle: await readFile(bundlePath), baseBranch: resolvedBranch };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -469,17 +478,24 @@ async function withoutStageNotes(
 }
 
 /**
- * Clones the base branch, and says what to do when it is not there.
+ * Clones the base branch, and returns the branch it actually took.
  *
- * git's own word for this is "fatal: Remote branch main not found in
- * upstream origin", wrapped in a command line and a temporary path
- * nobody typed, and it arrives as the whole reason a run failed or a
- * pull request never appeared. Two repositories hit it: one connected
+ * git's own word for a missing branch is "fatal: Remote branch main not
+ * found in upstream origin", wrapped in a command line and a temporary
+ * path nobody typed, and it arrives as the whole reason a run failed or
+ * a pull request never appeared. Two repositories hit it: one connected
  * before its first commit, which has no branches at all, and one whose
- * default branch was renamed after it was connected. Both have a fix,
- * so the fix is what gets said.
+ * default branch was renamed after it was connected.
+ *
+ * The renamed one heals itself: the remote still reports a default
+ * branch through its HEAD, so a first clone that fails for want of the
+ * stored branch reads that real default and clones it instead. The
+ * returned name is the branch that got cloned, because the caller
+ * bundles and hands it on, and that name must match what the remote
+ * has. The repository with no commits has no default branch to find, so
+ * it still gets the error that says what to do.
  */
-async function cloneBaseBranch(args: {
+export async function cloneBaseBranch(args: {
   remote: string;
   /** owner/repository, because the run record does not name it otherwise. */
   label: string;
@@ -488,9 +504,9 @@ async function cloneBaseBranch(args: {
   env: NodeJS.ProcessEnv;
   /** Clone flags this caller wants, ahead of the branch selection. */
   flags?: string[];
-}): Promise<void> {
-  try {
-    await run(
+}): Promise<string> {
+  const cloneBranch = (branch: string) =>
+    run(
       "git",
       [
         ...credentialArguments(),
@@ -498,14 +514,22 @@ async function cloneBaseBranch(args: {
         ...(args.flags ?? []),
         "--single-branch",
         "--branch",
-        args.baseBranch,
+        branch,
         args.remote,
         args.checkout,
       ],
       { env: args.env },
     );
+  try {
+    await cloneBranch(args.baseBranch);
+    return args.baseBranch;
   } catch (err) {
     if (!missingBranchFailure(err)) throw err;
+    const fallback = await remoteDefaultBranch(args.remote, args.env);
+    if (fallback && fallback !== args.baseBranch) {
+      await cloneBranch(fallback);
+      return fallback;
+    }
     // Chained, so git's own line is still in the server log and in the
     // exception capture. It is only kept out of what the person reads.
     throw new Error(
@@ -515,6 +539,26 @@ async function cloneBaseBranch(args: {
         "repository under Repositories and add it again to pick up the new name.",
       { cause: err },
     );
+  }
+}
+
+/**
+ * The branch the remote's HEAD points at, its real default branch, or
+ * null when the remote reports none. A repository with no commits has an
+ * unborn HEAD and lists nothing here, which is how the empty case is
+ * told apart from the renamed one.
+ */
+async function remoteDefaultBranch(remote: string, env: NodeJS.ProcessEnv): Promise<string | null> {
+  try {
+    const { stdout } = await run(
+      "git",
+      [...credentialArguments(), "ls-remote", "--symref", remote, "HEAD"],
+      { env },
+    );
+    const match = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(stdout);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 

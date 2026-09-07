@@ -249,19 +249,22 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         : [];
 
     const seedBundles = new Map<string, Buffer>();
+    // The base branch the seed actually carries, which is not the stored
+    // default branch when that name no longer exists on the remote. The
+    // sandbox must branch off the name the bundle has, not the stale one.
+    const seedBaseBranches = new Map<string, string>();
     if (ctx.driver.provider === "sprite" && publisher) {
       for (const row of repoRows) {
         if (!row.repoUrl) continue;
         const repoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-        seedBundles.set(
-          row.id,
-          await createRepositorySeed(
-            publisher,
-            row.repoUrl,
-            Number.isSafeInteger(repoId) ? repoId : undefined,
-            row.defaultBranch,
-          ),
+        const seed = await createRepositorySeed(
+          publisher,
+          row.repoUrl,
+          Number.isSafeInteger(repoId) ? repoId : undefined,
+          row.defaultBranch,
         );
+        seedBundles.set(row.id, seed.bundle);
+        seedBaseBranches.set(row.id, seed.baseBranch);
       }
     }
 
@@ -287,7 +290,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         name: r.name,
         cloneUrl: r.repoUrl ?? undefined,
         branch,
-        baseBranch: r.defaultBranch,
+        baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
         seedBundle: seedBundles.get(r.id),
       })),
       // Local mode can share the user's own agent logins and git identity.
