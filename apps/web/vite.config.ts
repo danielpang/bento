@@ -91,6 +91,16 @@ function stampIcons(): Plugin {
 
 export default defineConfig({
   plugins: [react(), stampIcons()],
+  build: {
+    // Hidden source maps: `.map` files are written next to each bundle,
+    // but no `sourceMappingURL` comment is added, so a browser never
+    // fetches them and they are not part of the public bundle. The
+    // deploy build injects a chunk id, uploads the maps to PostHog error
+    // tracking, then deletes them before the image ships. Without this,
+    // every browser exception arrives with minified frames such as
+    // `Nk`/`Pk` and the file shown as `/`, so no crash can be named.
+    sourcemap: "hidden",
+  },
   server: {
     port: 4401,
     proxy: {
