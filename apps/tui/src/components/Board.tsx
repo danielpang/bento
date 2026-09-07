@@ -1,7 +1,4 @@
 import { Box, Text } from "ink";
-import { useRef } from "react";
-import type { MouseBindings } from "../mouse.js";
-import { terminalText } from "../terminal.js";
 import type { AgentProfile, Feature, Stage } from "@bento/api-client";
 
 export function statusColor(status: string): string {
@@ -32,8 +29,6 @@ export function Board({
   selectedIndex,
   runStatus,
   gateWait,
-  maxRows,
-  mouse,
 }: {
   stages: Stage[];
   features: Feature[];
@@ -43,67 +38,19 @@ export function Board({
   runStatus: Record<string, string | undefined>;
   /** Why a gated card is held, in words, per card. */
   gateWait: Record<string, string | undefined>;
-  maxRows?: number;
-  mouse?: MouseBindings;
 }) {
-  const windowStart = useRef(0);
   const ordered = orderFeatures(stages, features);
   const finished = features.filter(isFinished);
-
-  if (maxRows !== undefined) {
-    let start = windowStart.current;
-    if (selectedIndex < start) start = selectedIndex;
-    if (selectedIndex >= start + maxRows) start = selectedIndex - maxRows + 1;
-    start = Math.max(0, Math.min(start, ordered.length - maxRows));
-    windowStart.current = start;
-    return (
-      <Box ref={mouse?.target("list", {})} flexDirection="column" marginBottom={1}>
-        <Text dimColor>
-          BOARD · {ordered.length} cards ·{" "}
-          {ordered.filter((f) => ["running", "starting", "queued"].includes(runStatus[f.id] ?? "")).length}{" "}
-          agents active
-        </Text>
-        {ordered.length === 0 && <Text dimColor>No cards yet. Press n to describe your first task.</Text>}
-        {ordered.slice(start, start + maxRows).map((feature, i) => {
-          const lane = isFinished(feature)
-            ? "Done"
-            : (stages.find((s) => s.id === feature.currentStageId)?.name ?? "Backlog");
-          const selected = start + i === selectedIndex;
-          return (
-            <Box
-              key={feature.id}
-              ref={mouse?.target(`card:${feature.id}`, { cardId: feature.id })}
-              height={1}
-            >
-              <Text wrap="truncate-end" {...(selected ? { color: "cyan" } : {})}>
-                {selected ? "› " : "  "}
-                <Text color={statusColor(cardState(feature, runStatus[feature.id]))}>● </Text>
-                {terminalText(feature.title)}{" "}
-                <Text dimColor>
-                  {" "}
-                  · {terminalText(lane)} · {cardState(feature, runStatus[feature.id])}
-                </Text>
-              </Text>
-            </Box>
-          );
-        })}
-        {ordered.length > maxRows && (
-          <Text dimColor wrap="truncate-end">
-            {start + 1} to {Math.min(start + maxRows, ordered.length)} of {ordered.length} · ↑/↓ to scroll
-          </Text>
-        )}
-      </Box>
-    );
-  }
 
   return (
     <Box flexDirection="column">
       {[{ id: null, name: "Backlog" }, ...stages].map((stage) => {
-        const inStage = features.filter((f) => (stage.id ? inLane(f, stage.id) : inBacklog(f)));
-        const agent =
-          "id" in stage && stage.id
-            ? profiles.find((p) => p.id === findStage(stages, stage.id)?.defaultAgentProfileId)
-            : undefined;
+        const inStage = features.filter((f) =>
+          stage.id
+            ? inLane(f, stage.id)
+            : inBacklog(f),
+        );
+        const agent = "id" in stage && stage.id ? profiles.find((p) => p.id === findStage(stages, stage.id)?.defaultAgentProfileId) : undefined;
         return (
           <Box key={stage.id ?? "backlog"} flexDirection="column" marginBottom={1}>
             <Box>
@@ -177,15 +124,10 @@ function CardRow({
       <Box>
         <Text color={selected ? "cyan" : "gray"}>{selected ? " > " : "   "}</Text>
         <Text color={statusColor(state)}>●</Text>
-        <Text {...(selected ? { color: "cyan" } : {})}> {terminalText(feature.title)}</Text>
+        <Text color={selected ? "cyan" : "white"}> {feature.title}</Text>
         <Text color="gray"> {state}</Text>
       </Box>
-      {detail && (
-        <Text color="gray">
-          {"     "}
-          {terminalText(detail)}
-        </Text>
-      )}
+      {detail && <Text color="gray">{"     "}{detail}</Text>}
     </Box>
   );
 }
@@ -203,7 +145,6 @@ function CardRow({
  */
 export function cardState(feature: Feature, runStatus: string | undefined): string {
   if (feature.status === "done") return "completed";
-  if (feature.status === "cancelled") return "cancelled";
   if (runStatus === "queued" || runStatus === "starting" || runStatus === "running") return runStatus;
   if (feature.status === "gated") return "gated";
   if (!feature.currentStageId) return "backlog";
@@ -216,8 +157,7 @@ export function isFinished(feature: Pick<Feature, "status">): boolean {
 }
 
 const inBacklog = (feature: Feature) => !feature.currentStageId && !isFinished(feature);
-const inLane = (feature: Feature, stageId: string) =>
-  feature.currentStageId === stageId && !isFinished(feature);
+const inLane = (feature: Feature, stageId: string) => feature.currentStageId === stageId && !isFinished(feature);
 
 /**
  * Flattened order used for keyboard selection: backlog, then stages,

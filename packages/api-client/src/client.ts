@@ -1,11 +1,3 @@
-import type {
-  AccountSession,
-  Organization,
-  OrganizationDetails,
-  OrganizationInvitation,
-  PlanState,
-  TeamPolicy,
-} from "./settings.js";
 import { SseParser, type AgentDelta, type AgentEvent, type GateCriteria } from "@bento/core";
 import type {
   AgentProfile,
@@ -401,123 +393,6 @@ export class BentoClient {
     return (await res.json()) as T;
   }
 
-  getAccountSession() {
-    return this.request<AccountSession | null>("/api/auth/get-session");
-  }
-  async signOut() {
-    await this.request("/api/auth/sign-out", { method: "POST", body: "{}" });
-    await this.tokens?.set(null);
-  }
-  listOrganizations() {
-    return this.request<Organization[]>("/api/auth/organization/list");
-  }
-  getOrganization(organizationId: string) {
-    return this.request<OrganizationDetails>(
-      `/api/auth/organization/get-full-organization?${new URLSearchParams({ organizationId, membersLimit: "100" })}`,
-    );
-  }
-  createOrganization(name: string, slug: string) {
-    return this.request<Organization>("/api/auth/organization/create", {
-      method: "POST",
-      body: JSON.stringify({ name, slug, keepCurrentActiveOrganization: true }),
-    });
-  }
-  setActiveOrganization(organizationId: string | null) {
-    return this.request("/api/auth/organization/set-active", {
-      method: "POST",
-      body: JSON.stringify({ organizationId }),
-    });
-  }
-  deleteOrganization(organizationId: string) {
-    return this.request("/api/auth/organization/delete", {
-      method: "POST",
-      body: JSON.stringify({ organizationId }),
-    });
-  }
-  inviteMember(organizationId: string, email: string, role: string) {
-    return this.request("/api/auth/organization/invite-member", {
-      method: "POST",
-      body: JSON.stringify({ organizationId, email, role }),
-    });
-  }
-  updateMemberRole(organizationId: string, memberId: string, role: string) {
-    return this.request("/api/auth/organization/update-member-role", {
-      method: "POST",
-      body: JSON.stringify({ organizationId, memberId, role }),
-    });
-  }
-  removeMember(organizationId: string, memberIdOrEmail: string) {
-    return this.request("/api/auth/organization/remove-member", {
-      method: "POST",
-      body: JSON.stringify({ organizationId, memberIdOrEmail }),
-    });
-  }
-  cancelInvitation(invitationId: string) {
-    return this.request("/api/auth/organization/cancel-invitation", {
-      method: "POST",
-      body: JSON.stringify({ invitationId }),
-    });
-  }
-  listInvitations() {
-    return this.request<OrganizationInvitation[]>("/api/auth/organization/list-user-invitations");
-  }
-  respondToInvitation(invitationId: string, accept: boolean) {
-    return this.request(`/api/auth/organization/${accept ? "accept" : "reject"}-invitation`, {
-      method: "POST",
-      body: JSON.stringify({ invitationId }),
-    });
-  }
-  requestAccountDeletion() {
-    return this.request("/api/auth/delete-user", {
-      method: "POST",
-      body: JSON.stringify({ callbackURL: "/" }),
-    });
-  }
-  updateAccountName(name: string) {
-    return this.request("/api/auth/update-user", { method: "POST", body: JSON.stringify({ name }) });
-  }
-  getTeamPolicy() {
-    return this.request<TeamPolicy>("/api/team/policy");
-  }
-  setTeamPolicy(restrictNetwork: boolean) {
-    return this.request<TeamPolicy>("/api/team/policy", {
-      method: "PATCH",
-      body: JSON.stringify({ restrictNetwork }),
-    });
-  }
-  getTeamHours(from: string, to: string) {
-    return this.request<{ features: { featureId: string; title: string; agentHours: number }[] }>(
-      `/api/team/hours?${new URLSearchParams({ from, to })}`,
-    );
-  }
-  getBillingPlan() {
-    return this.request<PlanState>("/api/billing/plan");
-  }
-  createBillingPortal() {
-    return this.request<{ url?: string }>("/api/billing/portal", { method: "POST", body: "{}" });
-  }
-  checkoutPlan(plan: string, overagePolicy: "stop" | "allow") {
-    return this.request<{ url?: string }>("/api/billing/checkout", {
-      method: "POST",
-      body: JSON.stringify({ plan, overagePolicy }),
-    });
-  }
-  setOveragePolicy(policy: "stop" | "allow") {
-    return this.request("/api/billing/overage-policy", { method: "POST", body: JSON.stringify({ policy }) });
-  }
-  setOverageCeiling(ceilingUsd: number | null) {
-    return this.request("/api/billing/overage-ceiling", {
-      method: "POST",
-      body: JSON.stringify({ ceilingUsd }),
-    });
-  }
-  contactSales(message: string, email?: string, company?: string) {
-    return this.request("/api/billing/contact-sales", {
-      method: "POST",
-      body: JSON.stringify({ message, email, company }),
-    });
-  }
-
   /**
    * The same request path, for routes whose body is a document rather
    * than JSON. Kept separate so `request` can go on assuming JSON.
@@ -766,7 +641,9 @@ export class BentoClient {
   }
 
   listLinearProjects(teamId: string) {
-    return this.request<LinearProjectOption[]>(`/api/linear/projects?teamId=${encodeURIComponent(teamId)}`);
+    return this.request<LinearProjectOption[]>(
+      `/api/linear/projects?teamId=${encodeURIComponent(teamId)}`,
+    );
   }
 
   createLinearMapping(input: { linearTeamId: string; projectId: string }) {
@@ -935,9 +812,7 @@ export class BentoClient {
    * status at all. The line snapshot already carries it, so this reads
    * that rather than asking per card and growing with the board.
    */
-  async getBoardSnapshot(
-    projectId: string,
-  ): Promise<{ statuses: Record<string, string>; outputs: Record<string, string> }> {
+  async getBoardSnapshot(projectId: string): Promise<{ statuses: Record<string, string>; outputs: Record<string, string> }> {
     const token = await this.tokens?.get();
     const res = await this.fetchImpl(`${this.baseUrl}/api/projects/${projectId}/board/plain`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
@@ -1109,55 +984,6 @@ export class BentoClient {
   /** One artifact's body as text, for the kinds the console renders itself. */
   getArtifactText(artifactId: string) {
     return this.requestText(`/api/artifacts/${artifactId}/content`);
-  }
-
-  /** Binary download for bearer-token clients. Never execute these bytes. */
-  async getArtifactBytes(
-    artifactId: string,
-    options: { signal?: AbortSignal; maxBytes?: number } = {},
-  ): Promise<Uint8Array> {
-    const token = await this.tokens?.get();
-    const response = await this.fetchImpl(this.artifactContentUrl(artifactId), {
-      ...(options.signal ? { signal: options.signal } : {}),
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      credentials: this.tokens ? "omit" : "include",
-    });
-    if (!response.ok) throw new ApiError(response.status, await response.text());
-    if (options.maxBytes === undefined) return new Uint8Array(await response.arrayBuffer());
-    const limit = options.maxBytes;
-    if (!Number.isSafeInteger(limit) || limit < 0) {
-      await response.body?.cancel();
-      throw new Error("Invalid artifact size limit.");
-    }
-    if (Number(response.headers.get("content-length")) > limit) {
-      await response.body?.cancel();
-      throw new Error("Artifact exceeds the preview size limit. Save it to inspect it.");
-    }
-    if (!response.body) return new Uint8Array();
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > limit) {
-          await reader.cancel();
-          throw new Error("Artifact exceeds the preview size limit. Save it to inspect it.");
-        }
-        chunks.push(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    const bytes = new Uint8Array(size);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return bytes;
   }
 
   /**
@@ -1343,7 +1169,6 @@ export class BentoClient {
     stageId: string,
     patch: {
       name?: string;
-      description?: string;
       defaultAgentProfileId?: string | null;
       gateType?: "manual" | "auto";
       gateCriteria?: GateCriteria;
@@ -1363,17 +1188,12 @@ export class BentoClient {
   }
 
   resumeRun(runId: string, prompt: string) {
-    return this.request<AgentRun>(`/api/runs/${runId}/resume`, {
-      method: "POST",
-      body: JSON.stringify({ prompt }),
-    });
+    return this.request<AgentRun>(`/api/runs/${runId}/resume`, { method: "POST", body: JSON.stringify({ prompt }) });
   }
 
   /** Restores the sandbox to the snapshot taken before this run. */
   rollbackRun(runId: string) {
-    return this.request<{ ok: boolean; restoredTo: string }>(`/api/runs/${runId}/rollback`, {
-      method: "POST",
-    });
+    return this.request<{ ok: boolean; restoredTo: string }>(`/api/runs/${runId}/rollback`, { method: "POST" });
   }
 
   getRun(runId: string) {
@@ -1381,10 +1201,7 @@ export class BentoClient {
   }
 
   /** Plain text transcript with a cursor, for clients that cannot hold SSE. */
-  async getTranscript(
-    runId: string,
-    since = 0,
-  ): Promise<{ cursor: number; status: string; lines: string[] }> {
+  async getTranscript(runId: string, since = 0): Promise<{ cursor: number; status: string; lines: string[] }> {
     const token = await this.tokens?.get();
     const res = await this.fetchImpl(`${this.baseUrl}/api/runs/${runId}/transcript?since=${since}`, {
       headers: token ? { authorization: `Bearer ${token}` } : {},
@@ -1406,7 +1223,11 @@ export class BentoClient {
    * message arrives through onEvent and supersedes every fragment
    * before it.
    */
-  streamRun(runId: string, handlers: RunStreamHandlers, since = 0): () => void {
+  streamRun(
+    runId: string,
+    handlers: RunStreamHandlers,
+    since = 0,
+  ): () => void {
     const url = `${this.baseUrl}/api/runs/${runId}/events?since=${since}`;
     // EventSource cannot carry an Authorization header, so a client
     // that authenticates with a bearer token (the TUI, the Mac app)
@@ -1545,65 +1366,6 @@ export class BentoClient {
    * is the caller's cue to refetch a snapshot and fill the gap.
    */
   streamBoard(projectId: string, onEvent: (event: unknown) => void, onReconnect?: () => void): () => void {
-    // EventSource cannot attach a bearer token and is absent in Node.
-    if (this.tokens || typeof EventSource === "undefined") {
-      const controller = new AbortController();
-      let retry: ReturnType<typeof setTimeout> | undefined;
-      let release: (() => void) | undefined;
-      void (async () => {
-        let opened = false;
-        let failures = 0;
-        while (!controller.signal.aborted) {
-          try {
-            const token = await this.tokens?.get();
-            const response = await this.fetchImpl(`${this.baseUrl}/api/board/${projectId}/events`, {
-              headers: token ? { authorization: `Bearer ${token}` } : {},
-              credentials: this.tokens ? "omit" : "include",
-              signal: controller.signal,
-            });
-            if (!response.ok || !response.body) throw new ApiError(response.status, response.statusText);
-            if (controller.signal.aborted) return;
-            if (opened) onReconnect?.();
-            opened = true;
-            const reader = response.body.getReader();
-            const parser = new SseParser();
-            const decoder = new TextDecoder();
-            try {
-              while (!controller.signal.aborted) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                failures = 0;
-                for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
-                  if (frame.event !== "board_event") continue;
-                  try {
-                    onEvent(JSON.parse(frame.data));
-                  } catch {
-                    /* A malformed frame must not end the stream. */
-                  }
-                }
-              }
-            } finally {
-              await reader.cancel().catch(() => {});
-              reader.releaseLock();
-            }
-          } catch (error) {
-            if (controller.signal.aborted) return;
-            if (error instanceof ApiError && [401, 403, 404].includes(error.status)) return;
-          }
-          if (controller.signal.aborted) return;
-          failures += 1;
-          await new Promise<void>((resolve) => {
-            release = resolve;
-            retry = setTimeout(resolve, Math.min(1000 * 2 ** (failures - 1), 8000));
-          });
-        }
-      })();
-      return () => {
-        controller.abort();
-        clearTimeout(retry);
-        release?.();
-      };
-    }
     const source = new EventSource(`${this.baseUrl}/api/board/${projectId}/events`, {
       withCredentials: !this.tokens,
     });

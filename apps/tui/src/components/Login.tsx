@@ -1,9 +1,6 @@
-import { useKeyboardInput as useInput } from "../mouse.js";
 import { useEffect, useState } from "react";
-import { Box, Text, useStdin } from "ink";
+import { Box, Text, useInput, useStdin } from "ink";
 import { DeviceFlow, type DeviceCodeResponse } from "@bento/api-client";
-import { MouseActions, MouseButton } from "./MouseControls.js";
-import { openUrl } from "../open-url.js";
 
 /**
  * Device flow login, the shape CLIs use: show a short code, the user
@@ -31,7 +28,6 @@ export function Login({
   /** Bumped by r, which abandons the current flow and starts another. */
   const [attempt, setAttempt] = useState(0);
   const [secondsLeft, setSecondsLeft] = useState(0);
-  const [browserError, setBrowserError] = useState("");
   const { isRawModeSupported } = useStdin();
 
   useEffect(() => {
@@ -39,7 +35,6 @@ export function Login({
     let cancelled = false;
     setCode(null);
     setError("");
-    setBrowserError("");
     const flow = new DeviceFlow({
       baseUrl,
       clientId: "bento-tui",
@@ -83,31 +78,7 @@ export function Login({
     { isActive: isRawModeSupported === true },
   );
 
-  const keys = isRawModeSupported
-    ? "r try again · q quit"
-    : "no terminal input available: press Ctrl-C to quit";
-  const controls = (
-    <MouseActions>
-      {code && (
-        <MouseButton
-          label="Open sign-in page"
-          onClick={() => {
-            void openUrl(code.verification_uri_complete ?? code.verification_uri).catch((e: Error) =>
-              setBrowserError(e.message),
-            );
-          }}
-        />
-      )}
-      <MouseButton
-        label="Try again"
-        onClick={() => {
-          setBrowserError("");
-          setAttempt((n) => n + 1);
-        }}
-      />
-      <MouseButton label="Quit" onClick={onQuit} />
-    </MouseActions>
-  );
+  const keys = isRawModeSupported ? "r try again · q quit" : "no terminal input available: press Ctrl-C to quit";
 
   if (error) {
     const { cause, fix } = explain(error, baseUrl);
@@ -118,9 +89,8 @@ export function Login({
         </Text>
         <Text color="gray">{cause}</Text>
         <Text>{fix}</Text>
-        <Box marginTop={1} flexDirection="column">
+        <Box marginTop={1}>
           <Text color="gray">{keys}</Text>
-          {controls}
         </Box>
       </Box>
     );
@@ -132,7 +102,6 @@ export function Login({
         {notice && <Text color="yellow">{notice}</Text>}
         <Text color="gray">Requesting a login code from {baseUrl}...</Text>
         <Text color="gray">{keys}</Text>
-        {controls}
       </Box>
     );
   }
@@ -154,8 +123,6 @@ export function Login({
           : `Waiting for approval. This code expires in ${countdown(secondsLeft)}.`}
       </Text>
       <Text color="gray">{keys}</Text>
-      {controls}
-      {browserError && <Text color="yellow">{browserError}</Text>}
     </Box>
   );
 }

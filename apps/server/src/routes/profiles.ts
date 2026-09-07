@@ -212,10 +212,6 @@ export function profileRoutes(ctx: AppContext) {
      * failing.
      */
     .post("/", zValidator("json", createProfile), async (c) => {
-      const membership = await getActiveOrganizationMembership(ctx, c);
-      if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
-        return c.json({ error: "not found" }, 404);
-      }
       const body = c.req.valid("json");
       const pairing = checkAgentPairing(body.cli, body.model);
       if (pairing.status === "impossible") {
@@ -223,7 +219,7 @@ export function profileRoutes(ctx: AppContext) {
       }
       const [profile] = await db(c, ctx)
         .insert(agentProfiles)
-        .values({ ownerId: actor(c), organizationId: membership?.organizationId ?? null, ...body })
+        .values({ ownerId: actor(c), ...body })
         .returning();
       if (!profile) return c.json({ error: "something went wrong saving the agent; try again" }, 500);
       return c.json(profile, 201);
