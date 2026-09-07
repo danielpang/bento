@@ -1,5 +1,7 @@
 # Running the web console
 
+For the terminal client, see [Bento in the terminal](./tui.md).
+
 Console source: `apps/web`. Development: Vite on port 4401. Production: built assets served by the API server. See README for the minimal setup.
 
 ## Processes
