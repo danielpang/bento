@@ -118,6 +118,7 @@ export async function createRepositorySeed(
       baseBranch,
       checkout,
       env,
+      fallbackToDefaultBranch: true,
     });
     await run("git", ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${resolvedBranch}`], { env });
     return { bundle: await readFile(bundlePath), baseBranch: resolvedBranch };
@@ -487,13 +488,18 @@ async function withoutStageNotes(
  * before its first commit, which has no branches at all, and one whose
  * default branch was renamed after it was connected.
  *
- * The renamed one heals itself: the remote still reports a default
- * branch through its HEAD, so a first clone that fails for want of the
- * stored branch reads that real default and clones it instead. The
- * returned name is the branch that got cloned, because the caller
- * bundles and hands it on, and that name must match what the remote
- * has. The repository with no commits has no default branch to find, so
- * it still gets the error that says what to do.
+ * A caller that only needs a starting point for the clone, and not the
+ * stored name in particular, sets `fallbackToDefaultBranch`. The seed
+ * for a run does: the remote still reports a real default branch through
+ * its HEAD, so a first clone that fails for want of the stored branch
+ * reads that default and clones it instead, and the returned name is the
+ * branch that got cloned so the seed and the sandbox agree on it. The
+ * repository with no commits has no default branch to find and still
+ * gets the error that says what to do.
+ *
+ * Publishing does not set it. There the stored branch is the pull
+ * request's base as well as the clone, so a rename is a mismatch a
+ * person must reconcile, not one this quietly papers over.
  */
 export async function cloneBaseBranch(args: {
   remote: string;
@@ -504,6 +510,8 @@ export async function cloneBaseBranch(args: {
   env: NodeJS.ProcessEnv;
   /** Clone flags this caller wants, ahead of the branch selection. */
   flags?: string[];
+  /** Clone the remote's real default branch when the stored one is gone. */
+  fallbackToDefaultBranch?: boolean;
 }): Promise<string> {
   const cloneBranch = (branch: string) =>
     run(
@@ -525,10 +533,12 @@ export async function cloneBaseBranch(args: {
     return args.baseBranch;
   } catch (err) {
     if (!missingBranchFailure(err)) throw err;
-    const fallback = await remoteDefaultBranch(args.remote, args.env);
-    if (fallback && fallback !== args.baseBranch) {
-      await cloneBranch(fallback);
-      return fallback;
+    if (args.fallbackToDefaultBranch) {
+      const fallback = await remoteDefaultBranch(args.remote, args.env);
+      if (fallback && fallback !== args.baseBranch) {
+        await cloneBranch(fallback);
+        return fallback;
+      }
     }
     // Chained, so git's own line is still in the server log and in the
     // exception capture. It is only kept out of what the person reads.

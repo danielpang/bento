@@ -92,10 +92,26 @@ test("cloneBaseBranch falls back to the remote default when the stored branch is
     baseBranch: "main",
     checkout,
     env: { ...process.env },
+    fallbackToDefaultBranch: true,
   });
   assert.equal(resolved, "master");
   const { stdout } = await git(checkout, "rev-parse", "--abbrev-ref", "HEAD");
   assert.equal(stdout.trim(), "master");
+});
+
+test("cloneBaseBranch reports a missing branch when the fallback is off", async () => {
+  const remote = await seedRemote("master");
+  const checkout = await freshCheckout();
+  await assert.rejects(
+    cloneBaseBranch({
+      remote,
+      label: "acme/app",
+      baseBranch: "main",
+      checkout,
+      env: { ...process.env },
+    }),
+    /acme\/app has no branch named main/,
+  );
 });
 
 test("cloneBaseBranch explains that an empty repository has no branches", async () => {
@@ -109,6 +125,7 @@ test("cloneBaseBranch explains that an empty repository has no branches", async 
       baseBranch: "main",
       checkout,
       env: { ...process.env },
+      fallbackToDefaultBranch: true,
     }),
     /acme\/empty has no branch named main/,
   );
