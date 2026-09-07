@@ -15,20 +15,12 @@ COPY apps/web ./apps/web
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
 
-# Give PostHog the web build's source maps, then throw them away.
-#
-# A browser reports a minified stack: the console's one captured
-# exception so far reads "RangeError: Maximum call stack size exceeded"
-# at `Nk` and `Pk`, line 226 of `/`, which names nothing. PostHog can
-# only undo that if it holds the maps, matched to the shipped chunks by
-# an id stamped into both. `sourcemap process` does all three steps:
-# stamp the chunks, upload chunks and maps, delete the maps.
-#
-# The maps are deleted whether or not the upload ran, because the final
-# stage copies this one wholesale and the server serves /assets as
-# static files: a shipped .map is the whole source, published.
-# POSTHOG_HOST only for a deployment that is not on PostHog US cloud;
-# empty leaves the CLI on its own default.
+# Source maps to PostHog, then deleted. Without them a browser
+# exception names nothing: the console's one so far reads "Maximum call
+# stack size exceeded" at `Nk`, line 226 of `/`. The delete runs even
+# when the upload is skipped, because the final stage copies this one
+# whole and the server serves /assets: a shipped .map publishes the
+# source. POSTHOG_HOST is only for a deployment off PostHog US cloud.
 ARG POSTHOG_HOST
 ARG POSTHOG_PROJECT_ID
 ARG SOURCE_COMMIT

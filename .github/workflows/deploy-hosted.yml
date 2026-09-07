@@ -22,13 +22,10 @@ name: Deploy hosted
 #                      advisory lock, which transaction-mode pooling
 #                      silently breaks
 #   POSTHOG_CLI_API_KEY
-#                      personal API key with error tracking write
-#                      access, read as a build secret so the web
-#                      build's source maps reach PostHog. Paired with
-#                      the POSTHOG_PROJECT_ID repository variable (the
-#                      numeric project id, not the phc_ token). Missing
-#                      either one only costs readable stack traces, so
-#                      the build says which one it wanted and carries on
+#                      repository secret, with POSTHOG_PROJECT_ID as a
+#                      repository variable. A PostHog personal API key;
+#                      the image build uploads the console's source maps
+#                      with it, so browser stack traces are readable
 #
 # Order: migrate development, deploy development, then (unless the
 # payload's target is "development") migrate production, deploy
@@ -104,10 +101,8 @@ jobs:
           path: bento-cloud
           ref: ${{ github.event.client_payload.ref || inputs.cloud_ref || 'main' }}
 
-      # POSTHOG_CLI_API_KEY and POSTHOG_PROJECT_ID are what turn a
-      # minified browser stack into named frames. Without them the build
-      # still succeeds and says so in its log; every exception the
-      # console then reports is unreadable.
+      # Without the PostHog credentials this still succeeds, and says in
+      # its log that the console's exceptions will stay minified.
       - name: Build the public image
         env:
           POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
