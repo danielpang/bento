@@ -19,12 +19,12 @@ test("dsh is a registered agent CLI", () => {
 test("every agent CLI has model guidance", () => {
   // A tool with no guidance leaves the model field unexplained, and the
   // formats genuinely differ between tools.
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"]) {
     const guidance = modelGuidanceFor(cli);
     assert.ok(guidance, `${cli} has no model guidance`);
     assert.ok(guidance.examples.length > 0, `${cli} offers no example model`);
   }
-  assert.equal(MODEL_GUIDANCE.length, 8);
+  assert.equal(MODEL_GUIDANCE.length, 9);
 });
 
 test("the provider agnostic tools show how to reach OpenRouter", () => {
@@ -46,7 +46,10 @@ test("the provider agnostic tools show how to reach OpenRouter", () => {
 test("the spend note names exactly the tools that report a cost", () => {
   const note = spendCoverageNote();
   assert.match(note, /Only Claude Code and pi report/);
-  assert.match(note, /Codex CLI, Cursor CLI, opencode, Poolside \(pool\) and DeepSeek Harness report none/);
+  assert.match(
+    note,
+    /Codex CLI, Cursor CLI, opencode, Poolside \(pool\), DeepSeek Harness and Antigravity CLI report none/,
+  );
   // The commoner reason a figure is missing, and the one the tool list
   // alone would misattribute.
   assert.match(note, /fails before finishing reports nothing/);
@@ -58,7 +61,14 @@ test("the spend note names exactly the tools that report a cost", () => {
 test("the spend page's two lists match the coverage sentence", () => {
   const { reporting, silent } = spendReportingTools();
   assert.deepEqual(reporting, ["Claude Code", "pi"]);
-  assert.deepEqual(silent, ["Codex CLI", "Cursor CLI", "opencode", "Poolside (pool)", "DeepSeek Harness"]);
+  assert.deepEqual(silent, [
+    "Codex CLI",
+    "Cursor CLI",
+    "opencode",
+    "Poolside (pool)",
+    "DeepSeek Harness",
+    "Antigravity CLI",
+  ]);
 });
 
 /**
@@ -104,8 +114,32 @@ test("dsh guidance uses bare DeepSeek ids and the pinned installer", () => {
   assert.equal(guidance.defaultModel, "deepseek-v4-pro");
   assert.equal(guidance.bareModelId, true);
   assert.equal(guidance.installCommand, "npm install -g @deepseek-ai/dsh@0.1.1-rc.2");
-  assert.equal(MODEL_GUIDANCE.at(-2)?.cli, "dsh");
+  assert.equal(MODEL_GUIDANCE.at(-3)?.cli, "dsh");
   assert.equal(MODEL_GUIDANCE.at(-1)?.cli, "fake");
+});
+
+/**
+ * Antigravity slugs name the model tier and its reasoning effort
+ * together, which is not what the Gemini API calls a model, so a
+ * provider-prefixed string is refused the way dsh's is.
+ */
+test("antigravity guidance uses Antigravity's own slugs and its installer", () => {
+  const guidance = modelGuidanceFor("antigravity")!;
+  assert.equal(guidance.defaultModel, "gemini-3.1-pro-high");
+  assert.equal(guidance.bareModelId, true);
+  assert.equal(guidance.binary, "agy");
+  assert.match(guidance.installCommand, /antigravity\.google\/cli\/install\.sh/);
+  assert.equal(MODEL_GUIDANCE.at(-2)?.cli, "antigravity");
+});
+
+test("the Gemini key and Antigravity's base URL are storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "GEMINI_API_KEY");
+  assert.ok(key, "GEMINI_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  assert.match(key.help, /Antigravity/);
+  const baseUrl = AGENT_CREDENTIALS.find((c) => c.name === "GOOGLE_GEMINI_BASE_URL");
+  assert.ok(baseUrl, "GOOGLE_GEMINI_BASE_URL cannot be stored");
+  assert.equal(baseUrl.secret, false);
 });
 
 /**

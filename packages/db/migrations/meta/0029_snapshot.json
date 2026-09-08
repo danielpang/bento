@@ -1,6 +1,6 @@
 {
-  "id": "fff003e7-e329-4847-ab8c-c4e156680063",
-  "prevId": "3f0b1f5a-2d47-4f8c-9d1a-6c2b8a4e7d31",
+  "id": "4a011431-91d2-4083-a9f2-98746c2b421e",
+  "prevId": "19130bff-bd5d-4946-a925-60fc821da40c",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -992,12 +992,11 @@
           "primaryKey": false,
           "notNull": true
         },
-        "kind": {
-          "name": "kind",
+        "type": {
+          "name": "type",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "default": "'task'"
+          "notNull": true
         },
         "role": {
           "name": "role",
@@ -1237,9 +1236,17 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "agent_runs_feature_or_swarm": {
-          "name": "agent_runs_feature_or_swarm",
-          "value": "(\"agent_runs\".\"feature_id\" is null) <> (\"agent_runs\".\"swarm_id\" is null)"
+        "agent_runs_pipeline_shape": {
+          "name": "agent_runs_pipeline_shape",
+          "value": "\"agent_runs\".\"type\" <> 'pipeline' or (\"agent_runs\".\"feature_id\" is not null and \"agent_runs\".\"stage_id\" is not null\n        and \"agent_runs\".\"swarm_id\" is null and \"agent_runs\".\"swarm_task_id\" is null)"
+        },
+        "agent_runs_swarm_shape": {
+          "name": "agent_runs_swarm_shape",
+          "value": "\"agent_runs\".\"type\" <> 'swarm' or (\"agent_runs\".\"swarm_id\" is not null and \"agent_runs\".\"feature_id\" is null and \"agent_runs\".\"stage_id\" is null)"
+        },
+        "agent_runs_role_for_type": {
+          "name": "agent_runs_role_for_type",
+          "value": "(\"agent_runs\".\"type\" = 'pipeline' and \"agent_runs\".\"role\" in ('stage', 'judge', 'rebase'))\n        or (\"agent_runs\".\"type\" = 'swarm' and \"agent_runs\".\"role\" in ('planner', 'subplanner', 'worker', 'resolver', 'judge'))"
         }
       },
       "isRLSEnabled": false
@@ -3786,6 +3793,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "feature_id": {
           "name": "feature_id",
           "type": "uuid",
@@ -4001,9 +4014,13 @@
           "name": "run_artifacts_content_or_key",
           "value": "(\"run_artifacts\".\"content\" is null) <> (\"run_artifacts\".\"storage_key\" is null)"
         },
-        "run_artifacts_feature_or_swarm": {
-          "name": "run_artifacts_feature_or_swarm",
-          "value": "(\"run_artifacts\".\"feature_id\" is null) <> (\"run_artifacts\".\"swarm_id\" is null)"
+        "run_artifacts_pipeline_shape": {
+          "name": "run_artifacts_pipeline_shape",
+          "value": "\"run_artifacts\".\"type\" <> 'pipeline' or (\"run_artifacts\".\"feature_id\" is not null and \"run_artifacts\".\"swarm_id\" is null and \"run_artifacts\".\"swarm_task_id\" is null)"
+        },
+        "run_artifacts_swarm_shape": {
+          "name": "run_artifacts_swarm_shape",
+          "value": "\"run_artifacts\".\"type\" <> 'swarm' or (\"run_artifacts\".\"swarm_id\" is not null and \"run_artifacts\".\"feature_id\" is null)"
         }
       },
       "isRLSEnabled": false
@@ -5963,12 +5980,12 @@
           "notNull": true,
           "default": 0
         },
-        "kind": {
-          "name": "kind",
+        "node_type": {
+          "name": "node_type",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'task'"
+          "default": "'leaf'"
         },
         "title": {
           "name": "title",
@@ -5988,7 +6005,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'pending'"
+          "default": "'open'"
         },
         "attention": {
           "name": "attention",

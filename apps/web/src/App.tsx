@@ -1158,6 +1158,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
             onChanged={refresh}
             onDeleting={handleDeleting}
             onDeleted={handleDeleted}
+            onSelectFeature={setSelectedId}
             onEvent={recordEvent}
           />
         )}

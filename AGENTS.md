@@ -147,6 +147,14 @@ always on.
   `getBetaTester`, the same convention as the access helpers.
 - Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
   `useBetaTesters()` is the boolean for lighter checks.
+- Orchestrator: a run has no session, and not always a person. The
+  console and the API start one as somebody; the gate evaluator and the
+  schedules start one as nobody. `isBetaRun` asks about the acting
+  member when there is one and the project's owner when there is not,
+  so a team's auto-started stages behave like the runs it starts by
+  hand. A capability given to an agent (the card tools on the MCP
+  gateway) belongs behind the same flag as the console that shows what
+  the agent did with it.
 
 Do not mint a second flag for "show this to testers". This is that flag.
 

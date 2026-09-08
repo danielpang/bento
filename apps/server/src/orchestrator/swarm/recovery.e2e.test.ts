@@ -17,7 +17,7 @@ import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { recoverInterruptedRuns } from "../run-executor.js";
-import { tickAllLiveSwarms } from "./coordinator.js";
+import { enqueueSwarmTick, hasActiveSwarms, stopSwarmTickWorker, tickAllLiveSwarms } from "./coordinator.js";
 
 /**
  * What a restart does to a swarm.
@@ -41,6 +41,8 @@ let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
 let queued: { queue: string; data: unknown; options?: unknown }[];
+let workers: string[];
+let stopped: string[];
 let emitted: BoardEvent[];
 
 before(async () => {
@@ -64,6 +66,8 @@ before(async () => {
   );
 
   queued = [];
+  workers = [];
+  stopped = [];
   emitted = [];
   const bus = new EventBus();
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
@@ -82,6 +86,13 @@ before(async () => {
         queued.push({ queue, data, options });
         return "job";
       },
+      work: async (queue: string) => {
+        workers.push(queue);
+        return "worker";
+      },
+      offWork: async (queue: string) => {
+        stopped.push(queue);
+      },
       notifyWorker: () => {},
     } as unknown as AppContext["boss"],
   } as unknown as AppContext;
@@ -94,7 +105,13 @@ after(async () => {
 beforeEach(async () => {
   await pool.query("delete from swarms");
   queued.length = 0;
+  workers.length = 0;
+  stopped.length = 0;
   emitted.length = 0;
+  // The worker registry is keyed by the boss, and this file has one:
+  // clear it so each test sees a process that has not started it.
+  await stopSwarmTickWorker(ctx);
+  stopped.length = 0;
 });
 
 async function makeSwarm(status: (typeof swarms.$inferSelect)["status"] = "running") {
@@ -199,9 +216,15 @@ test("a swarm run somebody had already finished is left alone", async () => {
   assert.equal(after!.error, null);
 });
 
-test("every swarm that has not finished gets one tick at boot", async () => {
-  const live = [await makeSwarm("planning"), await makeSwarm("running"), await makeSwarm("blocked"), await makeSwarm("paused")];
-  const over = [await makeSwarm("done"), await makeSwarm("failed"), await makeSwarm("cancelled"), await makeSwarm("draft")];
+test("every swarm still working gets one tick at boot", async () => {
+  const live = [await makeSwarm("planning"), await makeSwarm("running"), await makeSwarm("blocked")];
+  const over = [
+    await makeSwarm("paused"),
+    await makeSwarm("done"),
+    await makeSwarm("failed"),
+    await makeSwarm("cancelled"),
+    await makeSwarm("draft"),
+  ];
 
   const count = await tickAllLiveSwarms(ctx);
   assert.equal(count, live.length);
@@ -219,4 +242,54 @@ test("every swarm that has not finished gets one tick at boot", async () => {
       (job.data as { swarmId: string }).swarmId,
     );
   }
+});
+
+/**
+ * What an idle deployment pays for swarms.
+ *
+ * The tick worker polls every two seconds, which is the pace a person
+ * watching a board needs and a pure waste on a deployment that has
+ * never started a swarm. Most have not, and pg-boss has no push, so an
+ * always-registered worker is a query every two seconds forever on
+ * every install, which is the shape of cost this codebase has been
+ * billed for before.
+ */
+test("a deployment with nothing in flight registers no tick worker", async () => {
+  for (const status of ["paused", "done", "failed", "cancelled", "draft"] as const) await makeSwarm(status);
+
+  assert.equal(await hasActiveSwarms(ctx), false, "none of these has anything to reconcile");
+  const count = await tickAllLiveSwarms(ctx);
+
+  assert.equal(count, 0);
+  assert.deepEqual(workers, [], "so no worker polls for them");
+});
+
+test("the first tick starts the worker, and one start covers the rest", async () => {
+  const first = await makeSwarm("running");
+  const second = await makeSwarm("planning");
+
+  await enqueueSwarmTick(ctx, first.id);
+  assert.deepEqual(workers, ["swarm.tick"], "the door that queues the job is the door that starts the worker");
+
+  await enqueueSwarmTick(ctx, second.id);
+  assert.deepEqual(workers, ["swarm.tick"], "and a second swarm does not register a second worker");
+
+  // The worker before the job, or the job waits for the next restart.
+  assert.equal(queued.filter((job) => job.queue === "swarm.tick").length, 2);
+});
+
+test("the worker stops once the last swarm settles", async () => {
+  const swarm = await makeSwarm("running");
+  await enqueueSwarmTick(ctx, swarm.id);
+  assert.deepEqual(workers, ["swarm.tick"]);
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  assert.equal(await hasActiveSwarms(ctx), false);
+  await stopSwarmTickWorker(ctx);
+  assert.deepEqual(stopped, ["swarm.tick"], "an idle deployment stops paying for the poll");
+
+  // And a new swarm starts it again, rather than waiting for a deploy.
+  const next = await makeSwarm("running");
+  await enqueueSwarmTick(ctx, next.id);
+  assert.deepEqual(workers, ["swarm.tick", "swarm.tick"]);
 });

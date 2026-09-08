@@ -1,6 +1,6 @@
 {
-  "id": "e355edea-6389-4ee6-bb75-3172e0e655b1",
-  "prevId": "8eb81202-dee6-41b3-aa92-936bbfa09ca0",
+  "id": "8eb81202-dee6-41b3-aa92-936bbfa09ca0",
+  "prevId": "fff003e7-e329-4847-ab8c-c4e156680063",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1866,6 +1866,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -1874,6 +1880,21 @@
           "columns": [
             {
               "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "features_parent_idx": {
+          "name": "features_parent_idx",
+          "columns": [
+            {
+              "expression": "parent_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1932,6 +1953,19 @@
           "tableTo": "stages",
           "columnsFrom": [
             "current_stage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "features_parent_id_features_id_fk": {
+          "name": "features_parent_id_features_id_fk",
+          "tableFrom": "features",
+          "tableTo": "features",
+          "columnsFrom": [
+            "parent_id"
           ],
           "columnsTo": [
             "id"
@@ -5948,7 +5982,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'leaf'"
+          "default": "'task'"
         },
         "title": {
           "name": "title",
@@ -5968,7 +6002,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'open'"
+          "default": "'pending'"
         },
         "attention": {
           "name": "attention",

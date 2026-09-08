@@ -13,7 +13,7 @@ import type { AppContext } from "../context.js";
 import { BENTO_SWARM_SERVER_ID, BENTO_SWARM_SLUG } from "../mcp/swarm-server.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./swarm/sandbox.js";
-import { SWARM_TICK_QUEUE } from "./swarm/coordinator.js";
+import { enqueueSwarmTick } from "./swarm/coordinator.js";
 import type { PipelineRun } from "./pipeline-run.js";
 
 /**
@@ -223,7 +223,12 @@ async function swarmSubject(
       // implies (a parent's status, the next worker, the landing queue)
       // is decided by reading the rows, so the settlement's whole job
       // is to say that they changed.
-      await context.boss.send(SWARM_TICK_QUEUE, { swarmId: swarm.id }, { singletonKey: swarm.id });
+      //
+      // Through enqueueSwarmTick rather than a bare send, for the
+      // reason enqueueRun exists: the one door is what holds the
+      // singleton key and, now, what makes sure a worker is running to
+      // read the job.
+      await enqueueSwarmTick(context, swarm.id);
     },
   };
 }

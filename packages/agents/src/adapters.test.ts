@@ -2,6 +2,7 @@ import { providerKeyFor } from "./adapter.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
+import { antigravityAdapter } from "./antigravity.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
@@ -177,7 +178,7 @@ test("opencode builds a provider qualified model command", () => {
 });
 
 test("every declared cli resolves to an adapter", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"] as const) {
     assert.equal(getAdapter(cli).cli, cli);
   }
 });
@@ -187,6 +188,7 @@ test("adapters declare the env they need", () => {
   assert.deepEqual(cursorAdapter.requiredEnv, ["CURSOR_API_KEY"]);
   assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
   assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
+  assert.deepEqual(antigravityAdapter.requiredEnv, ["GEMINI_API_KEY"]);
 });
 
 test("dsh builds its headless command and isolated environment", () => {
@@ -439,7 +441,7 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"] as const) {
     const adapter = getAdapter(cli);
     for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
       // Poolside's enterprise endpoint is a local environment override.
@@ -660,4 +662,112 @@ test("pool's exit code decides, and 4 is the agent giving up rather than a crash
   const died = poolAdapter.extractOutcome([], 1);
   assert.equal(died.ok, false);
   assert.match(died.error ?? "", /stopped before reporting a result/);
+});
+
+/**
+ * Antigravity's stream is an envelope: every line names its `event` and
+ * carries the payload under a key of the same name. The lifecycle here
+ * is the one a run produces, in order.
+ */
+test("antigravity parses a headless conversation", () => {
+  const lines = [
+    `{"event":"init","conversation_id":"c3b66b04","init":{"cwd":"/workspace","model":"gemini-3.1-pro-high","permission_mode":"always-proceed","tools":["run_command"]}}`,
+    `{"event":"step_update","step_update":{"conversation_id":"c3b66b04","step_index":1,"state":"ACTIVE","step_type":"tool","tool_info":{"name":"run_command","parameters":{"command":"ls"}}}}`,
+    `{"event":"step_update","step_update":{"conversation_id":"c3b66b04","step_index":1,"state":"DONE","step_type":"tool","tool_info":{"name":"run_command","output":"README.md"}}}`,
+    `{"event":"step_update","step_update":{"conversation_id":"c3b66b04","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"Read the "}}`,
+    `{"event":"step_update","step_update":{"conversation_id":"c3b66b04","step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"Read the readme."}}`,
+    `{"event":"result","result":{"conversation_id":"c3b66b04","status":"SUCCESS","response":"Read the readme.","num_turns":2,"duration_seconds":9}}`,
+  ];
+  const events = parseAll(antigravityAdapter, lines);
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["init", "tool", "tool", "message", "result"],
+    "the ACTIVE fragment of a response is a delta, not a transcript event",
+  );
+  assert.deepEqual(
+    events.filter((e) => e.type === "tool").map((e) => [e.name, e.phase]),
+    [
+      ["run_command", "start"],
+      ["run_command", "end"],
+    ],
+  );
+  const outcome = antigravityAdapter.extractOutcome(events, 0);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.sessionId, "c3b66b04");
+  assert.equal(outcome.numTurns, 2);
+});
+
+/**
+ * A response streams as fragments of one step and lands once. Without
+ * the delta path they would each become a transcript message, and the
+ * card would read the answer out four times.
+ */
+test("antigravity streams a response as deltas and keeps one message", () => {
+  const active = `{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"Rebasing "}}`;
+  assert.deepEqual(antigravityAdapter.parseDelta?.(active), { channel: "text", text: "Rebasing " });
+  assert.equal(antigravityAdapter.parseEvent(active), null);
+
+  const done = `{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"Rebasing rewrites history."}}`;
+  assert.equal(antigravityAdapter.parseDelta?.(done), null, "the finished text is the message, not a delta");
+  assert.deepEqual(antigravityAdapter.parseEvent(done)?.type, "message");
+
+  // A tool step is never mistaken for typing.
+  const tool = `{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_info":{"name":"edit_file"}}}`;
+  assert.equal(antigravityAdapter.parseDelta?.(tool), null);
+});
+
+test("antigravity reports a failed result with its own reason", () => {
+  const events = parseAll(antigravityAdapter, [
+    `{"event":"init","conversation_id":"c9"}`,
+    `{"event":"result","result":{"conversation_id":"c9","status":"ERROR","error":{"type":"quota","message":"model quota exhausted"}}}`,
+  ]);
+  const outcome = antigravityAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error, "model quota exhausted");
+  // Kept even on a failure: it is the conversation a retry resumes.
+  assert.equal(outcome.sessionId, "c9");
+});
+
+/**
+ * agy exits 42 on a bad argument and 53 on the turn limit, and neither
+ * necessarily contradicts the terminal event. The exit code decides.
+ */
+test("antigravity trusts a non-zero exit over a successful result", () => {
+  const events = parseAll(antigravityAdapter, [
+    `{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"done"}}`,
+  ]);
+  const outcome = antigravityAdapter.extractOutcome(events, 53);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error ?? "", /exit code 53/);
+});
+
+test("antigravity builds its headless command and resumes by conversation", () => {
+  const input = { prompt: "Implement the card", model: "gemini-3.1-pro-high", cwd: "/workspace" };
+  const cmd = antigravityAdapter.buildCommand(input);
+  // The prompt is -p's value and has to stay beside it: agy rejects a
+  // valueless prompt flag rather than reading the next flag as one.
+  assert.deepEqual(cmd.slice(0, 3), ["agy", "-p", "Implement the card"]);
+  assert.ok(cmd.includes("--output-format") && cmd.includes("stream-json"));
+  assert.ok(cmd.includes("--dangerously-skip-permissions"));
+  assert.deepEqual(cmd.slice(-2), ["--model", "gemini-3.1-pro-high"]);
+  assert.ok(!cmd.includes("--conversation"));
+
+  const resumed = antigravityAdapter.buildCommand({ ...input, resumeSessionId: "c3b66b04" });
+  assert.deepEqual(resumed.slice(-2), ["--conversation", "c3b66b04"]);
+  assert.deepEqual(antigravityAdapter.optionalEnv, ["GOOGLE_GEMINI_BASE_URL"]);
+});
+
+test("antigravity writes its MCP servers where agy reads them", () => {
+  const files = antigravityAdapter.mcp!.renderConfig([
+    { slug: "linear", url: "https://bento.test/mcp/linear", transport: "http", headers: { Authorization: "Bearer t" } },
+  ]);
+  assert.deepEqual(files.map((f) => f.path), ["/root/.gemini/config/mcp_config.json"]);
+  assert.deepEqual(JSON.parse(files[0]!.content), {
+    mcpServers: {
+      linear: { serverUrl: "https://bento.test/mcp/linear", headers: { Authorization: "Bearer t" } },
+    },
+  });
+  // Called with nothing attached too, so a removed server does not
+  // linger in a sandbox the next run reuses.
+  assert.deepEqual(JSON.parse(antigravityAdapter.mcp!.renderConfig([])[0]!.content), { mcpServers: {} });
 });

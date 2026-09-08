@@ -98,6 +98,10 @@ before(async () => {
         queued.push({ queue, data, options });
         return "job";
       },
+      // The tick door starts the reconciler's worker before it queues
+      // the job, so a deployment with no swarms registers none.
+      work: async () => "worker",
+      offWork: async () => {},
       notifyWorker: () => {},
     } as unknown as AppContext["boss"],
     bus: new EventBus(),

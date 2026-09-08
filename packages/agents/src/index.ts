@@ -1,5 +1,6 @@
 import type { AgentCli } from "@bento/core";
 import type { AgentAdapter } from "./adapter.js";
+import { antigravityAdapter } from "./antigravity.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
@@ -10,6 +11,7 @@ import { poolAdapter } from "./pool.js";
 import { opencodeAdapter } from "./opencode.js";
 
 export * from "./adapter.js";
+export { antigravityAdapter } from "./antigravity.js";
 export { claudeCodeAdapter } from "./claude-code.js";
 export { codexAdapter } from "./codex.js";
 export { cursorAdapter } from "./cursor.js";
@@ -27,6 +29,7 @@ const adapters: Record<AgentCli, AgentAdapter> = {
   pi: piAdapter,
   pool: poolAdapter,
   dsh: dshAdapter,
+  antigravity: antigravityAdapter,
   fake: fakeAdapter,
 };
 
@@ -47,6 +50,9 @@ export const DEFAULT_MODELS: Record<AgentCli, string> = {
   // Vendor prefixed, which is the id Poolside's own inference takes.
   pool: "poolside/laguna-s-2.1",
   dsh: "deepseek-v4-pro",
+  // Antigravity's own slug for a model tier plus its reasoning effort,
+  // which is what its --model takes.
+  antigravity: "gemini-3.1-pro-high",
   fake: "fake-1",
 };
 export { runAgent, type RunAgentInput, type RunAgentResult, type ExecChunk } from "./execute.js";

@@ -213,6 +213,19 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.deepEqual(broken, [], `installed but not runnable: ${broken.join(", ")}`);
   });
 
+  /**
+   * agy signs in with a Google account unless settings.json redirects
+   * it to the Gemini API, and it refuses to start when the setting and
+   * the key disagree. The file is written by the same script that
+   * installs the CLI, so a real provision is the only thing that can
+   * say it landed where agy looks for it.
+   */
+  await t.test("agy is provisioned to run on a Gemini API key", { skip: needsSprite() }, async () => {
+    const settings = await shell("cat \"$HOME/.gemini/antigravity-cli/settings.json\"");
+    assert.equal(settings.exitCode, 0, `agy has no settings file: ${settings.stderr}`);
+    assert.deepEqual(JSON.parse(settings.out), { modelProvider: "gemini" });
+  });
+
   await t.test("dsh runs Bento's exact headless profile with local tools", { skip: needsSprite() }, async () => {
     const encoded = Buffer.from(DSH_MOCK_SERVER).toString("base64");
     const staged = await shell(
@@ -384,17 +397,18 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   /**
-   * Which of the five need api.github.com, and which only look like
+   * Which of them need api.github.com, and which only look like
    * they might.
    *
    * opencode's installer asked that API which release was latest and
    * then refused to install without the answer, which cost every
    * sandbox its opencode for an hour at a time whenever a shared egress
    * address spent its sixty unauthenticated requests. opencode no
-   * longer goes near it. Whether claude, codex or cursor do is not
+   * longer goes near it. Whether claude, codex, cursor or agy do is not
    * something their installers will say, and they are not published
    * anywhere they can be read: they are fetched from claude.ai,
-   * chatgpt.com and cursor.com and could change any week.
+   * chatgpt.com, cursor.com and antigravity.google and could change any
+   * week.
    *
    * So the question is asked of the machine rather than of the source.
    * With that one host unreachable, and the CLIs and the marker gone,

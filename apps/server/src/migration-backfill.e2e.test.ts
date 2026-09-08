@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 /**
- * The two backfills in 0028, replayed against rows they have to move.
+ * The two backfills in 0029, replayed against rows they have to move.
  *
  * Every other suite starts from an empty database, so a migration's
  * UPDATE runs over nothing and its assertion passes by having no rows
@@ -25,7 +25,7 @@ const testDbName = "migration_backfill_test";
 const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 /** The migration under test. Everything before it is the starting point. */
-const UNDER_TEST = "0028_run_artifact_type";
+const UNDER_TEST = "0029_run_artifact_type";
 
 const migrationsFolder = path.join(
   path.dirname(fileURLToPath(import.meta.url)),

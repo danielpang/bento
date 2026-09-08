@@ -38,7 +38,9 @@ import { buildPlannerPrompt } from "./swarm/planner-prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
-import { extendRunGrant, revokeRunGrant, runHasActiveMcp, sweepExpiredGrants } from "../mcp/grants.js";
+import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
+import { isBetaRun } from "../feature-flags.js";
+import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
@@ -54,7 +56,7 @@ import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-s
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
-import { SWARM_TICK_QUEUE, tickAllLiveSwarms, tickSwarm } from "./swarm/coordinator.js";
+import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -197,7 +199,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP servers are attached before the command is built, so the
   // gateway flags can join the argv. Never fails the run: an
   // unattachable server is left out with a transcript note.
-  const { extraArgs: mcpArgs } = await prepareRunMcp(ctx, {
+  const { extraArgs: mcpArgs, cardTools } = await prepareRunMcp(ctx, {
     runId,
     organizationId: subject.organizationId,
     actingUserId: run.startedBy,
@@ -205,8 +207,21 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     handle,
     restrictNetwork,
     mountedConfigPaths: authMounts.map((m) => m.containerPath),
-    // Bento's own tools, which is how a swarm agent acts on the plan.
-    ownServers: subject.ownMcpServers,
+    // Bento's own tools: how a swarm agent acts on the plan, and how a
+    // card's agent splits work too large for one branch. Both boards
+    // travel the same list, so one rule decides what happens when a
+    // team server claims one of these names.
+    //
+    // Splitting a card is unfinished product, and the console that
+    // shows a group is behind the same flag. An auto-started run has
+    // nobody acting, so the project's owner answers for it.
+    ownServers: [
+      ...subject.ownMcpServers,
+      ...(subject.kind === "pipeline" &&
+      (await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId }))
+        ? [{ id: BENTO_SERVER_ID, slug: BENTO_SERVER_ID }]
+        : []),
+    ],
     ...(subject.kind === "swarm" ? { swarmId: subject.swarm.id } : {}),
     say: saySystem,
   });
@@ -218,6 +233,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     handle,
     sendInitialPrompt: true,
     mcpArgs,
+    cardTools,
   });
 
   // Credentials come from the owning organization, never from the
@@ -857,6 +873,11 @@ async function buildRunCommand(
     sendInitialPrompt: boolean;
     /** Gateway flags for the run's MCP servers, after the profile args. */
     mcpArgs?: string[];
+    /**
+     * Whether Bento's own tools reached the sandbox. The prompt only
+     * mentions splitting a card when the tool that does it is there.
+     */
+    cardTools?: boolean;
   },
 ): Promise<{
   argv: string[];
@@ -889,7 +910,7 @@ async function buildRunCommand(
    * that the plan is made through tools. Both are built here, from the
    * subject, so the argv below is assembled once.
    */
-  const rolePrompt = await buildSubjectPrompt(ctx, subject, mounted, handle);
+  const rolePrompt = await buildSubjectPrompt(ctx, subject, mounted, handle, input.cardTools ?? false);
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
   // Only ordinary work compacts: judge and rebase prompts are complete
   // instructions on their own, and agentRunPrompt ignores a compacted
@@ -939,6 +960,8 @@ async function buildSubjectPrompt(
   subject: RunSubject,
   mounted: { name: string; mountPath: string; testCommand?: string | null }[],
   handle: SandboxHandle,
+  /** Whether the card tools reached the sandbox; only a stage prompt mentions them. */
+  cardTools: boolean,
 ): Promise<string> {
   if (subject.kind === "pipeline") {
     const allStages = await ctx.db
@@ -953,6 +976,7 @@ async function buildSubjectPrompt(
       mounted,
       { name: subject.profile.name, skill: subject.profile.skill },
       `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
+      cardTools,
     );
   }
   const [template] = subject.swarm.templateId
@@ -1596,8 +1620,8 @@ async function resumeInterruptedRun(
   // extended to cover the rest of the budget. A grant revoked or
   // expired during the outage stays dead, and the run's tools answer
   // 404, which is honest.
-  const hasGrant = adapter.mcp ? await runHasActiveMcp(ctx, run.id) : false;
-  const mcpArgs = hasGrant ? adapter.mcp?.extraArgs?.() ?? [] : [];
+  const grantServers = adapter.mcp ? await runGrantServerIds(ctx, run.id) : [];
+  const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
   const { argv, live, liveChannel } = await buildRunCommand(ctx, {
     subject,
@@ -1608,6 +1632,10 @@ async function resumeInterruptedRun(
     // would replay the whole task as a new user turn.
     sendInitialPrompt: false,
     mcpArgs,
+    // Reproduced from the grant, never re-decided: a resumed run has to
+    // be told exactly what its first life was told, or the two halves
+    // of one session disagree about what tools exist.
+    cardTools: grantServers.includes(BENTO_SERVER_ID),
   });
 
   // What is left of the run's budget, not a fresh one: the agent has
@@ -1617,7 +1645,7 @@ async function resumeInterruptedRun(
     60_000,
     ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - (run.startedAt ? Date.now() - run.startedAt.getTime() : 0),
   );
-  if (hasGrant) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
+  if (grantServers.length > 0) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
 
   // Attach before touching shared state or the transcript, so a failed
   // attach leaves no misleading "reattached" line and no stale abort
@@ -1798,10 +1826,14 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
 
   await recoverInterruptedRuns(ctx);
   /**
-   * Every swarm that has not finished gets one tick, after recovery
+   * Every swarm that is still working gets one tick, after recovery
    * rather than before it: the tick reads the runs, and it should read
    * them once the previous process's have been closed or reattached
    * rather than while they still say they are running.
+   *
+   * This is also what starts the tick worker, through the same door
+   * every other tick uses. A deployment with no swarm in flight
+   * enqueues nothing and so registers nothing.
    */
   const ticked = await tickAllLiveSwarms(ctx);
   if (ticked > 0) console.log(`queued a tick for ${ticked} live swarm(s)`);
@@ -1908,19 +1940,16 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   }));
 
   /**
-   * The swarm reconciler. One worker at the interactive pace, for the
-   * same reason the gate has one: a person is watching a board that
-   * moves when this runs, and one worker every two seconds is cheap
-   * where a worker per slot was not. Single job at a time, because two
-   * ticks for one swarm serializing on its row lock is work done twice.
+   * The swarm reconciler's worker is not registered here.
+   *
+   * It polls at the interactive pace, and most deployments have never
+   * started a swarm: a worker every two seconds for a board nobody has
+   * opened is the cost this file spent a release removing. It is
+   * started by the first tick instead (ensureSwarmTickWorker, which
+   * every door goes through) and stopped again when the last swarm
+   * settles. The boot path below starts it when there is already
+   * something to reconcile.
    */
-  await ctx.boss.work<{ swarmId: string }>(
-    SWARM_TICK_QUEUE,
-    { batchSize: 1, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS },
-    captureJobErrors(ctx.analytics, SWARM_TICK_QUEUE, async (jobs) => {
-      for (const job of jobs) await tickSwarm(ctx, job.data.swarmId);
-    }),
-  );
 
   // Polled at the interactive pace rather than the slow default: this
   // is what moves a card once its run ends, and one worker every two

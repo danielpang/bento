@@ -3,6 +3,7 @@ import { mcpCredentials, mcpServers } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
 import type { AgentAdapter, McpRemoteServer } from "@bento/agents";
 import type { AppContext } from "../context.js";
+import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { mintRunGrant, revokeRunGrant } from "../mcp/grants.js";
 
 /**
@@ -18,6 +19,15 @@ import { mintRunGrant, revokeRunGrant } from "../mcp/grants.js";
  * organization_id by hand, the way resolveAgentEnv does. Nothing here
  * ever fails the run: a server that cannot be attached is left out with
  * a line in the transcript.
+ *
+ * One of the servers is Bento itself (see mcp/bento-tools.ts), which
+ * has no row, no upstream and no credential: it is how the agent
+ * working a card can file the parts of a task too large for one
+ * branch. It rides the same grant as everything else, so a harness
+ * with no MCP support, an organization that restricts sandbox network
+ * access, and the local-process driver each run without it, which is
+ * the same limitation their MCP servers already have. It is also
+ * behind the beta flag, decided by the caller.
  */
 
 const EXEC_TIMEOUT_MS = 30_000;
@@ -52,8 +62,8 @@ export interface PrepareRunMcpInput {
 export async function prepareRunMcp(
   ctx: AppContext,
   input: PrepareRunMcpInput,
-): Promise<{ extraArgs: string[] }> {
-  const none = { extraArgs: [] as string[] };
+): Promise<{ extraArgs: string[]; cardTools: boolean }> {
+  const none = { extraArgs: [] as string[], cardTools: false };
   const capability = input.adapter.mcp;
   const own = input.ownServers ?? [];
   // Whether this run has any server to attach at all: Bento's own, team
@@ -133,13 +143,14 @@ export async function prepareRunMcp(
     return none;
   }
 
+  const attached: McpRemoteServer[] = [];
+  const attachedIds: string[] = [];
+
   // A personal slug may equal a team slug, and one slug is one tool
   // name to the harness. The team's server wins: the registry is what
   // admins govern, and a member's runs saying so in the transcript
   // beats their config silently shadowing it.
   const teamSlugs = new Set(servers.filter((s) => !s.userId).map((s) => s.slug));
-  const attached: McpRemoteServer[] = [];
-  const attachedIds: string[] = [];
   for (const server of servers) {
     if (server.userId && teamSlugs.has(server.slug)) {
       await input.say(
@@ -171,11 +182,12 @@ export async function prepareRunMcp(
   /**
    * Bento's own servers, which win their slug outright.
    *
-   * A team server sharing the name of a Bento tool would mean the
-   * planner's create_task reached somebody's own endpoint, which is
-   * worse than the personal-shadows-team case the rule above covers:
-   * the agent would still believe it was changing the plan. The team's
-   * server is dropped with a line, rather than silently shadowed.
+   * A team server sharing the name of a Bento tool would mean a call
+   * meant for the board (the planner's create_task, a card's split)
+   * reached somebody's own endpoint, which is worse than the
+   * personal-shadows-team case the rule above covers: the agent would
+   * still believe it had changed the board. The team's server is
+   * dropped with a line, rather than silently shadowed.
    */
   for (const server of own) {
     const clash = attached.findIndex((s) => s.slug === server.slug);
@@ -228,7 +240,7 @@ export async function prepareRunMcp(
     );
     return none;
   }
-  return { extraArgs: capability.extraArgs?.() ?? [] };
+  return { extraArgs: capability.extraArgs?.() ?? [], cardTools: attachedIds.includes(BENTO_SERVER_ID) };
 }
 
 /** Whether this run has any enabled server: the team's, plus the acting member's own. */

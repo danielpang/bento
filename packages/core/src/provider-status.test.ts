@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   PROVIDER_STATUS_PAGES,
+  looksLikeCapacityPressure,
   looksLikeProviderOutage,
   outageProvider,
   providerOutageAdvice,
@@ -106,4 +107,46 @@ test("advice is not appended twice", () => {
 test("a task-specific failure is left alone", () => {
   assert.equal(providerOutageAdvice("the tests failed", { cli: "claude-code" }), null);
   assert.equal(withProviderOutageAdvice("forced failure", { cli: "codex" }), "forced failure");
+});
+
+test("a Gemini demand spike says busy, not down, and warns the status page is green", () => {
+  const error =
+    'gemini error: failed: got status: UNAVAILABLE. {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}';
+  assert.equal(looksLikeCapacityPressure(error), true);
+  assert.equal(looksLikeProviderOutage(error), true);
+  assert.equal(outageProvider(error, { cli: "opencode", model: "google/gemini-3.1-pro-preview" }), "google");
+  const advice = providerOutageAdvice(error, { cli: "opencode", model: "google/gemini-3.1-pro-preview" }) ?? "";
+  assert.match(advice, /Gemini is busy, not down/);
+  assert.doesNotMatch(advice, /appears to be down/);
+  assert.match(advice, /another model/);
+  assert.match(advice, /stays green/);
+  assert.match(advice, /aistudio\.google\.com\/status/);
+});
+
+test("a Gemini UNAVAILABLE with no numeric code is still attributed", () => {
+  const error = "gemini error: failed: got status: UNAVAILABLE.";
+  assert.equal(looksLikeProviderOutage(error), true);
+  assert.equal(outageProvider(error), "google");
+});
+
+test("enriching a demand spike twice does not repeat the advice", () => {
+  const error = "gemini error: 503 This model is currently experiencing high demand.";
+  const hint = { cli: "opencode", model: "google/gemini-3.5-flash" };
+  const once = withProviderOutageAdvice(error, hint);
+  assert.equal(withProviderOutageAdvice(once, hint), once);
+});
+
+test("a generic 503 still reads as an outage, because the provider explained nothing", () => {
+  const error = "503 Service Unavailable";
+  assert.equal(looksLikeCapacityPressure(error), false);
+  assert.match(
+    providerOutageAdvice(error, { cli: "opencode", model: "google/gemini-2.5-pro" }) ?? "",
+    /Gemini appears to be down/,
+  );
+});
+
+test("a quota refusal is not a capacity spike", () => {
+  const error = '429 {"error":{"status":"RESOURCE_EXHAUSTED","message":"You exceeded your current quota"}}';
+  assert.equal(looksLikeProviderOutage(error), false);
+  assert.equal(providerOutageAdvice(error, { cli: "opencode", model: "google/gemini-2.5-pro" }), null);
 });

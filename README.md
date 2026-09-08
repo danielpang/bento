@@ -4,7 +4,7 @@ Kanban for Agents.
 
 Bento is a platform for running AI coding agents across your software development pipeline. Agents ship code faster than anyone can track by hand. Bento puts every feature on one board and shows you where each one is so you don't lose context or lose track of them.
 
-You define the stages of your software development process, for example: product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering. Each stage gets an agent and a model, from Claude Code, Codex CLI, Cursor CLI, opencode, pi, Poolside, or DeepSeek Harness. Cards move across the board as agents work on them, each in its own sandbox.
+You define the stages of your software development process, for example: product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering. Each stage gets an agent and a model, from Claude Code, Codex CLI, Cursor CLI, opencode, pi, Poolside, DeepSeek Harness, or the Antigravity CLI. Cards move across the board as agents work on them, each in its own sandbox.
 
 ## Local setup
 

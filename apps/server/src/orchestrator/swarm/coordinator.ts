@@ -11,7 +11,8 @@ import {
 } from "@bento/db";
 import type { AppContext } from "../../context.js";
 import type { BoardEvent } from "../../events.js";
-import { enqueueRun } from "../queue.js";
+import { captureJobErrors } from "../../analytics.js";
+import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 
@@ -51,6 +52,36 @@ import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 
 /** The queue. One worker covers it; see the poll interval at its registration. */
 export const SWARM_TICK_QUEUE = "swarm.tick";
+
+/**
+ * The statuses that are worth polling for.
+ *
+ * A draft has not started, a paused swarm cancelled its runs when it
+ * paused, and a done, failed or cancelled one is over: none of them has
+ * anything in flight for a tick to reconcile, so none of them is a
+ * reason to keep a worker awake. Resuming a paused swarm goes through
+ * enqueueSwarmTick like every other door, which starts the worker
+ * again.
+ */
+const ACTIVE_SWARM_STATUSES = ["planning", "running", "blocked"] as const;
+
+/** Whether any swarm on this deployment has work a tick would act on. */
+export async function hasActiveSwarms(ctx: Pick<AppContext, "db">): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ id: swarms.id })
+    .from(swarms)
+    .where(inArray(swarms.status, [...ACTIVE_SWARM_STATUSES]))
+    .limit(1);
+  return Boolean(row);
+}
+
+/**
+ * Which pg-boss instances already have a tick worker.
+ *
+ * Keyed by the boss rather than held as a module flag, because the
+ * tests run many contexts in one process and each has its own.
+ */
+const tickWorkers = new WeakSet<object>();
 
 /** The transaction handle drizzle hands the callback. */
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -721,11 +752,54 @@ async function recomputeSwarmStatus(
  * finishing workers one tick rather than one tick each, and a bare
  * send would be a tick per event that each read the same rows.
  */
-export async function enqueueSwarmTick(
-  ctx: Pick<AppContext, "boss">,
-  swarmId: string,
-): Promise<void> {
+export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promise<void> {
+  // The worker first, then the job. A deployment with no swarms runs
+  // none, so the order is what keeps a job from waiting for the next
+  // restart to be read.
+  await ensureSwarmTickWorker(ctx);
   await ctx.boss.send(SWARM_TICK_QUEUE, { swarmId }, { singletonKey: swarmId });
+}
+
+/**
+ * Starts the swarm reconciler's worker, if this process has not.
+ *
+ * The worker polls at the interactive pace, for the same reason the
+ * gate's does: a person is watching a board that moves when it runs.
+ * That pace is only cheap while it is earning its keep, and most
+ * deployments have never started a swarm, so the worker is started by
+ * the first tick rather than at boot and stopped again when the last
+ * swarm settles. Single job at a time, because two ticks for one swarm
+ * serializing on its row lock is work done twice.
+ *
+ * Idempotent, and safe to call concurrently: the boss is marked before
+ * the await, so a second caller does not register a second worker.
+ */
+export async function ensureSwarmTickWorker(ctx: AppContext): Promise<void> {
+  if (tickWorkers.has(ctx.boss)) return;
+  tickWorkers.add(ctx.boss);
+  try {
+    await ctx.boss.work<{ swarmId: string }>(
+      SWARM_TICK_QUEUE,
+      { batchSize: 1, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS },
+      captureJobErrors(ctx.analytics, SWARM_TICK_QUEUE, async (jobs) => {
+        for (const job of jobs) await tickSwarm(ctx, job.data.swarmId);
+        // Asked after the tick, because the tick is what settles the
+        // last swarm. offWork only flags the worker, so a stop from
+        // inside its own handler does not wait on this job.
+        if (!(await hasActiveSwarms(ctx))) await stopSwarmTickWorker(ctx);
+      }),
+    );
+  } catch (err) {
+    tickWorkers.delete(ctx.boss);
+    throw err;
+  }
+}
+
+/** Stops the tick worker, so an idle deployment stops paying for the poll. */
+export async function stopSwarmTickWorker(ctx: AppContext): Promise<void> {
+  if (!tickWorkers.has(ctx.boss)) return;
+  tickWorkers.delete(ctx.boss);
+  await ctx.boss.offWork(SWARM_TICK_QUEUE);
 }
 
 /**
@@ -741,7 +815,7 @@ export async function tickAllLiveSwarms(ctx: AppContext): Promise<number> {
   const live = await ctx.db
     .select({ id: swarms.id })
     .from(swarms)
-    .where(inArray(swarms.status, ["planning", "running", "blocked", "paused"]));
+    .where(inArray(swarms.status, [...ACTIVE_SWARM_STATUSES]));
   for (const row of live) await enqueueSwarmTick(ctx, row.id);
   return live.length;
 }

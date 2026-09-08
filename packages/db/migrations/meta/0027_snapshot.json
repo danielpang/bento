@@ -1,6 +1,6 @@
 {
-  "id": "19130bff-bd5d-4946-a925-60fc821da40c",
-  "prevId": "ed3fa4d1-b438-499b-9624-d6cd0ae37c80",
+  "id": "ed3fa4d1-b438-499b-9624-d6cd0ae37c80",
+  "prevId": "e355edea-6389-4ee6-bb75-3172e0e655b1",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1859,6 +1859,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -1867,6 +1873,21 @@
           "columns": [
             {
               "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "features_parent_idx": {
+          "name": "features_parent_idx",
+          "columns": [
+            {
+              "expression": "parent_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1925,6 +1946,19 @@
           "tableTo": "stages",
           "columnsFrom": [
             "current_stage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "features_parent_id_features_id_fk": {
+          "name": "features_parent_id_features_id_fk",
+          "tableFrom": "features",
+          "tableTo": "features",
+          "columnsFrom": [
+            "parent_id"
           ],
           "columnsTo": [
             "id"
@@ -5936,8 +5970,8 @@
           "notNull": true,
           "default": 0
         },
-        "node_type": {
-          "name": "node_type",
+        "kind": {
+          "name": "kind",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
