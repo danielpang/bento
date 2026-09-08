@@ -1405,6 +1405,17 @@ export function runOutputPreview(event: { type: string; role?: string; text?: st
 const ERROR_PROPERTY_CAP = 500;
 
 /**
+ * Wall-clock seconds from the agent starting to the run ending, or
+ * null when the run never started (a cancel from the queue) so a
+ * dashboard's average is not dragged down by zeros.
+ */
+export function runDurationSeconds(startedAt: Date | null, endedAt: Date | null): number | null {
+  if (!startedAt || !endedAt) return null;
+  const seconds = (endedAt.getTime() - startedAt.getTime()) / 1000;
+  return seconds < 0 ? null : Math.round(seconds * 1000) / 1000;
+}
+
+/**
  * The one builder of the "agent run finished" event, shared with the
  * runner report route so the two executors cannot drift apart on the
  * event's shape. Reads the persisted row, so it reports what actually
@@ -1431,11 +1442,17 @@ export async function captureRunFinished(
         numTurns: agentRuns.numTurns,
         exitCode: agentRuns.exitCode,
         error: agentRuns.error,
+        startedAt: agentRuns.startedAt,
+        endedAt: agentRuns.endedAt,
         organizationId: features.organizationId,
         projectId: features.projectId,
+        agentProfileId: agentRuns.agentProfileId,
+        harness: agentProfiles.cli,
+        model: agentProfiles.model,
       })
       .from(agentRuns)
       .innerJoin(features, eq(features.id, agentRuns.featureId))
+      .innerJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
       .where(eq(agentRuns.id, runId))
       .limit(1);
     if (!row) return;
@@ -1452,6 +1469,14 @@ export async function captureRunFinished(
         project_id: row.projectId,
         kind: row.kind,
         executor: row.executor,
+        // Which agent CLI ran the card and which model it was pointed
+        // at, read from the profile the run was created with. The
+        // profile is editable, so a run reports the profile as it is
+        // when the run ends; the runs table does not snapshot either.
+        agent_profile_id: row.agentProfileId,
+        harness: row.harness,
+        model: row.model,
+        duration_seconds: runDurationSeconds(row.startedAt, row.endedAt),
         cost_usd: row.costUsd === null ? null : Number(row.costUsd),
         num_turns: row.numTurns,
         exit_code: row.exitCode,
