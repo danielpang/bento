@@ -176,6 +176,42 @@ docker compose up --build
 
 
 
+## Log export
+
+The server logs through `console`, and every line is also shipped as an
+OpenTelemetry log record over OTLP/HTTP. Local output never depends on
+the export: the original console method runs first, and an unreachable
+collector only costs the copy.
+
+Where the records go is decided at boot, in this order:
+
+1. `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, used as written.
+2. `OTEL_EXPORTER_OTLP_ENDPOINT`, with `/v1/logs` appended.
+3. PostHog, when `POSTHOG_API_KEY` is set in multi mode (the hosted
+   default, needing nothing but the project token).
+4. Nowhere.
+
+The first two are the standard OpenTelemetry names, so a self-hosted
+install points the export at its own collector, Grafana Loki, Datadog,
+Honeycomb, or any other OTLP backend with no code change, and PostHog
+keeps receiving events, errors, and flags if its key is also set.
+Naming an endpoint works in local mode too; only the PostHog default is
+suppressed there. Credentials go in `OTEL_EXPORTER_OTLP_HEADERS` (or
+the `_LOGS_HEADERS` variant) as comma separated `key=value` pairs:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+OTEL_EXPORTER_OTLP_HEADERS=x-api-key=abc123
+```
+
+The exporter also honours `OTEL_EXPORTER_OTLP_TIMEOUT`,
+`OTEL_EXPORTER_OTLP_COMPRESSION`, and the `_CERTIFICATE`,
+`_CLIENT_KEY`, and `_CLIENT_CERTIFICATE` variables from the process
+environment. `OTEL_SERVICE_NAME` sets the `service.name` resource
+attribute (default `bento-server`); every record also carries
+`bento.mode` and `environment`, the latter from `BENTO_ENVIRONMENT`.
+The boot summary prints the destination as `log export: ...`.
+
 ## Troubleshooting
 
 

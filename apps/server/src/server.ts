@@ -324,6 +324,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         `bento server listening on http://${hostname}:${server.port} (${env.BENTO_MODE} mode, ${env.BENTO_SANDBOX_DRIVER} sandboxes, ${env.BENTO_MAX_CONCURRENT_RUNS} run workers)`,
       );
       if (env.BENTO_MODE === "multi") console.log(`invitation mail: ${mailer.description}`);
+      if (logExport) {
+        const via = logExport.destination === "posthog" ? "PostHog" : "OTLP";
+        console.log(`log export: ${via}, ${withoutUserinfo(logExport.url)}`);
+      }
     }
 
     return {
@@ -369,5 +373,21 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     await featureFlags.shutdown().catch(() => {});
     await logExport?.stop().catch(() => {});
     throw err;
+  }
+}
+
+/**
+ * The boot line prints where logs go, and an operator may have put
+ * basic auth in the endpoint URL. The exporter gets the URL intact;
+ * the log gets it without the secret.
+ */
+function withoutUserinfo(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return url;
   }
 }
