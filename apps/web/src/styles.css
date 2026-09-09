@@ -2563,8 +2563,7 @@ a.pr-row:hover .pr-external {
  * own panel-raised surface, so a page of tool steps does not read as
  * more messages than were actually said.
  */
-.chat-tools,
-.chat-tools-detail {
+.chat-tools {
   max-width: min(88%, 720px);
   min-width: 0;
   padding: 6px 10px;
@@ -2578,19 +2577,128 @@ a.pr-row:hover .pr-external {
   font-size: 11px;
   color: var(--text-faint);
 }
-.chat-tools-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+/* Per-burst and per-call disclosure stays quiet until the reader asks for detail. */
+.chat-tool-group {
+  width: fit-content;
+  box-sizing: border-box;
 }
-.chat-tool-line {
-  font-family: var(--mono);
-  font-size: 11px;
+.chat-tool-group[open] {
+  width: min(88%, 720px);
+}
+.chat-tool-group-summary,
+.chat-tool-call-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 0;
+  color: var(--text-dim);
+}
+.chat-tool-group-summary::-webkit-details-marker,
+.chat-tool-call-summary::-webkit-details-marker {
+  display: none;
+}
+.chat-tool-group-summary::before,
+.chat-tool-call-summary::before {
+  content: "▸";
+  flex: none;
   color: var(--text-faint);
+}
+.chat-tool-group[open] > summary::before,
+.chat-tool-call[open] > summary::before {
+  content: "▾";
+}
+.chat-tool-group-summary:hover,
+.chat-tool-call-summary:hover {
+  color: var(--text);
+}
+.chat-tool-group-summary:focus-visible,
+.chat-tool-call-summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.chat-tool-count,
+.chat-tool-state {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.chat-tool-failed {
+  color: var(--failed);
+  font-size: 11px;
+}
+.chat-tool-list {
+  margin-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.chat-tool-call {
+  padding: 5px 0;
+  min-width: 0;
+}
+.chat-tool-call + .chat-tool-call {
+  border-top: 1px solid var(--line);
+}
+.chat-tool-action {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.chat-tool-output {
+  margin: 6px 0 4px 16px;
+  min-width: 0;
+}
+.chat-tool-output h4 {
+  margin: 12px 0 5px;
+  font: 600 11px var(--sans);
+  color: var(--text-dim);
+}
+.chat-tool-output pre {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-dim);
+  font: 12px/1.5 var(--mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
-  min-width: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  user-select: text;
+}
+.chat-tool-copy {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.chat-tool-copy [role="status"] {
+  color: var(--text-dim);
+}
+.session-page .chat-tool-group[open] {
+  width: min(88%, 820px);
+}
+@media (max-width: 600px) {
+  .chat-tool-group[open],
+  .session-page .chat-tool-group[open] {
+    width: 100%;
+    max-width: 100%;
+  }
+  .chat-tool-call-summary {
+    flex-wrap: wrap;
+  }
+  .chat-tool-action {
+    flex-basis: calc(100% - 24px);
+  }
+  .chat-tool-state,
+  .chat-tool-call-summary > .chat-tool-failed {
+    margin-left: 16px;
+  }
 }
 
 /* How a run ended, as a pill in the conversation's own colours. */
@@ -4502,8 +4610,7 @@ a.pr-row:hover .pr-external {
   font-size: 13.5px;
 }
 .session-page .chat-bubble,
-.session-page .chat-tools,
-.session-page .chat-tools-detail {
+.session-page .chat-tools {
   max-width: min(92%, 720px);
 }
 /*
@@ -4516,10 +4623,8 @@ a.pr-row:hover .pr-external {
 @media (max-width: 720px) {
   .chat-bubble,
   .chat-tools,
-  .chat-tools-detail,
   .session-page .chat-bubble,
-  .session-page .chat-tools,
-  .session-page .chat-tools-detail {
+  .session-page .chat-tools {
     max-width: 94%;
   }
 }
