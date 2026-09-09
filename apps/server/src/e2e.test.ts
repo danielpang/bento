@@ -569,6 +569,21 @@ test("stages can be added, and removed only when empty", async () => {
   assert.ok(!after.stages.some((s) => s.id === created.id));
 });
 
+test("patching a stage emits one stage_updated board event", async () => {
+  const { project, stages } = await setupProject("Stage agent emit");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("board-agent");
+  const received: unknown[] = [];
+  const off = ctx.bus.onBoardEvent(project.id, (event) => received.push(event));
+  try {
+    await patchStage(stage.id, { defaultAgentProfileId: profile.id });
+  } finally {
+    off();
+  }
+  assert.equal(received.length, 1);
+  assert.deepEqual(received[0], { type: "stage_updated", projectId: project.id, stageId: stage.id });
+});
+
 /**
  * The live path: an adapter that holds a stdin conversation hears a
  * message while it works, in the same run. The fake's LIVE mode reads

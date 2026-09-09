@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ApiError,
   BentoClient,
   type AgentProfile,
   type Feature,
@@ -428,6 +429,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const [pulses, setPulses] = useState<Record<string, CardPulse | undefined>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [panel, setPanel] = useState<"none" | "pipeline" | "repos" | "agents">("none");
+  /**
+   * How the Agents panel should open. Stays off the panel union because
+   * `"agents"` is compared as a string by the nav and setupNeeded.
+   * Cleared when the panel closes, so a later open from the nav is
+   * the list, not last sitting's editor.
+   */
+  const [agentsIntent, setAgentsIntent] = useState<{ editId?: string; new?: boolean } | null>(null);
   const [dialog, setDialog] = useState<"none" | "feature" | "project">("none");
   /**
    * The board's search, held here rather than in the field.
@@ -563,6 +571,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   useEffect(() => {
     loadProjectList();
   }, [loadProjectList]);
+
+  useEffect(() => {
+    if (panel !== "agents") setAgentsIntent(null);
+  }, [panel]);
 
   // Persist the selection so a refresh lands on the same board. The
   // list effect above has already rejected ids this tenant cannot see,
@@ -814,7 +826,17 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         <RepositoriesPanel client={client} projectId={projectId} onClose={() => setPanel("none")} />
       )}
       {panel === "agents" && (
-        <AgentsPanel client={client} profiles={profiles} onClose={() => setPanel("none")} onChanged={refresh} />
+        <AgentsPanel
+          key={agentsIntent?.editId ?? (agentsIntent?.new ? "new" : "list")}
+          client={client}
+          profiles={profiles}
+          initialAction={agentsIntent ?? undefined}
+          onClose={() => {
+            setPanel("none");
+            setAgentsIntent(null);
+          }}
+          onChanged={refresh}
+        />
       )}
     </Suspense>
   );
@@ -863,7 +885,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const actions: NavAction[] = [
     { id: "board", label: "Board", href: "/", current: screen === "board" },
     { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
-    { id: "agents", label: "Agents", onSelect: () => setPanel("agents") },
+    { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
     ...(hasProjects
       ? [
           { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
@@ -1053,6 +1075,32 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
               setLoadError(`The move was refused: ${err instanceof Error ? err.message : String(err)}`),
             )
             .finally(() => void refresh());
+        }}
+        onAssignAgent={async (stageId, profileId) => {
+          const stageName = stages.find((s) => s.id === stageId)?.name ?? "this stage";
+          setStages((current) =>
+            current.map((s) => (s.id === stageId ? { ...s, defaultAgentProfileId: profileId } : s)),
+          );
+          try {
+            await client.updateStage(stageId, { defaultAgentProfileId: profileId });
+            await refresh();
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 404) {
+              toast.fail("This project is no longer available.");
+              loadProjectList();
+            } else {
+              toast.fail(`Could not change the agent for ${stageName}. Try again.`);
+            }
+            await refresh();
+          }
+        }}
+        onEditAgent={(profileId) => {
+          setAgentsIntent({ editId: profileId });
+          setPanel("agents");
+        }}
+        onNewAgent={() => {
+          setAgentsIntent({ new: true });
+          setPanel("agents");
         }}
         onFinish={(featureId) => {
           // Optimistic like a move, and the card keeps its stage: that
