@@ -13,6 +13,8 @@ import { linkifiedError } from "../error-text.js";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
+import { toolActivity, type ToolActivity } from "../tool-activity.js";
+import { ToolActivityGroup } from "./ToolActivityGroup.js";
 
 /** Animation is decoration; a stilled frame carries the same meaning. */
 const REDUCED_MOTION =
@@ -53,12 +55,7 @@ export type ChatItem =
   | { key: string; kind: "tools"; calls: ToolCall[] }
   | { key: string; kind: "result"; ok: boolean; costUsd?: number | undefined; error?: string | undefined };
 
-interface ToolCall {
-  name: string;
-  phase: "start" | "end";
-  /** A short reading of the call's input, when the adapter carried one. */
-  summary: string | null;
-}
+type ToolCall = ToolActivity;
 
 /** A message the server accepted but has not echoed back yet. */
 interface PendingMessage {
@@ -361,7 +358,10 @@ export function AgentSession({
     const itemsFor = (runId: string, runEvents: AgentEvent[], agentName: string, prefix: string): ChatItem[] => {
       const sourceRun = runs.find((run) => run.id === runId);
       const sourceAgent = profiles.find((profile) => profile.id === sourceRun?.agentProfileId);
-      const items = withProviderOutageErrors(toChatItems(runEvents, agentName, prefix), sourceAgent);
+      const items = withProviderOutageErrors(
+        toChatItems(runEvents, agentName, prefix, Boolean(sourceRun && !TERMINAL_RUN.has(sourceRun.status))),
+        sourceAgent,
+      );
       if (
         sourceRun &&
         TERMINAL_RUN.has(sourceRun.status) &&
@@ -528,7 +528,7 @@ export function AgentSession({
               localStorage.setItem("bento:logDetail", next ? "1" : "0");
             }}
           >
-            {showDetail ? "Hide detail" : "Show detail"}
+            {showDetail ? "Collapse tools" : "Expand tools"}
           </button>
           {expandHref && (
             <a className="session-expand" href={expandHref} target="_blank" rel="noreferrer">
@@ -779,7 +779,7 @@ function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) 
     return <MessageBubble role="assistant" speaker={item.speaker} text={item.text} />;
   }
   if (item.kind === "tools") {
-    return <ToolRow calls={item.calls} showDetail={showDetail} />;
+    return <ToolActivityGroup calls={item.calls} showDetail={showDetail} />;
   }
   return (
     <div className="chat-row chat-row-system">
@@ -793,47 +793,21 @@ function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) 
 }
 
 /**
- * A run's tool activity as one subdued row. Collapsed it counts steps
- * and names the tools; the detail toggle lists each call with a short
- * reading of its input, for debugging a stuck agent.
- */
-function ToolRow({ calls, showDetail }: { calls: ToolCall[]; showDetail: boolean }) {
-  if (showDetail) {
-    return (
-      <div className="chat-row chat-row-tools">
-        <div className="chat-tools-detail">
-          {calls.map((call, i) => (
-            <span key={i} className="chat-tool-line">
-              {call.name}
-              {call.summary ? `: ${call.summary}` : ""} {call.phase}
-            </span>
-          ))}
-        </div>
-      </div>
-    );
-  }
-  const starts = calls.filter((c) => c.phase === "start");
-  const names = [...new Set(starts.map((c) => c.name))];
-  const label =
-    starts.length === 0
-      ? "tool activity"
-      : `${starts.length} tool step${starts.length === 1 ? "" : "s"}${names.length > 0 ? ` · ${names.join(", ")}` : ""}`;
-  return (
-    <div className="chat-row chat-row-tools">
-      <span className="chat-tools">{label}</span>
-    </div>
-  );
-}
-
-/**
  * Folds a run's events into conversation rows. Consecutive tool events
  * gather into one row so a burst of file reads is a line, not a
  * screen; everything else keeps its order. Pure, so history and the
  * live stream render identically.
  */
-function toChatItems(events: AgentEvent[], agentName: string, keyPrefix: string): ChatItem[] {
+export function toChatItems(
+  events: AgentEvent[],
+  agentName: string,
+  keyPrefix: string,
+  running = false,
+): ChatItem[] {
   const items: ChatItem[] = [];
   let calls: ToolCall[] = [];
+  const byId = new Map<string, ToolCall>();
+  let callNumber = 0;
   let n = 0;
   const flush = () => {
     if (calls.length === 0) return;
@@ -843,11 +817,25 @@ function toChatItems(events: AgentEvent[], agentName: string, keyPrefix: string)
   };
   for (const event of events) {
     if (event.type === "tool") {
-      calls.push({ name: event.name, phase: event.phase, summary: toolSummary(event) });
+      const call = toolActivity(event);
+      call.stopped = !running && call.phase === "start";
+      const previous = call.id ? byId.get(call.id) : undefined;
+      if (previous) {
+        Object.assign(previous, {
+          ...call,
+          summary: call.hasInput ? call.summary : previous.summary,
+          input: call.input || previous.input,
+          output: call.output || previous.output,
+        });
+      } else {
+        call.key = `${keyPrefix}-call-${callNumber++}`;
+        calls.push(call);
+        if (call.id) byId.set(call.id, call);
+      }
       continue;
     }
+    if (event.type === "init") continue; // The run divider already says a session began.
     flush();
-    if (event.type === "init") continue; // the run divider already says a session began
     if (event.type === "message") {
       items.push({
         key: `${keyPrefix}-${n}`,
@@ -870,26 +858,6 @@ function toChatItems(events: AgentEvent[], agentName: string, keyPrefix: string)
   }
   flush();
   return items;
-}
-
-/**
- * A short reading of a tool call's input, when the adapter carried it:
- * the command for a shell, the path for a file edit, the pattern for a
- * search. Null when there is nothing honest to say.
- */
-function toolSummary(event: Extract<AgentEvent, { type: "tool" }>): string | null {
-  if (event.phase !== "start" || !event.detail || typeof event.detail !== "object") return null;
-  const input = event.detail as Record<string, unknown>;
-  const pick = (...keys: string[]): string | null => {
-    for (const key of keys) {
-      const value = input[key];
-      if (typeof value === "string" && value.trim()) return value.replaceAll(/\s+/g, " ").trim();
-    }
-    return null;
-  };
-  const text = pick("command", "file_path", "path", "pattern", "url", "query", "description", "prompt");
-  if (!text) return null;
-  return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }
 
 /**
