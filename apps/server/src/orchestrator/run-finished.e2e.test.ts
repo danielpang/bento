@@ -158,4 +158,9 @@ test("a swarm's run reports too, with the swarm and the leaf it worked", async (
   assert.equal(event.properties?.num_turns, 3);
   assert.equal(event.properties?.exit_code, 1);
   assert.equal(event.properties?.error, "the worker died");
+  // Which harness and model ran it is read through a join too, so a
+  // swarm run has to carry it for the same reason the rest does.
+  assert.equal(event.properties?.agent_profile_id, PROFILE);
+  assert.ok(event.properties?.harness, "the swarm's run says which CLI ran it");
+  assert.ok(event.properties?.model, "and which model it was pointed at");
 });

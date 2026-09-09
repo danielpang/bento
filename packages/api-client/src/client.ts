@@ -6,8 +6,11 @@ import type {
   CompletionRange,
   Feature,
   FeatureChanges,
+  FeatureCheckStatus,
   FeatureMergeStatus,
   FeaturePullRequest,
+  FeaturePullRequestRecord,
+  FeaturePullRequestStatus,
   FeatureEvent,
   GateState,
   Pipeline,
@@ -184,6 +187,53 @@ export interface McpServerPatch {
   clientId?: string | null;
   clientSecret?: string | null;
   scopes?: string | null;
+}
+
+/**
+ * An inbound MCP connection: a token an outside agent presents to
+ * Bento's own MCP server. The raw token appears only in the create
+ * response; rows carry a masked hint.
+ */
+export interface McpConnection {
+  id: string;
+  name: string;
+  scope: "organization" | "projects";
+  /** The pinned projects; name is null when one has left the organization. */
+  projects: { id: string; name: string | null }[];
+  tokenHint: string;
+  mine: boolean;
+  /** For an admin reading a teammate's connection, who owns it. */
+  ownerName: string | null;
+  lastUsedAt: string | null;
+  requestCount: number;
+  createdAt: string;
+}
+
+export interface McpConnectionList {
+  canManage: boolean;
+  connections: McpConnection[];
+}
+
+export interface McpConnectionInput {
+  name: string;
+  scope: "organization" | "projects";
+  projectIds?: string[];
+}
+
+export interface McpConnectionCreated {
+  id: string;
+  name: string;
+  scope: "organization" | "projects";
+  projectIds: string[];
+  tokenHint: string;
+  /** Shown once; never retrievable again. */
+  token: string;
+}
+
+export interface McpOAuthConsent {
+  request: string;
+  clientName: string;
+  redirectUri: string;
 }
 
 export interface LinearTeamOption {
@@ -685,6 +735,44 @@ export class BentoClient {
     return this.request<{ ok: boolean }>(`/api/mcp/${id}/user-credential`, { method: "DELETE" });
   }
 
+  listMcpConnections() {
+    return this.request<McpConnectionList>("/api/mcp-connections");
+  }
+
+  createMcpConnection(input: McpConnectionInput) {
+    return this.request<McpConnectionCreated>("/api/mcp-connections", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteMcpConnection(id: string) {
+    return this.request<{ ok: boolean }>(`/api/mcp-connections/${id}`, { method: "DELETE" });
+  }
+
+  mcpOAuthConsent(request: string) {
+    return this.request<McpOAuthConsent>(`/api/mcp-oauth/consent?request=${encodeURIComponent(request)}`);
+  }
+
+  approveMcpOAuthConsent(input: {
+    request: string;
+    name?: string;
+    scope: "organization" | "projects";
+    projectIds?: string[];
+  }) {
+    return this.request<{ redirect: string }>("/api/mcp-oauth/consent", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  denyMcpOAuthConsent(request: string) {
+    return this.request<{ redirect: string }>("/api/mcp-oauth/deny", {
+      method: "POST",
+      body: JSON.stringify({ request }),
+    });
+  }
+
   slackStatus() {
     return this.request<SlackConnection>("/api/slack/status");
   }
@@ -766,9 +854,14 @@ export class BentoClient {
   }
 
   getFeature(featureId: string) {
-    return this.request<Feature & { runs: AgentRun[]; pullRequests: FeaturePullRequest[] }>(
-      `/api/features/${featureId}`,
-    );
+    return this.request<
+      Feature & {
+        runs: AgentRun[];
+        pullRequests: FeaturePullRequest[];
+        /** Every pull request the card has opened, newest first. */
+        pullRequestHistory: FeaturePullRequestRecord[];
+      }
+    >(`/api/features/${featureId}`);
   }
 
   /**
@@ -913,8 +1006,9 @@ export class BentoClient {
   /** Pushes the card's branch and opens (or updates) its pull requests. */
   publishFeature(featureId: string) {
     return this.request<{
-      published: { name: string; repoUrl: string; prNumber: number; url: string }[];
+      published: { name: string; repoUrl: string; prNumber: number; url: string; draft?: boolean }[];
       failures: { name: string; reason: string }[];
+      rebaseRun: AgentRun | null;
     }>(`/api/features/${featureId}/publish`, { method: "POST" });
   }
 
@@ -925,6 +1019,28 @@ export class BentoClient {
   /** Asks GitHub whether each of the card's pull requests merges cleanly. */
   getMergeStatus(featureId: string) {
     return this.request<FeatureMergeStatus[]>(`/api/features/${featureId}/merge-status`);
+  }
+
+  /**
+   * Asks GitHub how each pull request the card has opened ended:
+   * merged, open, closed without merging, or unknown.
+   */
+  getPullRequestStatus(featureId: string) {
+    return this.request<FeaturePullRequestStatus[]>(`/api/features/${featureId}/pull-request-status`);
+  }
+
+  /** Asks GitHub how CI checks on each pull request head are doing. */
+  getCheckStatus(featureId: string) {
+    return this.request<FeatureCheckStatus[]>(`/api/features/${featureId}/check-status`);
+  }
+
+  /**
+   * Starts a run that fixes failing CI checks GitHub is reporting; the
+   * server publishes when the run finishes. Refused with 409 when no
+   * checks are failing or an agent is already working the card.
+   */
+  fixCiTests(featureId: string) {
+    return this.request<AgentRun>(`/api/features/${featureId}/fix-ci-tests`, { method: "POST" });
   }
 
   /**

@@ -27,8 +27,11 @@ import { LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHan
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
-import { publishFeatureBranches } from "./publish.js";
-import { linkGitHubRemotes } from "./repo-remote.js";
+import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
+import { syncPullRequestsFromRun } from "./sync-pr-from-run.js";
+import { linkGitHubRemotes, refreshBaseBranches } from "./repo-remote.js";
+import { branchForRun, cardBranch } from "./branch-rotation.js";
+import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
@@ -41,6 +44,7 @@ import { prepareRunMcp } from "./mcp-run.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { isBetaRun } from "../feature-flags.js";
 import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
+import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
@@ -150,9 +154,41 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
-  // Named out here because publishing needs it again once the run ends.
-  const branch = subject.branch;
   const publisher = await githubConnectionFor(ctx, subject.organizationId);
+  /**
+   * Named out here because publishing needs it again once the run ends.
+   *
+   * A card whose pull request has been merged gets a new branch here,
+   * off the base branch, rather than going on committing to the one
+   * that landed. Only for work runs: a judge reads what a stage did,
+   * and a rebase run exists to fix a pull request that is still open,
+   * so neither is a card being asked for something new.
+   *
+   * Only a card rotates at all. A swarm's branches belong to the merge
+   * queue, and a worker's is per task rather than per pull request, so
+   * a swarm run has no landed pull request to be moved off.
+   */
+  const rotation =
+    subject.kind === "pipeline" && subject.run.role === "stage"
+      ? await branchForRun(ctx.db, publisher, { featureId: subject.feature.id, branch: subject.branch })
+      : { branch: subject.branch, replaced: [] as Awaited<ReturnType<typeof branchForRun>>["replaced"] };
+  const { branch, replaced } = rotation;
+  if (replaced.length > 0) {
+    const numbers = replaced.map((pr) => `#${pr.number}`);
+    const landed =
+      numbers.length === 1
+        ? `Pull request ${numbers[0]} merged`
+        : `Pull requests ${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)} merged`;
+    await saySystem(
+      `${landed}, so this card continues on a new branch, ${branch}, started from the base branch. The next publish opens a new pull request.`,
+    );
+    // The new branch starts at origin/<base>, so origin/<base> had
+    // better be the merge. Sprites clone it fresh; the drivers that
+    // share a host checkout see only what was last fetched there.
+    if (ctx.driver.provider !== "sprite") {
+      await refreshBaseBranches(repoRows.map((r) => ({ localPath: r.localPath, defaultBranch: r.defaultBranch })));
+    }
+  }
   // Hoisted above provisioning because both the provision guard and the
   // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, subject.organizationId);
@@ -167,6 +203,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       authMounts,
       restrictNetwork,
       owner: subject.sandboxOwner,
+      restartedRepoUrls: replaced.map((pr) => pr.repoUrl),
       say: saySystem,
     });
     handle = workspace.handle;
@@ -796,34 +833,80 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     }
     if (mustPublish && publisher) {
       const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
+      const publishables = repoRows.map((row) => {
+        const preparedRepo = prepared.find((p) => p.name === row.name);
+        const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
+        return {
+          id: row.id,
+          name: row.name,
+          repoUrl: row.repoUrl,
+          githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
+          defaultBranch: row.defaultBranch,
+          ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
+          ...(ctx.driver.exportRepository
+            ? {
+                exportBundle: () =>
+                  ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
+              }
+            : {}),
+        };
+      });
       const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
         featureId: feature.id,
         featureTitle: feature.title,
         branch,
-        repositories: repoRows.map((row) => {
-          const preparedRepo = prepared.find((p) => p.name === row.name);
-          const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-          return {
-            id: row.id,
-            name: row.name,
-            repoUrl: row.repoUrl,
-            githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
-            defaultBranch: row.defaultBranch,
-            ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
-            ...(ctx.driver.exportRepository
-              ? {
-                  exportBundle: () =>
-                    ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
-                }
-              : {}),
-          };
-        }),
+        repositories: publishables,
       }, { includeStageNotes });
+      const [runRow] = await ctx.db
+        .select({ startedBy: agentRuns.startedBy })
+        .from(agentRuns)
+        .where(eq(agentRuns.id, runId))
+        .limit(1);
+      const recovery = await recoverAncestryPublishFailures(
+        ctx,
+        ctx.db,
+        feature,
+        failures,
+        failures.map((f) => ({
+          name: f.name,
+          defaultBranch: publishables.find((r) => r.name === f.name)?.defaultBranch ?? "main",
+        })),
+        {
+          publisher,
+          branch,
+          repositories: publishables,
+          includeStageNotes,
+        },
+        runRow?.startedBy ?? "system",
+      );
+      const allPublished = [...published, ...recovery.draftPublished];
+      if (allPublished.length > 0 && runRole !== "rebase") {
+        await syncPullRequestsFromRun(ctx.db, publisher, {
+          runId,
+          stageSlug: stage.slug,
+          stageName: stage.name,
+          published: allPublished,
+          say: saySystem,
+        });
+      }
       publishNotes.push(
         ...published.map((pr) => `Opened pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}`),
-        ...failures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
+        ...recovery.draftPublished.map(
+          (pr) =>
+            `Opened draft pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}. The branch may have merge conflicts until it is rebased.`,
+        ),
+        ...(recovery.rebaseRun
+          ? [
+              "The branch is behind the base branch. A rebase run was started; the pull request will publish when it finishes.",
+            ]
+          : [
+              ...failures
+                .filter((f) => !recovery.draftPublished.some((p) => p.name === f.name))
+                .map((f) => `Could not publish ${f.name}: ${f.reason}`),
+              ...recovery.draftFailures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
+            ]),
       );
-      if (published.length === 0 && failures.length === 0) {
+      if (published.length === 0 && failures.length === 0 && recovery.draftPublished.length === 0) {
         publishNotes.push(wording.noCommits);
       }
     }
@@ -1288,6 +1371,17 @@ export function runOutputPreview(event: { type: string; role?: string; text?: st
 const ERROR_PROPERTY_CAP = 500;
 
 /**
+ * Wall-clock seconds from the agent starting to the run ending, or
+ * null when the run never started (a cancel from the queue) so a
+ * dashboard's average is not dragged down by zeros.
+ */
+export function runDurationSeconds(startedAt: Date | null, endedAt: Date | null): number | null {
+  if (!startedAt || !endedAt) return null;
+  const seconds = (endedAt.getTime() - startedAt.getTime()) / 1000;
+  return seconds < 0 ? null : Math.round(seconds * 1000) / 1000;
+}
+
+/**
  * The one builder of the "agent run finished" event, shared with the
  * runner report route so the two executors cannot drift apart on the
  * event's shape. Reads the persisted row, so it reports what actually
@@ -1325,6 +1419,11 @@ export async function captureRunFinished(
         numTurns: agentRuns.numTurns,
         exitCode: agentRuns.exitCode,
         error: agentRuns.error,
+        startedAt: agentRuns.startedAt,
+        endedAt: agentRuns.endedAt,
+        agentProfileId: agentRuns.agentProfileId,
+        harness: agentProfiles.cli,
+        model: agentProfiles.model,
         featureOrganizationId: features.organizationId,
         featureProjectId: features.projectId,
         swarmOrganizationId: swarms.organizationId,
@@ -1333,6 +1432,7 @@ export async function captureRunFinished(
       .from(agentRuns)
       .leftJoin(features, eq(features.id, agentRuns.featureId))
       .leftJoin(swarms, eq(swarms.id, agentRuns.swarmId))
+      .innerJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
       .where(eq(agentRuns.id, runId))
       .limit(1);
     if (!row) return;
@@ -1352,6 +1452,14 @@ export async function captureRunFinished(
         project_id: row.featureProjectId ?? row.swarmProjectId,
         role: row.role,
         executor: row.executor,
+        // Which agent CLI ran the card and which model it was pointed
+        // at, read from the profile the run was created with. The
+        // profile is editable, so a run reports the profile as it is
+        // when the run ends; the runs table does not snapshot either.
+        agent_profile_id: row.agentProfileId,
+        harness: row.harness,
+        model: row.model,
+        duration_seconds: runDurationSeconds(row.startedAt, row.endedAt),
         cost_usd: row.costUsd === null ? null : Number(row.costUsd),
         num_turns: row.numTurns,
         exit_code: row.exitCode,
@@ -1992,6 +2100,13 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     // run's terminal paths already ended them; this only reclaims rows.
     await sweepExpiredGrants(ctx).catch((err: unknown) => {
       console.warn("the expired MCP grant sweep did not finish:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
+    });
+    // Codes and authorization requests nobody finished, and client
+    // registrations that never became a connection. /register takes no
+    // session, so this is the only thing bounding that table.
+    await sweepExpiredOAuth(ctx).catch((err: unknown) => {
+      console.warn("the expired MCP OAuth sweep did not finish:", err);
       ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
     });
   }));

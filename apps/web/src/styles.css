@@ -1606,8 +1606,120 @@ select.input,
   border-radius: var(--radius);
   background: var(--bg);
   color: var(--text);
-  text-decoration: none;
   font-size: 12px;
+}
+
+/*
+ * One table, not a stack of independently sized rows.
+ *
+ * Each row used to lay itself out, so the number, the chips and the
+ * buttons landed wherever that row's own text ran out: two pull
+ * requests on the same card put their #numbers in different places and
+ * the eye had to hunt for each one. The list owns the columns and the
+ * rows borrow them, which is what subgrid is for, and the row stays a
+ * row so it keeps its border and its background.
+ *
+ * Guarded rather than assumed: without subgrid the declaration is
+ * dropped and every cell would stack, so the flex layout above stands
+ * as it always did.
+ */
+@supports (grid-template-columns: subgrid) {
+  .pr-list {
+    display: grid;
+    /*
+     * repository | state | actions | number
+     *
+     * The number last, hard against the right edge, because it is the
+     * one thing every row has and the thing people click: down a list
+     * of four it wants to be a straight edge, not a column that shifts
+     * left whenever a row happens to carry a button.
+     */
+    grid-template-columns: auto 1fr auto auto;
+  }
+
+  .pr-row {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    align-items: center;
+    row-gap: 2px;
+  }
+
+  /*
+   * The branch takes a line of its own under the repository it was
+   * opened in, rather than a column between them.
+   *
+   * Squeezed into the row it lost its ending to an ellipsis, and the
+   * ending is the whole of what distinguishes a card's second branch
+   * from its first. Underneath, it has the width of the row and needs
+   * no trimming, while the chips, the numbers and the buttons keep the
+   * columns they line up in.
+   */
+  .pr-branch {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+.pr-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
+}
+
+/* Holds its column open on a row with nothing to say in it. */
+.pr-flags {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/*
+ * The branch a pull request came from, kept out of the way but not cut
+ * short: what tells two of them apart is the counter on the end of the
+ * name, so the branch takes the width the fixed columns leave and only
+ * a name too long for the drawer ellipsizes. Empty on the rows of the
+ * branch the card is on now, which the header already names.
+ */
+.pr-branch {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  /* For the flex fallback only; a grid item ignores it. */
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  text-decoration: none;
+}
+
+.pr-open:hover {
+  color: var(--brand);
+}
+
+.pr-row-btn {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+a.pr-row {
+  text-decoration: none;
 }
 
 .pr-row:hover {
@@ -1641,7 +1753,7 @@ select.input,
   flex: none;
 }
 
-.pr-row:hover .pr-external {
+a.pr-row:hover .pr-external {
   color: var(--brand);
 }
 
@@ -2915,6 +3027,23 @@ select.input,
 .chip[data-status="conflict"] {
   color: var(--failed);
   border-color: var(--failed);
+}
+.chip[data-status="ci-failed"] {
+  color: var(--failed);
+  border-color: var(--failed);
+}
+/* How a pull request in the card's history ended. */
+.chip[data-status="pr-merged"] {
+  color: var(--succeeded);
+  border-color: var(--succeeded);
+}
+.chip[data-status="pr-open"] {
+  color: var(--running);
+  border-color: var(--running);
+}
+.chip[data-status="pr-closed"] {
+  color: var(--text-faint);
+  border-color: var(--line);
 }
 
 /* Card actions as an even grid rather than free-wrapping rows. */

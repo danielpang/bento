@@ -57,12 +57,19 @@ import {
 } from "../orchestrator/messages.js";
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
 import { asPipelineRun } from "../orchestrator/pipeline-run.js";
+import { buildCiFixPrompt, buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
-import { linkGitHubRemotes, refreshBaseBranches } from "../orchestrator/repo-remote.js";
-import { buildConflictResolutionPrompt } from "../orchestrator/prompt.js";
+import { startFeatureFollowUpRun, startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
+import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
 import { githubConnectionFor } from "../github.js";
-import { featurePullRequestTargets, type FeaturePullRequestTarget } from "../feature-prs.js";
+import {
+  featurePullRequestHistory,
+  featurePullRequestTargets,
+  pullRequestStateOf,
+  type FeaturePullRequestRecord,
+  type FeaturePullRequestTarget,
+} from "../feature-prs.js";
 import { shouldIncludeStageNotes } from "../settings.js";
 import { collectFeatureChanges } from "../feature-changes.js";
 
@@ -144,9 +151,27 @@ async function withPullRequestUrls<T extends { id: string; prNumber: number | nu
     .from(featurePullRequests)
     .where(inArray(featurePullRequests.featureId, wanted))
     .orderBy(asc(featurePullRequests.createdAt));
-  const byFeature = new Map<string, string>();
-  for (const pr of prs) if (!byFeature.has(pr.featureId)) byFeature.set(pr.featureId, pr.url);
-  return rows.map((row) => ({ ...row, prUrl: byFeature.get(row.id) ?? null }));
+  /**
+   * Matched on the number the card mirrors, not on the oldest row. A
+   * card keeps a row per branch it has published from, so "the first
+   * one" is the pull request of a branch it may have left behind, and
+   * the link under a card has to be the link to the number beside it.
+   *
+   * First match wins, and the oldest row is still the fallback. Pull
+   * request numbers are per repository, so a card spanning two can
+   * hold two rows numbered the same and only the earlier one is the
+   * mirrored repository's; and a number that matches no row at all
+   * (linked by hand) kept its link before this and keeps it now.
+   */
+  const byNumber = new Map<string, string>();
+  const oldest = new Map<string, string>();
+  for (const pr of prs) {
+    const owner = rows.find((row) => row.id === pr.featureId);
+    if (!owner) continue;
+    if (!oldest.has(pr.featureId)) oldest.set(pr.featureId, pr.url);
+    if (owner.prNumber === pr.number && !byNumber.has(pr.featureId)) byNumber.set(pr.featureId, pr.url);
+  }
+  return rows.map((row) => ({ ...row, prUrl: byNumber.get(row.id) ?? oldest.get(row.id) ?? null }));
 }
 
 /** "acme/api" from a GitHub address, for a repository no longer in the project. */
@@ -175,6 +200,19 @@ interface PullRequestMergeRow {
    * computing mergeability, or the API refusing the read.
    */
   state: "clean" | "conflicted" | "unknown";
+}
+
+interface PullRequestCheckRow {
+  name: string;
+  number: number;
+  url: string;
+  /**
+   * "failed" when GitHub reports at least one failing check on the pull
+   * request head. "pending" when checks are still running. "passed" when
+   * every check succeeded or none are configured. "unknown" covers every
+   * unreadable case, same as merge-status.
+   */
+  state: "passed" | "pending" | "failed" | "unknown";
 }
 
 /**
@@ -210,6 +248,75 @@ async function readMergeStates(
           connection.mergeState({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
         );
         return { ...base, state: summary.state };
+      } catch {
+        return { ...base, state: "unknown" };
+      }
+    }),
+  );
+}
+
+interface PullRequestStateRow {
+  number: number;
+  url: string;
+  /**
+   * "merged" only when GitHub says the branch landed. "closed" is a
+   * pull request someone closed without merging, whose work never
+   * shipped, so the two are never shown as the same thing. "unknown"
+   * covers every unreadable case, same as merge-status.
+   */
+  state: "merged" | "open" | "closed" | "unknown";
+}
+
+/**
+ * Asks GitHub how each pull request ended. One failing read does not
+ * spoil the others, and a card with no GitHub connection still lists
+ * what it opened, marked unknown.
+ */
+async function readPullRequestStates(
+  connection: (GitHubClient & GitHubPublisher) | undefined,
+  rows: FeaturePullRequestRecord[],
+): Promise<PullRequestStateRow[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const base = { number: row.number, url: row.url };
+      const parsed = parseRepoUrl(row.repoUrl);
+      if (!connection || !parsed) return { ...base, state: "unknown" as const };
+      try {
+        const pr = await boundedRead(
+          connection.getPullRequest({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
+        );
+        return { ...base, state: pullRequestStateOf(pr) };
+      } catch {
+        return { ...base, state: "unknown" as const };
+      }
+    }),
+  );
+}
+
+/**
+ * Asks GitHub how CI checks on each pull request head are doing. One
+ * failing read does not spoil the others.
+ */
+async function readCheckStates(
+  connection: (GitHubClient & GitHubPublisher) | undefined,
+  rows: FeaturePullRequestTarget[],
+): Promise<PullRequestCheckRow[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const base: Omit<PullRequestCheckRow, "state"> = {
+        name: row.name ?? repoNameFromUrl(row.repoUrl),
+        number: row.number,
+        url: row.url,
+      };
+      const parsed = parseRepoUrl(row.repoUrl);
+      if (!connection || !parsed) return { ...base, state: "unknown" };
+      try {
+        const checks = await boundedRead(
+          connection.checks({ owner: parsed.owner, repo: parsed.repo, prNumber: row.number }),
+        );
+        if (checks.failed > 0) return { ...base, state: "failed" };
+        if (checks.pending > 0) return { ...base, state: "pending" };
+        return { ...base, state: "passed" };
       } catch {
         return { ...base, state: "unknown" };
       }
@@ -319,6 +426,16 @@ export function featureRoutes(ctx: AppContext) {
        * single link uses.
        */
       const pullRequests = await featurePullRequestTargets(db(c, ctx), feature);
+      /**
+       * And everything it opened before those, because a card that
+       * merges a branch and is asked for more opens another pull
+       * request on a new branch: what it has shipped is the list, and
+       * a card that showed only its live one looked like it had never
+       * shipped anything. Rows only, so opening a card still costs no
+       * GitHub round trip; whether each one merged comes from
+       * /pull-request-status.
+       */
+      const history = await featurePullRequestHistory(db(c, ctx), feature);
       return c.json({
         ...(withUrl ?? feature),
         runs,
@@ -329,6 +446,13 @@ export function featureRoutes(ctx: AppContext) {
           name: pr.name ?? repoNameFromUrl(pr.repoUrl),
           number: pr.number,
           url: pr.url,
+        })),
+        pullRequestHistory: history.map((pr) => ({
+          name: pr.name ?? repoNameFromUrl(pr.repoUrl),
+          number: pr.number,
+          url: pr.url,
+          branch: pr.branch,
+          current: pr.current,
         })),
       });
     })
@@ -1045,7 +1169,35 @@ export function featureRoutes(ctx: AppContext) {
         branch: feature.branchName,
         repositories: publishable,
       }, { includeStageNotes });
-      if (published.length > 0) {
+      const rebaseTargets: RebaseTarget[] = failures.map((f) => ({
+        name: f.name,
+        defaultBranch: publishable.find((r) => r.name === f.name)?.defaultBranch ?? "main",
+      }));
+      const recovery = await recoverAncestryPublishFailures(
+        ctx,
+        db(c, ctx),
+        feature,
+        failures,
+        rebaseTargets,
+        {
+          publisher,
+          branch: feature.branchName,
+          repositories: publishable,
+          includeStageNotes,
+        },
+        actor(c),
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      const ancestryNames = new Set(
+        failures.filter((f) => recovery.draftPublished.some((p) => p.name === f.name)).map((f) => f.name),
+      );
+      const allPublished = [...published, ...recovery.draftPublished];
+      const remainingFailures = [
+        ...failures.filter((f) => !ancestryNames.has(f.name)),
+        ...recovery.draftFailures,
+      ];
+      const rebaseRun = recovery.rebaseRun;
+      if (allPublished.length > 0) {
         ctx.bus.emitBoardEvent({
           type: "feature_updated",
           projectId: feature.projectId,
@@ -1054,7 +1206,16 @@ export function featureRoutes(ctx: AppContext) {
           currentStageId: feature.currentStageId,
         });
       }
-      return c.json({ published, failures });
+      if (rebaseRun) {
+        ctx.bus.emitBoardEvent({
+          type: "run_updated",
+          projectId: feature.projectId,
+          featureId: feature.id,
+          runId: rebaseRun.id,
+          status: "queued",
+        });
+      }
+      return c.json({ published: allPublished, failures: remainingFailures, rebaseRun: rebaseRun ?? null });
     })
     /**
      * Where each of the card's pull requests stands against its base:
@@ -1073,6 +1234,90 @@ export function featureRoutes(ctx: AppContext) {
       // drawer's; dropped by rest-destructuring so a field added to the
       // row later travels without anyone remembering this projection.
       return c.json(states.map(({ defaultBranch, ...pr }) => pr));
+    })
+    /**
+     * How each pull request the card has ever opened ended: merged,
+     * open, closed without merging, or unknown. Its own request for
+     * the same reason as merge-status, and asked of every row rather
+     * than the live ones, because the history is the part of the card
+     * that needs saying which is which.
+     */
+    .get("/:id/pull-request-status", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      const rows = await featurePullRequestHistory(db(c, ctx), feature);
+      if (rows.length === 0) return c.json([]);
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      return c.json(await readPullRequestStates(connection, rows));
+    })
+    /**
+     * How CI checks on each pull request head are doing: passed,
+     * pending, failed, or unknown. Separate from merge-status because
+     * most card opens do not need a GitHub round trip to render.
+     */
+    .get("/:id/check-status", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) return c.json([]);
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      const states = await readCheckStates(connection, rows);
+      return c.json(states);
+    })
+    /**
+     * Starts a run that fixes failing CI checks GitHub is reporting.
+     *
+     * Checks are re-read here rather than trusted from the button, so a
+     * stale drawer cannot start a fix run nothing needs.
+     */
+    .post("/:id/fix-ci-tests", async (c) => {
+      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
+      if (!feature) return c.json({ error: "not found" }, 404);
+      if (feature.status === "done" || feature.status === "cancelled") {
+        return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
+      }
+      if (!feature.branchName) {
+        return c.json({ error: "this card has no branch yet; run an agent on it first" }, 409);
+      }
+      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      if (rows.length === 0) {
+        return c.json({ error: "this card has no pull request yet; publish it first" }, 409);
+      }
+      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
+      if (!connection) {
+        return c.json({ error: GITHUB_NOT_CONNECTED }, 409);
+      }
+      const states = await readCheckStates(connection, rows);
+      const failing = states.filter((pr) => pr.state === "failed");
+      if (failing.length === 0) {
+        return c.json(
+          {
+            error: states.some((pr) => pr.state === "unknown")
+              ? "GitHub check status could not be read for this card's pull requests. Try again in a moment."
+              : states.some((pr) => pr.state === "pending")
+                ? "CI checks are still running on this card's pull requests."
+                : "GitHub reports no failing CI checks on this card's pull requests",
+          },
+          409,
+        );
+      }
+
+      const result = await startFeatureFollowUpRun(
+        ctx,
+        db(c, ctx),
+        feature,
+        buildCiFixPrompt(failing),
+        actor(c),
+        "stage",
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      if (!result.ok) {
+        return c.json(
+          { error: result.error, ...(result.code ? { code: result.code } : {}) },
+          result.status,
+        );
+      }
+      return c.json(result.run, 201);
     })
     /**
      * The same merge status in line form, for the Mac app.
@@ -1142,71 +1387,21 @@ export function featureRoutes(ctx: AppContext) {
         );
       }
 
-      // The conversation the rebase continues is the card's own work,
-      // never a judge's: same rule as the message route, because the
-      // resolving agent needs the context of the changes it made. A
-      // card whose only runs are judge runs still resolves, as a fresh
-      // run of whatever ran last, exactly like a follow-up message.
-      const conversation = await latestConversationRun(db(c, ctx), feature.id);
-      const [newest] = conversation
-        ? [conversation]
-        : await db(c, ctx)
-            .select()
-            .from(agentRuns)
-            .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.type, "pipeline")))
-            .orderBy(desc(agentRuns.queuedAt))
-            .limit(1);
-      if (!newest) {
-        return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
-      }
-      const latest = asPipelineRun(newest);
-      const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
-      /**
-       * Runner-executed runs settle on the runner's machine, and the
-       * server has no way to read that checkout, so the promise this
-       * run is built on (the server pushes the rebased branch) cannot
-       * be kept. Refusing honestly beats burning an agent run whose
-       * work goes nowhere.
-       */
-      if (resumeFrom.executor !== "server") {
+      const result = await startFeatureRebaseRun(
+        ctx,
+        db(c, ctx),
+        feature,
+        buildConflictResolutionPrompt(feature.branchName, conflicted),
+        actor(c),
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      if (!result.ok) {
         return c.json(
-          {
-            error:
-              "this project's agents run on a runner, and the server cannot push a branch it never sees. Rebase and push from the runner's checkout, or switch the project to server execution.",
-          },
-          409,
+          { error: result.error, ...(result.code ? { code: result.code } : {}) },
+          result.status,
         );
       }
-      /**
-       * Bring origin/<base> up to date where the server can: sprite
-       * sandboxes re-seed on provision, but docker and local worktrees
-       * share the host checkout, whose origin/<base> is only as fresh
-       * as the last fetch. Best effort, before the run is created, so
-       * the rebase has the real base to land on.
-       */
-      if (ctx.driver.provider !== "sprite") {
-        const repos = await db(c, ctx)
-          .select({ localPath: repositories.localPath, defaultBranch: repositories.defaultBranch })
-          .from(repositories)
-          .where(eq(repositories.projectId, feature.projectId));
-        await refreshBaseBranches(repos);
-      }
-      const run = await startRunIfIdle(db(c, ctx), {
-        type: "pipeline" as const,
-        featureId: feature.id,
-        stageId: resumeFrom.stageId,
-        agentProfileId: resumeFrom.agentProfileId,
-        prompt: buildConflictResolutionPrompt(feature.branchName, conflicted),
-        cliSessionId: resumeFrom.cliSessionId,
-        executor: resumeFrom.executor,
-        role: "rebase",
-        startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
-      if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
-      if (run === "gone") return c.json({ error: "not found" }, 404);
-      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      await enqueueRun(ctx, run.id);
-      return c.json(run, 201);
+      return c.json(result.run, 201);
     })
     /** Links a pull request so PR based gate criteria can evaluate. */
     .post("/:id/link-pr", zValidator("json", z.object({ prNumber: z.number().int().positive() })), async (c) => {

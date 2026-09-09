@@ -3,11 +3,15 @@ import assert from "node:assert/strict";
 import { agentRunPrompt } from "@bento/core";
 import {
   announcesLaunchOnFirstEvent,
+  captureRunFinished,
   dshFailureAdvice,
   mergeAgentExecEnv,
   poolFailureAdvice,
+  runDurationSeconds,
   runnerReportedError,
 } from "./run-executor.js";
+import type { Analytics } from "../analytics.js";
+import type { AppContext } from "../context.js";
 
 test("tools without session ids retain stage context whether sent idle or queued", () => {
   for (const cli of ["pool", "dsh"]) {
@@ -199,4 +203,108 @@ test("text-mode adapters do not announce launch on their first event", () => {
   assert.equal(announcesLaunchOnFirstEvent({ stdoutMode: "text" }), false);
   assert.equal(announcesLaunchOnFirstEvent({}), true);
   assert.equal(announcesLaunchOnFirstEvent({ stdoutMode: undefined }), true);
+});
+
+/**
+ * Thenable drizzle chain for captureRunFinished: the one select it
+ * issues resolves to the canned row, join and all.
+ */
+function dbReturning(rows: unknown[]) {
+  const obj: Record<string, unknown> = {};
+  const next = () => obj;
+  obj.select = next;
+  obj.from = next;
+  obj.innerJoin = next;
+  obj.leftJoin = next;
+  obj.where = next;
+  obj.limit = next;
+  obj.then = (onFulfilled: (value: unknown) => unknown, onRejected: (reason: unknown) => unknown) =>
+    Promise.resolve(rows).then(onFulfilled, onRejected);
+  return obj;
+}
+
+const FINISHED_ROW = {
+  startedBy: "user-1",
+  type: "pipeline",
+  featureId: "feature-1",
+  stageId: "stage-1",
+  swarmId: null,
+  swarmTaskId: null,
+  role: "stage",
+  executor: "server",
+  costUsd: "0.42",
+  numTurns: 7,
+  exitCode: 0,
+  error: null,
+  startedAt: new Date("2026-09-01T10:00:00Z"),
+  endedAt: new Date("2026-09-01T10:02:30Z"),
+  agentProfileId: "profile-1",
+  harness: "claude-code",
+  model: "claude-opus-5",
+  // Both parents are read, and only the run's own board fills one in.
+  featureOrganizationId: "org-1",
+  featureProjectId: "project-1",
+  swarmOrganizationId: null,
+  swarmProjectId: null,
+};
+
+test("a finished run reports which harness and model ran it", async () => {
+  const captured: Array<{ event: string; userId?: string | null; organizationId?: string | null; properties?: Record<string, unknown> }> =
+    [];
+  const analytics: Analytics = {
+    capture: (event) => captured.push(event),
+    captureException: () => {},
+    shutdown: async () => {},
+  };
+  await captureRunFinished(
+    { analytics, db: dbReturning([FINISHED_ROW]) } as unknown as AppContext,
+    "run-1",
+    "succeeded",
+  );
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0]?.event, "agent run finished");
+  assert.equal(captured[0]?.userId, "user-1");
+  assert.equal(captured[0]?.organizationId, "org-1");
+  assert.deepEqual(captured[0]?.properties, {
+    status: "succeeded",
+    success: true,
+    run_id: "run-1",
+    type: "pipeline",
+    feature_id: "feature-1",
+    stage_id: "stage-1",
+    swarm_id: null,
+    swarm_task_id: null,
+    project_id: "project-1",
+    role: "stage",
+    executor: "server",
+    agent_profile_id: "profile-1",
+    harness: "claude-code",
+    model: "claude-opus-5",
+    duration_seconds: 150,
+    cost_usd: 0.42,
+    num_turns: 7,
+    exit_code: 0,
+    error: null,
+  });
+});
+
+test("a run that never started has no duration, and no analytics means no query", async () => {
+  assert.equal(runDurationSeconds(null, new Date()), null);
+  assert.equal(runDurationSeconds(new Date("2026-09-01T10:00:00Z"), null), null);
+  // A clock that went backwards must not report a negative run.
+  assert.equal(runDurationSeconds(new Date("2026-09-01T10:00:01Z"), new Date("2026-09-01T10:00:00Z")), null);
+  assert.equal(runDurationSeconds(new Date("2026-09-01T10:00:00.000Z"), new Date("2026-09-01T10:00:00.250Z")), 0.25);
+
+  let queried = false;
+  const db = new Proxy(
+    {},
+    {
+      get: () => {
+        queried = true;
+        return () => db;
+      },
+    },
+  );
+  await captureRunFinished({ analytics: null, db } as unknown as AppContext, "run-1", "failed");
+  assert.equal(queried, false);
 });

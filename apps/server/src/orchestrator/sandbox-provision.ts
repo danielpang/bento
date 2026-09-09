@@ -44,6 +44,19 @@ export interface ProvisionWorkspaceInput {
   restrictNetwork: boolean;
   /** Which rows this machine belongs to. Exactly one board's worth. */
   owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null };
+  /**
+   * Repository urls whose work has landed, so this workspace is not on
+   * the branch it was built for.
+   *
+   * Today only a card sets it, when its pull request merged and it has
+   * started another branch: an existing worktree is moved rather than
+   * left where the agent was working, and the repositories that
+   * actually merged start again from the base branch. A repository
+   * whose publish failed, or that never opened a pull request, still
+   * holds commits nobody has landed, so its new branch starts where its
+   * old one stood and that work travels with the card.
+   */
+  restartedRepoUrls?: string[];
   /** Progress lines, which go into the transcript of whatever asked. */
   say: (text: string) => Promise<void>;
 }
@@ -61,13 +74,19 @@ export async function provisionWorkspace(
   const { repoRows, branch, workspaceKey } = input;
   const publisher = await githubConnectionFor(ctx, input.organizationId);
 
+  const restarted = new Set(input.restartedRepoUrls ?? []);
   const prepared: PreparedRepository[] =
     ctx.driver.provider === "sprite"
       ? repoRows.map((r) => ({ name: r.name, localPath: r.localPath, worktreePath: "" }))
       : await ctx.worktrees.ensureAll(
-          repoRows.map((r) => ({ name: r.name, localPath: r.localPath })),
+          repoRows.map((r) => ({
+            name: r.name,
+            localPath: r.localPath,
+            ...(r.repoUrl && restarted.has(r.repoUrl) ? { startFromBranch: r.defaultBranch } : {}),
+          })),
           workspaceKey,
           branch,
+          { branchChanged: restarted.size > 0 },
         );
 
   /**
@@ -88,19 +107,22 @@ export async function provisionWorkspace(
       : [];
 
   const seedBundles = new Map<string, Buffer>();
+  // The base branch the seed actually carries, which is not the stored
+  // default branch when that name no longer exists on the remote. The
+  // sandbox must branch off the name the bundle has, not the stale one.
+  const seedBaseBranches = new Map<string, string>();
   if (ctx.driver.provider === "sprite" && publisher) {
     for (const row of repoRows) {
       if (!row.repoUrl) continue;
       const repoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-      seedBundles.set(
-        row.id,
-        await createRepositorySeed(
-          publisher,
-          row.repoUrl,
-          Number.isSafeInteger(repoId) ? repoId : undefined,
-          row.defaultBranch,
-        ),
+      const seed = await createRepositorySeed(
+        publisher,
+        row.repoUrl,
+        Number.isSafeInteger(repoId) ? repoId : undefined,
+        row.defaultBranch,
       );
+      seedBundles.set(row.id, seed.bundle);
+      seedBaseBranches.set(row.id, seed.baseBranch);
     }
   }
 
@@ -126,7 +148,7 @@ export async function provisionWorkspace(
       name: r.name,
       cloneUrl: r.repoUrl ?? undefined,
       branch,
-      baseBranch: r.defaultBranch,
+      baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
       seedBundle: seedBundles.get(r.id),
     })),
     // Local mode can share the user's own agent logins and git identity.

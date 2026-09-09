@@ -37,6 +37,7 @@ Without either, agents commit locally. The transcript will report Github is not 
 
 | Setting     | Value                                                                                              |
 | ----------- | -------------------------------------------------------------------------------------------------- |
+| Where can this GitHub App be installed? | Any account. A private App can only be authorized by members of the account that owns it, and GitHub answers everyone else with a 404 on the sign in page. |
 | Setup URL   | `<server URL>/api/github/callback`                                                                 |
 | Webhook URL | `<server URL>/api/webhooks/github`                                                                 |
 | Permissions | Contents R/W, Pull requests R/W, Checks read, Metadata read                                        |

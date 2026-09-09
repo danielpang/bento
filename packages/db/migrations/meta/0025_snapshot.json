@@ -1,6 +1,6 @@
 {
-  "id": "8eb81202-dee6-41b3-aa92-936bbfa09ca0",
-  "prevId": "fff003e7-e329-4847-ab8c-c4e156680063",
+  "id": "80de5356-0f93-47db-b1e6-1c5e4498bec1",
+  "prevId": "030e6dee-679a-49c6-b267-d85d47ceeb63",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -935,7 +935,7 @@
           "name": "feature_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "organization_id": {
           "name": "organization_id",
@@ -947,19 +947,7 @@
           "name": "stage_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
-        },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "swarm_task_id": {
-          "name": "swarm_task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "agent_profile_id": {
           "name": "agent_profile_id",
@@ -998,19 +986,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'task'"
-        },
-        "type": {
-          "name": "type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "role": {
-          "name": "role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'stage'"
         },
         "executor": {
           "name": "executor",
@@ -1108,27 +1083,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "agent_runs_swarm_queued_idx": {
-          "name": "agent_runs_swarm_queued_idx",
-          "columns": [
-            {
-              "expression": "swarm_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "queued_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -1170,32 +1124,6 @@
             "id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "agent_runs_swarm_id_swarms_id_fk": {
-          "name": "agent_runs_swarm_id_swarms_id_fk",
-          "tableFrom": "agent_runs",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "agent_runs_swarm_task_id_swarm_tasks_id_fk": {
-          "name": "agent_runs_swarm_task_id_swarm_tasks_id_fk",
-          "tableFrom": "agent_runs",
-          "tableTo": "swarm_tasks",
-          "columnsFrom": [
-            "swarm_task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "agent_runs_agent_profile_id_agent_profiles_id_fk": {
@@ -1242,20 +1170,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "agent_runs_pipeline_shape": {
-          "name": "agent_runs_pipeline_shape",
-          "value": "\"agent_runs\".\"type\" <> 'pipeline' or (\"agent_runs\".\"feature_id\" is not null and \"agent_runs\".\"stage_id\" is not null\n        and \"agent_runs\".\"swarm_id\" is null and \"agent_runs\".\"swarm_task_id\" is null)"
-        },
-        "agent_runs_swarm_shape": {
-          "name": "agent_runs_swarm_shape",
-          "value": "\"agent_runs\".\"type\" <> 'swarm' or (\"agent_runs\".\"swarm_id\" is not null and \"agent_runs\".\"feature_id\" is null and \"agent_runs\".\"stage_id\" is null)"
-        },
-        "agent_runs_role_for_type": {
-          "name": "agent_runs_role_for_type",
-          "value": "(\"agent_runs\".\"type\" = 'pipeline' and \"agent_runs\".\"role\" in ('stage', 'judge', 'rebase'))\n        or (\"agent_runs\".\"type\" = 'swarm' and \"agent_runs\".\"role\" in ('planner', 'subplanner', 'worker', 'resolver', 'judge'))"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.feature_events": {
@@ -1675,6 +1590,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "branch": {
+          "name": "branch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "number": {
           "name": "number",
           "type": "integer",
@@ -1709,8 +1630,8 @@
         }
       },
       "indexes": {
-        "feature_pull_requests_feature_repo_idx": {
-          "name": "feature_pull_requests_feature_repo_idx",
+        "feature_pull_requests_feature_repo_branch_idx": {
+          "name": "feature_pull_requests_feature_repo_branch_idx",
           "columns": [
             {
               "expression": "feature_id",
@@ -1720,6 +1641,12 @@
             },
             {
               "expression": "repo_url",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "branch",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1853,6 +1780,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1866,12 +1799,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "parent_id": {
-          "name": "parent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -2657,6 +2584,184 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.mcp_connections": {
+      "name": "mcp_connections",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "owner_id": {
+          "name": "owner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_ids": {
+          "name": "project_ids",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_hint": {
+          "name": "token_hint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "refresh_token_hash": {
+          "name": "refresh_token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "oauth_client_id": {
+          "name": "oauth_client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_used_at": {
+          "name": "last_used_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "request_count": {
+          "name": "request_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "mcp_connections_token_idx": {
+          "name": "mcp_connections_token_idx",
+          "columns": [
+            {
+              "expression": "token_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "mcp_connections_refresh_idx": {
+          "name": "mcp_connections_refresh_idx",
+          "columns": [
+            {
+              "expression": "refresh_token_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "mcp_connections_org_idx": {
+          "name": "mcp_connections_org_idx",
+          "columns": [
+            {
+              "expression": "organization_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "mcp_connections_owner_id_user_id_fk": {
+          "name": "mcp_connections_owner_id_user_id_fk",
+          "tableFrom": "mcp_connections",
+          "tableTo": "user",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "owner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "mcp_connections_organization_id_organization_id_fk": {
+          "name": "mcp_connections_organization_id_organization_id_fk",
+          "tableFrom": "mcp_connections",
+          "tableTo": "organization",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.mcp_credentials": {
       "name": "mcp_credentials",
       "schema": "",
@@ -2832,6 +2937,334 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.mcp_oauth_clients": {
+      "name": "mcp_oauth_clients",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "client_secret_hash": {
+          "name": "client_secret_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "client_name": {
+          "name": "client_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "redirect_uris": {
+          "name": "redirect_uris",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_endpoint_auth_method": {
+          "name": "token_endpoint_auth_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'none'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "mcp_oauth_clients_client_idx": {
+          "name": "mcp_oauth_clients_client_idx",
+          "columns": [
+            {
+              "expression": "client_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.mcp_oauth_codes": {
+      "name": "mcp_oauth_codes",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "code_hash": {
+          "name": "code_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "redirect_uri": {
+          "name": "redirect_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "code_challenge": {
+          "name": "code_challenge",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "resource": {
+          "name": "resource",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "token_bundle": {
+          "name": "token_bundle",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "mcp_oauth_codes_hash_idx": {
+          "name": "mcp_oauth_codes_hash_idx",
+          "columns": [
+            {
+              "expression": "code_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "mcp_oauth_codes_expires_idx": {
+          "name": "mcp_oauth_codes_expires_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "mcp_oauth_codes_connection_id_mcp_connections_id_fk": {
+          "name": "mcp_oauth_codes_connection_id_mcp_connections_id_fk",
+          "tableFrom": "mcp_oauth_codes",
+          "tableTo": "mcp_connections",
+          "columnsFrom": [
+            "connection_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "mcp_oauth_codes_organization_id_organization_id_fk": {
+          "name": "mcp_oauth_codes_organization_id_organization_id_fk",
+          "tableFrom": "mcp_oauth_codes",
+          "tableTo": "organization",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.mcp_oauth_requests": {
+      "name": "mcp_oauth_requests",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "redirect_uri": {
+          "name": "redirect_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "code_challenge": {
+          "name": "code_challenge",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "resource": {
+          "name": "resource",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "mcp_oauth_requests_expires_idx": {
+          "name": "mcp_oauth_requests_expires_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "mcp_oauth_requests_user_id_user_id_fk": {
+          "name": "mcp_oauth_requests_user_id_user_id_fk",
+          "tableFrom": "mcp_oauth_requests",
+          "tableTo": "user",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.mcp_run_grants": {
       "name": "mcp_run_grants",
       "schema": "",
@@ -2852,12 +3285,6 @@
         "organization_id": {
           "name": "organization_id",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -2981,19 +3408,6 @@
           "schemaTo": "identity",
           "columnsFrom": [
             "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "mcp_run_grants_swarm_id_swarms_id_fk": {
-          "name": "mcp_run_grants_swarm_id_swarms_id_fk",
-          "tableFrom": "mcp_run_grants",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
           ],
           "columnsTo": [
             "id"
@@ -3804,23 +4218,11 @@
           "name": "feature_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "organization_id": {
           "name": "organization_id",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "swarm_task_id": {
-          "name": "swarm_task_id",
-          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -3916,27 +4318,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "run_artifacts_swarm_idx": {
-          "name": "run_artifacts_swarm_idx",
-          "columns": [
-            {
-              "expression": "swarm_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -3979,32 +4360,6 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
-        },
-        "run_artifacts_swarm_id_swarms_id_fk": {
-          "name": "run_artifacts_swarm_id_swarms_id_fk",
-          "tableFrom": "run_artifacts",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "run_artifacts_swarm_task_id_swarm_tasks_id_fk": {
-          "name": "run_artifacts_swarm_task_id_swarm_tasks_id_fk",
-          "tableFrom": "run_artifacts",
-          "tableTo": "swarm_tasks",
-          "columnsFrom": [
-            "swarm_task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4014,10 +4369,6 @@
         "run_artifacts_content_or_key": {
           "name": "run_artifacts_content_or_key",
           "value": "(\"run_artifacts\".\"content\" is null) <> (\"run_artifacts\".\"storage_key\" is null)"
-        },
-        "run_artifacts_feature_or_swarm": {
-          "name": "run_artifacts_feature_or_swarm",
-          "value": "(\"run_artifacts\".\"feature_id\" is null) <> (\"run_artifacts\".\"swarm_id\" is null)"
         }
       },
       "isRLSEnabled": false
@@ -4157,18 +4508,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "swarm_task_id": {
-          "name": "swarm_task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "provider": {
           "name": "provider",
           "type": "text",
@@ -4285,32 +4624,6 @@
           "tableTo": "features",
           "columnsFrom": [
             "feature_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "sandboxes_swarm_id_swarms_id_fk": {
-          "name": "sandboxes_swarm_id_swarms_id_fk",
-          "tableFrom": "sandboxes",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "sandboxes_swarm_task_id_swarm_tasks_id_fk": {
-          "name": "sandboxes_swarm_task_id_swarm_tasks_id_fk",
-          "tableFrom": "sandboxes",
-          "tableTo": "swarm_tasks",
-          "columnsFrom": [
-            "swarm_task_id"
           ],
           "columnsTo": [
             "id"
@@ -5262,1331 +5575,6 @@
             "id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.swarm_landings": {
-      "name": "swarm_landings",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "branch_name": {
-          "name": "branch_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "position": {
-          "name": "position",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'queued'"
-        },
-        "resolver_run_id": {
-          "name": "resolver_run_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "attempt": {
-          "name": "attempt",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ended_at": {
-          "name": "ended_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "swarm_landings_queue_idx": {
-          "name": "swarm_landings_queue_idx",
-          "columns": [
-            {
-              "expression": "swarm_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "position",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "swarm_landings_one_in_flight_idx": {
-          "name": "swarm_landings_one_in_flight_idx",
-          "columns": [
-            {
-              "expression": "swarm_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"swarm_landings\".\"status\" = 'landing'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "swarm_landings_swarm_id_swarms_id_fk": {
-          "name": "swarm_landings_swarm_id_swarms_id_fk",
-          "tableFrom": "swarm_landings",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_landings_organization_id_organization_id_fk": {
-          "name": "swarm_landings_organization_id_organization_id_fk",
-          "tableFrom": "swarm_landings",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_landings_task_id_swarm_tasks_id_fk": {
-          "name": "swarm_landings_task_id_swarm_tasks_id_fk",
-          "tableFrom": "swarm_landings",
-          "tableTo": "swarm_tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_landings_resolver_run_id_agent_runs_id_fk": {
-          "name": "swarm_landings_resolver_run_id_agent_runs_id_fk",
-          "tableFrom": "swarm_landings",
-          "tableTo": "agent_runs",
-          "columnsFrom": [
-            "resolver_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.swarm_messages": {
-      "name": "swarm_messages",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "text": {
-          "name": "text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'queued'"
-        },
-        "run_id": {
-          "name": "run_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "sent_at": {
-          "name": "sent_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "delivered_at": {
-          "name": "delivered_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "swarm_messages_claim_idx": {
-          "name": "swarm_messages_claim_idx",
-          "columns": [
-            {
-              "expression": "swarm_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "task_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "swarm_messages_swarm_id_swarms_id_fk": {
-          "name": "swarm_messages_swarm_id_swarms_id_fk",
-          "tableFrom": "swarm_messages",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_messages_organization_id_organization_id_fk": {
-          "name": "swarm_messages_organization_id_organization_id_fk",
-          "tableFrom": "swarm_messages",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_messages_task_id_swarm_tasks_id_fk": {
-          "name": "swarm_messages_task_id_swarm_tasks_id_fk",
-          "tableFrom": "swarm_messages",
-          "tableTo": "swarm_tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_messages_user_id_user_id_fk": {
-          "name": "swarm_messages_user_id_user_id_fk",
-          "tableFrom": "swarm_messages",
-          "tableTo": "user",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarm_messages_run_id_agent_runs_id_fk": {
-          "name": "swarm_messages_run_id_agent_runs_id_fk",
-          "tableFrom": "swarm_messages",
-          "tableTo": "agent_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.swarm_pull_requests": {
-      "name": "swarm_pull_requests",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repository_id": {
-          "name": "repository_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "repo_url": {
-          "name": "repo_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "number": {
-          "name": "number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "url": {
-          "name": "url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "head_sha": {
-          "name": "head_sha",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "swarm_pull_requests_swarm_repo_idx": {
-          "name": "swarm_pull_requests_swarm_repo_idx",
-          "columns": [
-            {
-              "expression": "swarm_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "repo_url",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "swarm_pull_requests_swarm_id_swarms_id_fk": {
-          "name": "swarm_pull_requests_swarm_id_swarms_id_fk",
-          "tableFrom": "swarm_pull_requests",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_pull_requests_repository_id_repositories_id_fk": {
-          "name": "swarm_pull_requests_repository_id_repositories_id_fk",
-          "tableFrom": "swarm_pull_requests",
-          "tableTo": "repositories",
-          "columnsFrom": [
-            "repository_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarm_pull_requests_organization_id_organization_id_fk": {
-          "name": "swarm_pull_requests_organization_id_organization_id_fk",
-          "tableFrom": "swarm_pull_requests",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.swarm_task_events": {
-      "name": "swarm_task_events",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "from_status": {
-          "name": "from_status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "to_status": {
-          "name": "to_status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "run_id": {
-          "name": "run_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "actor_user_id": {
-          "name": "actor_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "detail": {
-          "name": "detail",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "at": {
-          "name": "at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "swarm_task_events_task_at_idx": {
-          "name": "swarm_task_events_task_at_idx",
-          "columns": [
-            {
-              "expression": "task_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "swarm_task_events_task_id_swarm_tasks_id_fk": {
-          "name": "swarm_task_events_task_id_swarm_tasks_id_fk",
-          "tableFrom": "swarm_task_events",
-          "tableTo": "swarm_tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_task_events_organization_id_organization_id_fk": {
-          "name": "swarm_task_events_organization_id_organization_id_fk",
-          "tableFrom": "swarm_task_events",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_task_events_run_id_agent_runs_id_fk": {
-          "name": "swarm_task_events_run_id_agent_runs_id_fk",
-          "tableFrom": "swarm_task_events",
-          "tableTo": "agent_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarm_task_events_actor_user_id_user_id_fk": {
-          "name": "swarm_task_events_actor_user_id_user_id_fk",
-          "tableFrom": "swarm_task_events",
-          "tableTo": "user",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "actor_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.swarm_tasks": {
-      "name": "swarm_tasks",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "swarm_id": {
-          "name": "swarm_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "parent_id": {
-          "name": "parent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "position": {
-          "name": "position",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'task'"
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "attention": {
-          "name": "attention",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "weight": {
-          "name": "weight",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "branch_name": {
-          "name": "branch_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "assigned_run_id": {
-          "name": "assigned_run_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "flags": {
-          "name": "flags",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
-        },
-        "report": {
-          "name": "report",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cost_measured_usd": {
-          "name": "cost_measured_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "cost_estimated_usd": {
-          "name": "cost_estimated_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "cost_assumed_usd": {
-          "name": "cost_assumed_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ended_at": {
-          "name": "ended_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "swarm_tasks_tree_idx": {
-          "name": "swarm_tasks_tree_idx",
-          "columns": [
-            {
-              "expression": "swarm_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "parent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "position",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "swarm_tasks_swarm_id_swarms_id_fk": {
-          "name": "swarm_tasks_swarm_id_swarms_id_fk",
-          "tableFrom": "swarm_tasks",
-          "tableTo": "swarms",
-          "columnsFrom": [
-            "swarm_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_tasks_organization_id_organization_id_fk": {
-          "name": "swarm_tasks_organization_id_organization_id_fk",
-          "tableFrom": "swarm_tasks",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_tasks_parent_id_swarm_tasks_id_fk": {
-          "name": "swarm_tasks_parent_id_swarm_tasks_id_fk",
-          "tableFrom": "swarm_tasks",
-          "tableTo": "swarm_tasks",
-          "columnsFrom": [
-            "parent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_tasks_assigned_run_id_agent_runs_id_fk": {
-          "name": "swarm_tasks_assigned_run_id_agent_runs_id_fk",
-          "tableFrom": "swarm_tasks",
-          "tableTo": "agent_runs",
-          "columnsFrom": [
-            "assigned_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.swarm_templates": {
-      "name": "swarm_templates",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "owner_id": {
-          "name": "owner_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "planner_profile_id": {
-          "name": "planner_profile_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "worker_profile_id": {
-          "name": "worker_profile_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "planner_instructions": {
-          "name": "planner_instructions",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "worker_instructions": {
-          "name": "worker_instructions",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "max_workers": {
-          "name": "max_workers",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 4
-        },
-        "budget_usd": {
-          "name": "budget_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "time_limit_min": {
-          "name": "time_limit_min",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "swarm_templates_owner_id_user_id_fk": {
-          "name": "swarm_templates_owner_id_user_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "user",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "owner_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "swarm_templates_organization_id_organization_id_fk": {
-          "name": "swarm_templates_organization_id_organization_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_templates_planner_profile_id_agent_profiles_id_fk": {
-          "name": "swarm_templates_planner_profile_id_agent_profiles_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "agent_profiles",
-          "columnsFrom": [
-            "planner_profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarm_templates_worker_profile_id_agent_profiles_id_fk": {
-          "name": "swarm_templates_worker_profile_id_agent_profiles_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "agent_profiles",
-          "columnsFrom": [
-            "worker_profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.swarms": {
-      "name": "swarms",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "project_id": {
-          "name": "project_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "slug": {
-          "name": "slug",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "goal": {
-          "name": "goal",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "template_id": {
-          "name": "template_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'draft'"
-        },
-        "paused_reason": {
-          "name": "paused_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "branch_name": {
-          "name": "branch_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sandbox_id": {
-          "name": "sandbox_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "budget_usd": {
-          "name": "budget_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "max_workers": {
-          "name": "max_workers",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 4
-        },
-        "time_limit_min": {
-          "name": "time_limit_min",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "spent_measured_usd": {
-          "name": "spent_measured_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "spent_estimated_usd": {
-          "name": "spent_estimated_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "spent_assumed_usd": {
-          "name": "spent_assumed_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "started_by": {
-          "name": "started_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "archived_at": {
-          "name": "archived_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_opened_at": {
-          "name": "last_opened_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "swarms_project_slug_idx": {
-          "name": "swarms_project_slug_idx",
-          "columns": [
-            {
-              "expression": "project_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "slug",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "swarms_project_idx": {
-          "name": "swarms_project_idx",
-          "columns": [
-            {
-              "expression": "project_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "swarms_project_id_projects_id_fk": {
-          "name": "swarms_project_id_projects_id_fk",
-          "tableFrom": "swarms",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarms_organization_id_organization_id_fk": {
-          "name": "swarms_organization_id_organization_id_fk",
-          "tableFrom": "swarms",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarms_template_id_swarm_templates_id_fk": {
-          "name": "swarms_template_id_swarm_templates_id_fk",
-          "tableFrom": "swarms",
-          "tableTo": "swarm_templates",
-          "columnsFrom": [
-            "template_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarms_sandbox_id_sandboxes_id_fk": {
-          "name": "swarms_sandbox_id_sandboxes_id_fk",
-          "tableFrom": "swarms",
-          "tableTo": "sandboxes",
-          "columnsFrom": [
-            "sandbox_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarms_started_by_user_id_fk": {
-          "name": "swarms_started_by_user_id_fk",
-          "tableFrom": "swarms",
-          "tableTo": "user",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "started_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

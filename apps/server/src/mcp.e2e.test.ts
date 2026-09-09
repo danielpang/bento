@@ -450,6 +450,46 @@ test("the callback exchanges the code and stores the tokens encrypted", async ()
   assert.ok(!JSON.stringify(status).includes("flow-access"), "no route returns the access token");
 });
 
+test("a stored OAuth sign-in stays connected after the access token expires", async () => {
+  const created = await jsonRequest("/api/mcp", "POST", {
+    name: "Durable OAuth",
+    slug: "durable-oauth",
+    url: "https://mcp.durable.test/mcp",
+    authType: "oauth",
+    credentialScope: "user",
+    personal: true,
+  });
+  assert.equal(created.status, 201);
+  const { id } = (await created.json()) as { id: string };
+
+  await ctx.db.insert(mcpCredentials).values({
+    serverId: id,
+    organizationId: null,
+    userId: ctx.userId,
+    kind: "oauth",
+    encryptedSecret: ctx.secretBox.encrypt("stale-access"),
+    encryptedRefreshToken: ctx.secretBox.encrypt("refresh-still-good"),
+    expiresAt: new Date(Date.now() - 60_000),
+    hint: "…oken",
+  });
+
+  const status = (await (await app.request("/api/mcp/status")).json()) as {
+    servers: { id: string; userCredential: { connected: boolean } | null }[];
+  };
+  const row = status.servers.find((s) => s.id === id);
+  assert.equal(row?.userCredential?.connected, true, "expiry must not force a new sign in");
+
+  const gone = await jsonRequest(`/api/mcp/${id}/user-credential`, "DELETE");
+  assert.equal(gone.status, 200);
+  const after = (await (await app.request("/api/mcp/status")).json()) as {
+    servers: { id: string; userCredential: { connected: boolean } | null }[];
+  };
+  const disconnected = after.servers.find((s) => s.id === id);
+  assert.equal(disconnected?.userCredential?.connected, false, "disconnect is what ends the sign in");
+
+  await jsonRequest(`/api/mcp/${id}`, "DELETE");
+});
+
 test("the callback rejects a tampered state, a wrong issuer, and a mismatched server id", async () => {
   const id = await makeOAuthServer("org");
   const connect = await jsonRequest(`/api/mcp/${id}/connect`, "POST");

@@ -318,6 +318,19 @@ export const featurePullRequests = pgTable(
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
     /** Denormalized so a row still names its repository after a removal. */
     repoUrl: text("repo_url").notNull(),
+    /**
+     * The branch this pull request was opened from.
+     *
+     * A card outlives its branches. When its pull request merges, the
+     * next message it gets starts a new branch, and that branch opens
+     * its own pull request in the same repository, so "the card's pull
+     * request in this repository" is a question with several answers
+     * and only one of them current. The branch is what tells them
+     * apart, and it is part of the key: a card keeps every pull
+     * request it has ever had, and anything asking for the live one
+     * asks by the branch the card is on now.
+     */
+    branch: text("branch").notNull(),
     number: integer("number").notNull(),
     url: text("url").notNull(),
     /**
@@ -331,7 +344,7 @@ export const featurePullRequests = pgTable(
     headSha: text("head_sha"),
     ...timestamps,
   },
-  (t) => [uniqueIndex("feature_pull_requests_feature_repo_idx").on(t.featureId, t.repoUrl)],
+  (t) => [uniqueIndex("feature_pull_requests_feature_repo_branch_idx").on(t.featureId, t.repoUrl, t.branch)],
 );
 
 /**
@@ -1199,6 +1212,137 @@ export const mcpRunGrants = pgTable(
     uniqueIndex("mcp_run_grants_run_idx").on(t.runId),
     uniqueIndex("mcp_run_grants_token_idx").on(t.tokenHash),
     index("mcp_run_grants_expires_idx").on(t.expiresAt),
+  ],
+);
+
+/**
+ * An inbound MCP connection: a token an outside agent presents to
+ * Bento's own MCP server (/api/mcp-server) to create cards and read
+ * their progress. The mirror image of mcp_servers, which is Bento
+ * consuming somebody else's server.
+ *
+ * A connection acts as its creator, within the scope chosen when it
+ * was authorized: the whole organization, or a pinned selection of
+ * projects (the mcp_run_grants serverIds precedent). Only the sha256
+ * of the token is stored; the raw value is shown once at creation and
+ * never again. There is no expiry: the token stays valid until it is
+ * disconnected or its owner leaves the organization.
+ */
+export const mcpConnections = pgTable(
+  "mcp_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** The member this connection acts as. Their departure ends it. */
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /**
+     * "organization" reaches every project the team has, now and later;
+     * "projects" reaches only projectIds, re-checked live per request so
+     * a project that leaves the organization drops out of scope.
+     */
+    scope: text("scope", { enum: ["organization", "projects"] }).notNull(),
+    projectIds: jsonb("project_ids").$type<string[]>().notNull().default([]),
+    tokenHash: text("token_hash").notNull(),
+    /** Masked tail so the UI can say which token a row is. */
+    tokenHint: text("token_hint").notNull().default(""),
+    /**
+     * OAuth refresh token hash. Null on a connection minted from
+     * Settings rather than the Claude/Cursor sign-in. Looked up only on
+     * the token endpoint; a refresh token is not a Bearer credential.
+     */
+    refreshTokenHash: text("refresh_token_hash"),
+    /** The OAuth client_id that created this connection, when it did. */
+    oauthClientId: text("oauth_client_id"),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    requestCount: integer("request_count").notNull().default(0),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("mcp_connections_token_idx").on(t.tokenHash),
+    uniqueIndex("mcp_connections_refresh_idx").on(t.refreshTokenHash),
+    index("mcp_connections_org_idx").on(t.organizationId),
+  ],
+);
+
+/**
+ * Dynamically registered OAuth clients (RFC 7591). Claude, Cursor, and
+ * other MCP hosts register themselves before the authorize redirect.
+ * Not tenant-scoped: registration happens before anyone signs in, and
+ * the row is only a client_id plus allowed redirect URIs.
+ */
+export const mcpOAuthClients = pgTable(
+  "mcp_oauth_clients",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    clientId: text("client_id").notNull(),
+    clientSecretHash: text("client_secret_hash"),
+    clientName: text("client_name").notNull().default(""),
+    redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+    tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("mcp_oauth_clients_client_idx").on(t.clientId)],
+);
+
+/**
+ * An in-flight authorization request, between the MCP host opening
+ * /mcp-oauth/authorize and the member approving on the consent page.
+ * Short-lived, not tenant-scoped: the member has not consented yet.
+ */
+export const mcpOAuthRequests = pgTable(
+  "mcp_oauth_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    clientId: text("client_id").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    state: text("state"),
+    codeChallenge: text("code_challenge").notNull(),
+    resource: text("resource").notNull(),
+    scope: text("scope"),
+    /**
+     * Claimed on the first authenticated consent read, so a request
+     * opened in one browser cannot be finished by a different account.
+     */
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("mcp_oauth_requests_expires_idx").on(t.expiresAt)],
+);
+
+/**
+ * Single-use authorization codes, exchanged for the connection's
+ * tokens. Parented by the connection created at consent, so disconnect
+ * or owner-leave deletes any unused code.
+ */
+export const mcpOAuthCodes = pgTable(
+  "mcp_oauth_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    codeHash: text("code_hash").notNull(),
+    clientId: text("client_id").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    resource: text("resource").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => mcpConnections.id, { onDelete: "cascade" }),
+    /** Filled by the inherit trigger from the parent connection row. */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /**
+     * SecretBox ciphertext of the access and refresh tokens. Exists
+     * only until the code is exchanged, then the row is deleted.
+     */
+    tokenBundle: text("token_bundle").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_oauth_codes_hash_idx").on(t.codeHash),
+    index("mcp_oauth_codes_expires_idx").on(t.expiresAt),
   ],
 );
 

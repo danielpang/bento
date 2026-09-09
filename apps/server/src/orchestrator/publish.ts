@@ -12,6 +12,38 @@ import type { Db } from "@bento/db";
 
 const run = promisify(execFile);
 
+/** True when publish failed because the bundle base is not an ancestor of HEAD. */
+export function isAncestryPublishFailure(reason: string): boolean {
+  return /merge-base.*--is-ancestor/i.test(reason);
+}
+
+/**
+ * The fork point between the default branch and HEAD. Used as the
+ * bundle base so a feature branched before main moved forward still
+ * publishes; the default branch tip alone is not always an ancestor.
+ */
+export async function resolvePublishBaseSha(repoPath: string, defaultBranch: string): Promise<string> {
+  const baseRef = await resolveDefaultBranchRef(repoPath, defaultBranch);
+  try {
+    const { stdout } = await run("git", ["-C", repoPath, "merge-base", baseRef, "HEAD"]);
+    const sha = stdout.trim();
+    if (sha) return sha;
+  } catch {
+    // Fall back to the branch tip when histories do not share a merge-base.
+  }
+  const { stdout } = await run("git", ["-C", repoPath, "rev-parse", `${baseRef}^{commit}`]);
+  return stdout.trim();
+}
+
+async function resolveDefaultBranchRef(repoPath: string, defaultBranch: string): Promise<string> {
+  try {
+    await run("git", ["-C", repoPath, "rev-parse", "--verify", `${defaultBranch}^{commit}`]);
+    return defaultBranch;
+  } catch {
+    return `origin/${defaultBranch}`;
+  }
+}
+
 /**
  * Answers git's credential prompt from the environment.
  *
@@ -49,15 +81,26 @@ export interface PublishedPullRequest {
   repoUrl: string;
   prNumber: number;
   url: string;
+  /** True when opened as a draft because the branch could not be rebased cleanly. */
+  draft?: boolean;
 }
 
-/** Downloads a private repository on the trusted host and strips credentials before transfer. */
+/**
+ * Downloads a private repository on the trusted host and strips
+ * credentials before transfer.
+ *
+ * Returns the branch the bundle carries alongside the bytes. It is
+ * usually the branch asked for, but when the stored default branch no
+ * longer exists on the remote the clone falls back to the remote's real
+ * default, so the caller must record which branch it got and hand that
+ * name to the sandbox.
+ */
 export async function createRepositorySeed(
   publisher: GitHubPublisher,
   repoUrl: string,
   githubRepoId: number | undefined,
   baseBranch: string,
-): Promise<Buffer> {
+): Promise<{ bundle: Buffer; baseBranch: string }> {
   const parsed = parseRepoUrl(repoUrl);
   if (!parsed) throw new Error(`not a GitHub remote: ${repoUrl}`);
   const remote = `https://github.com/${parsed.owner}/${parsed.repo}.git`;
@@ -69,26 +112,26 @@ export async function createRepositorySeed(
   await mkdir(home);
   const env = trustedGitEnv(home, token);
   try {
-    await cloneBaseBranch({
+    const resolvedBranch = await cloneBaseBranch({
       remote,
       label: `${parsed.owner}/${parsed.repo}`,
       baseBranch,
       checkout,
       env,
+      fallbackToDefaultBranch: true,
     });
-    await run("git", ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${baseBranch}`], { env });
-    return await readFile(bundlePath);
+    await run("git", ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${resolvedBranch}`], { env });
+    return { bundle: await readFile(bundlePath), baseBranch: resolvedBranch };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 }
 
 /** Exports committed work without reading any remote or credential config. */
-async function bundleFromWorktree(worktreePath: string, base: string): Promise<RepositoryBundle | null> {
+async function bundleFromWorktree(worktreePath: string, defaultBranch: string): Promise<RepositoryBundle | null> {
   try {
-    const { stdout: baseOut } = await run("git", ["-C", worktreePath, "rev-parse", `${base}^{commit}`]);
+    const baseSha = await resolvePublishBaseSha(worktreePath, defaultBranch);
     const { stdout: headOut } = await run("git", ["-C", worktreePath, "rev-parse", "HEAD^{commit}"]);
-    const baseSha = baseOut.trim();
     const headSha = headOut.trim();
     if (baseSha === headSha) return null;
     const dir = await mkdtemp(path.join(tmpdir(), "bento-export-"));
@@ -139,6 +182,14 @@ export async function publishFeatureBranches(
      * generated markdown files in the diff.
      */
     includeStageNotes?: boolean;
+    /**
+     * Push the branch and open a draft pull request even when the
+     * bundle base is not an ancestor of HEAD. Used when a rebase run
+     * could not be started and something on GitHub is still useful.
+     */
+    draft?: boolean;
+    /** When set, only these repository names are published. */
+    onlyRepositories?: string[];
   } = {},
 ): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
   const published: PublishedPullRequest[] = [];
@@ -160,7 +211,10 @@ export async function publishFeatureBranches(
     };
   }
 
+  const only = options.onlyRepositories ? new Set(options.onlyRepositories) : null;
+
   for (const repo of args.repositories) {
+    if (only && !only.has(repo.name)) continue;
     // Publishing only happens when a stage asked for it, so a
     // repository that cannot be published is worth saying out loud
     // rather than skipping: the person who turned the mode on is
@@ -211,12 +265,23 @@ export async function publishFeatureBranches(
       const [known] = await db
         .select({ headSha: featurePullRequests.headSha })
         .from(featurePullRequests)
-        .where(and(eq(featurePullRequests.featureId, args.featureId), eq(featurePullRequests.repoUrl, repo.repoUrl)))
+        .where(
+          and(
+            eq(featurePullRequests.featureId, args.featureId),
+            eq(featurePullRequests.repoUrl, repo.repoUrl),
+            // This branch's lease, not the card's. A card that merged
+            // one branch and started another has a row for each, and
+            // holding the old branch's head against a push to the new
+            // one would fail every publish after the first rotation.
+            eq(featurePullRequests.branch, args.branch),
+          ),
+        )
         .limit(1);
       const pushedHead = await pushBundle(bundle, remote, repo.defaultBranch, args.branch, token, {
         includeStageNotes: options.includeStageNotes === true,
         label: `${parsed.owner}/${parsed.repo}`,
         expectedRemoteHead: known?.headSha ?? null,
+        skipAncestryCheck: options.draft === true,
       });
 
       const pr = await publisher.ensurePullRequest({
@@ -225,7 +290,14 @@ export async function publishFeatureBranches(
         head: args.branch,
         base: repo.defaultBranch,
         title: args.featureTitle,
-        body: `Opened by Bento for "${args.featureTitle}".`,
+        body: options.draft
+          ? [
+              `Opened by Bento for "${args.featureTitle}".`,
+              "",
+              "This pull request is a draft because the branch could not be rebased onto the base branch automatically. It may have merge conflicts until the branch is rebased.",
+            ].join("\n")
+          : `Opened by Bento for "${args.featureTitle}".`,
+        draft: options.draft === true,
       });
 
       await db
@@ -234,16 +306,23 @@ export async function publishFeatureBranches(
           featureId: args.featureId,
           repositoryId: repo.id,
           repoUrl: repo.repoUrl,
+          branch: args.branch,
           number: pr.prNumber,
           url: pr.url,
           headSha: pushedHead,
         })
         .onConflictDoUpdate({
-          target: [featurePullRequests.featureId, featurePullRequests.repoUrl],
+          target: [featurePullRequests.featureId, featurePullRequests.repoUrl, featurePullRequests.branch],
           set: { number: pr.prNumber, url: pr.url, headSha: pushedHead, updatedAt: new Date() },
         });
 
-      published.push({ name: repo.name, repoUrl: repo.repoUrl, prNumber: pr.prNumber, url: pr.url });
+      published.push({
+        name: repo.name,
+        repoUrl: repo.repoUrl,
+        prNumber: pr.prNumber,
+        url: pr.url,
+        ...(options.draft ? { draft: true } : {}),
+      });
     } catch (err) {
       failures.push({ name: repo.name, reason: reasonOf(err) });
     }
@@ -272,6 +351,8 @@ async function pushBundle(
     label: string;
     /** The commit Bento last pushed, when one is recorded; the lease to hold. */
     expectedRemoteHead?: string | null;
+    /** Skip the bundle-base ancestry check and push HEAD anyway. */
+    skipAncestryCheck?: boolean;
   },
 ): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
@@ -296,8 +377,10 @@ async function pushBundle(
     await run("git", ["-C", checkout, "fetch", bundlePath, "HEAD"], { env });
     const { stdout: fetched } = await run("git", ["-C", checkout, "rev-parse", "FETCH_HEAD^{commit}"], { env });
     if (fetched.trim() !== bundle.headSha) throw new Error("exported Git bundle head did not match the declared commit");
-    await run("git", ["-C", checkout, "cat-file", "-e", `${bundle.baseSha}^{commit}`], { env });
-    await run("git", ["-C", checkout, "merge-base", "--is-ancestor", bundle.baseSha, bundle.headSha], { env });
+    if (!options.skipAncestryCheck) {
+      await run("git", ["-C", checkout, "cat-file", "-e", `${bundle.baseSha}^{commit}`], { env });
+      await run("git", ["-C", checkout, "merge-base", "--is-ancestor", bundle.baseSha, bundle.headSha], { env });
+    }
 
     const { stdout: remoteRef } = await run(
       "git",
@@ -396,17 +479,29 @@ async function withoutStageNotes(
 }
 
 /**
- * Clones the base branch, and says what to do when it is not there.
+ * Clones the base branch, and returns the branch it actually took.
  *
- * git's own word for this is "fatal: Remote branch main not found in
- * upstream origin", wrapped in a command line and a temporary path
- * nobody typed, and it arrives as the whole reason a run failed or a
- * pull request never appeared. Two repositories hit it: one connected
+ * git's own word for a missing branch is "fatal: Remote branch main not
+ * found in upstream origin", wrapped in a command line and a temporary
+ * path nobody typed, and it arrives as the whole reason a run failed or
+ * a pull request never appeared. Two repositories hit it: one connected
  * before its first commit, which has no branches at all, and one whose
- * default branch was renamed after it was connected. Both have a fix,
- * so the fix is what gets said.
+ * default branch was renamed after it was connected.
+ *
+ * A caller that only needs a starting point for the clone, and not the
+ * stored name in particular, sets `fallbackToDefaultBranch`. The seed
+ * for a run does: the remote still reports a real default branch through
+ * its HEAD, so a first clone that fails for want of the stored branch
+ * reads that default and clones it instead, and the returned name is the
+ * branch that got cloned so the seed and the sandbox agree on it. The
+ * repository with no commits has no default branch to find and still
+ * gets the error that says what to do.
+ *
+ * Publishing does not set it. There the stored branch is the pull
+ * request's base as well as the clone, so a rename is a mismatch a
+ * person must reconcile, not one this quietly papers over.
  */
-async function cloneBaseBranch(args: {
+export async function cloneBaseBranch(args: {
   remote: string;
   /** owner/repository, because the run record does not name it otherwise. */
   label: string;
@@ -415,9 +510,11 @@ async function cloneBaseBranch(args: {
   env: NodeJS.ProcessEnv;
   /** Clone flags this caller wants, ahead of the branch selection. */
   flags?: string[];
-}): Promise<void> {
-  try {
-    await run(
+  /** Clone the remote's real default branch when the stored one is gone. */
+  fallbackToDefaultBranch?: boolean;
+}): Promise<string> {
+  const cloneBranch = (branch: string) =>
+    run(
       "git",
       [
         ...credentialArguments(),
@@ -425,14 +522,24 @@ async function cloneBaseBranch(args: {
         ...(args.flags ?? []),
         "--single-branch",
         "--branch",
-        args.baseBranch,
+        branch,
         args.remote,
         args.checkout,
       ],
       { env: args.env },
     );
+  try {
+    await cloneBranch(args.baseBranch);
+    return args.baseBranch;
   } catch (err) {
     if (!missingBranchFailure(err)) throw err;
+    if (args.fallbackToDefaultBranch) {
+      const fallback = await remoteDefaultBranch(args.remote, args.env);
+      if (fallback && fallback !== args.baseBranch) {
+        await cloneBranch(fallback);
+        return fallback;
+      }
+    }
     // Chained, so git's own line is still in the server log and in the
     // exception capture. It is only kept out of what the person reads.
     throw new Error(
@@ -442,6 +549,26 @@ async function cloneBaseBranch(args: {
         "repository under Repositories and add it again to pick up the new name.",
       { cause: err },
     );
+  }
+}
+
+/**
+ * The branch the remote's HEAD points at, its real default branch, or
+ * null when the remote reports none. A repository with no commits has an
+ * unborn HEAD and lists nothing here, which is how the empty case is
+ * told apart from the renamed one.
+ */
+async function remoteDefaultBranch(remote: string, env: NodeJS.ProcessEnv): Promise<string | null> {
+  try {
+    const { stdout } = await run(
+      "git",
+      [...credentialArguments(), "ls-remote", "--symref", remote, "HEAD"],
+      { env },
+    );
+    const match = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(stdout);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 

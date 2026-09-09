@@ -33,7 +33,7 @@ import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
-import { publishFeatureBranches } from "./orchestrator/publish.js";
+import { publishFeatureBranches, resolvePublishBaseSha } from "./orchestrator/publish.js";
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -3733,6 +3733,7 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
       featureId: feature.id,
       repositoryId: repoRow!.id,
       repoUrl: "https://github.com/acme/resolve-conflicts",
+      branch: "feature/conflicted",
       number: 41,
       url: "https://github.com/acme/resolve-conflicts/pull/41",
     });
@@ -4061,7 +4062,7 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
     });
     const res = await app.request(`/api/features/${feature.id}/publish`, { method: "POST" });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { published: [], failures: [] });
+    assert.deepEqual(await res.json(), { published: [], failures: [], rebaseRun: null });
     assert.deepEqual(exported, [`sprite-publish-test:/workspace:${repo!.name}->main`]);
 
     // A sandbox that went away surfaces as a named failure, not a
@@ -4945,6 +4946,55 @@ test("the server pushes each repository the agent committed in", { timeout: 90_0
   // The feature's own pr_number mirrors the first repository's.
   const [mirrored] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
   assert.equal(mirrored?.prNumber, 42);
+});
+
+test("publish succeeds when the feature branch forked before main moved forward", { timeout: 90_000 }, async () => {
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-remote-behind-"));
+  await run("git", ["-C", bare, "init", "--bare", "-b", "main"]);
+  const work = await fixtureRepo("publishing-behind");
+  await run("git", ["-C", work, "push", bare, "main"]);
+
+  const branch = "feature/behind-main";
+  await run("git", ["-C", work, "checkout", "-q", "-b", branch]);
+  await writeFile(path.join(work, "feature.txt"), "feature work\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "feature work",
+  ]);
+
+  await run("git", ["-C", work, "checkout", "-q", "main"]);
+  await writeFile(path.join(work, "main-moved.txt"), "main moved\n");
+  await run("git", ["-C", work, "add", "-A"]);
+  await run("git", [
+    "-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", "main moved",
+  ]);
+  await run("git", ["-C", work, "checkout", "-q", branch]);
+
+  const baseSha = await resolvePublishBaseSha(work, "main");
+  const { stdout: fork } = await run("git", ["-C", work, "merge-base", "main", branch]);
+  assert.equal(baseSha, fork.trim());
+
+  const publisher = {
+    async pushToken() {
+      return "unused";
+    },
+    async ensurePullRequest(input: { owner: string; repo: string; head: string; base: string }) {
+      return { prNumber: 51, url: `https://github.com/${input.owner}/${input.repo}/pull/51` };
+    },
+  };
+  const { project } = await setupProject("Behind main");
+  const feature = await createFeature(project.id, "Behind main");
+  const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
+    featureId: feature.id,
+    featureTitle: "Behind main",
+    branch,
+    repositories: [
+      { id: null, name: "app", repoUrl: "https://github.com/acme/app", defaultBranch: "main", worktreePath: work },
+    ],
+  }, { remoteUrl: () => bare });
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(published.map((p) => p.name), ["app"]);
 });
 
 /**
@@ -6356,4 +6406,73 @@ test("finishing the card a split came from leaves its parts alone", async () => 
   );
   assert.notEqual(stillThere.status, "done", "the part did not finish because the parent did");
   assert.equal(stillThere.parentId, parent.id, "and it still knows where it came from");
+});
+
+/**
+ * A card is not one pull request.
+ *
+ * When its pull request merges, the next message starts a new branch
+ * and opens another, so the card has to keep both: the live one it
+ * answers for, and the record of what it has already shipped. Before
+ * the rows were keyed by branch there was room for only one per
+ * repository, and the second publish overwrote the first.
+ */
+test("a card keeps every pull request it has opened, and answers only for the live one", async () => {
+  const { project } = await setupProject("pr-history");
+  const feature = await createFeature(project.id, "Ships more than once");
+  const [repoRow] = await ctx.db.select().from(repositories).where(eq(repositories.projectId, project.id));
+
+  const shipped = "feature/ships-more-than-once";
+  const now = "feature/ships-more-than-once-2";
+  await ctx.db.update(features).set({ branchName: shipped }).where(eq(features.id, feature.id));
+  await ctx.db.insert(featurePullRequests).values({
+    featureId: feature.id,
+    repositoryId: repoRow!.id,
+    repoUrl: "https://github.com/acme/history",
+    branch: shipped,
+    number: 11,
+    url: "https://github.com/acme/history/pull/11",
+  });
+
+  // The merge sends the card to a new branch, and the next publish
+  // opens a pull request in the same repository from that one.
+  await ctx.db.update(features).set({ branchName: now, prNumber: null }).where(eq(features.id, feature.id));
+  await ctx.db.insert(featurePullRequests).values({
+    featureId: feature.id,
+    repositoryId: repoRow!.id,
+    repoUrl: "https://github.com/acme/history",
+    branch: now,
+    number: 12,
+    url: "https://github.com/acme/history/pull/12",
+  });
+
+  const detail = await json<{
+    pullRequests: { number: number }[];
+    pullRequestHistory: { number: number; branch: string; current: boolean }[];
+  }>(await app.request(`/api/features/${feature.id}`));
+
+  assert.deepEqual(
+    detail.pullRequests.map((pr) => pr.number),
+    [12],
+    "the card answers for the branch it is on, not the one it merged",
+  );
+  assert.deepEqual(
+    detail.pullRequestHistory.map((pr) => ({ number: pr.number, branch: pr.branch, current: pr.current })),
+    [
+      { number: 12, branch: now, current: true },
+      { number: 11, branch: shipped, current: false },
+    ],
+    "both are kept, newest first, and the live one says so",
+  );
+
+  // Every one of them is asked about, live or landed. Without a GitHub
+  // connection the answer is "unknown", which shows no chip rather
+  // than guessing at a state.
+  const states = await json<{ number: number; state: string }[]>(
+    await app.request(`/api/features/${feature.id}/pull-request-status`),
+  );
+  assert.deepEqual(states, [
+    { number: 12, url: "https://github.com/acme/history/pull/12", state: "unknown" },
+    { number: 11, url: "https://github.com/acme/history/pull/11", state: "unknown" },
+  ]);
 });

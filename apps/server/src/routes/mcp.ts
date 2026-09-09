@@ -157,6 +157,9 @@ export function mcpRoutes(ctx: AppContext) {
         apiKeyHeader: server.apiKeyHeader,
         oauthClientConfigured: Boolean(server.clientId),
         orgCredential:
+          // A stored credential is connected. Access-token expiry is
+          // the gateway's problem (it refreshes); the console must not
+          // ask the member to sign in again until they disconnect.
           perUser || personal ? null : org && { connected: true, hint: org.hint, expiresAt: org.expiresAt },
         userCredential:
           personal && mineServer

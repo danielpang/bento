@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import { and, asc, eq, isNull } from "drizzle-orm";
@@ -7,6 +7,7 @@ import {
   account,
   deviceCode,
   invitation,
+  mcpConnections,
   mcpCredentials,
   mcpRunGrants,
   member,
@@ -17,6 +18,7 @@ import {
   verification,
   type Db,
 } from "@bento/db";
+import { authEventHook, methodFor, type AuthEvent } from "./auth-events.js";
 import type { Env } from "./env.js";
 import {
   deleteAccountMessage,
@@ -119,7 +121,9 @@ export interface AuthHooks {
    * awaited into the sign up's fate: an analytics outage must not
    * refuse an account.
    */
-  onUserSignedUp?: (user: { id: string; email: string; name: string }) => void;
+  onUserSignedUp?: (user: { id: string; email: string; name: string; method: string; route: string }) => void;
+  /** A sign in or sign up outcome from better-auth's after hook. Sign up successes come through onUserSignedUp. */
+  onAuthEvent?: (event: AuthEvent) => void;
 }
 
 function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
@@ -149,6 +153,8 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
   /** Where the emails point back to, for their footer links. */
   const appUrl = env.BETTER_AUTH_URL.replace(/\/$/, "");
 
+  const report = authEventHook((event) => hooks.onAuthEvent?.(event));
+
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
@@ -170,6 +176,16 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       transaction: true,
     }),
     trustedOrigins: env.BENTO_TRUSTED_ORIGINS,
+    // Sign in and sign up outcomes, for PostHog. See auth-events.ts.
+    ...(hooks.onAuthEvent
+      ? {
+          hooks: {
+            after: createAuthMiddleware(async (ctx) => {
+              report(ctx);
+            }),
+          },
+        }
+      : {}),
     /**
      * Every new session starts in the user's first organization.
      *
@@ -188,9 +204,15 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
     databaseHooks: {
       user: {
         create: {
-          async after(newUser) {
+          async after(newUser, ctx) {
             try {
-              hooks.onUserSignedUp?.({ id: newUser.id, email: newUser.email, name: newUser.name });
+              hooks.onUserSignedUp?.({
+                id: newUser.id,
+                email: newUser.email,
+                name: newUser.name,
+                method: methodFor(ctx),
+                route: ctx?.path ?? "",
+              });
             } catch (err) {
               console.warn("sign up hook failed:", err);
             }
@@ -344,6 +366,12 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
               await db
                 .delete(mcpCredentials)
                 .where(and(eq(mcpCredentials.organizationId, org.id), eq(mcpCredentials.userId, removed.id)));
+              // Inbound connections act as their creator, so a removed
+              // member's stop resolving immediately (the live membership
+              // re-read); deleting the rows is the same hygiene.
+              await db
+                .delete(mcpConnections)
+                .where(and(eq(mcpConnections.organizationId, org.id), eq(mcpConnections.ownerId, removed.id)));
               await db
                 .update(mcpRunGrants)
                 .set({ revokedAt: new Date() })

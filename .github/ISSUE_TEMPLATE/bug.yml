@@ -1,0 +1,88 @@
+name: Bug report
+description: Something in Bento did not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fill this in so we can reproduce the problem. Drag screenshots into the Screenshots field.
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Bento mode
+      description: The `BENTO_MODE` the server is running in. Hosted at usebento.ai is multi.
+      options:
+        - local
+        - multi
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how
+    attributes:
+      label: How are you running Bento?
+      options:
+        - Docker
+        - In-process
+        - usebento.ai
+    validations:
+      required: true
+
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Harness
+      description: The coding agent that was running, if the issue involves a run.
+      options:
+        - Claude Code
+        - Codex CLI
+        - Cursor CLI
+        - opencode
+        - pi
+        - Poolside
+        - DeepSeek Harness
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The model id on that agent, for example claude-sonnet-5. Leave blank if not applicable.
+      placeholder: claude-sonnet-5
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: What did you do?
+      description: The actions you took before the error.
+      placeholder: |
+        1. Created a card on the implementation stage
+        2. Advanced it
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: The error, unexpected UI, or incorrect result. Paste logs if you have them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened?
+      description: The outcome you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Drag and drop images here, or paste them.
