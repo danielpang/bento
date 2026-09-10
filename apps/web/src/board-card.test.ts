@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { Feature, FeatureSpend, Stage } from "@bento/api-client";
+import type { AgentProfile, Feature, FeatureSpend, Stage } from "@bento/api-client";
 import { Board } from "./components/Board.js";
 import { BetaTestersScope } from "./beta.js";
 
@@ -45,15 +45,28 @@ function spend(costUsd: number | null, extra: Partial<FeatureSpend> = {}): Featu
   };
 }
 
+const profile: AgentProfile = {
+  id: "ag1",
+  name: "Builder",
+  cli: "claude-code",
+  model: "claude-sonnet-4-5",
+};
+
 function render(
   features: Feature[],
   spendByFeature: Record<string, FeatureSpend> = {},
-  extra: { runStatusByFeature?: Record<string, string>; selectedId?: string; beta?: boolean } = {},
+  extra: {
+    runStatusByFeature?: Record<string, string>;
+    selectedId?: string;
+    beta?: boolean;
+    stages?: Stage[];
+    profiles?: AgentProfile[];
+  } = {},
 ) {
   const board = createElement(Board, {
-    stages: [stage],
+    stages: extra.stages ?? [stage],
     features,
-    profiles: [],
+    profiles: extra.profiles ?? [],
     runStatusByFeature: extra.runStatusByFeature ?? {},
     lastOutputByFeature: {},
     pulses: {},
@@ -63,6 +76,9 @@ function render(
     onMove: noop,
     onFinish: noop,
     onNewCard: noop,
+    onAssignAgent: async () => {},
+    onEditAgent: noop,
+    onNewAgent: noop,
     drawerOpen: false,
   });
   // Groups are behind the beta flag, and the flag defaults to off with
@@ -192,4 +208,26 @@ test("selecting a mid-level parent rings its parts, not only the card it came fr
 test("an ordinary selection does not dim the board", () => {
   const html = render([feature("active", "solo")], {}, { beta: true, selectedId: "solo" });
   assert.doesNotMatch(html, /data-grouped/);
+});
+
+test("a stage with an agent renders a control to change it", () => {
+  const html = render([feature("active")], {}, {
+    stages: [{ ...stage, defaultAgentProfileId: profile.id }],
+    profiles: [profile],
+  });
+  assert.match(html, /aria-label="Change the agent for the Build stage"/);
+  assert.match(html, />Builder</);
+});
+
+test("a stage with no agent renders a control to assign one", () => {
+  const html = render([feature("active")]);
+  assert.match(html, /aria-label="Assign an agent to the Build stage"/);
+});
+
+test("Backlog and Completed name their agent as a label, not a control", () => {
+  const html = render([feature("active")]);
+  assert.match(html, /<span class="lane-agent lane-agent-empty">no agent assigned<\/span>/);
+  assert.match(html, /<span class="lane-agent lane-agent-empty">finished work<\/span>/);
+  assert.doesNotMatch(html, /aria-label="Assign an agent to the Backlog stage"/);
+  assert.doesNotMatch(html, /aria-label="Assign an agent to the Completed stage"/);
 });
