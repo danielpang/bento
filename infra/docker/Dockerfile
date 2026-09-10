@@ -13,12 +13,9 @@ COPY apps/server ./apps/server
 COPY apps/web ./apps/web
 
 RUN pnpm install --frozen-lockfile
-# SOURCE_COMMIT is the console's build id (see apps/web/src/build-id.ts)
-# as well as the source map release below; a build without it derives
-# an id from its own output.
+# Also the console's build id (apps/web/src/build-id.ts).
 ARG SOURCE_COMMIT
-RUN pnpm --filter @bento/server... build \
- && SOURCE_COMMIT="${SOURCE_COMMIT:-}" pnpm --filter @bento/web... build
+RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
 
 # Upload the maps, then delete them even if the upload was skipped: the
 # final stage copies this one whole and the server serves /assets, so a

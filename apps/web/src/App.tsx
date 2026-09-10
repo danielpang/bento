@@ -122,8 +122,6 @@ function RouteFallback() {
 
 const client = new BentoClient({
   baseUrl: window.location.origin,
-  // Every response names the build the server serves; the watch turns
-  // the first one that is not this page's into the reload prompt.
   onBuild: buildWatch.note,
 });
 

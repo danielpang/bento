@@ -4962,8 +4962,7 @@ button.lane-agent[data-saving] {
   border-left-color: var(--succeeded);
 }
 
-/* The reload prompt after a deploy: the brand, because it is news
-   about the console itself rather than the outcome of an action. */
+/* The reload prompt after a deploy. */
 .toast[data-tone="update"] {
   border-left-color: var(--brand);
   align-items: center;

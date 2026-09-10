@@ -4,7 +4,7 @@ import { App } from "./App.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { ToastHost } from "./components/Toasts.js";
 import { startErrorTracking } from "./posthog.js";
-import { buildWatch, PRELOAD_RELOAD_KEY, preloadErrorAction } from "./build-watch.js";
+import { ownBuild } from "./build-watch.js";
 import "./styles.css";
 
 const root = document.getElementById("root");
@@ -14,25 +14,18 @@ if (!root) throw new Error("missing #root");
 // screen paints, but a slow or missing PostHog key must not hold it.
 void startErrorTracking();
 
-/**
- * A lazy chunk that failed to load is, nearly always, a chunk the last
- * deploy replaced: this page names files the server no longer has.
- * A reload fetches a shell that names the current ones, so the first
- * failure reloads instead of blanking the console with "Something
- * went wrong". Once per build, remembered for the tab: a page that
- * still cannot load its chunks after reloading has a different
- * problem, and that one goes to the ErrorBoundary as before.
- */
+// A lazy chunk that fails to load is almost always one the last deploy
+// replaced, so reload once per build; a second failure means something
+// else and reaches the ErrorBoundary as before. Without storage there
+// is no way to stop a loop, so no reload either.
 window.addEventListener("vite:preloadError", (event) => {
-  let reloadedFor: string | null = null;
+  const mark = ownBuild ?? "no-build";
   try {
-    reloadedFor = sessionStorage.getItem(PRELOAD_RELOAD_KEY);
-  } catch {}
-  const action = preloadErrorAction(buildWatch.snapshot().own, reloadedFor);
-  if (!action.reload) return;
-  try {
-    sessionStorage.setItem(PRELOAD_RELOAD_KEY, action.mark);
-  } catch {}
+    if (sessionStorage.getItem("bento:preload-reloaded") === mark) return;
+    sessionStorage.setItem("bento:preload-reloaded", mark);
+  } catch {
+    return;
+  }
   event.preventDefault();
   window.location.reload();
 });

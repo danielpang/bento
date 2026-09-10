@@ -1,4 +1,4 @@
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type Next } from "hono";
 import { cors } from "hono/cors";
 import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
@@ -32,7 +32,7 @@ import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
-import { BUILD_HEADER, cachedStatic, loadWebShell } from "./web-shell.js";
+import { BUILD_HEADER, cachedStatic, createWebShell } from "./web-shell.js";
 
 export interface AppExtras {
   /**
@@ -47,13 +47,10 @@ export interface AppExtras {
 export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   const app = new Hono();
 
-  // The console's shell and its build id, when this server serves the
-  // console at all. Read here, ahead of the routes, because the id
-  // rides on every API response and on /api/health, not only on the
-  // static routes at the bottom.
-  const shell = ctx.env.BENTO_WEB_DIR ? loadWebShell(ctx.env.BENTO_WEB_DIR) : null;
-  if (ctx.env.BENTO_WEB_DIR && !shell) {
-    console.warn(`BENTO_WEB_DIR=${ctx.env.BENTO_WEB_DIR} has no index.html: the console is not being served`);
+  // Ahead of the routes: the build id rides on every API response.
+  const shell = ctx.env.BENTO_WEB_DIR ? createWebShell(ctx.env.BENTO_WEB_DIR) : null;
+  if (shell && !shell.load()) {
+    console.warn(`BENTO_WEB_DIR=${ctx.env.BENTO_WEB_DIR} has no index.html yet: the console is not being served`);
   }
 
   /**
@@ -93,26 +90,19 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
         origin: ctx.env.BENTO_TRUSTED_ORIGINS,
         allowHeaders: ["Content-Type", "Authorization"],
         allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        exposeHeaders: ["Content-Length", "set-auth-token", BUILD_HEADER],
+        exposeHeaders: ["Content-Length", "set-auth-token"],
         credentials: true,
         maxAge: 600,
       }),
     );
   }
 
-  /**
-   * Which build of the console this server serves, on every API
-   * response. A tab compares it with the build it loaded and prompts
-   * for a reload when they differ, which is how a deploy reaches a
-   * page that was open before it. Response side so that it costs no
-   * request: the first fetch after the deploy (the board refetch that
-   * follows the stream reconnect) carries it.
-   */
-  if (shell?.build) {
-    const build = shell.build;
+  // The console build this server serves. A tab compares it with its
+  // own and prompts for a reload on a mismatch, at no extra request.
+  if (shell) {
     app.use("/api/*", async (c, next) => {
       await next();
-      c.res.headers.set(BUILD_HEADER, build);
+      if (shell.build) c.res.headers.set(BUILD_HEADER, shell.build);
     });
   }
 
@@ -126,10 +116,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
         ok: true,
         mode: ctx.env.BENTO_MODE,
         driver: ctx.driver.provider,
-        // The console build this server serves. Also on every API
-        // response as a header; here for people and for clients
-        // that want to ask outright.
-        ...(shell?.build ? { build: shell.build } : {}),
+        build: shell?.build ?? undefined,
         // Which social logins are actually configured, so the sign-in
         // page offers real buttons rather than ones that can only 404.
         social: {
@@ -375,29 +362,26 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
    * Unset in local development, where Vite serves the app and proxies
    * /api here instead.
    */
-  if (ctx.env.BENTO_WEB_DIR && shell) {
-    const webDir = ctx.env.BENTO_WEB_DIR;
-    /**
-     * The shell must never be cached past a deploy: it names hashed
-     * chunks, and a cached copy points at files the new image does
-     * not have, which is what the reload prompt exists to escape. So
-     * no-cache: a browser may keep it but has to ask before using it.
-     * Served from memory, the same bytes the build id was read from.
-     */
-    const serveShell = (c: Context) => {
+  if (shell) {
+    const webDir = ctx.env.BENTO_WEB_DIR!;
+    // no-cache: the shell names hashed chunks, and a cached copy points
+    // at files the next deploy no longer has. The build id is the ETag.
+    const serveShell = (c: Context, next: Next) => {
+      const page = shell.load();
+      if (!page) return next();
       c.header("cache-control", "no-cache");
-      return c.html(shell.html);
+      if (page.build) {
+        const etag = `"${page.build}"`;
+        if (c.req.header("if-none-match") === etag) return c.body(null, 304);
+        c.header("etag", etag);
+      }
+      return c.html(page.html);
     };
-    // Ahead of the static root below, which would resolve "/" to
-    // index.html itself and stamp it with an hour of cache.
+    // Ahead of the static root, which would serve both with an hour of cache.
     app.get("/", serveShell);
+    app.get("/index.html", serveShell);
     // Hashed filenames, so assets can be cached indefinitely.
     app.use("/assets/*", cachedStatic(webDir, "public, max-age=31536000, immutable"));
-    // A chunk the build did not emit is a 404, not the shell: a stale
-    // page asking for last deploy's chunk used to be handed HTML with
-    // a 200, which the browser reported as a wrong MIME type rather
-    // than as the missing file it was.
-    app.get("/assets/*", (c) => c.text("not found", 404));
     /**
      * Files that sit at the root of the build: the favicons and the
      * touch icon. Without this they fell through to the shell below and
@@ -418,7 +402,10 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
       if (c.req.path.startsWith("/.well-known/")) return next();
       if (c.req.path === "/mcp" || c.req.path === "/mcp/") return next();
       if (c.req.path.startsWith("/mcp-oauth/")) return next();
-      return serveShell(c);
+      // A missing file (a chunk from the last deploy) is a 404, not the
+      // shell served as a 200 with the wrong type.
+      if (FILE_PATH.test(c.req.path)) return c.text("not found", 404);
+      return serveShell(c, next);
     });
   }
 
@@ -426,6 +413,9 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
 }
 
 export type AppType = ReturnType<typeof createApp>;
+
+/** A path whose last segment has an extension. Client routes never do. */
+const FILE_PATH = /\.[A-Za-z0-9]+$/;
 
 /**
  * The better-auth organization routes that change how many people an

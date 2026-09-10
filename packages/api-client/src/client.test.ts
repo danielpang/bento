@@ -58,8 +58,9 @@ test("onBuild fires on a refusal too, since a renamed route is a deploy", async 
   assert.deepEqual(seen, ["ccc"]);
 });
 
-test("onBuild fires for document requests as well as JSON", async () => {
-  const { client, seen } = serverWith(["ddd"]);
+test("onBuild fires for document and transcript requests as well as JSON", async () => {
+  const { client, seen } = serverWith(["ddd", "eee"]);
   await client.exportPipeline("11111111-1111-1111-1111-111111111111");
-  assert.deepEqual(seen, ["ddd"]);
+  await client.getTranscript("22222222-2222-2222-2222-222222222222");
+  assert.deepEqual(seen, ["ddd", "eee"]);
 });

@@ -3,7 +3,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { BUILD_META, buildIdFor } from "./src/build-id.js";
+import { BUILD_META } from "@bento/core";
+import { buildIdFor } from "./src/build-id.js";
 
 /**
  * Stamps every icon URL in index.html with a hash of the file it points at.
@@ -91,25 +92,17 @@ function stampIcons(): Plugin {
 }
 
 /**
- * Stamps the build id into index.html, so a page can tell which build
- * it is and the server can tell which build it serves.
- *
- * A tab left open across a deploy keeps running the old bundle: its
- * next lazy chunk is a file the new image does not have, and its
- * requests speak to a server that may have moved on. The server sends
- * the id it read from this file on every API response, the console
- * compares that with the id here, and a mismatch is the prompt to
- * reload. See build-id.ts for where the id comes from. Build only:
- * the dev server emits no tag, and the console stays quiet without
- * one.
+ * Stamps the build id into index.html (see src/build-id.ts). The server
+ * reads it from the file it serves and the console compares it with
+ * its own page; a mismatch is the prompt to reload after a deploy.
+ * Build only: the dev server emits no tag.
  */
 function stampBuild(): Plugin {
   return {
     name: "bento-stamp-build",
     apply: "build",
     transformIndexHtml: {
-      // After the bundle exists, so the fallback id can see its files.
-      order: "post",
+      order: "post", // the fallback id hashes the emitted files
       handler(_html, ctx) {
         const id = buildIdFor(process.env.SOURCE_COMMIT, Object.keys(ctx.bundle ?? {}));
         if (!id) return [];

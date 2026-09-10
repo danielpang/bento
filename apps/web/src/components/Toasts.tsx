@@ -91,8 +91,7 @@ export function ToastHost({ children }: { children: ReactNode }) {
             </button>
           </div>
         ))}
-        {/* Nearest the corner, so it holds its place while the
-            transient ones come and go above it. */}
+        {/* Last, so it holds its place while transient toasts come and go. */}
         <StaleBuildToast />
       </div>
     </ToastContext.Provider>

@@ -1,4 +1,5 @@
 import { SseParser, type AgentDelta, type AgentEvent, type GateCriteria } from "@bento/core";
+import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
   AgentRun,
@@ -25,9 +26,6 @@ import type {
   FlagSnapshot,
 } from "./types.js";
 
-/** The response header naming the console build the server serves. */
-export const BUILD_HEADER = "x-bento-build";
-
 export interface TokenStore {
   get(): string | null | Promise<string | null>;
   set(token: string | null): void | Promise<void>;
@@ -39,12 +37,9 @@ export interface ClientOptions {
   tokens?: TokenStore;
   fetch?: typeof fetch;
   /**
-   * The server named a console build (its `x-bento-build` header) the
-   * client had not seen before. Fires once per distinct value, on the
-   * first response that carries it and then only when it changes,
-   * which after a deploy is the first request to reach the new
-   * server. The console compares it with the build its page loaded
-   * and offers a reload; clients that are not a page leave it unset.
+   * A response named a console build (`x-bento-build`) this client had
+   * not seen. Fires once per distinct value. The console uses it to
+   * offer a reload after a deploy; other clients leave it unset.
    */
   onBuild?: (build: string) => void;
 }
@@ -390,29 +385,31 @@ export class BentoClient {
   }
 
   /**
-   * Before the status check on purpose: a 404 from a server that
-   * renamed the route is exactly the response that should say a
-   * deploy happened.
+   * Every request goes through here: the bearer token or the cookie,
+   * and the build header check before the status check, since a 404
+   * from a renamed route is a deploy too.
    */
-  private noteBuild(res: Response): void {
+  private async send(url: string, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    const token = await this.tokens?.get();
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    const res = await this.fetchImpl(url, {
+      ...init,
+      headers,
+      credentials: this.tokens ? "omit" : "include",
+    });
     const build = res.headers.get(BUILD_HEADER);
-    if (!build || build === this.lastBuild) return;
-    this.lastBuild = build;
-    this.onBuild?.(build);
+    if (build && build !== this.lastBuild) {
+      this.lastBuild = build;
+      this.onBuild?.(build);
+    }
+    return res;
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
-    const token = await this.tokens?.get();
-    if (token) headers.set("authorization", `Bearer ${token}`);
-
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
-      credentials: this.tokens ? "omit" : "include",
-    });
-    this.noteBuild(res);
+    const res = await this.send(`${this.baseUrl}${path}`, { ...init, headers });
     if (!res.ok) {
       const body = await res.text();
       throw new ApiError(res.status, body || res.statusText);
@@ -426,15 +423,7 @@ export class BentoClient {
    * than JSON. Kept separate so `request` can go on assuming JSON.
    */
   private async requestText(path: string, init: RequestInit = {}): Promise<string> {
-    const headers = new Headers(init.headers);
-    const token = await this.tokens?.get();
-    if (token) headers.set("authorization", `Bearer ${token}`);
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
-      credentials: this.tokens ? "omit" : "include",
-    });
-    this.noteBuild(res);
+    const res = await this.send(`${this.baseUrl}${path}`, init);
     const body = await res.text();
     if (!res.ok) throw new ApiError(res.status, body || res.statusText);
     return body;
@@ -847,12 +836,7 @@ export class BentoClient {
    * that rather than asking per card and growing with the board.
    */
   async getBoardSnapshot(projectId: string): Promise<{ statuses: Record<string, string>; outputs: Record<string, string> }> {
-    const token = await this.tokens?.get();
-    const res = await this.fetchImpl(`${this.baseUrl}/api/projects/${projectId}/board/plain`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      credentials: this.tokens ? "omit" : "include",
-    });
-    this.noteBuild(res);
+    const res = await this.send(`${this.baseUrl}/api/projects/${projectId}/board/plain`);
     if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
     const statuses: Record<string, string> = {};
     const outputs: Record<string, string> = {};
@@ -1237,11 +1221,7 @@ export class BentoClient {
 
   /** Plain text transcript with a cursor, for clients that cannot hold SSE. */
   async getTranscript(runId: string, since = 0): Promise<{ cursor: number; status: string; lines: string[] }> {
-    const token = await this.tokens?.get();
-    const res = await this.fetchImpl(`${this.baseUrl}/api/runs/${runId}/transcript?since=${since}`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      credentials: this.tokens ? "omit" : "include",
-    });
+    const res = await this.send(`${this.baseUrl}/api/runs/${runId}/transcript?since=${since}`);
     if (!res.ok) throw new ApiError(res.status, res.statusText);
     const text = await res.text();
     const [header = "cursor|0|unknown", ...lines] = text.split("\n");
@@ -1324,12 +1304,7 @@ export class BentoClient {
       let failures = 0;
       while (!controller.signal.aborted) {
         try {
-          const token = await this.tokens!.get();
-          const res = await this.fetchImpl(`${base}?since=${lastSeq}`, {
-            headers: token ? { authorization: `Bearer ${token}` } : {},
-            credentials: "omit",
-            signal: controller.signal,
-          });
+          const res = await this.send(`${base}?since=${lastSeq}`, { signal: controller.signal });
           if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
