@@ -58,7 +58,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 
@@ -4672,7 +4672,12 @@ test("a repository's setup command runs before the agent, once per sandbox", { t
   assert.doesNotMatch(secondTranscript, /Setting up/);
 });
 
-test("a setup command that fails stops the run before the agent starts", { timeout: 120_000 }, async () => {
+test("a setup command that fails reaches the agent instead of preventing startup", { timeout: 120_000 }, async () => {
+  const adapter = getAdapter("fake");
+  const build = adapter.buildCommand.bind(adapter);
+  const prompts: string[] = [];
+  const spy = mock.method(adapter, "buildCommand", (input) => { prompts.push(input.prompt); return build(input); });
+  try {
   const checkout = await fixtureRepo("setup-fails");
   const project = await json<{ id: string }>(
     await app.request("/api/projects", {
@@ -4700,13 +4705,53 @@ test("a setup command that fails stops the run before the agent starts", { timeo
     }),
   );
 
-  assert.equal(await waitForRun(started.id, 90_000), "failed");
+  assert.equal(await waitForRun(started.id, 90_000), "succeeded");
   const detail = await json<{ error: string | null }>(await app.request(`/api/runs/${started.id}`));
-  assert.match(detail.error ?? "", /exited 7/);
+  assert.equal(detail.error, null);
   const transcript = await (await app.request(`/api/runs/${started.id}/transcript`)).text();
   assert.match(transcript, /no such package/, "the command's own output says why");
-  // The agent never ran, so nothing of its own is in the transcript.
-  assert.doesNotMatch(transcript, /Working on it/);
+  assert.match(transcript, /Starting the agent with the error details/);
+  assert.match(transcript, /Working on it/);
+  assert.ok(prompts.some((prompt) => prompt.includes("no such package") && prompt.includes("Diagnose and repair")), "the agent receives setup diagnostics, not just the UI");
+  } finally { spy.mock.restore(); }
+});
+
+test("a build-only setup command is deferred to agent checks", { timeout: 120_000 }, async () => {
+  const checkout = await fixtureRepo("setup-build-only");
+  const project = await json<{ id: string }>(await app.request("/api/projects", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Deferred build", localPath: checkout }),
+  }));
+  await unassignStages(project.id);
+  const [repo] = await json<{ id: string }[]>(await app.request(`/api/projects/${project.id}/repositories`));
+  await app.request(`/api/projects/${project.id}/repositories/${repo!.id}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ setupCommand: "turbo run build", testCommand: "pnpm test" }),
+  });
+  const adapter = getAdapter("fake"), build = adapter.buildCommand.bind(adapter);
+  const prompts: string[] = [];
+  const spy = mock.method(adapter, "buildCommand", (input) => { prompts.push(input.prompt); return build(input); });
+  try {
+    const feature = await createFeature(project.id, "Build after editing");
+    const profile = await fakeProfile("deferred-build-fake");
+    await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+    const started = await json<{ id: string }>(await app.request("/api/runs", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+    }));
+    assert.equal(await waitForRun(started.id, 90_000), "succeeded");
+    const transcript = await (await app.request(`/api/runs/${started.id}/transcript`)).text();
+    assert.doesNotMatch(transcript, /Setting up .*: turbo/);
+    assert.match(transcript, /after edits/);
+    assert.ok(prompts.some((prompt) => prompt.includes("turbo run build && pnpm test") && prompt.includes("Build and test after making your changes")));
+    const followUp = await json<{ id: string }>(await app.request("/api/runs", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "Check again" }),
+    }));
+    assert.equal(await waitForRun(followUp.id, 90_000), "succeeded");
+    assert.match(prompts.at(-1)!, /turbo run build && pnpm test/);
+    assert.match(prompts.at(-1)!, /Build and test after making your changes/);
+  } finally { spy.mock.restore(); }
 });
 
 /**
@@ -6374,4 +6419,14 @@ test("a card keeps every pull request it has opened, and answers only for the li
     { number: 12, url: "https://github.com/acme/history/pull/12", state: "unknown" },
     { number: 11, url: "https://github.com/acme/history/pull/11", state: "unknown" },
   ]);
+  // Old branches can still have open PRs. Their conflicts and CI must remain visible too.
+  for (const route of ["merge-status", "check-status"]) {
+    const statuses = await json<{ number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/${route}?history=all`),
+    );
+    assert.deepEqual(statuses.map((pr) => pr.number), [12, 11]);
+    assert.ok(statuses.every((pr) => pr.state === "unknown"));
+    const current = await json<{ number: number }[]>(await app.request(`/api/features/${feature.id}/${route}`));
+    assert.deepEqual(current.map((pr) => pr.number), [12], "default status reads remain scoped to the current branch");
+  }
 });

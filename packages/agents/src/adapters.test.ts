@@ -99,6 +99,35 @@ test("cursor marks error results as failed", () => {
   assert.equal(outcome.error, "auth failed");
 });
 
+test("cursor bounds its final background shell wait without limiting the active turn", () => {
+  const argv = cursorAdapter.buildCommand({ cwd: "/workspace", model: "auto", prompt: "Build it" });
+  assert.equal(argv[argv.indexOf("--background-shell-timeout") + 1], "30");
+  assert.ok(!argv.includes("--single-turn"), "background completions still get their follow-up turns");
+  const notice = cursorAdapter.parseEvent(JSON.stringify({
+    type: "system", subtype: "background_shell_timeout", aborted_count: 1, timeout_ms: 30000,
+  }));
+  assert.ok(notice?.type === "message" && notice.role === "system");
+});
+
+test("cursor thinking is live output, never a successful result or raw JSON in an error", async () => {
+  const deltas: unknown[] = [];
+  const result = await runAgent({
+    adapter: cursorAdapter,
+    argv: ["cursor-agent"],
+    exec: async function* () {
+      yield { kind: "stdout", data: '{"type":"thinking","subtype":"delta","text":"Already committed."}\n' };
+      yield { kind: "stdout", data: '{"type":"thinking","subtype":"completed"}\n' };
+      yield { kind: "stderr", data: "exec timeout: the command reached its 7200 second limit" };
+      yield { kind: "exit", exitCode: -1 };
+    },
+    onDelta: (delta) => { deltas.push(delta); },
+  });
+  assert.deepEqual(deltas, [{ channel: "thinking", text: "Already committed.", offset: 0 }]);
+  assert.equal(result.outcome.ok, false);
+  assert.match(result.outcome.error!, /exec timeout/);
+  assert.doesNotMatch(result.outcome.error!, /thinking|Already committed|subtype/);
+});
+
 test("opencode parses its NDJSON envelope", () => {
   const events = parseAll(opencodeAdapter, [
     `{"type":"step_start","timestamp":1,"sessionID":"ses_9","part":{}}`,

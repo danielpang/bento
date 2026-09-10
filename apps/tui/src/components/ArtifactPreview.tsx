@@ -2,20 +2,24 @@ import { useKeyboardInput as useInput } from "../mouse.js";
 import { useEffect, useState } from "react";
 import { Box, Text, useStdin, useWindowSize } from "ink";
 import type { BentoClient, RunArtifact } from "@bento/api-client";
-import { MAX_PREVIEW_BYTES, previewPixels, renderArtifact } from "../artifact-preview.js";
+import { MAX_PREVIEW_BYTES, previewPixels, renderArtifactContent } from "../artifact-preview.js";
 import { terminalText } from "../terminal.js";
 import { useMouseTarget } from "../mouse.js";
 import { MouseActions, MouseButton } from "./MouseControls.js";
+import { Reader } from "./Navigator.js";
+import { openUrl } from "../open-url.js";
 
 type Pixels = Awaited<ReturnType<typeof previewPixels>>;
 export function ArtifactPreview({
   client,
   artifact,
   onClose,
+  webUrl,
 }: {
   client: BentoClient;
   artifact: RunArtifact;
   onClose: () => void;
+  webUrl?: string;
 }) {
   const { rows, columns } = useWindowSize();
   const { isRawModeSupported } = useStdin();
@@ -24,6 +28,12 @@ export function ArtifactPreview({
   const [image, setImage] = useState<Buffer | null>(null);
   const [pixels, setPixels] = useState<Pixels | null>(null);
   const [error, setError] = useState("");
+  const [text, setText] = useState<string | null>(null);
+  const [overview, setOverview] = useState(false);
+  const reading = artifact.kind === "html" && !overview;
+  const browser = () => {
+    if (webUrl) void openUrl(webUrl).catch((err: Error) => setError(err.message));
+  };
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   useEffect(() => {
@@ -35,15 +45,18 @@ export function ArtifactPreview({
         signal: controller.signal,
         maxBytes: MAX_PREVIEW_BYTES,
       });
-      const result = await renderArtifact(bytes, artifact.kind, controller.signal);
-      if (!controller.signal.aborted) setImage(result);
+      const result = await renderArtifactContent(bytes, artifact.kind, controller.signal);
+      if (!controller.signal.aborted) {
+        setImage(result.image);
+        setText(result.text ?? null);
+      }
     })().catch((err: unknown) => {
       if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err));
     });
     return () => controller.abort();
   }, [client, artifact.id]);
   useEffect(() => {
-    if (!image) return;
+    if (!image || reading) return;
     let cancelled = false;
     void previewPixels(image, Math.min(960, width * zoom), Math.min(4096, height * 2 * zoom))
       .then((result) => {
@@ -55,7 +68,7 @@ export function ArtifactPreview({
     return () => {
       cancelled = true;
     };
-  }, [image, width, height, zoom]);
+  }, [image, width, height, zoom, reading]);
   const left = Math.min(offset.x, Math.max(0, (pixels?.width ?? 0) - width));
   const top = Math.min(offset.y, Math.max(0, Math.ceil((pixels?.height ?? 0) / 2) - height));
   const mouse = useMouseTarget({
@@ -94,7 +107,7 @@ export function ArtifactPreview({
           y: Math.max(0, Math.min(Math.max(0, Math.ceil((pixels?.height ?? 0) / 2) - height), top + dy)),
         });
     },
-    { isActive: isRawModeSupported === true },
+    { isActive: isRawModeSupported === true && !reading },
   );
   function row(y: number) {
     if (!pixels) return null;
@@ -120,6 +133,27 @@ export function ArtifactPreview({
       </Text>
     );
   }
+  if (reading)
+    return (
+      <Reader
+        title={artifact.path}
+        description="Readable HTML preview. Open browser for the visual layout and interactions."
+        document
+        lines={[
+          ...(error ? [error, ""] : []),
+          ...(text === null && error
+            ? []
+            : text === null
+              ? ["Preparing preview…"]
+              : [text || "This artifact has no readable text. Open its visual layout."]),
+        ]}
+        onClose={onClose}
+        actions={[
+          ...(image ? [{ label: "Image overview", onClick: () => setOverview(true) }] : []),
+          ...(webUrl ? [{ label: "Open browser", onClick: browser }] : []),
+        ]}
+      />
+    );
   return (
     <Box ref={mouse} flexDirection="column" paddingX={1}>
       <Text bold>
@@ -137,6 +171,8 @@ export function ArtifactPreview({
       </Text>
       <MouseActions>
         <MouseButton label="Back" onClick={onClose} />
+        {artifact.kind === "html" && <MouseButton label="Read text" onClick={() => setOverview(false)} />}
+        {webUrl && <MouseButton label="Open browser" onClick={browser} />}
         <MouseButton
           label="Zoom in"
           onClick={() => setZoom((z) => Math.min(8, z * 2))}
@@ -158,7 +194,7 @@ export function ArtifactPreview({
       </MouseActions>
       {artifact.kind === "html" && (
         <Text dimColor wrap="truncate-end">
-          Static preview. Scripts and external assets are disabled. First 6000 pixels shown.
+          Image overview. Read text for detail or open the browser for the full layout.
         </Text>
       )}
     </Box>

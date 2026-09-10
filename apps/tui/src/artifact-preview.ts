@@ -10,11 +10,21 @@ const MAX_PIXELS = 32_000_000;
 
 /** No application session, filesystem URLs, network, or agent JavaScript enters this renderer. */
 export async function renderArtifact(bytes: Uint8Array, kind: string, signal?: AbortSignal): Promise<Buffer> {
+  return (await renderArtifactContent(bytes, kind, signal)).image;
+}
+
+export async function renderArtifactContent(
+  bytes: Uint8Array,
+  kind: string,
+  signal?: AbortSignal,
+): Promise<{ image: Buffer; text?: string }> {
   if (bytes.length > MAX_PREVIEW_BYTES)
     throw new Error("Preview is limited to 10 MB. Save this artifact to inspect it.");
   signal?.throwIfAborted();
   if (kind === "image") {
-    return sharp(bytes, { limitInputPixels: MAX_PIXELS, animated: false }).rotate().png().toBuffer();
+    return {
+      image: await sharp(bytes, { limitInputPixels: MAX_PIXELS, animated: false }).rotate().png().toBuffer(),
+    };
   }
   if (kind !== "html" && kind !== "mermaid")
     throw new Error("This artifact supports source reading and download.");
@@ -90,11 +100,101 @@ export async function renderArtifact(bytes: Uint8Array, kind: string, signal?: A
         document.body.innerHTML = svg;
       }, source);
     }
+    // tsx preserves nested function names with this helper in source development.
+    await page.evaluate("globalThis.__name ??= (value) => value");
+    const text =
+      kind === "html"
+        ? await page.evaluate(() => {
+            let output = "";
+            let visited = 0;
+            const block = new Set([
+              "P",
+              "DIV",
+              "SECTION",
+              "ARTICLE",
+              "HEADER",
+              "FOOTER",
+              "MAIN",
+              "NAV",
+              "UL",
+              "OL",
+              "DL",
+              "DT",
+              "DD",
+              "BLOCKQUOTE",
+              "FORM",
+            ]);
+            const newline = () => {
+              if (!output.endsWith("\n")) output += "\n";
+            };
+            const walk = (node: Node) => {
+              if (++visited > 50_000 || output.length > 200_000) return;
+              if (node.nodeType === Node.TEXT_NODE) {
+                output += (node.textContent ?? "").replace(/\s+/g, " ");
+                return;
+              }
+              if (!(node instanceof HTMLElement)) return;
+              if (["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(node.tagName)) return;
+              const style = getComputedStyle(node);
+              if (node.hidden || style.display === "none" || style.visibility === "hidden") return;
+              const tag = node.tagName;
+              if (/^H[1-6]$/.test(tag)) {
+                newline();
+                output += "\n" + "#".repeat(Number(tag[1])) + " ";
+              } else if (tag === "LI") {
+                newline();
+                output += "• ";
+              } else if (tag === "TR") newline();
+              else if (tag === "TD" || tag === "TH") {
+                if (!output.endsWith("\n")) output += " | ";
+              } else if (block.has(tag) || tag === "BR") newline();
+              if (tag === "PRE") {
+                newline();
+                output += node.innerText + "\n";
+                return;
+              }
+              if (tag === "IMG") {
+                output += `[Image: ${node.getAttribute("alt") || "no description"}]`;
+                return;
+              }
+              if (tag === "INPUT") {
+                const input = node as HTMLInputElement;
+                if (input.type === "hidden") return;
+                output += ["checkbox", "radio"].includes(input.type)
+                  ? input.checked
+                    ? "[x] "
+                    : "[ ] "
+                  : `[${input.type === "password" ? "••••" : input.value || input.placeholder || "Input"}]`;
+                return;
+              }
+              if (tag === "BUTTON") output += "[";
+              for (const child of Array.from(node.childNodes)) walk(child);
+              if (tag === "BUTTON") output += "] ";
+              if (/^H[1-6]$/.test(tag) || block.has(tag) || tag === "LI" || tag === "TR") newline();
+              // CSS gaps separate adjacent labels even when HTML has no whitespace.
+              const parentStyle = node.parentElement ? getComputedStyle(node.parentElement) : null;
+              if (
+                parentStyle &&
+                ["flex", "inline-flex", "grid", "inline-grid"].includes(parentStyle.display)
+              ) {
+                if (parentStyle.flexDirection.startsWith("column")) newline();
+                else if (!/\s$/.test(output)) output += " ";
+              }
+            };
+            walk(document.body);
+            return output
+              .replace(/[ \t]+\n/g, "\n")
+              .replace(/\n[ \t]+/g, "\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim();
+          })
+        : undefined;
     const height = await page.evaluate(() =>
       Math.min(6000, Math.max(800, document.documentElement.scrollHeight)),
     );
     await page.setViewportSize({ width: 1200, height });
-    return await page.screenshot({ animations: "disabled", timeout: 10_000 });
+    const image = await page.screenshot({ animations: "disabled", timeout: 10_000 });
+    return { image, ...(text !== undefined ? { text } : {}) };
   } finally {
     clearTimeout(deadline);
     signal?.removeEventListener("abort", close);

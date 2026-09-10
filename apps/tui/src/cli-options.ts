@@ -26,8 +26,8 @@ export interface CliOptions {
   db?: string;
   dataDir: string;
   port: number;
-  /** Share this machine's agent logins with sandboxes. */
-  shareAgentAuth: boolean;
+  /** Initial sharing choice. Absent leaves the saved machine setting in control. */
+  shareAgentAuth?: boolean;
   /** Identifies this machine when claiming work in runner mode. */
   runnerId: string;
   /** Which project a command acts on, by name or id. */
@@ -130,8 +130,9 @@ Options
   --port <number>      Port for the local server (default: any free port)
   --share-agent-auth   Let agents use the Claude, Codex, Cursor, opencode
                        or pi login already on this machine, instead of an
-                       API key. Only for agents running locally. These are
-                       long lived credentials for a paid account, and an
+                       API key. Local mode saves this choice; Settings can
+                       change it afterward. Only for agents running locally.
+                       These are long lived credentials for a paid account, and an
                        agent can read anything its sandbox can, so only use
                        this on repositories you trust.
   --runner-id <name>   Name this machine reports when claiming work
@@ -286,7 +287,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
     ...(values.db ? { db: values.db } : {}),
     dataDir: values["data-dir"] ?? path.join(os.homedir(), ".bento"),
     port,
-    shareAgentAuth: values["share-agent-auth"] ?? false,
+    ...(values["share-agent-auth"] !== undefined ? { shareAgentAuth: values["share-agent-auth"] } : {}),
     runnerId: values["runner-id"] ?? os.hostname(),
     ...(values.project ? { project: values.project } : {}),
     ...(values.tool ? { tool: values.tool } : {}),

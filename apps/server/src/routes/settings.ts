@@ -9,7 +9,7 @@ import { z } from "zod";
 import { getAdapter } from "@bento/agents";
 import { agentCli } from "@bento/core";
 import type { AppContext } from "../context.js";
-import { readSettings, writeSettings } from "../settings.js";
+import { readSettings, writeSettings, shouldShareAgentAuth } from "../settings.js";
 import { gitIdentityEnv } from "../orchestrator/agent-auth.js";
 
 const run = promisify(execFile);
@@ -67,7 +67,7 @@ export function settingsRoutes(ctx: AppContext) {
       const identity = await gitIdentityEnv(ctx);
       return c.json({
         mode: "local",
-        shareAgentAuth: settings.shareAgentAuth,
+        shareAgentAuth: await shouldShareAgentAuth(ctx),
         gitAuthorName: settings.gitAuthorName,
         gitAuthorEmail: settings.gitAuthorEmail,
         /**
@@ -109,7 +109,7 @@ export function settingsRoutes(ctx: AppContext) {
         ...(body.gitAuthorEmail !== undefined ? { gitAuthorEmail: body.gitAuthorEmail.trim() } : {}),
       };
       await writeSettings(ctx, next);
-      return c.json(next);
+      return c.json({ ...next, shareAgentAuth: await shouldShareAgentAuth(ctx) });
     });
 }
 

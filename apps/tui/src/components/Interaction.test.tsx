@@ -7,6 +7,42 @@ import { Navigator, Reader } from "./Navigator.js";
 import { matchesSearch, terminalText, wrapLines } from "../terminal.js";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+
+test("editor waits for pending paste before allowing submission", async () => {
+  const submitted: string[] = [];
+  let finishPaste!: (handled: boolean) => void;
+  const paste = new Promise<boolean>((resolve) => {
+    finishPaste = resolve;
+  });
+  function Editor() {
+    const [value, setValue] = useState("original");
+    return (
+      <TextInput
+        value={value}
+        onChange={setValue}
+        onSubmit={(text) => submitted.push(text)}
+        onPasteContent={() => paste}
+      />
+    );
+  }
+  const ui = render(<Editor />);
+  try {
+    await ready(ui, /original/);
+    ui.stdin.write("\x1b[200~ pasted\x1b[201~");
+    await settle();
+    ui.stdin.write("\r");
+    await settle();
+    assert.deepEqual(submitted, []);
+    finishPaste(false);
+    await settle();
+    ui.stdin.write("\r");
+    await settle();
+    assert.deepEqual(submitted, ["original pasted"]);
+  } finally {
+    finishPaste(false);
+    ui.unmount();
+  }
+});
 // Ink's first render waits for Yoga and effects. Do not send keys before it is ready.
 async function ready(ui: ReturnType<typeof render>, expected: RegExp = /.*/) {
   const deadline = Date.now() + 5000;
@@ -255,10 +291,52 @@ test("replacing a wizard field moves the cursor to the new value's end", async (
   const ui = render(<Field />);
   try {
     await ready(ui);
-    replace("Cursor CLI"); await settle();
-    ui.stdin.write("\x15"); await settle();
-    ui.stdin.write("Reviewer"); await settle();
-    ui.stdin.write("\r"); await settle();
+    replace("Cursor CLI");
+    await settle();
+    ui.stdin.write("\x15");
+    await settle();
+    ui.stdin.write("Reviewer");
+    await settle();
+    ui.stdin.write("\r");
+    await settle();
     assert.deepEqual(submitted, ["Reviewer"]);
-  } finally { ui.unmount(); ui.cleanup(); }
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
+});
+
+test("expanded prompt paging moves through wrapped paragraphs without jumping to the end", async () => {
+  const original = "A long instruction with no line breaks. ".repeat(100);
+  const submitted: string[] = [];
+  function Editor() {
+    const [value, setValue] = useState(original);
+    return (
+      <TextInput
+        value={value}
+        onChange={setValue}
+        onSubmit={(text) => submitted.push(text)}
+        multiline
+        visibleRows={8}
+        initialCursor="start"
+      />
+    );
+  }
+  const ui = render(<Editor />);
+  try {
+    await ready(ui);
+    ui.stdin.write("\x1b[6~");
+    await settle();
+    ui.stdin.write("INSERTED");
+    await settle();
+    ui.stdin.write("\r");
+    await settle();
+    const result = submitted[0]!;
+    assert.ok(result.indexOf("INSERTED") > 0);
+    assert.ok(result.indexOf("INSERTED") < original.length / 2);
+    assert.equal(result.replace("INSERTED", ""), original);
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
 });

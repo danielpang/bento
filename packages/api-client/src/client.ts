@@ -1070,7 +1070,7 @@ export class BentoClient {
    * immediately when the agent is idle; queues for delivery at the end
    * of the run when it is working. The result says which happened.
    */
-  messageFeature(featureId: string, text: string) {
+  messageFeature(featureId: string, text: string, attachments?: { name: string; mime: string; data: string }[]) {
     return this.request<{
       queued: boolean;
       /** True when a live session took the message mid-run. */
@@ -1080,7 +1080,7 @@ export class BentoClient {
       run?: AgentRun;
     }>(`/api/features/${featureId}/message`, {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, ...(attachments?.length ? { attachments } : {}) }),
     });
   }
 
@@ -1191,8 +1191,10 @@ export class BentoClient {
   }
 
   /** Asks GitHub whether each of the card's pull requests merges cleanly. */
-  getMergeStatus(featureId: string) {
-    return this.request<FeatureMergeStatus[]>(`/api/features/${featureId}/merge-status`);
+  getMergeStatus(featureId: string, includeHistory = false) {
+    return this.request<FeatureMergeStatus[]>(
+      `/api/features/${featureId}/merge-status${includeHistory ? "?history=all" : ""}`,
+    );
   }
 
   /**
@@ -1204,8 +1206,10 @@ export class BentoClient {
   }
 
   /** Asks GitHub how CI checks on each pull request head are doing. */
-  getCheckStatus(featureId: string) {
-    return this.request<FeatureCheckStatus[]>(`/api/features/${featureId}/check-status`);
+  getCheckStatus(featureId: string, includeHistory = false) {
+    return this.request<FeatureCheckStatus[]>(
+      `/api/features/${featureId}/check-status${includeHistory ? "?history=all" : ""}`,
+    );
   }
 
   /**

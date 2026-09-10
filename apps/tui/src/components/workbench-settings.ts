@@ -4,10 +4,18 @@ import type {
   McpServerStatus,
   McpServerPatch,
   McpServerInput,
+  McpCatalogEntry,
 } from "@bento/api-client";
 import type { Choice } from "./Navigator.js";
+import type { FormField, FormValues, FormOptions } from "./Form.js";
 
 export interface SettingsUI {
+  fieldsForm: (
+    title: string,
+    fields: FormField[],
+    submit: (values: FormValues) => void | Promise<void>,
+    options?: FormOptions,
+  ) => void;
   list: (title: string, choices: Choice[]) => void;
   choice: (id: string, label: string, select: () => void, detail?: string) => Choice;
   read: (title: string, lines: string[]) => void;
@@ -29,100 +37,15 @@ export function advancedSettings(
   beta: boolean,
   ui: SettingsUI,
 ) {
-  const { list, choice, read, form, act, confirm, load, link } = ui;
-  function agents() {
-    void load(async () => {
-      const profiles = await client.listProfiles();
-      list(
-        "Agent instructions",
-        profiles.map((profile) =>
-          choice(
-            profile.id,
-            profile.name,
-            () =>
-              list(profile.name, [
-                choice("skill", "Edit operating instructions", () =>
-                  form(
-                    "Agent instructions",
-                    (skill) =>
-                      act("Instructions saved", () =>
-                        client.updateProfile(profile.id, { skill: skill || null }),
-                      ),
-                    {
-                      value: profile.skill ?? "",
-                      multiline: true,
-                      hint: "Enter save · Ctrl+J newline · Esc back",
-                    },
-                  ),
-                ),
-                choice("args", "Edit extra CLI arguments", () =>
-                  form(
-                    "Extra arguments as a JSON array",
-                    (text) =>
-                      act("Arguments saved", async () => {
-                        const args: unknown = JSON.parse(text);
-                        if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string"))
-                          throw new Error('Enter an array of strings, for example ["--verbose"].');
-                        return client.updateProfile(profile.id, { extraArgs: args });
-                      }),
-                    { value: JSON.stringify(profile.extraArgs ?? []) },
-                  ),
-                ),
-              ]),
-            `${profile.cli} · ${profile.model}`,
-          ),
-        ),
-      );
-    });
-  }
-  function pipeline() {
-    if (!project) return;
-    void load(async () => {
-      const pipeline = await client.getPipeline(project.id);
-      list(
-        "Stage instructions and order",
-        pipeline.stages.map((stage, at) =>
-          choice(stage.id, `${at + 1}. ${stage.name}`, () =>
-            list(stage.name, [
-              choice("description", "Edit stage instructions", () =>
-                form(
-                  "Stage instructions",
-                  (description) =>
-                    act("Stage instructions saved", () => client.updateStage(stage.id, { description })),
-                  {
-                    value: stage.description,
-                    multiline: true,
-                    hint: "Enter save · Ctrl+J newline · Esc back",
-                  },
-                ),
-              ),
-              ...([-1, 1] as const).flatMap((delta) => {
-                const to = at + delta;
-                if (to < 0 || to >= pipeline.stages.length) return [];
-                return [
-                  choice(String(delta), delta < 0 ? "Move stage earlier" : "Move stage later", () =>
-                    act("Stage order saved", async () => {
-                      const fresh = await client.getPipeline(project.id);
-                      const ids = fresh.stages.map((s) => s.id);
-                      const from = ids.indexOf(stage.id);
-                      const target = from + delta;
-                      if (from < 0 || target < 0 || target >= ids.length)
-                        throw new Error("The pipeline changed. Open stage settings again.");
-                      [ids[from], ids[target]] = [ids[target]!, ids[from]!];
-                      return client.reorderStages(fresh.id, ids);
-                    }),
-                  ),
-                ];
-              }),
-            ]),
-          ),
-        ),
-      );
-    });
-  }
+  const { list, choice, read, form, fieldsForm, act, confirm, load, link } = ui;
   function github() {
     void load(async () => {
-      const [status, settings] = await Promise.all([client.githubStatus(), client.githubSettings()]);
+      const [status, settings, credentials] = await Promise.all([
+        client.githubStatus(),
+        client.githubSettings(),
+        client.listSecrets(),
+      ]);
+      const token = credentials.secrets.find((secret) => secret.name === "GITHUB_TOKEN");
       list(
         `GitHub · ${status.installation?.accountLogin ?? (status.canPublish ? "token connected" : "not connected")}`,
         [
@@ -166,6 +89,39 @@ export function advancedSettings(
                       choice("disconnect", "Disconnect GitHub", () =>
                         confirm("Disconnect GitHub", "Publishing through this connection will stop.", () =>
                           client.disconnectGitHub(),
+                        ),
+                      ),
+                    ]
+                  : []),
+              ]
+            : []),
+          ...(credentials.canManage
+            ? [
+                choice(
+                  "token",
+                  token ? `Replace personal access token (${token.hint})` : "Add personal access token",
+                  () =>
+                    form(
+                      "GitHub personal access token",
+                      (value) => {
+                        if (value.trim())
+                          act("GitHub token saved", () =>
+                            client.createSecret({ name: "GITHUB_TOKEN", value: value.trim() }),
+                          );
+                      },
+                      {
+                        mask: true,
+                        hint: "Optional alternative to a GitHub App connection. Enter save · Esc back",
+                      },
+                    ),
+                ),
+                ...(token
+                  ? [
+                      choice("remove-token", "Remove personal access token", () =>
+                        confirm(
+                          "Remove GitHub token",
+                          "Publishing that relies on this token will stop.",
+                          () => client.deleteSecret(token.id),
                         ),
                       ),
                     ]
@@ -395,91 +351,98 @@ export function advancedSettings(
     });
   }
   function customMcp(canManage: boolean) {
-    const draft: McpServerInput = { name: "", slug: "", url: "", personal: !canManage };
-    function address() {
-      form("MCP endpoint URL", (url) => {
-        void load(async () => {
-          const parsed = new URL(url.trim());
-          if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password)
-            throw new Error("Enter an HTTP or HTTPS URL without embedded credentials.");
-          draft.url = parsed.toString();
-          list(
-            "Transport",
-            (["http", "sse"] as const).map((transport) =>
-              choice(transport, transport === "http" ? "Streamable HTTP" : "Server-sent events (SSE)", () => {
-                draft.transport = transport;
-                list(
-                  "Authentication",
-                  (["none", "api_key", "oauth"] as const).map((authType) =>
-                    choice(
-                      authType,
-                      authType === "none"
-                        ? "No authentication"
-                        : authType === "api_key"
-                          ? "API key"
-                          : "OAuth",
-                      () => {
-                        draft.authType = authType;
-                        const save = () =>
-                          act("MCP server added. Open the server to connect or configure credentials.", () =>
-                            client.createMcpServer(draft),
-                          );
-                        if (authType === "oauth" && !draft.personal)
-                          list("Credential sharing", [
-                            choice("user", "Each member connects their own account", () => {
-                              draft.credentialScope = "user";
-                              save();
-                            }),
-                            choice("org", "Share one account with the organization", () => {
-                              draft.credentialScope = "org";
-                              save();
-                            }),
-                          ]);
-                        else save();
-                      },
-                    ),
-                  ),
-                );
-              }),
-            ),
-          );
-        });
-      });
-    }
-    form("MCP server name", (name) => {
-      if (!name.trim()) return;
-      draft.name = name.trim();
-      form(
-        "Server slug",
-        (slug) => {
-          void load(async () => {
-            if (!/^[a-z0-9][a-z0-9-]*$/.test(slug))
-              throw new Error("Use lowercase letters, numbers and hyphens.");
-            draft.slug = slug;
-            if (canManage)
-              list("Who can use this server?", [
-                choice("org", "Organization", () => {
-                  draft.personal = false;
-                  address();
-                }),
-                choice("personal", "Only you", () => {
-                  draft.personal = true;
-                  address();
-                }),
-              ]);
-            else address();
-          });
+    fieldsForm(
+      "Add MCP server",
+      [
+        { id: "name", label: "Server name", required: true },
+        { id: "slug", label: "Slug (optional)", placeholder: "Generated from the name" },
+        { id: "url", label: "Endpoint URL", required: true },
+        ...(canManage
+          ? [
+              {
+                id: "scope",
+                label: "Who can use this server?",
+                value: "personal",
+                options: [
+                  { value: "personal", label: "Only you" },
+                  { value: "org", label: "Organization" },
+                ],
+              },
+            ]
+          : []),
+        {
+          id: "transport",
+          label: "Transport",
+          value: "http",
+          options: [
+            { value: "http", label: "Streamable HTTP" },
+            { value: "sse", label: "Server-sent events (SSE)" },
+          ],
         },
         {
-          value: name
+          id: "authType",
+          label: "Authentication",
+          value: "none",
+          options: [
+            { value: "none", label: "No authentication" },
+            { value: "api_key", label: "API key" },
+            { value: "oauth", label: "OAuth" },
+          ],
+        },
+        ...(canManage
+          ? [
+              {
+                id: "credentialScope",
+                label: "Organization OAuth credentials",
+                when: (values: FormValues) => values.scope === "org" && values.authType === "oauth",
+                value: "user",
+                options: [
+                  { value: "user", label: "Each member connects their own account" },
+                  { value: "org", label: "Share one account with the organization" },
+                ],
+              },
+            ]
+          : []),
+      ],
+      ({
+        name = "",
+        slug = "",
+        url = "",
+        scope = "personal",
+        transport = "http",
+        authType = "none",
+        credentialScope = "user",
+      }) => {
+        const parsed = new URL(url.trim());
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password)
+          throw new Error("Enter an HTTP or HTTPS URL without embedded credentials.");
+        const address =
+          slug.trim() ||
+          name
             .toLowerCase()
             .trim()
             .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-|-$/g, ""),
-        },
-      );
-    });
+            .replace(/^-|-$/g, "");
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(address))
+          throw new Error("Use lowercase letters, numbers and hyphens for the slug.");
+        const draft: McpServerInput = {
+          name: name.trim(),
+          slug: address,
+          url: parsed.toString(),
+          personal: !canManage || scope === "personal",
+          transport: transport === "sse" ? "sse" : "http",
+          authType: authType === "oauth" ? "oauth" : authType === "api_key" ? "api_key" : "none",
+        };
+        if (!draft.personal && authType === "oauth")
+          draft.credentialScope = credentialScope === "org" ? "org" : "user";
+        act("MCP server added. Open the server to connect or configure credentials.", () =>
+          client.createMcpServer(draft),
+        );
+      },
+      { submitLabel: "Add server" },
+    );
   }
+
   function mcpAuthentication(server: McpServerStatus) {
     const save = (patch: McpServerPatch) =>
       confirm(
@@ -568,36 +531,35 @@ export function advancedSettings(
               "client",
               "Configure OAuth client",
               () =>
-                form(
-                  "OAuth client ID",
-                  (clientId) => {
-                    if (!clientId.trim()) return;
-                    form(
-                      "OAuth client secret",
-                      (clientSecret) =>
-                        form(
-                          "OAuth scopes (space separated)",
-                          (scopes) =>
-                            confirm(
-                              "Save OAuth client",
-                              "Replace the client registration, secret and requested scopes. Reconnect your account after saving.",
-                              () =>
-                                client.updateMcpServer(server.id, {
-                                  clientId: clientId.trim(),
-                                  clientSecret: clientSecret || null,
-                                  scopes: scopes.trim() || null,
-                                }),
-                            ),
-                          { hint: "Enter save · Esc back. Empty uses provider defaults." },
-                        ),
-                      {
-                        mask: true,
-                        hint: "Enter continue · Esc back. Empty creates a public client without a secret.",
-                      },
-                    );
+                fieldsForm(
+                  "Configure OAuth client",
+                  [
+                    { id: "clientId", label: "Client ID", required: true },
+                    { id: "clientSecret", label: "Client secret (optional)", mask: true },
+                    {
+                      id: "scopes",
+                      label: "Scopes (optional)",
+                      placeholder: "Space separated; blank uses provider defaults",
+                    },
+                  ],
+                  ({ clientId = "", clientSecret = "", scopes = "" }) =>
+                    confirm(
+                      "Save OAuth client",
+                      "Replace the client registration, secret and requested scopes. Reconnect your account after saving.",
+                      () =>
+                        client.updateMcpServer(server.id, {
+                          clientId: clientId.trim(),
+                          clientSecret: clientSecret || null,
+                          scopes: scopes.trim() || null,
+                        }),
+                    ),
+                  {
+                    submitLabel: "Review changes",
+                    description:
+                      "Existing client credentials are never read back. Blank secret creates a public client.",
                   },
-                  { hint: "Enter continue · Esc back. Existing client credentials are never read back." },
                 ),
+
               server.oauthClientConfigured ? "Client registered" : "Automatic discovery",
             ),
             choice("automatic", "Use automatic OAuth registration", () =>
@@ -613,148 +575,164 @@ export function advancedSettings(
   }
   function mcp() {
     void load(async () => {
-      const status = await client.mcpStatus();
+      const [status, catalog] = await Promise.all([
+        client.mcpStatus(),
+        client.mcpCatalog().catch(() => null),
+      ]);
+      const serverChoices = status.servers.map((server) =>
+        choice(
+          server.id,
+          server.name,
+          () =>
+            list(server.name, [
+              choice("state", "Connection details", () =>
+                read(server.name, [
+                  server.url,
+                  `${server.transport} · ${server.authType} · ${server.credentialScope}`,
+                  server.enabled ? "Enabled" : "Disabled",
+                  `Team credential: ${server.orgCredential?.connected ? server.orgCredential.hint : "not connected"}`,
+                  `Your credential: ${server.userCredential?.connected ? "connected" : "not connected"}`,
+                ]),
+              ),
+              ...(server.personal && !server.mine && status.canManage
+                ? [
+                    choice(
+                      "govern",
+                      server.enabled ? "Disable personal server" : "Enable personal server",
+                      () =>
+                        act("Server saved", () =>
+                          client.updateMcpServer(server.id, { enabled: !server.enabled }),
+                        ),
+                    ),
+                    choice("remove-personal", "Remove personal server", () =>
+                      confirm(
+                        "Remove personal server",
+                        "The owner's agents will lose access to this server.",
+                        () => client.deleteMcpServer(server.id),
+                      ),
+                    ),
+                  ]
+                : []),
+              ...((server.personal ? server.mine : status.canManage)
+                ? [
+                    choice("authentication", "Authentication, transport and credential sharing", () =>
+                      mcpAuthentication(server),
+                    ),
+                    choice("toggle", server.enabled ? "Disable server" : "Enable server", () =>
+                      act("MCP server saved", () =>
+                        client.updateMcpServer(server.id, { enabled: !server.enabled }),
+                      ),
+                    ),
+                    choice("details", "Edit server details", () =>
+                      fieldsForm(
+                        "MCP server details",
+                        [
+                          { id: "name", label: "Server name", value: server.name, required: true },
+                          { id: "url", label: "Endpoint URL", value: server.url, required: true },
+                        ],
+                        ({ name = "", url = "" }) =>
+                          act("Server saved", () =>
+                            client.updateMcpServer(server.id, { name: name.trim(), url: url.trim() }),
+                          ),
+                      ),
+                    ),
+                    choice("remove", "Remove server", () =>
+                      confirm("Remove MCP server", "Agents will no longer be able to use this server.", () =>
+                        client.deleteMcpServer(server.id),
+                      ),
+                    ),
+                  ]
+                : []),
+              ...(server.authType === "api_key" && (server.personal ? server.mine : status.canManage)
+                ? [
+                    choice("key", "Set API key", () =>
+                      form(
+                        "MCP API key",
+                        (value) => act("MCP credential saved", () => client.setMcpApiKey(server.id, value)),
+                        { mask: true },
+                      ),
+                    ),
+                    choice("clear", "Disconnect API key", () =>
+                      confirm("Disconnect key", "The server will need a new credential.", () =>
+                        client.disconnectMcpCredential(server.id),
+                      ),
+                    ),
+                  ]
+                : []),
+              ...(server.authType === "oauth" &&
+              (server.personal ? server.mine : server.credentialScope === "user" || status.canManage)
+                ? [
+                    choice("oauth", "Connect your account in browser", () => {
+                      void load(async () =>
+                        read("Continue in your browser", [(await client.startMcpConnect(server.id)).url]),
+                      );
+                    }),
+                    choice("disconnect", "Disconnect your account", () =>
+                      confirm("Disconnect your account", "Your agents lose access to this connection.", () =>
+                        server.personal || server.credentialScope === "user"
+                          ? client.disconnectMcpUserCredential(server.id)
+                          : client.disconnectMcpCredential(server.id),
+                      ),
+                    ),
+                  ]
+                : []),
+            ]),
+          `${server.enabled ? "enabled" : "disabled"} · ${server.authType}`,
+        ),
+      );
+      function catalogChoice(entry: McpCatalogEntry): Choice {
+        const index = status.servers.findIndex(
+          (server) => server.url.replace(/\/$/, "") === entry.url.replace(/\/$/, ""),
+        );
+        const added = entry.added || index >= 0;
+        return choice(
+          entry.name,
+          `${added ? "" : "Add "}${entry.title} · ${added ? "Added" : entry.featured ? "Featured" : entry.publisher}`,
+          () => {
+            if (added) {
+              if (index >= 0) serverChoices[index]!.select();
+              else read(entry.title, ["This server is already configured."]);
+              return;
+            }
+            act("MCP server added. Open the server to connect your account.", () =>
+              client.createMcpServer({
+                name: entry.title.slice(0, 120),
+                slug: entry.slug,
+                url: entry.url,
+                transport: entry.transport,
+                personal: true,
+              }),
+            );
+          },
+          [entry.category, entry.description].filter(Boolean).join(" · "),
+        );
+      }
       list("MCP servers", [
-        choice("custom", "Add custom MCP server", () => customMcp(status.canManage)),
-        choice("refresh", "Refresh connection status", mcp),
+        ...serverChoices,
+        ...(catalog?.entries ?? []).filter((entry) => entry.featured).map(catalogChoice),
         choice("catalog", "Browse MCP catalog", () =>
           form("Search MCP catalog", (query) => {
             void load(async () => {
-              const catalog = await client.mcpCatalog(query);
-              if (!catalog.reachable) {
-                read("MCP catalog unavailable", ["Try again later, or add a custom server from setup."]);
+              const result = await client.mcpCatalog(query);
+              if (!result.reachable) {
+                read("MCP catalog unavailable", ["Try again later, or add a custom server."]);
                 return;
               }
-              list(
-                "MCP catalog",
-                catalog.entries.map((entry) =>
-                  choice(
-                    entry.name,
-                    entry.title,
-                    () =>
-                      act("MCP server added", () =>
-                        client.createMcpServer({
-                          name: entry.title,
-                          slug: entry.slug,
-                          url: entry.url,
-                          transport: entry.transport,
-                          personal: !catalog.canManage,
-                        }),
-                      ),
-                    entry.added ? "Already added" : entry.description,
-                  ),
-                ),
-              );
+              list("MCP catalog", result.entries.map(catalogChoice));
             });
           }),
         ),
-        ...status.servers.map((server) =>
-          choice(
-            server.id,
-            server.name,
-            () =>
-              list(server.name, [
-                choice("state", "Connection details", () =>
-                  read(server.name, [
-                    server.url,
-                    `${server.transport} · ${server.authType} · ${server.credentialScope}`,
-                    server.enabled ? "Enabled" : "Disabled",
-                    `Team credential: ${server.orgCredential?.connected ? server.orgCredential.hint : "not connected"}`,
-                    `Your credential: ${server.userCredential?.connected ? "connected" : "not connected"}`,
-                  ]),
-                ),
-                ...(server.personal && !server.mine && status.canManage
-                  ? [
-                      choice(
-                        "govern",
-                        server.enabled ? "Disable personal server" : "Enable personal server",
-                        () =>
-                          act("Server saved", () =>
-                            client.updateMcpServer(server.id, { enabled: !server.enabled }),
-                          ),
-                      ),
-                      choice("remove-personal", "Remove personal server", () =>
-                        confirm(
-                          "Remove personal server",
-                          "The owner's agents will lose access to this server.",
-                          () => client.deleteMcpServer(server.id),
-                        ),
-                      ),
-                    ]
-                  : []),
-                ...((server.personal ? server.mine : status.canManage)
-                  ? [
-                      choice("authentication", "Authentication, transport and credential sharing", () =>
-                        mcpAuthentication(server),
-                      ),
-                      choice("toggle", server.enabled ? "Disable server" : "Enable server", () =>
-                        act("MCP server saved", () =>
-                          client.updateMcpServer(server.id, { enabled: !server.enabled }),
-                        ),
-                      ),
-                      choice("name", "Rename server", () =>
-                        form(
-                          "Server name",
-                          (name) => act("Server saved", () => client.updateMcpServer(server.id, { name })),
-                          { value: server.name },
-                        ),
-                      ),
-                      choice("url", "Edit server URL", () =>
-                        form(
-                          "Server URL",
-                          (url) => act("Server saved", () => client.updateMcpServer(server.id, { url })),
-                          { value: server.url },
-                        ),
-                      ),
-                      choice("remove", "Remove server", () =>
-                        confirm(
-                          "Remove MCP server",
-                          "Agents will no longer be able to use this server.",
-                          () => client.deleteMcpServer(server.id),
-                        ),
-                      ),
-                    ]
-                  : []),
-                ...(server.authType === "api_key" && (server.personal ? server.mine : status.canManage)
-                  ? [
-                      choice("key", "Set API key", () =>
-                        form(
-                          "MCP API key",
-                          (value) => act("MCP credential saved", () => client.setMcpApiKey(server.id, value)),
-                          { mask: true },
-                        ),
-                      ),
-                      choice("clear", "Disconnect API key", () =>
-                        confirm("Disconnect key", "The server will need a new credential.", () =>
-                          client.disconnectMcpCredential(server.id),
-                        ),
-                      ),
-                    ]
-                  : []),
-                ...(server.authType === "oauth" &&
-                (server.personal ? server.mine : server.credentialScope === "user" || status.canManage)
-                  ? [
-                      choice("oauth", "Connect your account in browser", () => {
-                        void load(async () =>
-                          read("Continue in your browser", [(await client.startMcpConnect(server.id)).url]),
-                        );
-                      }),
-                      choice("disconnect", "Disconnect your account", () =>
-                        confirm(
-                          "Disconnect your account",
-                          "Your agents lose access to this connection.",
-                          () =>
-                            server.personal || server.credentialScope === "user"
-                              ? client.disconnectMcpUserCredential(server.id)
-                              : client.disconnectMcpCredential(server.id),
-                        ),
-                      ),
-                    ]
-                  : []),
-              ]),
-            `${server.enabled ? "enabled" : "disabled"} · ${server.authType}`,
-          ),
-        ),
+        choice("custom", "Add custom MCP server", () => customMcp(status.canManage)),
+        choice("refresh", "Refresh connection status", mcp),
+        ...(!catalog?.reachable
+          ? [
+              choice("unavailable", "Featured servers unavailable", () =>
+                read("MCP catalog unavailable", [
+                  "Your configured servers still work. Refresh to try again, or add a custom server.",
+                ]),
+              ),
+            ]
+          : []),
         ...(beta ? [choice("connections", "Agents connected to Bento", connections)] : []),
       ]);
     });
@@ -765,11 +743,22 @@ export function advancedSettings(
       const projects = await client.listProjects();
       list("Agents connected to Bento", [
         choice("create", "Create an access token", () =>
-          form("Connection name", (name) =>
-            list("Connection scope", [
-              choice("org", "All organization projects", () => createConnection(name, [])),
-              ...projects.map((p) => choice(p.id, p.name, () => createConnection(name, [p.id]))),
-            ]),
+          fieldsForm(
+            "Create access token",
+            [
+              { id: "name", label: "Connection name", required: true },
+              {
+                id: "scope",
+                label: "Project access",
+                value: "all",
+                options: [
+                  { value: "all", label: "All organization projects" },
+                  ...projects.map((project) => ({ value: project.id, label: project.name })),
+                ],
+              },
+            ],
+            ({ name = "", scope = "all" }) => createConnection(name.trim(), scope === "all" ? [] : [scope]),
+            { submitLabel: "Create token" },
           ),
         ),
         ...result.connections.map((connection) =>
@@ -809,21 +798,5 @@ export function advancedSettings(
       read("Copy your access token", ["This token is shown only once. Keep it private.", result.token]);
     });
   }
-  function identity() {
-    void load(async () => {
-      const machine = await client.getMachineSettings();
-      form(
-        "Git author name",
-        (gitAuthorName) =>
-          form(
-            "Git author email",
-            (gitAuthorEmail) =>
-              act("Git identity saved", () => client.setGitIdentity({ gitAuthorName, gitAuthorEmail })),
-            { value: machine.gitAuthorEmail ?? "" },
-          ),
-        { value: machine.gitAuthorName ?? "" },
-      );
-    });
-  }
-  return { agents, pipeline, github, linear, slack, mcp, identity };
+  return { github, linear, slack, mcp };
 }

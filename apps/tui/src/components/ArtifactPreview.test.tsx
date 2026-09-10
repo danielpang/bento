@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import sharp from "sharp";
 import { createServer } from "node:http";
-import { MAX_PREVIEW_BYTES, previewPixels, renderArtifact } from "../artifact-preview.js";
+import {
+  MAX_PREVIEW_BYTES,
+  previewPixels,
+  renderArtifact,
+  renderArtifactContent,
+} from "../artifact-preview.js";
 
 test("image preview decodes real pixels, preserves aspect ratio and rejects oversized input", async () => {
   const png = await sharp({ create: { width: 40, height: 20, channels: 4, background: "#f00" } })
@@ -38,6 +43,17 @@ test(
         .toBuffer();
       assert.deepEqual([...pixel], [255, 0, 0], "artifact JavaScript cannot change the page");
       assert.equal(requests, 0, "external resources never reach the network");
+      const readable = await renderArtifactContent(
+        Buffer.from(
+          `<h1>Agent settings</h1><p>Choose a harness and model.</p><ul><li>Cursor</li><li>Claude Code</li></ul><button>Save agent</button><p hidden>Hidden text</p><table><tr><th>Name</th><th>Model</th></tr><tr><td>Reviewer</td><td>Auto</td></tr></table><script>document.body.textContent='Injected'</script>`,
+        ),
+        "html",
+      );
+      assert.match(readable.text ?? "", /# Agent settings/);
+      assert.match(readable.text ?? "", /• Cursor/);
+      assert.match(readable.text ?? "", /\[Save agent\]/);
+      assert.match(readable.text ?? "", /Reviewer \| Auto/);
+      assert.doesNotMatch(readable.text ?? "", /Hidden text|Injected/);
       const diagram = await renderArtifact(
         Buffer.from("graph LR\n A[Plan] --> B[Build] --> C[Review]"),
         "mermaid",

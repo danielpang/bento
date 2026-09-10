@@ -19,16 +19,15 @@ import { actorDisplayName, forgetsBetweenRuns, hasNoLiveTranscript, historyTrigg
 import { Workbench, type WorkbenchPage } from "./components/Workbench.js";
 import { Reader } from "./components/Navigator.js";
 import { terminalText } from "./terminal.js";
-import { Board, cardState, orderFeatures, statusColor } from "./components/Board.js";
 import { Kanban, boardLanes, kanbanSelection, moveKanban } from "./components/Kanban.js";
 import { describeCriterion } from "./criteria.js";
 import { Login } from "./components/Login.js";
 import { Setup } from "./components/Setup.js";
+import { Startup } from "./components/Startup.js";
 import { FileTokenStore } from "./credentials.js";
 import type { CliOptions } from "./cli-options.js";
 import { startEmbedded, type EmbeddedHandle } from "./embedded.js";
 import { LocalRunner } from "./runner.js";
-import { RunnerNotice } from "./components/RunnerNotice.js";
 import { describeMode } from "./cli-options.js";
 import { repositoryPathOwnerForMode } from "./repository-path.js";
 
@@ -90,7 +89,7 @@ export function App({ options }: { options: CliOptions }) {
       </Box>
     );
   }
-  if (!baseUrl) return <Text color="gray">{bootMessage}</Text>;
+  if (!baseUrl) return <Startup message={bootMessage} />;
 
   return <Console baseUrl={baseUrl} options={options} embedded={embedded} />;
 }
@@ -141,37 +140,6 @@ function describeEvent(event: FeatureEvent, stages: Stage[]): string {
 
 function triggerLabel(event: FeatureEvent): string {
   return historyTriggerLabel(event.trigger, actorDisplayName(event.actorName, event.actorEmail));
-}
-
-/**
- * Why each held card is held.
- *
- * A card that says only "gated" tells you it stopped, not what would
- * start it again, and the answer is one line long. Manual stages
- * answer without asking the server at all, and only cards that are
- * actually held are asked, so a board that is moving costs nothing.
- */
-async function gateWaits(
-  client: BentoClient,
-  stages: Stage[],
-  features: Feature[],
-  profiles: AgentProfile[],
-): Promise<Record<string, string>> {
-  const waits: Record<string, string> = {};
-  await Promise.all(
-    features
-      .filter((feature) => feature.status === "gated")
-      .map(async (feature) => {
-        const stage = stages.find((s) => s.id === feature.currentStageId);
-        if (stage && stage.gateType !== "auto") {
-          waits[feature.id] = "waiting for your approval";
-          return;
-        }
-        const gate = await client.getGate(feature.id).catch(() => null);
-        waits[feature.id] = gate ? describeGateWait(gate, profiles) : "waiting at its gate";
-      }),
-  );
-  return waits;
 }
 
 /**
@@ -246,12 +214,12 @@ export function Console({
 
   const { rows: terminalRows, columns: terminalColumns } = useWindowSize();
   const compactBoard = terminalRows < 24 || terminalColumns < 70;
-  const [boardView, setBoardView] = useState<"kanban" | "list">("kanban");
   const [focusedLaneId, setFocusedLaneId] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const projectRef = useRef<string | null>(null);
   const refreshSerial = useRef(0);
   const [beta, setBeta] = useState(false);
+  const [serverMode, setServerMode] = useState<"local" | "multi">("local");
   const [workbench, setWorkbench] = useState<WorkbenchPage | null>(null);
   const [activity, setActivity] = useState(false);
   const actionRef = useRef<(input: string) => void>(() => {});
@@ -261,19 +229,9 @@ export function Console({
   const [features, setFeatures] = useState<Feature[]>([]);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [runStatus, setRunStatus] = useState<Record<string, string | undefined>>({});
-  /** Why each held card is held, in words, so "gated" says what for. */
-  const [gateWait, setGateWait] = useState<Record<string, string | undefined>>({});
   // By id, not index: a board event can move a card between lanes, and
   // lanes would silently move the highlight to a different card.
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
-  const [transcript, setTranscript] = useState<string[]>([]);
-  /**
-   * The message the agent is typing right now, streamed as fragments.
-   * The transcript endpoint cannot render it (fragments are never
-   * persisted), so the draft lives here and is dropped the moment the
-   * finished message makes it into the transcript.
-   */
-  const [draft, setDraft] = useState("");
   const [history, setHistory] = useState<FeatureEvent[]>([]);
   const [setupHint, setSetupHint] = useState("");
   const [notice, setNotice] = useState("");
@@ -330,6 +288,7 @@ export function Console({
       setError("");
       setScreen("loading");
       const health = await client.health();
+      setServerMode(health.mode === "multi" ? "multi" : "local");
       if (health.mode === "multi" && !(await tokens.get())) {
         setScreen("login");
         return;
@@ -363,7 +322,7 @@ export function Console({
       setProjectName("");
       setFeatures([]);
       setStages([]);
-      setNotice("No projects yet. Press p to create one, or comma to open setup.");
+      setNotice("No projects yet. Press p to create one, or comma to open settings.");
       return;
     }
     if (requested && !projectRows.some((p) => p.id === requested || p.name === requested)) {
@@ -386,9 +345,6 @@ export function Console({
     setFeatures(featureRows);
     setProfiles(profileRows);
     setRunStatus(statuses);
-    const waits = await gateWaits(client, pipeline.stages, featureRows, profileRows);
-    if (serial !== refreshSerial.current) return;
-    setGateWait(waits);
 
     // A board with no agent cannot run anything, and the reason is not
     // visible from the cards, so say it here rather than let a person
@@ -462,25 +418,9 @@ export function Console({
     return () => runner.stop();
   }, [options.mode, screen === "board" || screen === "setup", baseUrl]);
 
-  const ordered = orderFeatures(stages, features);
-  const found = selectedFeatureId ? ordered.findIndex((f) => f.id === selectedFeatureId) : 0;
-  /**
-   * Where the selection sat while it still resolved.
-   *
-   * A card deleted in the web console leaves this terminal holding an
-   * id that matches nothing. Falling back to index 0 put the highlight
-   * on the first backlog card while selectedFeatureId kept the dead id,
-   * so every per-card fetch went on 404ing into a swallowed catch and
-   * the board answered nothing until somebody pressed j or k. The card
-   * that took the deleted one's place is at the same index, and the one
-   * before it when the deleted card was last.
-   */
-  const lastIndex = useRef(0);
-  if (found >= 0) lastIndex.current = found;
-  const selected = found >= 0 ? found : Math.max(0, Math.min(lastIndex.current, ordered.length - 1));
   const lanes = boardLanes(stages, features);
   const columnSelection = kanbanSelection(lanes, selectedFeatureId, focusedLaneId);
-  const current = boardView === "kanban" ? columnSelection.feature : ordered[selected];
+  const current = columnSelection.feature;
   const boardRoot = useRef<DOMElement | null>(null);
   const mouseSelection = useRef({ cardId: current?.id ?? null, laneId: columnSelection.lane.id });
   mouseSelection.current = { cardId: current?.id ?? null, laneId: columnSelection.lane.id };
@@ -507,25 +447,16 @@ export function Console({
       }
     },
     onScroll: (target, direction) => {
-      if (boardView === "kanban") {
-        const laneId =
-          direction === "left" || direction === "right"
-            ? mouseSelection.current.laneId
-            : (target.laneId ?? mouseSelection.current.laneId);
-        const cardId =
-          laneId === mouseSelection.current.laneId ? mouseSelection.current.cardId : (target.cardId ?? null);
-        const next = moveKanban(lanes, cardId, laneId, direction);
-        mouseSelection.current = next;
-        setSelectedFeatureId(next.cardId);
-        setFocusedLaneId(next.laneId);
-      } else if (direction === "up" || direction === "down") {
-        const index = ordered.findIndex((card) => card.id === mouseSelection.current.cardId);
-        const cardId =
-          ordered[Math.max(0, Math.min(ordered.length - 1, index + (direction === "up" ? -1 : 1)))]?.id ??
-          null;
-        mouseSelection.current.cardId = cardId;
-        setSelectedFeatureId(cardId);
-      }
+      const laneId =
+        direction === "left" || direction === "right"
+          ? mouseSelection.current.laneId
+          : (target.laneId ?? mouseSelection.current.laneId);
+      const cardId =
+        laneId === mouseSelection.current.laneId ? mouseSelection.current.cardId : (target.cardId ?? null);
+      const next = moveKanban(lanes, cardId, laneId, direction);
+      mouseSelection.current = next;
+      setSelectedFeatureId(next.cardId);
+      setFocusedLaneId(next.laneId);
     },
   });
 
@@ -537,27 +468,9 @@ export function Console({
     setNotice("That card was deleted.");
   }, [features, selectedFeatureId, current?.id]);
 
-  /**
-   * What the card has cost so far, and how much of it is known. Codex,
-   * Cursor, and opencode print no cost, so a bare total would read as a
-   * cheap card rather than an unmeasured one.
-   */
-  const spend = (() => {
-    const finished = cardRuns.filter((r) => ["succeeded", "failed", "cancelled"].includes(r.status));
-    if (finished.length === 0) return "";
-    const measured = finished.filter((r) => r.costUsd !== null && r.costUsd !== undefined);
-    if (measured.length === 0) return "cost not reported";
-    const total = measured.reduce((sum, r) => sum + Number(r.costUsd), 0);
-    const silent = finished.length - measured.length;
-    return silent > 0 ? `$${total.toFixed(2)}+ (${silent} unmeasured)` : `$${total.toFixed(2)}`;
-  })();
-
-  /** The agent on the newest run, which decides what a message does to it. */
-  const cardAgent = profiles.find((profile) => profile.id === cardRuns[0]?.agentProfileId);
   const runActive = ["queued", "starting", "running"].includes(
     runStatus[current?.id ?? ""] ?? latestRunStatus,
   );
-  const quietLine = quietRunStatus(cardAgent?.cli, runActive);
   const latestSettledRunId =
     latestRunId && ["succeeded", "failed", "cancelled"].includes(latestRunStatus) ? latestRunId : null;
   const hasConflicts = mergeStates.some((state) => state.state === "conflicted");
@@ -593,14 +506,11 @@ export function Console({
     setLatestRunId(null);
     setLatestRunStatus("");
     setCardRuns([]);
-    setTranscript([]);
     setHistory([]);
-    setDraft("");
     setDeleteConfirm(null);
-    transcriptCursor.current = null;
   }, [current?.id]);
 
-  // Follow the selected card's newest run.
+  // Read the selected card's run state for board actions. Conversation owns transcript streaming.
   useEffect(() => {
     if (!current || screen !== "board" || workbench) return;
     let cancelled = false;
@@ -618,124 +528,19 @@ export function Console({
       const latest = detail.runs[0];
       if (cancelled) return;
       if (!latest) {
-        // A card with no runs must also forget the previous card's:
-        // stale latestRunId kept the live follow subscribed to it and
-        // streamed another card's conversation into this pane.
+        // A card with no runs must not inherit the previous card's run actions.
         setLatestRunId(null);
         setLatestRunStatus("");
-        setTranscript([]);
         return;
       }
       setRunStatus((prev) => ({ ...prev, [current.id]: latest.status }));
       setLatestRunId(latest.id);
       setLatestRunStatus(latest.status);
-      const { cursor, lines } = await client.getTranscript(latest.id);
-      if (cancelled) return;
-      setTranscript(lines);
-      transcriptCursor.current = { runId: latest.id, cursor };
     })().catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [current?.id, features, screen, workbench]);
-
-  /**
-   * Live follow of the run being watched. The periodic board refresh
-   * above keeps working as the fallback; this subscription is what
-   * makes output appear the moment it happens, and it carries the
-   * fragments of the message being typed, which no transcript fetch
-   * can ever return. Fragment bursts are coalesced on short timers so
-   * the terminal is not redrawn per token.
-   */
-  const followedRunId = screen === "board" && !workbench && runActive ? latestRunId : null;
-  const transcriptCursor = useRef<{ runId: string; cursor: number } | null>(null);
-  useEffect(() => {
-    setDraft("");
-    if (!followedRunId) return;
-    let stopped = false;
-    let draftText = "";
-    let draftTimer: ReturnType<typeof setTimeout> | null = null;
-    let refetchTimer: ReturnType<typeof setTimeout> | null = null;
-    const dropDraft = () => {
-      // Both halves, or a flush timer scheduled just before the drop
-      // would put the stale text right back on screen.
-      draftText = "";
-      if (draftTimer) {
-        clearTimeout(draftTimer);
-        draftTimer = null;
-      }
-      setDraft("");
-    };
-    const refetchTranscript = () => {
-      refetchTimer ??= setTimeout(() => {
-        refetchTimer = null;
-        /**
-         * From the cursor, not from zero: a chatty run fires this
-         * four times a second, and re-reading the whole transcript
-         * each time made the run cost quadratic in its own length.
-         * The card-switch effect above resets the cursor whenever it
-         * replaces the transcript outright.
-         */
-        const since = transcriptCursor.current?.runId === followedRunId ? transcriptCursor.current.cursor : 0;
-        client
-          .getTranscript(followedRunId, since)
-          .then(({ cursor, lines }) => {
-            if (stopped) return;
-            // Another fetch replaced the transcript meanwhile; these
-            // rows would double-append.
-            const held = transcriptCursor.current;
-            if (since > 0 && (held?.runId !== followedRunId || held.cursor !== since)) return;
-            transcriptCursor.current = { runId: followedRunId, cursor };
-            if (since > 0) setTranscript((prev) => [...prev, ...lines]);
-            else setTranscript(lines);
-          })
-          .catch(() => {});
-      }, 250);
-    };
-    const stop = client.streamRun(followedRunId, {
-      onEvent: (event) => {
-        if (stopped) return;
-        // The persisted line supersedes the draft that previewed it.
-        // Assistant lines and results only: the user's own steer says
-        // nothing about the message still being typed, and clearing
-        // on it froze the draft mid sentence.
-        if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
-          dropDraft();
-        }
-        refetchTranscript();
-      },
-      onDelta: (delta) => {
-        if (stopped || delta.channel !== "text") return;
-        // Offset zero starts a draft (new message or the server's
-        // catch-up snapshot); anything else must continue this one.
-        if (delta.offset === 0) draftText = delta.text;
-        else if (delta.offset === draftText.length) draftText += delta.text;
-        else return;
-        draftTimer ??= setTimeout(() => {
-          draftTimer = null;
-          if (!stopped) setDraft(draftText);
-        }, 150);
-      },
-      onDone: () => {
-        if (stopped) return;
-        dropDraft();
-        refetchTranscript();
-      },
-      onError: () => {
-        if (stopped) return;
-        // The stream is gone (token rejected, connection dropped).
-        // The periodic poll still covers the transcript; what must
-        // not survive is a frozen half sentence posing as live.
-        dropDraft();
-      },
-    });
-    return () => {
-      stopped = true;
-      stop();
-      if (draftTimer) clearTimeout(draftTimer);
-      if (refetchTimer) clearTimeout(refetchTimer);
-    };
-  }, [client, followedRunId]);
 
   function mutate(work: () => Promise<unknown>, success: string) {
     if (mutationPending.current) return;
@@ -787,22 +592,16 @@ export function Console({
       setWorkbench("commands");
       return;
     }
-    if (input === "v") {
-      if (current) setSelectedFeatureId(current.id);
-      setBoardView((view) => (view === "kanban" ? "list" : "kanban"));
-      return;
-    }
     if (
-      boardView === "kanban" &&
-      (key.leftArrow ||
-        key.rightArrow ||
-        key.tab ||
-        key.upArrow ||
-        key.downArrow ||
-        input === "j" ||
-        input === "k" ||
-        input === "g" ||
-        input === "G")
+      key.leftArrow ||
+      key.rightArrow ||
+      key.tab ||
+      key.upArrow ||
+      key.downArrow ||
+      input === "j" ||
+      input === "k" ||
+      input === "g" ||
+      input === "G"
     ) {
       const direction =
         key.leftArrow || (key.tab && key.shift)
@@ -837,7 +636,7 @@ export function Console({
       setWorkbench("spend");
       return;
     }
-    if (input === "e" && projectId) {
+    if ((input === "v" || input === "e") && projectId) {
       setWorkbench("sessions");
       return;
     }
@@ -858,14 +657,6 @@ export function Console({
       return;
     }
     if (input === "q") quit();
-    if (key.downArrow || input === "j") {
-      setDeleteConfirm(null);
-      setSelectedFeatureId(ordered[Math.min(selected + 1, ordered.length - 1)]?.id ?? null);
-    }
-    if (key.upArrow || input === "k") {
-      setDeleteConfirm(null);
-      setSelectedFeatureId(ordered[Math.max(selected - 1, 0)]?.id ?? null);
-    }
     if (!current) return;
     if (mutationPending.current) return;
     const isDone = current.status === "done";
@@ -980,9 +771,6 @@ export function Console({
     setSelectedFeatureId(null);
     setFocusedLaneId(null);
     setRunStatus({});
-    setGateWait({});
-    setTranscript([]);
-    setDraft("");
     setHistory([]);
     setBeta(false);
     setNotice("");
@@ -991,14 +779,16 @@ export function Console({
     if (!signedOut) await connect();
   }
 
-  if (screen === "loading") return <Text color="gray">Connecting to {baseUrl}...</Text>;
-  if (screen === "setup") {
+  if (screen === "loading") return <Startup message={`Connecting to ${baseUrl}...`} />;
+  if (screen === "setup" && !workbench) {
     return (
       <Setup
         client={client}
         repositoryPathOwner={repositoryPathOwnerForMode(options.mode)}
         agentsRunLocally={options.mode !== "client"}
         selectedProjectId={projectId ?? options.project}
+        serverMode={serverMode}
+        onSection={setWorkbench}
         // Setup is a screen, not a program: everything it configures is
         // for the board, which is already running behind it.
         onDone={() => setScreen("board")}
@@ -1091,11 +881,7 @@ export function Console({
         </Text>
       )}
 
-      {options.mode === "runner" && boardView === "list" && (
-        <RunnerNotice server={options.server ?? baseUrl} sandbox={options.sandbox} />
-      )}
-
-      {boardView === "kanban" && !deleteConfirm && (
+      {!deleteConfirm && (
         <Kanban
           lanes={lanes}
           cardId={selectedFeatureId}
@@ -1115,72 +901,6 @@ export function Console({
           )}
         />
       )}
-      {boardView === "list" && !(compactBoard && deleteConfirm) && (
-        <Board
-          stages={stages}
-          features={features}
-          profiles={profiles}
-          selectedIndex={selected}
-          runStatus={runStatus}
-          gateWait={gateWait}
-          mouse={mouse}
-          maxRows={Math.max(1, terminalRows - (compactBoard ? 10 : 18) - Number(terminalColumns < 65))}
-        />
-      )}
-
-      {current && boardView === "list" && !compactBoard && (
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
-          <Text wrap="truncate-end">
-            <Text color={statusColor(cardState(current, runStatus[current.id] ?? latestRunStatus))}>
-              {cardState(current, runStatus[current.id] ?? latestRunStatus)}
-            </Text>
-            {" · "}
-            <Text bold>{terminalText(current.title)}</Text>
-          </Text>
-          {spend && (
-            <Text dimColor wrap="truncate-end">
-              {spend}
-            </Text>
-          )}
-          {canResolveConflicts && (
-            <Text color="yellow">
-              GitHub cannot merge{" "}
-              {mergeStates.filter((s) => s.state === "conflicted").length === 1
-                ? "this card's pull request"
-                : "some of this card's pull requests"}
-              : the base branch has moved and the changes collide. Press m to resolve conflicts.
-            </Text>
-          )}
-          {!runActive && gateWait[current.id] && (
-            <Text color="yellow" wrap="truncate-end">
-              {terminalText(gateWait[current.id]!)}
-            </Text>
-          )}
-          <Text bold color="gray">
-            Agent output · Enter for full conversation
-          </Text>
-          {transcript.length > 3 && <Text color="gray">... {transcript.length - 3} earlier lines</Text>}
-          {transcript.slice(-3).map((line, i) => (
-            <Text key={i} color="gray" wrap="truncate-end">
-              {terminalText(line).replaceAll(/\s+/g, " ")}
-            </Text>
-          ))}
-          {draft !== "" && (
-            // The typing edge of the message in progress: its tail,
-            // because that is where the new words appear. Flattened
-            // to one line; embedded newlines grew the fixed pane
-            // and bounced the panels below it on every flush.
-            <Text wrap="truncate-end">
-              {terminalText(`${cardAgent?.name ?? "agent"}> ${draft}`)
-                .replaceAll(/\s+/g, " ")
-                .slice(-100)}
-            </Text>
-          )}
-          {quietLine && draft === "" && <Text color="gray">{quietLine}</Text>}
-          {!quietLine && transcript.length === 0 && draft === "" && <Text color="gray">No output yet.</Text>}
-        </Box>
-      )}
-
       {deleteConfirm && (
         <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
           <Text color="red" wrap="truncate-end">
@@ -1219,23 +939,16 @@ export function Console({
         <Box flexDirection="column">
           <Text color="gray" wrap="truncate-end">
             {compactBoard
-              ? boardView === "kanban"
-                ? "←/→ stages · ↑/↓ cards · v list"
-                : "↑/↓ cards · v kanban · Enter read"
-              : boardView === "kanban"
-                ? "←/→ stages · ↑/↓ cards · Enter read · / search · v list · : commands"
-                : "↑/↓ move · Enter read · / search · v kanban · : commands · p projects · , setup"}
+              ? "←/→ stages · ↑/↓ cards · v sessions"
+              : "←/→ stages · ↑/↓ cards · Enter read · / search · v sessions · : commands"}
           </Text>
           {!deleteConfirm && (
             <MouseActions>
               <MouseButton label="Commands" onClick={() => handleInput(":")} />
               <MouseButton label="Projects" onClick={() => handleInput("p")} />
-              <MouseButton label="Setup" onClick={() => handleInput(",")} />
+              <MouseButton label="Settings" onClick={() => handleInput(",")} />
               <MouseButton label="New" onClick={() => handleInput("n")} />
-              <MouseButton
-                label={boardView === "kanban" ? "List" : "Kanban"}
-                onClick={() => handleInput("v")}
-              />
+              <MouseButton label="Sessions" onClick={() => handleInput("v")} disabled={!projectId} />
               <MouseButton label="Quit" onClick={quit} />
             </MouseActions>
           )}

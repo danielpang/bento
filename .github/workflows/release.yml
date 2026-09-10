@@ -95,10 +95,23 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: "./bento-$TAG/bento --help"
 
+      - name: Prepare the install script
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            head -1 scripts/install.sh
+            printf 'BENTO_VERSION=%q\n' "$TAG"
+            tail -n +2 scripts/install.sh
+          } > install.sh
+          chmod +x install.sh
+
       - uses: actions/upload-artifact@v6
         with:
           name: cli
-          path: bento-cli-*.tar.gz
+          path: |
+            bento-cli-*.tar.gz
+            install.sh
 
   mac:
     name: Package the Mac app
@@ -199,13 +212,14 @@ jobs:
             echo '### Terminal'
             echo
             echo '```bash'
-            echo "tar -xzf bento-cli-$TAG.tar.gz"
-            echo "sudo mv bento-$TAG /usr/local/lib/bento"
-            echo 'sudo ln -sf /usr/local/lib/bento/bento /usr/local/bin/bento'
+            echo "curl -fsSL https://github.com/danielpang/bento/releases/download/$TAG/install.sh | bash"
             echo 'bento --help'
             echo '```'
             echo
+            echo "Or download \`install.sh\` and \`bento-cli-$TAG.tar.gz\` from the assets below."
+            echo
             echo 'Requires Node 22. Docker is needed only when agents run on your machine.'
+            echo 'See [docs/tui.md](https://github.com/danielpang/bento/blob/main/docs/tui.md) for local and hosted setup.'
             echo
             echo '| Command | What it does |'
             echo '|---|---|'

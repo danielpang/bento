@@ -6,6 +6,7 @@ import { useMouseTarget } from "../mouse.js";
 import { MouseActions, MouseButton } from "./MouseControls.js";
 import { openUrl } from "../open-url.js";
 import { matchesSearch, terminalText, wrapLines } from "../terminal.js";
+import { wrapConversationText } from "./conversation-layout.js";
 
 export interface Choice {
   id: string;
@@ -160,12 +161,18 @@ export function Reader({
   onClose,
   follow = false,
   onMessage,
+  document = false,
+  actions = [],
+  description,
 }: {
   title: string;
   lines: string[];
   onClose: () => void;
   follow?: boolean;
   onMessage?: () => void;
+  document?: boolean;
+  description?: string;
+  actions?: { label: string; onClick: () => void; disabled?: boolean }[];
 }) {
   const { rows, columns } = useWindowSize();
   const { isRawModeSupported } = useStdin();
@@ -175,8 +182,8 @@ export function Reader({
   const [search, setSearch] = useState("");
   const [linkError, setLinkError] = useState("");
   const link = lines.find((line) => /^https?:\/\/\S+$/.test(line.trim()))?.trim();
-  const wrapped = wrapLines(lines, columns - 6);
-  const height = Math.max(1, rows - (onMessage ? 12 : 10));
+  const wrapped = document ? wrapConversationText(lines, columns - 6) : wrapLines(lines, columns - 6);
+  const height = Math.max(1, rows - (onMessage ? 12 : 10) - (description ? 1 : 0) - (actions.length ? 2 : 0));
   const max = Math.max(0, wrapped.length - height);
   const top = following ? max : Math.min(offset, max);
   const scrollTop = useRef(top);
@@ -235,10 +242,16 @@ export function Reader({
       <Text bold wrap="truncate-end">
         {terminalText(title)}
       </Text>
+      {description && (
+        <Text dimColor wrap="truncate-end">
+          {description}
+        </Text>
+      )}
       <Box flexDirection="column" height={Math.min(height, Math.max(1, wrapped.length))}>
         {wrapped.slice(top, top + height).map((line, i) => (
           <Text
             key={top + i}
+            {...(document && /^#{1,6} /.test(line) ? { bold: true, color: "cyan" } : {})}
             {...(line.startsWith("+") ? { color: "green" } : line.startsWith("-") ? { color: "red" } : {})}
           >
             {line || " "}
@@ -300,6 +313,14 @@ export function Reader({
               }}
             />
           )}
+          {actions.map((action) => (
+            <MouseButton
+              key={action.label}
+              label={action.label}
+              onClick={action.onClick}
+              disabled={action.disabled ?? false}
+            />
+          ))}
         </MouseActions>
       )}
       {linkError && (

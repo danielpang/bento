@@ -20,23 +20,20 @@ import {
   checkAgentPairing,
   modelStringFor,
   providersForCli,
+  resolveRepositoryCommands,
   type AgentCli,
 } from "@bento/core";
 import type { GateCriteria, GateCriterion } from "@bento/core";
 import { getAdapter } from "@bento/agents";
 import { terminalText } from "../terminal.js";
-import type {
-  AgentProfile,
-  AgentTool,
-  BentoClient,
-  McpServerStatus,
-  Project,
-  Repository,
-  Stage,
-} from "@bento/api-client";
+import type { AgentProfile, AgentTool, BentoClient, Project, Repository, Stage } from "@bento/api-client";
 import { useMouseTarget, useSuspendMouse } from "../mouse.js";
 import { MouseActions, MouseButton } from "./MouseControls.js";
 import { TextInput } from "./TextInput.js";
+import { AgentEditor } from "./AgentEditor.js";
+import { Form } from "./Form.js";
+import { Navigator } from "./Navigator.js";
+export type SettingsSection = "integrations" | "mcp" | "team" | "account" | "billing" | "identity";
 import { CRITERION_KINDS, describeCriterion } from "../criteria.js";
 import { prepareRepositoryPath, repositoryNameHint, type RepositoryPathOwner } from "../repository-path.js";
 
@@ -53,14 +50,16 @@ type Screen =
   | { name: "hub" }
   | { name: "repos" }
   | { name: "repoPath"; value: string }
-  | { name: "projectName"; repoPath: string; value: string }
   | { name: "agents" }
   | { name: "agentProvider"; cli: AgentCli }
   | { name: "agentModelList"; cli: AgentCli; providerId: string }
   | { name: "agentModel"; cli: AgentCli; value: string }
-  /** Only reached when editing: a new agent names itself. */
-  | { name: "agentName"; cli: AgentCli; model: string; editingId: string; value: string }
+  | { name: "agentEdit"; profile: AgentProfile }
   | { name: "stages" }
+  | { name: "stageDetails"; stageId: string }
+  | { name: "stageGate"; stageId: string }
+  | { name: "stageDelete"; stageId: string }
+  | { name: "stagePrompt"; stageId: string; value: string }
   | { name: "criteria"; stageId: string }
   | { name: "criterionCmd"; stageId: string; value: string }
   /** Which agent rules on the work, for an agent_judge requirement. */
@@ -69,13 +68,8 @@ type Screen =
   | { name: "stageName"; stageId: string; value: string }
   | { name: "newStage"; value: string }
   | { name: "keys" }
-  | { name: "github" }
   | { name: "subscription" }
-  | { name: "keyValue"; credential: string; from: "keys" | "github"; value: string }
-  | { name: "mcp" }
-  | { name: "mcpName"; value: string }
-  | { name: "mcpUrl"; serverName: string; value: string }
-  | { name: "mcpKey"; serverName: string; url: string; value: string }
+  | { name: "keyValue"; credential: string; from: "keys"; value: string }
   | { name: "yamlAgents" }
   | { name: "yamlPipeline" }
   | {
@@ -83,8 +77,7 @@ type Screen =
       kind: "agents-export" | "agents-import" | "pipeline-export" | "pipeline-import";
       value: string;
     }
-  | { name: "repoSetup"; repoId: string; value: string }
-  | { name: "repoTest"; repoId: string; setupCommand: string; value: string };
+  | { name: "repoSetup"; repoId: string; value: string };
 
 /** What the server reports about the machine it runs on. */
 type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
@@ -92,19 +85,18 @@ type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
 /** Screens where typing composes text rather than driving a list. */
 const TYPING = new Set([
   "repoPath",
-  "projectName",
   "agentModel",
-  "agentName",
+  "agentEdit",
   "stageName",
+  "stageDetails",
+  "stageGate",
+  "stageDelete",
+  "stagePrompt",
   "newStage",
   "keyValue",
   "criterionCmd",
-  "mcpName",
-  "mcpUrl",
-  "mcpKey",
   "yamlPath",
   "repoSetup",
-  "repoTest",
 ]);
 
 /**
@@ -119,10 +111,8 @@ const PROVIDER_CREDENTIALS = AGENT_CREDENTIALS.filter(
   (credential) => credential.name !== "CLAUDE_CODE_OAUTH_TOKEN" && credential.name !== "GITHUB_TOKEN",
 );
 
-const GITHUB_CREDENTIAL = AGENT_CREDENTIALS.find((credential) => credential.name === "GITHUB_TOKEN")!;
-
 /** Screens whose hint advertises d, so d owes an answer on every row. */
-const REMOVABLE = new Set(["repos", "agents", "criteria", "keys", "github", "stages", "mcp"]);
+const REMOVABLE = new Set(["repos", "agents", "criteria", "keys", "stages"]);
 
 /** The key whose presence means a provider is paid for, per provider. */
 export const PROVIDER_KEYS = [
@@ -151,6 +141,8 @@ export function Setup({
   repositoryPathOwner,
   agentsRunLocally,
   selectedProjectId,
+  serverMode = "local",
+  onSection,
   onDone,
 }: {
   client: BentoClient;
@@ -159,9 +151,12 @@ export function Setup({
   /** Whether agents execute on this machine, which is what makes its logins usable. */
   agentsRunLocally: boolean;
   selectedProjectId?: string | undefined;
+  serverMode?: "local" | "multi";
+  onSection?: (section: SettingsSection) => void;
   onDone: () => void;
 }) {
   const [screen, setScreen] = useState<Screen>({ name: "hub" });
+  const { columns } = useWindowSize();
   const [index, setIndex] = useState(0);
   /**
    * The selected row, readable synchronously.
@@ -189,16 +184,8 @@ export function Setup({
    * all rather than as "missing".
    */
   const [tools, setTools] = useState<AgentTool[]>([]);
-  const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
-  const [mcpCanManage, setMcpCanManage] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  /**
-   * The agent being changed, or null when adding. Held beside the
-   * screen rather than inside it because the edit runs through the
-   * same tool, provider and model screens an add does.
-   */
-  const [editingAgent, setEditingAgent] = useState<{ id: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [loading, setLoading] = useState(true);
@@ -211,7 +198,7 @@ export function Setup({
   const hints: Record<string, string> = Object.fromEntries(secrets.map((row) => [row.name, row.hint]));
 
   async function load() {
-    const [projectRows, profileRows, secretRows, machineRow, toolRows, mcp] = await Promise.all([
+    const [projectRows, profileRows, secretRows, machineRow, toolRows] = await Promise.all([
       client.listProjects(),
       client.listProfiles(),
       client.listSecrets(),
@@ -219,7 +206,6 @@ export function Setup({
       // has no such route; neither is worth failing setup over.
       client.getMachineSettings().catch(() => null),
       client.listAgentTools().catch(() => []),
-      client.mcpStatus().catch(() => ({ canManage: false, servers: [], userConnectionsNeeded: 0 })),
     ]);
     setProjects(projectRows);
     setProfiles(profileRows);
@@ -227,8 +213,6 @@ export function Setup({
     setCanManageCredentials(secretRows.canManage);
     setMachine(machineRow);
     setTools(toolRows);
-    setMcpServers(mcp.servers);
-    setMcpCanManage(mcp.canManage);
     // In local mode the server is this process, so its report and this
     // machine's are the same answer. With a remote server they are not:
     // the agents run here, so the logins that matter are here, and the
@@ -328,9 +312,6 @@ export function Setup({
   }
 
   function go(next: Screen) {
-    // Landing back on the list ends an edit, however it got there:
-    // saved, or escaped out of half way through.
-    if (next.name === "agents" || next.name === "hub") setEditingAgent(null);
     setScreen(next);
     indexRef.current = 0;
     setIndex(0);
@@ -338,14 +319,7 @@ export function Setup({
     setError("");
   }
 
-  /**
-   * Stores the pairing, however the model string was arrived at.
-   *
-   * Editing takes one more step than adding: an agent that already has
-   * a name has one worth keeping or correcting, and silently renaming
-   * "Reviewer" to "opencode" because its model moved would break the
-   * only label the stage list shows.
-   */
+  /** Create a new agent once its harness and model have been selected. */
   function saveAgent(cli: AgentCli, model: string) {
     const trimmed = model.trim();
     if (!trimmed) return;
@@ -357,10 +331,6 @@ export function Setup({
       setError(pairing.detail);
       return;
     }
-    if (editingAgent) {
-      go({ name: "agentName", cli, model: trimmed, editingId: editingAgent.id, value: editingAgent.name });
-      return;
-    }
     const label = MODEL_GUIDANCE.find((g) => g.cli === cli)?.label ?? cli;
     // Two profiles for one tool need telling apart, so the model joins
     // the name only when the plain label is already taken.
@@ -370,6 +340,27 @@ export function Setup({
         if (ok) go({ name: "agents" });
       },
     );
+  }
+
+  async function saveStage(stageId: string, patch: Parameters<BentoClient["updateStage"]>[1]) {
+    if (await act("Stage updated", () => client.updateStage(stageId, patch)))
+      go({ name: "stageDetails", stageId });
+  }
+  async function moveStage(stageId: string, delta: number) {
+    if (!project) return;
+    if (
+      await act("Stage order updated", async () => {
+        const fresh = await client.getPipeline(project.id);
+        const ids = fresh.stages.map((stage) => stage.id);
+        const from = ids.indexOf(stageId),
+          to = from + delta;
+        if (from < 0 || to < 0 || to >= ids.length)
+          throw new Error("The pipeline changed. Open the stage again.");
+        [ids[from], ids[to]] = [ids[to]!, ids[from]!];
+        await client.reorderStages(fresh.id, ids);
+      })
+    )
+      go({ name: "stageDetails", stageId });
   }
 
   /** The criteria currently on a stage. */
@@ -403,12 +394,12 @@ export function Setup({
       open: () => go({ name: "repos" }),
     },
     {
-      label: "Coding agents",
-      status: profiles.length ? profiles.map((p) => `${p.cli} ${p.model}`).join(", ") : "none yet",
+      label: "Agents",
+      status: `${profiles.length} configured · harness, model and prompt`,
       open: () => go({ name: "agents" }),
     },
     {
-      label: "Stages",
+      label: "Pipeline",
       status: !project ? "connect a repository first" : `${assigned} of ${stages.length} have an agent`,
       open: () => (project ? go({ name: "stages" }) : setNotice("Connect a repository first.")),
     },
@@ -417,7 +408,7 @@ export function Setup({
     ...(agentsRunLocally
       ? [
           {
-            label: "Subscriptions on this machine",
+            label: "Local agent sign-ins",
             status: subscriptionStatus(machine, logins),
             open: () => go({ name: "subscription" }),
           },
@@ -428,27 +419,38 @@ export function Setup({
       status: providerKeyStatus(hints),
       open: () => go({ name: "keys" }),
     },
-    {
-      label: "GitHub (pull requests)",
-      status: hints[GITHUB_CREDENTIAL.name] ?? "no token saved",
-      open: () => go({ name: "github" }),
-    },
-    {
-      label: "MCP servers",
-      status: mcpServers.length ? `${mcpServers.length} configured` : "none yet",
-      open: () => go({ name: "mcp" }),
-    },
-    {
-      label: "Agents file",
-      status: profiles.length ? `${profiles.length} named agents` : "none yet",
-      open: () => go({ name: "yamlAgents" }),
-    },
-    {
-      label: "Pipeline file",
-      status: project ? `${stages.length} stages` : "connect a repository first",
-      open: () => (project ? go({ name: "yamlPipeline" }) : setNotice("Connect a repository first.")),
-    },
-    { label: "Finish and open the board", status: "", open: onDone },
+    ...(onSection
+      ? [
+          {
+            label: "MCP",
+            status: "featured servers, connections and custom servers",
+            open: () => onSection("mcp"),
+          },
+          {
+            label: "Integrations",
+            status: "GitHub, Linear" + (serverMode === "multi" ? ", Slack" : ""),
+            open: () => onSection("integrations"),
+          },
+          ...(serverMode === "multi"
+            ? [
+                {
+                  label: "Team",
+                  status: "organizations, members and invitations",
+                  open: () => onSection("team"),
+                },
+                { label: "Account", status: "profile and sign out", open: () => onSection("account") },
+                { label: "Billing", status: "plan and usage", open: () => onSection("billing") },
+              ]
+            : [
+                {
+                  label: "Git identity",
+                  status: "commit author name and email",
+                  open: () => onSection("identity"),
+                },
+              ]),
+        ]
+      : []),
+    { label: "Back to board", status: "", open: onDone },
   ];
 
   usePaste(() => setNotice("Choose a text field before pasting."), {
@@ -463,6 +465,11 @@ export function Setup({
 
     if (key.escape || (input === "q" && screen.name === "hub")) {
       if (screen.name === "hub") onDone();
+      else if (screen.name === "yamlAgents") go({ name: "agents" });
+      else if (screen.name === "yamlPipeline") go({ name: "stages" });
+      else if (screen.name === "criteria" || screen.name === "assign")
+        go({ name: "stageDetails", stageId: screen.stageId });
+      else if (screen.name === "judge") go({ name: "criteria", stageId: screen.stageId });
       else go({ name: "hub" });
       return;
     }
@@ -492,39 +499,6 @@ export function Setup({
       return;
     }
 
-    if (screen.name === "stages" && stages[indexRef.current]) {
-      const stage = stages[indexRef.current]!;
-      if (input === "g") {
-        const gateType = stage.gateType === "manual" ? "auto" : "manual";
-        void act(
-          `${stage.name} advances ${gateType === "auto" ? "once its requirements pass" : "when you approve"}`,
-          () => client.updateStage(stage.id, { gateType }),
-        );
-        return;
-      }
-      if (input === "r") {
-        go({ name: "stageName", stageId: stage.id, value: stage.name });
-        return;
-      }
-      if (input === "c") {
-        go({ name: "criteria", stageId: stage.id });
-        return;
-      }
-      // The stage that opens the pull request is a decision people
-      // make once per pipeline, and it was only reachable from the
-      // console even though the field has always been here.
-      if (input === "p") {
-        const createPr = !stage.createPr;
-        void act(
-          createPr
-            ? `${stage.name} opens a pull request when its agent finishes`
-            : `${stage.name} no longer opens a pull request`,
-          () => client.updateStage(stage.id, { createPr }),
-        );
-        return;
-      }
-    }
-
     // Deleting is a d away wherever a saved thing is listed.
     if (input === "d") {
       if (screen.name === "criteria") {
@@ -544,7 +518,7 @@ export function Setup({
           // The server refuses while cards are in the stage, and its
           // refusal names the fix, so it is shown rather than
           // second-guessed here.
-          void act(`Removed ${stage.name}`, () => client.deleteStage(stage.id));
+          go({ name: "stageDelete", stageId: stage.id });
           return;
         }
       }
@@ -553,13 +527,12 @@ export function Setup({
         void act(`Removed ${profile.name}`, () => client.deleteProfile(profile.id));
         return;
       }
-      if (screen.name === "keys" || screen.name === "github") {
+      if (screen.name === "keys") {
         if (!canManageCredentials) {
           setNotice("Only owners and admins can change credentials.");
           return;
         }
-        const credential =
-          screen.name === "github" ? GITHUB_CREDENTIAL : PROVIDER_CREDENTIALS[indexRef.current];
+        const credential = PROVIDER_CREDENTIALS[indexRef.current];
         const saved = credential && secrets.find((s) => s.name === credential.name);
         if (saved) {
           void act(`Removed ${saved.name}`, () => client.deleteSecret(saved.id));
@@ -575,32 +548,16 @@ export function Setup({
         void act(`Removed ${repo.name}`, () => client.removeRepository(project.id, repo.id));
         return;
       }
-      if (screen.name === "mcp") {
-        const server = mcpServers[indexRef.current];
-        if (server) {
-          if (!mcpCanManage) {
-            setNotice("Only owners and admins can remove a team MCP server.");
-            return;
-          }
-          void act(`Removed ${server.name}`, () => client.deleteMcpServer(server.id));
-          return;
-        }
-      }
       // A screen whose hint advertises d owes an answer on every row,
       // including the ones with nothing behind them.
       if (REMOVABLE.has(screen.name)) setNotice("Nothing saved here yet.");
       return;
     }
 
-    // Editing runs through the same tool, provider and model screens
-    // adding does, so it starts by staying put and asking for a tool.
     if (input === "e" && screen.name === "agents") {
       const profile = existingAgents[indexRef.current];
-      if (profile) {
-        setEditingAgent({ id: profile.id, name: profile.name });
-        setNotice(`Editing ${profile.name}. Choose the tool it should run.`);
-        return;
-      }
+      if (profile) go({ name: "agentEdit", profile });
+      return;
     }
 
     if (!key.return) return;
@@ -616,7 +573,7 @@ export function Setup({
       case "repos":
         return repos.length + 2; // repositories, add, back
       case "agents":
-        return existingAgents.length + MODEL_GUIDANCE.length + 1;
+        return existingAgents.length + MODEL_GUIDANCE.length + 2;
       case "criteria":
         // A manual stage consults no requirements, so it offers none:
         // only the way back.
@@ -630,15 +587,11 @@ export function Setup({
       case "agentModelList":
         return modelsFor(screen.cli, screen.providerId).length + 1;
       case "stages":
-        return stages.length + 2; // stages, add, back
+        return stages.length + 3; // stages, add, import/export, back
       case "assign":
         return profiles.length + 1; // profiles, then no agent
       case "keys":
         return PROVIDER_CREDENTIALS.length + 1;
-      case "github":
-        return 2; // the token, then back
-      case "mcp":
-        return mcpServers.length + 2; // servers, add, back
       case "yamlAgents":
       case "yamlPipeline":
         return 3; // export, import, back
@@ -663,48 +616,29 @@ export function Setup({
         }
         return;
       }
-      case "mcp": {
-        if (index === mcpServers.length) {
-          if (!mcpCanManage) {
-            setNotice("Only owners and admins can add a team MCP server.");
-            return;
-          }
-          go({ name: "mcpName", value: "" });
-          return;
-        }
-        if (index === mcpServers.length + 1) {
-          go({ name: "hub" });
-          return;
-        }
-        const server = mcpServers[index];
-        if (
-          server?.authType === "oauth" &&
-          !server.userCredential?.connected &&
-          !server.orgCredential?.connected
-        ) {
-          setNotice("Connect this server in the web console. OAuth needs a browser.");
-        }
-        return;
-      }
       case "yamlAgents": {
         if (index === 0) go({ name: "yamlPath", kind: "agents-export", value: "agents.yaml" });
         else if (index === 1) go({ name: "yamlPath", kind: "agents-import", value: "agents.yaml" });
-        else go({ name: "hub" });
+        else go({ name: "agents" });
         return;
       }
       case "yamlPipeline": {
         if (index === 0) go({ name: "yamlPath", kind: "pipeline-export", value: "pipeline.yaml" });
         else if (index === 1) go({ name: "yamlPath", kind: "pipeline-import", value: "pipeline.yaml" });
-        else go({ name: "hub" });
+        else go({ name: "stages" });
         return;
       }
       case "agents": {
         if (index < existingAgents.length) {
-          setNotice("Press d to remove this agent.");
+          go({ name: "agentEdit", profile: existingAgents[index]! });
           return;
         }
         const at = index - existingAgents.length;
         if (at === MODEL_GUIDANCE.length) {
+          go({ name: "yamlAgents" });
+          return;
+        }
+        if (at === MODEL_GUIDANCE.length + 1) {
           go({ name: "hub" });
           return;
         }
@@ -756,19 +690,19 @@ export function Setup({
           return;
         }
         if (index === stages.length + 1) {
+          go({ name: "yamlPipeline" });
+          return;
+        }
+        if (index === stages.length + 2) {
           go({ name: "hub" });
           return;
         }
-        if (profiles.length === 0) {
-          setNotice("Add a coding agent first.");
-          return;
-        }
-        go({ name: "assign", stageId: stages[index]!.id });
+        go({ name: "stageDetails", stageId: stages[index]!.id });
         return;
       }
       case "criteria": {
         if (!isAutomatic(screen.stageId)) {
-          go({ name: "stages" });
+          go({ name: "stageDetails", stageId: screen.stageId });
           return;
         }
         const current = criteriaOf(screen.stageId);
@@ -778,7 +712,7 @@ export function Setup({
         }
         const at = index - current.length;
         if (at === CRITERION_KINDS.length) {
-          go({ name: "stages" });
+          go({ name: "stageDetails", stageId: screen.stageId });
           return;
         }
         const kind = CRITERION_KINDS[at]!;
@@ -833,7 +767,7 @@ export function Setup({
             : `${stage?.name ?? "Stage"} has no agent`,
           () => client.updateStage(stageId, { defaultAgentProfileId }),
         ).then((ok) => {
-          if (ok) go({ name: "stages" });
+          if (ok) go({ name: "stageDetails", stageId });
         });
         return;
       }
@@ -850,18 +784,6 @@ export function Setup({
         go({ name: "keyValue", credential: credential.name, from: "keys", value: "" });
         return;
       }
-      case "github": {
-        if (index === 0) {
-          if (!canManageCredentials) {
-            setNotice("Only owners and admins can change credentials.");
-            return;
-          }
-          go({ name: "keyValue", credential: GITHUB_CREDENTIAL.name, from: "github", value: "" });
-          return;
-        }
-        go({ name: "hub" });
-        return;
-      }
       default:
         return;
     }
@@ -869,19 +791,11 @@ export function Setup({
 
   const mouseActions = [
     ...(screen.name === "agents" ? [{ label: "Edit", key: "e" }] : []),
-    ...(screen.name === "stages"
-      ? [
-          { label: "Rename", key: "r" },
-          { label: "Gate", key: "g" },
-          { label: "Requirements", key: "c" },
-          { label: "Auto PR", key: "p" },
-        ]
-      : []),
     ...(REMOVABLE.has(screen.name) ? [{ label: "Remove", key: "d" }] : []),
     ...(screen.name === "subscription"
       ? [
           { label: "Toggle sharing", key: "s" },
-          { label: "Sign in", key: "l" },
+          { label: "Sign in to Claude", key: "l" },
         ]
       : []),
   ];
@@ -943,68 +857,28 @@ export function Setup({
     if (screen.name === "repoPath") {
       const pathLocation = repositoryPathOwner === "client" ? "this machine" : "the server";
       return (
-        <Frame title="Connect a repository" hint="Enter to continue, Escape to go back">
-          <Text color="gray">
-            Path on {pathLocation} to the git checkout agents will use. Several can share one project.
-          </Text>
-          <Box marginTop={1}>
-            <Text>{repositoryPathOwner === "client" ? "Path" : "Server path"}: </Text>
-            <TextInput
-              value={screen.value}
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "repos" })}
-              onSubmit={(raw) => {
-                const dir = prepareRepositoryPath(raw, repositoryPathOwner);
-                if (!dir) return;
-                const problem = repositoryPathOwner === "client" ? pathProblem(dir) : null;
-                if (problem) {
-                  setError(problem);
-                  return;
-                }
-                setError("");
-                if (!project) {
-                  go({ name: "projectName", repoPath: dir, value: repositoryNameHint(dir) });
-                  return;
-                }
-                void act(`Added ${repositoryNameHint(dir)}`, () =>
-                  client.addRepository(project.id, { localPath: dir }),
-                ).then((ok) => {
-                  if (ok) go({ name: "repos" });
-                });
-              }}
-            />
-          </Box>
-          {error && <Text color="red">{error}</Text>}
-        </Frame>
-      );
-    }
-
-    if (screen.name === "projectName") {
-      return (
-        <Frame title="Name this project" hint="Enter to create, Escape to go back">
-          <Text color="gray">The board is named after it. {screen.repoPath}</Text>
-          <Box marginTop={1}>
-            <Text>Name: </Text>
-            <TextInput
-              value={screen.value}
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "repos" })}
-              onSubmit={(name) => {
-                const trimmed = name.trim();
-                if (!trimmed) return;
-                // Lands on the repository list rather than the hub: a
-                // project spanning a frontend and a backend spans them
-                // from the start, and this is where the second one is
-                // added. From the hub it looks like editing a mistake.
-                void act(`Connected ${trimmed}. Add another repository, or go back.`, () =>
-                  client.createProject({ name: trimmed, localPath: screen.repoPath }),
-                ).then((ok) => {
-                  if (ok) go({ name: "repos" });
-                });
-              }}
-            />
-          </Box>
-        </Frame>
+        <Form
+          title={project ? "Connect a repository" : "Create project"}
+          fields={[
+            ...(!project
+              ? [{ id: "name", label: "Project name (optional)", placeholder: "Use the repository name" }]
+              : []),
+            { id: "path", label: `Repository path on ${pathLocation}`, value: screen.value, required: true },
+          ]}
+          description="Choose the Git checkout agents will use."
+          submitLabel={project ? "Connect repository" : "Create project"}
+          onCancel={() => go({ name: "repos" })}
+          onSubmit={async ({ path: raw = "", name = "" }) => {
+            const dir = prepareRepositoryPath(raw, repositoryPathOwner);
+            if (!dir) throw new Error("Enter a repository path.");
+            const problem = repositoryPathOwner === "client" ? pathProblem(dir) : null;
+            if (problem) throw new Error(problem);
+            if (project) await client.addRepository(project.id, { localPath: dir });
+            else await client.createProject({ name: name.trim() || repositoryNameHint(dir), localPath: dir });
+            await load();
+            go({ name: "repos" });
+          }}
+        />
       );
     }
 
@@ -1083,44 +957,187 @@ export function Setup({
       );
     }
 
-    if (screen.name === "agentName") {
-      const tool = MODEL_GUIDANCE.find((g) => g.cli === screen.cli);
+    if (screen.name === "agentEdit") {
       return (
-        <Frame title="Name this agent" hint="Enter to save, Escape to go back">
-          <Text color="gray">
-            {tool?.label ?? screen.cli} on {screen.model}
-          </Text>
-          <Text color="gray">Every stage using this agent follows the change.</Text>
-          <Box marginTop={1}>
-            <Text>Name: </Text>
-            <TextInput
-              value={screen.value}
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "agents" })}
-              onSubmit={(raw) => {
-                const name = raw.trim();
-                if (!name) return;
-                void act(`Updated ${name}`, () =>
-                  client.updateProfile(screen.editingId, { name, cli: screen.cli, model: screen.model }),
-                ).then((ok) => {
-                  if (ok) go({ name: "agents" });
-                });
-              }}
-            />
-          </Box>
-        </Frame>
+        <AgentEditor
+          profile={screen.profile}
+          onCancel={() => go({ name: "agents" })}
+          onSave={async (draft) => {
+            await client.updateProfile(screen.profile.id, draft);
+            await load();
+            go({ name: "agents" });
+            setNotice(`Updated ${draft.name}.`);
+          }}
+        />
       );
     }
 
+    if (screen.name === "stageDetails" || screen.name === "stageGate" || screen.name === "stageDelete") {
+      const stage = stages.find((item) => item.id === screen.stageId);
+      if (!stage)
+        return (
+          <Box flexDirection="column">
+            <Text>Stage no longer exists.</Text>
+            <MouseButton label="Back to pipeline" onClick={() => go({ name: "stages" })} />
+          </Box>
+        );
+      if (busy) return <Text>Saving stage…</Text>;
+      const at = stages.findIndex((item) => item.id === stage.id);
+      const choices =
+        screen.name === "stageDelete"
+          ? [
+              {
+                id: "delete",
+                label: `Delete ${stage.name}`,
+                select: () => {
+                  void act("Stage removed", () => client.deleteStage(stage.id)).then((ok) => {
+                    if (ok) go({ name: "stages" });
+                  });
+                },
+              },
+              {
+                id: "cancel",
+                label: "Cancel",
+                select: () => go({ name: "stageDetails", stageId: stage.id }),
+              },
+            ]
+          : screen.name === "stageGate"
+            ? [
+                {
+                  id: "manual",
+                  label: "Manual approval",
+                  select: () => {
+                    void saveStage(stage.id, { gateType: "manual" });
+                  },
+                },
+                {
+                  id: "auto",
+                  label: "Automatic when requirements pass",
+                  select: () => {
+                    void saveStage(stage.id, {
+                      gateType: "auto",
+                      gateCriteria: criteriaOf(stage.id).filter(
+                        (criterion) => criterion.type !== "manual",
+                      ) as GateCriteria,
+                    });
+                  },
+                },
+              ]
+            : [
+                {
+                  id: "name",
+                  label: `Name: ${stage.name}`,
+                  select: () => go({ name: "stageName", stageId: stage.id, value: stage.name }),
+                },
+                {
+                  id: "agent",
+                  label: `Agent: ${profiles.find((item) => item.id === stage.defaultAgentProfileId)?.name ?? "None"}`,
+                  select: () => go({ name: "assign", stageId: stage.id }),
+                },
+                {
+                  id: "prompt",
+                  label: `Prompt: ${stage.description?.split("\n")[0] || "None"}`,
+                  select: () =>
+                    go({ name: "stagePrompt", stageId: stage.id, value: stage.description ?? "" }),
+                },
+                {
+                  id: "gate",
+                  label: `Advancement: ${isAutomatic(stage.id) ? "Automatic" : "Manual approval"}`,
+                  select: () => go({ name: "stageGate", stageId: stage.id }),
+                },
+                {
+                  id: "requirements",
+                  label: `Requirements: ${criteriaOf(stage.id).length}${isAutomatic(stage.id) ? "" : " (inactive with manual approval)"}`,
+                  select: () => go({ name: "criteria", stageId: stage.id }),
+                },
+                {
+                  id: "pr",
+                  label: `Open pull request: ${stage.createPr ? "On" : "Off"}`,
+                  select: () => {
+                    void saveStage(stage.id, { createPr: !stage.createPr });
+                  },
+                },
+                ...(at > 0
+                  ? [
+                      {
+                        id: "earlier",
+                        label: "Move stage earlier",
+                        select: () => {
+                          void moveStage(stage.id, -1);
+                        },
+                      },
+                    ]
+                  : []),
+                ...(at < stages.length - 1
+                  ? [
+                      {
+                        id: "later",
+                        label: "Move stage later",
+                        select: () => {
+                          void moveStage(stage.id, 1);
+                        },
+                      },
+                    ]
+                  : []),
+                {
+                  id: "delete",
+                  label: "Delete stage",
+                  select: () => go({ name: "stageDelete", stageId: stage.id }),
+                },
+              ];
+      return (
+        <Box flexDirection="column">
+          <Navigator
+            key={`${screen.name}:${stage.id}`}
+            title={
+              screen.name === "stageDelete"
+                ? "Delete stage?"
+                : screen.name === "stageGate"
+                  ? "Stage advancement"
+                  : `Stage: ${stage.name}`
+            }
+            choices={choices}
+            onClose={() =>
+              go(
+                screen.name === "stageDetails"
+                  ? { name: "stages" }
+                  : { name: "stageDetails", stageId: stage.id },
+              )
+            }
+          />
+          {error && <Text color="red">{terminalText(error)}</Text>}
+        </Box>
+      );
+    }
+    if (screen.name === "stagePrompt")
+      return (
+        <Box flexDirection="column" borderStyle="round" paddingX={1}>
+          <Text bold>Stage prompt</Text>
+          <Text dimColor>Ctrl+J newline · Enter save · Esc back</Text>
+          <TextInput
+            value={screen.value}
+            onChange={(value) => setScreen({ ...screen, value })}
+            multiline
+            showActions
+            isActive={!busy}
+            onCancel={() => go({ name: "stageDetails", stageId: screen.stageId })}
+            onSubmit={(description) => {
+              void saveStage(screen.stageId, { description });
+            }}
+          />
+          {error && <Text color="red">{terminalText(error)}</Text>}
+        </Box>
+      );
+
     if (screen.name === "stageName") {
       return (
-        <Frame title="Rename this stage" hint="Enter to save, Escape to go back">
+        <Frame title="Rename this stage" hint="Enter to save, Escape to go back" error={error}>
           <Box marginTop={1}>
             <Text>Name: </Text>
             <TextInput
               value={screen.value}
               onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "stages" })}
+              onCancel={() => go({ name: "stageDetails", stageId: screen.stageId })}
               onSubmit={(name) => {
                 const trimmed = name.trim();
                 if (!trimmed) return;
@@ -1130,7 +1147,7 @@ export function Setup({
                   // Leaving on failure would clear the error and make a
                   // failed rename look like it just did not stick.
                   (ok) => {
-                    if (ok) go({ name: "stages" });
+                    if (ok) go({ name: "stageDetails", stageId: screen.stageId });
                   },
                 );
               }}
@@ -1210,7 +1227,7 @@ export function Setup({
 
       return (
         <Frame
-          title="Subscriptions on this machine"
+          title="Local agent sign-ins"
           hint="l sign in to Claude · s share on/off · Escape back"
           notice={notice}
           error={error}
@@ -1285,8 +1302,8 @@ export function Setup({
           error={error}
         >
           <Text color="gray">
-            Sandboxes carry no language runtime, so give each one a setup command to install what it needs and
-            a test command for the agent.
+            The agent can inspect the repository and install its dependencies. Optional commands let you
+            specify dependency setup before work and build or test checks after edits.
           </Text>
           <Box flexDirection="column" marginTop={1}>
             {repos.map((repo, i) => (
@@ -1308,165 +1325,43 @@ export function Setup({
     }
 
     if (screen.name === "repoSetup") {
+      const repo = repos.find((item) => item.id === screen.repoId);
+      const commands = resolveRepositoryCommands(repo ?? {});
       return (
-        <Frame title="Setup command" hint="Enter to continue, Escape to go back">
-          <Text color="gray">
-            Shell run once in a fresh sandbox, before any agent starts. Leave it empty for none.
-          </Text>
-          <Box marginTop={1}>
-            <Text>Setup: </Text>
-            <TextInput
-              value={screen.value}
-              placeholder="npm ci"
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "repos" })}
-              onSubmit={(setupCommand) => {
-                const repo = repos.find((r) => r.id === screen.repoId);
-                go({ name: "repoTest", repoId: screen.repoId, setupCommand, value: repo?.testCommand ?? "" });
-              }}
-            />
-          </Box>
-        </Frame>
-      );
-    }
-
-    if (screen.name === "repoTest") {
-      return (
-        <Frame title="Test command" hint="Enter to save, Escape to go back" error={error}>
-          <Text color="gray">Shell the agent is told to run to check its work. Leave it empty for none.</Text>
-          <Box marginTop={1}>
-            <Text>Test: </Text>
-            <TextInput
-              value={screen.value}
-              placeholder="npm test"
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "repos" })}
-              onSubmit={(testCommand) => {
-                if (!project) return;
-                void act("Saved the commands", () =>
-                  client.updateRepository(project.id, screen.repoId, {
-                    setupCommand: screen.setupCommand.trim() || null,
-                    testCommand: testCommand.trim() || null,
-                  }),
-                ).then((ok) => {
-                  if (ok) go({ name: "repos" });
-                });
-              }}
-            />
-          </Box>
-        </Frame>
-      );
-    }
-
-    if (screen.name === "mcp") {
-      return (
-        <Frame
-          title="MCP servers"
-          hint="j/k move · Enter add · d remove · Escape back"
-          notice={notice}
-          error={error}
-        >
-          <Text color="gray">
-            Servers agents can call during a run. OAuth servers have to be connected in the web console.
-          </Text>
-          <Box flexDirection="column" marginTop={1}>
-            {mcpServers.map((server, i) => {
-              const connected =
-                server.authType === "none" ||
-                server.orgCredential?.connected === true ||
-                server.userCredential?.connected === true;
-              return (
-                <Row
-                  key={server.id}
-                  selected={i === index}
-                  label={server.name}
-                  status={`${server.authType} · ${server.enabled ? "on" : "off"} · ${connected ? "connected" : "not connected"}`}
-                />
-              );
-            })}
-            <Row selected={index === mcpServers.length} label="Add a custom URL" />
-            <Row selected={index === mcpServers.length + 1} label="Back" />
-          </Box>
-        </Frame>
-      );
-    }
-
-    if (screen.name === "mcpName") {
-      return (
-        <Frame title="Name this MCP server" hint="Enter to continue, Escape to go back">
-          <Box marginTop={1}>
-            <Text>Name: </Text>
-            <TextInput
-              value={screen.value}
-              placeholder="Docs"
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "mcp" })}
-              onSubmit={(name) => {
-                const trimmed = name.trim();
-                if (!trimmed) return;
-                go({ name: "mcpUrl", serverName: trimmed, value: "" });
-              }}
-            />
-          </Box>
-        </Frame>
-      );
-    }
-
-    if (screen.name === "mcpUrl") {
-      return (
-        <Frame title={`URL for ${screen.serverName}`} hint="Enter to continue, Escape to go back">
-          <Box marginTop={1}>
-            <Text>URL: </Text>
-            <TextInput
-              value={screen.value}
-              placeholder="https://example.test/mcp"
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "mcp" })}
-              onSubmit={(url) => {
-                const trimmed = url.trim();
-                if (!trimmed) return;
-                go({ name: "mcpKey", serverName: screen.serverName, url: trimmed, value: "" });
-              }}
-            />
-          </Box>
-        </Frame>
-      );
-    }
-
-    if (screen.name === "mcpKey") {
-      return (
-        <Frame title="API key (optional)" hint="Enter to save, Escape to go back" error={error}>
-          <Text color="gray">Leave empty for a server that needs no auth.</Text>
-          <Box marginTop={1}>
-            <Text>Key: </Text>
-            <TextInput
-              value={screen.value}
-              mask
-              onChange={(value) => setScreen({ ...screen, value })}
-              onCancel={() => go({ name: "mcp" })}
-              onSubmit={(raw) => {
-                const key = raw.trim();
-                const slug =
-                  screen.serverName
-                    .toLowerCase()
-                    .replace(/[^a-z0-9]+/g, "-")
-                    .replace(/^-+|-+$/g, "")
-                    .slice(0, 64) || "server";
-                void act(`Added ${screen.serverName}`, async () => {
-                  const created = await client.createMcpServer({
-                    name: screen.serverName,
-                    slug,
-                    url: screen.url,
-                    authType: key ? "api_key" : "none",
-                  });
-                  if (key) await client.setMcpApiKey(created.id, key);
-                }).then((ok) => {
-                  if (ok) go({ name: "mcp" });
-                });
-              }}
-            />
-          </Box>
-        </Frame>
+        <Form
+          title="Repository commands"
+          fields={[
+            {
+              id: "setup",
+              label: "Install dependencies (optional, before work)",
+              value: commands.setupCommand ?? "",
+              placeholder: "Leave blank for agent-managed setup",
+            },
+            {
+              id: "test",
+              label: "Build and test (optional, after edits)",
+              value: commands.testCommand ?? "",
+              placeholder: "pnpm run build && pnpm test",
+            },
+          ]}
+          description={
+            commands.deferredSetup
+              ? "Your build command was moved to checks after edits. Save to apply. Leave dependency setup blank to let the agent configure the environment."
+              : "Leave setup blank to let the agent inspect the repo and install dependencies. Builds and tests run after edits, before the agent reports completion."
+          }
+          fullDescription
+          onCancel={() => go({ name: "repos" })}
+          onSubmit={async ({ setup = "", test = "" }) => {
+            if (!project) throw new Error("Choose a project first.");
+            const resolved = resolveRepositoryCommands({ setupCommand: setup, testCommand: test });
+            await client.updateRepository(project.id, screen.repoId, {
+              setupCommand: resolved.setupCommand,
+              testCommand: resolved.testCommand,
+            });
+            await load();
+            go({ name: "repos" });
+          }}
+        />
       );
     }
 
@@ -1553,12 +1448,12 @@ export function Setup({
     if (screen.name === "agents") {
       return (
         <Frame
-          title="Coding agents"
-          hint="j/k move · Enter add · e edit · d remove · Escape back"
+          title="Agents"
+          hint="j/k move · Enter open · e edit · d remove · Escape back"
           notice={notice}
           error={error}
         >
-          <Text color="gray">A coding agent is a tool paired with a model. Stages point at one.</Text>
+          <Text color="gray">Select an agent to edit its harness, model, prompt and advanced options.</Text>
           <Box flexDirection="column" marginTop={1}>
             {existingAgents.map((profile, i) => (
               <Row
@@ -1569,7 +1464,7 @@ export function Setup({
                 // same tool and model, and it was set here but readable
                 // nowhere: the row that hid it is the row that needs it.
                 status={`${profile.cli} ${profile.model}${
-                  profile.skill ? ` · skill: ${skillPreview(profile.skill)}` : " · no skill"
+                  profile.skill ? ` · prompt: ${skillPreview(profile.skill)}` : " · no prompt"
                 }`}
               />
             ))}
@@ -1588,7 +1483,11 @@ export function Setup({
                 />
               );
             })}
-            <Row selected={index === existingAgents.length + MODEL_GUIDANCE.length} label="Back" />
+            <Row
+              selected={index === existingAgents.length + MODEL_GUIDANCE.length}
+              label="Import or export agents"
+            />
+            <Row selected={index === existingAgents.length + MODEL_GUIDANCE.length + 1} label="Back" />
           </Box>
           {(() => {
             const at = index - existingAgents.length;
@@ -1628,9 +1527,10 @@ export function Setup({
               You decide on the card: Approve moves it on, Reject sends it back. No requirements apply.
             </Text>
             <Box marginTop={1}>
-              <Text color="gray">
-                Press g on the stage list to make this stage advance on its requirements.
-              </Text>
+              <MouseButton
+                label="Change advancement"
+                onClick={() => go({ name: "stageGate", stageId: screen.stageId })}
+              />
             </Box>
           </Frame>
         );
@@ -1725,12 +1625,14 @@ export function Setup({
     if (screen.name === "stages") {
       return (
         <Frame
-          title="Stages"
-          hint="j/k move · Enter agent · c requirements · g advance · p pull request · r rename · d remove · Escape back"
+          title="Pipeline"
+          hint="j/k move · Enter edit stage · d remove · Escape back"
           notice={notice}
           error={error}
         >
-          <Text color="gray">A card entering a stage starts that stage's agent.</Text>
+          <Text color="gray">
+            Select a stage to edit its agent, prompt, advancement and pull request settings.
+          </Text>
           <Box flexDirection="column" marginTop={1}>
             {stages.map((stage, i) => {
               const agent = profiles.find((p) => p.id === stage.defaultAgentProfileId);
@@ -1746,7 +1648,8 @@ export function Setup({
               );
             })}
             <Row selected={index === stages.length} label="Add stage" />
-            <Row selected={index === stages.length + 1} label="Back" />
+            <Row selected={index === stages.length + 1} label="Import or export pipeline" />
+            <Row selected={index === stages.length + 2} label="Back" />
           </Box>
         </Frame>
       );
@@ -1798,6 +1701,8 @@ export function Setup({
                 selected={i === index}
                 label={credential.label}
                 status={hints[credential.name] ?? "not set"}
+                statusColumn={Math.max(1, Math.min(24, columns - 18))}
+                statusColor={hints[credential.name] ? "green" : "gray"}
               />
             ))}
             <Row selected={index === PROVIDER_CREDENTIALS.length} label="Back" />
@@ -1806,43 +1711,9 @@ export function Setup({
       );
     }
 
-    if (screen.name === "github") {
-      return (
-        <Frame
-          title="GitHub (pull requests)"
-          hint={
-            canManageCredentials
-              ? "j/k move · Enter choose · d remove · Escape back"
-              : "j/k move · Escape back"
-          }
-          notice={notice}
-          error={error}
-        >
-          <Text color="gray">
-            A stage with a pull request turned on pushes the card's branch and opens the pull request. Without
-            the GitHub App, that needs a token here.
-          </Text>
-          {!canManageCredentials && <Text color="gray">Only owners and admins can change credentials.</Text>}
-          <Box flexDirection="column" marginTop={1}>
-            <Row
-              selected={index === 0}
-              label={GITHUB_CREDENTIAL.label}
-              status={hints[GITHUB_CREDENTIAL.name] ?? "not set"}
-            />
-            <Row selected={index === 1} label="Back" />
-          </Box>
-        </Frame>
-      );
-    }
-
     return (
-      <Frame
-        title="Bento setup"
-        hint="j/k move · Enter choose · q open the board"
-        notice={notice}
-        error={error}
-      >
-        <Text color="gray">Everything a board needs before agents can work.</Text>
+      <Frame title="Settings" hint="j/k move · Enter choose · q open the board" notice={notice} error={error}>
+        <Text color="gray">Configure this project and the agents that work on it.</Text>
         <Box flexDirection="column" marginTop={1}>
           {hubRows.map((row, i) => (
             <Row key={row.label} selected={i === index} label={row.label} status={row.status} />
@@ -2021,13 +1892,35 @@ export function Row({
   label,
   status,
   onClick,
+  statusColumn,
+  statusColor = "gray",
 }: {
   selected: boolean;
   label: string;
   status?: string;
   onClick?: () => void;
+  statusColumn?: number;
+  statusColor?: string;
 }) {
   const ref = useMouseTarget({ onClick: () => onClick?.(), priority: 1 });
+  if (statusColumn !== undefined) {
+    // Reserve room for the masked tail even when the provider label is long.
+    return (
+      <Box ref={ref} height={1}>
+        <Text {...(selected ? { color: "cyan" } : {})}>{selected ? "› " : "  "}</Text>
+        <Box width={statusColumn} flexShrink={0} marginRight={2}>
+          <Text wrap="truncate-end" {...(selected ? { color: "cyan" } : {})}>
+            {terminalText(label)}
+          </Text>
+        </Box>
+        <Box flexGrow={1} minWidth={0}>
+          <Text wrap="truncate-end" color={statusColor}>
+            {terminalText(status ?? "")}
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
   return (
     <Box ref={ref} height={1}>
       <Text wrap="truncate-end" {...(selected ? { color: "cyan" } : {})}>

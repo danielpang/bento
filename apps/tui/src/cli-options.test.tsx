@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HELP } from "./cli-options.js";
+import { HELP, parseCliOptions } from "./cli-options.js";
+
+test("omitting the login-sharing flag leaves saved settings and the environment in control", () => {
+  assert.equal(parseCliOptions([]).shareAgentAuth, undefined);
+  assert.equal(parseCliOptions(["serve"]).shareAgentAuth, undefined);
+  assert.equal(parseCliOptions(["--share-agent-auth"]).shareAgentAuth, true);
+});
 
 test("bento --help lists all preview and production tool values", () => {
   assert.match(HELP, /--tool[\s\S]*pool/);

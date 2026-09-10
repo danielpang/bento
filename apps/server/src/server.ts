@@ -23,6 +23,7 @@ import { EventBus } from "./events.js";
 import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
 import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
+import { applyInitialAgentAuthSharing } from "./settings.js";
 
 export interface StartOptions {
   /** Overrides applied on top of the process environment. */
@@ -31,6 +32,8 @@ export interface StartOptions {
   migrate?: boolean;
   /** Suppress the startup banner (the TUI draws its own chrome). */
   quiet?: boolean;
+  /** Save an initial local login-sharing choice. Settings can change it after startup. */
+  initialShareAgentAuth?: boolean;
 }
 
 /**
@@ -61,6 +64,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // inbox) are deliberately unknown to this schema.
   const rawEnv = { ...process.env, ...options.env } as NodeJS.ProcessEnv;
   const env = loadEnv(rawEnv);
+  await applyInitialAgentAuthSharing({ env }, options.initialShareAgentAuth);
 
   if (options.migrate) await runMigrations(env.DATABASE_URL);
 

@@ -20,7 +20,7 @@ export function accountSettings(
   ui: SettingsUI,
   reset: (signedOut?: boolean) => Promise<void>,
 ) {
-  const { list, choice, read, form, act, confirm, load } = ui;
+  const { list, choice, read, form, fieldsForm, act, confirm, load } = ui;
   async function planOrAbsent() {
     try {
       return await client.getBillingPlan();
@@ -62,30 +62,29 @@ export function accountSettings(
       list("Switch organization", [
         ...orgs.map((org) => choice(org.id, org.name, () => switchTo(org.id), org.slug)),
         choice("create", "Create organization", () =>
-          form("Organization name", (name) => {
-            if (!name.trim()) return;
-            form(
-              "Organization slug",
-              (slug) => {
-                void load(async () => {
-                  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug))
-                    throw new Error("Use lowercase letters, numbers and single hyphens.");
-                  const org = await client.createOrganization(name.trim(), slug);
-                  // Keep the created organization reachable if switching fails.
-                  list("Organization created", [choice(org.id, `Open ${org.name}`, () => switchTo(org.id))]);
-                });
-              },
-              {
-                value: name
+          fieldsForm(
+            "Create organization",
+            [
+              { id: "name", label: "Organization name", required: true },
+              { id: "slug", label: "Slug (optional)", placeholder: "Generated from the name" },
+            ],
+            async ({ name = "", slug = "" }) => {
+              const address =
+                slug.trim() ||
+                name
                   .toLowerCase()
                   .trim()
                   .replace(/[^a-z0-9]+/g, "-")
                   .replace(/^-|-$/g, "")
                   .slice(0, 40)
-                  .replace(/-$/, ""),
-              },
-            );
-          }),
+                  .replace(/-$/, "");
+              if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(address))
+                throw new Error("Use lowercase letters, numbers and single hyphens for the slug.");
+              const org = await client.createOrganization(name.trim(), address);
+              list("Organization created", [choice(org.id, `Open ${org.name}`, () => switchTo(org.id))]);
+            },
+            { submitLabel: "Create organization" },
+          ),
         ),
         choice("invitations", "Your invitations", invitations),
       ]);
@@ -163,24 +162,30 @@ export function accountSettings(
         ...(manage
           ? [
               choice("invite", "Invite a member", () =>
-                form("Invite email address", (email) => {
-                  if (!email.trim()) return;
-                  list(
-                    "Invitation role",
-                    (owner ? ["member", "admin", "owner"] : ["member", "admin"]).map((role) =>
-                      choice(role, role, () => {
-                        void load(async () => {
-                          const plan = await planOrAbsent();
-                          confirm(
-                            "Send invitation",
-                            `Invite ${email.trim()} as ${role}. Invitations reserve a seat immediately. ${role === "owner" ? "Owners have full control, including deleting this organization. " : ""}${seatChangeNote(plan, 1)}`,
-                            () => client.inviteMember(org.id, email.trim(), role),
-                          );
-                        });
-                      }),
-                    ),
-                  );
-                }),
+                fieldsForm(
+                  "Invite a member",
+                  [
+                    { id: "email", label: "Email address", required: true },
+                    {
+                      id: "role",
+                      label: "Role",
+                      value: "member",
+                      options: (owner ? ["member", "admin", "owner"] : ["member", "admin"]).map((role) => ({
+                        value: role,
+                        label: role,
+                      })),
+                    },
+                  ],
+                  async ({ email = "", role = "member" }) => {
+                    const plan = await planOrAbsent();
+                    confirm(
+                      "Send invitation",
+                      `Invite ${email.trim()} as ${role}. Invitations reserve a seat immediately. ${role === "owner" ? "Owners have full control, including deleting this organization. " : ""}${seatChangeNote(plan, 1)}`,
+                      () => client.inviteMember(org.id, email.trim(), role),
+                    );
+                  },
+                  { submitLabel: "Review invitation" },
+                ),
               ),
             ]
           : []),
@@ -351,22 +356,21 @@ export function accountSettings(
     });
   }
   function sales() {
-    form("Reply email (optional)", (email) =>
-      form("Company (optional)", (company) =>
-        form(
-          "Message to the sales team",
-          (message) => {
-            if (!message.trim()) return;
-            confirm(
-              "Contact sales",
-              `Send this message to Bento sales. Reply address: ${email.trim() || "your account email"}.`,
-              () =>
-                client.contactSales(message.trim(), email.trim() || undefined, company.trim() || undefined),
-            );
-          },
-          { multiline: true },
-        ),
-      ),
+    fieldsForm(
+      "Contact sales",
+      [
+        { id: "email", label: "Reply email (optional)" },
+        { id: "company", label: "Company (optional)" },
+        { id: "message", label: "Message", required: true, multiline: true },
+      ],
+      ({ email = "", company = "", message = "" }) => {
+        confirm(
+          "Contact sales",
+          `Send this message to Bento sales. Reply address: ${email.trim() || "your account email"}.`,
+          () => client.contactSales(message.trim(), email.trim() || undefined, company.trim() || undefined),
+        );
+      },
+      { submitLabel: "Review message" },
     );
   }
   function billing() {

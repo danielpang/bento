@@ -1,6 +1,7 @@
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { accountSettings } from "./account-settings.js";
-import { Conversation } from "./Conversation.js";
+import { Conversation, type ConversationViewState } from "./Conversation.js";
+import { artifactStages } from "./conversation-layout.js";
 import { advancedSettings } from "./workbench-settings.js";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -10,7 +11,8 @@ import type { BentoClient, Feature, Project, Stage, AgentProfile, RunArtifact } 
 import { describeCriterion } from "../criteria.js";
 import { terminalText } from "../terminal.js";
 import { Navigator, Reader, type Choice } from "./Navigator.js";
-import { TextInput } from "./TextInput.js";
+import { Form, type FormField, type FormValues, type FormOptions } from "./Form.js";
+import { GitIdentity } from "./GitIdentity.js";
 
 export type WorkbenchPage =
   | "commands"
@@ -26,21 +28,26 @@ export type WorkbenchPage =
   | "spend"
   | "search"
   | "integrations"
+  | "mcp"
+  | "team"
+  | "account"
+  | "billing"
+  | "identity"
   | "reject"
   | "message";
 type Page =
+  | { kind: "identity" }
   | { kind: "preview"; artifact: RunArtifact }
-  | { kind: "conversation" }
+  | { kind: "conversation"; compose?: boolean }
   | { kind: "list"; title: string; choices: Choice[] }
   | { kind: "read"; title: string; lines: string[] }
   | {
-      kind: "form";
+      kind: "fields";
       title: string;
-      hint: string;
-      value: string;
-      mask?: boolean;
-      multiline?: boolean;
-      submit: (value: string) => void;
+      fields: FormField[];
+      values: FormValues;
+      options: FormOptions;
+      submit: (values: FormValues) => void | Promise<void>;
     };
 
 /** Navigable command surface. Async work is scoped to its mounted project/card. */
@@ -81,7 +88,7 @@ export function Workbench({
   onChanged: () => Promise<void>;
   onSessionChanged?: (signedOut?: boolean) => Promise<void>;
 }) {
-  const [feature] = useState(selectedFeature);
+  const [feature, setFeature] = useState(selectedFeature);
   const [page, setPage] = useState<Page | null>(null);
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -90,6 +97,7 @@ export function Workbench({
   const pending = useRef(false);
   const stack = useRef<Page[]>([]);
   const pageRef = useRef<Page | null>(null);
+  const conversationView = useRef<ConversationViewState | undefined>(undefined);
   useEffect(
     () => () => {
       alive.current = false;
@@ -119,16 +127,47 @@ export function Workbench({
   function form(
     title: string,
     submit: (value: string) => void,
-    opts: { value?: string; hint?: string; mask?: boolean; multiline?: boolean } = {},
+    opts: {
+      value?: string;
+      hint?: string;
+      mask?: boolean;
+      multiline?: boolean;
+      submitLabel?: string;
+      fullDescription?: boolean;
+    } = {},
+  ) {
+    fieldsForm(
+      title,
+      [
+        {
+          id: "value",
+          label: title,
+          value: opts.value ?? "",
+          mask: opts.mask ?? false,
+          multiline: opts.multiline ?? false,
+        },
+      ],
+      (values) => submit(values.value ?? ""),
+      {
+        ...(opts.hint ? { description: opts.hint } : {}),
+        ...(opts.submitLabel ? { submitLabel: opts.submitLabel } : {}),
+        ...(opts.fullDescription ? { fullDescription: true } : {}),
+      },
+    );
+  }
+  function fieldsForm(
+    title: string,
+    fields: FormField[],
+    submit: (values: FormValues) => void | Promise<void>,
+    options: FormOptions = {},
   ) {
     show({
-      kind: "form",
+      kind: "fields",
       title,
-      hint: opts.hint ?? "Enter save · Esc back · Ctrl+U clear",
-      value: opts.value ?? "",
-      ...(opts.mask ? { mask: true } : {}),
-      ...(opts.multiline ? { multiline: true } : {}),
+      fields,
+      values: Object.fromEntries(fields.map((field) => [field.id, field.value ?? ""])),
       submit,
+      options,
     });
   }
   async function load(work: () => Promise<void>) {
@@ -174,7 +213,7 @@ export function Workbench({
         }
         act(title, work);
       },
-      { hint: `${consequences} Type confirm, then Enter.` },
+      { hint: `${consequences} Type confirm, then Enter.`, submitLabel: "Confirm", fullDescription: true },
     );
   }
   const choice = (id: string, label: string, select: () => void, detail?: string): Choice => ({
@@ -209,31 +248,31 @@ export function Workbench({
         ),
       ),
       choice("new", "Create project", () =>
-        form("Project name", (name) => {
-          if (!name.trim()) {
-            setError("Enter a project name.");
-            return;
-          }
-          form(
-            "Repository path or clone URL",
-            (source) => {
-              if (!source.trim()) {
-                setError("Enter a repository path or URL.");
-                return;
-              }
-              void load(async () => {
-                const repo = /^(https?:\/\/|git@|ssh:\/\/)/.test(source.trim())
-                  ? { repoUrl: source.trim() }
-                  : { localPath: source.trim() };
-                const created = await client.createProject({ name: name.trim(), repositories: [repo] });
-                onProject(created.id);
-                onClose();
-              });
-            },
-            { hint: "Use a checkout on the server, or a clone URL. Enter create · Esc back" },
-          );
-        }),
+        fieldsForm(
+          "Create project",
+          [
+            { id: "name", label: "Project name", required: true },
+            { id: "source", label: "Repository path (optional)", placeholder: "Connect a repository later" },
+          ],
+          async ({ name = "", source = "" }) => {
+            if (/^(https?:\/\/|git@|ssh:\/\/)/.test(source.trim()))
+              throw new Error(
+                "Use a checkout path on the server, or leave this blank to connect a repository later.",
+              );
+            const created = await client.createProject({
+              name: name.trim(),
+              ...(source.trim() ? { localPath: source.trim() } : {}),
+            });
+            onProject(created.id);
+            onClose();
+          },
+          {
+            submitLabel: "Create project",
+            description: "Use a checkout on the server, or connect a repository later.",
+          },
+        ),
       ),
+
       ...(project
         ? [
             choice("rename", "Rename current project", () =>
@@ -273,29 +312,27 @@ export function Workbench({
       projectsPage();
       return;
     }
-    form(parentId ? "New related card: title" : "New card: title", (title) => {
-      if (!title.trim()) {
-        setError("Enter a title.");
-        return;
-      }
-      form(
-        "Card description (optional)",
-        (description) => {
-          void load(async () => {
-            const created = await client.createFeature({
-              projectId: project.id,
-              title: title.trim(),
-              description,
-              ...(parentId ? { parentId } : {}),
-            });
-            await onChanged();
-            chooseFeature(created.id);
-          });
-        },
-        { multiline: true, hint: "Enter create · Ctrl+J newline · Esc back. Pasting never submits." },
-      );
-    });
+    fieldsForm(
+      parentId ? "New related card" : "New card",
+      [
+        { id: "title", label: "Title", required: true },
+        { id: "description", label: "Description (optional)", multiline: true },
+      ],
+      async ({ title = "", description = "" }) => {
+        const created = await client.createFeature({
+          projectId: project.id,
+          title: title.trim(),
+          description,
+          ...(parentId ? { parentId } : {}),
+        });
+        // A refresh failure must not turn a successful creation into a second card on retry.
+        await onChanged().catch(() => {});
+        chooseFeature(created.id);
+      },
+      { submitLabel: "Create card", description: `Project: ${project.name}` },
+    );
   }
+
   function conversation() {
     if (feature) show({ kind: "conversation" });
   }
@@ -318,13 +355,12 @@ export function Workbench({
       );
     });
   }
-  function artifacts() {
+  function artifacts(stageSlug?: string, artifactId?: string) {
     if (!feature) return;
     void load(async () => {
       const items = await client.listArtifacts(feature.id);
-      list(
-        "Artifacts",
-        items.map((artifact) =>
+      const artifactChoices = (selected: RunArtifact[]) =>
+        selected.map((artifact) =>
           choice(
             artifact.id,
             artifact.path,
@@ -364,14 +400,55 @@ export function Workbench({
                     { hint: "Enter save · Esc back. Choose a new file path." },
                   ),
                 ),
-                choice("preview", "Preview in web console", () =>
-                  link(artifact.path, `/artifact/${artifact.id}`),
+                choice("preview", "Open in browser", () =>
+                  read(artifact.path, [
+                    "Open the artifact preview:",
+                    new URL(`/api/artifacts/${artifact.id}/preview`, baseUrl).toString(),
+                  ]),
                 ),
               ]),
             `${artifact.stageName} · ${artifact.kind} · ${artifact.size} bytes`,
           ),
-        ),
-      );
+        );
+      if (artifactId !== undefined) {
+        const selected = artifactChoices(items).find((item) => item.id === artifactId);
+        if (selected) selected.select();
+        else read("Artifact unavailable", ["This artifact is no longer available."]);
+        return;
+      }
+      const groups = artifactStages(items, stages);
+      const openStage = (slug: string) => {
+        const group = groups.find((group) => group.slug === slug);
+        if (!group) {
+          read("Stage artifacts", ["This stage is no longer available."]);
+          return;
+        }
+        if (!group.artifacts.length) {
+          read(`${group.name} · Artifacts`, [
+            "No artifacts yet for this stage.",
+            "Generated files will appear here after the agent produces them.",
+          ]);
+          return;
+        }
+        list(`${group.name} · ${group.artifacts.length} artifacts`, artifactChoices(group.artifacts));
+      };
+      if (stageSlug !== undefined) openStage(stageSlug);
+      else
+        list("Artifacts by stage", [
+          choice("all", `All stages · ${items.length} files`, () =>
+            items.length
+              ? list("All artifacts", artifactChoices(items))
+              : read("All artifacts", ["No artifacts have been generated for this card yet."]),
+          ),
+          ...groups.map((group) =>
+            choice(
+              group.slug,
+              `${group.name} · ${group.artifacts.length} files`,
+              () => openStage(group.slug),
+              group.artifacts[0]?.path ?? "No artifacts yet",
+            ),
+          ),
+        ]);
     });
   }
   function runs() {
@@ -489,7 +566,15 @@ export function Workbench({
           choice(
             s.featureId,
             s.title,
-            () => chooseFeature(s.featureId),
+            () => {
+              void load(async () => {
+                const selected = await client.getFeature(s.featureId);
+                setFeature(selected);
+                onFeature(selected.id);
+                conversationView.current = undefined;
+                show({ kind: "conversation" });
+              });
+            },
             `${s.latestRun.status} · ${s.runCount} runs`,
           ),
         ),
@@ -550,8 +635,8 @@ export function Workbench({
     void load(async () => {
       const [detail, checks, merges, statuses] = await Promise.all([
         client.getFeature(feature.id),
-        client.getCheckStatus(feature.id),
-        client.getMergeStatus(feature.id),
+        client.getCheckStatus(feature.id, true),
+        client.getMergeStatus(feature.id, true),
         client.getPullRequestStatus(feature.id),
       ]);
       read(
@@ -565,7 +650,7 @@ export function Workbench({
       );
     });
   }
-  const settingsUI = { list, choice, read, form, act, confirm, load, link };
+  const settingsUI = { list, choice, read, form, fieldsForm, act, confirm, load, link };
   const settings = advancedSettings(client, project, beta, settingsUI);
   const accounts = accountSettings(
     client,
@@ -579,54 +664,17 @@ export function Workbench({
   function integrations() {
     void load(async () => {
       const health = await client.health();
-      list("Integrations and account", [
-        choice("setup", "Repositories, agents, stages and provider keys", onSetup),
-        choice("instructions", "Agent operating instructions and CLI arguments", settings.agents),
-        ...(project ? [choice("stages", "Stage instructions and order", settings.pipeline)] : []),
+      list("Integrations", [
         choice("github", "GitHub connection and pull request settings", settings.github),
         choice("linear", "Linear connection, mappings and issue import", settings.linear),
-        choice("mcp", "MCP catalog, servers and connections", settings.mcp),
         ...(health.mode === "multi"
-          ? [
-              choice("slack", "Slack connection and default project", settings.slack),
-              choice("team", "Team, organizations and invitations", accounts.team),
-              choice("billing", "Billing, plans and usage", accounts.billing),
-              choice("account", "Account and sign out", accounts.account),
-            ]
-          : [choice("identity", "Git commit author", settings.identity)]),
+          ? [choice("slack", "Slack connection and default project", settings.slack)]
+          : []),
       ]);
     });
   }
   function message() {
-    if (!feature) return;
-    form(
-      "Message the card's agent",
-      (text) => {
-        if (!text.trim()) {
-          setError("Enter a message.");
-          return;
-        }
-        void load(async () => {
-          const result = await client.messageFeature(feature.id, text.trim());
-          await onChanged().catch(() => {});
-          stack.current = [];
-          pageRef.current = null;
-          read("Message sent", [
-            result.queued
-              ? "Queued. The agent reads it when this run ends."
-              : result.live
-                ? result.delivery === "steer"
-                  ? "The running agent is changing course now."
-                  : "The agent reads it after the current step."
-                : "Continuing with your instructions.",
-          ]);
-        });
-      },
-      {
-        multiline: true,
-        hint: "Enter send · Ctrl+J newline · Esc back. The server steers, queues or resumes the agent.",
-      },
-    );
+    if (feature) show({ kind: "conversation", compose: true });
   }
   function commands() {
     list("Commands", [
@@ -643,17 +691,11 @@ export function Workbench({
         "/",
       ),
       choice("projects", "Switch or manage projects", projectsPage, "p"),
-      choice("board-view", "Toggle Kanban or list view", () => onAction("v", feature?.id), "v"),
       choice("new", "Create card", () => newCard(), "n"),
-      choice("setup", "Settings: repositories, agents, stages and keys", onSetup, ","),
-      choice("integrations", "Integrations and account", integrations),
-      choice("instructions", "Edit agent operating instructions", settings.agents),
-      ...(project
-        ? [choice("stage-settings", "Edit stage instructions and reorder pipeline", settings.pipeline)]
-        : []),
+      choice("setup", "Settings", onSetup, ","),
       ...(project
         ? [
-            choice("sessions", "Sessions", sessions, "e"),
+            choice("sessions", "Sessions", sessions, "v / e"),
             choice("spend", "Spend and completions", spend, "u"),
           ]
         : []),
@@ -747,22 +789,20 @@ export function Workbench({
             ].map(([key, label]) => choice(key!, label!, () => onAction(key!, feature.id), key!)),
           ]
         : []),
-      choice("changelog", "Read the changelog in browser", () => link("Changelog", "/changelog")),
-      choice("web", "Open web console address", () => link("Web console", "/")),
       choice("help", "Keyboard help", () =>
         read("Keyboard shortcuts", [
           "Board",
           "↑/↓ or j/k: select a card",
           "←/→ or Tab/Shift+Tab: change Kanban stage",
           "g/G: first/last card in the Kanban stage",
-          "v: toggle Kanban and list views",
+          "v / e: open project sessions",
           "Mouse: click a card to select, double-click to open",
           "Wheel: move through cards under the pointer",
           "Horizontal wheel or Shift+wheel: change Kanban stage",
           "/: find a card across lanes",
           ": or Ctrl+P: command palette",
           "p: switch projects",
-          ",: setup and settings",
+          ",: settings",
           "Enter: full conversation",
           "d: complete diff",
           "h: activity history",
@@ -770,7 +810,7 @@ export function Workbench({
           "s: start stage agent · x: stop · c: message",
           "a: approve · R: reject with reason · r: recheck",
           "b: send back or reopen · f: done · D: delete",
-          "u: spend · e: sessions",
+          "u: spend",
           "q: quit · Esc: close the current view",
           "",
           "Editor",
@@ -779,7 +819,8 @@ export function Workbench({
           "←/→: move cursor · Home/End or Ctrl+A/E: first/last",
           "Ctrl+W: delete word · Ctrl+U/K: clear before/after cursor",
           "Ctrl+J: newline in descriptions and messages",
-          "Enter: submit · Esc: cancel",
+          "Tab/Shift+Tab: switch fields and buttons",
+          "Ctrl+S: save or create · Enter: next field or activate button · Esc: cancel",
           "Pasted text never submits a form.",
           "",
           "Reader",
@@ -827,6 +868,11 @@ export function Workbench({
           ),
         ),
       integrations,
+      mcp: settings.mcp,
+      team: accounts.team,
+      account: accounts.account,
+      billing: accounts.billing,
+      identity: () => show({ kind: "identity" }),
     };
     open[initial]();
   }, []);
@@ -834,33 +880,50 @@ export function Workbench({
     <Box flexDirection="column">
       {busy ? (
         <Text color="cyan">Working…</Text>
+      ) : page?.kind === "identity" ? (
+        <GitIdentity client={client} onClose={back} />
       ) : page?.kind === "preview" ? (
-        <ArtifactPreview client={client} artifact={page.artifact} onClose={back} />
+        <ArtifactPreview
+          client={client}
+          artifact={page.artifact}
+          onClose={back}
+          webUrl={new URL(`/api/artifacts/${page.artifact.id}/preview`, baseUrl).toString()}
+        />
       ) : page?.kind === "conversation" && feature ? (
-        <Conversation client={client} feature={feature} onClose={back} onMessage={message} />
+        <Conversation
+          client={client}
+          feature={feature}
+          stages={stages}
+          profiles={profiles}
+          onClose={back}
+          onMessageSent={onChanged}
+          allowAttachments={beta}
+          initialCompose={page.compose ?? false}
+          onArtifacts={artifacts}
+          initialView={conversationView.current}
+          onViewChange={(view) => {
+            conversationView.current = view;
+          }}
+        />
       ) : page?.kind === "list" ? (
         <Navigator key={revision} title={page.title} choices={page.choices} onClose={back} />
       ) : page?.kind === "read" ? (
         <Reader key={revision} title={page.title} lines={page.lines} onClose={back} />
-      ) : page?.kind === "form" ? (
-        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text bold>{terminalText(page.title)}</Text>
-          <Text dimColor>{terminalText(page.hint)}</Text>
-          <TextInput
-            key={revision}
-            value={page.value}
-            onChange={(value) => {
-              const next = { ...page, value };
-              pageRef.current = next;
-              setPage(next);
-            }}
-            onSubmit={page.submit}
-            onCancel={back}
-            mask={page.mask ?? false}
-            multiline={page.multiline ?? false}
-            showActions
-          />
-        </Box>
+      ) : page?.kind === "fields" ? (
+        <Form
+          key={revision}
+          title={page.title}
+          fields={page.fields}
+          initialValues={page.values}
+          {...page.options}
+          onValuesChange={(values) => {
+            const next = { ...page, values };
+            pageRef.current = next;
+            setPage(next);
+          }}
+          onSubmit={page.submit}
+          onCancel={back}
+        />
       ) : (
         <Text dimColor>Loading…</Text>
       )}

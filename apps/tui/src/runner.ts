@@ -159,6 +159,7 @@ export class LocalRunner {
         repositories.map((r) => ({
           name: r.name,
           localPath: r.localPath,
+          defaultBranch: r.defaultBranch,
           ...(feature.startFromBase ? { startFromBranch: r.defaultBranch } : {}),
         })),
         feature.id,

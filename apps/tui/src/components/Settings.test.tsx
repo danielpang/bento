@@ -7,6 +7,7 @@ import { accountSettings, hasRole, seatChangeNote } from "./account-settings.js"
 import { advancedSettings, type SettingsUI } from "./workbench-settings.js";
 import { Workbench } from "./Workbench.js";
 import type { Choice } from "./Navigator.js";
+import type { FormValues } from "./Form.js";
 
 const plan: PlanState = {
   plan: "free",
@@ -95,7 +96,11 @@ function harness() {
     submit: (value: string) => void = () => {};
   let confirmation: { text: string; work: () => Promise<unknown> } | null = null;
   let error: unknown;
+  let submitFields: (values: FormValues) => void | Promise<void> = () => {};
   const ui: SettingsUI = {
+    fieldsForm: (_title, _fields, fn) => {
+      submitFields = fn;
+    },
     list: (_title, rows) => {
       choices = rows;
     },
@@ -131,6 +136,10 @@ function harness() {
       item.select();
     },
     input: (value: string) => submit(value),
+    inputFields: (values: FormValues) =>
+      ui.load(async () => {
+        await submitFields(values);
+      }),
     choices: () => choices,
     lines: () => lines,
     confirmation: () => confirmation,
@@ -178,8 +187,7 @@ test("inviting a member stops on billing failure and shows prorated seat pricing
   accountSettings(client, h.ui, async () => {}).team();
   await settle();
   h.pick("invite");
-  h.input("invite@example.test");
-  h.pick("member");
+  await h.inputFields({ email: "invite@example.test", role: "member" });
   await settle();
   assert.ok(h.error());
   assert.equal(h.confirmation(), null);
@@ -241,6 +249,99 @@ test("spending limits reject empty, negative and infinite values before confirma
   assert.deepEqual(requests.at(-1)?.body, { ceilingUsd: 20.5 });
 });
 
+test("MCP features the shared catalog and adds personal servers with registry defaults", async () => {
+  const entry = {
+    name: "example/featured",
+    title: "Example",
+    slug: "example",
+    url: "https://example.test/mcp",
+    transport: "http",
+    featured: true,
+    category: "Productivity",
+    description: "Example tools",
+    publisher: "example",
+    added: false,
+  };
+  for (const canManage of [true, false]) {
+    const h = harness();
+    const { client, requests } = clientFor({
+      "/api/mcp/status": { servers: [], canManage },
+      "/api/mcp/catalog": {
+        entries: [entry, { ...entry, name: "example/other", featured: false }],
+        reachable: true,
+        canManage,
+      },
+    });
+    advancedSettings(client, undefined, false, h.ui).mcp();
+    await settle();
+    assert.match(h.choices().find((c) => c.id === entry.name)!.label, /Add Example · Featured/);
+    assert.equal(
+      h.choices().some((c) => c.id === "example/other"),
+      false,
+    );
+    h.pick(entry.name);
+    await settle();
+    assert.deepEqual(requests.find((r) => r.method === "POST")?.body, {
+      name: "Example",
+      slug: "example",
+      url: entry.url,
+      transport: "http",
+      personal: true,
+    });
+    h.pick("catalog");
+    h.input("Example");
+    await settle();
+    assert.ok(h.choices().some((c) => c.id === "example/other"));
+  }
+});
+
+test("MCP opens already-added servers and remains usable when the catalog is unavailable", async () => {
+  const server = {
+    id: "saved",
+    name: "Example",
+    url: "https://example.test/mcp/",
+    enabled: true,
+    authType: "none",
+    personal: true,
+    mine: true,
+  };
+  const h = harness();
+  const { client, requests } = clientFor({
+    "/api/mcp/status": { servers: [server], canManage: true },
+    "/api/mcp/catalog": {
+      entries: [
+        {
+          name: "example/featured",
+          title: "Example",
+          url: "https://example.test/mcp",
+          featured: true,
+          added: true,
+        },
+      ],
+      reachable: true,
+    },
+  });
+  advancedSettings(client, undefined, false, h.ui).mcp();
+  await settle();
+  assert.match(h.choices().find((c) => c.id === "example/featured")!.label, /Added/);
+  h.pick("example/featured");
+  assert.ok(h.choices().some((c) => c.id === "authentication"));
+  assert.equal(
+    requests.some((r) => r.method === "POST"),
+    false,
+  );
+  const unavailable = clientFor({
+    "/api/mcp/status": { servers: [server], canManage: true },
+    "/api/mcp/catalog": new Response("unavailable", { status: 503 }),
+  });
+  advancedSettings(unavailable.client, undefined, false, h.ui).mcp();
+  await settle();
+  assert.ok(h.choices().some((c) => c.id === "saved"));
+  assert.ok(h.choices().some((c) => c.id === "custom"));
+  assert.ok(h.choices().some((c) => c.id === "unavailable"));
+  assert.equal(h.error(), undefined);
+});
+
 test("MCP shared OAuth uses organization disconnect and hides connection actions from members", async () => {
   const server = {
     id: "server",
@@ -284,7 +385,7 @@ test("checkout requires a policy and confirmation, then preserves the browser pa
     <Workbench
       client={client}
       baseUrl="http://bento.test"
-      initial="integrations"
+      initial="billing"
       project={undefined}
       projects={[]}
       feature={undefined}
@@ -308,7 +409,6 @@ test("checkout requires a policy and confirmation, then preserves the browser pa
   };
   try {
     await ready(ui);
-    await choose("Billing", /Free · Billing/);
     await choose("Compare plans", /│ Plans +│/);
     await choose("Pro", /│ Pro +│/);
     await choose("Choose Pro", /After included hours are used/);
@@ -346,4 +446,27 @@ test("a removed membership still allows choosing another organization and signin
     h.choices().some((c) => c.id === "delete-org"),
     false,
   );
+});
+
+test("the unified GitHub screen keeps token management restricted to credential managers", async () => {
+  for (const canManage of [false, true]) {
+    const { client } = clientFor({
+      "/api/github/status": { canManage, canPublish: true, connected: false },
+      "/api/github/settings": { canManage, includeStageNotesInPr: true },
+      "/api/secrets": { canManage, secrets: [{ id: "token", name: "GITHUB_TOKEN", hint: "…test" }] },
+    });
+    const h = harness();
+    advancedSettings(client, undefined, false, h.ui).github();
+    await settle();
+    assert.equal(h.error(), undefined);
+    assert.ok(h.choices().some((choice) => choice.id === "state"));
+    assert.equal(
+      h.choices().some((choice) => choice.id === "token"),
+      canManage,
+    );
+    assert.equal(
+      h.choices().some((choice) => choice.id === "remove-token"),
+      canManage,
+    );
+  }
 });
