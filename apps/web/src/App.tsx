@@ -30,7 +30,6 @@ import {
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
-import { StaleBuildBar } from "./components/StaleBuildBar.js";
 import { CHANGELOG_URL } from "./changelog.js";
 import { BetaTestersProvider } from "./beta.js";
 import { NavMenu, type NavAction } from "./components/NavMenu.js";
@@ -1230,51 +1229,46 @@ function TopBar({
   ];
 
   return (
-    <>
-      <header className="topbar">
-        <BrandLockup />
-        {/* One block, so it can drop to a row of its own on a phone
-            without the picker and the field being separated by whatever
-            happened to wrap between them. */}
-        {(picker || search) && (
-          <div className="topbar-lead">
-            {picker}
-            {search}
-          </div>
+    <header className="topbar">
+      <BrandLockup />
+      {/* One block, so it can drop to a row of its own on a phone
+          without the picker and the field being separated by whatever
+          happened to wrap between them. */}
+      {(picker || search) && (
+        <div className="topbar-lead">
+          {picker}
+          {search}
+        </div>
+      )}
+      <span className="topbar-spacer" />
+      {meta}
+      <nav className="topbar-nav" aria-label="Board">
+        {actions.map((action) =>
+          action.href === undefined ? (
+            <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
+              {action.label}
+            </button>
+          ) : (
+            <a
+              key={action.id}
+              className="btn btn-ghost"
+              href={action.href}
+              target={action.external ? "_blank" : undefined}
+              rel={action.external ? "noreferrer" : undefined}
+              aria-current={action.current ? "page" : undefined}
+            >
+              {action.label}
+            </a>
+          ),
         )}
-        <span className="topbar-spacer" />
-        {meta}
-        <nav className="topbar-nav" aria-label="Board">
-          {actions.map((action) =>
-            action.href === undefined ? (
-              <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
-                {action.label}
-              </button>
-            ) : (
-              <a
-                key={action.id}
-                className="btn btn-ghost"
-                href={action.href}
-                target={action.external ? "_blank" : undefined}
-                rel={action.external ? "noreferrer" : undefined}
-                aria-current={action.current ? "page" : undefined}
-              >
-                {action.label}
-              </a>
-            ),
-          )}
-          <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
-            <GearMark />
-          </a>
-          {showSignOut && <SignOutButton onClick={() => signOut()} />}
-        </nav>
-        {primary}
-        <NavMenu actions={entries} />
-      </header>
-      {/* Under the chrome on every screen that has it, so a deploy
-          reaches the board, the sessions list and the spend page alike. */}
-      <StaleBuildBar />
-    </>
+        <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
+          <GearMark />
+        </a>
+        {showSignOut && <SignOutButton onClick={() => signOut()} />}
+      </nav>
+      {primary}
+      <NavMenu actions={entries} />
+    </header>
   );
 }
 
