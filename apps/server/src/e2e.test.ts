@@ -6663,6 +6663,39 @@ test("publishing the config opens a pull request carrying both files", { timeout
   } as unknown as NonNullable<AppContext["githubApp"]>;
 
   try {
+    // Earlier tests in this file leave their own same-named agents
+    // behind; give each a name of its own so the roster is publishable,
+    // and so the refusal below is about the twin this test makes.
+    const roster = await json<{ id: string; name: string }[]>(await app.request("/api/profiles"));
+    const seen = new Set<string>();
+    for (const agent of roster) {
+      if (seen.has(agent.name)) {
+        await app.request(`/api/profiles/${agent.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `${agent.name} ${agent.id.slice(0, 8)}` }),
+        });
+      }
+      seen.add(agent.name);
+    }
+
+    // Agents belong to the person, and nothing stops two from sharing a
+    // name. The agents file cannot express that, so publishing would
+    // commit a file the sync then refuses. Refused here instead, with
+    // the reason, before anything reaches the repository.
+    const twin = await fakeProfile("Twin Publisher");
+    const twinAgain = await fakeProfile("Twin Publisher");
+    const refused = await app.request(`/api/projects/${project.id}/config/publish`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(refused.status, 400);
+    assert.match(((await refused.json()) as { error: string }).error, /Twin Publisher/);
+    assert.equal(commits.length, 0, "nothing was committed for a file that cannot be read back");
+    await app.request(`/api/profiles/${twinAgain.id}`, { method: "DELETE" });
+    await app.request(`/api/profiles/${twin.id}`, { method: "DELETE" });
+
     const published = await json<{ unchanged: boolean; branch: string; prNumber: number; url: string }>(
       await app.request(`/api/projects/${project.id}/config/publish`, {
         method: "POST",

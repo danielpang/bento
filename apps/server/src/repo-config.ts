@@ -372,6 +372,19 @@ export async function publishRepoConfig(
   if ("error" in built) return { ok: false, status: 400, error: built.error };
   const pipelineYaml = writePipelineFile(built.file);
   const agentsYaml = writeAgentFile(await buildAgentFile(database, args.owner.ownerId));
+  // The point of the files is to be read back, so a pair the sync would
+  // refuse is refused here, before it reaches anyone's repository. The
+  // export routes deliberately skip this check (a roster too big for the
+  // format must still be able to leave), but a pull request that can
+  // never be applied is a worse outcome than no pull request.
+  const readable = validateRepoConfig({ pipeline: pipelineYaml, agents: agentsYaml });
+  if ("error" in readable) {
+    return {
+      ok: false,
+      status: 400,
+      error: `these files would be refused when Bento reads them back: ${readable.error}. Fix that first, then publish again.`,
+    };
+  }
 
   const repository = { id: repo.id, name: repo.name };
   const at = (file: string) => github.readFile({ owner: parsed.owner, repo: parsed.repo, path: file, ref: repo.defaultBranch });
