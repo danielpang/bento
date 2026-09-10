@@ -5,7 +5,7 @@ import { TextInput } from "./TextInput.js";
 import { useMouseTarget } from "../mouse.js";
 import { MouseActions, MouseButton } from "./MouseControls.js";
 import { openUrl } from "../open-url.js";
-import { matchesSearch, terminalText, wrapLines } from "../terminal.js";
+import { matchesSearch, terminalSelectionHint, terminalText, wrapLines } from "../terminal.js";
 import { wrapConversationText } from "./conversation-layout.js";
 
 export interface Choice {
@@ -282,8 +282,9 @@ export function Reader({
           c message agent · {following ? "Following live output" : "Reading history. G follows output"}
         </Text>
       )}
-      <Text dimColor>
+      <Text dimColor wrap="truncate-end">
         {wrapped.length ? top + 1 : 0} to {Math.min(top + height, wrapped.length)} of {wrapped.length} lines
+        {terminalSelectionHint() && ` · ${terminalSelectionHint()}`}
       </Text>
       {query === null && (
         <MouseActions>

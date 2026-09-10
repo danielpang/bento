@@ -1,5 +1,11 @@
 import { stripVTControlCharacters } from "node:util";
 
+/** Native selection bypasses application mouse reporting in Warp. */
+export function terminalSelectionHint(): string {
+  if (process.env.TERM_PROGRAM !== "WarpTerminal") return "";
+  return `Shift-drag to select · ${process.platform === "darwin" ? "Cmd+C" : "Ctrl+Shift+C"} to copy`;
+}
+
 /** Agent output is untrusted, including terminal escapes and OSC links. */
 export function terminalText(value: string): string {
   return stripVTControlCharacters(value).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");

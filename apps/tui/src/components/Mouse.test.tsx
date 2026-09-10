@@ -69,6 +69,7 @@ test("selecting another visible Kanban column does not move it away from the poi
 
 test("mouse cursor placement respects wrapped lines, Unicode width and grapheme boundaries", () => {
   assert.equal(cursorAtCell("abcXYZ", 30, 3, 0), 3);
+  assert.equal(cursorAtCell("a\tb", 30, 2, 0), 2);
   assert.equal(cursorAtCell("abc\ndef", 30, 2, 1), 6);
   assert.equal(cursorAtCell("abcde", 3, 1, 1), 4);
   assert.equal(cursorAtCell("a🙂b", 30, 2, 0), 1);

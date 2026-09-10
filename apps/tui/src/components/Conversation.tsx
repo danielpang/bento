@@ -10,7 +10,7 @@ import type {
   Stage,
 } from "@bento/api-client";
 import type { AgentEvent } from "@bento/core";
-import { terminalText } from "../terminal.js";
+import { terminalSelectionHint, terminalText } from "../terminal.js";
 import { useKeyboardInput, useMouseTarget } from "../mouse.js";
 import { MouseActions, MouseButton } from "./MouseControls.js";
 import { TextInput } from "./TextInput.js";
@@ -502,6 +502,7 @@ export function Conversation({
                   ? "Following live output"
                   : "Latest messages"
                 : "Reading history. G to follow"}
+              {terminalSelectionHint() && ` · ${terminalSelectionHint()}`}
             </Text>
           )}
           <Box flexDirection="column" height={viewport} overflow="hidden">

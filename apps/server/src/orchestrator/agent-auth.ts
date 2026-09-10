@@ -69,6 +69,11 @@ export async function agentAuthMounts(
  */
 export async function agentAuthEnv(ctx: AppContext, adapter: AgentAdapter): Promise<Record<string, string>> {
   if (!(await shouldShareAgentAuth(ctx))) return {};
+  return localAgentAuthEnv(adapter);
+}
+
+/** Read only on the user's local machine. Callers must exclude multi mode. */
+export async function localAgentAuthEnv(adapter: AgentAdapter): Promise<Record<string, string>> {
   if (adapter.cli === "cursor") {
     return cursorLoginEnv({
       platform: process.platform,

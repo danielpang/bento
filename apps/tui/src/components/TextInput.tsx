@@ -7,6 +7,10 @@ import { useMouseTarget } from "../mouse.js";
 import { MouseActions, MouseButton } from "./MouseControls.js";
 import { type ClipboardContent } from "../clipboard.js";
 
+// Keep tabs in the draft, but render one visible cell instead of letting the
+// terminal advance its cursor outside Ink's layout and break mouse targets.
+const displayTabs = (text: string) => text.replace(/\t/g, "⇥");
+
 /** Map display cells back to code-point offsets, including wide glyphs and combining marks. */
 export function cursorAtCell(text: string, width: number, column: number, row: number): number {
   let x = 0,
@@ -20,7 +24,7 @@ export function cursorAtCell(text: string, width: number, column: number, row: n
       index++;
       continue;
     }
-    const cells = stringWidth(segment);
+    const cells = stringWidth(displayTabs(segment));
     if (x + cells > width) {
       y++;
       x = 0;
@@ -44,7 +48,7 @@ function editorLineStarts(text: string, width: number) {
       x = 0;
       continue;
     }
-    const cells = stringWidth(segment);
+    const cells = stringWidth(displayTabs(segment));
     if (x + cells > width) {
       starts.push(index);
       x = 0;
@@ -151,7 +155,7 @@ export function TextInput({
         starts.findLastIndex((start) => start <= at),
       );
       const target = Math.max(0, Math.min(starts.length - 1, line + direction * count));
-      const column = stringWidth(chars.slice(starts[line], at).join(""));
+      const column = stringWidth(displayTabs(chars.slice(starts[line], at).join("")));
       const targetText = chars
         .slice(starts[target], starts[target + 1] ?? chars.length)
         .join("")
@@ -283,7 +287,7 @@ export function TextInput({
     { isActive: active },
   );
 
-  const chars = Array.from(mask ? "•".repeat(Array.from(value).length) : value);
+  const chars = Array.from(mask ? "•".repeat(Array.from(value).length) : displayTabs(value));
   const at = Math.min(cursor, chars.length);
   const { start, end } = editorWindow(
     chars.join(""),

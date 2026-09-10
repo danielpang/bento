@@ -1273,7 +1273,7 @@ export class BentoClient {
       gitAuthorEmail?: string;
       /** What a commit would actually say, from whichever source wins. */
       gitIdentity?: { name: string; email: string } | null;
-      logins: { cli: string; signedIn: boolean }[];
+      logins: { cli: string; signedIn: boolean; detail?: string }[];
       /**
        * Whether the server can offer its machine's login at all. False
        * when the server runs in a container, whose home holds nobody's

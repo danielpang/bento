@@ -3,6 +3,7 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { MouseProvider } from "./mouse.js";
 import { HELP, parseCliOptions } from "./cli-options.js";
+import { redirectTerminalLogs } from "./terminal-log.js";
 import {
   runAgents,
   runLogin,
@@ -63,17 +64,24 @@ if (options.command === "serve") {
 }
 
 async function runBoard() {
-  // Mouse coordinates are relative to the viewport. Keep the app at a stable origin
-  // and restore the user's shell screen when it exits.
-  const { waitUntilExit } = render(
-    <MouseProvider>
-      <App options={options!} />
-    </MouseProvider>,
-    {
-      alternateScreen: process.env.INK_SCREEN_READER !== "true",
-    },
-  );
-  await waitUntilExit();
+  const fullScreen = Boolean(process.stdout.isTTY) && process.env.INK_SCREEN_READER !== "true";
+  const restoreLogs = fullScreen ? await redirectTerminalLogs(options!.dataDir) : undefined;
+  try {
+    // Mouse coordinates are relative to the viewport. Keep the app at a stable origin
+    // and restore the user's shell screen when it exits.
+    const { waitUntilExit } = render(
+      <MouseProvider>
+        <App options={options!} />
+      </MouseProvider>,
+      {
+        alternateScreen: process.env.INK_SCREEN_READER !== "true",
+        patchConsole: !fullScreen,
+      },
+    );
+    await waitUntilExit();
+  } finally {
+    await restoreLogs?.();
+  }
   // The embedded server keeps handles open; leaving is the user's intent.
   process.exit(0);
 }

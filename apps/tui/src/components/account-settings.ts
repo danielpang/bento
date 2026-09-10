@@ -284,6 +284,7 @@ export function accountSettings(
       },
       {
         hint: `Permanently deletes projects, cards, runs and credentials, removes member access and cancels the subscription. Type ${org.name} to delete.`,
+        fullDescription: true,
       },
     );
   }

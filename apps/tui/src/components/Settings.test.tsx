@@ -448,6 +448,24 @@ test("a removed membership still allows choosing another organization and signin
   );
 });
 
+test("local GitHub preferences use their own permissions without offering unavailable browser flows", async () => {
+  const { client, requests } = clientFor({
+    "/api/github/status": { canManage: false, configured: false, canLinkIdentity: false },
+    "/api/github/settings": { canManage: true, includeStageNotesInPr: false },
+    "/api/secrets": { canManage: true, secrets: [] },
+  });
+  const h = harness();
+  advancedSettings(client, undefined, false, h.ui).github();
+  await settle();
+  assert.equal(h.error(), undefined);
+  assert.ok(h.choices().some((choice) => choice.id === "notes"));
+  assert.ok(!h.choices().some((choice) => ["identity", "install", "existing"].includes(choice.id)));
+  h.pick("notes");
+  await settle();
+  assert.ok(requests.some((request) => request.path === "/api/github/settings" &&
+    request.method === "PATCH" && (request.body as { includeStageNotesInPr: boolean }).includeStageNotesInPr));
+});
+
 test("the unified GitHub screen keeps token management restricted to credential managers", async () => {
   for (const canManage of [false, true]) {
     const { client } = clientFor({

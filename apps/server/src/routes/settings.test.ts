@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,7 +10,34 @@ import {
   shouldShareAgentAuth,
   writeSettings,
 } from "../settings.js";
-import { settingsRoutes } from "./settings.js";
+import { localLoginStatus, settingsRoutes } from "./settings.js";
+
+test("login status requires usable execution credentials, not an existing config directory", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "bento-login-status-"));
+  try {
+    for (const dir of [".cursor", ".claude", ".codex"]) await mkdir(path.join(home, dir));
+    for (const cli of ["cursor", "claude-code"] as const) {
+      const missing = await localLoginStatus(cli, home, async () => ({}));
+      assert.equal(missing.signedIn, false);
+      assert.match(missing.detail, /Sign in again/);
+      const present = await localLoginStatus(cli, home, async () => ({ TOKEN: "must-not-reach-the-ui" }));
+      assert.equal(present.signedIn, true);
+      assert.doesNotMatch(JSON.stringify(present), /must-not-reach-the-ui/);
+    }
+    const codex = await localLoginStatus("codex", home, async () => {
+      throw new Error("Other tools must not read unrelated credentials");
+    });
+    assert.equal(codex.signedIn, false);
+    assert.match(codex.detail, /Configuration found; sign-in unverified/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("shared-server settings never report the operator's local logins", async () => {
+  const response = await settingsRoutes({ env: { BENTO_MODE: "multi" } } as AppContext).request("/");
+  assert.deepEqual(await response.json(), { mode: "multi", shareAgentAuth: false, logins: [] });
+});
 
 test("machine settings report effective login sharing, including launch overrides", async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-sharing-route-"));

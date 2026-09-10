@@ -22,7 +22,7 @@ export interface SettingsUI {
   form: (
     title: string,
     submit: (value: string) => void,
-    opts?: { value?: string; hint?: string; mask?: boolean; multiline?: boolean },
+    opts?: { value?: string; hint?: string; mask?: boolean; multiline?: boolean; fullDescription?: boolean },
   ) => void;
   act: (title: string, work: () => Promise<unknown>) => void;
   confirm: (title: string, consequences: string, work: () => Promise<unknown>) => void;
@@ -55,7 +55,7 @@ export function advancedSettings(
               `Identity linked: ${status.identityLinked ? "yes" : "no"}`,
             ]),
           ),
-          ...(status.canManage
+          ...(status.canManage && status.configured
             ? [
                 choice("install", "Install GitHub App", () => {
                   void load(async () =>
@@ -76,6 +76,19 @@ export function advancedSettings(
                     ),
                   );
                 }),
+              ]
+            : []),
+          ...(status.canManage && status.connected
+            ? [
+                choice("disconnect", "Disconnect GitHub", () =>
+                  confirm("Disconnect GitHub", "Publishing through this connection will stop.", () =>
+                    client.disconnectGitHub(),
+                  ),
+                ),
+              ]
+            : []),
+          ...(settings.canManage
+            ? [
                 choice(
                   "notes",
                   `${settings.includeStageNotesInPr ? "Exclude" : "Include"} stage notes in pull requests`,
@@ -84,15 +97,6 @@ export function advancedSettings(
                       client.setGitHubSettings({ includeStageNotesInPr: !settings.includeStageNotesInPr }),
                     ),
                 ),
-                ...(status.connected
-                  ? [
-                      choice("disconnect", "Disconnect GitHub", () =>
-                        confirm("Disconnect GitHub", "Publishing through this connection will stop.", () =>
-                          client.disconnectGitHub(),
-                        ),
-                      ),
-                    ]
-                  : []),
               ]
             : []),
           ...(credentials.canManage
@@ -128,9 +132,13 @@ export function advancedSettings(
                   : []),
               ]
             : []),
-          choice("identity", "GitHub identity settings in browser", () =>
-            link("GitHub identity", "/settings?tab=github"),
-          ),
+          ...(status.canLinkIdentity
+            ? [
+                choice("identity", "GitHub identity settings in browser", () =>
+                  link("GitHub identity", "/settings?tab=github"),
+                ),
+              ]
+            : []),
         ],
       );
     });

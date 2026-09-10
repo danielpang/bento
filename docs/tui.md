@@ -69,6 +69,10 @@ Optional flags: `--data-dir`, `--db`, `--port`, `--share-agent-auth`. Run `bento
 
 To use your existing Claude Code subscription, sign in with `claude auth login`, then open Settings → Local agent sign-ins and press `s` to enable sharing. Bento remembers this choice, and the next run can use the login without an Anthropic API key. Sharing is off until enabled. Starting local Bento with `--share-agent-auth` also enables and saves sharing, and you can turn it off in Settings without restarting. Later launches without the flag retain your last saved choice; passing the flag again enables sharing again. An explicit `BENTO_SHARE_AGENT_AUTH` environment variable still pins sharing unless the CLI flag takes precedence.
 
+Claude Code and Cursor show **Ready to share** only when Bento finds a usable local credential. An expired or missing credential asks you to sign in again or set an API key. Other tools report configuration presence as **sign-in unverified**, since a config folder alone does not establish a working login.
+
+Full-screen background diagnostics are written to `~/.bento/logs/tui.log` (or `logs/tui.log` beneath `--data-dir`). They cannot scroll the board or shift mouse targets. Headless commands retain their normal terminal output.
+
 To attach to an existing local server instead of starting an embedded stack:
 
 ```sh
@@ -155,6 +159,10 @@ In menus, type to filter and use arrows to select. In readers, `PgUp` and `PgDn`
 The reply box stays below the conversation, so previous messages remain visible while you type. Press `c` or Tab, or click the box, to focus it. Enter sends; `Ctrl+J` adds a newline. Tab, Escape or History returns focus to the transcript without clearing the draft. While typing, shortcut letters are ordinary text; you can still scroll history with the mouse. Sending stays in the conversation and reports whether the message was queued or delivered. Failed sends preserve the draft, and artifact browsing preserves it too. The board's `c` shortcut opens this same inline composer.
 
 Select text using your terminal and use its normal copy and paste shortcuts (Cmd+C and Cmd+V on macOS). While mouse reporting is enabled, your terminal may require Option-drag or Shift-drag to select text. Click the reply box before pasting. Bracketed paste preserves newlines and never submits the message. There are no dedicated clipboard buttons or shortcuts in the composer. Clipboard images must be saved to a file and attached by pasting its path.
+
+Editors display tabs as `⇥` to keep cursor placement stable. Saving preserves the original tab characters.
+
+In **Warp**, hold **Shift while dragging** to highlight text, then press **Cmd+C**. A plain drag is sent to Bento's mouse controls, so it does not create a terminal selection. Click the reply box and press **Cmd+V** to paste. This works in the existing TUI without a rebuild. Conversation and reader screens show a reminder when running in Warp. See [Warp's mouse reporting documentation](https://docs.warp.dev/terminal/more-features/full-screen-apps).
 
 Drop or paste quoted file paths into the conversation to attach their contents. Attached filenames appear above the editor; Remove removes the last attachment. Up to three files are allowed, with a 5 MB limit per file and 8 MB total. Files are copied into the card's existing agent workspace when you send, and the message tells the agent where to read them. Image interpretation depends on the agent's image-reading tools and model. A card must already have an agent workspace; attachments last with that workspace. Attachments are enabled locally and for beta testers on shared servers. Copy/Paste text works in either mode.
 

@@ -177,7 +177,7 @@ export function Setup({
   const [canManageCredentials, setCanManageCredentials] = useState(false);
   const [machine, setMachine] = useState<MachineSettings | null>(null);
   /** Coding tools signed in wherever the agents actually run. */
-  const [logins, setLogins] = useState<{ cli: string; label: string; signedIn: boolean }[]>([]);
+  const [logins, setLogins] = useState<{ cli: string; label: string; signedIn: boolean; detail?: string }[]>([]);
   /**
    * Which coding agents this deployment can actually start. Absent when
    * the question could not be answered, which is shown as nothing at
@@ -223,6 +223,7 @@ export function Setup({
             cli: row.cli,
             label: toolLabel(row.cli),
             signedIn: row.signedIn,
+            ...(row.detail ? { detail: row.detail } : {}),
           }))
         : agentsRunLocally
           ? localLogins()
@@ -791,7 +792,9 @@ export function Setup({
 
   const mouseActions = [
     ...(screen.name === "agents" ? [{ label: "Edit", key: "e" }] : []),
-    ...(REMOVABLE.has(screen.name) ? [{ label: "Remove", key: "d" }] : []),
+    ...(REMOVABLE.has(screen.name) && (screen.name !== "keys" || canManageCredentials)
+      ? [{ label: "Remove", key: "d" }]
+      : []),
     ...(screen.name === "subscription"
       ? [
           { label: "Toggle sharing", key: "s" },
@@ -1220,6 +1223,7 @@ export function Setup({
 
     if (screen.name === "subscription") {
       const claude = machine?.claude ?? null;
+      const labelWidth = Math.max(14, ...logins.map((tool) => tool.label.length + 2));
       const sharing = machine?.shareAgentAuth === true;
       const pinned = machine?.pinnedByEnv === true;
       /** The sharing setting lives on the machine the server runs on. */
@@ -1241,8 +1245,8 @@ export function Setup({
             {logins.map((tool) => (
               <Box key={tool.cli}>
                 <Text color={tool.signedIn ? "green" : "gray"}>{tool.signedIn ? "●" : "○"}</Text>
-                <Text> {tool.label.padEnd(14)}</Text>
-                <Text color="gray">{tool.signedIn ? "signed in" : "not signed in"}</Text>
+                <Text> {tool.label.padEnd(labelWidth)}</Text>
+                <Text color="gray">{tool.detail ?? (tool.signedIn ? "signed in" : "not signed in")}</Text>
               </Box>
             ))}
             {logins.length === 0 && <Text color="gray">No coding tool on this machine has a login.</Text>}
@@ -1839,7 +1843,7 @@ function subscriptionStatus(
   logins: { label: string; signedIn: boolean }[],
 ): string {
   const signedIn = logins.filter((row) => row.signedIn).map((row) => row.label);
-  const who = signedIn.length ? `${signedIn.join(", ")} signed in` : "no tool signed in here";
+  const who = signedIn.length ? `${signedIn.join(", ")} ready to share` : "no verified login; open to check";
   if (!m || m.mode !== "local") return who;
   return m.shareAgentAuth ? `sharing on, ${who}` : `sharing off, using API keys`;
 }
@@ -1866,16 +1870,19 @@ function toolLabel(cli: string): string {
  *
  * Asked here rather than of the server, because with a remote server
  * the server's answer describes the wrong computer: the runs happen
- * here. This is the same check the server makes, against the tools'
- * own config directories.
+ * here. Directory presence is only a configuration hint, never proof
+ * that credentials exist or have not expired.
  */
-function localLogins(): { cli: string; label: string; signedIn: boolean }[] {
+function localLogins(): { cli: string; label: string; signedIn: boolean; detail: string }[] {
   return MODEL_GUIDANCE.map((tool) => {
     const paths = getAdapter(tool.cli as AgentCli).configPaths ?? [];
     return {
       cli: tool.cli,
       label: tool.label,
-      signedIn: paths.some((relative) => fs.existsSync(path.join(os.homedir(), relative))),
+      signedIn: false,
+      detail: paths.some((relative) => fs.existsSync(path.join(os.homedir(), relative)))
+        ? "Configuration found; sign-in unverified"
+        : "Not configured",
     };
   });
 }

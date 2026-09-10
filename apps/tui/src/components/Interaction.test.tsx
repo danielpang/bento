@@ -105,13 +105,15 @@ test("bracketed multiline paste preserves text without submitting or firing shor
   const ui = render(<Editor />);
   try {
     await ready(ui);
-    ui.stdin.write("\x1b[200~first\nsecond\x1b[201~");
+    ui.stdin.write("\x1b[200~first\n\tsecond\x1b[201~");
     await settle();
     assert.equal(submitted.length, 0);
-    assert.equal(value, "first\nsecond");
+    assert.equal(value, "first\n\tsecond");
+    assert.match(ui.lastFrame() ?? "", /⇥second/);
+    assert.doesNotMatch(ui.lastFrame() ?? "", /\t/);
     ui.stdin.write("\r");
     await settle();
-    assert.deepEqual(submitted, ["first\nsecond"]);
+    assert.deepEqual(submitted, ["first\n\tsecond"]);
   } finally {
     ui.unmount();
     ui.cleanup();

@@ -1,5 +1,36 @@
 # TUI verification, 2026-09-06
 
+## Settings and Docker shipping audit, 2026-09-10
+
+The rebuilt CLI was driven with keyboard and SGR mouse input in real PTYs against isolated local and team servers backed by Postgres. Ninety-two distinct recorded checks covered the settings workflows and command-line entry points. Settings mutations were read back through the API, and local preferences were checked after a normal restart.
+
+| Area | Live coverage |
+| --- | --- |
+| Repositories | First project, invalid paths, additional checkouts, removal, last-checkout protection, setup and post-edit test commands |
+| Agents | Harness and model changes, renaming, full prompt and SKILL file loading, advanced JSON validation, cancellation, YAML round-trip |
+| Pipeline | Stage creation, rename, assignment, ordering, deletion and cancellation, prompts, manual and automatic gates, command criteria, automatic PR preference, YAML round-trip |
+| Local settings | Login sharing, persisted preferences, expired Cursor credentials, aligned status columns, atomic Git identity save and cancellation |
+| Credentials and integrations | Masked dummy provider keys, save and removal, GitHub token cancellation and stage-note preference, Linear input masking, Slack connection information |
+| MCP | Featured catalog and search, custom servers, transport and authentication edits, enable and disable, masked API keys, OAuth client configuration and reset, removal |
+| Team and account | Role changes, member restrictions, last-owner protection, invitation review and cancellation, profile edits, organization creation, switching and exact-name deletion, sign-out cancellation and session revocation |
+| CLI | Help, version, repositories, agents, pipeline export, spend, sessions and MCP listing against the live project |
+
+A new card, **Add a label-to-slug helper**, went from Backlog through Implement and Verify to Completed using the TUI. Both successful runs used Claude Code in the card's real Docker sandbox. The agent implemented the helper, six Node tests and a README example, then a separate verification run reviewed the acceptance criteria and repeated the tests. The implementation tests were also independently run inside Docker before completion, and the final saved worktree passed all six again. Commits were `fd86a97` and `605c388`, confined to the disposable repository. Both stage artifacts opened from the sidebar, and an artifact download was verified against its saved content. No PR was published. Completing the card automatically removed its Docker container.
+
+The first attempted Cursor run exposed an expired local token that Settings had incorrectly described as signed in. The audit fixed that status, aligned long tool names, restored the local GitHub stage-note preference, hid unavailable browser actions and a read-only credential removal button, and kept the full organization deletion instruction visible.
+
+Two mouse regressions were found during the live audit. Sandbox cleanup console output could shift the full-screen origin, and pasted tabs could advance the terminal cursor outside the editor layout. Full-screen diagnostics now go to a private `logs/tui.log`; tabs render as `⇥` while saved drafts retain their original characters. A second real PTY streamed log, warning and error output while clicking Settings, Git identity, the agent editor and the conversation composer. All targets stayed aligned, tab-containing paste remained visible, and diagnostics were retained in the log file.
+
+Validation: the TUI build passed, 108 TUI tests passed, eight settings/authentication tests passed, and all 22 workspace typechecks passed. The default suite skips its optional browser-preview test; a separate `test:previews` run passed all three tests with real Chromium, including that test. The mouse suite passed all 11 tests after adding tab-coordinate coverage. Temporary team data and test services were cleaned up; the isolated completed-card database and worktree were retained for inspection.
+
+Limits: external OAuth approvals, real invitations, payment changes and GitHub PR publication were not performed. The expired Cursor login still requires the user to sign in again; successful execution was verified with Claude Code. Warp was represented by its terminal identifier and real terminal input sequences, not a physical GUI mouse or clipboard. Native Warp selection still requires Shift-drag, followed by Cmd+C on macOS.
+
+## Warp selection hint and mouse regression checks, 2026-09-10
+
+The Warp change adds selection instructions to conversation and reader screens. It does not change mouse reporting, dispatch, click handlers or clipboard behavior. The reader hint truncates at narrow widths so it cannot add rows above its buttons.
+
+All 106 TUI tests passed, with one optional browser-preview test skipped, and the TUI build passed. Eleven checks drove the rebuilt TUI against the local server in a real PTY with Warp's terminal identifier: session selection, conversation scrolling, Follow, tool expansion and collapse, editor caret placement and multiline paste, PR reader controls, 60-column reader navigation, and board command/help navigation. No messages were sent and no cards or settings were changed. These checks verify Bento's input handling and layout; Warp's native Shift-drag selection occurs outside the PTY and was checked against its documentation, not automated in Warp's GUI.
+
 ## TUI branch publication checks, 2026-09-10
 
 The final working tree includes the inline conversation composer, simplified settings and forms, Sessions navigation, flat artifact sidebar, PR history and repair actions, explicit merge/CI symbols, collapsed tool activity with a running spinner, local CLI authentication, repository setup recovery and base-branch isolation.
