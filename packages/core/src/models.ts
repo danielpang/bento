@@ -89,6 +89,9 @@ const BY_CLI: Record<string, readonly string[]> = {
   // slugs rather than the Gemini API's ids, so it is its own provider.
   // See model-catalog.manual.ts.
   antigravity: ["antigravity"],
+  // Muse Code reaches Muse Spark and nothing else here, under Meta's
+  // own bare ids rather than the OpenRouter `meta/muse-spark-*` strings.
+  muse: ["meta"],
   fake: [],
 };
 

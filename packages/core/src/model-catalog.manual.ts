@@ -148,4 +148,30 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
      */
     models: [{ id: "poolside/laguna-s-2.1", name: "Laguna S 2.1" }],
   },
+  {
+    id: "meta",
+    name: "Meta",
+    env: ["META_API_KEY"],
+    // No mark: there is none in the repository, and inventing a brand
+    // mark is worse than the empty slot ProviderMark already draws.
+    logo: "",
+    /**
+     * Muse Spark, as Muse Code's `--model` takes it. The generated
+     * snapshot lists some of these weights under OpenRouter as
+     * `meta/muse-spark-*`, which is a different endpoint and a
+     * different key, so this provider is its own entry rather than
+     * ids appended to that one.
+     *
+     * Bare ids, newest first. Contributor variants are cheaper and
+     * train on prompts; they stay listed because they are published
+     * ids a key can actually call, not guesses.
+     */
+    models: [
+      { id: "muse-spark-1.3", name: "Muse Spark 1.3" },
+      { id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 Contributor" },
+      { id: "muse-spark-1.2", name: "Muse Spark 1.2" },
+      { id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 Contributor" },
+      { id: "muse-spark-1.1", name: "Muse Spark 1.1" },
+    ],
+  },
 ];
