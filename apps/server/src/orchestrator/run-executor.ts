@@ -754,6 +754,22 @@ export function dshFailureAdvice(error: string): string | null {
 }
 
 /**
+ * Per-tool next steps for a failure the CLI already named. A new
+ * harness that needs its own sentence is one entry here, used by both
+ * the hosted settle path and runner-reported errors.
+ */
+const TOOL_FAILURE_ADVICE: Record<string, (error: string) => string | null> = {
+  pool: poolFailureAdvice,
+  dsh: dshFailureAdvice,
+  muse: museFailureAdvice,
+};
+
+function toolFailureAdvice(cli: string | undefined, error: string): string | null {
+  if (!cli) return null;
+  return TOOL_FAILURE_ADVICE[cli]?.(error) ?? null;
+}
+
+/**
  * Runner-executed failures skip settleAgentResult, so they never pick
  * up tool-specific advice on their own. Same sentences, same place the
  * hosted board reads the error from, for every runner client.
@@ -765,14 +781,7 @@ export function runnerReportedError(
 ): string | null {
   const base = error ?? null;
   if (!base) return null;
-  const advice =
-    cli === "pool"
-      ? poolFailureAdvice(base)
-      : cli === "dsh"
-        ? dshFailureAdvice(base)
-        : cli === "muse"
-          ? museFailureAdvice(base)
-          : null;
+  const advice = toolFailureAdvice(cli, base);
   if (advice) return `${base} ${advice}`;
   return withProviderOutageAdvice(base, { cli, model });
 }
@@ -873,14 +882,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      */
     const toolMissing =
       exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
-    const toolAdvice =
-      profile.cli === "pool"
-        ? poolFailureAdvice(outcome.error ?? "")
-        : profile.cli === "dsh"
-          ? dshFailureAdvice(outcome.error ?? "")
-          : profile.cli === "muse"
-            ? museFailureAdvice(outcome.error ?? "")
-            : null;
+    const toolAdvice = toolFailureAdvice(profile.cli, outcome.error ?? "");
     const providerAdvice = toolAdvice
       ? `${outcome.error} ${toolAdvice}`
       : withProviderOutageAdvice(outcome.error ?? "", { cli: profile.cli, model: profile.model });
