@@ -6,6 +6,7 @@ import {
   captureRunFinished,
   dshFailureAdvice,
   mergeAgentExecEnv,
+  museFailureAdvice,
   poolFailureAdvice,
   runDurationSeconds,
   runnerReportedError,
@@ -147,6 +148,21 @@ test("runner-reported dsh failures receive Harness advice", () => {
     "dsh stopped before reporting a result (exit code 1): dsh: 401: invalid API key",
   );
   assert.match(reported ?? "", /Replace DEEPSEEK_API_KEY/);
+});
+
+test("Muse Code failures name the setting that fixes them", () => {
+  assert.match(
+    museFailureAdvice("muse stopped before reporting a result (exit code 1): invalid API key") ?? "",
+    /Replace META_API_KEY/,
+  );
+  assert.match(museFailureAdvice("The model `muse-spark-9` does not exist") ?? "", /Change the model/);
+  assert.equal(museFailureAdvice("the tests failed"), null);
+  assert.equal(museFailureAdvice("executable file `muse` not found in $PATH"), null);
+});
+
+test("runner-reported muse failures receive Muse Code advice", () => {
+  const reported = runnerReportedError("muse", "unauthorized: invalid API key");
+  assert.match(reported ?? "", /Replace META_API_KEY/);
 });
 
 test("a runner-reported Claude outage names the Claude status page", () => {

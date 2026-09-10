@@ -12,6 +12,7 @@ Each stage runs one agent: harness, model, and skill. Tools differ in authentica
 | Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs (new run, no session id) | No |
 | DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | Between runs (new run, no session id) | No |
 | Antigravity CLI | `gemini-3.1-pro-high` | `GEMINI_API_KEY` | Between runs (conversation resume) | No |
+| Muse Code | `muse-spark-1.3` | `META_API_KEY` | Between runs (session resume) | No |
 
 Keys are stored encrypted (per organization in multi mode; local scope in local mode) via the web console, `bento setup`, or the Mac app.
 
@@ -27,7 +28,7 @@ The card composer accepts input during runs. Behavior by tool:
 
 - **pi:** message delivered after the current tool call (steering). Manual stages keep the session open after a turn.
 - **Claude Code:** message queued for the next step in the same session. Manual stages keep the session open.
-- **Codex, Cursor, opencode, Antigravity:** message delivered when the current run ends; next run resumes the session.
+- **Codex, Cursor, opencode, Antigravity, Muse Code:** message delivered when the current run ends; next run resumes the session.
 - **pool, dsh:** message delivered when the current run ends; next run starts fresh with stage prompt and compacted transcript.
 
 If the session is unavailable (sandbox recreated or CLI session lost), Bento starts a new run with the same instructions and compacted transcript.
@@ -99,3 +100,13 @@ Authentication is `GEMINI_API_KEY`. Antigravity normally signs in with a Google 
 Runs resume by conversation id (`--conversation`), so a follow-up continues the same conversation. Headless mode accepts no mid-run input. Does not report cost: Antigravity bills against a plan's quota rather than per run.
 
 MCP servers attach through `~/.gemini/config/mcp_config.json`, which Bento rewrites before every run.
+
+### Muse Code
+
+Meta's `muse`, run headlessly (`muse exec --json --yolo --user-input-auto-resolve`). Bare Muse Spark ids: `muse-spark-1.3`, `muse-spark-1.2`, `muse-spark-1.3-contributor`. Unlisted ids may be typed manually. Reasoning effort is a `--reasoning-effort` extra arg, not part of the model id.
+
+Authentication is `META_API_KEY`. Muse Code normally signs in with a browser, which no sandbox can do, so the key is the whole of its authentication here. Local mode can share this machine's `~/.config/muse` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
+
+`--yolo` disables Muse's own approvals and OS sandbox: Bento's sandbox is the boundary. `--user-input-auto-resolve` cancels prompts for a person so a headless run cannot hang. Runs resume by session id (`--session-id`). Headless mode accepts no mid-run input. Does not report cost.
+
+MCP servers attach through `~/.config/muse/settings.json`, which Bento rewrites before every run.

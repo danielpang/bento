@@ -9,7 +9,7 @@
  * on whatever version happened to be baked in, and every Go project
  * start by fighting it.
  *
- * Six of the eight CLIs ship standalone binaries, so they carry no
+ * Seven of the nine CLIs ship standalone binaries, so they carry no
  * runtime of their own. pi and dsh are published only on npm, so they get a
  * private Node under /opt/bento that runs them and nothing else: it is
  * never placed on the PATH an agent's shell sees, so `node` in a
@@ -17,7 +17,7 @@
  */
 
 /** Binaries this script is responsible for putting on the PATH. */
-export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", "opencode", "pi", "pool"] as const;
+export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"] as const;
 
 /**
  * Bumped whenever the script changes what it installs, or when the
@@ -58,6 +58,7 @@ export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", 
  * that never had it, and so is adding agy. Warm sprites that already
  * have pi or opencode too old for native DeepSeek, or a dsh pin that
  * has moved, are caught by the version check below rather than a bump.
+ * Adding muse is the same for a machine that never had it.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -195,7 +196,7 @@ cli_stale() {
 }
 
 # What a run can actually spawn decides the work, not the marker alone.
-# With the marker there this is eight builtin lookups and no network,
+# With the marker there this is nine builtin lookups and no network,
 # which is what makes the common case free; without it the whole set is
 # installed, because a version bump means the commands Bento builds now
 # want newer CLIs than the ones already here. A present CLI can still be
@@ -360,6 +361,13 @@ fi
 # one command, which is also where the installer's child shell reads it.
 if wanted pool; then
   POOL_INSTALL_ACCEPT_EULA=1 install_from pool https://downloads.poolside.ai/pool/install.sh sh || true
+fi
+
+# Muse Code's installer rewrites shell rc files unless told not to.
+# The sandbox has no login shell that would read them, and rewriting
+# them is a surprise on a machine that already has a PATH.
+if wanted muse; then
+  MUSE_NO_MODIFY_PATH=1 install_from muse https://dev.meta.ai/install.sh bash || true
 fi
 
 # pi and dsh are npm only, so they share a private Node. A compatibility

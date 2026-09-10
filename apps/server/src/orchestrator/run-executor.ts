@@ -700,6 +700,22 @@ export function poolFailureAdvice(error: string): string | null {
 }
 
 /**
+ * Turns Muse Code's auth and model failures into the next action in Bento.
+ */
+export function museFailureAdvice(error: string): string | null {
+  if (/invalid api key|incorrect api key|unauthorized|authentication|no api key|META_API_KEY/i.test(error)) {
+    return "Meta rejected the saved key. Replace META_API_KEY under Model provider keys, then run again. Keys revoked in the Meta AI console fail this way.";
+  }
+  if (/does not exist|model_not_found|unknown model|no such model|not found/i.test(error) && /model/i.test(error)) {
+    const named = /model [`'"]?([\w./:-]+)/i.exec(error)?.[1];
+    return named
+      ? `Muse Code could not run the model ${named}. Change the model on this agent under Agents, then run again.`
+      : "Muse Code could not run this agent's model. Change it under Agents, then run again.";
+  }
+  return null;
+}
+
+/**
  * Text-mode adapters emit their only event when the process exits, so a
  * "started and is working" line on that event reads as a stall that
  * resolved instantly. Streamed CLIs still get the line on first output.
@@ -738,6 +754,22 @@ export function dshFailureAdvice(error: string): string | null {
 }
 
 /**
+ * Per-tool next steps for a failure the CLI already named. A new
+ * harness that needs its own sentence is one entry here, used by both
+ * the hosted settle path and runner-reported errors.
+ */
+const TOOL_FAILURE_ADVICE: Record<string, (error: string) => string | null> = {
+  pool: poolFailureAdvice,
+  dsh: dshFailureAdvice,
+  muse: museFailureAdvice,
+};
+
+function toolFailureAdvice(cli: string | undefined, error: string): string | null {
+  if (!cli) return null;
+  return TOOL_FAILURE_ADVICE[cli]?.(error) ?? null;
+}
+
+/**
  * Runner-executed failures skip settleAgentResult, so they never pick
  * up tool-specific advice on their own. Same sentences, same place the
  * hosted board reads the error from, for every runner client.
@@ -749,7 +781,7 @@ export function runnerReportedError(
 ): string | null {
   const base = error ?? null;
   if (!base) return null;
-  const advice = cli === "pool" ? poolFailureAdvice(base) : cli === "dsh" ? dshFailureAdvice(base) : null;
+  const advice = toolFailureAdvice(cli, base);
   if (advice) return `${base} ${advice}`;
   return withProviderOutageAdvice(base, { cli, model });
 }
@@ -850,12 +882,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      */
     const toolMissing =
       exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
-    const toolAdvice =
-      profile.cli === "pool"
-        ? poolFailureAdvice(outcome.error ?? "")
-        : profile.cli === "dsh"
-          ? dshFailureAdvice(outcome.error ?? "")
-          : null;
+    const toolAdvice = toolFailureAdvice(profile.cli, outcome.error ?? "");
     const providerAdvice = toolAdvice
       ? `${outcome.error} ${toolAdvice}`
       : withProviderOutageAdvice(outcome.error ?? "", { cli: profile.cli, model: profile.model });

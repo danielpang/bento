@@ -6,6 +6,7 @@ import { antigravityAdapter } from "./antigravity.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
+import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
 import { poolAdapter } from "./pool.js";
@@ -178,7 +179,7 @@ test("opencode builds a provider qualified model command", () => {
 });
 
 test("every declared cli resolves to an adapter", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
     assert.equal(getAdapter(cli).cli, cli);
   }
 });
@@ -189,6 +190,7 @@ test("adapters declare the env they need", () => {
   assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
   assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
   assert.deepEqual(antigravityAdapter.requiredEnv, ["GEMINI_API_KEY"]);
+  assert.deepEqual(museAdapter.requiredEnv, ["META_API_KEY"]);
 });
 
 test("dsh builds its headless command and isolated environment", () => {
@@ -441,7 +443,7 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
     const adapter = getAdapter(cli);
     for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
       // Poolside's enterprise endpoint is a local environment override.
@@ -770,4 +772,131 @@ test("antigravity writes its MCP servers where agy reads them", () => {
   // Called with nothing attached too, so a removed server does not
   // linger in a sandbox the next run reuses.
   assert.deepEqual(JSON.parse(antigravityAdapter.mcp!.renderConfig([])[0]!.content), { mcpServers: {} });
+});
+
+/**
+ * Muse Code's stream is an envelope: every line names its `payload_type`
+ * and carries the body under `payload`. The lifecycle here is the one
+ * a run produces, captured from `muse exec --json --yolo --provider echo`.
+ */
+function museLine(
+  payloadType: string,
+  payload: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    schema_version: 1,
+    stream: { kind: "session", id: "11111111-1111-4111-8111-111111111111" },
+    payload_type: payloadType,
+    payload,
+    ...extra,
+  });
+}
+
+test("muse parses a headless conversation", () => {
+  const events = parseAll(museAdapter, [
+    museLine("runtime.command.accepted"),
+    museLine("run.lifecycle.started"),
+    museLine("task.lifecycle.proposed", { task_kind: "tool.bash" }),
+    museLine("tool.result", { text: "README.md" }, { correlation_facts: { tool_name: "bash" } }),
+    museLine("run.output.delta", { text: "Read the " }),
+    museLine("run.terminal.completed", { text: "Read the readme." }),
+  ]);
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["init", "init", "tool", "tool", "message"],
+    "output deltas are not transcript events",
+  );
+  assert.deepEqual(
+    events.filter((e) => e.type === "tool").map((e) => [e.name, e.phase]),
+    [
+      ["bash", "start"],
+      ["bash", "end"],
+    ],
+  );
+  const said = events.find((e) => e.type === "message");
+  assert.ok(said?.type === "message" && said.text === "Read the readme.");
+  const outcome = museAdapter.extractOutcome(events, 0);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.sessionId, "11111111-1111-4111-8111-111111111111");
+});
+
+test("muse streams a response as deltas and keeps one message", () => {
+  const delta = museLine("run.output.delta", { text: "Rebasing " });
+  assert.deepEqual(museAdapter.parseDelta?.(delta), { channel: "text", text: "Rebasing " });
+  assert.equal(museAdapter.parseEvent(delta), null);
+
+  const done = museLine("run.terminal.completed", { text: "Rebased onto main." });
+  assert.equal(museAdapter.parseDelta?.(done), null, "the finished text is the message, not a delta");
+  assert.deepEqual(museAdapter.parseEvent(done)?.type, "message");
+});
+
+test("muse ignores reminder and unknown-model task proposals", () => {
+  assert.equal(museAdapter.parseEvent(museLine("task.lifecycle.proposed", { task_kind: "reminder.agent.idle" })), null);
+  assert.equal(
+    museAdapter.parseEvent(museLine("task.lifecycle.proposed", { task_kind: "model.unknown.response" })),
+    null,
+  );
+});
+
+test("muse reports a failed terminal with its own reason", () => {
+  const events = parseAll(museAdapter, [
+    museLine("runtime.command.accepted"),
+    museLine("run.terminal.failed", { reason: "invalid API key" }),
+  ]);
+  const outcome = museAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error, "invalid API key");
+  assert.equal(outcome.sessionId, "11111111-1111-4111-8111-111111111111");
+});
+
+test("muse trusts a non-zero exit over a completed terminal", () => {
+  const events = parseAll(museAdapter, [museLine("run.terminal.completed", { text: "Done." })]);
+  const outcome = museAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error ?? "", /exit code 1/);
+});
+
+test("muse builds its headless command and resumes by session", () => {
+  const input = { prompt: "Implement the card", model: "muse-spark-1.3", cwd: "/workspace" };
+  const cmd = museAdapter.buildCommand(input);
+  assert.deepEqual(cmd, [
+    "muse",
+    "exec",
+    "--json",
+    "--yolo",
+    "--user-input-auto-resolve",
+    "--workspace",
+    "/workspace",
+    "--model",
+    "muse-spark-1.3",
+    "Implement the card",
+  ]);
+  const resumed = museAdapter.buildCommand({ ...input, resumeSessionId: "11111111-1111-4111-8111-111111111111" });
+  assert.ok(resumed.includes("--session-id"));
+  assert.equal(resumed[resumed.indexOf("--session-id") + 1], "11111111-1111-4111-8111-111111111111");
+  assert.equal(resumed.at(-1), "Implement the card");
+});
+
+test("muse writes its MCP servers where the CLI reads them", () => {
+  const files = museAdapter.mcp!.renderConfig([
+    { slug: "linear", url: "https://bento.test/mcp/linear", transport: "http", headers: { Authorization: "Bearer t" } },
+  ]);
+  assert.deepEqual(files.map((f) => f.path), ["/root/.config/muse/settings.json"]);
+  assert.deepEqual(JSON.parse(files[0]!.content), {
+    schema_version: 1,
+    mcp_servers: {
+      linear: {
+        transport: "streamable_http",
+        url: "https://bento.test/mcp/linear",
+        headers: { Authorization: "Bearer t" },
+        enabled: true,
+        mode: "optional",
+      },
+    },
+  });
+  assert.deepEqual(JSON.parse(museAdapter.mcp!.renderConfig([])[0]!.content), {
+    schema_version: 1,
+    mcp_servers: {},
+  });
 });
