@@ -126,7 +126,7 @@ export function settingsRoutes(ctx: AppContext) {
  */
 let containerCheck: Promise<boolean> | null = null;
 
-function runsInContainer(): Promise<boolean> {
+export function runsInContainer(): Promise<boolean> {
   containerCheck ??= (async () => {
     // A Mac or a Linux host running the server directly is the common
     // case, and it exits here without reading anything.

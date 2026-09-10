@@ -4586,6 +4586,79 @@ button.session-expand[aria-pressed="true"] {
   padding-left: 9px;
 }
 
+/* The pill is a menu trigger on a stage. Backlog and Completed keep
+   the span, so these rules only apply where it is a button. */
+button.lane-agent {
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+button.lane-agent:hover,
+button.lane-agent:focus-visible {
+  border-color: var(--field-line);
+}
+button.lane-agent[data-state="open"] {
+  border-color: var(--brand);
+}
+button.lane-agent:disabled,
+button.lane-agent[data-saving] {
+  opacity: 0.65;
+  cursor: default;
+}
+.lane-agent .picker-caret {
+  margin-left: 1px;
+  border-left-width: 3px;
+  border-right-width: 3px;
+  border-top-width: 4px;
+}
+.lane-agent-spinner {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  margin-left: 1px;
+  border: 1.5px solid var(--text-faint);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: lane-agent-spin 0.6s linear infinite;
+}
+@keyframes lane-agent-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.lane-agent-kicker {
+  padding: 6px 9px 4px;
+}
+.lane-agent-menu .picker-item {
+  align-items: flex-start;
+}
+.lane-agent-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.lane-agent-item-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lane-agent-empty-note,
+.lane-agent-footnote {
+  margin: 0;
+  padding: 6px 9px;
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+.lane-agent-footnote {
+  font-size: 11px;
+}
+
 /* The project switcher. A board is always about one project, so the
    control says which, rather than making its name look like a value in
    a form. */

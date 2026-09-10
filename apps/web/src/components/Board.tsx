@@ -2,7 +2,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import type { AgentProfile, Feature, FeatureSpend, Stage } from "@bento/api-client";
 import { childBadgeLabel, childStatsFrom, childTone, relatedRootId, type ChildStats } from "@bento/core";
 import { useBetaTesters } from "../beta.js";
-import { ProviderMark } from "./ProviderMark.js";
+import { LaneAgentMenu } from "./LaneAgentMenu.js";
 import { formatCardSpend } from "./spend-format.js";
 
 /** Read once: a page is not re-rendered when the setting changes. */
@@ -208,6 +208,12 @@ interface BoardProps {
   onFinish: (featureId: string) => void;
   /** Opens the new-card dialog; the empty backlog offers it inline. */
   onNewCard: () => void;
+  /** Switch which agent a stage runs. Null means start runs by hand. */
+  onAssignAgent: (stageId: string, profileId: string | null) => Promise<void>;
+  /** Open the Agents panel on this profile's editor. */
+  onEditAgent: (profileId: string) => void;
+  /** Open the Agents panel on the create form. */
+  onNewAgent: () => void;
   /** The drawer covers the right edge; the board makes room for it. */
   drawerOpen: boolean;
   /**
@@ -357,6 +363,9 @@ export function Board({
   onMove,
   onFinish,
   onNewCard,
+  onAssignAgent,
+  onEditAgent,
+  onNewAgent,
   drawerOpen,
   spendByFeature = {},
   query = "",
@@ -527,7 +536,16 @@ export function Board({
             name={stage.name}
             ordinal={String(i + 1).padStart(2, "0")}
             count={inStage.length}
-            agent={agent}
+            agentMenu={
+              <LaneAgentMenu
+                stage={{ id: stage.id, name: stage.name }}
+                agent={agent}
+                profiles={profiles}
+                onAssign={(profileId) => onAssignAgent(stage.id, profileId)}
+                onEditAgent={onEditAgent}
+                onNewAgent={onNewAgent}
+              />
+            }
             expecting={expecting.has(stage.id)}
             {...(searching ? { empty: nothingFound } : {})}
             {...laneDropProps(stage.id, (featureId) => onMove(featureId, stage.id))}
@@ -568,7 +586,7 @@ function Lane({
   name,
   ordinal,
   count,
-  agent,
+  agentMenu,
   note,
   empty,
   over,
@@ -582,7 +600,8 @@ function Lane({
   /** The stage's position in the pipeline; the backlog is 00. */
   ordinal: string;
   count: number;
-  agent?: AgentProfile | undefined;
+  /** Replaces the read-only pill on a stage that can change its agent. */
+  agentMenu?: React.ReactNode;
   /** Said in the agent's place, for a lane no agent works. */
   note?: string;
   /** Shown in place of the default empty slot when the lane has no cards. */
@@ -612,19 +631,9 @@ function Lane({
           </span>
           <span className="lane-count">{count}</span>
         </div>
-        {agent ? (
-          // The agent's own name, the way the pipeline editor names it.
-          // The tool is what it runs on, not what it is called, and a
-          // lane reading "claude-code" beside a stage card reading
-          // "Senior Product Manager" made them look unrelated.
-          <span className="lane-agent" title={`${agent.cli} · ${agent.model}`}>
-            <ProviderMark cli={agent.cli} model={agent.model} decorative />
-            <span className="lane-agent-name">{agent.name}</span>
-          </span>
-        ) : (
-          // "no agent assigned" is a gap worth naming on a stage, which
-          // is a lane an agent is meant to work. On the Done lane it
-          // would be an instruction to fix something that is not broken.
+        {agentMenu ?? (
+          // Backlog and Completed carry no agent. Stage lanes pass the
+          // menu, which is the pill and the way to change it.
           <span className="lane-agent lane-agent-empty">{note ?? "no agent assigned"}</span>
         )}
       </header>
