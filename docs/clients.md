@@ -35,8 +35,8 @@ bento pipeline export team-pipeline.yaml
 | Set a repository's setup and test commands    | Yes                   | `bento repos set`                | No                      |
 | Export and import a pipeline as YAML          | Yes                   | `bento pipeline`                 | No                      |
 | Export and import agents as YAML              | Yes                   | `bento agents export` / `import` | No                      |
-| Sync the pipeline from the repository's `.bento/` files | Yes         | `bento pipeline sync`            | No                      |
-| Commit the `.bento/` files through a pull request | Yes               | `bento pipeline publish`         | No                      |
+| Sync the pipeline from the repository's `.bento/` files (beta testers) | Yes | `bento pipeline sync`     | No                      |
+| Commit the `.bento/` files through a pull request (beta testers) | Yes | `bento pipeline publish`         | No                      |
 | Add a card                                    | Yes                   | No                               | Yes                     |
 | Add, edit and remove agents                   | Yes                   | Yes                              | Yes                     |
 | Assign an agent to a stage                    | Yes                   | Yes                              | Yes                     |

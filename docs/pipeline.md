@@ -105,6 +105,8 @@ Both files can live in the repository they describe, at a fixed place:
 
 Bento reads them back from there, so the same board follows the code to another computer, another project, or from a local Bento to a hosted one. Either file may be present on its own.
 
+This is behind the `beta-testers` flag on hosted installs: the **In the repository** section under **Pipeline**, the sync and publish routes, and the push-driven sync all answer only for people on the flag. Local mode is always on.
+
 **When they are read.** On project creation, when the checkout (or the GitHub repository) carries them: the project arrives as that pipeline rather than the default six stages. On a push to the default branch that adds, changes, or removes either file, on hosted installs whose GitHub App receives `push` events. And on request: **Sync from repository** under **Pipeline**, or `bento pipeline sync`. A sync whose files match the ones last applied changes nothing, so edits made in the console survive until the files themselves change.
 
 **Where they are read from.** Local mode reads the checkout the project points at, as it is on disk. Hosted mode reads the default branch on GitHub, never a feature branch: feature branches are what agents push to, and a stage's requirements and a repository's setup command are things the server runs. In a project spanning several repositories, the first one in workspace order that carries either file is used.
