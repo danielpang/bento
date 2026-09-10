@@ -129,9 +129,9 @@ Options
                        own Postgres container.
   --data-dir <path>    Where worktrees and state live (default ~/.bento)
   --port <number>      Port for the local server (default: any free port)
-  --share-agent-auth   Let agents use the Claude, Codex, Cursor, opencode
-                       or pi login already on this machine, instead of an
-                       API key. Only for agents running locally. These are
+  --share-agent-auth   Let agents use the Claude, Codex, Cursor, opencode,
+                       pi or Muse Code login already on this machine, instead
+                       of an API key. Only for agents running locally. These are
                        long lived credentials for a paid account, and an
                        agent can read anything its sandbox can, so only use
                        this on repositories you trust.
@@ -147,7 +147,7 @@ Options
   --skill <text>       The agent's operating instructions, sent with every
                        run. Define what its stage write-up must contain.
   --tool <cli>         Coding tool for an agent: claude-code, codex, cursor,
-                       opencode, pi, pool, dsh, antigravity.
+                       opencode, pi, pool, dsh, antigravity, muse.
   --model <model>      Model for an agent.
   --name <name>        New name, when editing an agent.
   --url <url>          MCP server URL, for mcp add.

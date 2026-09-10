@@ -65,5 +65,6 @@ test("the spend page lists the tools that report a cost and the ones that do not
   assert.match(html, /Claude Code, pi/);
   assert.match(html, /<dt>Report none<\/dt>/);
   assert.match(html, /Codex CLI, Cursor CLI, opencode, Poolside \(pool\)/);
+  assert.match(html, /Muse Code/);
   assert.match(html, /floor rather than a full total/);
 });

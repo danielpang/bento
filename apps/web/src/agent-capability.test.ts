@@ -21,7 +21,7 @@ test("existing live tools retain their distinct delivery promises", () => {
  * the row decoration rather than information.
  */
 test("every tool offers exactly one messaging fact and one cost fact", () => {
-  for (const cli of ["pi", "claude-code", "dsh", "codex", "antigravity"]) {
+  for (const cli of ["pi", "claude-code", "dsh", "codex", "antigravity", "muse"]) {
     const chips = toolCapabilities(cli);
     assert.equal(chips.length, 2, `${cli} shows two chips`);
     assert.ok(
@@ -41,6 +41,8 @@ test("mid-run messaging is distinguished, not flattened to one icon", () => {
   assert.equal(toolCapabilities("claude-code")[0]!.icon, "queue");
   assert.equal(toolCapabilities("dsh")[0]!.icon, "between-runs");
   assert.equal(toolCapabilities("antigravity")[0]!.icon, "between-runs");
+  assert.equal(toolCapabilities("muse")[0]!.icon, "between-runs");
+  assert.equal(toolCapabilities("muse")[1]!.icon, "no-cost");
 });
 
 /** The sentence and the chips come from one source, so they cannot drift. */
