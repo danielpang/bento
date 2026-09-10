@@ -309,7 +309,7 @@ export function StageConfig({
           />
         </section>
 
-        <RepoConfigActions client={client} projectId={projectId} canPublish={canPublish} onChanged={onChanged} />
+        <RepoConfigActions client={client} projectId={projectId} onChanged={onChanged} />
 
         {/* The count comes from the board rather than from the server's
             refusal: "cards must be moved first" as a warning is advice,

@@ -6550,18 +6550,38 @@ test("an invalid .bento file applies nothing, is reported, and a fix clears it",
   assert.equal(stillRefused.status, 400);
   assert.ok(((await stillRefused.json()) as { error: string }).error.startsWith(`${PIPELINE_FILE_PATH}:`));
 
-  // Fixed: the third stage lands, and the error goes away.
+  // Fixed: the third stage lands, pointing at an agent only the agents
+  // file defines, and the error goes away.
   await writeRepoConfig(checkout, {
     pipeline: configuredPipelineYaml.replace(
       "agents:\n",
-      "    - name: Verify\n      slug: verify\n      agent: Repo Builder\nagents:\n",
+      "    - name: Verify\n      slug: verify\n      agent: Repo Reviewer\nagents:\n",
     ),
   });
-  const applied = await json<{ status: string; pipeline: { stages: number } | null }>(
+  const applied = await json<{ status: string; pipeline: { stages: number } | null; agents: number }>(
     await app.request(`/api/projects/${project.id}/config/sync`, { method: "POST" }),
   );
   assert.equal(applied.status, "applied");
   assert.equal(applied.pipeline?.stages, 3);
+  assert.equal(applied.agents, 3, "two from the pipeline file, one from the agents file");
+  const fixed = await json<{ stages: { slug: string; defaultAgentProfileId: string | null }[] }>(
+    await app.request(`/api/projects/${project.id}/pipeline`),
+  );
+  const reviewer = (await json<{ id: string; name: string }[]>(await app.request("/api/profiles"))).find(
+    (p) => p.name === "Repo Reviewer",
+  );
+  assert.equal(
+    fixed.stages.find((s) => s.slug === "verify")?.defaultAgentProfileId,
+    reviewer?.id,
+    "a stage may point at an agent the agents file defines",
+  );
+
+  // Pressing Sync again with the same files changes nothing: the button
+  // reads the repository, it does not undo edits made in the console.
+  const again = await json<{ status: string }>(
+    await app.request(`/api/projects/${project.id}/config/sync`, { method: "POST" }),
+  );
+  assert.equal(again.status, "unchanged");
   const cleared = await json<{ error: string | null; changed: boolean }>(
     await app.request(`/api/projects/${project.id}/config`),
   );
@@ -6707,7 +6727,7 @@ test("publishing the config opens a pull request carrying both files", { timeout
     );
     assert.equal(published.unchanged, false);
     assert.equal(published.prNumber, 7);
-    assert.match(published.branch, /^bento\/config-\d{8}-\d{6}$/);
+    assert.match(published.branch, /^bento\/config-\d{8}-\d{6}-[0-9a-f]{4}$/);
 
     assert.equal(commits.length, 1);
     const commit = commits[0]!;
@@ -6780,6 +6800,9 @@ test("a push that changes .bento on the default branch queues a sync for its pro
 
   const touching = new Set([PIPELINE_FILE_PATH, "README.md"]);
   assert.equal(await queueRepoConfigSyncs(ctx, ctx.db, { owner: "acme", repo: "pushed-config", branch: "main", paths: touching }), 1);
+  // GitHub names are case insensitive, and a checkout cloned as
+  // Acme/Pushed-Config is the same repository.
+  assert.equal(await queueRepoConfigSyncs(ctx, ctx.db, { owner: "ACME", repo: "Pushed-Config", branch: "main", paths: touching }), 1);
   assert.equal(
     await queueRepoConfigSyncs(ctx, ctx.db, { owner: "acme", repo: "pushed-config", branch: "feature/x", paths: touching }),
     0,

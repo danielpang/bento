@@ -8,8 +8,9 @@ import { pipelineFile, type PipelineFile } from "./pipeline-file.js";
  *
  * Shared by the export routes, which hand the document to the person,
  * and by the repository publish, which commits it for them. One
- * builder each, so the file a pull request carries is byte for byte
- * the one the Export button would have written.
+ * builder each, so the two paths cannot drift in what they write. They
+ * can differ in whose rows they read: export writes the caller's
+ * roster, publish the project owner's.
  */
 
 /**

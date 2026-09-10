@@ -23,13 +23,14 @@ import { applyPipelineFile } from "../pipeline-apply.js";
 import { buildPipelineFile } from "../pipeline-export.js";
 import { parsePipelineFile, writePipelineFile } from "../pipeline-file.js";
 import {
+  REPO_CONFIG_SYNC_QUEUE,
   describeRepoConfig,
   publishRepoConfig,
   syncRepoConfig,
   type RepoConfigSyncResult,
 } from "../repo-config.js";
 import type { AppContext } from "../context.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { activeOrg } from "../middleware/actor.js";
 import {
@@ -380,12 +381,23 @@ export function projectRoutes(ctx: AppContext) {
       // tuned, so it arrives that way rather than as the default six
       // stages. Never fatal: the project exists either way, and an
       // invalid file is reported on the project rather than thrown.
+      //
+      // Local mode reads the disk here and answers with the result. A
+      // hosted project's files live on GitHub, and two HTTP calls per
+      // repository inside the request's tenant transaction would hold a
+      // pooled connection for the whole wait, so that read goes to the
+      // queue once the rows are committed and the console learns the
+      // outcome from the Pipeline panel.
       let repoConfig: RepoConfigSyncResult | null = null;
       if (repoInputs.length > 0 && (await getBetaTester(ctx, c))) {
-        try {
-          repoConfig = await syncRepoConfig(ctx, db(c, ctx), { projectId: project.id });
-        } catch (err) {
-          console.error(`reading the repository configuration for project ${project.id} failed:`, err);
+        if (ctx.env.BENTO_MODE === "multi") {
+          deferAfterCommit(c, () => ctx.boss.send(REPO_CONFIG_SYNC_QUEUE, { projectId: project.id }).then(() => {}));
+        } else {
+          try {
+            repoConfig = await syncRepoConfig(ctx, db(c, ctx), { projectId: project.id });
+          } catch (err) {
+            console.error(`reading the repository configuration for project ${project.id} failed:`, err);
+          }
         }
       }
       return c.json({ ...project, repoConfig }, 201);
@@ -1086,11 +1098,15 @@ export function projectRoutes(ctx: AppContext) {
       const parsed = parsePipelineFile(await c.req.text());
       if ("error" in parsed) return c.json({ error: parsed.error }, 400);
 
-      const applied = await applyPipelineFile(db(c, ctx), {
-        projectId,
-        file: parsed.data,
-        owner: { ownerId: actor(c), organizationId: membership?.organizationId ?? null },
-      });
+      // One transaction, so a failure part way through leaves the board
+      // as it was rather than with some stages from each file.
+      const applied = await db(c, ctx).transaction((tx) =>
+        applyPipelineFile(tx, {
+          projectId,
+          file: parsed.data,
+          owner: { ownerId: actor(c), organizationId: membership?.organizationId ?? null },
+        }),
+      );
       if (!applied.ok) return c.json({ error: applied.error }, applied.status);
       return c.json(applied.summary);
     })
@@ -1122,9 +1138,10 @@ export function projectRoutes(ctx: AppContext) {
         return c.json({ error: "not found" }, 404);
       }
       // As the project's owner, whoever is pressing: see repo-config.ts.
-      // A person pressing the button means it: the hash check is for
-      // pushes, where nothing changed is the common case.
-      const result = await syncRepoConfig(ctx, db(c, ctx), { projectId, force: true });
+      // Not forced: files that match what was last applied change
+      // nothing, so edits made in the console are not undone by a
+      // button that promised to read the repository.
+      const result = await syncRepoConfig(ctx, db(c, ctx), { projectId });
       // The result carries its own `error` for the refused cases, which
       // is also what the client's error handling reads.
       const refused = { invalid: 400, unavailable: 409, missing: 404 } as const;

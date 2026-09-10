@@ -15,19 +15,16 @@ import { useToast } from "./Toasts.js";
 export function RepoConfigActions({
   client,
   projectId,
-  canPublish,
   onChanged,
 }: {
   client: BentoClient;
   projectId: string | null;
-  /** Whether a pull request could be opened from here today; null while unknown. */
-  canPublish: boolean | null;
   /** Called after a sync changed the pipeline, so the board re-reads it. */
   onChanged: () => void;
 }) {
   return (
     <BetaOnly>
-      <RepoConfigSection client={client} projectId={projectId} canPublish={canPublish} onChanged={onChanged} />
+      <RepoConfigSection client={client} projectId={projectId} onChanged={onChanged} />
     </BetaOnly>
   );
 }
@@ -35,16 +32,26 @@ export function RepoConfigActions({
 function RepoConfigSection({
   client,
   projectId,
-  canPublish,
   onChanged,
 }: {
   client: BentoClient;
   projectId: string | null;
-  canPublish: boolean | null;
   onChanged: () => void;
 }) {
   const toast = useToast();
   const [status, setStatus] = useState<RepoConfigStatus | null>(null);
+  /**
+   * Whether a pull request could be opened from here today. Asked from
+   * inside the beta gate, so a person off the flag pays no request for a
+   * button they never see.
+   */
+  const [canPublish, setCanPublish] = useState<boolean | null>(null);
+  useEffect(() => {
+    void client
+      .githubStatus()
+      .then((github) => setCanPublish(github.canPublish))
+      .catch(() => setCanPublish(null));
+  }, [client]);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   /** What the last action did, so a button press is not silent. */
@@ -83,7 +90,7 @@ function RepoConfigSection({
     if (!projectId) return;
     await act(async () => {
       const result = await client.syncRepoConfig(projectId);
-      if (result.status !== "applied") return "Nothing to apply.";
+      if (result.status !== "applied") return "The files match what was last applied, so nothing changed.";
       onChanged();
       const parts: string[] = [];
       if (result.pipeline) parts.push(`${result.pipeline.stages} stages`);

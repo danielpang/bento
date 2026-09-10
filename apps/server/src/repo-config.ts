@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import { projects, repositories, type Db } from "@bento/db";
 import { parseRepoUrl, type GitHubRepositoryFiles } from "@bento/github";
-import { parseAgentFile, writeAgentFile, type AgentFile } from "./agent-file.js";
+import { parseAgentFile, writeAgentFile, type AgentEntry, type AgentFile } from "./agent-file.js";
 import type { AppContext } from "./context.js";
 import { isBetaRun } from "./feature-flags.js";
 import { GITHUB_NOT_CONNECTED, githubConnectionFor } from "./github.js";
@@ -205,14 +205,6 @@ export function validateRepoConfig(
   return { pipeline, agents };
 }
 
-/** The distinct agent names the pair defines, which is what "n agents" counts. */
-function agentNamesIn(validated: { pipeline: PipelineFile | null; agents: AgentFile | null }): Set<string> {
-  const names = new Set<string>();
-  for (const agent of validated.pipeline?.agents ?? []) names.add(agent.name);
-  for (const agent of validated.agents?.agents ?? []) names.add(agent.name);
-  return names;
-}
-
 export type RepoConfigSyncResult =
   /** No repository carries either file. */
   | { status: "missing"; error: string }
@@ -261,15 +253,30 @@ async function recordRepoConfigState(
 class Refused extends Error {}
 
 /**
+ * The agents both files define, as one list the pipeline apply can
+ * create before it points stages at them. The agents file's definition
+ * wins when both carry an agent, so a skill edited there is not
+ * overwritten by the copy the pipeline file carries; agents only the
+ * agents file knows are created too, so a stage may name them.
+ */
+function mergedAgents(validated: { pipeline: PipelineFile | null; agents: AgentFile | null }): AgentEntry[] {
+  const fromAgentsFile = new Set((validated.agents?.agents ?? []).map((agent) => agent.name));
+  return [
+    ...(validated.pipeline?.agents ?? []).filter((agent) => !fromAgentsFile.has(agent.name)),
+    ...(validated.agents?.agents ?? []),
+  ];
+}
+
+/**
  * Reads the repository's files and applies them to the project.
  *
  * Skipped when the files hash the same as the last ones applied, so
  * changes made in the console survive until the files themselves
  * change; `force` applies them anyway. Everything is written in one
- * transaction, pipeline file first and agents file second, so the agents
- * file is the definition that wins when both describe an agent. A
- * refusal anywhere rolls all of it back and is recorded on the project
- * so the console can show it.
+ * transaction: the agents of both files first, as one list, then the
+ * stages, so a stage can point at an agent whichever file defined it.
+ * A refusal anywhere rolls all of it back and is recorded on the
+ * project so the console can show it.
  *
  * Acts as the project's owner: see the module comment.
  */
@@ -305,15 +312,19 @@ export async function syncRepoConfig(
   }
 
   let pipelineSummary: PipelineApplySummary | null = null;
+  const agents = mergedAgents(validated);
   try {
     await database.transaction(async (tx) => {
       if (validated.pipeline) {
-        const applied = await applyPipelineFile(tx, { projectId: project.id, file: validated.pipeline, owner });
+        const applied = await applyPipelineFile(tx, {
+          projectId: project.id,
+          file: { ...validated.pipeline, agents },
+          owner,
+        });
         if (!applied.ok) throw new Refused(`${PIPELINE_FILE_PATH}: ${applied.error}`);
-        pipelineSummary = applied.summary;
-      }
-      if (validated.agents) {
-        const applied = await upsertAgentsFromFile(tx, validated.agents.agents, owner);
+        pipelineSummary = { ...applied.summary, agents: agents.length };
+      } else {
+        const applied = await upsertAgentsFromFile(tx, agents, owner);
         if ("error" in applied) throw new Refused(`${AGENTS_FILE_PATH}: ${applied.error}`);
       }
       await recordRepoConfigState(tx, project.id, { hash, syncedAt: new Date(), error: null });
@@ -332,7 +343,7 @@ export async function syncRepoConfig(
     repository: source.repository,
     files,
     pipeline: pipelineSummary,
-    agents: agentNamesIn(validated).size,
+    agents: agents.length,
   };
 }
 
@@ -457,26 +468,43 @@ export async function publishRepoConfig(
     return { ok: true, unchanged: true, repository };
   }
 
-  const branch = `bento/config-${timestampForBranch(new Date())}`;
-  await github.commitFiles({
-    owner: parsed.owner,
-    repo: parsed.repo,
-    baseBranch: repo.defaultBranch,
-    branch,
-    message: "Add the Bento pipeline and agents",
-    files: [
-      { path: PIPELINE_FILE_PATH, content: pipelineYaml },
-      { path: AGENTS_FILE_PATH, content: agentsYaml },
-    ],
-  });
-  const pr = await github.ensurePullRequest({
-    owner: parsed.owner,
-    repo: parsed.repo,
-    head: branch,
-    base: repo.defaultBranch,
-    title: "Add the Bento pipeline and agents",
-    body: pullRequestBody(project.name, repo.defaultBranch),
-  });
+  // A timestamp people can read, plus a few random characters so two
+  // publishes in the same second (two teammates, a script run twice)
+  // do not collide on the branch name after the commit is already made.
+  const branch = `bento/config-${timestampForBranch(new Date())}-${randomBytes(2).toString("hex")}`;
+  let pr: { prNumber: number; url: string };
+  try {
+    await github.commitFiles({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      baseBranch: repo.defaultBranch,
+      branch,
+      message: "Add the Bento pipeline and agents",
+      files: [
+        { path: PIPELINE_FILE_PATH, content: pipelineYaml },
+        { path: AGENTS_FILE_PATH, content: agentsYaml },
+      ],
+    });
+    pr = await github.ensurePullRequest({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      head: branch,
+      base: repo.defaultBranch,
+      title: "Add the Bento pipeline and agents",
+      body: pullRequestBody(project.name, repo.defaultBranch),
+    });
+  } catch (err) {
+    // A GitHub refusal (the base branch does not exist under that name,
+    // the credential lost Contents access) is the person's to act on,
+    // so it arrives as a message rather than a 500.
+    return {
+      ok: false,
+      status: 409,
+      error: `GitHub would not take the files for ${parsed.owner}/${parsed.repo} on ${repo.defaultBranch}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
 
   await recordRepoConfigState(database, project.id, {
     hash: hashRepoConfig({ pipeline: pipelineYaml, agents: agentsYaml }),
@@ -521,9 +549,10 @@ export function pushChangesRepoConfig(push: { branch: string; paths: Set<string>
  *
  * Almost every push is an agent's feature branch, so the path check
  * comes before any query: a push that did not touch `.bento/` costs
- * nothing. A burst of pushes collapses to one job per project, because
- * every job after the first would read the same files and find them
- * already applied.
+ * nothing. One job per push, deliberately: pg-boss's singleton options
+ * drop a job that lands in the same slot as one already done, which
+ * would lose the push that fixed the file. A job after the first reads
+ * the files and finds them applied, which is cheap.
  */
 export async function queueRepoConfigSyncs(
   ctx: AppContext,
@@ -536,15 +565,19 @@ export async function queueRepoConfigSyncs(
     .from(repositories)
     .where(eq(repositories.defaultBranch, push.branch));
   const projectIds = new Set<string>();
+  // GitHub names are case insensitive and the stored URL is whatever the
+  // person cloned with, so the comparison folds case.
+  const owner = push.owner.toLowerCase();
+  const repo = push.repo.toLowerCase();
   for (const row of rows) {
     if (!row.repoUrl) continue;
     const parsed = parseRepoUrl(row.repoUrl);
-    if (!parsed || parsed.owner !== push.owner || parsed.repo !== push.repo) continue;
+    if (!parsed || parsed.owner.toLowerCase() !== owner || parsed.repo.toLowerCase() !== repo) continue;
     if (!pushChangesRepoConfig(push, row.defaultBranch)) continue;
     projectIds.add(row.projectId);
   }
   for (const projectId of projectIds) {
-    await ctx.boss.send(REPO_CONFIG_SYNC_QUEUE, { projectId }, { singletonKey: projectId, singletonSeconds: 30 });
+    await ctx.boss.send(REPO_CONFIG_SYNC_QUEUE, { projectId });
   }
   return projectIds.size;
 }
