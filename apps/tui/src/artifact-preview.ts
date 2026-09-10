@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import sharp from "sharp";
 import { chromium } from "playwright";
 
@@ -34,7 +35,7 @@ export async function renderArtifactContent(
   const browser = await chromium.launch({ chromiumSandbox: true, timeout: 15_000 }).catch((error: Error) => {
     if (error.message.includes("Executable doesn't exist"))
       throw new Error(
-        "Install the preview browser with: pnpm --filter @bento/tui exec playwright install chromium",
+        `Install the preview browser with: node '${path.join(path.dirname(require.resolve("playwright/package.json")), "cli.js").replace(/'/g, "'\\''")}' install chromium`,
       );
     throw error;
   });

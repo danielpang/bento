@@ -4,7 +4,7 @@
 
 ### From a release
 
-Push a version tag (`v*`) on `main` to publish a CLI tarball and install script on [GitHub Releases](https://github.com/danielpang/bento/releases).
+Pushing a version tag such as `v1.2.3` triggers the [release workflow](../.github/workflows/release.yml). It checks the CLI and its dependencies, builds and tests native packages on macOS and Linux for x64 and arm64, then publishes the archives, checksums and installer on [GitHub Releases](https://github.com/danielpang/bento/releases). Tags containing a suffix, such as `v1.2.3-rc.1`, publish prereleases and do not become the latest stable installer. The workflow uses the tagged commit, which must contain the release workflow and packaging scripts.
 
 ```sh
 curl -fsSL https://github.com/danielpang/bento/releases/latest/download/install.sh | bash
@@ -16,21 +16,28 @@ Pin a version:
 curl -fsSL https://github.com/danielpang/bento/releases/download/v0.1.0/install.sh | bash
 ```
 
-Requires **Node.js 22+**. The packaged CLI is a self-contained Node app (no pnpm or monorepo checkout on the target machine).
+Requires **Node.js 22.19+** and `curl`/`tar`. The installer selects the package matching the Node runtime and verifies its SHA-256 checksum before replacing an existing installation. Supported platforms are macOS and glibc Linux, on x64 and arm64. Alpine/musl and native Windows are not packaged; WSL with glibc Linux is supported. No pnpm or monorepo checkout is needed.
+
+Run the same install command again to update. A versioned release's installer is pinned to that release; fetching `latest/download/install.sh` selects the latest stable version. `bento --version` reports the version from the release tag.
 
 Install location:
 
 | Condition | Path |
 | --- | --- |
-| Writable `/usr/local` or run as root | `/usr/local/lib/bento`, symlink `/usr/local/bin/bento` |
+| Both `/usr/local/lib` and `/usr/local/bin` are writable | `/usr/local/lib/bento`, symlink `/usr/local/bin/bento` |
 | Otherwise | `~/.local/lib/bento`, symlink `~/.local/bin/bento` |
 
-Override with `BENTO_INSTALL_DIR` and optional `BENTO_BIN_DIR`.
+Override with `BENTO_INSTALL_DIR` and optional `BENTO_BIN_DIR`. The installer prints the selected directories and a PATH instruction when needed. It does not invoke sudo. For example, to install entirely under your home directory:
+
+```sh
+curl -fsSL https://github.com/danielpang/bento/releases/latest/download/install.sh \
+  | BENTO_INSTALL_DIR="$HOME/.local/lib/bento" BENTO_BIN_DIR="$HOME/.local/bin" bash
+```
 
 Manual install from the release assets:
 
 ```sh
-tar -xzf bento-cli-v0.1.0.tar.gz
+tar -xzf bento-cli-v0.1.0-darwin-arm64.tar.gz
 sudo mv bento-v0.1.0 /usr/local/lib/bento
 sudo ln -sf /usr/local/lib/bento/bento /usr/local/bin/bento
 ```
@@ -64,6 +71,14 @@ bento setup
 ```
 
 Requires **Docker** for agent sandboxes (default driver). Without Docker you can pass `--sandbox local-process` for development only; agents then run on the host with no isolation.
+
+For a release installation, build the included sandbox image before starting local agents. Use the installation directory printed by the installer:
+
+```sh
+docker build -t bento-sandbox:dev "$HOME/.local/lib/bento/sandbox"
+```
+
+If Bento installed to `/usr/local/lib/bento`, use `/usr/local/lib/bento/sandbox` instead. Hosted connections using `bento --server <url>` do not need a local sandbox image.
 
 Optional flags: `--data-dir`, `--db`, `--port`, `--share-agent-auth`. Run `bento --help` for the full list.
 
@@ -244,7 +259,13 @@ Images render as terminal color blocks without needing terminal-specific image p
 
 HTML opens as readable terminal text with headings, lists, tables and control labels. Text wraps at word boundaries, and Find, scrolling and mouse controls work as in other readers. Image overview provides the static layout when needed. Open browser loads a lightweight viewer at `/api/artifacts/:id/preview`; it does not require the web console or a separate web build. The browser shows the HTML at normal resolution inside a sandboxed frame and supports inline interactions. External requests are blocked. The preview and download both check access to the artifact; browser authentication uses the browser's own session.
 
-HTML and Mermaid previews require Chromium. Install it once with:
+HTML and Mermaid previews require Chromium. For a release installation, install it once using the bundled Playwright CLI (adjust the installation directory if needed):
+
+```sh
+node "$HOME/.local/lib/bento/node_modules/playwright/cli.js" install chromium
+```
+
+From a source checkout:
 
 ```sh
 pnpm --filter @bento/tui exec playwright install chromium
@@ -255,6 +276,28 @@ The terminal renderer uses a fresh browser context without application cookies. 
 ## Verification
 
 See the [real terminal verification report](./tui-testing.md) for the latest keyboard coverage, runtime fixes, real agent results and remaining integration limits.
+
+## Publishing a CLI release
+
+Choose an unused version and tag the commit you want to ship:
+
+```sh
+git tag -a v1.2.3 -m "Bento v1.2.3"
+git push origin v1.2.3
+```
+
+The workflow validates the tag, runs checks, packages each platform and runs the installer against each real archive before publishing. A draft release receives all CLI assets before becoming public. A failed upload can be retried while it is still a draft; a published version requires a new tag. The existing Mac app build attaches its archive afterward and cannot block CLI publication. Publishing uses the repository's built-in `GITHUB_TOKEN` with write access scoped to the publishing jobs.
+
+To exercise the same packaging and install checks locally without publishing:
+
+```sh
+pnpm exec turbo run build --filter=@bento/tui...
+node scripts/package-cli.mjs v0.0.0-test
+BENTO_TEST_ARCHIVE="$PWD/release-dist/bento-cli-v0.0.0-test-$(node -p 'process.platform + "-" + process.arch').tar.gz" \
+  node --test scripts/install.test.mjs
+```
+
+The tests download from an isolated local HTTP server using real curl, install outside the checkout, exercise upgrades and failure recovery, and load the packaged native renderer, embedded server and database migrations. The installer behavior tests also run in pull-request CI.
 
 Run `pnpm --filter @bento/tui test`, `pnpm --filter @bento/api-client test`, and `pnpm typecheck`. TUI tests report failures through their exit status. Interaction tests cover pasted text, editing, navigation, setup list scrolling, retained failed drafts, card targeting, search parity, and beta visibility. Client tests cover bearer-authenticated board streams, reconnection, rejected tokens, and binary artifact downloads.
 

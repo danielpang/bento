@@ -1,5 +1,15 @@
 # TUI verification, 2026-09-06
 
+## CLI release packaging, 2026-09-10
+
+The tag workflow now builds macOS and glibc Linux packages for x64 and arm64, stamps `--version` from the tag, and tests each archive before publishing the release. The Mac app attaches separately after CLI publication. `actionlint` and `shellcheck` passed for the workflow and shell scripts.
+
+A real macOS arm64 archive passed all seven release tests. These used real curl against an isolated HTTP server and installed outside the source checkout, including the literal `curl | bash` path, symlink launching, paths containing spaces, latest and pinned versions, upgrades, missing assets, checksum failures, old Node versions, unsupported platforms and protection of unrelated installation directories. The packaged native renderer and embedded-server imports worked, database migrations and the sandbox Dockerfile were present, and every package symlink stayed inside the installation. Testing found and fixed pnpm's hoisted link back to the original checkout.
+
+The extracted CLI also migrated a fresh real Postgres database and served healthy HTTP and project endpoints from outside the repository, then shut down normally. The temporary database and runtime were removed. The three browser-preview tests, TUI build and TUI typecheck passed after updating standalone browser-install instructions.
+
+No release tag or public release was created during these tests. The other platform archives and GitHub publication are checked by the workflow when a version tag is pushed.
+
 ## Settings and Docker shipping audit, 2026-09-10
 
 The rebuilt CLI was driven with keyboard and SGR mouse input in real PTYs against isolated local and team servers backed by Postgres. Ninety-two distinct recorded checks covered the settings workflows and command-line entry points. Settings mutations were read back through the API, and local preferences were checked after a normal restart.
