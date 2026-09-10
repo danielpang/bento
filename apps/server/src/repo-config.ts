@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import { projects, repositories, type Db } from "@bento/db";
-import { parseRepoUrl, type GitHubRepositoryFiles } from "@bento/github";
+import { isWritableConfigBranch, parseRepoUrl, type GitHubRepositoryFiles } from "@bento/github";
 import { parseAgentFile, writeAgentFile, type AgentFile } from "./agent-file.js";
 import type { AppContext } from "./context.js";
 import { isBetaRun } from "./feature-flags.js";
@@ -315,6 +315,11 @@ const GITHUB_NOT_CONNECTED =
 /**
  * Commits the two files to a new branch and opens a pull request.
  *
+ * Never to the default branch. The files land on a `bento/config-...`
+ * branch and reach the trunk only when a person merges the pull
+ * request; nothing here can write to main or master, and the GitHub
+ * layer refuses such a request outright.
+ *
  * The files are the export routes' own output, so what lands in the
  * repository is exactly what the Export buttons would have downloaded.
  * The commit is made on the trusted host with the server's GitHub
@@ -393,7 +398,14 @@ export async function publishRepoConfig(
     return { ok: true, unchanged: true, repository };
   }
 
+  // Always a fresh branch of Bento's own, and never the default branch:
+  // the files reach the trunk through the pull request and a person.
+  // The GitHub layer refuses a trunk too; this is the same rule stated
+  // where the branch is chosen.
   const branch = `bento/config-${timestampForBranch(new Date())}`;
+  if (!isWritableConfigBranch(branch, repo.defaultBranch)) {
+    return { ok: false, status: 409, error: `refusing to write to ${branch}: Bento never pushes to the default branch` };
+  }
   await github.commitFiles({
     owner: parsed.owner,
     repo: parsed.repo,
@@ -434,7 +446,7 @@ function pullRequestBody(projectName: string, defaultBranch: string): string {
     "",
     `Bento reads these files when a project is created from this repository, and again whenever they change on \`${defaultBranch}\`, so the same board follows the code to another computer or another Bento install. A file that does not validate is refused whole and the board is left as it was.`,
     "",
-    "Opened by Bento.",
+    `Opened by Bento. Bento only ever commits these files to a branch of its own and leaves merging to you; it never pushes to \`${defaultBranch}\`.`,
   ].join("\n");
 }
 

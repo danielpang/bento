@@ -111,7 +111,7 @@ Bento reads them back from there, so the same board follows the code to another 
 
 **Validation.** Both files are checked before anything is written. A file that does not parse, an agent with an unsupported tool and model pair, a stage naming an agent neither file defines, or a removed stage with cards in it refuses the whole pair, and the board is left exactly as it was. The reason is shown under **Pipeline** (and in `bento pipeline sync`) with the file named.
 
-**Putting them there.** **Open a pull request** under **Pipeline**, or `bento pipeline publish`, commits both files to a new `bento/config-...` branch of the repository and opens a pull request for them, using the same GitHub connection that publishes feature branches. Nothing is opened when the default branch already carries these exact files, and nothing is committed when the files could not be read back (two agents sharing one name, for instance); the refusal says what to fix.
+**Putting them there.** **Open a pull request** under **Pipeline**, or `bento pipeline publish`, commits both files to a new `bento/config-...` branch of the repository and opens a pull request for them, using the same GitHub connection that publishes feature branches. Bento never pushes to the default branch: the files reach `main` only when someone merges that pull request, and a request to write `main`, `master`, or the base branch itself is refused before any call to GitHub. Nothing is opened when the default branch already carries these exact files, and nothing is committed when the files could not be read back (two agents sharing one name, for instance); the refusal says what to fix.
 
 CLI:
 

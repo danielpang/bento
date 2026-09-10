@@ -11,6 +11,7 @@ export {
   type PullRequestMergeLike,
 } from "./app-client.js";
 export { GitHubTokenClient } from "./token-client.js";
+export { commitFilesVia, isWritableConfigBranch } from "./repo-files.js";
 export {
   isBentoDefaultPullRequestBody,
   parseStageWriteUpForPullRequest,

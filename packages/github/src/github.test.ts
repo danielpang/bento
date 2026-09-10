@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { parseRepoUrl, summarizeChecks, summarizeMergeState } from "./app-client.js";
+import { commitFilesVia, isWritableConfigBranch } from "./repo-files.js";
 import { pushTarget, verifyWebhookSignature, webhookTarget } from "./webhook.js";
 
 test("summarizeChecks counts pending and failed", () => {
@@ -91,4 +92,34 @@ test("pushTarget ignores tags, deleted branches, and other events", () => {
   assert.equal(pushTarget("push", { ref: "refs/tags/v1", repository, commits: [] }), null);
   assert.equal(pushTarget("push", { ref: "refs/heads/gone", deleted: true, repository, commits: [] }), null);
   assert.equal(pushTarget("pull_request", { ref: "refs/heads/main", repository }), null);
+});
+
+/**
+ * Bento's files reach the trunk through a pull request and a person.
+ * Nothing here may write to main, master, or the base it starts from.
+ */
+test("config files are only ever committed to a new branch, never the default branch", async () => {
+  assert.equal(isWritableConfigBranch("bento/config-20260910-024600", "main"), true);
+  assert.equal(isWritableConfigBranch("main", "main"), false);
+  assert.equal(isWritableConfigBranch("Master", "main"), false);
+  assert.equal(isWritableConfigBranch("trunk", "main"), false);
+  assert.equal(isWritableConfigBranch("release", "release"), false, "the base itself is never written");
+  assert.equal(isWritableConfigBranch("", "main"), false);
+
+  // Refused before a single API call: a fake Octokit that fails loudly
+  // if anything reaches it.
+  const untouched = new Proxy({}, { get: () => { throw new Error("GitHub must not be called"); } });
+  for (const branch of ["main", "master"]) {
+    await assert.rejects(
+      commitFilesVia(untouched as never, {
+        owner: "acme",
+        repo: "widgets",
+        baseBranch: "main",
+        branch,
+        message: "x",
+        files: [{ path: ".bento/pipeline.yaml", content: "version: 1\n" }],
+      }),
+      /never to the default branch/,
+    );
+  }
 });

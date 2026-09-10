@@ -125,7 +125,10 @@ function RepoConfigSection({
       ) : status?.unavailable ? (
         <p className="muted">{capitalise(status.unavailable)}</p>
       ) : status && !found ? (
-        <p className="muted">Not in the repository yet. Open a pull request to add them.</p>
+        <p className="muted">
+          Not in the repository yet. Open a pull request to add them: Bento commits to a branch of its own
+          and never pushes to your default branch.
+        </p>
       ) : status && status.repository ? (
         <p className="muted">
           {status.repository.name} has {files.join(" and ")}.{" "}
@@ -154,7 +157,7 @@ function RepoConfigSection({
           title={
             canPublish === false
               ? "Connect GitHub under Settings to open pull requests"
-              : "Commit both files to a new branch and open a pull request"
+              : "Commit both files to a new bento/config branch and open a pull request. Nothing is pushed to your default branch."
           }
           onClick={() => void publish()}
         >

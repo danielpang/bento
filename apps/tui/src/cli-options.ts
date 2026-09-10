@@ -107,7 +107,8 @@ Commands
   pipeline sync        Apply the repository's own .bento/pipeline.yaml and
                        .bento/agents.yaml to the project now.
   pipeline publish     Commit both files to a new branch of the repository
-                       and open a pull request for them.
+                       and open a pull request for them. Never pushes to
+                       the default branch.
   spend                Agent spend for the project, one line per card.
   sessions             Conversations in the project, newest activity first.
   mcp [list]           MCP servers agents can call, one per line.
