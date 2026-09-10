@@ -61,7 +61,7 @@ import { publishFeatureBranches, type PublishableRepository } from "../orchestra
 import { startFeatureFollowUpRun, startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
-import { githubConnectionFor } from "../github.js";
+import { GITHUB_NOT_CONNECTED, githubConnectionFor } from "../github.js";
 import {
   featurePullRequestHistory,
   featurePullRequestTargets,
@@ -183,8 +183,6 @@ function repoNameFromUrl(repoUrl: string): string {
  * refusing with two drifting copies of these instructions is how one of
  * them ends up pointing at a Settings panel that moved.
  */
-const GITHUB_NOT_CONNECTED =
-  "no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then try again.";
 
 interface PullRequestMergeRow {
   name: string;

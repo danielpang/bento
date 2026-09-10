@@ -34,7 +34,7 @@ export async function readFileVia(
  * never through Bento itself. The same list as the feature branch
  * publisher, for the same reason.
  */
-const PROTECTED_BRANCHES = new Set(["main", "master", "trunk", "develop"]);
+export const PROTECTED_BRANCHES: ReadonlySet<string> = new Set(["main", "master", "trunk", "develop"]);
 
 /**
  * Whether the branch may be created and written by Bento: not the base

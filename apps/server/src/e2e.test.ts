@@ -6453,7 +6453,9 @@ test("a project created from a checkout with .bento files arrives as that pipeli
   assert.equal(created.repoConfig?.status, "applied");
   assert.deepEqual(created.repoConfig?.files, [PIPELINE_FILE_PATH, AGENTS_FILE_PATH]);
   assert.equal(created.repoConfig?.pipeline?.stages, 2);
-  assert.equal(created.repoConfig?.agents, 1);
+  // Two from the pipeline file and one from the agents file, counted
+  // once each whichever file defined them.
+  assert.equal(created.repoConfig?.agents, 3);
 
   // The default six stages were replaced by the file's two, wired to
   // the agents the file defines.

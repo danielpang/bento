@@ -43,7 +43,7 @@ export interface RepoConfigStatus {
 }
 
 export type RepoConfigSyncResult =
-  | { status: "missing"; error?: string }
+  | { status: "missing"; error: string }
   | { status: "unavailable"; error: string }
   | { status: "unchanged"; repository: { id: string; name: string } }
   | { status: "invalid"; error: string; repository: { id: string; name: string } }
@@ -52,7 +52,8 @@ export type RepoConfigSyncResult =
       repository: { id: string; name: string };
       files: string[];
       pipeline: { stages: number; agents: number; removedStages: string[]; skippedRepositories: string[] } | null;
-      agents: number | null;
+      /** Distinct agents the pair defined, whichever file each came from. */
+      agents: number;
     };
 
 export type RepoConfigPublishResult =

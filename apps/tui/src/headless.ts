@@ -268,8 +268,7 @@ export async function runPipeline(options: CliOptions): Promise<void> {
           console.log("nothing to apply");
           return;
         }
-        const agents = (result.pipeline?.agents ?? 0) + (result.agents ?? 0);
-        console.log(`${result.pipeline?.stages ?? 0} stages, ${agents} agents from ${result.repository.name}`);
+        console.log(`${result.pipeline?.stages ?? 0} stages, ${result.agents} agents from ${result.repository.name}`);
         for (const name of result.pipeline?.removedStages ?? []) console.log(`removed stage\t${name}`);
         return;
       }

@@ -23,8 +23,6 @@ import { applyPipelineFile } from "../pipeline-apply.js";
 import { buildPipelineFile } from "../pipeline-export.js";
 import { parsePipelineFile, writePipelineFile } from "../pipeline-file.js";
 import {
-  AGENTS_FILE_PATH,
-  PIPELINE_FILE_PATH,
   describeRepoConfig,
   publishRepoConfig,
   syncRepoConfig,
@@ -385,10 +383,7 @@ export function projectRoutes(ctx: AppContext) {
       let repoConfig: RepoConfigSyncResult | null = null;
       if (repoInputs.length > 0 && (await getBetaTester(ctx, c))) {
         try {
-          repoConfig = await syncRepoConfig(ctx, db(c, ctx), {
-            projectId: project.id,
-            owner: { ownerId: actor(c), organizationId: membership?.organizationId ?? null },
-          });
+          repoConfig = await syncRepoConfig(ctx, db(c, ctx), { projectId: project.id });
         } catch (err) {
           console.error(`reading the repository configuration for project ${project.id} failed:`, err);
         }
@@ -1126,23 +1121,14 @@ export function projectRoutes(ctx: AppContext) {
       if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
         return c.json({ error: "not found" }, 404);
       }
-      const result = await syncRepoConfig(ctx, db(c, ctx), {
-        projectId,
-        owner: { ownerId: actor(c), organizationId: membership?.organizationId ?? null },
-        // A person pressing the button means it: the hash check is for
-        // pushes, where nothing changed is the common case.
-        force: true,
-      });
+      // As the project's owner, whoever is pressing: see repo-config.ts.
+      // A person pressing the button means it: the hash check is for
+      // pushes, where nothing changed is the common case.
+      const result = await syncRepoConfig(ctx, db(c, ctx), { projectId, force: true });
       // The result carries its own `error` for the refused cases, which
       // is also what the client's error handling reads.
-      if (result.status === "invalid") return c.json(result, 400);
-      if (result.status === "unavailable") return c.json(result, 409);
-      if (result.status === "missing") {
-        return c.json(
-          { ...result, error: `no repository in this project has a ${PIPELINE_FILE_PATH} or ${AGENTS_FILE_PATH}` },
-          404,
-        );
-      }
+      const refused = { invalid: 400, unavailable: 409, missing: 404 } as const;
+      if (result.status in refused) return c.json(result, refused[result.status as keyof typeof refused]);
       return c.json(result);
     })
     /**
@@ -1163,7 +1149,6 @@ export function projectRoutes(ctx: AppContext) {
         }
         const result = await publishRepoConfig(ctx, db(c, ctx), {
           projectId,
-          owner: { ownerId: actor(c), organizationId: membership?.organizationId ?? null },
           repositoryId: c.req.valid("json").repositoryId ?? null,
         });
         if (!result.ok) return c.json({ error: result.error }, result.status);

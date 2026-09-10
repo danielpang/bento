@@ -87,8 +87,7 @@ function RepoConfigSection({
       onChanged();
       const parts: string[] = [];
       if (result.pipeline) parts.push(`${result.pipeline.stages} stages`);
-      const agents = result.pipeline ? result.pipeline.agents + (result.agents ?? 0) : result.agents ?? 0;
-      parts.push(`${agents} agent${agents === 1 ? "" : "s"}`);
+      parts.push(`${result.agents} agent${result.agents === 1 ? "" : "s"}`);
       const removed = result.pipeline?.removedStages ?? [];
       return `Applied ${parts.join(" and ")} from ${result.repository.name}.${
         removed.length > 0 ? ` Removed: ${removed.join(", ")}.` : ""

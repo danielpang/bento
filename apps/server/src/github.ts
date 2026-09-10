@@ -10,6 +10,13 @@ import type { GitHubAppClient } from "@bento/github";
 import type { AppContext } from "./context.js";
 
 /**
+ * The one message for "nothing here can talk to GitHub", so the routes
+ * that need a connection cannot drift in what they tell people to do.
+ */
+export const GITHUB_NOT_CONNECTED =
+  "no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then try again.";
+
+/**
  * Resolves the server-owned GitHub client for one tenant.
  *
  * `db` is the connection the lookups run on. HTTP routes pass their

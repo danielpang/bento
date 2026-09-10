@@ -56,6 +56,28 @@ test("an invalid file is refused with its path named, whichever one it is", () =
   assert.ok(badAgents.error.startsWith(`${AGENTS_FILE_PATH}:`), badAgents.error);
 });
 
+/**
+ * The two files are one configuration. A stage may point at an agent
+ * the agents file defines, and only an agent neither file defines is a
+ * problem.
+ */
+test("a stage may name an agent defined in the agents file", () => {
+  const pipelineOnlyStage = `version: 1
+pipeline:
+  stages:
+    - name: Review
+      slug: review
+      agent: Reviewer
+`;
+  const ok = validateRepoConfig({ pipeline: pipelineOnlyStage, agents: agentsYaml });
+  assert.ok(!("error" in ok), "error" in ok ? ok.error : "");
+
+  const alone = validateRepoConfig({ pipeline: pipelineOnlyStage, agents: null });
+  assert.ok("error" in alone);
+  assert.match(alone.error, /Reviewer/);
+  assert.match(alone.error, /neither file defines/);
+});
+
 test("the hash tells the pair apart from either file alone", () => {
   const both = hashRepoConfig({ pipeline: pipelineYaml, agents: agentsYaml });
   assert.equal(both, hashRepoConfig({ pipeline: pipelineYaml, agents: agentsYaml }));
