@@ -62,8 +62,18 @@ export const pipelineFile = z.object({
 
 export type PipelineFile = z.infer<typeof pipelineFile>;
 
-/** Parses and validates, with the first problem reported in words. */
-export function parsePipelineFile(text: string): { data: PipelineFile } | { error: string } {
+/**
+ * Parses and validates, with the first problem reported in words.
+ *
+ * `knownAgents` are names defined somewhere other than this file (the
+ * agents file beside it in a repository). On its own, a pipeline file
+ * has to define every agent it names, because an import has nowhere
+ * else to look.
+ */
+export function parsePipelineFile(
+  text: string,
+  options: { knownAgents?: string[] } = {},
+): { data: PipelineFile } | { error: string } {
   const raw = parseYamlDocument(text);
   if ("error" in raw) return raw;
   const parsed = pipelineFile.safeParse(raw.data);
@@ -77,10 +87,14 @@ export function parsePipelineFile(text: string): { data: PipelineFile } | { erro
   }
   // Every named agent has to be defined, or the stage silently arrives
   // with nothing assigned and the pipeline cannot run.
-  const names = new Set(parsed.data.agents.map((agent) => agent.name));
+  const names = new Set([...parsed.data.agents.map((agent) => agent.name), ...(options.knownAgents ?? [])]);
   for (const stage of parsed.data.pipeline.stages) {
     if (stage.agent && !names.has(stage.agent)) {
-      return { error: `stage "${stage.slug}" names the agent "${stage.agent}", which the file does not define` };
+      return {
+        error: options.knownAgents
+          ? `stage "${stage.slug}" names the agent "${stage.agent}", which neither file defines`
+          : `stage "${stage.slug}" names the agent "${stage.agent}", which the file does not define`,
+      };
     }
   }
   return { data: parsed.data };

@@ -260,8 +260,31 @@ export async function runPipeline(options: CliOptions): Promise<void> {
         }
         return;
       }
+      case "sync": {
+        // The repository's own .bento files, applied now rather than on
+        // the next push. Refusals arrive as errors with the file named.
+        const result = await client.syncRepoConfig(project.id);
+        if (result.status !== "applied") {
+          console.log("nothing to apply");
+          return;
+        }
+        console.log(`${result.pipeline?.stages ?? 0} stages, ${result.agents} agents from ${result.repository.name}`);
+        for (const name of result.pipeline?.removedStages ?? []) console.log(`removed stage\t${name}`);
+        return;
+      }
+      case "publish": {
+        // Both files, committed to a new branch with a pull request, so
+        // the board can be picked up by cloning.
+        const result = await client.publishRepoConfig(project.id);
+        if (result.unchanged) {
+          console.log(`${result.repository.name} already has these exact files`);
+          return;
+        }
+        console.log(result.url);
+        return;
+      }
       default:
-        throw new Error(`unknown pipeline action "${action ?? ""}". Use export or import.`);
+        throw new Error(`unknown pipeline action "${action ?? ""}". Use export, import, sync, or publish.`);
     }
   } catch (err) {
     console.error(readableError(err));

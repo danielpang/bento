@@ -104,6 +104,11 @@ Commands
   pipeline import <file>
                        Apply one. Stages are matched by slug and updated in
                        place, so a live board keeps its cards where they are.
+  pipeline sync        Apply the repository's own .bento/pipeline.yaml and
+                       .bento/agents.yaml to the project now.
+  pipeline publish     Commit both files to a new branch of the repository
+                       and open a pull request for them. Never pushes to
+                       the default branch.
   spend                Agent spend for the project, one line per card.
   sessions             Conversations in the project, newest activity first.
   mcp [list]           MCP servers agents can call, one per line.
@@ -173,6 +178,12 @@ Examples
   bento pipeline export team-pipeline.yaml
       Keep the pipeline beside the code it describes, and import it into
       the next project rather than clicking it together again.
+
+  bento pipeline publish
+      Put the pipeline and agents in the repository as .bento/pipeline.yaml
+      and .bento/agents.yaml, through a pull request. Bento reads them back
+      when a project is created from that checkout and whenever they
+      change, so the same board follows the code to another machine.
 
   bento agents export team-agents.yaml
       Keep the named agents beside the code they work in, and import them

@@ -46,3 +46,47 @@ export function webhookTarget(event: string, payload: unknown): WebhookTarget | 
   }
   return null;
 }
+
+export interface PushTarget {
+  owner: string;
+  repo: string;
+  /** The branch pushed to, without refs/heads/. */
+  branch: string;
+  /** Every path the pushed commits added, changed, or removed. */
+  paths: Set<string>;
+}
+
+interface PushPayload {
+  ref?: string;
+  deleted?: boolean;
+  repository?: { name?: string; owner?: { login?: string; name?: string } };
+  commits?: { added?: string[]; modified?: string[]; removed?: string[] }[];
+  head_commit?: { added?: string[]; modified?: string[]; removed?: string[] } | null;
+}
+
+/**
+ * A push event, as the branch it landed on and the paths it touched.
+ *
+ * Only branch pushes count: a tag carries no branch to compare with,
+ * and a deleted branch has nothing left to read. The paths come from
+ * every commit in the push, so a file changed three commits back on a
+ * five commit push is still seen. GitHub lists at most twenty commits
+ * per push; a bigger push than that reports what it can, and the head
+ * commit is always included.
+ */
+export function pushTarget(event: string, payload: unknown): PushTarget | null {
+  if (event !== "push") return null;
+  const p = payload as PushPayload;
+  const owner = p.repository?.owner?.login ?? p.repository?.owner?.name;
+  const repo = p.repository?.name;
+  const ref = p.ref ?? "";
+  if (!owner || !repo || !ref.startsWith("refs/heads/") || p.deleted) return null;
+  const paths = new Set<string>();
+  const commits = [...(p.commits ?? []), ...(p.head_commit ? [p.head_commit] : [])];
+  for (const commit of commits) {
+    for (const path of [...(commit.added ?? []), ...(commit.modified ?? []), ...(commit.removed ?? [])]) {
+      paths.add(path);
+    }
+  }
+  return { owner, repo, branch: ref.slice("refs/heads/".length), paths };
+}

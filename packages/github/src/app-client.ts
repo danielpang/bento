@@ -2,9 +2,11 @@ import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import type {
   CheckSummary,
+  CommitFilesInput,
   GitHubClient,
   GitHubPublisher,
   GitHubRepository,
+  GitHubRepositoryFiles,
   MergeStateSummary,
   OpenPullRequest,
   PullRequestDetails,
@@ -19,6 +21,7 @@ import {
   pullRequestHasRunCommentVia,
   updatePullRequestVia,
 } from "./pr-sync.js";
+import { commitFilesVia, readFileVia } from "./repo-files.js";
 
 export interface AppConfig {
   appId: string;
@@ -181,7 +184,7 @@ export async function ensurePullRequestVia(octokit: Octokit, input: PullRequestI
 }
 
 /** GitHub App backed client. Installation tokens are short lived and repo scoped. */
-export class GitHubAppClient implements GitHubClient, GitHubPublisher {
+export class GitHubAppClient implements GitHubClient, GitHubPublisher, GitHubRepositoryFiles {
   private octokit: Octokit;
 
   constructor(config: AppConfig) {
@@ -225,6 +228,14 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
 
   createPullRequestComment(ref: PullRequestRef, body: string): Promise<void> {
     return createPullRequestCommentVia(this.octokit, ref, body);
+  }
+
+  readFile(input: { owner: string; repo: string; path: string; ref: string }): Promise<string | null> {
+    return readFileVia(this.octokit, input);
+  }
+
+  commitFiles(input: CommitFilesInput): Promise<{ sha: string }> {
+    return commitFilesVia(this.octokit, input);
   }
 
   async listRepositories(): Promise<GitHubRepository[]> {

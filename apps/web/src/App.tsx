@@ -785,6 +785,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     const rows = await client.listProjects();
     setProjects(rows);
     setProjectId(created.id);
+    // A checkout carrying .bento files arrives as the board they
+    // describe rather than the default stages; worth a word, because
+    // the person did not press anything to make that happen.
+    if (created.repoConfig?.status === "applied") {
+      toast.note(`Applied the pipeline and agents from ${created.repoConfig.repository.name}'s .bento files.`);
+    } else if (created.repoConfig?.status === "invalid") {
+      toast.fail(`The repository's .bento files were not applied: ${created.repoConfig.error}`);
+    }
   }
 
   const dialogs = (

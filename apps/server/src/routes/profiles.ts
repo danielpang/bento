@@ -6,6 +6,7 @@ import { MODEL_GUIDANCE, agentCli, checkAgentPairing, providerForProfile } from 
 import { agentProfiles, agentRuns, stages } from "@bento/db";
 import { getActiveOrganizationMembership } from "../access.js";
 import { parseAgentFile, writeAgentFile } from "../agent-file.js";
+import { buildAgentFile } from "../pipeline-export.js";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
@@ -149,31 +150,10 @@ export function profileRoutes(ctx: AppContext) {
      * their own.
      */
     .get("/export", async (c) => {
-      const rows = await db(c, ctx)
-        .select()
-        .from(agentProfiles)
-        .where(eq(agentProfiles.ownerId, actor(c)))
-        .orderBy(...byName);
-      // Written from the rows themselves, not re-validated against the
-      // import cap: a roster can grow past what one file will accept,
-      // and refusing to export it would trap the agents in this database.
-      return c.text(
-        writeAgentFile({
-          version: 1,
-          agents: rows.map((agent) => ({
-            name: agent.name,
-            tool: agent.cli,
-            model: agent.model,
-            skill: agent.skill ?? null,
-            extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : [],
-          })),
-        }),
-        200,
-        {
-          "content-type": "application/yaml; charset=utf-8",
-          "content-disposition": 'attachment; filename="bento-agents.yaml"',
-        },
-      );
+      return c.text(writeAgentFile(await buildAgentFile(db(c, ctx), actor(c))), 200, {
+        "content-type": "application/yaml; charset=utf-8",
+        "content-disposition": 'attachment; filename="bento-agents.yaml"',
+      });
     })
     /**
      * Applies an agents file to this user. Matched by name, so

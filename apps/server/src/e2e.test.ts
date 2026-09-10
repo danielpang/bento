@@ -34,6 +34,14 @@ import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { publishFeatureBranches, resolvePublishBaseSha } from "./orchestrator/publish.js";
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
+import { parseAgentFile } from "./agent-file.js";
+import { parsePipelineFile } from "./pipeline-file.js";
+import {
+  AGENTS_FILE_PATH,
+  PIPELINE_FILE_PATH,
+  hashRepoConfig,
+  queueRepoConfigSyncs,
+} from "./repo-config.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
@@ -6436,4 +6444,438 @@ test("a card keeps every pull request it has opened, and answers only for the li
     { number: 12, url: "https://github.com/acme/history/pull/12", state: "unknown" },
     { number: 11, url: "https://github.com/acme/history/pull/11", state: "unknown" },
   ]);
+});
+
+/**
+ * The pipeline and agents files, kept in the repository at .bento/.
+ *
+ * A checkout that carries them is a board somebody already tuned, so
+ * creating a project from it arrives as that board rather than the
+ * default six stages. That is how the same pipeline follows the code to
+ * a second computer, or from a local Bento to a hosted one.
+ */
+const configuredPipelineYaml = `version: 1
+pipeline:
+  name: From the repo
+  stages:
+    - name: Plan
+      slug: plan
+      description: Work out what to build.
+      agent: Repo Planner
+    - name: Build
+      slug: build
+      gate: auto
+      requirements:
+        - type: checks_pass
+      createPr: true
+      agent: Repo Builder
+agents:
+  - name: Repo Planner
+    tool: fake
+    model: fake-1
+    skill: Plan carefully.
+  - name: Repo Builder
+    tool: fake
+    model: fake-1
+`;
+
+const configuredAgentsYaml = `version: 1
+agents:
+  - name: Repo Reviewer
+    tool: fake
+    model: fake-1
+    skill: |
+      Review what the build stage produced.
+`;
+
+async function writeRepoConfig(checkout: string, files: { pipeline?: string | null; agents?: string | null }) {
+  await mkdir(path.join(checkout, ".bento"), { recursive: true });
+  if (files.pipeline !== undefined && files.pipeline !== null) {
+    await writeFile(path.join(checkout, PIPELINE_FILE_PATH), files.pipeline);
+  }
+  if (files.agents !== undefined && files.agents !== null) {
+    await writeFile(path.join(checkout, AGENTS_FILE_PATH), files.agents);
+  }
+}
+
+test("a project created from a checkout with .bento files arrives as that pipeline", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("configured");
+  await writeRepoConfig(checkout, { pipeline: configuredPipelineYaml, agents: configuredAgentsYaml });
+
+  const created = await json<{
+    id: string;
+    repoConfig: { status: string; files: string[]; pipeline: { stages: number } | null; agents: number | null } | null;
+  }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Configured by repo", localPath: checkout }),
+    }),
+  );
+  assert.equal(created.repoConfig?.status, "applied");
+  assert.deepEqual(created.repoConfig?.files, [PIPELINE_FILE_PATH, AGENTS_FILE_PATH]);
+  assert.equal(created.repoConfig?.pipeline?.stages, 2);
+  // Two from the pipeline file and one from the agents file, counted
+  // once each whichever file defined them.
+  assert.equal(created.repoConfig?.agents, 3);
+
+  // The default six stages were replaced by the file's two, wired to
+  // the agents the file defines.
+  const pipeline = await json<{
+    name: string;
+    stages: { slug: string; gateType: string; createPr: boolean; defaultAgentProfileId: string | null }[];
+  }>(await app.request(`/api/projects/${created.id}/pipeline`));
+  assert.equal(pipeline.name, "From the repo");
+  assert.deepEqual(pipeline.stages.map((s) => s.slug), ["plan", "build"]);
+  const build = pipeline.stages[1]!;
+  assert.equal(build.gateType, "auto");
+  assert.equal(build.createPr, true);
+  const profiles = await json<{ id: string; name: string; skill: string | null }[]>(await app.request("/api/profiles"));
+  const builder = profiles.find((p) => p.name === "Repo Builder");
+  assert.equal(build.defaultAgentProfileId, builder?.id, "the stage points at the agent the file named");
+  assert.match(profiles.find((p) => p.name === "Repo Reviewer")?.skill ?? "", /Review what the build stage produced/);
+
+  // The status the console shows: both files, in step, applied just now.
+  const status = await json<{
+    repository: { name: string } | null;
+    found: { pipeline: boolean; agents: boolean };
+    changed: boolean;
+    syncedAt: string | null;
+    error: string | null;
+  }>(await app.request(`/api/projects/${created.id}/config`));
+  assert.equal(status.repository?.name, repoNameOf(checkout));
+  assert.deepEqual(status.found, { pipeline: true, agents: true });
+  assert.equal(status.changed, false);
+  assert.ok(status.syncedAt);
+  assert.equal(status.error, null);
+
+  // Nothing pushed anywhere: the checkout is exactly as the person left it.
+  const { stdout } = await run("git", ["-C", checkout, "status", "--porcelain"]);
+  assert.match(stdout, /\.bento\//, "the files are untracked in the fixture, and stay that way");
+});
+
+/**
+ * An invalid file must leave the board exactly as it was, and say which
+ * file and what is wrong. Half a pipeline is worse than the old one.
+ */
+test("an invalid .bento file applies nothing, is reported, and a fix clears it", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("misconfigured");
+  await writeRepoConfig(checkout, { pipeline: configuredPipelineYaml, agents: configuredAgentsYaml });
+  const project = await json<{ id: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Misconfigured later", localPath: checkout }),
+    }),
+  );
+  const before = await json<{ stages: { id: string; slug: string }[] }>(
+    await app.request(`/api/projects/${project.id}/pipeline`),
+  );
+  assert.deepEqual(before.stages.map((s) => s.slug), ["plan", "build"]);
+
+  // A stage that names an agent neither file defines: the kind of edit
+  // that looks fine in a diff and would strand the stage.
+  await writeRepoConfig(checkout, {
+    pipeline: configuredPipelineYaml.replace("agent: Repo Builder", "agent: Nobody"),
+    // An agent with no model: not a pairing question, a file that does
+    // not describe an agent at all.
+    agents: "version: 1\nagents:\n  - name: Broken\n    tool: fake\n",
+  });
+  const status = await json<{ changed: boolean; error: string | null }>(
+    await app.request(`/api/projects/${project.id}/config`),
+  );
+  assert.equal(status.changed, true, "the files differ from what was applied");
+
+  const refused = await app.request(`/api/projects/${project.id}/config/sync`, { method: "POST" });
+  assert.equal(refused.status, 400);
+  const body = (await refused.json()) as { status: string; error: string };
+  assert.equal(body.status, "invalid");
+  // The agents file is checked first, so that is the file the message
+  // names even though the pipeline file is wrong too.
+  assert.ok(body.error.startsWith(`${AGENTS_FILE_PATH}:`), body.error);
+
+  const after = await json<{ stages: { id: string; slug: string }[] }>(
+    await app.request(`/api/projects/${project.id}/pipeline`),
+  );
+  assert.deepEqual(after.stages.map((s) => s.id), before.stages.map((s) => s.id), "nothing was written");
+  const profiles = await json<{ name: string }[]>(await app.request("/api/profiles"));
+  assert.ok(!profiles.some((p) => p.name === "Broken"), "no agent from the refused file exists");
+  const remembered = await json<{ error: string | null; changed: boolean }>(
+    await app.request(`/api/projects/${project.id}/config`),
+  );
+  assert.equal(remembered.error, body.error, "the refusal is kept for the console to show");
+
+  // A pipeline file that parses but points at an undefined agent is
+  // refused by the pipeline file's own checks, with that file named.
+  await writeRepoConfig(checkout, { agents: configuredAgentsYaml });
+  const stillRefused = await app.request(`/api/projects/${project.id}/config/sync`, { method: "POST" });
+  assert.equal(stillRefused.status, 400);
+  assert.ok(((await stillRefused.json()) as { error: string }).error.startsWith(`${PIPELINE_FILE_PATH}:`));
+
+  // Fixed: the third stage lands, pointing at an agent only the agents
+  // file defines, and the error goes away.
+  await writeRepoConfig(checkout, {
+    pipeline: configuredPipelineYaml.replace(
+      "agents:\n",
+      "    - name: Verify\n      slug: verify\n      agent: Repo Reviewer\nagents:\n",
+    ),
+  });
+  const applied = await json<{ status: string; pipeline: { stages: number } | null; agents: number }>(
+    await app.request(`/api/projects/${project.id}/config/sync`, { method: "POST" }),
+  );
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.pipeline?.stages, 3);
+  assert.equal(applied.agents, 3, "two from the pipeline file, one from the agents file");
+  const fixed = await json<{ stages: { slug: string; defaultAgentProfileId: string | null }[] }>(
+    await app.request(`/api/projects/${project.id}/pipeline`),
+  );
+  const reviewer = (await json<{ id: string; name: string }[]>(await app.request("/api/profiles"))).find(
+    (p) => p.name === "Repo Reviewer",
+  );
+  assert.equal(
+    fixed.stages.find((s) => s.slug === "verify")?.defaultAgentProfileId,
+    reviewer?.id,
+    "a stage may point at an agent the agents file defines",
+  );
+
+  // Pressing Sync again with the same files changes nothing: the button
+  // reads the repository, it does not undo edits made in the console.
+  const again = await json<{ status: string }>(
+    await app.request(`/api/projects/${project.id}/config/sync`, { method: "POST" }),
+  );
+  assert.equal(again.status, "unchanged");
+  const cleared = await json<{ error: string | null; changed: boolean }>(
+    await app.request(`/api/projects/${project.id}/config`),
+  );
+  assert.equal(cleared.error, null);
+  assert.equal(cleared.changed, false);
+});
+
+/**
+ * A sync that would strand cards is refused like an import would be,
+ * and for the same reason: moving somebody's cards is not a sync.
+ */
+test("a .bento sync that would delete an occupied stage is refused whole", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("occupied-sync");
+  const project = await json<{ id: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Occupied sync", localPath: checkout }),
+    }),
+  );
+  await unassignStages(project.id);
+  const seeded = await json<{ stages: { id: string; name: string }[] }>(
+    await app.request(`/api/projects/${project.id}/pipeline`),
+  );
+  const feature = await createFeature(project.id, "Sitting here");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  // Its own agent name: agents belong to the person, not the project,
+  // and the other tests here have already created "Repo Reviewer".
+  await writeRepoConfig(checkout, {
+    pipeline: configuredPipelineYaml,
+    agents: configuredAgentsYaml.replace("Repo Reviewer", "Occupied Reviewer"),
+  });
+  const refused = await app.request(`/api/projects/${project.id}/config/sync`, { method: "POST" });
+  assert.equal(refused.status, 400);
+  const body = (await refused.json()) as { error: string };
+  assert.match(body.error, new RegExp(seeded.stages[0]!.name));
+  assert.match(body.error, /1 card is sitting in it/);
+
+  // The agents file was valid on its own, and still did not land: the
+  // pair applies together or not at all.
+  const profiles = await json<{ name: string }[]>(await app.request("/api/profiles"));
+  assert.ok(!profiles.some((p) => p.name === "Occupied Reviewer"));
+  const after = await json<{ stages: { id: string }[] }>(await app.request(`/api/projects/${project.id}/pipeline`));
+  assert.equal(after.stages.length, seeded.stages.length);
+});
+
+/**
+ * The other direction: the board's pipeline and agents committed to the
+ * repository through a pull request, so the next clone carries them.
+ * The commit and the pull request go through the server's GitHub
+ * connection, never through a sandbox.
+ */
+test("publishing the config opens a pull request carrying both files", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("publish-config");
+  await run("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/acme/publish-config.git"]);
+  const project = await json<{ id: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Publish config", localPath: checkout }),
+    }),
+  );
+  await unassignStages(project.id);
+  const pipeline = await json<{ stages: { id: string }[] }>(await app.request(`/api/projects/${project.id}/pipeline`));
+  const agent = await fakeProfile("Config Publisher");
+  await patchStage(pipeline.stages[0]!.id, { defaultAgentProfileId: agent.id, createPr: true });
+
+  const commits: { branch: string; baseBranch: string; files: { path: string; content: string }[] }[] = [];
+  const pullRequests: { head: string; base: string; title: string; body: string }[] = [];
+  /** What the default branch carries; empty until "merged" below. */
+  const onMain = new Map<string, string>();
+  const github = {
+    async readFile(input: { path: string; ref: string }) {
+      assert.equal(input.ref, "main", "files are read from the default branch only");
+      return onMain.get(input.path) ?? null;
+    },
+    async commitFiles(input: { branch: string; baseBranch: string; files: { path: string; content: string }[] }) {
+      commits.push(input);
+      return { sha: "abc123" };
+    },
+    async ensurePullRequest(input: { head: string; base: string; title: string; body: string }) {
+      pullRequests.push(input);
+      return { prNumber: 7, url: "https://github.com/acme/publish-config/pull/7" };
+    },
+  };
+  await ctx.db.insert(organization).values({ id: "publish-config-org", name: "Publish Config", slug: "publish-config" });
+  await ctx.db.update(projects).set({ organizationId: "publish-config-org" }).where(eq(projects.id, project.id));
+  await ctx.db.insert(githubInstallations).values({
+    organizationId: "publish-config-org",
+    installationId: "publish-config-installation",
+    accountLogin: "acme",
+    accountType: "Organization",
+    installedBy: ctx.userId,
+  });
+  const previousGitHubApp = ctx.githubApp;
+  ctx.githubApp = {
+    forInstallation() {
+      return github;
+    },
+  } as unknown as NonNullable<AppContext["githubApp"]>;
+
+  try {
+    // Earlier tests in this file leave their own same-named agents
+    // behind; give each a name of its own so the roster is publishable,
+    // and so the refusal below is about the twin this test makes.
+    const roster = await json<{ id: string; name: string }[]>(await app.request("/api/profiles"));
+    const seen = new Set<string>();
+    for (const agent of roster) {
+      if (seen.has(agent.name)) {
+        await app.request(`/api/profiles/${agent.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: `${agent.name} ${agent.id.slice(0, 8)}` }),
+        });
+      }
+      seen.add(agent.name);
+    }
+
+    // Agents belong to the person, and nothing stops two from sharing a
+    // name. The agents file cannot express that, so publishing would
+    // commit a file the sync then refuses. Refused here instead, with
+    // the reason, before anything reaches the repository.
+    const twin = await fakeProfile("Twin Publisher");
+    const twinAgain = await fakeProfile("Twin Publisher");
+    const refused = await app.request(`/api/projects/${project.id}/config/publish`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(refused.status, 400);
+    assert.match(((await refused.json()) as { error: string }).error, /Twin Publisher/);
+    assert.equal(commits.length, 0, "nothing was committed for a file that cannot be read back");
+    await app.request(`/api/profiles/${twinAgain.id}`, { method: "DELETE" });
+    await app.request(`/api/profiles/${twin.id}`, { method: "DELETE" });
+
+    const published = await json<{ unchanged: boolean; branch: string; prNumber: number; url: string }>(
+      await app.request(`/api/projects/${project.id}/config/publish`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+    );
+    assert.equal(published.unchanged, false);
+    assert.equal(published.prNumber, 7);
+    assert.match(published.branch, /^bento\/config-\d{8}-\d{6}-[0-9a-f]{4}$/);
+
+    assert.equal(commits.length, 1);
+    const commit = commits[0]!;
+    assert.equal(commit.baseBranch, "main");
+    assert.equal(commit.branch, published.branch);
+    assert.deepEqual(commit.files.map((f) => f.path), [PIPELINE_FILE_PATH, AGENTS_FILE_PATH]);
+    // The committed files are the export routes' own output, and they
+    // parse back as what they describe.
+    const pipelineText = commit.files[0]!.content;
+    const parsedPipeline = parsePipelineFile(pipelineText);
+    assert.ok(!("error" in parsedPipeline), "error" in parsedPipeline ? parsedPipeline.error : "");
+    assert.equal(parsedPipeline.data.pipeline.stages[0]?.agent, "Config Publisher");
+    assert.equal(parsedPipeline.data.pipeline.stages[0]?.createPr, true);
+    assert.equal(pipelineText, await (await app.request(`/api/projects/${project.id}/pipeline/export`)).text());
+    const agentsText = commit.files[1]!.content;
+    const parsedAgents = parseAgentFile(agentsText);
+    assert.ok(!("error" in parsedAgents));
+    assert.ok(parsedAgents.data.agents.some((a) => a.name === "Config Publisher"));
+
+    assert.equal(pullRequests.length, 1);
+    assert.equal(pullRequests[0]!.head, published.branch);
+    assert.equal(pullRequests[0]!.base, "main");
+    assert.match(pullRequests[0]!.body, /\.bento\/pipeline\.yaml/);
+    assert.doesNotMatch(pullRequests[0]!.body, /[–—]/, "no dashes as pauses in what people read");
+
+    // Merging the pull request unchanged must not turn around and
+    // re-import the same files over the board: what was published is
+    // recorded as already applied.
+    const [row] = await ctx.db
+      .select({ hash: projects.repoConfigHash })
+      .from(projects)
+      .where(eq(projects.id, project.id));
+    assert.equal(row?.hash, hashRepoConfig({ pipeline: pipelineText, agents: agentsText }));
+
+    // Once the default branch carries these exact files, publishing
+    // again opens nothing: an empty pull request is noise.
+    onMain.set(PIPELINE_FILE_PATH, pipelineText);
+    onMain.set(AGENTS_FILE_PATH, agentsText);
+    const again = await json<{ unchanged: boolean }>(
+      await app.request(`/api/projects/${project.id}/config/publish`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+    );
+    assert.equal(again.unchanged, true);
+    assert.equal(commits.length, 1);
+    assert.equal(pullRequests.length, 1);
+  } finally {
+    if (previousGitHubApp) ctx.githubApp = previousGitHubApp;
+    else delete ctx.githubApp;
+  }
+});
+
+/**
+ * A push to the default branch that touched .bento/ queues a sync for
+ * every project on that repository, and nothing else does.
+ */
+test("a push that changes .bento on the default branch queues a sync for its projects", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("pushed-config");
+  await run("git", ["-C", checkout, "remote", "add", "origin", "https://github.com/acme/pushed-config.git"]);
+  const project = await json<{ id: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Pushed config", localPath: checkout }),
+    }),
+  );
+  await unassignStages(project.id);
+
+  const touching = new Set([PIPELINE_FILE_PATH, "README.md"]);
+  assert.equal(await queueRepoConfigSyncs(ctx, ctx.db, { owner: "acme", repo: "pushed-config", branch: "main", paths: touching }), 1);
+  // GitHub names are case insensitive, and a checkout cloned as
+  // Acme/Pushed-Config is the same repository.
+  assert.equal(await queueRepoConfigSyncs(ctx, ctx.db, { owner: "ACME", repo: "Pushed-Config", branch: "main", paths: touching }), 1);
+  assert.equal(
+    await queueRepoConfigSyncs(ctx, ctx.db, { owner: "acme", repo: "pushed-config", branch: "feature/x", paths: touching }),
+    0,
+    "a feature branch is what agents push to, so it never re-reads the files",
+  );
+  assert.equal(
+    await queueRepoConfigSyncs(ctx, ctx.db, { owner: "acme", repo: "pushed-config", branch: "main", paths: new Set(["src/a.ts"]) }),
+    0,
+  );
+  assert.equal(
+    await queueRepoConfigSyncs(ctx, ctx.db, { owner: "acme", repo: "someone-else", branch: "main", paths: touching }),
+    0,
+  );
 });

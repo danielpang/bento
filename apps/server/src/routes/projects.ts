@@ -18,10 +18,19 @@ import {
   seedDefaultPipeline,
   stages,
 } from "@bento/db";
-import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
-import { upsertAgentsFromFile } from "../upsert-agents.js";
+import { getBetaTester } from "../feature-flags.js";
+import { applyPipelineFile } from "../pipeline-apply.js";
+import { buildPipelineFile } from "../pipeline-export.js";
+import { parsePipelineFile, writePipelineFile } from "../pipeline-file.js";
+import {
+  REPO_CONFIG_SYNC_QUEUE,
+  describeRepoConfig,
+  publishRepoConfig,
+  syncRepoConfig,
+  type RepoConfigSyncResult,
+} from "../repo-config.js";
 import type { AppContext } from "../context.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { activeOrg } from "../middleware/actor.js";
 import {
@@ -367,7 +376,31 @@ export function projectRoutes(ctx: AppContext) {
         ownerId: actor(c),
         organizationId: membership?.organizationId ?? null,
       });
-      return c.json(project, 201);
+
+      // A checkout that carries .bento files is a board somebody already
+      // tuned, so it arrives that way rather than as the default six
+      // stages. Never fatal: the project exists either way, and an
+      // invalid file is reported on the project rather than thrown.
+      //
+      // Local mode reads the disk here and answers with the result. A
+      // hosted project's files live on GitHub, and two HTTP calls per
+      // repository inside the request's tenant transaction would hold a
+      // pooled connection for the whole wait, so that read goes to the
+      // queue once the rows are committed and the console learns the
+      // outcome from the Pipeline panel.
+      let repoConfig: RepoConfigSyncResult | null = null;
+      if (repoInputs.length > 0 && (await getBetaTester(ctx, c))) {
+        if (ctx.env.BENTO_MODE === "multi") {
+          deferAfterCommit(c, () => ctx.boss.send(REPO_CONFIG_SYNC_QUEUE, { projectId: project.id }).then(() => {}));
+        } else {
+          try {
+            repoConfig = await syncRepoConfig(ctx, db(c, ctx), { projectId: project.id });
+          } catch (err) {
+            console.error(`reading the repository configuration for project ${project.id} failed:`, err);
+          }
+        }
+      }
+      return c.json({ ...project, repoConfig }, 201);
     })
     /** Repositories a project spans, in workspace order. */
     .get("/:id/repositories", async (c) => {
@@ -1035,53 +1068,14 @@ export function projectRoutes(ctx: AppContext) {
     .get("/:id/pipeline/export", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
-      const [pipeline] = await db(c, ctx).select().from(pipelines).where(eq(pipelines.projectId, projectId));
-      if (!pipeline) return c.json({ error: "not found" }, 404);
-
-      const [stageRows, repoRows] = await Promise.all([
-        db(c, ctx).select().from(stages).where(eq(stages.pipelineId, pipeline.id)).orderBy(asc(stages.position)),
-        db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId)).orderBy(asc(repositories.position)),
-      ]);
-      const usedIds = [...new Set(stageRows.map((s) => s.defaultAgentProfileId).filter((id): id is string => !!id))];
-      const agentRows = usedIds.length
-        ? await db(c, ctx).select().from(agentProfiles).where(inArray(agentProfiles.id, usedIds))
-        : [];
-      const nameById = new Map(agentRows.map((agent) => [agent.id, agent.name]));
-
-      const file = {
-        version: 1 as const,
-        pipeline: {
-          name: pipeline.name,
-          stages: stageRows.map((stage) => ({
-            name: stage.name,
-            slug: stage.slug,
-            description: stage.description ?? "",
-            gate: stage.gateType,
-            requirements: Array.isArray(stage.gateCriteria) ? stage.gateCriteria : [],
-            createPr: stage.createPr,
-            agent: stage.defaultAgentProfileId ? (nameById.get(stage.defaultAgentProfileId) ?? null) : null,
-          })),
-        },
-        agents: agentRows.map((agent) => ({
-          name: agent.name,
-          tool: agent.cli,
-          model: agent.model,
-          skill: agent.skill ?? null,
-          extraArgs: agent.extraArgs ?? [],
-        })),
-        repositories: repoRows
-          .filter((repo) => repo.setupCommand || repo.testCommand)
-          .map((repo) => ({ name: repo.name, setup: repo.setupCommand, test: repo.testCommand })),
-      };
-      const parsed = pipelineFile.safeParse(file);
-      if (!parsed.success) {
-        // Stored rows that this format cannot express, which means the
-        // format is behind the schema rather than the data being wrong.
-        return c.json({ error: "this pipeline cannot be exported yet; please report it" }, 500);
-      }
-      return c.text(writePipelineFile(parsed.data), 200, {
+      const built = await buildPipelineFile(db(c, ctx), projectId);
+      if (!built) return c.json({ error: "not found" }, 404);
+      // Stored rows that this format cannot express, which means the
+      // format is behind the schema rather than the data being wrong.
+      if ("error" in built) return c.json({ error: built.error }, 500);
+      return c.text(writePipelineFile(built.file), 200, {
         "content-type": "application/yaml; charset=utf-8",
-        "content-disposition": `attachment; filename="${slugForFile(pipeline.name)}-pipeline.yaml"`,
+        "content-disposition": `attachment; filename="${slugForFile(built.file.pipeline.name)}-pipeline.yaml"`,
       });
     })
     /**
@@ -1103,97 +1097,81 @@ export function projectRoutes(ctx: AppContext) {
 
       const parsed = parsePipelineFile(await c.req.text());
       if ("error" in parsed) return c.json({ error: parsed.error }, 400);
-      const file = parsed.data;
 
-      const [pipeline] = await db(c, ctx).select().from(pipelines).where(eq(pipelines.projectId, projectId));
-      if (!pipeline) return c.json({ error: "not found" }, 404);
-
-      // Agents first: a stage cannot point at one that does not exist
-      // yet. Matched by name, so importing twice edits rather than
-      // duplicates.
-      const applied = await upsertAgentsFromFile(db(c, ctx), file.agents, {
-        ownerId: actor(c),
-        organizationId: membership?.organizationId ?? null,
-      });
-      if ("error" in applied) return c.json({ error: applied.error }, 400);
-      const agentIdByName = applied.idsByName;
-
-      const existingStages = await db(c, ctx)
-        .select()
-        .from(stages)
-        .where(eq(stages.pipelineId, pipeline.id))
-        .orderBy(asc(stages.position));
-      const bySlug = new Map(existingStages.map((stage) => [stage.slug, stage]));
-      const wanted = new Set(file.pipeline.stages.map((stage) => stage.slug));
-
-      // Refused before anything is written, so a rejected import
-      // changes nothing at all.
-      const doomed = existingStages.filter((stage) => !wanted.has(stage.slug));
-      for (const stage of doomed) {
-        const [{ held } = { held: 0 }] = await db(c, ctx)
-          .select({ held: count(features.id) })
-          .from(features)
-          .where(eq(features.currentStageId, stage.id));
-        if (Number(held) > 0) {
-          return c.json(
-            {
-              error: `this file has no "${stage.name}" stage, and ${held} card${
-                Number(held) === 1 ? " is" : "s are"
-              } sitting in it. Move them first, or add that stage to the file.`,
-            },
-            409,
-          );
+      // One transaction, so a failure part way through leaves the board
+      // as it was rather than with some stages from each file.
+      const applied = await db(c, ctx).transaction((tx) =>
+        applyPipelineFile(tx, {
+          projectId,
+          file: parsed.data,
+          owner: { ownerId: actor(c), organizationId: membership?.organizationId ?? null },
+        }),
+      );
+      if (!applied.ok) return c.json({ error: applied.error }, applied.status);
+      return c.json(applied.summary);
+    })
+    /**
+     * The repository's own copy of the configuration: whether
+     * .bento/pipeline.yaml and .bento/agents.yaml exist, whether they
+     * differ from what was last applied, and why the last sync applied
+     * nothing. Reads only; the Sync button below is what writes.
+     */
+    .get("/:id/config", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+      const status = await describeRepoConfig(ctx, db(c, ctx), projectId);
+      if (!status) return c.json({ error: "not found" }, 404);
+      return c.json(status);
+    })
+    /**
+     * Applies the repository's .bento files to this project, the way
+     * a push to the default branch does, but now. Files that do not
+     * validate change nothing and the refusal is the answer.
+     */
+    .post("/:id/config/sync", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+      const membership = await getActiveOrganizationMembership(ctx, c);
+      if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
+        return c.json({ error: "not found" }, 404);
+      }
+      // As the project's owner, whoever is pressing: see repo-config.ts.
+      // Not forced: files that match what was last applied change
+      // nothing, so edits made in the console are not undone by a
+      // button that promised to read the repository.
+      const result = await syncRepoConfig(ctx, db(c, ctx), { projectId });
+      // The result carries its own `error` for the refused cases, which
+      // is also what the client's error handling reads.
+      const refused = { invalid: 400, unavailable: 409, missing: 404 } as const;
+      if (result.status in refused) return c.json(result, refused[result.status as keyof typeof refused]);
+      return c.json(result);
+    })
+    /**
+     * Commits the pipeline and agents files to a new branch of the
+     * repository and opens a pull request for them, so the board can be
+     * picked up from another computer, or another Bento, by cloning.
+     */
+    .post(
+      "/:id/config/publish",
+      zValidator("json", z.object({ repositoryId: z.string().uuid().nullish() }).default({})),
+      async (c) => {
+        const projectId = c.req.param("id");
+        if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+        if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+        const membership = await getActiveOrganizationMembership(ctx, c);
+        if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
+          return c.json({ error: "not found" }, 404);
         }
-      }
-
-      for (const [position, entry] of file.pipeline.stages.entries()) {
-        const values = {
-          name: entry.name,
-          description: entry.description,
-          gateType: entry.gate,
-          gateCriteria: entry.requirements as unknown[],
-          createPr: entry.createPr,
-          position,
-          defaultAgentProfileId: entry.agent ? (agentIdByName.get(entry.agent) ?? null) : null,
-        };
-        const existing = bySlug.get(entry.slug);
-        if (existing) {
-          await db(c, ctx).update(stages).set(values).where(eq(stages.id, existing.id));
-        } else {
-          await db(c, ctx).insert(stages).values({ ...values, pipelineId: pipeline.id, slug: entry.slug });
-        }
-      }
-      for (const stage of doomed) {
-        await db(c, ctx).delete(stages).where(eq(stages.id, stage.id));
-      }
-      if (file.pipeline.name !== pipeline.name) {
-        await db(c, ctx).update(pipelines).set({ name: file.pipeline.name }).where(eq(pipelines.id, pipeline.id));
-      }
-
-      // Repository commands, where a checkout of that name exists here.
-      const repoRows = await db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId));
-      const skippedRepositories: string[] = [];
-      for (const entry of file.repositories) {
-        const target = repoRows.find((repo) => repo.name === entry.name);
-        if (!target) {
-          skippedRepositories.push(entry.name);
-          continue;
-        }
-        await db(c, ctx)
-          .update(repositories)
-          .set({ setupCommand: entry.setup ?? null, testCommand: entry.test ?? null })
-          .where(eq(repositories.id, target.id));
-      }
-
-      return c.json({
-        stages: file.pipeline.stages.length,
-        agents: file.agents.length,
-        removedStages: doomed.map((stage) => stage.name),
-        // Named rather than swallowed: a file written for another
-        // project can carry commands for checkouts this one lacks.
-        skippedRepositories,
-      });
-    });
+        const result = await publishRepoConfig(ctx, db(c, ctx), {
+          projectId,
+          repositoryId: c.req.valid("json").repositoryId ?? null,
+        });
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result);
+      },
+    );
 }
 
 /** A filename people can find again, from a pipeline's name. */

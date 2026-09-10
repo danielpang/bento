@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { BentoClient, Project } from "@bento/api-client";
 import { ListRowsSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
+import { RepoConfigActions } from "./RepoConfigActions.js";
 import { YamlFileActions, downloadYaml, pipelineImportSummary } from "./YamlFileActions.js";
 
 /**
@@ -133,6 +134,9 @@ export function ConfigSettings({ client }: { client: BentoClient }) {
           onExport={() => void exportPipeline()}
           onImport={(file) => void importPipeline(file)}
         />
+        {projectId && (
+          <RepoConfigActions client={client} projectId={projectId} onChanged={() => {}} />
+        )}
       </section>
     </>
   );
