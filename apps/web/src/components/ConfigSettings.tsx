@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { BentoClient, Project } from "@bento/api-client";
 import { ListRowsSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
+import { RepoConfigActions } from "./RepoConfigActions.js";
 import { YamlFileActions, downloadYaml, pipelineImportSummary } from "./YamlFileActions.js";
 
 /**
@@ -20,6 +21,15 @@ export function ConfigSettings({ client }: { client: BentoClient }) {
   const [busy, setBusy] = useState(false);
   const [agentsImported, setAgentsImported] = useState("");
   const [pipelineImported, setPipelineImported] = useState("");
+  /** Whether a pull request could actually be opened from here today. */
+  const [canPublish, setCanPublish] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void client
+      .githubStatus()
+      .then((status) => setCanPublish(status.canPublish))
+      .catch(() => setCanPublish(null));
+  }, [client]);
 
   useEffect(() => {
     void client
@@ -133,6 +143,9 @@ export function ConfigSettings({ client }: { client: BentoClient }) {
           onExport={() => void exportPipeline()}
           onImport={(file) => void importPipeline(file)}
         />
+        {projectId && (
+          <RepoConfigActions client={client} projectId={projectId} canPublish={canPublish} onChanged={() => {}} />
+        )}
       </section>
     </>
   );

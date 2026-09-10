@@ -1,6 +1,11 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { githubInstallations, secrets, type Db } from "@bento/db";
-import { GitHubTokenClient, type GitHubClient, type GitHubPublisher } from "@bento/github";
+import {
+  GitHubTokenClient,
+  type GitHubClient,
+  type GitHubPublisher,
+  type GitHubRepositoryFiles,
+} from "@bento/github";
 import type { GitHubAppClient } from "@bento/github";
 import type { AppContext } from "./context.js";
 
@@ -40,7 +45,7 @@ export async function githubConnectionFor(
   ctx: AppContext,
   organizationId: string | null,
   db: Db = ctx.db,
-): Promise<(GitHubClient & GitHubPublisher) | undefined> {
+): Promise<(GitHubClient & GitHubPublisher & GitHubRepositoryFiles) | undefined> {
   const app = await githubForOrganization(ctx, organizationId, db);
   if (app) return app;
 

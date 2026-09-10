@@ -889,6 +889,12 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/mcp/${mcpServer!.id}/connect`],
     ["DELETE", `/api/mcp/${mcpServer!.id}/user-credential`],
     ["DELETE", `/api/mcp/${mcpServer!.id}`],
+    // The repository's own .bento files: reading them says which
+    // checkouts a project has, syncing rewrites its pipeline, and
+    // publishing commits with the organization's GitHub credential.
+    ["GET", `/api/projects/${project.id}/config`],
+    ["POST", `/api/projects/${project.id}/config/sync`],
+    ["POST", `/api/projects/${project.id}/config/publish`, { body: JSON.stringify({}) }],
     ["DELETE", `/api/features/${feature.id}`],
     // Last: a delete that went through would refuse everything after it
     // for the wrong reason. The project last, because it would take the

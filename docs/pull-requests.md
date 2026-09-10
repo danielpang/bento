@@ -41,7 +41,7 @@ Without either, agents commit locally. The transcript will report Github is not 
 | Setup URL   | `<server URL>/api/github/callback`                                                                 |
 | Webhook URL | `<server URL>/api/webhooks/github`                                                                 |
 | Permissions | Contents R/W, Pull requests R/W, Checks read, Metadata read                                        |
-| Events      | installation, installation repositories, pull request, check run, check suite, pull request review |
+| Events      | installation, installation repositories, pull request, check run, check suite, pull request review, push (to re-read `.bento/` files when they change) |
 
 
 Then set the following values as environment variables: `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`.

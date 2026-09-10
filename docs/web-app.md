@@ -237,6 +237,7 @@ The boot summary prints the destination as `log export: ...`.
 | `apps/web/src/components/FeatureDrawer.tsx` | Card actions, transcript, gates |
 | `apps/web/src/components/AgentsPanel.tsx`   | Agent CRUD, YAML                |
 | `apps/web/src/components/StageConfig.tsx`   | Stage config, pipeline YAML     |
+| `apps/web/src/components/RepoConfigActions.tsx` | The repository's `.bento/` files: sync and pull request |
 | `apps/web/src/components/TeamSettings.tsx`  | Organizations, credentials      |
 
 

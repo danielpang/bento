@@ -16,4 +16,4 @@ export {
   parseStageWriteUpForPullRequest,
   pullRequestRunMarker,
 } from "./pr-sync.js";
-export { verifyWebhookSignature, webhookTarget, type WebhookTarget } from "./webhook.js";
+export { pushTarget, verifyWebhookSignature, webhookTarget, type PushTarget, type WebhookTarget } from "./webhook.js";

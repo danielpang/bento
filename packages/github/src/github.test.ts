@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { parseRepoUrl, summarizeChecks, summarizeMergeState } from "./app-client.js";
-import { verifyWebhookSignature, webhookTarget } from "./webhook.js";
+import { pushTarget, verifyWebhookSignature, webhookTarget } from "./webhook.js";
 
 test("summarizeChecks counts pending and failed", () => {
   const summary = summarizeChecks([
@@ -67,4 +67,28 @@ test("webhookTarget extracts PR from relevant events", () => {
   });
   assert.equal(webhookTarget("push", { repository }), null);
   assert.equal(webhookTarget("check_suite", { repository, check_suite: { pull_requests: [] } }), null);
+});
+
+test("pushTarget names the branch and every path the push touched", () => {
+  const target = pushTarget("push", {
+    ref: "refs/heads/main",
+    repository: { name: "widgets", owner: { login: "acme" } },
+    commits: [
+      { added: [".bento/pipeline.yaml"], modified: [], removed: [] },
+      { added: [], modified: ["README.md"], removed: ["old.txt"] },
+    ],
+    head_commit: { added: [], modified: ["README.md"], removed: [] },
+  });
+  assert.ok(target);
+  assert.equal(target.owner, "acme");
+  assert.equal(target.repo, "widgets");
+  assert.equal(target.branch, "main");
+  assert.deepEqual([...target.paths].sort(), [".bento/pipeline.yaml", "README.md", "old.txt"]);
+});
+
+test("pushTarget ignores tags, deleted branches, and other events", () => {
+  const repository = { name: "widgets", owner: { login: "acme" } };
+  assert.equal(pushTarget("push", { ref: "refs/tags/v1", repository, commits: [] }), null);
+  assert.equal(pushTarget("push", { ref: "refs/heads/gone", deleted: true, repository, commits: [] }), null);
+  assert.equal(pushTarget("pull_request", { ref: "refs/heads/main", repository }), null);
 });

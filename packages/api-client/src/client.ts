@@ -19,6 +19,9 @@ import type {
   ProjectSession,
   ProjectUsage,
   RelatedGroup,
+  RepoConfigPublishResult,
+  RepoConfigStatus,
+  RepoConfigSyncResult,
   Repository,
   RunArtifact,
   Stage,
@@ -430,6 +433,27 @@ export class BentoClient {
     });
   }
 
+  /**
+   * The repository's .bento/pipeline.yaml and .bento/agents.yaml:
+   * whether they exist and whether they differ from what was applied.
+   */
+  repoConfig(projectId: string) {
+    return this.request<RepoConfigStatus>(`/api/projects/${projectId}/config`);
+  }
+
+  /** Applies the repository's .bento files to the project now. */
+  syncRepoConfig(projectId: string) {
+    return this.request<RepoConfigSyncResult>(`/api/projects/${projectId}/config/sync`, { method: "POST" });
+  }
+
+  /** Commits the two files to a new branch and opens a pull request for them. */
+  publishRepoConfig(projectId: string, input: { repositoryId?: string | null } = {}) {
+    return this.request<RepoConfigPublishResult>(`/api/projects/${projectId}/config/publish`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
   /** Every named agent as a YAML document: tool, model, skill. */
   exportAgents() {
     return this.requestText("/api/profiles/export");
@@ -491,7 +515,10 @@ export class BentoClient {
       defaultBranch?: string;
     }[];
   }) {
-    return this.request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
+    return this.request<Project & { repoConfig: RepoConfigSyncResult | null }>("/api/projects", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   /**

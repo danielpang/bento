@@ -7,6 +7,7 @@ import type { AgentProfile, BentoClient, Feature, Stage } from "@bento/api-clien
 import type { GateCriterion } from "@bento/core";
 import { ProviderMark } from "./ProviderMark.js";
 import { PREVIEW_TOOLS } from "./ui.js";
+import { RepoConfigActions } from "./RepoConfigActions.js";
 import { YamlFileActions, downloadYaml, pipelineImportSummary } from "./YamlFileActions.js";
 
 /**
@@ -307,6 +308,8 @@ export function StageConfig({
             onImport={(file) => void importFile(file)}
           />
         </section>
+
+        <RepoConfigActions client={client} projectId={projectId} canPublish={canPublish} onChanged={onChanged} />
 
         {/* The count comes from the board rather than from the server's
             refusal: "cards must be moved first" as a warning is advice,
