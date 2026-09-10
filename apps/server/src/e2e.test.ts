@@ -61,6 +61,7 @@ import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
 import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
+import { runsInContainer } from "./routes/settings.js";
 
 const run = promisify(execFile);
 
@@ -4322,14 +4323,22 @@ test("starting a run on a card that was deleted answers gone, not a foreign key 
  * sandboxes run. The console reads this to hide the control rather than
  * show one that can only report failure.
  *
- * This suite runs the server as a host process, which is the case that
- * must stay visible: hiding a working control is the worse mistake,
- * because the person looking at it cannot recover from it.
+ * The route and this test share `runsInContainer`, so a host process
+ * still has to stay visible and a container still has to stay hidden.
+ * Hard-asserting true failed inside Docker (/.dockerenv) even though
+ * the route was right.
  */
 test("the settings route says whether a machine login can be shared", { timeout: 60_000 }, async () => {
   const settings = await json<{ canShareMachineLogin: boolean }>(await app.request("/api/settings"));
   assert.equal(typeof settings.canShareMachineLogin, "boolean", "the console gets an answer, not undefined");
-  assert.equal(settings.canShareMachineLogin, true, "a server running on the host can offer its own login");
+  const shareable = !(await runsInContainer());
+  assert.equal(
+    settings.canShareMachineLogin,
+    shareable,
+    shareable
+      ? "a server running on the host can offer its own login"
+      : "a containerised server has no login to share",
+  );
 });
 
 /**
