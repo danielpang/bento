@@ -25,6 +25,9 @@ import type {
   FlagSnapshot,
 } from "./types.js";
 
+/** The response header naming the console build the server serves. */
+export const BUILD_HEADER = "x-bento-build";
+
 export interface TokenStore {
   get(): string | null | Promise<string | null>;
   set(token: string | null): void | Promise<void>;
@@ -35,6 +38,15 @@ export interface ClientOptions {
   /** Bearer token source for non-browser clients (TUI, Mac app). */
   tokens?: TokenStore;
   fetch?: typeof fetch;
+  /**
+   * The server named a console build (its `x-bento-build` header) the
+   * client had not seen before. Fires once per distinct value, on the
+   * first response that carries it and then only when it changes,
+   * which after a deploy is the first request to reach the new
+   * server. The console compares it with the build its page loaded
+   * and offers a reload; clients that are not a page leave it unset.
+   */
+  onBuild?: (build: string) => void;
 }
 
 export interface RunStreamHandlers {
@@ -366,12 +378,27 @@ export class BentoClient {
   private baseUrl: string;
   private tokens: TokenStore | undefined;
   private fetchImpl: typeof fetch;
+  private onBuild: ((build: string) => void) | undefined;
+  private lastBuild: string | null = null;
 
   constructor(options: ClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.tokens = options.tokens;
     // Must be bound: an unbound window.fetch throws "Illegal invocation".
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.onBuild = options.onBuild;
+  }
+
+  /**
+   * Before the status check on purpose: a 404 from a server that
+   * renamed the route is exactly the response that should say a
+   * deploy happened.
+   */
+  private noteBuild(res: Response): void {
+    const build = res.headers.get(BUILD_HEADER);
+    if (!build || build === this.lastBuild) return;
+    this.lastBuild = build;
+    this.onBuild?.(build);
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -385,6 +412,7 @@ export class BentoClient {
       headers,
       credentials: this.tokens ? "omit" : "include",
     });
+    this.noteBuild(res);
     if (!res.ok) {
       const body = await res.text();
       throw new ApiError(res.status, body || res.statusText);
@@ -406,6 +434,7 @@ export class BentoClient {
       headers,
       credentials: this.tokens ? "omit" : "include",
     });
+    this.noteBuild(res);
     const body = await res.text();
     if (!res.ok) throw new ApiError(res.status, body || res.statusText);
     return body;
@@ -449,6 +478,11 @@ export class BentoClient {
       ok: boolean;
       mode: string;
       driver: string;
+      /**
+       * The console build the server serves, when it serves one. The
+       * same value rides on every API response as `x-bento-build`.
+       */
+      build?: string;
       /** Which social logins the server is configured for (multi mode). */
       social?: { github: boolean; google: boolean };
       /**
@@ -818,6 +852,7 @@ export class BentoClient {
       headers: token ? { authorization: `Bearer ${token}` } : {},
       credentials: this.tokens ? "omit" : "include",
     });
+    this.noteBuild(res);
     if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
     const statuses: Record<string, string> = {};
     const outputs: Record<string, string> = {};

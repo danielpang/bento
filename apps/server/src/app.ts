@@ -1,8 +1,5 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import { serveStatic } from "@hono/node-server/serve-static";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
 import { activeOrg, actorMiddleware, maybeActor } from "./middleware/actor.js";
@@ -35,6 +32,7 @@ import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
+import { BUILD_HEADER, cachedStatic, loadWebShell } from "./web-shell.js";
 
 export interface AppExtras {
   /**
@@ -48,6 +46,15 @@ export interface AppExtras {
 
 export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   const app = new Hono();
+
+  // The console's shell and its build id, when this server serves the
+  // console at all. Read here, ahead of the routes, because the id
+  // rides on every API response and on /api/health, not only on the
+  // static routes at the bottom.
+  const shell = ctx.env.BENTO_WEB_DIR ? loadWebShell(ctx.env.BENTO_WEB_DIR) : null;
+  if (ctx.env.BENTO_WEB_DIR && !shell) {
+    console.warn(`BENTO_WEB_DIR=${ctx.env.BENTO_WEB_DIR} has no index.html: the console is not being served`);
+  }
 
   /**
    * The last stop for an error no route caught. An HTTPException is a
@@ -86,11 +93,27 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
         origin: ctx.env.BENTO_TRUSTED_ORIGINS,
         allowHeaders: ["Content-Type", "Authorization"],
         allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        exposeHeaders: ["Content-Length", "set-auth-token"],
+        exposeHeaders: ["Content-Length", "set-auth-token", BUILD_HEADER],
         credentials: true,
         maxAge: 600,
       }),
     );
+  }
+
+  /**
+   * Which build of the console this server serves, on every API
+   * response. A tab compares it with the build it loaded and prompts
+   * for a reload when they differ, which is how a deploy reaches a
+   * page that was open before it. Response side so that it costs no
+   * request: the first fetch after the deploy (the board refetch that
+   * follows the stream reconnect) carries it.
+   */
+  if (shell?.build) {
+    const build = shell.build;
+    app.use("/api/*", async (c, next) => {
+      await next();
+      c.res.headers.set(BUILD_HEADER, build);
+    });
   }
 
   app.get("/api/health", async (c) => {
@@ -103,6 +126,10 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
         ok: true,
         mode: ctx.env.BENTO_MODE,
         driver: ctx.driver.provider,
+        // The console build this server serves. Also on every API
+        // response as a header; here for people and for clients
+        // that want to ask outright.
+        ...(shell?.build ? { build: shell.build } : {}),
         // Which social logins are actually configured, so the sign-in
         // page offers real buttons rather than ones that can only 404.
         social: {
@@ -348,16 +375,29 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
    * Unset in local development, where Vite serves the app and proxies
    * /api here instead.
    */
-  if (ctx.env.BENTO_WEB_DIR) {
+  if (ctx.env.BENTO_WEB_DIR && shell) {
     const webDir = ctx.env.BENTO_WEB_DIR;
+    /**
+     * The shell must never be cached past a deploy: it names hashed
+     * chunks, and a cached copy points at files the new image does
+     * not have, which is what the reload prompt exists to escape. So
+     * no-cache: a browser may keep it but has to ask before using it.
+     * Served from memory, the same bytes the build id was read from.
+     */
+    const serveShell = (c: Context) => {
+      c.header("cache-control", "no-cache");
+      return c.html(shell.html);
+    };
+    // Ahead of the static root below, which would resolve "/" to
+    // index.html itself and stamp it with an hour of cache.
+    app.get("/", serveShell);
     // Hashed filenames, so assets can be cached indefinitely.
-    app.use(
-      "/assets/*",
-      serveStatic({
-        root: webDir,
-        onFound: (_path, c) => c.header("cache-control", "public, max-age=31536000, immutable"),
-      }),
-    );
+    app.use("/assets/*", cachedStatic(webDir, "public, max-age=31536000, immutable"));
+    // A chunk the build did not emit is a 404, not the shell: a stale
+    // page asking for last deploy's chunk used to be handed HTML with
+    // a 200, which the browser reported as a wrong MIME type rather
+    // than as the missing file it was.
+    app.get("/assets/*", (c) => c.text("not found", 404));
     /**
      * Files that sit at the root of the build: the favicons and the
      * touch icon. Without this they fell through to the shell below and
@@ -369,24 +409,16 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
      * cache is short because these names carry no hash: a new icon has
      * to be able to replace the old one.
      */
-    app.use(
-      "*",
-      serveStatic({
-        root: webDir,
-        onFound: (_path, c) => c.header("cache-control", "public, max-age=3600"),
-      }),
-    );
+    app.use("*", cachedStatic(webDir, "public, max-age=3600"));
     // Every other non-API path is a client route: serve the shell and
     // let the app decide, which is what makes /device and
     // /accept-invitation survive a hard refresh.
-    app.get("*", async (c, next) => {
+    app.get("*", (c, next) => {
       if (c.req.path.startsWith("/api/")) return next();
       if (c.req.path.startsWith("/.well-known/")) return next();
       if (c.req.path === "/mcp" || c.req.path === "/mcp/") return next();
       if (c.req.path.startsWith("/mcp-oauth/")) return next();
-      const index = await readFile(path.join(webDir, "index.html"), "utf8").catch(() => null);
-      if (index === null) return next();
-      return c.html(index);
+      return serveShell(c);
     });
   }
 

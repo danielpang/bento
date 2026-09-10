@@ -13,7 +13,12 @@ COPY apps/server ./apps/server
 COPY apps/web ./apps/web
 
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
+# SOURCE_COMMIT is the console's build id (see apps/web/src/build-id.ts)
+# as well as the source map release below; a build without it derives
+# an id from its own output.
+ARG SOURCE_COMMIT
+RUN pnpm --filter @bento/server... build \
+ && SOURCE_COMMIT="${SOURCE_COMMIT:-}" pnpm --filter @bento/web... build
 
 # Upload the maps, then delete them even if the upload was skipped: the
 # final stage copies this one whole and the server serves /assets, so a
@@ -21,7 +26,6 @@ RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
 # POSTHOG_HOST only for a deployment off PostHog US cloud.
 ARG POSTHOG_HOST
 ARG POSTHOG_PROJECT_ID
-ARG SOURCE_COMMIT
 RUN --mount=type=secret,id=posthog_api_key \
     set -eu; \
     if [ -s /run/secrets/posthog_api_key ] && [ -n "${POSTHOG_PROJECT_ID:-}" ]; then \
