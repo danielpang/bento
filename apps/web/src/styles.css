@@ -2108,6 +2108,7 @@ a.pr-row:hover .pr-external {
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
+  background: color-mix(in srgb, var(--failed) 8%, transparent);
   text-align: left;
 }
 
@@ -2401,8 +2402,22 @@ a.pr-row:hover .pr-external {
   overflow-wrap: anywhere;
 }
 
+/* Run failure in the card summary: same rectangular box as the
+   transcript result, so the reason is easy to spot above the actions. */
+.error-box {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--failed) 40%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--failed) 8%, transparent);
+  max-width: 100%;
+  min-width: 0;
+  word-break: break-word;
+}
+
 .error a,
-.chat-result a {
+.chat-result a,
+.error-box a {
   color: inherit;
   text-decoration: underline;
 }
