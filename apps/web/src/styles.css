@@ -2091,9 +2091,15 @@ a.pr-row:hover .pr-external {
 /* How a run ended, as a pill in the conversation's own colours. */
 .chat-result {
   font-size: 11px;
-  border-radius: 999px;
-  padding: 2px 10px;
+  /* Rectangular like chat bubbles: a pill radius clips multi-line
+     failure text at the curved ends. */
+  border-radius: var(--radius);
+  padding: 6px 10px;
   border: 1px solid var(--line);
+  max-width: 92%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .chat-result[data-ok="true"] {
   color: var(--succeeded);
@@ -2102,7 +2108,7 @@ a.pr-row:hover .pr-external {
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
-  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .field {
