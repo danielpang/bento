@@ -882,9 +882,10 @@ export function FeatureDrawer({
           </div>
           {/* Why the last run failed, where the eye lands. The same
               sentence closes the transcript, but a person looking at a
-              red card reads the actions first. */}
+              red card reads the actions first. Boxed so it reads as the
+              failure reason, not another muted line of drawer text. */}
           {latestRun?.status === "failed" && latestRun.error && !finished && (
-            <p className="error">
+            <p className="error error-box">
               {linkifiedError(
                 withProviderOutageAdvice(latestRun.error, {
                   cli: latestAgent?.cli,
