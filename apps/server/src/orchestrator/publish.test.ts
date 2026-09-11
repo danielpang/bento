@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { isAncestryPublishFailure, publishFeatureBranches, resolvePublishBaseSha } from "./publish.js";
+import { cloneBaseBranch, isAncestryPublishFailure, publishFeatureBranches, resolvePublishBaseSha } from "./publish.js";
 
 const run = promisify(execFile);
 
@@ -50,6 +50,85 @@ test("resolvePublishBaseSha uses the fork point when main moved forward", async 
   await git(root, "checkout", "feature/behind");
   const baseSha = await resolvePublishBaseSha(root, "main");
   assert.equal(baseSha, fork.trim());
+});
+
+async function seedRemote(defaultBranch: string): Promise<string> {
+  const work = await mkdtemp(path.join(tmpdir(), "bento-seed-work-"));
+  await git(work, "init", "-b", defaultBranch);
+  await writeFile(path.join(work, "base.txt"), "base\n");
+  await git(work, "add", "base.txt");
+  await git(work, "commit", "-m", "base");
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-seed-bare-"));
+  await git(bare, "init", "--bare", "-b", defaultBranch);
+  await git(work, "remote", "add", "origin", bare);
+  await git(work, "push", "origin", defaultBranch);
+  return bare;
+}
+
+async function freshCheckout(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "bento-seed-co-"));
+  return path.join(root, "checkout");
+}
+
+test("cloneBaseBranch returns the branch it was asked for when it exists", async () => {
+  const remote = await seedRemote("master");
+  const checkout = await freshCheckout();
+  const resolved = await cloneBaseBranch({
+    remote,
+    label: "acme/app",
+    baseBranch: "master",
+    checkout,
+    env: { ...process.env },
+  });
+  assert.equal(resolved, "master");
+});
+
+test("cloneBaseBranch falls back to the remote default when the stored branch is gone", async () => {
+  const remote = await seedRemote("master");
+  const checkout = await freshCheckout();
+  const resolved = await cloneBaseBranch({
+    remote,
+    label: "acme/app",
+    baseBranch: "main",
+    checkout,
+    env: { ...process.env },
+    fallbackToDefaultBranch: true,
+  });
+  assert.equal(resolved, "master");
+  const { stdout } = await git(checkout, "rev-parse", "--abbrev-ref", "HEAD");
+  assert.equal(stdout.trim(), "master");
+});
+
+test("cloneBaseBranch reports a missing branch when the fallback is off", async () => {
+  const remote = await seedRemote("master");
+  const checkout = await freshCheckout();
+  await assert.rejects(
+    cloneBaseBranch({
+      remote,
+      label: "acme/app",
+      baseBranch: "main",
+      checkout,
+      env: { ...process.env },
+    }),
+    /acme\/app has no branch named main/,
+  );
+});
+
+test("cloneBaseBranch explains that an empty repository has no branches", async () => {
+  const remote = await mkdtemp(path.join(tmpdir(), "bento-seed-empty-"));
+  await git(remote, "init", "--bare", "-b", "main");
+  const checkout = await freshCheckout();
+  await assert.rejects(
+    cloneBaseBranch({
+      remote,
+      label: "acme/empty",
+      baseBranch: "main",
+      checkout,
+      env: { ...process.env },
+      fallbackToDefaultBranch: true,
+    }),
+    /acme\/empty has no branch named main/,
+  );
 });
 
 test("draft publish opens a draft pull request", async () => {

@@ -251,19 +251,22 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         : [];
 
     const seedBundles = new Map<string, Buffer>();
+    // The base branch the seed actually carries, which is not the stored
+    // default branch when that name no longer exists on the remote. The
+    // sandbox must branch off the name the bundle has, not the stale one.
+    const seedBaseBranches = new Map<string, string>();
     if (ctx.driver.provider === "sprite" && publisher) {
       for (const row of repoRows) {
         if (!row.repoUrl) continue;
         const repoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-        seedBundles.set(
-          row.id,
-          await createRepositorySeed(
-            publisher,
-            row.repoUrl,
-            Number.isSafeInteger(repoId) ? repoId : undefined,
-            row.defaultBranch,
-          ),
+        const seed = await createRepositorySeed(
+          publisher,
+          row.repoUrl,
+          Number.isSafeInteger(repoId) ? repoId : undefined,
+          row.defaultBranch,
         );
+        seedBundles.set(row.id, seed.bundle);
+        seedBaseBranches.set(row.id, seed.baseBranch);
       }
     }
 
@@ -289,7 +292,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         name: r.name,
         cloneUrl: r.repoUrl ?? undefined,
         branch,
-        baseBranch: r.defaultBranch,
+        baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
         seedBundle: seedBundles.get(r.id),
       })),
       // Local mode can share the user's own agent logins and git identity.
@@ -699,6 +702,22 @@ export function poolFailureAdvice(error: string): string | null {
 }
 
 /**
+ * Turns Muse Code's auth and model failures into the next action in Bento.
+ */
+export function museFailureAdvice(error: string): string | null {
+  if (/invalid api key|incorrect api key|unauthorized|authentication|no api key|META_API_KEY/i.test(error)) {
+    return "Meta rejected the saved key. Replace META_API_KEY under Model provider keys, then run again. Keys revoked in the Meta AI console fail this way.";
+  }
+  if (/does not exist|model_not_found|unknown model|no such model|not found/i.test(error) && /model/i.test(error)) {
+    const named = /model [`'"]?([\w./:-]+)/i.exec(error)?.[1];
+    return named
+      ? `Muse Code could not run the model ${named}. Change the model on this agent under Agents, then run again.`
+      : "Muse Code could not run this agent's model. Change it under Agents, then run again.";
+  }
+  return null;
+}
+
+/**
  * Text-mode adapters emit their only event when the process exits, so a
  * "started and is working" line on that event reads as a stall that
  * resolved instantly. Streamed CLIs still get the line on first output.
@@ -737,6 +756,22 @@ export function dshFailureAdvice(error: string): string | null {
 }
 
 /**
+ * Per-tool next steps for a failure the CLI already named. A new
+ * harness that needs its own sentence is one entry here, used by both
+ * the hosted settle path and runner-reported errors.
+ */
+const TOOL_FAILURE_ADVICE: Record<string, (error: string) => string | null> = {
+  pool: poolFailureAdvice,
+  dsh: dshFailureAdvice,
+  muse: museFailureAdvice,
+};
+
+function toolFailureAdvice(cli: string | undefined, error: string): string | null {
+  if (!cli) return null;
+  return TOOL_FAILURE_ADVICE[cli]?.(error) ?? null;
+}
+
+/**
  * Runner-executed failures skip settleAgentResult, so they never pick
  * up tool-specific advice on their own. Same sentences, same place the
  * hosted board reads the error from, for every runner client.
@@ -748,7 +783,7 @@ export function runnerReportedError(
 ): string | null {
   const base = error ?? null;
   if (!base) return null;
-  const advice = cli === "pool" ? poolFailureAdvice(base) : cli === "dsh" ? dshFailureAdvice(base) : null;
+  const advice = toolFailureAdvice(cli, base);
   if (advice) return `${base} ${advice}`;
   return withProviderOutageAdvice(base, { cli, model });
 }
@@ -849,12 +884,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      */
     const toolMissing =
       exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
-    const toolAdvice =
-      profile.cli === "pool"
-        ? poolFailureAdvice(outcome.error ?? "")
-        : profile.cli === "dsh"
-          ? dshFailureAdvice(outcome.error ?? "")
-          : null;
+    const toolAdvice = toolFailureAdvice(profile.cli, outcome.error ?? "");
     const providerAdvice = toolAdvice
       ? `${outcome.error} ${toolAdvice}`
       : withProviderOutageAdvice(outcome.error ?? "", { cli: profile.cli, model: profile.model });
@@ -1408,6 +1438,17 @@ export function runOutputPreview(event: { type: string; role?: string; text?: st
 const ERROR_PROPERTY_CAP = 500;
 
 /**
+ * Wall-clock seconds from the agent starting to the run ending, or
+ * null when the run never started (a cancel from the queue) so a
+ * dashboard's average is not dragged down by zeros.
+ */
+export function runDurationSeconds(startedAt: Date | null, endedAt: Date | null): number | null {
+  if (!startedAt || !endedAt) return null;
+  const seconds = (endedAt.getTime() - startedAt.getTime()) / 1000;
+  return seconds < 0 ? null : Math.round(seconds * 1000) / 1000;
+}
+
+/**
  * The one builder of the "agent run finished" event, shared with the
  * runner report route so the two executors cannot drift apart on the
  * event's shape. Reads the persisted row, so it reports what actually
@@ -1434,11 +1475,17 @@ export async function captureRunFinished(
         numTurns: agentRuns.numTurns,
         exitCode: agentRuns.exitCode,
         error: agentRuns.error,
+        startedAt: agentRuns.startedAt,
+        endedAt: agentRuns.endedAt,
         organizationId: features.organizationId,
         projectId: features.projectId,
+        agentProfileId: agentRuns.agentProfileId,
+        harness: agentProfiles.cli,
+        model: agentProfiles.model,
       })
       .from(agentRuns)
       .innerJoin(features, eq(features.id, agentRuns.featureId))
+      .innerJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
       .where(eq(agentRuns.id, runId))
       .limit(1);
     if (!row) return;
@@ -1455,6 +1502,14 @@ export async function captureRunFinished(
         project_id: row.projectId,
         kind: row.kind,
         executor: row.executor,
+        // Which agent CLI ran the card and which model it was pointed
+        // at, read from the profile the run was created with. The
+        // profile is editable, so a run reports the profile as it is
+        // when the run ends; the runs table does not snapshot either.
+        agent_profile_id: row.agentProfileId,
+        harness: row.harness,
+        model: row.model,
+        duration_seconds: runDurationSeconds(row.startedAt, row.endedAt),
         cost_usd: row.costUsd === null ? null : Number(row.costUsd),
         num_turns: row.numTurns,
         exit_code: row.exitCode,

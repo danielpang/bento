@@ -42,6 +42,7 @@ export const PROVIDER_TABS = [
   { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"] },
   { id: "poolside", label: "Poolside", keys: ["POOLSIDE_API_KEY"] },
   { id: "deepseek", label: "DeepSeek", keys: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"] },
+  { id: "meta", label: "Meta", keys: ["META_API_KEY"] },
 ] as const;
 
 /**

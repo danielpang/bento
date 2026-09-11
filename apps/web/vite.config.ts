@@ -91,6 +91,11 @@ function stampIcons(): Plugin {
 
 export default defineConfig({
   plugins: [react(), stampIcons()],
+  build: {
+    // Written but not linked, so no browser fetches them. The deploy
+    // build uploads them to PostHog and deletes them.
+    sourcemap: "hidden",
+  },
   server: {
     port: 4401,
     proxy: {

@@ -3,11 +3,16 @@ import assert from "node:assert/strict";
 import { agentRunPrompt } from "@bento/core";
 import {
   announcesLaunchOnFirstEvent,
+  captureRunFinished,
   dshFailureAdvice,
   mergeAgentExecEnv,
+  museFailureAdvice,
   poolFailureAdvice,
+  runDurationSeconds,
   runnerReportedError,
 } from "./run-executor.js";
+import type { Analytics } from "../analytics.js";
+import type { AppContext } from "../context.js";
 
 test("tools without session ids retain stage context whether sent idle or queued", () => {
   for (const cli of ["pool", "dsh"]) {
@@ -145,6 +150,21 @@ test("runner-reported dsh failures receive Harness advice", () => {
   assert.match(reported ?? "", /Replace DEEPSEEK_API_KEY/);
 });
 
+test("Muse Code failures name the setting that fixes them", () => {
+  assert.match(
+    museFailureAdvice("muse stopped before reporting a result (exit code 1): invalid API key") ?? "",
+    /Replace META_API_KEY/,
+  );
+  assert.match(museFailureAdvice("The model `muse-spark-9` does not exist") ?? "", /Change the model/);
+  assert.equal(museFailureAdvice("the tests failed"), null);
+  assert.equal(museFailureAdvice("executable file `muse` not found in $PATH"), null);
+});
+
+test("runner-reported muse failures receive Muse Code advice", () => {
+  const reported = runnerReportedError("muse", "unauthorized: invalid API key");
+  assert.match(reported ?? "", /Replace META_API_KEY/);
+});
+
 test("a runner-reported Claude outage names the Claude status page", () => {
   const reported = runnerReportedError(
     "claude-code",
@@ -199,4 +219,98 @@ test("text-mode adapters do not announce launch on their first event", () => {
   assert.equal(announcesLaunchOnFirstEvent({ stdoutMode: "text" }), false);
   assert.equal(announcesLaunchOnFirstEvent({}), true);
   assert.equal(announcesLaunchOnFirstEvent({ stdoutMode: undefined }), true);
+});
+
+/**
+ * Thenable drizzle chain for captureRunFinished: the one select it
+ * issues resolves to the canned row, join and all.
+ */
+function dbReturning(rows: unknown[]) {
+  const obj: Record<string, unknown> = {};
+  const next = () => obj;
+  obj.select = next;
+  obj.from = next;
+  obj.innerJoin = next;
+  obj.where = next;
+  obj.limit = next;
+  obj.then = (onFulfilled: (value: unknown) => unknown, onRejected: (reason: unknown) => unknown) =>
+    Promise.resolve(rows).then(onFulfilled, onRejected);
+  return obj;
+}
+
+const FINISHED_ROW = {
+  startedBy: "user-1",
+  featureId: "feature-1",
+  stageId: "stage-1",
+  kind: "task",
+  executor: "server",
+  costUsd: "0.42",
+  numTurns: 7,
+  exitCode: 0,
+  error: null,
+  startedAt: new Date("2026-09-01T10:00:00Z"),
+  endedAt: new Date("2026-09-01T10:02:30Z"),
+  organizationId: "org-1",
+  projectId: "project-1",
+  agentProfileId: "profile-1",
+  harness: "claude-code",
+  model: "claude-opus-5",
+};
+
+test("a finished run reports which harness and model ran it", async () => {
+  const captured: Array<{ event: string; userId?: string | null; organizationId?: string | null; properties?: Record<string, unknown> }> =
+    [];
+  const analytics: Analytics = {
+    capture: (event) => captured.push(event),
+    captureException: () => {},
+    shutdown: async () => {},
+  };
+  await captureRunFinished(
+    { analytics, db: dbReturning([FINISHED_ROW]) } as unknown as AppContext,
+    "run-1",
+    "succeeded",
+  );
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0]?.event, "agent run finished");
+  assert.equal(captured[0]?.userId, "user-1");
+  assert.equal(captured[0]?.organizationId, "org-1");
+  assert.deepEqual(captured[0]?.properties, {
+    status: "succeeded",
+    success: true,
+    run_id: "run-1",
+    feature_id: "feature-1",
+    stage_id: "stage-1",
+    project_id: "project-1",
+    kind: "task",
+    executor: "server",
+    agent_profile_id: "profile-1",
+    harness: "claude-code",
+    model: "claude-opus-5",
+    duration_seconds: 150,
+    cost_usd: 0.42,
+    num_turns: 7,
+    exit_code: 0,
+    error: null,
+  });
+});
+
+test("a run that never started has no duration, and no analytics means no query", async () => {
+  assert.equal(runDurationSeconds(null, new Date()), null);
+  assert.equal(runDurationSeconds(new Date("2026-09-01T10:00:00Z"), null), null);
+  // A clock that went backwards must not report a negative run.
+  assert.equal(runDurationSeconds(new Date("2026-09-01T10:00:01Z"), new Date("2026-09-01T10:00:00Z")), null);
+  assert.equal(runDurationSeconds(new Date("2026-09-01T10:00:00.000Z"), new Date("2026-09-01T10:00:00.250Z")), 0.25);
+
+  let queried = false;
+  const db = new Proxy(
+    {},
+    {
+      get: () => {
+        queried = true;
+        return () => db;
+      },
+    },
+  );
+  await captureRunFinished({ analytics: null, db } as unknown as AppContext, "run-1", "failed");
+  assert.equal(queried, false);
 });

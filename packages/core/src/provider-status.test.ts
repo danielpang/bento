@@ -86,6 +86,13 @@ test("a Poolside outage names the Poolside status page", () => {
   assert.match(providerOutageAdvice(error, { cli: "pool" }) ?? "", /status\.poolside\.ai/);
 });
 
+test("a Muse Code outage names the Meta status page", () => {
+  const error = "503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "muse", model: "muse-spark-1.3" }), "meta");
+  assert.match(providerOutageAdvice(error, { cli: "muse" }) ?? "", /dev\.meta\.ai\/status/);
+  assert.equal(outageProvider("muse-spark-1.3 is overloaded"), "meta");
+});
+
 test("every provider page is an https status URL", () => {
   for (const [id, page] of Object.entries(PROVIDER_STATUS_PAGES)) {
     assert.match(page.url, /^https:\/\//, `${id} is not an https URL`);

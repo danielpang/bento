@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pool's installer refuses to run without a terminal unless the EULA is
 # accepted up front, which is Bento accepting Poolside's terms on the
 # operator's behalf, here and in every sandbox the Sprite script builds.
+# Muse Code's installer rewrites shell rc files unless told not to.
 # Same order and same reasons as packages/sandbox/src/agent-toolchain.ts.
 RUN set -eu; \
     fetch_run() { \
@@ -55,6 +56,7 @@ RUN set -eu; \
     fetch_run cursor https://cursor.com/install bash; \
     fetch_run agy https://antigravity.google/cli/install.sh bash; \
     POOL_INSTALL_ACCEPT_EULA=1 fetch_run pool https://downloads.poolside.ai/pool/install.sh sh; \
+    MUSE_NO_MODIFY_PATH=1 fetch_run muse https://dev.meta.ai/install.sh bash; \
     case "$(dpkg --print-architecture)" in arm64) target=linux-arm64 ;; *) target=linux-x64 ;; esac; \
     if [ "$target" = linux-x64 ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then target=linux-x64-baseline; fi; \
     mkdir -p /tmp/oc "$HOME/.opencode/bin"; \
@@ -119,13 +121,13 @@ RUN arch="$(dpkg --print-architecture)" \
 # that ships without one of these produces no symptom until a card runs
 # that agent half an hour later, and then only "executable file
 # `opencode` not found in $PATH".
-RUN for tool in agy claude codex cursor-agent opencode pool; do \
+RUN for tool in agy claude codex cursor-agent muse opencode pool; do \
       for dir in /root/.local/bin /root/.opencode/bin /root/.cursor/bin /root/.antigravity/bin; do \
         [ -x "$dir/$tool" ] && ln -sf "$dir/$tool" /usr/local/bin/"$tool" && break; \
       done; \
     done; \
     status=0; \
-    for tool in agy claude codex cursor-agent dsh opencode pi pool; do \
+    for tool in agy claude codex cursor-agent dsh muse opencode pi pool; do \
       command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is not on PATH"; status=1; }; \
     done; \
     exit $status

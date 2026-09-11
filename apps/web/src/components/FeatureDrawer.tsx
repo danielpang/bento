@@ -103,6 +103,15 @@ function CardSpend({ runs }: { runs: AgentRun[] }) {
 
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
 
+/**
+ * How many artifacts the drawer shows before asking. Six is what the
+ * history list settled on, and it is about a stage's worth: enough
+ * that the newest run's output is all there without the section
+ * running past the fold.
+ */
+const ARTIFACT_PREVIEW = 6;
+
+
 export function FeatureDrawer({
   client,
   feature,
@@ -171,6 +180,13 @@ export function FeatureDrawer({
    * from a sentence naming three runs and twelve dollars.
    */
   const [loadedId, setLoadedId] = useState<string | null>(null);
+  /**
+   * Artifacts are capped until asked for, the way history is. A card
+   * that has run a pipeline several times has a write-up, a mockup and
+   * a screenshot per stage, and the untrimmed list pushed the changes
+   * and the conversation below anything a scroll would reach.
+   */
+  const [showAllArtifacts, setShowAllArtifacts] = useState(false);
   const [showAllHistory, setShowAllHistory] = useState(false);
   /**
    * A long description opens clamped. Per card, like the sections
@@ -484,6 +500,8 @@ export function FeatureDrawer({
   const visibleArtifacts = artifacts.filter(
     (artifact, index) => artifacts.findIndex((other) => other.path === artifact.path) === index,
   );
+  /** Newest first, as the server sends them, so the trim keeps the latest. */
+  const listedArtifacts = showAllArtifacts ? visibleArtifacts : visibleArtifacts.slice(0, ARTIFACT_PREVIEW);
   // What the Artifacts section already covers, so the Changes section
   // below does not show the same write-up a second time as raw text.
   const capturedPaths = new Set(artifacts.map((artifact) => artifact.path));
@@ -508,6 +526,7 @@ export function FeatureDrawer({
   const mergeStateByUrl = new Map(mergeStates.map((state) => [state.url, state]));
   const checkStateByUrl = new Map(checkStates.map((state) => [state.url, state]));
   const pullRequestStateByUrl = new Map(pullRequestStates.map((state) => [state.url, state.state]));
+  const earlierPullRequests = pullRequestHistory.filter((pr) => !pr.current);
   const conflictedUrls = new Set(
     mergeStates.filter((s) => s.state === "conflicted").map((s) => s.url),
   );
@@ -518,6 +537,16 @@ export function FeatureDrawer({
   const hasFailedChecks = failedCheckUrls.size > 0;
   /** Shown on stages that push a branch and open pull requests when work lands. */
   const showPullRequests = stage?.createPr === true && !!feature.currentStageId;
+  /**
+   * The pull requests listed as history rather than as rows to act on.
+   *
+   * A stage that publishes gives every repository a row of its own
+   * with its buttons, so the card's live pull requests are already up
+   * there and only the branches it has left are left to list. A card
+   * on a stage that publishes nothing has no such rows, and then this
+   * list is the only place its pull requests appear at all.
+   */
+  const listedPullRequests = showPullRequests ? earlierPullRequests : pullRequestHistory;
   const publishDisabled = busy || runActive || canPublish === false || !feature.branchName;
   const publishDisabledReason = !feature.branchName
     ? "Run an agent on this card first."
@@ -538,9 +567,31 @@ export function FeatureDrawer({
     (pr) => !projectRepos.some((repo) => repo.name === pr.name),
   );
 
-  function renderPullRequestRow(repo: Repository | { id: string; name: string; repoUrl: string | null }, pr?: FeaturePullRequest) {
-    const conflicted = pr ? mergeStateByUrl.get(pr.url)?.state === "conflicted" : false;
-    const ciFailed = pr ? checkStateByUrl.get(pr.url)?.state === "failed" : false;
+  /**
+   * One row of the pull request table.
+   *
+   * Every cell sits in a named column so the numbers, the chips and
+   * the buttons line up down the list rather than landing wherever
+   * each row's own text happens to end. A row with nothing in a column
+   * leaves it empty; the column still holds its place.
+   */
+  function renderPullRequestRow(
+    repo: Repository | { id: string; name: string; repoUrl: string | null },
+    pr?: FeaturePullRequest,
+    options: { branch?: string; live?: boolean } = {},
+  ) {
+    const live = options.live !== false;
+    const conflicted = live && pr ? mergeStateByUrl.get(pr.url)?.state === "conflicted" : false;
+    const ciFailed = live && pr ? checkStateByUrl.get(pr.url)?.state === "failed" : false;
+    const state = pr ? pullRequestStateByUrl.get(pr.url) : undefined;
+    /**
+     * On a live row the state chip appears only when it says something
+     * changed. A pull request the card is still working is open, which
+     * is the default and would be a chip on every row saying nothing;
+     * merged or closed underneath the card is worth the space. On an
+     * earlier row the state is the whole point of the row.
+     */
+    const showState = state && state !== "unknown" && (!live || state !== "open");
     const rowPublishDisabled = publishDisabled || !repo.repoUrl;
     const rowPublishReason = !feature.branchName
       ? "Run an agent on this card first."
@@ -548,60 +599,28 @@ export function FeatureDrawer({
         ? "This repository has no GitHub remote configured."
         : publishDisabledReason;
     return (
-      <div key={repo.id} className="pr-row pr-row-with-actions">
+      <div key={pr ? `${repo.id}:${pr.url}` : repo.id} className="pr-row">
         <span className="pr-repo">{repo.name}</span>
-        <div className="pr-row-actions">
-          {pr ? (
-            <>
-              {conflicted && (
-                <span className="chip" data-status="conflict">
-                  Merge conflict
-                </span>
-              )}
-              {ciFailed && (
-                <span className="chip" data-status="ci-failed">
-                  CI failing
-                </span>
-              )}
-              <a
-                className="pr-open"
-                href={pr.url}
-                target="_blank"
-                rel="noreferrer"
-                title={`Open pull request #${pr.number} in ${repo.name} on GitHub`}
-              >
-                #{pr.number} <ExternalMark />
-              </a>
-              {conflicted && !finished && (
-                <button
-                  type="button"
-                  className="btn btn-ghost pr-row-btn"
-                  disabled={resolveDisabled}
-                  title={
-                    resolveDisabledReason ??
-                    "The stage agent rebases the branch onto the latest base branch and resolves the conflicts."
-                  }
-                  onClick={() => void resolveConflictsNow()}
-                >
-                  Fix conflicts
-                </button>
-              )}
-              {ciFailed && !finished && (
-                <button
-                  type="button"
-                  className="btn btn-ghost pr-row-btn"
-                  disabled={fixCiDisabled}
-                  title={
-                    fixCiDisabledReason ??
-                    "The stage agent fixes the failing CI checks and commits the result."
-                  }
-                  onClick={() => void fixCiTestsNow()}
-                >
-                  Fix CI Tests
-                </button>
-              )}
-            </>
-          ) : (
+        {options.branch && <span className="pr-branch">{options.branch}</span>}
+        <span className="pr-flags">
+          {conflicted && (
+            <span className="chip" data-status="conflict">
+              Merge conflict
+            </span>
+          )}
+          {ciFailed && (
+            <span className="chip" data-status="ci-failed">
+              CI failing
+            </span>
+          )}
+          {showState && (
+            <span className="chip" data-status={`pr-${state}`}>
+              {state === "merged" ? "Merged" : state === "open" ? "Open" : "Closed"}
+            </span>
+          )}
+        </span>
+        <span className="pr-row-actions">
+          {!pr && live && (
             <button
               type="button"
               className="btn btn-ghost pr-row-btn"
@@ -612,7 +631,48 @@ export function FeatureDrawer({
               {publishing ? "Creating..." : "Create PR"}
             </button>
           )}
-        </div>
+          {conflicted && !finished && (
+            <button
+              type="button"
+              className="btn btn-ghost pr-row-btn"
+              disabled={resolveDisabled}
+              title={
+                resolveDisabledReason ??
+                "The stage agent rebases the branch onto the latest base branch and resolves the conflicts."
+              }
+              onClick={() => void resolveConflictsNow()}
+            >
+              Fix conflicts
+            </button>
+          )}
+          {ciFailed && !finished && (
+            <button
+              type="button"
+              className="btn btn-ghost pr-row-btn"
+              disabled={fixCiDisabled}
+              title={
+                fixCiDisabledReason ??
+                "The stage agent fixes the failing CI checks and commits the result."
+              }
+              onClick={() => void fixCiTestsNow()}
+            >
+              Fix CI Tests
+            </button>
+          )}
+        </span>
+        {pr ? (
+          <a
+            className="pr-open"
+            href={pr.url}
+            target="_blank"
+            rel="noreferrer"
+            title={`Open pull request #${pr.number} in ${repo.name} on GitHub`}
+          >
+            #{pr.number} <ExternalMark />
+          </a>
+        ) : (
+          <span className="pr-open" />
+        )}
       </div>
     );
   }
@@ -1007,16 +1067,16 @@ export function FeatureDrawer({
           </section>
         )}
 
-        {showPullRequests && (
+        {(showPullRequests || listedPullRequests.length > 0) && (
           <section className="section">
             <span className="label">Pull requests</span>
-            {hasConflicts && !finished && (
+            {showPullRequests && hasConflicts && !finished && (
               <p className="warn">
                 GitHub cannot merge {conflictedUrls.size === 1 ? "this card's pull request" : "some of this card's pull requests"}:
                 the base branch has moved and the changes collide. Use Fix conflicts on the row below.
               </p>
             )}
-            {hasFailedChecks && !finished && (
+            {showPullRequests && hasFailedChecks && !finished && (
               <p className="warn">
                 {failedCheckUrls.size === 1
                   ? "CI checks are failing on this card's pull request."
@@ -1029,13 +1089,32 @@ export function FeatureDrawer({
                 <Skeleton height={36} />
                 <Skeleton height={36} />
               </div>
-            ) : projectRepos.length === 0 ? (
+            ) : showPullRequests && projectRepos.length === 0 ? (
               <p className="muted">This project has no repositories yet. Add one under project settings.</p>
             ) : (
               <div className="pr-list">
-                {projectRepos.map((repo) => renderPullRequestRow(repo, pullRequestByName.get(repo.name)))}
-                {orphanPullRequests.map((pr) =>
-                  renderPullRequestRow({ id: pr.url, name: pr.name, repoUrl: pr.url }, pr),
+                {showPullRequests && (
+                  <>
+                    {projectRepos.map((repo) => renderPullRequestRow(repo, pullRequestByName.get(repo.name)))}
+                    {orphanPullRequests.map((pr) =>
+                      renderPullRequestRow({ id: pr.url, name: pr.name, repoUrl: pr.url }, pr),
+                    )}
+                  </>
+                )}
+                {/*
+                  And the branches this card has already merged, in the
+                  same table rather than a second one below it: they are
+                  the same question, and listing the live pull requests
+                  twice was the answer to none of it. The branch is what
+                  tells them apart, so it is the column they carry.
+                */}
+                {listedPullRequests.map((pr) =>
+                  renderPullRequestRow({ id: pr.url, name: pr.name, repoUrl: pr.url }, pr, {
+                    // Named only when it is not the branch the card is
+                    // on, which the drawer's header already carries.
+                    ...(pr.current ? {} : { branch: pr.branch }),
+                    live: false,
+                  }),
                 )}
               </div>
             )}
@@ -1044,56 +1123,6 @@ export function FeatureDrawer({
                 {note.text}
               </p>
             ))}
-          </section>
-        )}
-
-        {/*
-          Everything this card has opened, live and landed.
-
-          A card is not one pull request. When one merges, the next
-          message it gets starts a new branch and opens another, and
-          without this the card showed only the newest and read as
-          though the earlier ones had never happened. Each row says
-          where it stands, because a merged pull request and an open
-          one are the difference between shipped and waiting.
-        */}
-        {pullRequestHistory.length > 0 && (
-          <section className="section">
-            <span className="label">Pull request history</span>
-            <div className="pr-list">
-              {pullRequestHistory.map((pr) => {
-                const state = pullRequestStateByUrl.get(pr.url);
-                return (
-                  <a
-                    key={pr.url}
-                    className="pr-row pr-row-with-actions pr-row-history"
-                    href={pr.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={`Open pull request #${pr.number} in ${pr.name} on GitHub`}
-                  >
-                    <span className="pr-repo">{pr.name}</span>
-                    <span className="pr-branch" title={pr.branch}>
-                      {pr.branch}
-                    </span>
-                    <div className="pr-row-actions">
-                      {/*
-                        No chip until GitHub has answered. A row that
-                        said "Open" while the read was still in flight
-                        would be wrong about exactly the pull requests
-                        this list exists to describe.
-                      */}
-                      {state && state !== "unknown" && (
-                        <span className="chip" data-status={`pr-${state}`}>
-                          {state === "merged" ? "Merged" : state === "open" ? "Open" : "Closed"}
-                        </span>
-                      )}
-                      <span className="pr-open">#{pr.number}</span>
-                    </div>
-                  </a>
-                );
-              })}
-            </div>
           </section>
         )}
 
@@ -1131,7 +1160,7 @@ export function FeatureDrawer({
           <section className="section">
             <span className="label">Artifacts</span>
             <div className="artifact-list">
-              {visibleArtifacts.map((artifact) => (
+              {listedArtifacts.map((artifact) => (
                 <button key={artifact.id} className="artifact-row" onClick={() => setOpenArtifact(artifact)}>
                   <span className="chip">{artifactKindWords(artifact.kind)}</span>
                   <span className="artifact-name" title={artifact.path}>
@@ -1141,6 +1170,11 @@ export function FeatureDrawer({
                 </button>
               ))}
             </div>
+            {visibleArtifacts.length > ARTIFACT_PREVIEW && (
+              <button className="btn btn-ghost" onClick={() => setShowAllArtifacts((on) => !on)}>
+                {showAllArtifacts ? "Show less" : `Show all ${visibleArtifacts.length}`}
+              </button>
+            )}
           </section>
         )}
         {openArtifact && (
