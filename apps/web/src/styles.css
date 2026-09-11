@@ -2094,12 +2094,13 @@ a.pr-row:hover .pr-external {
   /* Rectangular like chat bubbles: a pill radius clips multi-line
      failure text at the curved ends. */
   border-radius: var(--radius);
-  padding: 6px 10px;
+  padding: 8px 12px;
   border: 1px solid var(--line);
   max-width: 92%;
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+  line-height: 1.45;
 }
 .chat-result[data-ok="true"] {
   color: var(--succeeded);
@@ -2406,13 +2407,14 @@ a.pr-row:hover .pr-external {
    transcript result, so the reason is easy to spot above the actions. */
 .error-box {
   margin: 0;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border: 1px solid color-mix(in srgb, var(--failed) 40%, transparent);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--failed) 8%, transparent);
   max-width: 100%;
   min-width: 0;
   word-break: break-word;
+  line-height: 1.45;
 }
 
 .error a,
