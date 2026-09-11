@@ -50,7 +50,7 @@ const runTag = process.env.GITHUB_RUN_ID
   : `local-${Date.now()}`;
 const workspaceKey = `e2e-${runTag}`;
 
-/** Long: a cold sprite installs seven CLIs and a private Node. */
+/** Long: a cold sprite installs nine CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
 
 const DSH_MOCK_SERVER = `import { appendFileSync, writeFileSync } from "node:fs";
@@ -257,6 +257,37 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.match(requests.out, /\"model\":\"deepseek-v4-pro\"/);
     assert.match(requests.out, /\"hasToolResult\":true/);
     await shell("rm -f /workspace/dsh-e2e-marker /tmp/bento-dsh-*");
+  });
+
+  /**
+   * Muse Code's echo provider needs no key and still emits the JSONL
+   * envelope Bento's adapter reads: a session stream, output deltas,
+   * and a completed terminal. That is the headless path a sandbox
+   * actually runs, without spending a Meta key in CI.
+   */
+  await t.test("muse runs headlessly against its credential-free echo provider", { skip: needsSprite() }, async () => {
+    const ran = await shell(
+      "muse exec --json --yolo --user-input-auto-resolve --provider echo --workspace /workspace 'verify Bento integration'",
+    );
+    assert.equal(ran.exitCode, 0, ran.stderr || ran.stdout);
+    assert.match(ran.out, /run\.terminal\.completed/);
+    assert.match(ran.out, /verify Bento integration/);
+    assert.match(ran.out, /"kind":\s*"session"/);
+  });
+
+  /**
+   * pool is in AGENT_BINARIES, so install and --version are covered.
+   * The flags Bento actually passes are what a headless run depends
+   * on, and a CLI that dropped --unsafe-auto-allow would hang every
+   * card on an approval nobody is there to give.
+   */
+  await t.test("pool exec exposes the headless flags Bento uses", { skip: needsSprite() }, async () => {
+    const help = await shell("pool exec --help");
+    assert.equal(help.exitCode, 0, help.stderr);
+    const text = `${help.out}\n${help.stderr}`;
+    assert.match(text, /--unsafe-auto-allow/);
+    assert.match(text, /--sandbox/);
+    assert.match(text, /-o|json/);
   });
 
   /**

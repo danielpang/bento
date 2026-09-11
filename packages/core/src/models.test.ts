@@ -61,6 +61,18 @@ test("antigravity only offers its own slugs and requires them bare", () => {
   assert.equal(checkAgentPairing("antigravity", "gemini-3.8-flash-high").status, "unknown");
 });
 
+test("muse only offers Muse Spark and requires its bare model ids", () => {
+  assert.deepEqual(providersForCli("muse").map((provider) => provider.id), ["meta"]);
+  assert.equal(modelStringFor("muse", "meta", "muse-spark-1.3"), "muse-spark-1.3");
+  assert.equal(providerForProfile("muse", "muse-spark-1.3")?.id, "meta");
+  assert.equal(checkAgentPairing("muse", "muse-spark-1.3").status, "ok");
+  assert.deepEqual(checkAgentPairing("muse", "meta/muse-spark-1.3"), {
+    status: "impossible",
+    detail: "Muse Code takes a bare model id, for example muse-spark-1.3, without a provider prefix.",
+  });
+  assert.equal(checkAgentPairing("muse", "muse-spark-1.4").status, "unknown");
+});
+
 test("a bare model id is resolved against the tool's own providers", () => {
   assert.equal(providerForProfile("claude-code", "claude-sonnet-5")?.id, "anthropic");
 });
@@ -88,7 +100,7 @@ test("a tool's default model resolves even when the snapshot lacks it", () => {
  * whose logo was shown when it was created.
  */
 test("every string modelStringFor composes resolves back to its provider", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity", "muse"]) {
     for (const provider of providersForCli(cli)) {
       const model = provider.models[0];
       if (!model) continue;

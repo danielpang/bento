@@ -69,6 +69,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     secret: true,
   },
   {
+    name: "META_API_KEY",
+    label: "Meta (Muse Code)",
+    help: "Used by Muse Code, whichever Muse Spark model it runs. Create one in the Meta AI developer console. Muse Code signs in with a browser everywhere else and can only run headlessly against this key.",
+    secret: true,
+  },
+  {
     name: "GITHUB_TOKEN",
     label: "GitHub token (pull requests)",
     help: "Lets stages with Create a pull request enabled push the feature branch and open the pull request, without installing the GitHub App. Use a fine grained personal access token with contents and pull request write access. It stays on the server and is never given to an agent.",
@@ -222,6 +228,17 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     binary: "agy",
     installUrl: "https://antigravity.google/docs/cli/overview",
     installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+  },
+  {
+    cli: "muse",
+    label: "Muse Code",
+    defaultModel: "muse-spark-1.3",
+    format: "A bare Muse Spark model id, without a provider prefix.",
+    examples: ["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.3-contributor"],
+    bareModelId: true,
+    binary: "muse",
+    installUrl: "https://dev.meta.ai/docs/muse-code",
+    installCommand: "curl -fsSL https://dev.meta.ai/install.sh | bash",
   },
   {
     cli: "fake",

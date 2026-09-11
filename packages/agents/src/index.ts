@@ -6,6 +6,7 @@ import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
 import { fakeAdapter } from "./fake.js";
+import { museAdapter } from "./muse.js";
 import { piAdapter } from "./pi.js";
 import { poolAdapter } from "./pool.js";
 import { opencodeAdapter } from "./opencode.js";
@@ -16,6 +17,7 @@ export { claudeCodeAdapter } from "./claude-code.js";
 export { codexAdapter } from "./codex.js";
 export { cursorAdapter } from "./cursor.js";
 export { dshAdapter } from "./dsh.js";
+export { museAdapter } from "./muse.js";
 export { piAdapter } from "./pi.js";
 export { poolAdapter } from "./pool.js";
 export { opencodeAdapter } from "./opencode.js";
@@ -30,6 +32,7 @@ const adapters: Record<AgentCli, AgentAdapter> = {
   pool: poolAdapter,
   dsh: dshAdapter,
   antigravity: antigravityAdapter,
+  muse: museAdapter,
   fake: fakeAdapter,
 };
 
@@ -53,6 +56,7 @@ export const DEFAULT_MODELS: Record<AgentCli, string> = {
   // Antigravity's own slug for a model tier plus its reasoning effort,
   // which is what its --model takes.
   antigravity: "gemini-3.1-pro-high",
+  muse: "muse-spark-1.3",
   fake: "fake-1",
 };
 export { runAgent, type RunAgentInput, type RunAgentResult, type ExecChunk } from "./execute.js";

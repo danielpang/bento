@@ -59,11 +59,14 @@ export function AgentsPanel({
   profiles,
   onClose,
   onChanged,
+  initialAction,
 }: {
   client: BentoClient;
   profiles: AgentProfile[];
   onClose: () => void;
   onChanged: () => void;
+  /** Open the editor or the create form on mount, from the board pill. */
+  initialAction?: { editId?: string; new?: boolean };
 }) {
   const toast = useToast();
   const panel = useDismissable<HTMLElement>(onClose);
@@ -212,6 +215,23 @@ export function AgentsPanel({
     resetForm();
     setFormOpen(true);
   }
+
+  /**
+   * The board's pill can open this panel already sitting on an agent
+   * (or on the create form). Run once: later profile refreshes must
+   * not yank the form out from under whoever is filling it.
+   */
+  useEffect(() => {
+    if (!initialAction) return;
+    if (initialAction.new) {
+      openNew();
+      return;
+    }
+    if (initialAction.editId) {
+      const profile = profiles.find((p) => p.id === initialAction.editId);
+      if (profile) startEdit(profile);
+    }
+  }, []);
 
   /**
    * Fit the skill to what is there, including a skill loaded for

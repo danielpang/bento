@@ -59,9 +59,10 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, museAdapter, opencodeAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
+import { runsInContainer } from "./routes/settings.js";
 
 const run = promisify(execFile);
 
@@ -578,6 +579,21 @@ test("stages can be added, and removed only when empty", async () => {
   assert.equal(removed.status, 200);
   const after = await json<{ stages: { id: string }[] }>(await app.request(`/api/projects/${project.id}/pipeline`));
   assert.ok(!after.stages.some((s) => s.id === created.id));
+});
+
+test("patching a stage emits one stage_updated board event", async () => {
+  const { project, stages } = await setupProject("Stage agent emit");
+  const stage = stages[0]!;
+  const profile = await fakeProfile("board-agent");
+  const received: unknown[] = [];
+  const off = ctx.bus.onBoardEvent(project.id, (event) => received.push(event));
+  try {
+    await patchStage(stage.id, { defaultAgentProfileId: profile.id });
+  } finally {
+    off();
+  }
+  assert.equal(received.length, 1);
+  assert.deepEqual(received[0], { type: "stage_updated", projectId: project.id, stageId: stage.id });
 });
 
 /**
@@ -2073,6 +2089,38 @@ test("an Antigravity run with no Gemini key is missing it by name", async () => 
 });
 
 /**
+ * The path a person actually takes to run Muse Code: pick the tool,
+ * pick a Muse Spark model, paste a Meta key. Muse Code's own default
+ * credential is a browser sign-in, which no sandbox can do, so the
+ * key is the whole of its authentication here.
+ */
+test("a pasted Meta key is what reaches a Muse Code run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "META_API_KEY", value: "meta-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ META_API_KEY: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
+      assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
+      assert.equal(env.META_API_KEY, "meta-pasted-by-the-user");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+test("a Muse Code run with no Meta key is missing it by name", async () => {
+  await withEnv({ META_API_KEY: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
+    assert.deepEqual(missing, ["META_API_KEY"]);
+  });
+});
+
+/**
  * The exception, and the reason this is not a plain preference: a login
  * token is only valid at Anthropic's own API. Once a base URL points
  * the tool at OpenRouter or a gateway, the key is the only credential
@@ -3019,6 +3067,12 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   });
   assert.equal(prefixedSlug.status, 400, "an Antigravity slug carries no provider prefix");
   assert.match(((await prefixedSlug.json()) as { error: string }).error, /bare model id/);
+
+  const muse = await post({ name: "Muse Code", cli: "muse", model: "muse-spark-1.3" });
+  assert.equal(muse.status, 201, "Muse Code accepts its bare Muse Spark id");
+  const prefixedMuse = await post({ name: "prefixed muse", cli: "muse", model: "meta/muse-spark-1.3" });
+  assert.equal(prefixedMuse.status, 400, "Muse Code cannot accept provider-prefixed model ids");
+  assert.match(((await prefixedMuse.json()) as { error: string }).error, /bare model id/);
 
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
@@ -4343,14 +4397,22 @@ test("starting a run on a card that was deleted answers gone, not a foreign key 
  * sandboxes run. The console reads this to hide the control rather than
  * show one that can only report failure.
  *
- * This suite runs the server as a host process, which is the case that
- * must stay visible: hiding a working control is the worse mistake,
- * because the person looking at it cannot recover from it.
+ * The route and this test share `runsInContainer`, so a host process
+ * still has to stay visible and a container still has to stay hidden.
+ * Hard-asserting true failed inside Docker (/.dockerenv) even though
+ * the route was right.
  */
 test("the settings route says whether a machine login can be shared", { timeout: 60_000 }, async () => {
   const settings = await json<{ canShareMachineLogin: boolean }>(await app.request("/api/settings"));
   assert.equal(typeof settings.canShareMachineLogin, "boolean", "the console gets an answer, not undefined");
-  assert.equal(settings.canShareMachineLogin, true, "a server running on the host can offer its own login");
+  const shareable = !(await runsInContainer());
+  assert.equal(
+    settings.canShareMachineLogin,
+    shareable,
+    shareable
+      ? "a server running on the host can offer its own login"
+      : "a containerised server has no login to share",
+  );
 });
 
 /**

@@ -50,7 +50,18 @@ export interface SwarmBoardEvent {
   status?: string;
 }
 
-export type BoardEvent = CardBoardEvent | SwarmBoardEvent;
+/**
+ * A stage changed, which is a fact about the pipeline rather than
+ * about any one card: the board pill that switches a stage's agent
+ * moves every card sitting in that stage at once.
+ */
+export interface StageBoardEvent {
+  type: "stage_updated";
+  projectId: string;
+  stageId: string;
+}
+
+export type BoardEvent = CardBoardEvent | SwarmBoardEvent | StageBoardEvent;
 
 /**
  * What travels between server processes when the bus is replicated

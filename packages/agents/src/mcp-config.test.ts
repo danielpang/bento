@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { cursorAdapter } from "./cursor.js";
+import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { codexAdapter } from "./codex.js";
 import type { McpRemoteServer } from "./adapter.js";
@@ -77,12 +78,11 @@ test("codex escapes a slug that is not a bare TOML key", () => {
 });
 
 test("an empty server set still renders a config, so a removed server is cleared", () => {
-  for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter]) {
+  for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter, museAdapter]) {
     const files = adapter.mcp!.renderConfig([]);
     assert.equal(files.length, 1, `${adapter.cli} must still write its config file`);
-    // The file parses and holds no servers.
     const parsed = JSON.parse(files[0]!.content) as Record<string, Record<string, unknown>>;
-    const bag = parsed.mcpServers ?? parsed.mcp ?? {};
+    const bag = parsed.mcpServers ?? parsed.mcp ?? parsed.mcp_servers ?? {};
     assert.equal(Object.keys(bag).length, 0, `${adapter.cli} must clear stale servers`);
   }
   // Codex clears by writing an empty file.
