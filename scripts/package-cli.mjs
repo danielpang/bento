@@ -57,6 +57,8 @@ try {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   await writeFile(manifestPath, JSON.stringify({ ...manifest, version }, null, 2) + "\n");
   await copyFile(path.join(root, "scripts/bento-launcher.sh"), path.join(directory, "bento"));
+  // Keep this copy unpinned so bento update can resolve the latest stable release.
+  await copyFile(path.join(root, "scripts/install.sh"), path.join(directory, "install.sh"));
   await chmod(path.join(directory, "bento"), 0o755);
   await copyFile(path.join(root, "LICENSE"), path.join(directory, "LICENSE"));
   await mkdir(path.join(directory, "sandbox"));

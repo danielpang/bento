@@ -41,7 +41,15 @@ if (options.version) {
 
 // Headless commands exist so another application can supervise the
 // stack: the desktop app spawns these and reads their status lines.
-if (options.command === "serve") {
+if (options.command === "update") {
+  try {
+    const { runUpdate } = await import("./update.js");
+    await runUpdate();
+  } catch (error) {
+    console.error(`Update failed: ${(error as Error).message}`);
+    process.exitCode = 1;
+  }
+} else if (options.command === "serve") {
   await runServe(options);
 } else if (options.command === "runner") {
   await runRunner(options);

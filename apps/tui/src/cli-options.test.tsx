@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { HELP, parseCliOptions } from "./cli-options.js";
 
+test("update is a standalone command with no version argument", () => {
+  assert.equal(parseCliOptions(["update"]).command, "update");
+  assert.match(HELP, /^ {2}update\s/m);
+  assert.throws(() => parseCliOptions(["update", "v1.2.3"]));
+});
+
 test("omitting the login-sharing flag leaves saved settings and the environment in control", () => {
   assert.equal(parseCliOptions([]).shareAgentAuth, undefined);
   assert.equal(parseCliOptions(["serve"]).shareAgentAuth, undefined);
