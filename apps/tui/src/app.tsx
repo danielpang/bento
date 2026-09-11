@@ -210,7 +210,7 @@ export function Console({
   const [tokens] = useState(() => new FileTokenStore(baseUrl));
   const [client] = useState(() => new BentoClient({ baseUrl, tokens }));
   const [screen, setScreen] = useState<Screen>("loading");
-  const [error, setError] = useState("");
+  const [connectionFailed, setConnectionFailed] = useState(false);
 
   const { rows: terminalRows, columns: terminalColumns } = useWindowSize();
   const compactBoard = terminalRows < 24 || terminalColumns < 70;
@@ -285,7 +285,7 @@ export function Console({
   // Local mode needs no sign in; multi mode requires a stored token.
   const connect = async () => {
     try {
-      setError("");
+      setConnectionFailed(false);
       setScreen("loading");
       const health = await client.health();
       setServerMode(health.mode === "multi" ? "multi" : "local");
@@ -302,7 +302,9 @@ export function Console({
         setNotice("Your session expired. Sign in again.");
         return;
       }
-      setError(err instanceof Error ? err.message : String(err));
+      // A wrong server URL often returns an entire HTML page. Keep response
+      // bodies out of the connection screen and show an actionable message.
+      setConnectionFailed(true);
     }
   };
   useEffect(() => {
@@ -425,7 +427,7 @@ export function Console({
   const mouseSelection = useRef({ cardId: current?.id ?? null, laneId: columnSelection.lane.id });
   mouseSelection.current = { cardId: current?.id ?? null, laneId: columnSelection.lane.id };
   const mouse = useBoardMouse({
-    enabled: screen === "board" && !workbench && !activity && !deleteConfirm && !error,
+    enabled: screen === "board" && !workbench && !activity && !deleteConfirm && !connectionFailed,
     root: boardRoot,
     onSelect: (target) => {
       const lane = lanes.find((lane) => lane.id === target.laneId);
@@ -565,7 +567,7 @@ export function Console({
   const handleInput = (input: string, key: Partial<import("ink").Key> = {}) => {
     // The connection screen has no board to drive, and leaving is the
     // only thing it can offer.
-    if (error) {
+    if (connectionFailed) {
       if (input === "q") quit();
       if (input === "r") void connect();
       return;
@@ -734,14 +736,14 @@ export function Console({
   actionRef.current = (input) => handleInput(input);
   useInput(handleInput, { isActive: isRawModeSupported === true });
 
-  if (error) {
+  if (connectionFailed) {
     return (
       <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1} paddingY={1}>
         <Text bold color="red">
-          Could not reach {baseUrl}
+          Could not connect to Bento at {terminalText(baseUrl)}
         </Text>
-        <Text color="gray">{error}</Text>
-        <Text>Check the address, and that the server is running.</Text>
+        <Text>Check the server URL and make sure Bento is running there.</Text>
+        <Text color="gray">For hosted Bento, run: bento --server https://app.usebento.ai</Text>
         <Box marginTop={1}>
           <Text color="gray">{isRawModeSupported ? "r retry · q quit" : "press Ctrl-C to quit"}</Text>
           <MouseActions>
@@ -774,7 +776,7 @@ export function Console({
     setHistory([]);
     setBeta(false);
     setNotice("");
-    setError("");
+    setConnectionFailed(false);
     setScreen(signedOut ? "login" : "loading");
     if (!signedOut) await connect();
   }
