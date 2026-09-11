@@ -1,6 +1,16 @@
-# Bento
+<pre align="center">
+╭────────────╮                                              &#32;
+│ ██████ ███ │   ██████╗ ███████╗███╗   ██╗████████╗ ██████╗&#32;
+│ ██████ ███ │   ██╔══██╗██╔════╝████╗  ██║╚══██╔══╝██╔═══██╗
+│ ██████ ███ │   ██████╔╝█████╗  ██╔██╗ ██║   ██║   ██║   ██║
+│ ███ ██████ │   ██╔══██╗██╔══╝  ██║╚██╗██║   ██║   ██║   ██║
+│ ███ ██████ │   ██████╔╝███████╗██║ ╚████║   ██║   ╚██████╔╝
+╰────────────╯   ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝&#32;
+</pre>
 
-Kanban for Agents.
+<h1 align="center">Bento</h1>
+
+<p align="center">Kanban for Agents.</p>
 
 Bento is a platform for running AI coding agents across your software development pipeline. Agents ship code faster than anyone can track by hand. Bento puts every feature on one board and shows you where each one is so you don't lose context or lose track of them.
 
