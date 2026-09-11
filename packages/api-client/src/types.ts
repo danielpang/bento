@@ -263,6 +263,7 @@ export interface ProjectSession {
 export interface AgentProfile {
   /** User-authored operating instructions, injected into stage prompts. */
   skill?: string | null;
+  extraArgs?: string[];
   id: string;
   name: string;
   cli: AgentCli;

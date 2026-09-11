@@ -31,12 +31,12 @@ export async function startEmbedded(
     server = await startServer({
       migrate: true,
       quiet: true,
+      ...(options.shareAgentAuth !== undefined ? { initialShareAgentAuth: options.shareAgentAuth } : {}),
       env: {
         BENTO_MODE: "local",
         DATABASE_URL: databaseUrl,
         BENTO_SANDBOX_DRIVER: options.sandbox,
         BENTO_DATA_DIR: options.dataDir,
-        BENTO_SHARE_AGENT_AUTH: String(options.shareAgentAuth),
         PORT: String(options.port),
       },
     });

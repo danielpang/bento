@@ -10,3 +10,4 @@ export * from "./history.js";
 export * from "./conversation.js";
 export * from "./cards.js";
 export * from "./build.js";
+export * from "./repository-commands.js";

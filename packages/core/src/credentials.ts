@@ -5,10 +5,11 @@
  * by the server, so a hosted deployment never puts the operator's
  * credentials inside a tenant's sandbox.
  *
- * OpenRouter is supported the way it actually works, by pointing a
- * provider's base URL at it rather than being a separate CLI. Store the
- * OpenRouter key plus the matching base URL and any adapter that speaks
- * that provider's API will route through it.
+ * OpenRouter is a stored key of its own. pi, opencode, and Codex read
+ * OPENROUTER_API_KEY directly (Codex because Bento writes it as a
+ * Codex model_provider). Claude Code still speaks Anthropic's API, so
+ * the OpenRouter key is saved as ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL
+ * points at https://openrouter.ai/api/v1.
  */
 export interface AgentCredential {
   name: string;
@@ -41,7 +42,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "OPENROUTER_API_KEY",
     label: "OpenRouter",
-    help: "Used by opencode and pi directly. To send Claude Code or Codex through OpenRouter, also set that provider's base URL to https://openrouter.ai/api/v1.",
+    help: "Used by opencode, pi, and Codex. Claude Code does not read it: to send Claude Code through OpenRouter, save the OpenRouter key as the Anthropic key and set ANTHROPIC_BASE_URL to https://openrouter.ai/api/v1.",
     secret: true,
   },
   {
@@ -69,6 +70,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     secret: true,
   },
   {
+    name: "META_API_KEY",
+    label: "Meta (Muse Code)",
+    help: "Used by Muse Code, whichever Muse Spark model it runs. Create one in the Meta AI developer console. Muse Code signs in with a browser everywhere else and can only run headlessly against this key.",
+    secret: true,
+  },
+  {
     name: "GITHUB_TOKEN",
     label: "GitHub token (pull requests)",
     help: "Lets stages with Create a pull request enabled push the feature branch and open the pull request, without installing the GitHub App. Use a fine grained personal access token with contents and pull request write access. It stays on the server and is never given to an agent.",
@@ -83,7 +90,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "OPENAI_BASE_URL",
     label: "OpenAI base URL",
-    help: "Point Codex somewhere else, for example https://openrouter.ai/api/v1.",
+    help: "Point Codex at an OpenAI compatible gateway. OpenRouter does not need this: pick an OpenRouter model and save the OpenRouter key.",
     secret: false,
   },
   {
@@ -150,8 +157,9 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     cli: "codex",
     label: "Codex CLI",
     defaultModel: "gpt-5-codex",
-    format: "A model id. Route through OpenRouter by also setting OPENAI_BASE_URL.",
-    examples: ["gpt-5-codex", "gpt-5"],
+    format:
+      "A bare OpenAI id, or pick OpenRouter for a slug such as openai/gpt-5-mini. Selecting OpenRouter uses the OpenRouter key.",
+    examples: ["gpt-5-codex", "gpt-5", "openai/gpt-5-mini"],
     binary: "codex",
     installUrl: "https://github.com/openai/codex",
     installCommand: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
@@ -222,6 +230,17 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     binary: "agy",
     installUrl: "https://antigravity.google/docs/cli/overview",
     installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+  },
+  {
+    cli: "muse",
+    label: "Muse Code",
+    defaultModel: "muse-spark-1.3",
+    format: "A bare Muse Spark model id, without a provider prefix.",
+    examples: ["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.3-contributor"],
+    bareModelId: true,
+    binary: "muse",
+    installUrl: "https://dev.meta.ai/docs/muse-code",
+    installCommand: "curl -fsSL https://dev.meta.ai/install.sh | bash",
   },
   {
     cli: "fake",

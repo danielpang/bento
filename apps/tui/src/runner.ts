@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { getAdapter, runAgent } from "@bento/agents";
+import { forwardedEnvNames, getAdapter, runAgent } from "@bento/agents";
 import { agentRunPrompt, forgetsBetweenRuns, type AgentEvent } from "@bento/core";
 import {
   DockerDriver,
@@ -159,6 +159,7 @@ export class LocalRunner {
         repositories.map((r) => ({
           name: r.name,
           localPath: r.localPath,
+          defaultBranch: r.defaultBranch,
           ...(feature.startFromBase ? { startFromBranch: r.defaultBranch } : {}),
         })),
         feature.id,
@@ -205,25 +206,31 @@ export class LocalRunner {
       ...(run.kind ? { kind: run.kind } : {}),
     });
 
+    // Credentials come from this machine's environment and never reach
+    // the server, which is the point of running agents locally.
+    const credentials: Record<string, string> = {};
+    // Same names the server forwards: requiredEnvFor replaces
+    // requiredEnv, so a Codex OpenRouter run does not also pick up
+    // OPENAI_API_KEY from this machine.
+    for (const name of forwardedEnvNames(adapter, agent.model)) {
+      const value = process.env[name];
+      if (value) credentials[name] = value;
+    }
+
     const commandInput = {
       prompt,
       model: agent.model,
       cwd: workdir,
       ...(run.resumeSessionId ? { resumeSessionId: run.resumeSessionId } : {}),
       ...(agent.extraArgs.length ? { extraArgs: agent.extraArgs } : {}),
+      credentials,
     };
     const argv = adapter.buildCommand(commandInput);
 
-    // Credentials come from this machine's environment and never reach
-    // the server, which is the point of running agents locally. The
-    // adapter's own variables go under them: pool's model travels this
-    // way, since `pool exec` has no flag for it, and an exported base
-    // URL still wins over the default.
-    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}) };
-    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
-      const value = process.env[name];
-      if (value) env[name] = value;
-    }
+    // The adapter's own variables go under the credentials: pool's model
+    // travels this way, since `pool exec` has no flag for it, and an
+    // exported base URL still wins over the default.
+    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}), ...credentials };
 
     let pending: AgentEvent[] = [];
 

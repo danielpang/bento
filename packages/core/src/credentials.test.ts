@@ -19,12 +19,12 @@ test("dsh is a registered agent CLI", () => {
 test("every agent CLI has model guidance", () => {
   // A tool with no guidance leaves the model field unexplained, and the
   // formats genuinely differ between tools.
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"]) {
     const guidance = modelGuidanceFor(cli);
     assert.ok(guidance, `${cli} has no model guidance`);
     assert.ok(guidance.examples.length > 0, `${cli} offers no example model`);
   }
-  assert.equal(MODEL_GUIDANCE.length, 9);
+  assert.equal(MODEL_GUIDANCE.length, 10);
 });
 
 test("the provider agnostic tools show how to reach OpenRouter", () => {
@@ -36,6 +36,17 @@ test("the provider agnostic tools show how to reach OpenRouter", () => {
       `${cli} should show an OpenRouter example`,
     );
   }
+  const codex = modelGuidanceFor("codex")!;
+  assert.match(codex.format, /OpenRouter/);
+  assert.ok(codex.examples.some((e) => e.includes("/")), "Codex should show an OpenRouter slug");
+  const openrouter = AGENT_CREDENTIALS.find((c) => c.name === "OPENROUTER_API_KEY");
+  assert.match(openrouter?.help ?? "", /Codex/, "Codex reads OPENROUTER_API_KEY for OpenRouter slugs");
+  const openaiBase = AGENT_CREDENTIALS.find((c) => c.name === "OPENAI_BASE_URL");
+  assert.match(
+    openaiBase?.help ?? "",
+    /OpenRouter does not need this/,
+    "OpenRouter is a Codex provider, not a hijacked openai_base_url",
+  );
 });
 
 /**
@@ -48,7 +59,7 @@ test("the spend note names exactly the tools that report a cost", () => {
   assert.match(note, /Only Claude Code and pi report/);
   assert.match(
     note,
-    /Codex CLI, Cursor CLI, opencode, Poolside \(pool\), DeepSeek Harness and Antigravity CLI report none/,
+    /Codex CLI, Cursor CLI, opencode, Poolside \(pool\), DeepSeek Harness, Antigravity CLI and Muse Code report none/,
   );
   // The commoner reason a figure is missing, and the one the tool list
   // alone would misattribute.
@@ -68,6 +79,7 @@ test("the spend page's two lists match the coverage sentence", () => {
     "Poolside (pool)",
     "DeepSeek Harness",
     "Antigravity CLI",
+    "Muse Code",
   ]);
 });
 
@@ -114,7 +126,7 @@ test("dsh guidance uses bare DeepSeek ids and the pinned installer", () => {
   assert.equal(guidance.defaultModel, "deepseek-v4-pro");
   assert.equal(guidance.bareModelId, true);
   assert.equal(guidance.installCommand, "npm install -g @deepseek-ai/dsh@0.1.1-rc.2");
-  assert.equal(MODEL_GUIDANCE.at(-3)?.cli, "dsh");
+  assert.equal(MODEL_GUIDANCE.at(-4)?.cli, "dsh");
   assert.equal(MODEL_GUIDANCE.at(-1)?.cli, "fake");
 });
 
@@ -129,7 +141,23 @@ test("antigravity guidance uses Antigravity's own slugs and its installer", () =
   assert.equal(guidance.bareModelId, true);
   assert.equal(guidance.binary, "agy");
   assert.match(guidance.installCommand, /antigravity\.google\/cli\/install\.sh/);
-  assert.equal(MODEL_GUIDANCE.at(-2)?.cli, "antigravity");
+  assert.equal(MODEL_GUIDANCE.at(-3)?.cli, "antigravity");
+});
+
+test("muse guidance uses bare Muse Spark ids and its installer", () => {
+  const guidance = modelGuidanceFor("muse")!;
+  assert.equal(guidance.defaultModel, "muse-spark-1.3");
+  assert.equal(guidance.bareModelId, true);
+  assert.equal(guidance.binary, "muse");
+  assert.match(guidance.installCommand, /dev\.meta\.ai\/install\.sh/);
+  assert.equal(MODEL_GUIDANCE.at(-2)?.cli, "muse");
+});
+
+test("the Meta key is storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "META_API_KEY");
+  assert.ok(key, "META_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  assert.match(key.help, /Muse Code/);
 });
 
 test("the Gemini key and Antigravity's base URL are storable", () => {

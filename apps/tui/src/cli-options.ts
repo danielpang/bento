@@ -13,7 +13,7 @@ import path from "node:path";
 export type Mode = "client" | "runner" | "local";
 
 /** A subcommand, or the interactive board when none is given. */
-export type Command = "board" | "serve" | "runner" | "login" | "setup" | "repos" | "agents" | "pipeline" | "spend" | "sessions" | "mcp";
+export type Command = "board" | "serve" | "runner" | "login" | "update" | "uninstall" | "setup" | "repos" | "agents" | "pipeline" | "spend" | "sessions" | "mcp";
 
 export interface CliOptions {
   command: Command;
@@ -26,8 +26,8 @@ export interface CliOptions {
   db?: string;
   dataDir: string;
   port: number;
-  /** Share this machine's agent logins with sandboxes. */
-  shareAgentAuth: boolean;
+  /** Initial sharing choice. Absent leaves the saved machine setting in control. */
+  shareAgentAuth?: boolean;
   /** Identifies this machine when claiming work in runner mode. */
   runnerId: string;
   /** Which project a command acts on, by name or id. */
@@ -65,7 +65,15 @@ Usage
   bento --server <url>                     Use a server for both data and agents
   bento --server <url> --run-agents local  Use a server for data, run agents here
 
+Interactive keys
+  : or Ctrl+P commands   / find card   p projects   , setup
+  Enter conversation    n new card    ? help       q quit
+
 Commands
+  update               Install the latest stable CLI release in place.
+                       Restart the TUI afterward. Source checkouts use Git.
+  uninstall            Remove this CLI installation after confirming with Y.
+                       Keep your projects, settings, and credentials.
   setup                Connect repositories, add coding agents, assign them to
                        stages, and save provider keys. Everything a board needs
                        before agents can work, in one screen you can reopen.
@@ -124,16 +132,17 @@ Options
                        own Postgres container.
   --data-dir <path>    Where worktrees and state live (default ~/.bento)
   --port <number>      Port for the local server (default: any free port)
-  --share-agent-auth   Let agents use the Claude, Codex, Cursor, opencode
-                       or pi login already on this machine, instead of an
-                       API key. Only for agents running locally. These are
-                       long lived credentials for a paid account, and an
+  --share-agent-auth   Let agents use the Claude, Codex, Cursor, opencode,
+                       pi or Muse Code login already on this machine, instead
+                       of an API key. Local mode saves this choice; Settings can
+                       change it afterward. Only for agents running locally.
+                       These are long lived credentials for a paid account, and an
                        agent can read anything its sandbox can, so only use
                        this on repositories you trust.
   --runner-id <name>   Name this machine reports when claiming work
                        (default: this computer's hostname)
-  --project <name>     Project a command acts on, by name or id. Only needed
-                       when there is more than one.
+  --project <name>     Initial board or setup project, or the project a
+                       command acts on. Accepts a name or id.
   --setup <cmd>        Shell run once in a fresh sandbox, before any agent
                        starts. Sandboxes carry git and the coding agents
                        and no language runtime, so this is where a
@@ -142,7 +151,7 @@ Options
   --skill <text>       The agent's operating instructions, sent with every
                        run. Define what its stage write-up must contain.
   --tool <cli>         Coding tool for an agent: claude-code, codex, cursor,
-                       opencode, pi, pool, dsh, antigravity.
+                       opencode, pi, pool, dsh, antigravity, muse.
   --model <model>      Model for an agent.
   --name <name>        New name, when editing an agent.
   --url <url>          MCP server URL, for mcp add.
@@ -189,6 +198,8 @@ export function parseCliOptions(argv: string[]): CliOptions {
       first !== "serve" &&
       first !== "runner" &&
       first !== "login" &&
+      first !== "update" &&
+      first !== "uninstall" &&
       first !== "setup" &&
       first !== "repos" &&
       first !== "pipeline" &&
@@ -198,7 +209,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
       first !== "mcp"
     ) {
       throw new Error(
-        `unknown command "${first}". Use setup, serve, runner, login, repos, pipeline, agents, spend, sessions, or mcp, or no command for the board.`,
+        `unknown command "${first}". Use setup, serve, runner, login, update, uninstall, repos, pipeline, agents, spend, sessions, or mcp, or no command for the board.`,
       );
     }
     command = first;
@@ -282,7 +293,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
     ...(values.db ? { db: values.db } : {}),
     dataDir: values["data-dir"] ?? path.join(os.homedir(), ".bento"),
     port,
-    shareAgentAuth: values["share-agent-auth"] ?? false,
+    ...(values["share-agent-auth"] !== undefined ? { shareAgentAuth: values["share-agent-auth"] } : {}),
     runnerId: values["runner-id"] ?? os.hostname(),
     ...(values.project ? { project: values.project } : {}),
     ...(values.tool ? { tool: values.tool } : {}),

@@ -24,6 +24,7 @@ test("every provider status URL is recognized", () => {
     "https://status.deepseek.com",
     "https://aistudio.google.com/status",
     "https://status.poolside.ai",
+    "https://dev.meta.ai/status",
   ]) {
     assert.deepEqual(splitErrorLinks(`see ${url}`).at(-1), { text: url, href: url });
   }

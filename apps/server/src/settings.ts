@@ -18,8 +18,8 @@ import type { AppContext } from "./context.js";
  * must never reach a tenant's sandbox, so nothing here is ever
  * consulted there.
  *
- * The environment variable still wins when it is set, so a launch flag
- * remains an override and CI stays predictable.
+ * An explicit environment variable pins the setting. The CLI flag
+ * instead saves an initial choice that can still be edited in Settings.
  */
 export interface MachineSettings {
   /** Share this machine's agent logins with sandboxes. */
@@ -41,11 +41,13 @@ export interface MachineSettings {
 
 const DEFAULTS: MachineSettings = { shareAgentAuth: false, gitAuthorName: "", gitAuthorEmail: "", includeStageNotesInPr: false };
 
-function settingsPath(ctx: AppContext): string {
+type SettingsContext = Pick<AppContext, "env">;
+
+function settingsPath(ctx: SettingsContext): string {
   return path.join(ctx.env.BENTO_DATA_DIR, "settings.json");
 }
 
-export async function readSettings(ctx: AppContext): Promise<MachineSettings> {
+export async function readSettings(ctx: SettingsContext): Promise<MachineSettings> {
   try {
     const raw = await readFile(settingsPath(ctx), "utf8");
     const parsed = JSON.parse(raw) as Partial<MachineSettings>;
@@ -61,9 +63,17 @@ export async function readSettings(ctx: AppContext): Promise<MachineSettings> {
   }
 }
 
-export async function writeSettings(ctx: AppContext, next: MachineSettings): Promise<void> {
+export async function writeSettings(ctx: SettingsContext, next: MachineSettings): Promise<void> {
   await mkdir(ctx.env.BENTO_DATA_DIR, { recursive: true });
   await writeFile(settingsPath(ctx), `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+}
+
+/** Apply an explicit CLI choice before any workers start, keeping later edits effective. */
+export async function applyInitialAgentAuthSharing(ctx: SettingsContext, sharing?: boolean): Promise<void> {
+  if (ctx.env.BENTO_MODE === "multi" || sharing === undefined) return;
+  await writeSettings(ctx, { ...(await readSettings(ctx)), shareAgentAuth: sharing });
+  // An explicit CLI choice takes precedence over the inherited environment.
+  ctx.env.BENTO_SHARE_AGENT_AUTH = undefined;
 }
 
 /**

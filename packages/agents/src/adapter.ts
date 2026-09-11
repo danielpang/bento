@@ -7,6 +7,15 @@ export interface BuildCommandInput {
   cwd: string;
   resumeSessionId?: string;
   extraArgs?: string[];
+  /**
+   * The credentials resolved for this run, under the names Bento stores
+   * them by. For tools that want a stored value under another name or as
+   * a flag: Codex reads neither OPENAI_API_KEY nor OPENAI_BASE_URL any
+   * more. Only base URLs may be copied into argv, which a process
+   * listing shows to anything else in the sandbox; keys travel through
+   * the env hook.
+   */
+  credentials?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -198,6 +207,34 @@ export interface AgentAdapter {
   parseDelta?(line: string): Pick<AgentDelta, "channel" | "text"> | null;
   /** Decide success/failure from the collected events and exit code. */
   extractOutcome(events: AgentEvent[], exitCode: number): RunOutcome;
+}
+
+/**
+ * The credential names a run needs for this model.
+ *
+ * requiredEnvFor replaces requiredEnv entirely: a Codex profile with
+ * OpenRouter selected needs OPENROUTER_API_KEY and must not also
+ * demand OPENAI_API_KEY. The hook is used when it exists, rather than
+ * or-ing its return onto requiredEnv, so an empty list stays empty.
+ */
+export function requiredEnvForModel(
+  adapter: Pick<AgentAdapter, "requiredEnv" | "requiredEnvFor">,
+  model?: string,
+): string[] {
+  if (model && adapter.requiredEnvFor) return adapter.requiredEnvFor(model);
+  return adapter.requiredEnv;
+}
+
+/** Names resolveAgentEnv forwards into the sandbox for this model. */
+export function forwardedEnvNames(
+  adapter: Pick<AgentAdapter, "requiredEnv" | "optionalEnv" | "authAlternatives" | "requiredEnvFor">,
+  model?: string,
+): string[] {
+  return [
+    ...requiredEnvForModel(adapter, model),
+    ...(adapter.optionalEnv ?? []),
+    ...(adapter.authAlternatives ?? []),
+  ];
 }
 
 export function lastResultEvent(events: AgentEvent[]): Extract<AgentEvent, { type: "result" }> | undefined {

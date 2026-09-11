@@ -4,9 +4,32 @@ Kanban for Agents.
 
 Bento is a platform for running AI coding agents across your software development pipeline. Agents ship code faster than anyone can track by hand. Bento puts every feature on one board and shows you where each one is so you don't lose context or lose track of them.
 
-You define the stages of your software development process, for example: product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering. Each stage gets an agent and a model, from Claude Code, Codex CLI, Cursor CLI, opencode, pi, Poolside, DeepSeek Harness, or the Antigravity CLI. Cards move across the board as agents work on them, each in its own sandbox.
+You define the stages of your software development process, for example: product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering. Each stage gets an agent and a model, from Claude Code, Codex CLI, Cursor CLI, opencode, pi, Poolside, DeepSeek Harness, the Antigravity CLI, or Muse Code. Cards move across the board as agents work on them, each in its own sandbox.
 
-## Local setup
+## CLI
+
+Requires **Node.js 22.19+**, `curl`, `tar`, and macOS or glibc Linux (x64/ARM64). Local mode also needs **Docker running**.
+
+**Windows:** use [WSL 2 setup](./docs/tui.md#windows-wsl-2), then run the commands below inside Ubuntu.
+
+The first CLI release is not published yet. Use [source installation](./docs/tui.md#install-from-source) for now. Once released:
+
+```bash
+curl -fsSL https://usebento.ai/install.sh | sh
+```
+
+Follow the installer's PATH instruction. For local agents, build the sandbox and open setup (use `/usr/local/lib/bento/sandbox` if installed there):
+
+```sh
+docker build -t bento-sandbox:dev "$HOME/.local/lib/bento/sandbox"
+bento setup
+```
+
+Connect a repository, configure agents and credentials, then return to the board. Run `bento` next time; use `bento update` to upgrade.
+
+See the **[Bento CLI guide](./docs/tui.md)** for settings, shortcuts, and cloud setup (no local Docker required).
+
+## Web UI
 
 You will need Docker installed to run Bento.
 
@@ -61,11 +84,12 @@ Turn on "Create a pull request" for a stage and a successful run there pushes th
 |                                            |                                                                                |
 | ----------------------------------------   | ------------------------------------------------------------------------------ |
 | [Bento Quick Overview](./docs/concepts.md) | Cards, sandboxes, worktrees, spend, tenancy                            |
+| [Bento CLI](./docs/tui.md)                 | Install, configure, run local or cloud agents, and keyboard shortcuts          |
 | [Pipelines](./docs/pipeline.md)            | Stages, gates, judge agents, the pipeline file, repository commands            |
 | [Coding agents](./docs/agents.md)          | What each tool can do, how each authenticates, talking to a working agent      |
 | [Pull requests](./docs/pull-requests.md)   | Publishing, what stays out of the diff, connecting GitHub                      |
 | [Web app setup](./docs/web-app.md)         | Running it for a team, multi mode, troubleshooting, contributing               |
-| [Other clients](./docs/clients.md)         | The terminal and macOS apps, both in progress                                  |
+| [macOS app](./apps/mac/README.md)          | Desktop app setup                                                            |
 
 ## Security model
 

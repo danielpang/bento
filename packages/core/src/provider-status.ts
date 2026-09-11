@@ -18,6 +18,7 @@ export const PROVIDER_STATUS_PAGES = {
   deepseek: { name: "DeepSeek", url: "https://status.deepseek.com" },
   google: { name: "Gemini", url: "https://aistudio.google.com/status" },
   poolside: { name: "Poolside", url: "https://status.poolside.ai" },
+  meta: { name: "Meta", url: "https://dev.meta.ai/status" },
 } as const;
 
 export type StatusProvider = keyof typeof PROVIDER_STATUS_PAGES;
@@ -36,6 +37,7 @@ const BY_ID: Record<string, StatusProvider> = {
   // API key, so an outage there is Gemini's to report.
   antigravity: "google",
   poolside: "poolside",
+  meta: "meta",
 };
 
 /**
@@ -50,6 +52,7 @@ const BY_CLI: Record<string, StatusProvider> = {
   dsh: "deepseek",
   pool: "poolside",
   antigravity: "google",
+  muse: "meta",
 };
 
 /**
@@ -66,6 +69,7 @@ const MENTIONS: readonly [RegExp, StatusProvider][] = [
   [/deepseek/i, "deepseek"],
   [/gemini|antigravity|aistudio\.google|generativelanguage\.googleapis|\bgoogle\b/i, "google"],
   [/poolside|\blaguna\b/i, "poolside"],
+  [/\bmuse\b|muse-spark|meta\.ai|META_API_KEY/i, "meta"],
 ];
 
 /**

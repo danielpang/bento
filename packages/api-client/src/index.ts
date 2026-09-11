@@ -29,3 +29,5 @@ export {
   type McpOAuthConsent,
 } from "./client.js";
 export { DeviceFlow, type DeviceCodeResponse, type DeviceFlowOptions } from "./device-flow.js";
+
+export * from "./settings.js";

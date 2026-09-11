@@ -58,7 +58,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { antigravityAdapter, claudeCodeAdapter, opencodeAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, codexAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 import { runsInContainer } from "./routes/settings.js";
@@ -2062,6 +2062,78 @@ test("an Antigravity run with no Gemini key is missing it by name", async () => 
 });
 
 /**
+ * The path a person actually takes to run Muse Code: pick the tool,
+ * pick a Muse Spark model, paste a Meta key. Muse Code's own default
+ * credential is a browser sign-in, which no sandbox can do, so the
+ * key is the whole of its authentication here.
+ */
+test("a pasted Meta key is what reaches a Muse Code run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "META_API_KEY", value: "meta-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ META_API_KEY: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
+      assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
+      assert.equal(env.META_API_KEY, "meta-pasted-by-the-user");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+test("a Muse Code run with no Meta key is missing it by name", async () => {
+  await withEnv({ META_API_KEY: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
+    assert.deepEqual(missing, ["META_API_KEY"]);
+  });
+});
+
+/**
+ * The path a person actually takes to run Codex through OpenRouter:
+ * pick Codex, pick an OpenRouter model, paste the OpenRouter key.
+ * Codex no longer reads OPENAI_BASE_URL, so the key under OpenRouter
+ * has to be enough on its own.
+ */
+test("a pasted OpenRouter key is what reaches a Codex OpenRouter run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "OPENROUTER_API_KEY", value: "sk-or-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ OPENROUTER_API_KEY: null, OPENAI_API_KEY: null, OPENAI_BASE_URL: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini");
+      assert.deepEqual(missing, [], "the OpenRouter key is the credential, so nothing is missing");
+      assert.equal(env.OPENROUTER_API_KEY, "sk-or-pasted-by-the-user");
+      assert.equal(env.OPENAI_API_KEY, undefined, "an OpenRouter run does not take the OpenAI key with it");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+test("a Codex OpenRouter run with no OpenRouter key is missing it by name", async () => {
+  await withEnv({ OPENROUTER_API_KEY: null, OPENAI_API_KEY: "sk-proj-unused" }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini");
+    assert.deepEqual(missing, ["OPENROUTER_API_KEY"]);
+  });
+});
+
+test("a Codex OpenAI run still names the OpenAI key", async () => {
+  await withEnv({ OPENAI_API_KEY: null, OPENROUTER_API_KEY: "sk-or-unused" }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, codexAdapter, "gpt-5-codex");
+    assert.deepEqual(missing, ["OPENAI_API_KEY"]);
+  });
+});
+
+/**
  * The exception, and the reason this is not a plain preference: a login
  * token is only valid at Anthropic's own API. Once a base URL points
  * the tool at OpenRouter or a gateway, the key is the only credential
@@ -3004,6 +3076,12 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   });
   assert.equal(prefixedSlug.status, 400, "an Antigravity slug carries no provider prefix");
   assert.match(((await prefixedSlug.json()) as { error: string }).error, /bare model id/);
+
+  const muse = await post({ name: "Muse Code", cli: "muse", model: "muse-spark-1.3" });
+  assert.equal(muse.status, 201, "Muse Code accepts its bare Muse Spark id");
+  const prefixedMuse = await post({ name: "prefixed muse", cli: "muse", model: "meta/muse-spark-1.3" });
+  assert.equal(prefixedMuse.status, 400, "Muse Code cannot accept provider-prefixed model ids");
+  assert.match(((await prefixedMuse.json()) as { error: string }).error, /bare model id/);
 
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
@@ -4696,7 +4774,12 @@ test("a repository's setup command runs before the agent, once per sandbox", { t
   assert.doesNotMatch(secondTranscript, /Setting up/);
 });
 
-test("a setup command that fails stops the run before the agent starts", { timeout: 120_000 }, async () => {
+test("a setup command that fails reaches the agent instead of preventing startup", { timeout: 120_000 }, async () => {
+  const adapter = getAdapter("fake");
+  const build = adapter.buildCommand.bind(adapter);
+  const prompts: string[] = [];
+  const spy = mock.method(adapter, "buildCommand", (input) => { prompts.push(input.prompt); return build(input); });
+  try {
   const checkout = await fixtureRepo("setup-fails");
   const project = await json<{ id: string }>(
     await app.request("/api/projects", {
@@ -4724,13 +4807,53 @@ test("a setup command that fails stops the run before the agent starts", { timeo
     }),
   );
 
-  assert.equal(await waitForRun(started.id, 90_000), "failed");
+  assert.equal(await waitForRun(started.id, 90_000), "succeeded");
   const detail = await json<{ error: string | null }>(await app.request(`/api/runs/${started.id}`));
-  assert.match(detail.error ?? "", /exited 7/);
+  assert.equal(detail.error, null);
   const transcript = await (await app.request(`/api/runs/${started.id}/transcript`)).text();
   assert.match(transcript, /no such package/, "the command's own output says why");
-  // The agent never ran, so nothing of its own is in the transcript.
-  assert.doesNotMatch(transcript, /Working on it/);
+  assert.match(transcript, /Starting the agent with the error details/);
+  assert.match(transcript, /Working on it/);
+  assert.ok(prompts.some((prompt) => prompt.includes("no such package") && prompt.includes("Diagnose and repair")), "the agent receives setup diagnostics, not just the UI");
+  } finally { spy.mock.restore(); }
+});
+
+test("a build-only setup command is deferred to agent checks", { timeout: 120_000 }, async () => {
+  const checkout = await fixtureRepo("setup-build-only");
+  const project = await json<{ id: string }>(await app.request("/api/projects", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Deferred build", localPath: checkout }),
+  }));
+  await unassignStages(project.id);
+  const [repo] = await json<{ id: string }[]>(await app.request(`/api/projects/${project.id}/repositories`));
+  await app.request(`/api/projects/${project.id}/repositories/${repo!.id}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ setupCommand: "turbo run build", testCommand: "pnpm test" }),
+  });
+  const adapter = getAdapter("fake"), build = adapter.buildCommand.bind(adapter);
+  const prompts: string[] = [];
+  const spy = mock.method(adapter, "buildCommand", (input) => { prompts.push(input.prompt); return build(input); });
+  try {
+    const feature = await createFeature(project.id, "Build after editing");
+    const profile = await fakeProfile("deferred-build-fake");
+    await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+    const started = await json<{ id: string }>(await app.request("/api/runs", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+    }));
+    assert.equal(await waitForRun(started.id, 90_000), "succeeded");
+    const transcript = await (await app.request(`/api/runs/${started.id}/transcript`)).text();
+    assert.doesNotMatch(transcript, /Setting up .*: turbo/);
+    assert.match(transcript, /after edits/);
+    assert.ok(prompts.some((prompt) => prompt.includes("turbo run build && pnpm test") && prompt.includes("Build and test after making your changes")));
+    const followUp = await json<{ id: string }>(await app.request("/api/runs", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "Check again" }),
+    }));
+    assert.equal(await waitForRun(followUp.id, 90_000), "succeeded");
+    assert.match(prompts.at(-1)!, /turbo run build && pnpm test/);
+    assert.match(prompts.at(-1)!, /Build and test after making your changes/);
+  } finally { spy.mock.restore(); }
 });
 
 /**
@@ -6398,4 +6521,14 @@ test("a card keeps every pull request it has opened, and answers only for the li
     { number: 12, url: "https://github.com/acme/history/pull/12", state: "unknown" },
     { number: 11, url: "https://github.com/acme/history/pull/11", state: "unknown" },
   ]);
+  // Old branches can still have open PRs. Their conflicts and CI must remain visible too.
+  for (const route of ["merge-status", "check-status"]) {
+    const statuses = await json<{ number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/${route}?history=all`),
+    );
+    assert.deepEqual(statuses.map((pr) => pr.number), [12, 11]);
+    assert.ok(statuses.every((pr) => pr.state === "unknown"));
+    const current = await json<{ number: number }[]>(await app.request(`/api/features/${feature.id}/${route}`));
+    assert.deepEqual(current.map((pr) => pr.number), [12], "default status reads remain scoped to the current branch");
+  }
 });

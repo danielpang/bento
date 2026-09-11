@@ -1,4 +1,4 @@
-import { providerKeyFor } from "./adapter.js";
+import { forwardedEnvNames, providerKeyFor, requiredEnvForModel } from "./adapter.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
@@ -6,6 +6,7 @@ import { antigravityAdapter } from "./antigravity.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
+import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
 import { poolAdapter } from "./pool.js";
@@ -58,6 +59,76 @@ test("codex resume puts the thread id in the command", () => {
   assert.ok(!cmd.includes("--full-auto"), "--full-auto was removed from codex");
 });
 
+/**
+ * Codex 0.153 reads neither variable Bento stores. With OPENAI_API_KEY
+ * set it sent api.openai.com no Authorization header, and with
+ * OPENAI_BASE_URL set it still called api.openai.com. The key has to
+ * arrive as CODEX_API_KEY. OpenRouter is a custom model_provider, not
+ * a base URL on the reserved openai id: when OpenRouter is the
+ * selected provider (a slash slug on Codex), the adapter passes
+ * `-c model_provider=openrouter`, and the OpenRouter key is what that
+ * provider reads.
+ */
+test("codex OpenRouter slugs select the OpenRouter provider and keep the key out of argv", () => {
+  const input = {
+    prompt: "do it",
+    model: "openai/gpt-5-mini",
+    cwd: "/workspace",
+    extraArgs: ["-c", 'model_reasoning_effort="high"'],
+    credentials: {
+      OPENROUTER_API_KEY: "sk-or-routed",
+      OPENAI_API_KEY: "sk-proj-leftover",
+      OPENAI_BASE_URL: "https://openrouter.ai/api/v1",
+    },
+  };
+  const cmd = codexAdapter.buildCommand(input);
+  const provider = cmd.indexOf('model_provider="openrouter"');
+  assert.ok(provider > 0 && cmd[provider - 1] === "-c", "OpenRouter is selected as the model provider");
+  const base = cmd.indexOf('model_providers.openrouter.base_url="https://openrouter.ai/api/v1"');
+  assert.ok(base > 0 && cmd[base - 1] === "-c", "and its endpoint is set as a config override");
+  assert.ok(base < cmd.indexOf('model_reasoning_effort="high"'), "before the profile's own args");
+  assert.ok(!cmd.some((arg) => arg.includes("sk-or-routed")), "the key never reaches argv");
+  assert.ok(!cmd.some((arg) => arg.startsWith("openai_base_url")), "OpenRouter is not the built-in openai provider");
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(requiredEnvForModel(codexAdapter, "openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.equal(forwardedEnvNames(codexAdapter, "openai/gpt-5-mini").includes("OPENAI_API_KEY"), false);
+  assert.deepEqual(codexAdapter.env?.(input), {});
+  const resumed = codexAdapter.buildCommand({ ...input, resumeSessionId: "th_abc" });
+  assert.ok(resumed.includes('model_provider="openrouter"'));
+});
+
+test("codex without an OpenRouter slug keeps OpenAI's own endpoint", () => {
+  const input = { prompt: "do it", model: "gpt-5-codex", cwd: "/workspace", credentials: { OPENAI_API_KEY: "sk-proj" } };
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.includes("model_provider")));
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.startsWith("openai_base_url")));
+  assert.deepEqual(codexAdapter.env?.(input), { CODEX_API_KEY: "sk-proj" });
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.env?.({ ...input, credentials: {} }), {});
+});
+
+test("codex selects OpenRouter as model_provider for a slash slug the catalog has not listed", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "openai/gpt-brand-new",
+    cwd: "/workspace",
+  });
+  assert.ok(cmd.includes('model_provider="openrouter"'));
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-brand-new"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("acme/unreleased"), ["OPENROUTER_API_KEY"]);
+});
+
+test("codex sends a saved non-OpenRouter base URL as openai_base_url", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "gpt-5-codex",
+    cwd: "/workspace",
+    credentials: { OPENAI_API_KEY: "sk-proj", OPENAI_BASE_URL: "https://gateway.example/v1" },
+  });
+  const override = cmd.indexOf('openai_base_url="https://gateway.example/v1"');
+  assert.ok(override > 0 && cmd[override - 1] === "-c");
+  assert.ok(!cmd.includes('model_provider="openrouter"'));
+});
+
 test("cursor parses stream-json and names tools from the wrapper key", () => {
   const events = parseAll(cursorAdapter, [
     `{"type":"system","subtype":"init","session_id":"c6b6","model":"Claude 4 Sonnet"}`,
@@ -97,6 +168,35 @@ test("cursor marks error results as failed", () => {
   const outcome = cursorAdapter.extractOutcome(events, 1);
   assert.equal(outcome.ok, false);
   assert.equal(outcome.error, "auth failed");
+});
+
+test("cursor bounds its final background shell wait without limiting the active turn", () => {
+  const argv = cursorAdapter.buildCommand({ cwd: "/workspace", model: "auto", prompt: "Build it" });
+  assert.equal(argv[argv.indexOf("--background-shell-timeout") + 1], "30");
+  assert.ok(!argv.includes("--single-turn"), "background completions still get their follow-up turns");
+  const notice = cursorAdapter.parseEvent(JSON.stringify({
+    type: "system", subtype: "background_shell_timeout", aborted_count: 1, timeout_ms: 30000,
+  }));
+  assert.ok(notice?.type === "message" && notice.role === "system");
+});
+
+test("cursor thinking is live output, never a successful result or raw JSON in an error", async () => {
+  const deltas: unknown[] = [];
+  const result = await runAgent({
+    adapter: cursorAdapter,
+    argv: ["cursor-agent"],
+    exec: async function* () {
+      yield { kind: "stdout", data: '{"type":"thinking","subtype":"delta","text":"Already committed."}\n' };
+      yield { kind: "stdout", data: '{"type":"thinking","subtype":"completed"}\n' };
+      yield { kind: "stderr", data: "exec timeout: the command reached its 7200 second limit" };
+      yield { kind: "exit", exitCode: -1 };
+    },
+    onDelta: (delta) => { deltas.push(delta); },
+  });
+  assert.deepEqual(deltas, [{ channel: "thinking", text: "Already committed.", offset: 0 }]);
+  assert.equal(result.outcome.ok, false);
+  assert.match(result.outcome.error!, /exec timeout/);
+  assert.doesNotMatch(result.outcome.error!, /thinking|Already committed|subtype/);
 });
 
 test("opencode parses its NDJSON envelope", () => {
@@ -178,17 +278,23 @@ test("opencode builds a provider qualified model command", () => {
 });
 
 test("every declared cli resolves to an adapter", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
     assert.equal(getAdapter(cli).cli, cli);
   }
 });
 
 test("adapters declare the env they need", () => {
   assert.deepEqual(codexAdapter.requiredEnv, ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  // The OpenRouter key is selected per model, not forwarded on every
+  // Codex run: a native OpenAI sandbox must not receive it.
+  assert.equal((codexAdapter.optionalEnv ?? []).includes("OPENROUTER_API_KEY"), false);
   assert.deepEqual(cursorAdapter.requiredEnv, ["CURSOR_API_KEY"]);
   assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
   assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
   assert.deepEqual(antigravityAdapter.requiredEnv, ["GEMINI_API_KEY"]);
+  assert.deepEqual(museAdapter.requiredEnv, ["META_API_KEY"]);
 });
 
 test("dsh builds its headless command and isolated environment", () => {
@@ -441,9 +547,15 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"] as const) {
+  const sampleModels = ["gpt-5-codex", "openai/gpt-5-mini", "openrouter/auto", "anthropic/claude-sonnet-5"];
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
     const adapter = getAdapter(cli);
-    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
+    const names = new Set([
+      ...adapter.requiredEnv,
+      ...(adapter.optionalEnv ?? []),
+      ...sampleModels.flatMap((model) => adapter.requiredEnvFor?.(model) ?? []),
+    ]);
+    for (const name of names) {
       // Poolside's enterprise endpoint is a local environment override.
       // Hosted v1 always targets Platform and deliberately offers no
       // organization setting for a custom endpoint.
@@ -770,4 +882,131 @@ test("antigravity writes its MCP servers where agy reads them", () => {
   // Called with nothing attached too, so a removed server does not
   // linger in a sandbox the next run reuses.
   assert.deepEqual(JSON.parse(antigravityAdapter.mcp!.renderConfig([])[0]!.content), { mcpServers: {} });
+});
+
+/**
+ * Muse Code's stream is an envelope: every line names its `payload_type`
+ * and carries the body under `payload`. The lifecycle here is the one
+ * a run produces, captured from `muse exec --json --yolo --provider echo`.
+ */
+function museLine(
+  payloadType: string,
+  payload: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    schema_version: 1,
+    stream: { kind: "session", id: "11111111-1111-4111-8111-111111111111" },
+    payload_type: payloadType,
+    payload,
+    ...extra,
+  });
+}
+
+test("muse parses a headless conversation", () => {
+  const events = parseAll(museAdapter, [
+    museLine("runtime.command.accepted"),
+    museLine("run.lifecycle.started"),
+    museLine("task.lifecycle.proposed", { task_kind: "tool.bash" }),
+    museLine("tool.result", { text: "README.md" }, { correlation_facts: { tool_name: "bash" } }),
+    museLine("run.output.delta", { text: "Read the " }),
+    museLine("run.terminal.completed", { text: "Read the readme." }),
+  ]);
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["init", "init", "tool", "tool", "message"],
+    "output deltas are not transcript events",
+  );
+  assert.deepEqual(
+    events.filter((e) => e.type === "tool").map((e) => [e.name, e.phase]),
+    [
+      ["bash", "start"],
+      ["bash", "end"],
+    ],
+  );
+  const said = events.find((e) => e.type === "message");
+  assert.ok(said?.type === "message" && said.text === "Read the readme.");
+  const outcome = museAdapter.extractOutcome(events, 0);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.sessionId, "11111111-1111-4111-8111-111111111111");
+});
+
+test("muse streams a response as deltas and keeps one message", () => {
+  const delta = museLine("run.output.delta", { text: "Rebasing " });
+  assert.deepEqual(museAdapter.parseDelta?.(delta), { channel: "text", text: "Rebasing " });
+  assert.equal(museAdapter.parseEvent(delta), null);
+
+  const done = museLine("run.terminal.completed", { text: "Rebased onto main." });
+  assert.equal(museAdapter.parseDelta?.(done), null, "the finished text is the message, not a delta");
+  assert.deepEqual(museAdapter.parseEvent(done)?.type, "message");
+});
+
+test("muse ignores reminder and unknown-model task proposals", () => {
+  assert.equal(museAdapter.parseEvent(museLine("task.lifecycle.proposed", { task_kind: "reminder.agent.idle" })), null);
+  assert.equal(
+    museAdapter.parseEvent(museLine("task.lifecycle.proposed", { task_kind: "model.unknown.response" })),
+    null,
+  );
+});
+
+test("muse reports a failed terminal with its own reason", () => {
+  const events = parseAll(museAdapter, [
+    museLine("runtime.command.accepted"),
+    museLine("run.terminal.failed", { reason: "invalid API key" }),
+  ]);
+  const outcome = museAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error, "invalid API key");
+  assert.equal(outcome.sessionId, "11111111-1111-4111-8111-111111111111");
+});
+
+test("muse trusts a non-zero exit over a completed terminal", () => {
+  const events = parseAll(museAdapter, [museLine("run.terminal.completed", { text: "Done." })]);
+  const outcome = museAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error ?? "", /exit code 1/);
+});
+
+test("muse builds its headless command and resumes by session", () => {
+  const input = { prompt: "Implement the card", model: "muse-spark-1.3", cwd: "/workspace" };
+  const cmd = museAdapter.buildCommand(input);
+  assert.deepEqual(cmd, [
+    "muse",
+    "exec",
+    "--json",
+    "--yolo",
+    "--user-input-auto-resolve",
+    "--workspace",
+    "/workspace",
+    "--model",
+    "muse-spark-1.3",
+    "Implement the card",
+  ]);
+  const resumed = museAdapter.buildCommand({ ...input, resumeSessionId: "11111111-1111-4111-8111-111111111111" });
+  assert.ok(resumed.includes("--session-id"));
+  assert.equal(resumed[resumed.indexOf("--session-id") + 1], "11111111-1111-4111-8111-111111111111");
+  assert.equal(resumed.at(-1), "Implement the card");
+});
+
+test("muse writes its MCP servers where the CLI reads them", () => {
+  const files = museAdapter.mcp!.renderConfig([
+    { slug: "linear", url: "https://bento.test/mcp/linear", transport: "http", headers: { Authorization: "Bearer t" } },
+  ]);
+  assert.deepEqual(files.map((f) => f.path), ["/root/.config/muse/settings.json"]);
+  assert.deepEqual(JSON.parse(files[0]!.content), {
+    schema_version: 1,
+    mcp_servers: {
+      linear: {
+        transport: "streamable_http",
+        url: "https://bento.test/mcp/linear",
+        headers: { Authorization: "Bearer t" },
+        enabled: true,
+        mode: "optional",
+      },
+    },
+  });
+  assert.deepEqual(JSON.parse(museAdapter.mcp!.renderConfig([])[0]!.content), {
+    schema_version: 1,
+    mcp_servers: {},
+  });
 });
