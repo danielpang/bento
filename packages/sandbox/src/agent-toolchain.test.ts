@@ -291,6 +291,8 @@ test("a warm machine upgrades an old private Node while installing only missing 
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-node-upgrade-"));
   try {
     const sandbox = new ToolchainSandbox(root);
+    // This fixture contains an x64 archive, including when tests run on an ARM Mac.
+    writeFileSync(path.join(root, "stubs/uname"), "#!/bin/sh\nprintf 'x86_64\\n'\n", { mode: 0o755 });
     assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
 
     rmSync(path.join(root, "opt/bento/dsh"), { recursive: true, force: true });

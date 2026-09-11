@@ -4,6 +4,7 @@ import {
   agentRunPrompt,
   forgetsBetweenRuns,
   modelGuidanceFor,
+  resolveRepositoryCommands,
   withProviderOutageAdvice,
   type RunOutcome,
 } from "@bento/core";
@@ -32,7 +33,7 @@ import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
-import { buildStagePrompt } from "./prompt.js";
+import { buildStagePrompt, repositoryInstructions } from "./prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
@@ -211,6 +212,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           repoRows.map((r) => ({
             name: r.name,
             localPath: r.localPath,
+            defaultBranch: r.defaultBranch,
             /**
              * From the base branch only where this card's work actually
              * merged, which is the repositories it had a pull request
@@ -379,19 +381,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     say: saySystem,
   });
 
-  const { argv, live, liveChannel, workdir, toolEnv } = await buildRunCommand(ctx, {
-    run,
-    feature,
-    stage,
-    profile,
-    adapter,
-    repoRows,
-    prepared,
-    handle,
-    sendInitialPrompt: true,
-    mcpArgs,
-    cardTools,
-  });
 
   // Credentials come from the owning organization, never from the
   // server's own environment: see resolveAgentEnv.
@@ -400,7 +389,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // own variables go first, so anything the organization saved under
   // the same name wins: pool's base URL defaults to Poolside Platform
   // here and to an enterprise endpoint when one is stored.
-  const execEnv = mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx));
   // A shared login is a credential, whether it arrives as a mount or an
   // env var. Only when none of the three exists does the run stop here.
   if (missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
@@ -418,7 +406,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         : sharing
           ? `Login sharing is on, but this machine has no ${profile.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
           : canShareLogin
-            ? "Save it with bento setup in a terminal, or turn on this machine's agent logins under Agents. Then run again."
+            ? "Save it with bento setup in a terminal, or open Settings, then Local agent sign-ins, and turn on sharing. Then run again."
             : "Save it with bento setup in a terminal, then run again.";
     const toolName = modelGuidanceFor(profile.cli)?.label ?? profile.cli;
     await finishRun(
@@ -472,11 +460,25 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     say: saySystem,
   });
   if (setupFailure) {
-    await finishRun(ctx, runId, { ok: false, error: setupFailure }, null);
-    emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
-    return;
+    await saySystem("Dependency setup needs attention. Starting the agent with the error details so it can diagnose and repair the environment.");
   }
+
+  const { argv, live, liveChannel, workdir, toolEnv } = await buildRunCommand(ctx, {
+    run,
+    feature,
+    stage,
+    profile,
+    adapter,
+    repoRows,
+    prepared,
+    handle,
+    sendInitialPrompt: true,
+    mcpArgs,
+    cardTools,
+    setupWarning: setupFailure,
+  });
+
+  const execEnv = mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx));
 
   /**
    * A resumed conversation may have a hole: the previous run's agent
@@ -1079,6 +1081,7 @@ async function buildRunCommand(
     prepared: PreparedRepository[];
     handle: SandboxHandle;
     sendInitialPrompt: boolean;
+    setupWarning?: string | null;
     /** Gateway flags for the org's MCP servers, after the profile args. */
     mcpArgs?: string[];
     /**
@@ -1108,7 +1111,7 @@ async function buildRunCommand(
     return {
       name: repo.name,
       mountPath: repositoryPathIn(handle.workdir, repo.name),
-      testCommand: row?.testCommand ?? null,
+      testCommand: resolveRepositoryCommands(row ?? {}).testCommand,
     };
   });
   // With one repository the agent starts inside it, which is what a
@@ -1133,7 +1136,7 @@ async function buildRunCommand(
     run.prompt && run.kind === "task" && !resume
       ? await compactedConversation(ctx.db, feature.id, run.id)
       : "";
-  const prompt = agentRunPrompt({
+  const basePrompt = agentRunPrompt({
     cli: profile.cli,
     followUp: run.prompt,
     stagePrompt,
@@ -1141,6 +1144,9 @@ async function buildRunCommand(
     compacted,
     kind: run.kind,
   });
+
+  const prompt = [basePrompt, resume && run.prompt ? repositoryInstructions(mounted).join("\n") : "", input.setupWarning ?
+    `Repository dependency setup failed before this turn. Diagnose and repair it inside the sandbox, then continue the task. If it cannot be repaired, explain the blocker and the next step. Do not report checks as passing without running them.\n\n${input.setupWarning}` : ""].filter(Boolean).join("\n\n");
 
   // The org's MCP gateway flags follow the profile's own extra args, so
   // a profile cannot shadow them and they read as one list to the CLI.

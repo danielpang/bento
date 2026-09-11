@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
+import { resolveRepositoryCommands } from "@bento/core";
 import { sandboxes } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
@@ -9,8 +10,8 @@ import type { AppContext } from "../context.js";
  *
  * Sandboxes carry git and the agent CLIs and nothing else. Which
  * language, which version, which package manager: those belong to the
- * repository, and the people who work in it are the only ones who know
- * them, so they write a setup command and it runs here.
+ * repository. Users can provide an explicit dependency setup command;
+ * otherwise the agent inspects the repository and manages its environment.
  *
  * Once per sandbox, not once per run. A sandbox outlives the run that
  * created it, so a card pays for its install on the first stage and
@@ -44,16 +45,7 @@ export function setupFingerprint(repositories: SetupRepository[]): string | null
   return createHash("sha256").update(JSON.stringify(commands)).digest("hex").slice(0, 32);
 }
 
-/**
- * Runs each repository's setup command. Returns null when everything
- * needed has run, or the message the run should fail with.
- *
- * Failing the run is deliberate. An agent whose project cannot build is
- * not "mostly fine": it will spend the stage confused by errors that
- * have nothing to do with the task, and its work cannot be checked. The
- * transcript carries the command's own output, because that is what
- * says why.
- */
+/** Run optional dependency setup. Return diagnostics for the agent to repair on failure. */
 export async function runRepositorySetup(
   ctx: AppContext,
   args: {
@@ -63,7 +55,17 @@ export async function runRepositorySetup(
     say: (text: string) => Promise<void>;
   },
 ): Promise<string | null> {
-  const fingerprint = setupFingerprint(args.repositories);
+  const repositories = args.repositories.map((repo) => {
+    const commands = resolveRepositoryCommands(repo);
+    return { ...repo, setupCommand: commands.setupCommand };
+  });
+  for (const repo of args.repositories) {
+    if (resolveRepositoryCommands(repo).deferredSetup)
+      await args.say(
+        `The build or test command for ${repo.name} will run as an agent check after edits, not before the agent starts: ${repo.setupCommand}`,
+      );
+  }
+  const fingerprint = setupFingerprint(repositories);
   if (!fingerprint) return null;
 
   /**
@@ -79,7 +81,8 @@ export async function runRepositorySetup(
     .limit(1);
   if (known.length > 0) return null;
 
-  for (const repo of args.repositories) {
+  const failures: string[] = [];
+  for (const repo of repositories) {
     const command = repo.setupCommand?.trim();
     if (!command) continue;
     await args.say(`Setting up ${repo.name}: ${command}`);
@@ -95,16 +98,23 @@ export async function runRepositorySetup(
         }),
       );
     } catch (err) {
-      return `The setup command for ${repo.name} could not run: ${err instanceof Error ? err.message : String(err)}`;
+      if (args.signal?.aborted) throw err;
+      failures.push(
+        `The setup command for ${repo.name} (${command}) could not run: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      continue;
     }
 
     if (result.exitCode !== 0) {
       const output = tail(`${result.stdout}\n${result.stderr}`);
       await args.say(`Setup for ${repo.name} failed:\n${output}`);
-      return `The setup command for ${repo.name} exited ${result.exitCode}, so the agent has no toolchain to work with. Fix the command under Repositories, then run again.`;
+      failures.push(`The setup command for ${repo.name} (${command}) exited ${result.exitCode}.\n${output}`);
+      continue;
     }
     await args.say(`Setup for ${repo.name} finished in ${Math.round((Date.now() - started) / 1000)}s.`);
   }
+
+  if (failures.length) return failures.join("\n\n");
 
   // Recorded only after every command succeeded: a half-installed
   // sandbox must try again rather than be treated as ready.
