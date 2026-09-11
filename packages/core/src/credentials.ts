@@ -158,7 +158,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     label: "Codex CLI",
     defaultModel: "gpt-5-codex",
     format:
-      "A bare OpenAI id, or an OpenRouter slug such as openai/gpt-5-mini. OpenRouter slugs use the OpenRouter key.",
+      "A bare OpenAI id, or pick OpenRouter for a slug such as openai/gpt-5-mini. Selecting OpenRouter uses the OpenRouter key.",
     examples: ["gpt-5-codex", "gpt-5", "openai/gpt-5-mini"],
     binary: "codex",
     installUrl: "https://github.com/openai/codex",

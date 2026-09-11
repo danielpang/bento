@@ -1,4 +1,4 @@
-import type { AgentEvent, RunOutcome } from "@bento/core";
+import { providerForProfile, type AgentEvent, type RunOutcome } from "@bento/core";
 import { lastResultEvent, type AgentAdapter, type BuildCommandInput, type McpRemoteServer } from "./adapter.js";
 
 interface CodexLine {
@@ -19,8 +19,8 @@ const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
  * openai_base_url at OpenRouter is not how this route works. The
  * table lives in user-level ~/.codex/config.toml (the sandbox home),
  * which is the only file Codex honours for model_providers. Selected
- * at run time with `-c model_provider=openrouter` when the model is
- * an OpenRouter slug.
+ * at run time with `-c model_provider=openrouter` when OpenRouter is
+ * the profile's provider (a slash slug such as openai/gpt-5-mini).
  */
 const OPENROUTER_PROVIDER_TOML = [
   "[model_providers.openrouter]",
@@ -40,11 +40,11 @@ export const codexAdapter: AgentAdapter = {
   requiredEnv: ["OPENAI_API_KEY"],
   optionalEnv: ["OPENAI_BASE_URL"],
   /**
-   * OpenRouter slugs (openai/gpt-5-mini) need the OpenRouter key, not
-   * the OpenAI one. Bare ids still need OPENAI_API_KEY.
+   * OpenRouter selected as the provider needs the OpenRouter key, not
+   * the OpenAI one. Bare OpenAI ids still need OPENAI_API_KEY.
    */
   requiredEnvFor(model) {
-    return isOpenRouterSlug(model) ? ["OPENROUTER_API_KEY"] : ["OPENAI_API_KEY"];
+    return openRouterSelected(model) ? ["OPENROUTER_API_KEY"] : ["OPENAI_API_KEY"];
   },
   configPaths: [".codex"],
 
@@ -58,7 +58,7 @@ export const codexAdapter: AgentAdapter = {
     // OpenRouter authenticates through OPENROUTER_API_KEY on the
     // custom provider. Remapping a leftover OpenAI key would put
     // CODEX_API_KEY in a sandbox that should not see it.
-    if (isOpenRouterSlug(input.model)) return {};
+    if (openRouterSelected(input.model)) return {};
     const key = input.credentials?.OPENAI_API_KEY;
     return key ? { CODEX_API_KEY: key } : {};
   },
@@ -97,10 +97,11 @@ export const codexAdapter: AgentAdapter = {
       "-m",
       input.model,
     );
-    if (isOpenRouterSlug(input.model)) {
-      // -c still applies when ~/.codex is mounted read-only and the
-      // config file above was not written. Nested keys create the
-      // provider table if it is missing.
+    if (openRouterSelected(input.model)) {
+      // OpenRouter is the selected provider: tell Codex to use that
+      // model_provider. -c still applies when ~/.codex is mounted
+      // read-only and the config file above was not written. Nested
+      // keys create the provider table if it is missing.
       cmd.push(...openRouterConfigOverrides());
     } else {
       // OPENAI_BASE_URL is ignored as an env var the same way the key
@@ -175,12 +176,16 @@ export const codexAdapter: AgentAdapter = {
 };
 
 /**
- * Native Codex ids are bare (gpt-5-codex). A slash is an OpenRouter
- * slug, which is also how the picker composes OpenRouter models for
- * this tool.
+ * Whether this Codex profile has OpenRouter selected as its provider.
+ *
+ * Native ids are bare (`gpt-5-codex`). The picker writes an OpenRouter
+ * catalog slug when that provider is chosen, and those slugs contain a
+ * slash (`openai/gpt-5-mini`, `openrouter/auto`). providerForProfile is
+ * the same answer the pairing chip uses, so the adapter selects Codex's
+ * `model_provider=openrouter` exactly when OpenRouter is selected.
  */
-function isOpenRouterSlug(model: string): boolean {
-  return model.includes("/");
+function openRouterSelected(model: string): boolean {
+  return providerForProfile("codex", model)?.id === "openrouter";
 }
 
 function openRouterConfigOverrides(): string[] {

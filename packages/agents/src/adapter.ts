@@ -212,10 +212,10 @@ export interface AgentAdapter {
 /**
  * The credential names a run needs for this model.
  *
- * requiredEnvFor replaces requiredEnv entirely: a Codex OpenRouter slug
- * needs OPENROUTER_API_KEY and must not also demand OPENAI_API_KEY.
- * The hook is used when it exists, rather than or-ing its return onto
- * requiredEnv, so an empty list stays empty.
+ * requiredEnvFor replaces requiredEnv entirely: a Codex profile with
+ * OpenRouter selected needs OPENROUTER_API_KEY and must not also
+ * demand OPENAI_API_KEY. The hook is used when it exists, rather than
+ * or-ing its return onto requiredEnv, so an empty list stays empty.
  */
 export function requiredEnvForModel(
   adapter: Pick<AgentAdapter, "requiredEnv" | "requiredEnvFor">,

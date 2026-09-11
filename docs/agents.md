@@ -67,7 +67,7 @@ Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API
 
 ### Codex CLI
 
-Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. OpenRouter slugs (`openai/gpt-5-mini`) use `OPENROUTER_API_KEY`. Bento writes OpenRouter as a Codex `model_provider`, so you do not set `OPENAI_BASE_URL` for that route.
+Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. You do not set `OPENAI_BASE_URL` for that route.
 
 Codex 0.153 ignores `OPENAI_API_KEY` for its built in provider. Bento hands the saved OpenAI key over as `CODEX_API_KEY`. `OPENAI_BASE_URL` is still honored for other OpenAI compatible gateways, as `-c openai_base_url=...`. Does not report cost.
 

@@ -64,8 +64,10 @@ test("codex resume puts the thread id in the command", () => {
  * set it sent api.openai.com no Authorization header, and with
  * OPENAI_BASE_URL set it still called api.openai.com. The key has to
  * arrive as CODEX_API_KEY. OpenRouter is a custom model_provider, not
- * a base URL on the reserved openai id: a slashed model selects it,
- * and the OpenRouter key is what that provider reads.
+ * a base URL on the reserved openai id: when OpenRouter is the
+ * selected provider (a slash slug on Codex), the adapter passes
+ * `-c model_provider=openrouter`, and the OpenRouter key is what that
+ * provider reads.
  */
 test("codex OpenRouter slugs select the OpenRouter provider and keep the key out of argv", () => {
   const input = {
@@ -102,6 +104,17 @@ test("codex without an OpenRouter slug keeps OpenAI's own endpoint", () => {
   assert.deepEqual(codexAdapter.env?.(input), { CODEX_API_KEY: "sk-proj" });
   assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
   assert.deepEqual(codexAdapter.env?.({ ...input, credentials: {} }), {});
+});
+
+test("codex selects OpenRouter as model_provider for a slash slug the catalog has not listed", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "openai/gpt-brand-new",
+    cwd: "/workspace",
+  });
+  assert.ok(cmd.includes('model_provider="openrouter"'));
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-brand-new"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("acme/unreleased"), ["OPENROUTER_API_KEY"]);
 });
 
 test("codex sends a saved non-OpenRouter base URL as openai_base_url", () => {

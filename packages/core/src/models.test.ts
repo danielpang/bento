@@ -265,6 +265,10 @@ test("OpenRouter through a provider naming tool needs no base URL", () => {
  * OpenRouter catalog is OpenRouter's, not OpenAI's. Treating the
  * prefix as a provider would mark the pairing as a plain OpenAI run
  * and never select Codex's OpenRouter provider.
+ *
+ * A slash on Codex is that selection even when the snapshot has not
+ * listed the slug yet: the picker and a typed id use the same shape,
+ * and the adapter reads this answer to pass model_provider=openrouter.
  */
 test("Codex OpenRouter slugs belong to OpenRouter, not OpenAI", () => {
   assert.equal(providerForProfile("codex", "openai/gpt-5-mini")?.id, "openrouter");
@@ -274,8 +278,9 @@ test("Codex OpenRouter slugs belong to OpenRouter, not OpenAI", () => {
   assert.equal(checkAgentPairing("codex", "openrouter/auto").status, "ok");
   assert.equal(providerForProfile("codex", "gpt-5-codex")?.id, "openai");
   assert.equal(checkAgentPairing("codex", "gpt-5-codex").status, "ok");
-  // A slug the catalog has not caught up with is typeable, not refused.
-  assert.equal(checkAgentPairing("codex", "openai/gpt-brand-new").status, "unknown");
+  assert.equal(providerForProfile("codex", "openai/gpt-brand-new")?.id, "openrouter");
+  assert.equal(checkAgentPairing("codex", "openai/gpt-brand-new").status, "ok");
+  assert.equal(checkAgentPairing("codex", "acme/unreleased").provider?.id, "openrouter");
 });
 
 /**

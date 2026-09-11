@@ -131,6 +131,12 @@ export function modelStringFor(cli: string, providerId: string, modelId: string)
  *    opencode, and pool). Codex and Claude Code take bare ids natively,
  *    so openai/gpt-5-mini is OpenRouter's slug rather than OpenAI's.
  *    The explicit openrouter/ prefix is the exception both kinds share.
+ *    Codex goes further: every slash is OpenRouter, because that is how
+ *    the picker writes the selected provider, and because a typed slug
+ *    the snapshot has not listed yet is still that same selection. The
+ *    Codex adapter reads this answer to pass `-c model_provider=openrouter`.
+ *    Claude Code does not: a google/ slug there is Gemini, which it
+ *    cannot run, not an OpenRouter id.
  * 2. A bare id, or a slug the prefix rule did not claim, is looked up
  *    among the providers that tool can use. This is why the search is
  *    scoped to the tool rather than the whole catalog: several
@@ -160,6 +166,11 @@ export function providerForProfile(cli: string, model: string): CatalogProvider 
     const prefix = model.slice(0, slash);
     const named = allowed.find((p) => p.id === prefix);
     if (named && (namesItsProvider(cli) || prefix === "openrouter")) return named;
+    // Codex native ids are bare. A slash is OpenRouter selected as the
+    // provider: the picker writes catalog slugs that way, and a typed
+    // id uses the same shape. The adapter then selects Codex's own
+    // `model_provider=openrouter` from this same answer.
+    if (cli === "codex") return allowed.find((p) => p.id === "openrouter");
   }
 
   const serving = allowed.find((p) => p.models.some((m) => m.id === model));
@@ -244,9 +255,10 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
   if (!provider) {
     // Not reachable by this tool. Whether that is a mistake or just a
     // model the catalog has not caught up with depends on whether a
-    // provider this tool cannot use serves it. A slug whose prefix
-    // names a reachable provider (openai/gpt-brand-new on Codex) is
-    // unprovable, not impossible: the snapshot trails the tools.
+    // provider this tool cannot use serves it. A slash on Codex is
+    // OpenRouter (handled above). A google/ slug on Claude Code names
+    // a provider it cannot reach, so it is impossible rather than an
+    // unlisted OpenRouter id.
     const elsewhere = providerOfModel(model);
     if (elsewhere && !allowed.some((p) => p.id === elsewhere.id)) {
       const reachable = allowed.map((p) => p.name).join(", ");
@@ -263,10 +275,10 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
   }
 
   if (provider.id === "openrouter" && !namesItsProvider(cli)) {
-    // Codex writes OpenRouter as its own model_provider, so an
-    // OpenRouter slug is a first class pairing. Claude Code still
-    // speaks Anthropic's API and needs ANTHROPIC_BASE_URL pointed at
-    // OpenRouter.
+    // Codex selects OpenRouter as its model_provider, so picking that
+    // provider (a slash slug) is a first class pairing. Claude Code
+    // still speaks Anthropic's API and needs ANTHROPIC_BASE_URL
+    // pointed at OpenRouter.
     if (cli === "codex") {
       return { status: "ok", provider, detail: "Runs on OpenRouter." };
     }
