@@ -2406,11 +2406,12 @@ a.pr-row:hover .pr-external {
 /* Run failure in the card summary: same rectangular box as the
    transcript result, so the reason is easy to spot above the actions. */
 .error-box {
+  display: block;
   margin: 0;
-  padding: 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--failed) 40%, transparent);
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--failed) 55%, transparent);
   border-radius: var(--radius);
-  background: color-mix(in srgb, var(--failed) 8%, transparent);
+  background: color-mix(in srgb, var(--failed) 12%, transparent);
   max-width: 100%;
   min-width: 0;
   word-break: break-word;
