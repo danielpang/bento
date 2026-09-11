@@ -5,10 +5,19 @@ import {
   forgetsBetweenRuns,
   modelGuidanceFor,
   resolveRepositoryCommands,
+  trustedCostUsd,
   withProviderOutageAdvice,
   type RunOutcome,
 } from "@bento/core";
-import { getAdapter, runAgent, type AgentAdapter, type LiveSession } from "@bento/agents";
+import {
+  credentialNamesFor,
+  getAdapter,
+  runAgent,
+  writeFileCommand,
+  type AgentAdapter,
+  type LiveSession,
+  type McpFile,
+} from "@bento/agents";
 import {
   agentProfiles,
   agentRuns,
@@ -21,7 +30,7 @@ import {
   sandboxes,
   stages,
 } from "@bento/db";
-import { LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
@@ -137,7 +146,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // mounted right there failed runs for people who had already paid.
   // Logins that live outside the filesystem (macOS keychain) travel as
   // env vars; a mount cannot carry them.
-  const authEnv = await agentAuthEnv(ctx, adapter);
+  //
+  // Never for an ollama/ model: the run goes to Ollama, and a shared
+  // Claude login would be sent to whatever server OLLAMA_BASE_URL names.
+  const sharesLogin = credentialNamesFor(adapter, profile.model).sharesLogin;
+  const authEnv = sharesLogin ? await agentAuthEnv(ctx, adapter) : {};
   /**
    * When the login arrives as an env token, the config mounts are not
    * just redundant, they are harmful: they arrive read-only, and Claude
@@ -146,7 +159,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * home plus the token is a working agent; a mounted read-only one is
    * an agent that cannot run a single command.
    */
-  const authMounts = Object.keys(authEnv).length > 0 ? [] : await agentAuthMounts(ctx, adapter);
+  const authMounts = !sharesLogin || Object.keys(authEnv).length > 0 ? [] : await agentAuthMounts(ctx, adapter);
 
   /**
    * The transcript starts before the sandbox does. Provisioning a cold
@@ -463,7 +476,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     await saySystem("Dependency setup needs attention. Starting the agent with the error details so it can diagnose and repair the environment.");
   }
 
-  const { argv, live, liveChannel, workdir, toolEnv } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, workdir, toolEnv, files } = await buildRunCommand(ctx, {
     run,
     feature,
     stage,
@@ -480,6 +493,16 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   });
 
   const execEnv = mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx));
+
+  // Files the tool reads settings from, written before every run because
+  // the sandbox outlives it. A failed write is said in the transcript,
+  // ahead of whatever the tool then reports without it.
+  for (const file of files) {
+    const written = await collectExec(ctx.driver.exec(handle, writeFileCommand(file), { timeoutMs: 60_000 }));
+    if (written.exitCode !== 0) {
+      await saySystem(`Could not write ${file.path} into the sandbox, so ${profile.cli} starts without it.`);
+    }
+  }
 
   /**
    * A resumed conversation may have a hole: the previous run's agent
@@ -810,7 +833,12 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     settlement;
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
-  const { outcome, exitCode } = result;
+  const { exitCode } = result;
+  // Claude Code prices an Ollama model as a Claude one, so that figure is
+  // not recorded. See trustedCostUsd.
+  const { costUsd: reportedCost, ...reportedOutcome } = result.outcome;
+  const cost = trustedCostUsd(profile.model, reportedCost);
+  const outcome: RunOutcome = cost === undefined ? reportedOutcome : { ...reportedOutcome, costUsd: cost };
   if (!outcome.ok) {
     /**
      * A resume against a conversation the sandbox no longer holds
@@ -1104,6 +1132,8 @@ async function buildRunCommand(
   workdir: string;
   /** Environment this tool takes instead of flags, per run. */
   toolEnv: Record<string, string>;
+  /** Files the tool reads settings from, written before it starts. */
+  files: McpFile[];
 }> {
   const { run, feature, stage, profile, adapter, repoRows, prepared, handle } = input;
   const allStages = await ctx.db
@@ -1179,7 +1209,14 @@ async function buildRunCommand(
   const liveChannel = live ? new LineChannel() : null;
   if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
   const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
-  return { argv, live, liveChannel, workdir, toolEnv: adapter.env?.(commandInput) ?? {} };
+  return {
+    argv,
+    live,
+    liveChannel,
+    workdir,
+    toolEnv: adapter.env?.(commandInput) ?? {},
+    files: adapter.files?.(commandInput) ?? [],
+  };
 }
 
 /** Whether this organization has asked for sandboxes with no egress. */

@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { agentEvent, forgetsBetweenRuns } from "@bento/core";
+import { agentEvent, forgetsBetweenRuns, trustedCostUsd } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, repositories, runEvents, stages } from "@bento/db";
 import { canAccessProject, visibleProjectFilter } from "../access.js";
 import type { AppContext } from "../context.js";
@@ -338,7 +338,7 @@ export function runnerRoutes(ctx: AppContext) {
           // session id must not erase one already recorded, or the
           // conversation ends with the failure it should survive.
           ...(body.sessionId !== undefined ? { cliSessionId: body.sessionId } : {}),
-          costUsd: body.costUsd !== undefined ? String(body.costUsd) : null,
+          costUsd: trustedCostUsd(profile?.model ?? "", body.costUsd)?.toString() ?? null,
           numTurns: body.numTurns ?? null,
           error: body.ok ? (body.error ?? null) : runnerReportedError(profile?.cli, body.error, profile?.model),
         })

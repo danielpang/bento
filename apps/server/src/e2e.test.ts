@@ -6532,3 +6532,51 @@ test("a card keeps every pull request it has opened, and answers only for the li
     assert.deepEqual(current.map((pr) => pr.number), [12], "default status reads remain scoped to the current branch");
   }
 });
+
+/**
+ * An Ollama run is given Ollama's credentials and nothing else. The
+ * Anthropic key and the subscription token sit right beside it in the
+ * environment, and either one forwarded would be sent to the server
+ * OLLAMA_BASE_URL names.
+ */
+test("an Ollama run on Claude Code gets Ollama's credentials and no Anthropic ones", async () => {
+  await withEnv(
+    {
+      ANTHROPIC_API_KEY: "sk-ant-api-local",
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-local",
+      ANTHROPIC_BASE_URL: null,
+      OLLAMA_API_KEY: "ollama-key",
+      OLLAMA_BASE_URL: null,
+    },
+    async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+      assert.deepEqual(missing, []);
+      assert.deepEqual(env, { OLLAMA_API_KEY: "ollama-key" });
+    },
+  );
+});
+
+test("Ollama Cloud without a key is missing it, and a server of your own is not", async () => {
+  await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+    assert.deepEqual(missing, ["OLLAMA_API_KEY"]);
+  });
+  await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://gpu-box:11434" }, async () => {
+    const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+    assert.deepEqual(missing, []);
+    assert.equal(env.OLLAMA_BASE_URL, "http://gpu-box:11434");
+  });
+});
+
+test("a Docker sandbox reaches an Ollama server on this machine's loopback", async () => {
+  const driver = ctx.driver;
+  ctx.driver = { provider: "docker" } as unknown as AppContext["driver"];
+  try {
+    await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://localhost:11434" }, async () => {
+      const { env } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+      assert.equal(env.OLLAMA_BASE_URL, "http://host.docker.internal:11434");
+    });
+  } finally {
+    ctx.driver = driver;
+  }
+});

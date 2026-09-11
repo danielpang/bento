@@ -27,8 +27,8 @@ test("pi and opencode offer current native DeepSeek models", () => {
   assert.equal(providerForProfile("pi", "openrouter/deepseek/deepseek-v4-pro")?.id, "openrouter");
 });
 
-test("dsh only offers DeepSeek and requires its bare model ids", () => {
-  assert.deepEqual(providersForCli("dsh").map((provider) => provider.id), ["deepseek"]);
+test("dsh offers DeepSeek and Ollama, and requires bare DeepSeek ids", () => {
+  assert.deepEqual(providersForCli("dsh").map((provider) => provider.id), ["deepseek", "ollama"]);
   assert.equal(modelStringFor("dsh", "deepseek", "deepseek-v4-pro"), "deepseek-v4-pro");
   assert.equal(providerForProfile("dsh", "deepseek-v4-pro")?.id, "deepseek");
   assert.equal(checkAgentPairing("dsh", "deepseek-v4-pro").status, "ok");
@@ -413,4 +413,35 @@ test("a DeepSeek model is refused by the tools that cannot reach DeepSeek", () =
   assert.equal(checkAgentPairing("claude-code", "deepseek/deepseek-v4-pro").credential, "ANTHROPIC_BASE_URL");
   assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").status, "ok");
   assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").provider?.id, "openrouter");
+});
+
+/**
+ * Ollama is named only by Bento's prefix. The three tools that reach it
+ * take the prefixed string, DeepSeek Harness's bare ids included, and
+ * the picker composes it for them.
+ */
+test("the tools that reach Ollama take its prefixed model string", () => {
+  for (const cli of ["claude-code", "opencode", "dsh"]) {
+    assert.equal(modelStringFor(cli, "ollama", "glm-5.1"), "ollama/glm-5.1");
+    assert.equal(providerForProfile(cli, "ollama/glm-5.1")?.id, "ollama");
+    assert.equal(checkAgentPairing(cli, "ollama/glm-5.1").status, "ok", `${cli} refused an Ollama model`);
+    // A model pulled onto a server of the organization's own is in no
+    // catalog, and still belongs to Ollama by its prefix.
+    assert.equal(checkAgentPairing(cli, "ollama/my-team/coder:7b").status, "ok");
+  }
+});
+
+test("a bare Ollama id is refused with the prefix that fixes it", () => {
+  const verdict = checkAgentPairing("claude-code", "glm-5.1");
+  assert.equal(verdict.status, "impossible");
+  assert.match(verdict.detail, /ollama\/glm-5\.1/);
+  // Never read as Ollama's either, or the agent would wear Ollama's mark
+  // while its runs went to Anthropic.
+  assert.notEqual(providerForProfile("claude-code", "glm-5.1")?.id, "ollama");
+});
+
+test("tools that cannot reach Ollama refuse its models", () => {
+  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse"]) {
+    assert.equal(checkAgentPairing(cli, "ollama/glm-5.1").status, "impossible", `${cli} accepted an Ollama model`);
+  }
 });

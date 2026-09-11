@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { forwardedEnvNames, requiredEnvForModel } from "@bento/agents";
+import { credentialNamesFor } from "@bento/agents";
+import { isOllamaModel, OLLAMA_CLOUD_URL, ollamaServerUrl } from "@bento/core";
 import { secrets } from "@bento/db";
 import type { AppContext } from "../context.js";
 
@@ -26,13 +27,13 @@ export async function resolveAgentEnv(
   model?: string,
 ): Promise<{ env: Record<string, string>; missing: string[] }> {
   const env: Record<string, string> = {};
-  // Provider agnostic tools require nothing in general and something
-  // specific per model: an openrouter/ model needs the OpenRouter key.
+  // An ollama/ model is given Ollama's credentials only. Otherwise
   // requiredEnvFor replaces requiredEnv, so a Codex OpenRouter run does
   // not also take OPENAI_API_KEY into the sandbox.
-  const required = requiredEnvForModel(adapter, model);
-  const alternatives = adapter.authAlternatives ?? [];
-  const wanted = forwardedEnvNames(adapter, model);
+  const names = credentialNamesFor(adapter, model);
+  const required = names.required;
+  const alternatives = names.alternatives;
+  const wanted = [...required, ...names.optional, ...alternatives];
   if (wanted.length === 0) return { env, missing: [] };
 
   if (ctx.env.BENTO_MODE !== "multi") {
@@ -58,6 +59,21 @@ export async function resolveAgentEnv(
       // A secret encrypted with a rotated key is treated as missing,
       // which surfaces as a clear error rather than a broken agent.
     }
+  }
+
+  /**
+   * Ollama Cloud needs a key. A server the organization named may not,
+   * so a saved base URL is enough to start. A Docker sandbox reaches
+   * this machine's loopback as host.docker.internal, the same rewrite
+   * the MCP gateway gets, so a local mode user's own Ollama server works
+   * as saved.
+   */
+  if (model && isOllamaModel(model)) {
+    if (env.OLLAMA_BASE_URL && ctx.driver.provider === "docker") {
+      env.OLLAMA_BASE_URL = env.OLLAMA_BASE_URL.replace(/\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/, "//host.docker.internal");
+    }
+    const cloud = ollamaServerUrl(env.OLLAMA_BASE_URL) === OLLAMA_CLOUD_URL;
+    return { env, missing: cloud && !env.OLLAMA_API_KEY ? ["OLLAMA_API_KEY"] : [] };
   }
 
   /**

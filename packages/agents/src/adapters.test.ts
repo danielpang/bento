@@ -1,8 +1,9 @@
-import { forwardedEnvNames, providerKeyFor, requiredEnvForModel } from "./adapter.js";
+import { credentialNamesFor, forwardedEnvNames, providerKeyFor, requiredEnvForModel, writeFileCommand } from "./adapter.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
 import { antigravityAdapter } from "./antigravity.js";
+import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
@@ -1009,4 +1010,100 @@ test("muse writes its MCP servers where the CLI reads them", () => {
     schema_version: 1,
     mcp_servers: {},
   });
+});
+
+const OLLAMA = { OLLAMA_API_KEY: "ollama-secret", OLLAMA_BASE_URL: "http://gpu-box:11434/v1" };
+
+/**
+ * An Anthropic key or a Claude subscription token forwarded to an Ollama
+ * run would be sent to whatever server OLLAMA_BASE_URL names, so an
+ * ollama/ model is given Ollama's credentials and no shared login.
+ */
+test("an Ollama run is given Ollama's credentials and no shared login", () => {
+  for (const adapter of [claudeCodeAdapter, opencodeAdapter, dshAdapter]) {
+    assert.deepEqual(credentialNamesFor(adapter, "ollama/glm-5.1"), {
+      required: [],
+      optional: ["OLLAMA_API_KEY", "OLLAMA_BASE_URL"],
+      alternatives: [],
+      sharesLogin: false,
+    });
+  }
+  assert.deepEqual(credentialNamesFor(claudeCodeAdapter, "claude-sonnet-5"), {
+    required: ["ANTHROPIC_API_KEY"],
+    optional: ["ANTHROPIC_BASE_URL"],
+    alternatives: ["CLAUDE_CODE_OAUTH_TOKEN"],
+    sharesLogin: true,
+  });
+});
+
+test("Claude Code on an Ollama model talks to Ollama and nothing of Anthropic's", () => {
+  const input = { prompt: "do it", model: "ollama/glm-5.1", cwd: "/workspace", credentials: OLLAMA };
+  const cmd = claudeCodeAdapter.buildCommand(input);
+  assert.equal(cmd[cmd.indexOf("--model") + 1], "glm-5.1");
+  assert.ok(!cmd.some((arg) => arg.includes("ollama-secret")), "the key never reaches argv");
+  const live = claudeCodeAdapter.live!.buildCommand(input);
+  assert.equal(live[live.indexOf("--model") + 1], "glm-5.1");
+  // Anthropic's credentials are overwritten, not left out: the local
+  // process driver would otherwise inherit the server's own.
+  assert.deepEqual(claudeCodeAdapter.env?.(input), {
+    ANTHROPIC_BASE_URL: "http://gpu-box:11434",
+    ANTHROPIC_AUTH_TOKEN: "ollama-secret",
+    ANTHROPIC_API_KEY: "",
+    CLAUDE_CODE_OAUTH_TOKEN: "",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "glm-5.1",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5.1",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-5.1",
+    CLAUDE_CODE_SUBAGENT_MODEL: "glm-5.1",
+  });
+  assert.equal(
+    claudeCodeAdapter.env?.({ ...input, credentials: { OLLAMA_API_KEY: "k" } }).ANTHROPIC_BASE_URL,
+    "https://ollama.com",
+    "no saved base URL is Ollama Cloud",
+  );
+  assert.deepEqual(claudeCodeAdapter.env?.({ ...input, model: "claude-sonnet-5" }), {});
+});
+
+test("opencode on an Ollama model brings its own provider config", () => {
+  const input = { prompt: "do it", model: "ollama/gpt-oss:120b", cwd: "/workspace", credentials: OLLAMA };
+  const cmd = opencodeAdapter.buildCommand(input);
+  assert.equal(cmd[cmd.indexOf("-m") + 1], "ollama/gpt-oss:120b");
+  const config = opencodeAdapter.env?.(input).OPENCODE_CONFIG_CONTENT ?? "";
+  assert.ok(!config.includes("ollama-secret"), "the key is referenced, not inlined");
+  assert.deepEqual(JSON.parse(config).provider.ollama, {
+    npm: "@ai-sdk/openai-compatible",
+    name: "Ollama",
+    options: { baseURL: "http://gpu-box:11434/v1", apiKey: "{env:OLLAMA_API_KEY}" },
+    models: { "gpt-oss:120b": { name: "gpt-oss:120b" } },
+  });
+  const keyless = opencodeAdapter.env?.({ ...input, credentials: { OLLAMA_BASE_URL: "http://gpu-box:11434" } });
+  assert.equal(JSON.parse(keyless?.OPENCODE_CONFIG_CONTENT ?? "{}").provider.ollama.options.apiKey, undefined);
+  assert.deepEqual(opencodeAdapter.env?.({ ...input, model: "anthropic/claude-sonnet-5" }), {});
+});
+
+test("DeepSeek Harness on an Ollama model points its provider at Ollama with a lower token limit", () => {
+  const input = { prompt: "do it", model: "ollama/gpt-oss:120b", cwd: "/workspace", credentials: OLLAMA };
+  const files = dshAdapter.files?.(input) ?? [];
+  assert.equal(files.length, 1);
+  assert.match(files[0]!.content, /- id: llm-deepseek\n  config:\n    maxTokens: 32768/);
+  assert.deepEqual(dshAdapter.buildCommand(input), ["dsh", "--profile", "headless", "--patch", files[0]!.path, "do it"]);
+  assert.deepEqual(dshAdapter.env?.(input), {
+    DSH_MODEL: "gpt-oss:120b",
+    DSH_TOOLS_MODE: "native",
+    DSH_PERMISSION_MODE: "danger-full-access",
+    DSH_TELEMETRY_DISABLED: "1",
+    DEEPSEEK_BASE_URL: "http://gpu-box:11434/v1",
+    DEEPSEEK_API_KEY: "ollama-secret",
+  });
+  assert.deepEqual(dshAdapter.files?.({ ...input, model: "deepseek-v4-pro" }), []);
+});
+
+test("writeFileCommand writes content a shell would otherwise mangle", async () => {
+  const { execFile } = await import("node:child_process");
+  const { mkdtemp, readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(`${tmpdir()}/bento-write-`);
+  const file = { path: `${dir}/nested/it's here.yml`, content: "- id: x\n  quote: 'single' \"double\" $HOME `tick`\n" };
+  const [command, ...args] = writeFileCommand(file);
+  await new Promise<void>((resolve, reject) => execFile(command!, args, (err) => (err ? reject(err) : resolve())));
+  assert.equal(await readFile(file.path, "utf8"), file.content);
 });

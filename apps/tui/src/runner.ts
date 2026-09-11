@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { forwardedEnvNames, getAdapter, runAgent } from "@bento/agents";
+import { credentialNamesFor, getAdapter, runAgent, writeFileCommand } from "@bento/agents";
 import { agentRunPrompt, forgetsBetweenRuns, type AgentEvent } from "@bento/core";
 import {
   DockerDriver,
@@ -208,11 +208,13 @@ export class LocalRunner {
 
     // Credentials come from this machine's environment and never reach
     // the server, which is the point of running agents locally.
+    // An ollama/ model is given Ollama's credentials only.
     const credentials: Record<string, string> = {};
-    // Same names the server forwards: requiredEnvFor replaces
-    // requiredEnv, so a Codex OpenRouter run does not also pick up
-    // OPENAI_API_KEY from this machine.
-    for (const name of forwardedEnvNames(adapter, agent.model)) {
+    // Same names the server forwards: an ollama/ model is given Ollama's
+    // credentials only, and requiredEnvFor replaces requiredEnv, so a
+    // Codex OpenRouter run does not also pick up OPENAI_API_KEY here.
+    const names = credentialNamesFor(adapter, agent.model);
+    for (const name of [...names.required, ...names.optional, ...names.alternatives]) {
       const value = process.env[name];
       if (value) credentials[name] = value;
     }
@@ -226,6 +228,16 @@ export class LocalRunner {
       credentials,
     };
     const argv = adapter.buildCommand(commandInput);
+
+    // Files the tool reads settings from, written before every run
+    // because the sandbox outlives it.
+    for (const file of adapter.files?.(commandInput) ?? []) {
+      let exitCode = 0;
+      for await (const chunk of this.driver.exec(handle, writeFileCommand(file), { cwd: workdir })) {
+        if (chunk.kind === "exit") exitCode = chunk.exitCode ?? 0;
+      }
+      if (exitCode !== 0) console.warn(`could not write ${file.path} into the sandbox (exit ${exitCode})`);
+    }
 
     // The adapter's own variables go under the credentials: pool's model
     // travels this way, since `pool exec` has no flag for it, and an

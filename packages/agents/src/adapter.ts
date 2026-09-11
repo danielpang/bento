@@ -1,4 +1,5 @@
 import type { AgentCli, AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
+import { isOllamaModel, OLLAMA_CREDENTIAL_NAMES } from "@bento/core";
 
 export interface BuildCommandInput {
   prompt: string;
@@ -180,6 +181,14 @@ export interface AgentAdapter {
    * spawn-failure detection.
    */
   env?(input: BuildCommandInput): Record<string, string>;
+  /**
+   * Files the tool needs in the sandbox before it starts, for settings it
+   * takes only from a file. DeepSeek Harness is the case: the token limit
+   * an Ollama model needs can only be lowered by a patch overlay. Written
+   * before every run, because sandboxes outlive runs. Never secrets:
+   * those travel through env.
+   */
+  files?(input: BuildCommandInput): McpFile[];
   /** Present when the tool can consume remote MCP servers. */
   mcp?: McpCapability;
   /** Present when the tool can hold a live stdin conversation. */
@@ -257,4 +266,41 @@ export function providerKeyFor(model: string): string[] {
   };
   const key = byProvider[model.split("/")[0] ?? ""];
   return key ? [key] : [];
+}
+
+/**
+ * Which credentials a run needs and may be given, for this tool and model.
+ *
+ * An ollama/ model sets the tool's own provider aside: the run goes to
+ * Ollama, so Ollama's credentials are the only ones wanted and no shared
+ * login is mounted. An Anthropic key or a Claude subscription token
+ * forwarded to that run would be sent to whatever server
+ * OLLAMA_BASE_URL names.
+ */
+export function credentialNamesFor(
+  adapter: Pick<AgentAdapter, "requiredEnv" | "optionalEnv" | "authAlternatives" | "requiredEnvFor">,
+  model?: string,
+): { required: string[]; optional: string[]; alternatives: string[]; sharesLogin: boolean } {
+  if (model && isOllamaModel(model)) {
+    return { required: [], optional: [...OLLAMA_CREDENTIAL_NAMES], alternatives: [], sharesLogin: false };
+  }
+  return {
+    // Provider agnostic tools require nothing in general and something
+    // specific per model: an openrouter/ model needs the OpenRouter key.
+    required: requiredEnvForModel(adapter, model),
+    optional: adapter.optionalEnv ?? [],
+    alternatives: adapter.authAlternatives ?? [],
+    sharesLogin: true,
+  };
+}
+
+/**
+ * argv that writes one file into a sandbox. The content rides argv,
+ * single quoted, rather than exec env, which the sprite driver puts in
+ * the exec URL.
+ */
+export function writeFileCommand(file: McpFile): string[] {
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const dir = file.path.replace(/\/[^/]+$/, "") || "/";
+  return ["sh", "-c", `mkdir -p ${quote(dir)} && printf %s ${quote(file.content)} > ${quote(file.path)}`];
 }

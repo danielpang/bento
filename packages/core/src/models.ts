@@ -1,6 +1,7 @@
 import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
+import { isOllamaModel } from "./ollama.js";
 
 export interface CatalogModel {
   id: string;
@@ -78,13 +79,15 @@ export function mergeCatalogs(
  * way they always were, with pi or opencode.
  */
 const BY_CLI: Record<string, readonly string[]> = {
-  "claude-code": ["anthropic", "openrouter"],
+  // Ollama is last wherever it appears, and only ever named by its
+  // prefix (ollama/glm-5.1). See ollama.ts.
+  "claude-code": ["anthropic", "openrouter", "ollama"],
   codex: ["openai", "openrouter"],
   cursor: ["anthropic", "openai", "google", "xai", "cursor"],
-  opencode: ["anthropic", "openai", "google", "deepseek", "openrouter"],
+  opencode: ["anthropic", "openai", "google", "deepseek", "openrouter", "ollama"],
   pi: ["anthropic", "openai", "google", "deepseek", "openrouter"],
   pool: ["poolside"],
-  dsh: ["deepseek"],
+  dsh: ["deepseek", "ollama"],
   // Antigravity reaches Gemini and nothing else here, but under its own
   // slugs rather than the Gemini API's ids, so it is its own provider.
   // See model-catalog.manual.ts.
@@ -116,6 +119,9 @@ export function providerById(id: string): CatalogProvider | undefined {
  */
 export function modelStringFor(cli: string, providerId: string, modelId: string): string {
   if (cli === "opencode" || cli === "pi") return `${providerId}/${modelId}`;
+  // Bento's prefix, stripped before the CLI sees the id: it is what sends
+  // this agent's runs to Ollama instead of the tool's own provider.
+  if (providerId === "ollama") return `ollama/${modelId}`;
   if (providerId === "openrouter") return modelId;
   return modelId;
 }
@@ -165,7 +171,9 @@ export function providerForProfile(cli: string, model: string): CatalogProvider 
   if (slash > 0) {
     const prefix = model.slice(0, slash);
     const named = allowed.find((p) => p.id === prefix);
-    if (named && (namesItsProvider(cli) || prefix === "openrouter")) return named;
+    // ollama/ is Bento's own prefix on every tool that reaches Ollama,
+    // bare id tools included, because the adapter strips it.
+    if (named && (namesItsProvider(cli) || prefix === "openrouter" || prefix === "ollama")) return named;
     // Codex native ids are bare. A slash is OpenRouter selected as the
     // provider: the picker writes catalog slugs that way, and a typed
     // id uses the same shape. The adapter then selects Codex's own
@@ -173,7 +181,10 @@ export function providerForProfile(cli: string, model: string): CatalogProvider 
     if (cli === "codex") return allowed.find((p) => p.id === "openrouter");
   }
 
-  const serving = allowed.find((p) => p.models.some((m) => m.id === model));
+  // Never Ollama: its cloud ids are bare (glm-5.1), and matching one here
+  // would mark a Claude Code agent as Ollama's while its runs went to
+  // Anthropic. Only the ollama/ prefix sends a run there.
+  const serving = allowed.find((p) => p.id !== "ollama" && p.models.some((m) => m.id === model));
   if (serving) return serving;
 
   // BY_CLI lists a tool's own provider first, which is the one its
@@ -238,7 +249,7 @@ function providerOfModel(model: string): CatalogProvider | undefined {
  */
 export function checkAgentPairing(cli: string, model: string): AgentPairing {
   const guidance = modelGuidanceFor(cli);
-  if (guidance?.bareModelId && model.includes("/")) {
+  if (guidance?.bareModelId && model.includes("/") && !isOllamaModel(model)) {
     const example = guidance.examples[0] ?? guidance.defaultModel;
     return {
       status: "impossible",
@@ -260,6 +271,13 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
     // a provider it cannot reach, so it is impossible rather than an
     // unlisted OpenRouter id.
     const elsewhere = providerOfModel(model);
+    if (elsewhere?.id === "ollama" && allowed.some((p) => p.id === "ollama")) {
+      return {
+        status: "impossible",
+        provider: elsewhere,
+        detail: `Ollama models take the ollama/ prefix, for example ollama/${model}.`,
+      };
+    }
     if (elsewhere && !allowed.some((p) => p.id === elsewhere.id)) {
       const reachable = allowed.map((p) => p.name).join(", ");
       return {

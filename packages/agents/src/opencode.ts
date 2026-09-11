@@ -1,4 +1,5 @@
 import type { AgentEvent, RunOutcome } from "@bento/core";
+import { isOllamaModel, ollamaModelId, ollamaServerUrl } from "@bento/core";
 import {
   providerKeyFor,
   type AgentAdapter,
@@ -53,6 +54,29 @@ export const opencodeAdapter: AgentAdapter = {
   requiredEnvFor: providerKeyFor,
   optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
   configPaths: [".config/opencode", ".local/share/opencode"],
+
+  /**
+   * opencode ships no provider for an Ollama server, so an ollama/ model
+   * brings one as OPENCODE_CONFIG_CONTENT, which opencode merges over its
+   * config files: the opencode.json Bento writes for MCP servers stays as
+   * it is. The key is referenced rather than inlined, since it already
+   * travels in the environment as OLLAMA_API_KEY.
+   */
+  env(input: BuildCommandInput): Record<string, string> {
+    if (!isOllamaModel(input.model)) return {};
+    const id = ollamaModelId(input.model);
+    const options: Record<string, string> = {
+      baseURL: `${ollamaServerUrl(input.credentials?.OLLAMA_BASE_URL)}/v1`,
+    };
+    if (input.credentials?.OLLAMA_API_KEY) options.apiKey = "{env:OLLAMA_API_KEY}";
+    const config = {
+      $schema: "https://opencode.ai/config.json",
+      provider: {
+        ollama: { npm: "@ai-sdk/openai-compatible", name: "Ollama", options, models: { [id]: { name: id } } },
+      },
+    };
+    return { OPENCODE_CONFIG_CONTENT: JSON.stringify(config) };
+  },
 
   // The sandbox home carries no opencode config of its own, so the
   // whole file is Bento's to overwrite each run. The orchestrator skips
