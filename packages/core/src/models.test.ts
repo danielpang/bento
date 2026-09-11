@@ -261,6 +261,29 @@ test("OpenRouter through a provider naming tool needs no base URL", () => {
 });
 
 /**
+ * Codex takes bare OpenAI ids natively, so an openai/ slug from the
+ * OpenRouter catalog is OpenRouter's, not OpenAI's. Treating the
+ * prefix as a provider would mark the pairing as a plain OpenAI run
+ * and never select Codex's OpenRouter provider.
+ *
+ * A slash on Codex is that selection even when the snapshot has not
+ * listed the slug yet: the picker and a typed id use the same shape,
+ * and the adapter reads this answer to pass model_provider=openrouter.
+ */
+test("Codex OpenRouter slugs belong to OpenRouter, not OpenAI", () => {
+  assert.equal(providerForProfile("codex", "openai/gpt-5-mini")?.id, "openrouter");
+  assert.equal(modelStringFor("codex", "openrouter", "openai/gpt-5-mini"), "openai/gpt-5-mini");
+  assert.equal(checkAgentPairing("codex", "openai/gpt-5-mini").status, "ok");
+  assert.equal(checkAgentPairing("codex", "openai/gpt-5-mini").provider?.id, "openrouter");
+  assert.equal(checkAgentPairing("codex", "openrouter/auto").status, "ok");
+  assert.equal(providerForProfile("codex", "gpt-5-codex")?.id, "openai");
+  assert.equal(checkAgentPairing("codex", "gpt-5-codex").status, "ok");
+  assert.equal(providerForProfile("codex", "openai/gpt-brand-new")?.id, "openrouter");
+  assert.equal(checkAgentPairing("codex", "openai/gpt-brand-new").status, "ok");
+  assert.equal(checkAgentPairing("codex", "acme/unreleased").provider?.id, "openrouter");
+});
+
+/**
  * The catalog trails the tools, so an unrecognised model must not be
  * called impossible: that would block a model released this week.
  */
@@ -383,8 +406,11 @@ test("a DeepSeek model is refused by the tools that cannot reach DeepSeek", () =
   for (const cli of ["claude-code", "codex", "cursor", "pool"]) {
     assert.equal(checkAgentPairing(cli, "deepseek-v4-pro").status, "impossible", `${cli} accepted a bare DeepSeek id`);
   }
-  // Claude Code and Codex can still be pointed at OpenRouter, which is
+  // Claude Code can still be pointed at OpenRouter, which is
   // what the prefixed form means to a tool that names no provider.
+  // Codex configures OpenRouter as its own provider, so the same
+  // slug is a first class pairing rather than a base URL redirect.
   assert.equal(checkAgentPairing("claude-code", "deepseek/deepseek-v4-pro").credential, "ANTHROPIC_BASE_URL");
-  assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").credential, "OPENAI_BASE_URL");
+  assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").status, "ok");
+  assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").provider?.id, "openrouter");
 });

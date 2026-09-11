@@ -1,4 +1,4 @@
-import { providerKeyFor } from "./adapter.js";
+import { forwardedEnvNames, providerKeyFor, requiredEnvForModel } from "./adapter.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
@@ -57,6 +57,76 @@ test("codex resume puts the thread id in the command", () => {
   // prompts, which would hang a headless run.
   assert.ok(cmd.includes("--dangerously-bypass-approvals-and-sandbox"));
   assert.ok(!cmd.includes("--full-auto"), "--full-auto was removed from codex");
+});
+
+/**
+ * Codex 0.153 reads neither variable Bento stores. With OPENAI_API_KEY
+ * set it sent api.openai.com no Authorization header, and with
+ * OPENAI_BASE_URL set it still called api.openai.com. The key has to
+ * arrive as CODEX_API_KEY. OpenRouter is a custom model_provider, not
+ * a base URL on the reserved openai id: when OpenRouter is the
+ * selected provider (a slash slug on Codex), the adapter passes
+ * `-c model_provider=openrouter`, and the OpenRouter key is what that
+ * provider reads.
+ */
+test("codex OpenRouter slugs select the OpenRouter provider and keep the key out of argv", () => {
+  const input = {
+    prompt: "do it",
+    model: "openai/gpt-5-mini",
+    cwd: "/workspace",
+    extraArgs: ["-c", 'model_reasoning_effort="high"'],
+    credentials: {
+      OPENROUTER_API_KEY: "sk-or-routed",
+      OPENAI_API_KEY: "sk-proj-leftover",
+      OPENAI_BASE_URL: "https://openrouter.ai/api/v1",
+    },
+  };
+  const cmd = codexAdapter.buildCommand(input);
+  const provider = cmd.indexOf('model_provider="openrouter"');
+  assert.ok(provider > 0 && cmd[provider - 1] === "-c", "OpenRouter is selected as the model provider");
+  const base = cmd.indexOf('model_providers.openrouter.base_url="https://openrouter.ai/api/v1"');
+  assert.ok(base > 0 && cmd[base - 1] === "-c", "and its endpoint is set as a config override");
+  assert.ok(base < cmd.indexOf('model_reasoning_effort="high"'), "before the profile's own args");
+  assert.ok(!cmd.some((arg) => arg.includes("sk-or-routed")), "the key never reaches argv");
+  assert.ok(!cmd.some((arg) => arg.startsWith("openai_base_url")), "OpenRouter is not the built-in openai provider");
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(requiredEnvForModel(codexAdapter, "openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.equal(forwardedEnvNames(codexAdapter, "openai/gpt-5-mini").includes("OPENAI_API_KEY"), false);
+  assert.deepEqual(codexAdapter.env?.(input), {});
+  const resumed = codexAdapter.buildCommand({ ...input, resumeSessionId: "th_abc" });
+  assert.ok(resumed.includes('model_provider="openrouter"'));
+});
+
+test("codex without an OpenRouter slug keeps OpenAI's own endpoint", () => {
+  const input = { prompt: "do it", model: "gpt-5-codex", cwd: "/workspace", credentials: { OPENAI_API_KEY: "sk-proj" } };
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.includes("model_provider")));
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.startsWith("openai_base_url")));
+  assert.deepEqual(codexAdapter.env?.(input), { CODEX_API_KEY: "sk-proj" });
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.env?.({ ...input, credentials: {} }), {});
+});
+
+test("codex selects OpenRouter as model_provider for a slash slug the catalog has not listed", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "openai/gpt-brand-new",
+    cwd: "/workspace",
+  });
+  assert.ok(cmd.includes('model_provider="openrouter"'));
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-brand-new"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("acme/unreleased"), ["OPENROUTER_API_KEY"]);
+});
+
+test("codex sends a saved non-OpenRouter base URL as openai_base_url", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "gpt-5-codex",
+    cwd: "/workspace",
+    credentials: { OPENAI_API_KEY: "sk-proj", OPENAI_BASE_URL: "https://gateway.example/v1" },
+  });
+  const override = cmd.indexOf('openai_base_url="https://gateway.example/v1"');
+  assert.ok(override > 0 && cmd[override - 1] === "-c");
+  assert.ok(!cmd.includes('model_provider="openrouter"'));
 });
 
 test("cursor parses stream-json and names tools from the wrapper key", () => {
@@ -215,6 +285,11 @@ test("every declared cli resolves to an adapter", () => {
 
 test("adapters declare the env they need", () => {
   assert.deepEqual(codexAdapter.requiredEnv, ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  // The OpenRouter key is selected per model, not forwarded on every
+  // Codex run: a native OpenAI sandbox must not receive it.
+  assert.equal((codexAdapter.optionalEnv ?? []).includes("OPENROUTER_API_KEY"), false);
   assert.deepEqual(cursorAdapter.requiredEnv, ["CURSOR_API_KEY"]);
   assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
   assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
@@ -472,9 +547,15 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
+  const sampleModels = ["gpt-5-codex", "openai/gpt-5-mini", "openrouter/auto", "anthropic/claude-sonnet-5"];
   for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
     const adapter = getAdapter(cli);
-    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
+    const names = new Set([
+      ...adapter.requiredEnv,
+      ...(adapter.optionalEnv ?? []),
+      ...sampleModels.flatMap((model) => adapter.requiredEnvFor?.(model) ?? []),
+    ]);
+    for (const name of names) {
       // Poolside's enterprise endpoint is a local environment override.
       // Hosted v1 always targets Platform and deliberately offers no
       // organization setting for a custom endpoint.

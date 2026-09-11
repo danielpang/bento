@@ -58,7 +58,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { antigravityAdapter, claudeCodeAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, codexAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 import { runsInContainer } from "./routes/settings.js";
@@ -2090,6 +2090,46 @@ test("a Muse Code run with no Meta key is missing it by name", async () => {
   await withEnv({ META_API_KEY: null }, async () => {
     const { missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
     assert.deepEqual(missing, ["META_API_KEY"]);
+  });
+});
+
+/**
+ * The path a person actually takes to run Codex through OpenRouter:
+ * pick Codex, pick an OpenRouter model, paste the OpenRouter key.
+ * Codex no longer reads OPENAI_BASE_URL, so the key under OpenRouter
+ * has to be enough on its own.
+ */
+test("a pasted OpenRouter key is what reaches a Codex OpenRouter run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "OPENROUTER_API_KEY", value: "sk-or-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ OPENROUTER_API_KEY: null, OPENAI_API_KEY: null, OPENAI_BASE_URL: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini");
+      assert.deepEqual(missing, [], "the OpenRouter key is the credential, so nothing is missing");
+      assert.equal(env.OPENROUTER_API_KEY, "sk-or-pasted-by-the-user");
+      assert.equal(env.OPENAI_API_KEY, undefined, "an OpenRouter run does not take the OpenAI key with it");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+test("a Codex OpenRouter run with no OpenRouter key is missing it by name", async () => {
+  await withEnv({ OPENROUTER_API_KEY: null, OPENAI_API_KEY: "sk-proj-unused" }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini");
+    assert.deepEqual(missing, ["OPENROUTER_API_KEY"]);
+  });
+});
+
+test("a Codex OpenAI run still names the OpenAI key", async () => {
+  await withEnv({ OPENAI_API_KEY: null, OPENROUTER_API_KEY: "sk-or-unused" }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, codexAdapter, "gpt-5-codex");
+    assert.deepEqual(missing, ["OPENAI_API_KEY"]);
   });
 });
 
