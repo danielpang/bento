@@ -1,7 +1,15 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { credentialNamesFor, getAdapter, runAgent, writeFileCommand } from "@bento/agents";
-import { agentRunPrompt, forgetsBetweenRuns, type AgentEvent } from "@bento/core";
+import { credentialNamesFor, getAdapter, runAgent, runsOnOllama, writeFileCommand } from "@bento/agents";
+import {
+  agentRunPrompt,
+  forgetsBetweenRuns,
+  missingOllamaCredentials,
+  modelGuidanceFor,
+  ollamaCredentialsOnly,
+  ollamaUrlFromSandbox,
+  type AgentEvent,
+} from "@bento/core";
 import {
   DockerDriver,
   LocalProcessDriver,
@@ -209,14 +217,31 @@ export class LocalRunner {
     // Credentials come from this machine's environment and never reach
     // the server, which is the point of running agents locally.
     // An ollama/ model is given Ollama's credentials only.
-    const credentials: Record<string, string> = {};
-    // Same names the server forwards: an ollama/ model is given Ollama's
-    // credentials only, and requiredEnvFor replaces requiredEnv, so a
-    // Codex OpenRouter run does not also pick up OPENAI_API_KEY here.
+    let credentials: Record<string, string> = {};
+    // Same names the server forwards: requiredEnvFor replaces requiredEnv,
+    // so a Codex OpenRouter run does not also pick up OPENAI_API_KEY here.
     const names = credentialNamesFor(adapter, agent.model);
     for (const name of [...names.required, ...names.optional, ...names.alternatives]) {
       const value = process.env[name];
       if (value) credentials[name] = value;
+    }
+    // A run on Ollama is given Ollama's credentials only, as on the server,
+    // with the same loopback rewrite for a Docker sandbox and the same
+    // refusal to start Ollama Cloud without a key.
+    if (runsOnOllama(names, credentials)) {
+      credentials = ollamaCredentialsOnly(credentials);
+      if (credentials.OLLAMA_BASE_URL) {
+        credentials.OLLAMA_BASE_URL = ollamaUrlFromSandbox(credentials.OLLAMA_BASE_URL, this.driver.provider);
+      }
+      const missing = missingOllamaCredentials(credentials);
+      if (missing.length > 0) {
+        const label = modelGuidanceFor(agent.cli)?.label ?? agent.cli;
+        await this.complete(run.id, {
+          ok: false,
+          error: `No ${missing.join(", ")} is set, so ${label} cannot start on Ollama Cloud. Export OLLAMA_API_KEY, or OLLAMA_BASE_URL naming an Ollama server you run, then run again.`,
+        });
+        return;
+      }
     }
 
     const commandInput = {

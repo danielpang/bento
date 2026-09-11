@@ -68,8 +68,8 @@ Bento does not run Ollama. Runs go to one of two places:
 
 How each tool is pointed at it:
 
-- **Claude Code** uses Ollama's Anthropic compatible API. Bento sets `ANTHROPIC_BASE_URL`, passes the key as `ANTHROPIC_AUTH_TOKEN`, and sets every model slot (subagents and session titles included) to the one model. Anthropic keys, the subscription token, and shared logins are withheld from these runs. Claude Code prices every model as a Claude model, so Bento records no cost for them.
-- **opencode** gets an `ollama` provider (`@ai-sdk/openai-compatible` at `<server>/v1`) through `OPENCODE_CONFIG_CONTENT`, which leaves its config files alone.
+- **Claude Code** uses Ollama's Anthropic compatible API. Bento sets `ANTHROPIC_BASE_URL`, passes the key as `ANTHROPIC_AUTH_TOKEN`, and sets every model slot (subagents and session titles included) to the one model. Anthropic keys, the subscription token, and shared logins are withheld from these runs. Claude Code prices every model as a Claude model, so Bento records no cost for them, drops the figure from the transcript, and the console shows these agents as reporting no cost.
+- **opencode** gets an `ollama` provider (`@ai-sdk/openai-compatible` at `<server>/v1`) through `OPENCODE_CONFIG_CONTENT`, which leaves its config files alone. Until Ollama credentials are saved in Bento, an `ollama/` model on opencode runs with opencode's own configuration instead, so an `ollama` provider you already defined there keeps working.
 - **DeepSeek Harness** keeps its DeepSeek provider and points it at `<server>/v1`. A patch lowers its token limit to 32768: dsh asks for 256000, and Ollama refuses more than a model's output limit.
 
 Ollama recommends a context window of at least 64k tokens for coding agents. A server you run may need its context length raised.

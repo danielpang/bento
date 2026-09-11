@@ -1,3 +1,5 @@
+import { isOllamaModel } from "./ollama.js";
+
 /**
  * Credentials an organization can store for its agents.
  *
@@ -275,7 +277,10 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
  * unmeasured one, so anywhere spend is shown, this decides whether to
  * say the number is partial.
  */
-export function reportsCost(cli: string): boolean {
+export function reportsCost(cli: string, model?: string): boolean {
+  // Claude Code prices every model as a Claude model, so on an Ollama
+  // model its figure is wrong, and Bento records none.
+  if (cli === "claude-code" && model && isOllamaModel(model)) return false;
   return cli === "claude-code" || cli === "pi" || cli === "fake";
 }
 
@@ -315,7 +320,7 @@ export function spendReportingTools(): { reporting: string[]; silent: string[] }
  */
 export function spendCoverageNote(): string {
   const { reporting, silent } = spendReportingTools();
-  return `Only ${joinNames(reporting)} report what a run cost, and ${joinNames(silent)} report none. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
+  return `Only ${joinNames(reporting)} report what a run cost, and ${joinNames(silent)} report none. Claude Code runs on Ollama models report none either, because Claude Code would price them as Claude models. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
 }
 
 export function modelGuidanceFor(cli: string): ModelGuidance | undefined {

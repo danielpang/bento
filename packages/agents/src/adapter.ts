@@ -1,5 +1,5 @@
 import type { AgentCli, AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { isOllamaModel, OLLAMA_CREDENTIAL_NAMES } from "@bento/core";
+import { hasOllamaCredentials, OLLAMA_CREDENTIAL_NAMES, ollamaNeedsSavedCredentials, routesToOllama } from "@bento/core";
 
 export interface BuildCommandInput {
   prompt: string;
@@ -269,29 +269,47 @@ export function providerKeyFor(model: string): string[] {
 }
 
 /**
- * Which credentials a run needs and may be given, for this tool and model.
+ * How an ollama/ model decides where a run goes: always to Bento's
+ * Ollama, only once Ollama credentials are saved (opencode, whose own
+ * config can define an ollama provider), or never (a tool Bento does not
+ * point at Ollama).
+ */
+export type OllamaRoute = "always" | "when-saved" | "never";
+
+/**
+ * Which credentials to look up for a run, for this tool and model.
  *
- * An ollama/ model sets the tool's own provider aside: the run goes to
- * Ollama, so Ollama's credentials are the only ones wanted and no shared
- * login is mounted. An Anthropic key or a Claude subscription token
- * forwarded to that run would be sent to whatever server
- * OLLAMA_BASE_URL names.
+ * Claude Code and DeepSeek Harness on an ollama/ model want Ollama's
+ * credentials and nothing else. opencode looks up both its own and
+ * Ollama's, because which set the run keeps depends on what was saved:
+ * see runsOnOllama.
  */
 export function credentialNamesFor(
-  adapter: Pick<AgentAdapter, "requiredEnv" | "optionalEnv" | "authAlternatives" | "requiredEnvFor">,
+  adapter: Pick<AgentAdapter, "requiredEnv" | "optionalEnv" | "authAlternatives" | "requiredEnvFor"> & { cli?: string },
   model?: string,
-): { required: string[]; optional: string[]; alternatives: string[]; sharesLogin: boolean } {
-  if (model && isOllamaModel(model)) {
-    return { required: [], optional: [...OLLAMA_CREDENTIAL_NAMES], alternatives: [], sharesLogin: false };
-  }
-  return {
-    // Provider agnostic tools require nothing in general and something
-    // specific per model: an openrouter/ model needs the OpenRouter key.
+): { required: string[]; optional: string[]; alternatives: string[]; ollama: OllamaRoute } {
+  const own = {
+    // requiredEnvFor replaces requiredEnv: an openrouter/ model needs the
+    // OpenRouter key and nothing the tool requires in general.
     required: requiredEnvForModel(adapter, model),
     optional: adapter.optionalEnv ?? [],
     alternatives: adapter.authAlternatives ?? [],
-    sharesLogin: true,
   };
+  if (!model || !adapter.cli || !routesToOllama(adapter.cli, model)) return { ...own, ollama: "never" };
+  if (ollamaNeedsSavedCredentials(adapter.cli)) {
+    return { ...own, optional: [...own.optional, ...OLLAMA_CREDENTIAL_NAMES], ollama: "when-saved" };
+  }
+  return { required: [], optional: [...OLLAMA_CREDENTIAL_NAMES], alternatives: [], ollama: "always" };
+}
+
+/**
+ * Whether a run with the credentials found goes to Bento's Ollama. When
+ * it does, it is given Ollama's credentials only and no shared login: an
+ * Anthropic key or a Claude subscription token would otherwise be sent to
+ * whatever server OLLAMA_BASE_URL names.
+ */
+export function runsOnOllama(names: { ollama: OllamaRoute }, found: Readonly<Record<string, string>>): boolean {
+  return names.ollama === "always" || (names.ollama === "when-saved" && hasOllamaCredentials(found));
 }
 
 /**

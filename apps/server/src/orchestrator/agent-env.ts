@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { credentialNamesFor } from "@bento/agents";
-import { isOllamaModel, OLLAMA_CLOUD_URL, ollamaServerUrl } from "@bento/core";
+import { credentialNamesFor, runsOnOllama } from "@bento/agents";
+import { missingOllamaCredentials, ollamaCredentialsOnly, ollamaUrlFromSandbox } from "@bento/core";
 import { secrets } from "@bento/db";
 import type { AppContext } from "../context.js";
 
@@ -14,27 +14,30 @@ import type { AppContext } from "../context.js";
  *
  * Local mode has one trusted user, so the process environment is theirs
  * to use, with stored secrets layered on top.
+ *
+ * `ollama` says the run goes to Bento's Ollama, which shares no login.
  */
 export async function resolveAgentEnv(
   ctx: AppContext,
   organizationId: string | null,
   adapter: {
+    cli?: string;
     requiredEnv: string[];
     optionalEnv?: string[];
     authAlternatives?: string[];
     requiredEnvFor?(model: string): string[];
   },
   model?: string,
-): Promise<{ env: Record<string, string>; missing: string[] }> {
+): Promise<{ env: Record<string, string>; missing: string[]; ollama: boolean }> {
   const env: Record<string, string> = {};
-  // An ollama/ model is given Ollama's credentials only. Otherwise
   // requiredEnvFor replaces requiredEnv, so a Codex OpenRouter run does
-  // not also take OPENAI_API_KEY into the sandbox.
+  // not also take OPENAI_API_KEY into the sandbox. An ollama/ model looks
+  // up Ollama's credentials: see credentialNamesFor.
   const names = credentialNamesFor(adapter, model);
   const required = names.required;
   const alternatives = names.alternatives;
   const wanted = [...required, ...names.optional, ...alternatives];
-  if (wanted.length === 0) return { env, missing: [] };
+  if (wanted.length === 0) return { env, missing: [], ollama: false };
 
   if (ctx.env.BENTO_MODE !== "multi") {
     for (const name of wanted) {
@@ -62,18 +65,15 @@ export async function resolveAgentEnv(
   }
 
   /**
-   * Ollama Cloud needs a key. A server the organization named may not,
-   * so a saved base URL is enough to start. A Docker sandbox reaches
-   * this machine's loopback as host.docker.internal, the same rewrite
-   * the MCP gateway gets, so a local mode user's own Ollama server works
-   * as saved.
+   * A run on Bento's Ollama keeps Ollama's credentials and nothing else,
+   * so no Anthropic key or login token reaches the server OLLAMA_BASE_URL
+   * names. Ollama Cloud needs a key; a server the organization named may
+   * not, so a saved base URL is enough to start.
    */
-  if (model && isOllamaModel(model)) {
-    if (env.OLLAMA_BASE_URL && ctx.driver.provider === "docker") {
-      env.OLLAMA_BASE_URL = env.OLLAMA_BASE_URL.replace(/\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/, "//host.docker.internal");
-    }
-    const cloud = ollamaServerUrl(env.OLLAMA_BASE_URL) === OLLAMA_CLOUD_URL;
-    return { env, missing: cloud && !env.OLLAMA_API_KEY ? ["OLLAMA_API_KEY"] : [] };
+  if (runsOnOllama(names, env)) {
+    const ollama = ollamaCredentialsOnly(env);
+    if (ollama.OLLAMA_BASE_URL) ollama.OLLAMA_BASE_URL = ollamaUrlFromSandbox(ollama.OLLAMA_BASE_URL, ctx.driver.provider);
+    return { env: ollama, missing: missingOllamaCredentials(ollama), ollama: true };
   }
 
   /**
@@ -96,8 +96,8 @@ export async function resolveAgentEnv(
   const redirected = wanted.some((name) => name.endsWith("_BASE_URL") && env[name]);
   if (!redirected && alternatives.some((name) => env[name])) {
     for (const name of required) delete env[name];
-    return { env, missing: [] };
+    return { env, missing: [], ollama: false };
   }
   for (const name of alternatives) delete env[name];
-  return { env, missing: required.filter((name) => !env[name]) };
+  return { env, missing: required.filter((name) => !env[name]), ollama: false };
 }

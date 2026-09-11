@@ -1,4 +1,4 @@
-import { credentialNamesFor, forwardedEnvNames, providerKeyFor, requiredEnvForModel, writeFileCommand } from "./adapter.js";
+import { credentialNamesFor, forwardedEnvNames, providerKeyFor, requiredEnvForModel, runsOnOllama, writeFileCommand } from "./adapter.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
@@ -1020,20 +1020,39 @@ const OLLAMA = { OLLAMA_API_KEY: "ollama-secret", OLLAMA_BASE_URL: "http://gpu-b
  * ollama/ model is given Ollama's credentials and no shared login.
  */
 test("an Ollama run is given Ollama's credentials and no shared login", () => {
-  for (const adapter of [claudeCodeAdapter, opencodeAdapter, dshAdapter]) {
-    assert.deepEqual(credentialNamesFor(adapter, "ollama/glm-5.1"), {
+  for (const adapter of [claudeCodeAdapter, dshAdapter]) {
+    const names = credentialNamesFor(adapter, "ollama/glm-5.1");
+    assert.deepEqual(names, {
       required: [],
       optional: ["OLLAMA_API_KEY", "OLLAMA_BASE_URL"],
       alternatives: [],
-      sharesLogin: false,
+      ollama: "always",
     });
+    // With nothing saved it is still Ollama's, and the run stops naming the key.
+    assert.equal(runsOnOllama(names, {}), true);
   }
   assert.deepEqual(credentialNamesFor(claudeCodeAdapter, "claude-sonnet-5"), {
     required: ["ANTHROPIC_API_KEY"],
     optional: ["ANTHROPIC_BASE_URL"],
     alternatives: ["CLAUDE_CODE_OAUTH_TOKEN"],
-    sharesLogin: true,
+    ollama: "never",
   });
+});
+
+/**
+ * "ollama" is also a provider opencode's own config can define. Bento's
+ * Ollama takes the model over only once Ollama credentials are saved;
+ * until then the run is opencode's, with opencode's credentials.
+ */
+test("opencode keeps its own ollama provider until Ollama credentials are saved", () => {
+  const names = credentialNamesFor(opencodeAdapter, "ollama/qwen3:8b");
+  assert.equal(names.ollama, "when-saved");
+  assert.deepEqual(names.optional, [...(opencodeAdapter.optionalEnv ?? []), "OLLAMA_API_KEY", "OLLAMA_BASE_URL"]);
+  assert.equal(runsOnOllama(names, { ANTHROPIC_API_KEY: "sk-ant" }), false);
+  assert.equal(runsOnOllama(names, { OLLAMA_BASE_URL: "http://gpu-box:11434" }), true);
+  const input = { prompt: "do it", model: "ollama/qwen3:8b", cwd: "/workspace" };
+  assert.deepEqual(opencodeAdapter.env?.({ ...input, credentials: { ANTHROPIC_API_KEY: "sk-ant" } }), {});
+  assert.deepEqual(opencodeAdapter.env?.(input), {});
 });
 
 test("Claude Code on an Ollama model talks to Ollama and nothing of Anthropic's", () => {
@@ -1106,4 +1125,16 @@ test("writeFileCommand writes content a shell would otherwise mangle", async () 
   const [command, ...args] = writeFileCommand(file);
   await new Promise<void>((resolve, reject) => execFile(command!, args, (err) => (err ? reject(err) : resolve())));
   assert.equal(await readFile(file.path, "utf8"), file.content);
+});
+
+/**
+ * pi reaches no Ollama of Bento's, so an ollama/ model there is pi's own
+ * provider (from its models.json) and keeps pi's credentials and login.
+ */
+test("an ollama/ model on a tool Bento does not point at Ollama keeps that tool's credentials", () => {
+  const names = credentialNamesFor(piAdapter, "ollama/gpt-oss:20b");
+  assert.equal(names.ollama, "never");
+  assert.equal(runsOnOllama(names, { OLLAMA_API_KEY: "k" }), false);
+  assert.deepEqual(names.optional, piAdapter.optionalEnv);
+  assert.ok(!names.optional.includes("OLLAMA_API_KEY"));
 });

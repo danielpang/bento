@@ -44,12 +44,33 @@ export function ollamaServerUrl(saved: string | undefined): string {
   return trimmed || OLLAMA_CLOUD_URL;
 }
 
+/** Whether any Ollama credential was saved or exported. */
+export function hasOllamaCredentials(env: Readonly<Record<string, string>>): boolean {
+  return Boolean(env.OLLAMA_API_KEY || env.OLLAMA_BASE_URL);
+}
+
+/** The Ollama credentials out of a resolved environment, and nothing else. */
+export function ollamaCredentialsOnly(env: Readonly<Record<string, string>>): Record<string, string> {
+  const only: Record<string, string> = {};
+  for (const name of OLLAMA_CREDENTIAL_NAMES) {
+    const value = env[name];
+    if (value) only[name] = value;
+  }
+  return only;
+}
+
+/** Ollama Cloud needs a key. A server the organization named may not. */
+export function missingOllamaCredentials(env: Readonly<Record<string, string>>): string[] {
+  return ollamaServerUrl(env.OLLAMA_BASE_URL) === OLLAMA_CLOUD_URL && !env.OLLAMA_API_KEY ? ["OLLAMA_API_KEY"] : [];
+}
+
 /**
- * The cost to record for a run, or nothing. Claude Code prices every
- * model as a Claude model, so the figure it reports for an Ollama run is
- * made up: $0.12 for a run on a free model. Recording nothing reads as
- * "not reported", which is true, rather than as spend.
+ * The address a sandbox uses for a saved Ollama server. A Docker sandbox
+ * reaches this machine's loopback as host.docker.internal, the same
+ * rewrite the MCP gateway gets, so an Ollama server on the machine
+ * running Bento works as saved. Every other driver dials it as given.
  */
-export function trustedCostUsd(model: string, costUsd: number | undefined): number | undefined {
-  return isOllamaModel(model) ? undefined : costUsd;
+export function ollamaUrlFromSandbox(saved: string, driver: string): string {
+  if (driver !== "docker") return saved;
+  return saved.replace(/\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/, "//host.docker.internal");
 }

@@ -1,5 +1,5 @@
 import type { AgentEvent, RunOutcome } from "@bento/core";
-import { isOllamaModel, ollamaModelId, ollamaServerUrl } from "@bento/core";
+import { hasOllamaCredentials, isOllamaModel, ollamaModelId, ollamaServerUrl } from "@bento/core";
 import {
   providerKeyFor,
   type AgentAdapter,
@@ -63,7 +63,10 @@ export const opencodeAdapter: AgentAdapter = {
    * travels in the environment as OLLAMA_API_KEY.
    */
   env(input: BuildCommandInput): Record<string, string> {
-    if (!isOllamaModel(input.model)) return {};
+    // Without Ollama credentials saved in Bento, ollama/ is the provider
+    // of that name in the user's own opencode config, as it was before
+    // Bento offered Ollama.
+    if (!isOllamaModel(input.model) || !hasOllamaCredentials(input.credentials ?? {})) return {};
     const id = ollamaModelId(input.model);
     const options: Record<string, string> = {
       baseURL: `${ollamaServerUrl(input.credentials?.OLLAMA_BASE_URL)}/v1`,

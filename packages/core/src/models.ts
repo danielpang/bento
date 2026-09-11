@@ -105,6 +105,56 @@ export function providersForCli(cli: string): CatalogProvider[] {
     .filter((p): p is CatalogProvider => Boolean(p));
 }
 
+/**
+ * Whether this tool, running this model, goes to Ollama.
+ *
+ * The ollama/ prefix means Ollama only on the tools Bento points at it.
+ * Anywhere else the string is whatever that tool makes of it (pi users
+ * define providers of their own under that name), and Bento treats it
+ * exactly as it did before Ollama was listed.
+ */
+export function routesToOllama(cli: string, model: string): boolean {
+  return isOllamaModel(model) && (BY_CLI[cli] ?? []).includes("ollama");
+}
+
+/**
+ * Whether Bento's Ollama waits for saved credentials on this tool.
+ *
+ * opencode names providers itself, and "ollama" is one its own config can
+ * define, so an ollama/ model there runs with the user's own opencode
+ * setup until Ollama credentials are saved in Bento. Claude Code and
+ * DeepSeek Harness have no such setup to fall back on.
+ */
+export function ollamaNeedsSavedCredentials(cli: string): boolean {
+  return namesItsProvider(cli);
+}
+
+/**
+ * The cost to record for a run, or nothing. Claude Code prices every
+ * model as a Claude model, so the figure it reports for an Ollama run is
+ * made up: $0.12 for a run on a free model. Recording nothing reads as
+ * "not reported", which is true, rather than as spend.
+ */
+export function trustedCostUsd(cli: string, model: string, costUsd: number | undefined): number | undefined {
+  return routesToOllama(cli, model) ? undefined : costUsd;
+}
+
+/**
+ * The same rule for a transcript event. The result line of a run is
+ * where the cost is shown ("finished · $0.12"), so an untrusted figure
+ * is dropped there too, not only from the run's row.
+ */
+export function withTrustedCost<T extends { type: string; costUsd?: number | undefined }>(
+  cli: string,
+  model: string,
+  event: T,
+): T {
+  if (event.type !== "result" || event.costUsd === undefined) return event;
+  if (trustedCostUsd(cli, model, event.costUsd) !== undefined) return event;
+  const { costUsd: _untrusted, ...rest } = event;
+  return rest as T;
+}
+
 export function providerById(id: string): CatalogProvider | undefined {
   return MODEL_CATALOG.find((p) => p.id === id);
 }
@@ -235,7 +285,11 @@ function providerOfModel(model: string): CatalogProvider | undefined {
     const named = MODEL_CATALOG.find((p) => p.id === model.slice(0, slash));
     if (named) return named;
   }
-  return MODEL_CATALOG.find((p) => p.models.some((m) => m.id === model));
+  // Never Ollama by a bare id, for the reason providerForProfile gives. A
+  // tool that cannot reach Ollama was allowed a model like gpt-oss:20b
+  // before Ollama was listed (Codex pointed at an Ollama server of its
+  // own), and listing it must not turn that into a refusal.
+  return MODEL_CATALOG.find((p) => p.id !== "ollama" && p.models.some((m) => m.id === model));
 }
 
 /**
@@ -249,7 +303,7 @@ function providerOfModel(model: string): CatalogProvider | undefined {
  */
 export function checkAgentPairing(cli: string, model: string): AgentPairing {
   const guidance = modelGuidanceFor(cli);
-  if (guidance?.bareModelId && model.includes("/") && !isOllamaModel(model)) {
+  if (guidance?.bareModelId && model.includes("/") && !routesToOllama(cli, model)) {
     const example = guidance.examples[0] ?? guidance.defaultModel;
     return {
       status: "impossible",
@@ -269,16 +323,11 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
     // provider this tool cannot use serves it. A slash on Codex is
     // OpenRouter (handled above). A google/ slug on Claude Code names
     // a provider it cannot reach, so it is impossible rather than an
-    // unlisted OpenRouter id.
+    // unlisted OpenRouter id. An ollama/ string reaches this point only
+    // on a tool Bento does not point at Ollama, where it names nothing
+    // Bento can judge.
     const elsewhere = providerOfModel(model);
-    if (elsewhere?.id === "ollama" && allowed.some((p) => p.id === "ollama")) {
-      return {
-        status: "impossible",
-        provider: elsewhere,
-        detail: `Ollama models take the ollama/ prefix, for example ollama/${model}.`,
-      };
-    }
-    if (elsewhere && !allowed.some((p) => p.id === elsewhere.id)) {
+    if (elsewhere && elsewhere.id !== "ollama" && !allowed.some((p) => p.id === elsewhere.id)) {
       const reachable = allowed.map((p) => p.name).join(", ");
       return {
         status: "impossible",
@@ -286,9 +335,16 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
         detail: `This tool cannot run ${elsewhere.name} models. It reaches ${reachable}.`,
       };
     }
+    // A bare id Ollama serves may be meant for a base URL pointed at an
+    // Ollama server, which is allowed. The prefix is the other reading.
+    const ollamaServes =
+      allowed.some((p) => p.id === "ollama") &&
+      Boolean(providerById("ollama")?.models.some((m) => m.id === model));
     return {
       status: "unknown",
-      detail: "This model is not in the catalog, so its provider could not be checked.",
+      detail: ollamaServes
+        ? `This model is not in the catalog for this tool, so its provider could not be checked. To run it on Ollama, use ollama/${model}.`
+        : "This model is not in the catalog, so its provider could not be checked.",
     };
   }
 

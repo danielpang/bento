@@ -15,6 +15,7 @@ import { YamlFileActions, downloadYaml } from "./YamlFileActions.js";
 import {
   MODEL_GUIDANCE,
   checkAgentPairing,
+  isOllamaModel,
   modelGuidanceFor,
   modelStringFor,
   providersForCli,
@@ -492,7 +493,7 @@ export function AgentsPanel({
                   </option>
                 ))}
               </select>
-              <CapabilityChips cli={cli} />
+              <CapabilityChips cli={cli} model={model.trim()} />
               {PREVIEW_TOOLS[cli] && (
                 <p className="warn">
                   <strong>Developer preview.</strong> It prints nothing while it works, so the card stays quiet until
@@ -583,6 +584,15 @@ export function AgentsPanel({
               {pairing.status !== "ok" && (
                 <p className={pairing.status === "impossible" ? "error" : "muted"}>{pairing.detail}</p>
               )}
+              {/* Said where the model is picked, not only on a chip's
+                  hover title: a spend total that silently leaves these
+                  runs out would read as cheap rather than unmeasured. */}
+              {cli === "claude-code" && isOllamaModel(model.trim()) && (
+                <p className="muted">
+                  Cost is not recorded for runs on Ollama. Claude Code would price the model as a Claude model, so
+                  the figure would be wrong.
+                </p>
+              )}
             </label>
             <div className="field">
               <button
@@ -662,10 +672,10 @@ export function AgentsPanel({
  * replaced is still on the chip's title, so the detail is a hover away
  * rather than three lines of prose nobody finished.
  */
-function CapabilityChips({ cli }: { cli: string }) {
+function CapabilityChips({ cli, model }: { cli: string; model?: string }) {
   return (
     <div className="cap-chips">
-      {toolCapabilities(cli).map((capability) => (
+      {toolCapabilities(cli, model).map((capability) => (
         <span key={capability.icon} className="chip chip-soft cap-chip" title={capability.detail}>
           <CapabilityIcon icon={capability.icon} />
           {capability.label}

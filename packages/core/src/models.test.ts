@@ -7,6 +7,9 @@ import {
   modelStringFor,
   providerForProfile,
   providersForCli,
+  routesToOllama,
+  trustedCostUsd,
+  withTrustedCost,
 } from "./models.js";
 
 test("a prefixed model string names its own provider", () => {
@@ -431,17 +434,60 @@ test("the tools that reach Ollama take its prefixed model string", () => {
   }
 });
 
-test("a bare Ollama id is refused with the prefix that fixes it", () => {
+/**
+ * A bare id Ollama serves is still allowed: Claude Code with its base URL
+ * pointed at an Ollama server runs glm-5.1 exactly that way, which is
+ * Ollama's own documented setup. The prefix is offered, not demanded.
+ */
+test("a bare Ollama id stays unknown, with the prefix as a hint", () => {
   const verdict = checkAgentPairing("claude-code", "glm-5.1");
-  assert.equal(verdict.status, "impossible");
+  assert.equal(verdict.status, "unknown");
   assert.match(verdict.detail, /ollama\/glm-5\.1/);
   // Never read as Ollama's either, or the agent would wear Ollama's mark
   // while its runs went to Anthropic.
   assert.notEqual(providerForProfile("claude-code", "glm-5.1")?.id, "ollama");
 });
 
-test("tools that cannot reach Ollama refuse its models", () => {
-  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse"]) {
-    assert.equal(checkAgentPairing(cli, "ollama/glm-5.1").status, "impossible", `${cli} accepted an Ollama model`);
+/**
+ * Listing Ollama must not refuse an agent that saved before it was
+ * listed. These were "unknown" then: Codex on an Ollama server of
+ * its own through OPENAI_BASE_URL, and pi with an ollama provider in its
+ * own models.json, among them.
+ */
+test("agents that saved before Ollama was listed still save", () => {
+  for (const [cli, model] of [
+    ["codex", "gpt-oss:20b"],
+    ["claude-code", "glm-5.1"],
+    ["cursor", "kimi-k2.6"],
+    ["pi", "ollama/gpt-oss:20b"],
+  ] as const) {
+    assert.equal(checkAgentPairing(cli, model).status, "unknown", `${cli} on ${model}`);
   }
+  // Tools that take bare ids refuse any prefix, as they always did.
+  for (const cli of ["antigravity", "muse"]) {
+    assert.match(checkAgentPairing(cli, "ollama/glm-5.1").detail, /takes a bare model id/);
+  }
+});
+
+test("only the tools Bento points at Ollama send ollama/ runs there", () => {
+  for (const cli of ["claude-code", "opencode", "dsh"]) assert.equal(routesToOllama(cli, "ollama/glm-5.1"), true);
+  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse", "fake"]) {
+    assert.equal(routesToOllama(cli, "ollama/glm-5.1"), false, cli);
+  }
+  assert.equal(routesToOllama("claude-code", "glm-5.1"), false);
+});
+
+test("a cost reported for an Ollama run is not kept, and every other cost is", () => {
+  assert.equal(trustedCostUsd("claude-code", "ollama/gpt-oss:120b", 0.117262), undefined);
+  assert.equal(trustedCostUsd("claude-code", "claude-sonnet-5", 0.42), 0.42);
+  // pi's own ollama provider prices its runs itself.
+  assert.equal(trustedCostUsd("pi", "ollama/gpt-oss:20b", 0.01), 0.01);
+});
+
+test("a result event on an Ollama run loses its cost, and nothing else does", () => {
+  const result = { type: "result", ok: true, costUsd: 0.117262, numTurns: 2 };
+  assert.deepEqual(withTrustedCost("claude-code", "ollama/glm-5.1", result), { type: "result", ok: true, numTurns: 2 });
+  assert.equal(withTrustedCost("claude-code", "claude-sonnet-5", result), result);
+  const message = { type: "message", role: "assistant", text: "done" };
+  assert.equal(withTrustedCost("claude-code", "ollama/glm-5.1", message), message);
 });

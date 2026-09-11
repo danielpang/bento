@@ -53,3 +53,15 @@ test("the sentence form still contains what the chips say", () => {
     }
   }
 });
+
+/**
+ * Claude Code reports cost, but on an Ollama model its figure is priced
+ * as a Claude model, so the chip has to stop promising one there.
+ */
+test("Claude Code on an Ollama model says its cost is not reported, and why", () => {
+  const chips = toolCapabilities("claude-code", "ollama/glm-5.1");
+  assert.equal(chips[1]!.icon, "no-cost");
+  assert.match(chips[1]!.label, /Ollama/);
+  assert.match(toolCapability("claude-code", "ollama/glm-5.1"), /would price them as Claude models/);
+  assert.equal(toolCapabilities("claude-code", "claude-sonnet-5")[1]!.icon, "cost");
+});

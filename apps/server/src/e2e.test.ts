@@ -6580,3 +6580,27 @@ test("a Docker sandbox reaches an Ollama server on this machine's loopback", asy
     ctx.driver = driver;
   }
 });
+
+/**
+ * "ollama" is also a provider opencode's own config can define. Until
+ * Ollama credentials are saved, an ollama/ model on opencode is that
+ * provider's, with opencode's own credentials, rather than a run stopped
+ * for want of an Ollama key.
+ */
+test("an opencode run keeps its own ollama provider until Ollama credentials are saved", async () => {
+  await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: null, ANTHROPIC_API_KEY: "sk-ant-api-local" }, async () => {
+    const { env, missing, ollama } = await resolveAgentEnv(ctx, null, opencodeAdapter, "ollama/qwen3:8b");
+    assert.equal(ollama, false);
+    assert.deepEqual(missing, []);
+    assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-api-local");
+  });
+  await withEnv(
+    { OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://gpu-box:11434", ANTHROPIC_API_KEY: "sk-ant-api-local" },
+    async () => {
+      const { env, missing, ollama } = await resolveAgentEnv(ctx, null, opencodeAdapter, "ollama/qwen3:8b");
+      assert.equal(ollama, true);
+      assert.deepEqual(missing, []);
+      assert.deepEqual(env, { OLLAMA_BASE_URL: "http://gpu-box:11434" });
+    },
+  );
+});

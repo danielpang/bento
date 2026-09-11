@@ -7,10 +7,10 @@ import {
   resolveRepositoryCommands,
   trustedCostUsd,
   withProviderOutageAdvice,
+  withTrustedCost,
   type RunOutcome,
 } from "@bento/core";
 import {
-  credentialNamesFor,
   getAdapter,
   runAgent,
   writeFileCommand,
@@ -149,7 +149,17 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   //
   // Never for an ollama/ model: the run goes to Ollama, and a shared
   // Claude login would be sent to whatever server OLLAMA_BASE_URL names.
-  const sharesLogin = credentialNamesFor(adapter, profile.model).sharesLogin;
+  //
+  // Credentials come from the owning organization, never from the
+  // server's own environment: see resolveAgentEnv. Resolved here, ahead
+  // of the logins, because it decides whether the run goes to Ollama.
+  const { env: agentEnv, missing, ollama: onOllama } = await resolveAgentEnv(
+    ctx,
+    project.organizationId,
+    adapter,
+    profile.model,
+  );
+  const sharesLogin = !onOllama;
   const authEnv = sharesLogin ? await agentAuthEnv(ctx, adapter) : {};
   /**
    * When the login arrives as an env token, the config mounts are not
@@ -395,9 +405,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   });
 
 
-  // Credentials come from the owning organization, never from the
-  // server's own environment: see resolveAgentEnv.
-  const { env: agentEnv, missing } = await resolveAgentEnv(ctx, project.organizationId, adapter, profile.model);
   // Commits land as the user rather than a placeholder. The adapter's
   // own variables go first, so anything the organization saved under
   // the same name wins: pool's base URL defaults to Poolside Platform
@@ -411,10 +418,15 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // when sharing is already on but this machine has no login for the
     // tool, saying "turn on sharing" would point at a switch already
     // flipped.
-    const canShareLogin = Boolean(adapter.configPaths?.length);
+    // An Ollama run shares no login, so the fixes worth naming are
+    // Ollama's own: the key, or a server of the organization's own.
+    const canShareLogin = !onOllama && Boolean(adapter.configPaths?.length);
     const sharing = canShareLogin && ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
-    const where =
-      ctx.env.BENTO_MODE === "multi"
+    const where = onOllama
+      ? ctx.env.BENTO_MODE === "multi"
+        ? "Add it under Team, or save an Ollama base URL naming an Ollama server you run. Then run again."
+        : "Save it under Agents, then Ollama, or save an Ollama base URL naming an Ollama server you run. Then run again."
+      : ctx.env.BENTO_MODE === "multi"
         ? "Add it under Team, then run again."
         : sharing
           ? `Login sharing is on, but this machine has no ${profile.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
@@ -607,7 +619,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           sessionRecorded = true;
           await ctx.db.update(agentRuns).set({ cliSessionId: event.sessionId }).where(eq(agentRuns.id, runId));
         }
-        await appendRunEvent(ctx, runId, event);
+        await appendRunEvent(ctx, runId, withTrustedCost(profile.cli, profile.model, event));
         if (event.type === "result") {
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
@@ -837,7 +849,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // Claude Code prices an Ollama model as a Claude one, so that figure is
   // not recorded. See trustedCostUsd.
   const { costUsd: reportedCost, ...reportedOutcome } = result.outcome;
-  const cost = trustedCostUsd(profile.model, reportedCost);
+  const cost = trustedCostUsd(profile.cli, profile.model, reportedCost);
   const outcome: RunOutcome = cost === undefined ? reportedOutcome : { ...reportedOutcome, costUsd: cost };
   if (!outcome.ok) {
     /**
@@ -1951,7 +1963,7 @@ async function resumeInterruptedRun(
       onEvent: async (event) => {
         // A draining process only consumes: its successor has the run.
         if (ctx.draining) return;
-        await appendRunEvent(ctx, run.id, event);
+        await appendRunEvent(ctx, run.id, withTrustedCost(profile.cli, profile.model, event));
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);
           await onTurnFinished(event.ok);

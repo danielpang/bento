@@ -1,4 +1,4 @@
-import { providerForProfile } from "./models.js";
+import { providerForProfile, routesToOllama } from "./models.js";
 import { isOllamaModel } from "./ollama.js";
 
 /**
@@ -87,7 +87,8 @@ export function outageProvider(
   // An Ollama run went to Ollama, whatever the harness calls itself in
   // its error ("DeepSeek API error", "Claude Code"), and Ollama has no
   // status page to send anyone to.
-  if (hint?.model && isOllamaModel(hint.model.trim())) return null;
+  const hinted = hint?.model?.trim() ?? "";
+  if (isOllamaModel(hinted) && (!hint?.cli || routesToOllama(hint.cli, hinted))) return null;
   for (const [pattern, provider] of MENTIONS) {
     if (pattern.test(error)) return provider;
   }
