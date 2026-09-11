@@ -1,4 +1,5 @@
-import { providerForProfile } from "./models.js";
+import { providerForProfile, routesToOllama } from "./models.js";
+import { isOllamaModel } from "./ollama.js";
 
 /**
  * Official status pages for every model provider a Bento tool can
@@ -83,6 +84,11 @@ export function outageProvider(
   error: string,
   hint?: { cli?: string | undefined; model?: string | undefined },
 ): StatusProvider | null {
+  // An Ollama run went to Ollama, whatever the harness calls itself in
+  // its error ("DeepSeek API error", "Claude Code"), and Ollama has no
+  // status page to send anyone to.
+  const hinted = hint?.model?.trim() ?? "";
+  if (isOllamaModel(hinted) && (!hint?.cli || routesToOllama(hint.cli, hinted))) return null;
   for (const [pattern, provider] of MENTIONS) {
     if (pattern.test(error)) return provider;
   }

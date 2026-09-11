@@ -1,4 +1,5 @@
 import type { AgentCli, AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
+import { hasOllamaCredentials, OLLAMA_CREDENTIAL_NAMES, ollamaNeedsSavedCredentials, routesToOllama } from "@bento/core";
 
 export interface BuildCommandInput {
   prompt: string;
@@ -180,6 +181,14 @@ export interface AgentAdapter {
    * spawn-failure detection.
    */
   env?(input: BuildCommandInput): Record<string, string>;
+  /**
+   * Files the tool needs in the sandbox before it starts, for settings it
+   * takes only from a file. DeepSeek Harness is the case: the token limit
+   * an Ollama model needs can only be lowered by a patch overlay. Written
+   * before every run, because sandboxes outlive runs. Never secrets:
+   * those travel through env.
+   */
+  files?(input: BuildCommandInput): McpFile[];
   /** Present when the tool can consume remote MCP servers. */
   mcp?: McpCapability;
   /** Present when the tool can hold a live stdin conversation. */
@@ -257,4 +266,59 @@ export function providerKeyFor(model: string): string[] {
   };
   const key = byProvider[model.split("/")[0] ?? ""];
   return key ? [key] : [];
+}
+
+/**
+ * How an ollama/ model decides where a run goes: always to Bento's
+ * Ollama, only once Ollama credentials are saved (opencode, whose own
+ * config can define an ollama provider), or never (a tool Bento does not
+ * point at Ollama).
+ */
+export type OllamaRoute = "always" | "when-saved" | "never";
+
+/**
+ * Which credentials to look up for a run, for this tool and model.
+ *
+ * Claude Code and DeepSeek Harness on an ollama/ model want Ollama's
+ * credentials and nothing else. opencode looks up both its own and
+ * Ollama's, because which set the run keeps depends on what was saved:
+ * see runsOnOllama.
+ */
+export function credentialNamesFor(
+  adapter: Pick<AgentAdapter, "requiredEnv" | "optionalEnv" | "authAlternatives" | "requiredEnvFor"> & { cli?: string },
+  model?: string,
+): { required: string[]; optional: string[]; alternatives: string[]; ollama: OllamaRoute } {
+  const own = {
+    // requiredEnvFor replaces requiredEnv: an openrouter/ model needs the
+    // OpenRouter key and nothing the tool requires in general.
+    required: requiredEnvForModel(adapter, model),
+    optional: adapter.optionalEnv ?? [],
+    alternatives: adapter.authAlternatives ?? [],
+  };
+  if (!model || !adapter.cli || !routesToOllama(adapter.cli, model)) return { ...own, ollama: "never" };
+  if (ollamaNeedsSavedCredentials(adapter.cli)) {
+    return { ...own, optional: [...own.optional, ...OLLAMA_CREDENTIAL_NAMES], ollama: "when-saved" };
+  }
+  return { required: [], optional: [...OLLAMA_CREDENTIAL_NAMES], alternatives: [], ollama: "always" };
+}
+
+/**
+ * Whether a run with the credentials found goes to Bento's Ollama. When
+ * it does, it is given Ollama's credentials only and no shared login: an
+ * Anthropic key or a Claude subscription token would otherwise be sent to
+ * whatever server OLLAMA_BASE_URL names.
+ */
+export function runsOnOllama(names: { ollama: OllamaRoute }, found: Readonly<Record<string, string>>): boolean {
+  return names.ollama === "always" || (names.ollama === "when-saved" && hasOllamaCredentials(found));
+}
+
+/**
+ * argv that writes one file into a sandbox. The content rides argv,
+ * single quoted, rather than exec env, which the sprite driver puts in
+ * the exec URL.
+ */
+export function writeFileCommand(file: McpFile): string[] {
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const dir = file.path.replace(/\/[^/]+$/, "") || "/";
+  return ["sh", "-c", `mkdir -p ${quote(dir)} && printf %s ${quote(file.content)} > ${quote(file.path)}`];
 }

@@ -201,3 +201,13 @@ test("every storable key can be supplied through a deployment's environment", as
     );
   }
 });
+
+test("the Ollama key and base URL are storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "OLLAMA_API_KEY");
+  assert.ok(key, "OLLAMA_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  const baseUrl = AGENT_CREDENTIALS.find((c) => c.name === "OLLAMA_BASE_URL");
+  assert.ok(baseUrl, "OLLAMA_BASE_URL cannot be stored");
+  assert.equal(baseUrl.secret, false);
+  assert.match(baseUrl.help, /https:\/\/ollama\.com/);
+});

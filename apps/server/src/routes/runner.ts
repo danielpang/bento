@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { agentEvent, forgetsBetweenRuns } from "@bento/core";
+import { agentEvent, forgetsBetweenRuns, trustedCostUsd, withTrustedCost } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, repositories, runEvents, stages } from "@bento/db";
 import { canAccessProject, visibleProjectFilter } from "../access.js";
 import type { AppContext } from "../context.js";
@@ -232,6 +232,12 @@ export function runnerRoutes(ctx: AppContext) {
       const authorized = await authorizeReport(ctx, c, runId, c.req.valid("json").runnerId);
       if ("error" in authorized) return c.json({ error: authorized.error }, authorized.status);
       const { run } = authorized;
+      // A cost Claude Code reports for an Ollama run is made up, so it
+      // never reaches the transcript. See withTrustedCost.
+      const [profile] = await db(c, ctx)
+        .select({ cli: agentProfiles.cli, model: agentProfiles.model })
+        .from(agentProfiles)
+        .where(eq(agentProfiles.id, run.agentProfileId));
       // Resolved once per report batch, for the board's output line.
       const [owner] = await db(c, ctx)
         .select({ featureId: features.id, projectId: features.projectId })
@@ -254,7 +260,9 @@ export function runnerRoutes(ctx: AppContext) {
        * (the reaper's requeue note, a finish line), so a collision does
        * not need the runner to notice and resend the batch.
        */
-      const events = c.req.valid("json").events;
+      const events = c.req
+        .valid("json")
+        .events.map((event) => withTrustedCost(profile?.cli ?? "", profile?.model ?? "", event));
       const writeBatch = () =>
         db(c, ctx).transaction(async (tx) => {
           // max() in SQL: loading every row grew with transcript length.
@@ -338,7 +346,7 @@ export function runnerRoutes(ctx: AppContext) {
           // session id must not erase one already recorded, or the
           // conversation ends with the failure it should survive.
           ...(body.sessionId !== undefined ? { cliSessionId: body.sessionId } : {}),
-          costUsd: body.costUsd !== undefined ? String(body.costUsd) : null,
+          costUsd: trustedCostUsd(profile?.cli ?? "", profile?.model ?? "", body.costUsd)?.toString() ?? null,
           numTurns: body.numTurns ?? null,
           error: body.ok ? (body.error ?? null) : runnerReportedError(profile?.cli, body.error, profile?.model),
         })
