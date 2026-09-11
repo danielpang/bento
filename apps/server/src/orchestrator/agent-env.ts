@@ -1,4 +1,5 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
+import { forwardedEnvNames, requiredEnvForModel } from "@bento/agents";
 import { secrets } from "@bento/db";
 import type { AppContext } from "../context.js";
 
@@ -27,9 +28,11 @@ export async function resolveAgentEnv(
   const env: Record<string, string> = {};
   // Provider agnostic tools require nothing in general and something
   // specific per model: an openrouter/ model needs the OpenRouter key.
-  const required = (model && adapter.requiredEnvFor?.(model)) || adapter.requiredEnv;
+  // requiredEnvFor replaces requiredEnv, so a Codex OpenRouter run does
+  // not also take OPENAI_API_KEY into the sandbox.
+  const required = requiredEnvForModel(adapter, model);
   const alternatives = adapter.authAlternatives ?? [];
-  const wanted = [...required, ...(adapter.optionalEnv ?? []), ...alternatives];
+  const wanted = forwardedEnvNames(adapter, model);
   if (wanted.length === 0) return { env, missing: [] };
 
   if (ctx.env.BENTO_MODE !== "multi") {

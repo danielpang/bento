@@ -1,4 +1,4 @@
-import { providerKeyFor } from "./adapter.js";
+import { forwardedEnvNames, providerKeyFor, requiredEnvForModel } from "./adapter.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
@@ -73,7 +73,11 @@ test("codex OpenRouter slugs select the OpenRouter provider and keep the key out
     model: "openai/gpt-5-mini",
     cwd: "/workspace",
     extraArgs: ["-c", 'model_reasoning_effort="high"'],
-    credentials: { OPENROUTER_API_KEY: "sk-or-routed" },
+    credentials: {
+      OPENROUTER_API_KEY: "sk-or-routed",
+      OPENAI_API_KEY: "sk-proj-leftover",
+      OPENAI_BASE_URL: "https://openrouter.ai/api/v1",
+    },
   };
   const cmd = codexAdapter.buildCommand(input);
   const provider = cmd.indexOf('model_provider="openrouter"');
@@ -84,6 +88,8 @@ test("codex OpenRouter slugs select the OpenRouter provider and keep the key out
   assert.ok(!cmd.some((arg) => arg.includes("sk-or-routed")), "the key never reaches argv");
   assert.ok(!cmd.some((arg) => arg.startsWith("openai_base_url")), "OpenRouter is not the built-in openai provider");
   assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(requiredEnvForModel(codexAdapter, "openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.equal(forwardedEnvNames(codexAdapter, "openai/gpt-5-mini").includes("OPENAI_API_KEY"), false);
   assert.deepEqual(codexAdapter.env?.(input), {});
   const resumed = codexAdapter.buildCommand({ ...input, resumeSessionId: "th_abc" });
   assert.ok(resumed.includes('model_provider="openrouter"'));
@@ -528,9 +534,15 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
+  const sampleModels = ["gpt-5-codex", "openai/gpt-5-mini", "openrouter/auto", "anthropic/claude-sonnet-5"];
   for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
     const adapter = getAdapter(cli);
-    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
+    const names = new Set([
+      ...adapter.requiredEnv,
+      ...(adapter.optionalEnv ?? []),
+      ...sampleModels.flatMap((model) => adapter.requiredEnvFor?.(model) ?? []),
+    ]);
+    for (const name of names) {
       // Poolside's enterprise endpoint is a local environment override.
       // Hosted v1 always targets Platform and deliberately offers no
       // organization setting for a custom endpoint.

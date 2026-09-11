@@ -209,6 +209,34 @@ export interface AgentAdapter {
   extractOutcome(events: AgentEvent[], exitCode: number): RunOutcome;
 }
 
+/**
+ * The credential names a run needs for this model.
+ *
+ * requiredEnvFor replaces requiredEnv entirely: a Codex OpenRouter slug
+ * needs OPENROUTER_API_KEY and must not also demand OPENAI_API_KEY.
+ * The hook is used when it exists, rather than or-ing its return onto
+ * requiredEnv, so an empty list stays empty.
+ */
+export function requiredEnvForModel(
+  adapter: Pick<AgentAdapter, "requiredEnv" | "requiredEnvFor">,
+  model?: string,
+): string[] {
+  if (model && adapter.requiredEnvFor) return adapter.requiredEnvFor(model);
+  return adapter.requiredEnv;
+}
+
+/** Names resolveAgentEnv forwards into the sandbox for this model. */
+export function forwardedEnvNames(
+  adapter: Pick<AgentAdapter, "requiredEnv" | "optionalEnv" | "authAlternatives" | "requiredEnvFor">,
+  model?: string,
+): string[] {
+  return [
+    ...requiredEnvForModel(adapter, model),
+    ...(adapter.optionalEnv ?? []),
+    ...(adapter.authAlternatives ?? []),
+  ];
+}
+
 export function lastResultEvent(events: AgentEvent[]): Extract<AgentEvent, { type: "result" }> | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];

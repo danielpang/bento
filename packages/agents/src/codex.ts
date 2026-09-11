@@ -55,6 +55,10 @@ export const codexAdapter: AgentAdapter = {
    * reads, so the stored key is handed over under that name.
    */
   env(input: BuildCommandInput): Record<string, string> {
+    // OpenRouter authenticates through OPENROUTER_API_KEY on the
+    // custom provider. Remapping a leftover OpenAI key would put
+    // CODEX_API_KEY in a sandbox that should not see it.
+    if (isOpenRouterSlug(input.model)) return {};
     const key = input.credentials?.OPENAI_API_KEY;
     return key ? { CODEX_API_KEY: key } : {};
   },

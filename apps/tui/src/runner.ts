@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { getAdapter, runAgent } from "@bento/agents";
+import { forwardedEnvNames, getAdapter, runAgent } from "@bento/agents";
 import { agentRunPrompt, forgetsBetweenRuns, type AgentEvent } from "@bento/core";
 import {
   DockerDriver,
@@ -209,12 +209,10 @@ export class LocalRunner {
     // Credentials come from this machine's environment and never reach
     // the server, which is the point of running agents locally.
     const credentials: Record<string, string> = {};
-    const wanted = new Set([
-      ...adapter.requiredEnv,
-      ...(adapter.optionalEnv ?? []),
-      ...(adapter.requiredEnvFor?.(agent.model) ?? []),
-    ]);
-    for (const name of wanted) {
+    // Same names the server forwards: requiredEnvFor replaces
+    // requiredEnv, so a Codex OpenRouter run does not also pick up
+    // OPENAI_API_KEY from this machine.
+    for (const name of forwardedEnvNames(adapter, agent.model)) {
       const value = process.env[name];
       if (value) credentials[name] = value;
     }
