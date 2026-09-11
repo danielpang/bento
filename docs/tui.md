@@ -27,6 +27,14 @@ bento
 
 Updates preserve your install location and Bento data. Rebuild the local sandbox image when prompted. Source installations use Git instead.
 
+To uninstall a release installation, quit other Bento sessions and run:
+
+```sh
+bento uninstall
+```
+
+The command shows the installation directory and command it will remove. Type `Y` and press Enter to confirm. Any other answer cancels. Your projects, settings, credentials, and local Docker data are kept. Source checkouts must be removed manually.
+
 The installer uses `/usr/local/lib/bento` when writable, otherwise `~/.local/lib/bento`. It prints the selected paths. The examples below use the home directory; substitute `/usr/local/lib/bento` if installed there.
 
 ### Windows (WSL 2)

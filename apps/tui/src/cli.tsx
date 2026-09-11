@@ -49,6 +49,14 @@ if (options.command === "update") {
     console.error(`Update failed: ${(error as Error).message}`);
     process.exitCode = 1;
   }
+} else if (options.command === "uninstall") {
+  try {
+    const { runUninstall } = await import("./uninstall.js");
+    await runUninstall();
+  } catch (error) {
+    console.error(`Uninstall failed: ${(error as Error).message}`);
+    process.exitCode = 1;
+  }
 } else if (options.command === "serve") {
   await runServe(options);
 } else if (options.command === "runner") {
