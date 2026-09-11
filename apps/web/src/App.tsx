@@ -13,6 +13,7 @@ import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { teamDisplayName } from "./team-name.js";
 import { useCountUp } from "./count-up.js";
 import { createRequestGate } from "./latest-request.js";
+import { buildWatch } from "./build-watch.js";
 import { Board, matchesQuery, neighbourCardId, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
 import { BottomBar } from "./components/BottomBar.js";
@@ -119,7 +120,10 @@ function RouteFallback() {
 }
 
 
-const client = new BentoClient({ baseUrl: window.location.origin });
+const client = new BentoClient({
+  baseUrl: window.location.origin,
+  onBuild: buildWatch.note,
+});
 
 const PROJECT_KEY = "bento:projectId";
 

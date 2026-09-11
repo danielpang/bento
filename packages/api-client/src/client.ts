@@ -7,6 +7,7 @@ import type {
   TeamPolicy,
 } from "./settings.js";
 import { SseParser, type AgentDelta, type AgentEvent, type GateCriteria } from "@bento/core";
+import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
   AgentRun,
@@ -43,6 +44,12 @@ export interface ClientOptions {
   /** Bearer token source for non-browser clients (TUI, Mac app). */
   tokens?: TokenStore;
   fetch?: typeof fetch;
+  /**
+   * A response named a console build (`x-bento-build`) this client had
+   * not seen. Fires once per distinct value. The console uses it to
+   * offer a reload after a deploy; other clients leave it unset.
+   */
+  onBuild?: (build: string) => void;
 }
 
 export interface RunStreamHandlers {
@@ -374,25 +381,43 @@ export class BentoClient {
   private baseUrl: string;
   private tokens: TokenStore | undefined;
   private fetchImpl: typeof fetch;
+  private onBuild: ((build: string) => void) | undefined;
+  private lastBuild: string | null = null;
 
   constructor(options: ClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.tokens = options.tokens;
     // Must be bound: an unbound window.fetch throws "Illegal invocation".
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.onBuild = options.onBuild;
+  }
+
+  /**
+   * Every request goes through here: the bearer token or the cookie,
+   * and the build header check before the status check, since a 404
+   * from a renamed route is a deploy too.
+   */
+  private async send(url: string, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    const token = await this.tokens?.get();
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    const res = await this.fetchImpl(url, {
+      ...init,
+      headers,
+      credentials: this.tokens ? "omit" : "include",
+    });
+    const build = res.headers.get(BUILD_HEADER);
+    if (build && build !== this.lastBuild) {
+      this.lastBuild = build;
+      this.onBuild?.(build);
+    }
+    return res;
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
-    const token = await this.tokens?.get();
-    if (token) headers.set("authorization", `Bearer ${token}`);
-
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
-      credentials: this.tokens ? "omit" : "include",
-    });
+    const res = await this.send(`${this.baseUrl}${path}`, { ...init, headers });
     if (!res.ok) {
       const body = await res.text();
       throw new ApiError(res.status, body || res.statusText);
@@ -523,14 +548,7 @@ export class BentoClient {
    * than JSON. Kept separate so `request` can go on assuming JSON.
    */
   private async requestText(path: string, init: RequestInit = {}): Promise<string> {
-    const headers = new Headers(init.headers);
-    const token = await this.tokens?.get();
-    if (token) headers.set("authorization", `Bearer ${token}`);
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
-      credentials: this.tokens ? "omit" : "include",
-    });
+    const res = await this.send(`${this.baseUrl}${path}`, init);
     const body = await res.text();
     if (!res.ok) throw new ApiError(res.status, body || res.statusText);
     return body;
@@ -574,6 +592,11 @@ export class BentoClient {
       ok: boolean;
       mode: string;
       driver: string;
+      /**
+       * The console build the server serves, when it serves one. The
+       * same value rides on every API response as `x-bento-build`.
+       */
+      build?: string;
       /** Which social logins the server is configured for (multi mode). */
       social?: { github: boolean; google: boolean };
       /**
@@ -938,11 +961,7 @@ export class BentoClient {
   async getBoardSnapshot(
     projectId: string,
   ): Promise<{ statuses: Record<string, string>; outputs: Record<string, string> }> {
-    const token = await this.tokens?.get();
-    const res = await this.fetchImpl(`${this.baseUrl}/api/projects/${projectId}/board/plain`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      credentials: this.tokens ? "omit" : "include",
-    });
+    const res = await this.send(`${this.baseUrl}/api/projects/${projectId}/board/plain`);
     if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
     const statuses: Record<string, string> = {};
     const outputs: Record<string, string> = {};
@@ -1116,11 +1135,8 @@ export class BentoClient {
     artifactId: string,
     options: { signal?: AbortSignal; maxBytes?: number } = {},
   ): Promise<Uint8Array> {
-    const token = await this.tokens?.get();
-    const response = await this.fetchImpl(this.artifactContentUrl(artifactId), {
+    const response = await this.send(this.artifactContentUrl(artifactId), {
       ...(options.signal ? { signal: options.signal } : {}),
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      credentials: this.tokens ? "omit" : "include",
     });
     if (!response.ok) throw new ApiError(response.status, await response.text());
     if (options.maxBytes === undefined) return new Uint8Array(await response.arrayBuffer());
@@ -1389,11 +1405,7 @@ export class BentoClient {
     runId: string,
     since = 0,
   ): Promise<{ cursor: number; status: string; lines: string[] }> {
-    const token = await this.tokens?.get();
-    const res = await this.fetchImpl(`${this.baseUrl}/api/runs/${runId}/transcript?since=${since}`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      credentials: this.tokens ? "omit" : "include",
-    });
+    const res = await this.send(`${this.baseUrl}/api/runs/${runId}/transcript?since=${since}`);
     if (!res.ok) throw new ApiError(res.status, res.statusText);
     const text = await res.text();
     const [header = "cursor|0|unknown", ...lines] = text.split("\n");
@@ -1472,12 +1484,7 @@ export class BentoClient {
       let failures = 0;
       while (!controller.signal.aborted) {
         try {
-          const token = await this.tokens!.get();
-          const res = await this.fetchImpl(`${base}?since=${lastSeq}`, {
-            headers: token ? { authorization: `Bearer ${token}` } : {},
-            credentials: "omit",
-            signal: controller.signal,
-          });
+          const res = await this.send(`${base}?since=${lastSeq}`, { signal: controller.signal });
           if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
@@ -1559,10 +1566,7 @@ export class BentoClient {
         let failures = 0;
         while (!controller.signal.aborted) {
           try {
-            const token = await this.tokens?.get();
-            const response = await this.fetchImpl(`${this.baseUrl}/api/board/${projectId}/events`, {
-              headers: token ? { authorization: `Bearer ${token}` } : {},
-              credentials: this.tokens ? "omit" : "include",
+            const response = await this.send(`${this.baseUrl}/api/board/${projectId}/events`, {
               signal: controller.signal,
             });
             if (!response.ok || !response.body) throw new ApiError(response.status, response.statusText);

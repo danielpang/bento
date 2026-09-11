@@ -13,6 +13,8 @@ COPY apps/server ./apps/server
 COPY apps/web ./apps/web
 
 RUN pnpm install --frozen-lockfile
+# Also the console's build id (apps/web/src/build-id.ts).
+ARG SOURCE_COMMIT
 RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
 
 # Upload the maps, then delete them even if the upload was skipped: the
@@ -21,7 +23,6 @@ RUN pnpm --filter @bento/server... build && pnpm --filter @bento/web... build
 # POSTHOG_HOST only for a deployment off PostHog US cloud.
 ARG POSTHOG_HOST
 ARG POSTHOG_PROJECT_ID
-ARG SOURCE_COMMIT
 RUN --mount=type=secret,id=posthog_api_key \
     set -eu; \
     if [ -s /run/secrets/posthog_api_key ] && [ -n "${POSTHOG_PROJECT_ID:-}" ]; then \

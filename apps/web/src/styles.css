@@ -4962,6 +4962,18 @@ button.lane-agent[data-saving] {
   border-left-color: var(--succeeded);
 }
 
+/* The reload prompt after a deploy. */
+.toast[data-tone="update"] {
+  border-left-color: var(--brand);
+  align-items: center;
+}
+
+.toast-action {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .toast-text {
   flex: 1;
   min-width: 0;
