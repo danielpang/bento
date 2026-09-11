@@ -7,6 +7,15 @@ export interface BuildCommandInput {
   cwd: string;
   resumeSessionId?: string;
   extraArgs?: string[];
+  /**
+   * The credentials resolved for this run, under the names Bento stores
+   * them by. For tools that want a stored value under another name or as
+   * a flag: Codex reads neither OPENAI_API_KEY nor OPENAI_BASE_URL any
+   * more. Only base URLs may be copied into argv, which a process
+   * listing shows to anything else in the sandbox; keys travel through
+   * the env hook.
+   */
+  credentials?: Readonly<Record<string, string>>;
 }
 
 /**

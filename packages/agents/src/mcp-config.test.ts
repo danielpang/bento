@@ -64,6 +64,9 @@ test("codex renders TOML tables with a static Authorization header", () => {
   const files = codexAdapter.mcp!.renderConfig(servers);
   assert.equal(files[0]!.path, "/root/.codex/config.toml");
   const toml = files[0]!.content;
+  assert.match(toml, /\[model_providers\.openrouter\]/);
+  assert.match(toml, /env_key = "OPENROUTER_API_KEY"/);
+  assert.match(toml, /base_url = "https:\/\/openrouter\.ai\/api\/v1"/);
   assert.match(toml, /\[mcp_servers\.docs\]/);
   assert.match(toml, /url = "https:\/\/bento\.test\/api\/mcp-gateway\/abc"/);
   assert.match(toml, /http_headers = \{ "Authorization" = "Bearer bmg_token" \}/);
@@ -85,6 +88,9 @@ test("an empty server set still renders a config, so a removed server is cleared
     const bag = parsed.mcpServers ?? parsed.mcp ?? parsed.mcp_servers ?? {};
     assert.equal(Object.keys(bag).length, 0, `${adapter.cli} must clear stale servers`);
   }
-  // Codex clears by writing an empty file.
-  assert.equal(codexAdapter.mcp!.renderConfig([])[0]!.content, "");
+  // Codex keeps the OpenRouter provider so a removed MCP server does
+  // not drop the route, and writes no mcp_servers tables.
+  const emptyCodex = codexAdapter.mcp!.renderConfig([])[0]!.content;
+  assert.match(emptyCodex, /\[model_providers\.openrouter\]/);
+  assert.doesNotMatch(emptyCodex, /\[mcp_servers\./);
 });

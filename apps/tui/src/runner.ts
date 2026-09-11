@@ -206,25 +206,33 @@ export class LocalRunner {
       ...(run.kind ? { kind: run.kind } : {}),
     });
 
+    // Credentials come from this machine's environment and never reach
+    // the server, which is the point of running agents locally.
+    const credentials: Record<string, string> = {};
+    const wanted = new Set([
+      ...adapter.requiredEnv,
+      ...(adapter.optionalEnv ?? []),
+      ...(adapter.requiredEnvFor?.(agent.model) ?? []),
+    ]);
+    for (const name of wanted) {
+      const value = process.env[name];
+      if (value) credentials[name] = value;
+    }
+
     const commandInput = {
       prompt,
       model: agent.model,
       cwd: workdir,
       ...(run.resumeSessionId ? { resumeSessionId: run.resumeSessionId } : {}),
       ...(agent.extraArgs.length ? { extraArgs: agent.extraArgs } : {}),
+      credentials,
     };
     const argv = adapter.buildCommand(commandInput);
 
-    // Credentials come from this machine's environment and never reach
-    // the server, which is the point of running agents locally. The
-    // adapter's own variables go under them: pool's model travels this
-    // way, since `pool exec` has no flag for it, and an exported base
-    // URL still wins over the default.
-    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}) };
-    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
-      const value = process.env[name];
-      if (value) env[name] = value;
-    }
+    // The adapter's own variables go under the credentials: pool's model
+    // travels this way, since `pool exec` has no flag for it, and an
+    // exported base URL still wins over the default.
+    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}), ...credentials };
 
     let pending: AgentEvent[] = [];
 

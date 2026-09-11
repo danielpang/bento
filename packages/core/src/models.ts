@@ -126,12 +126,16 @@ export function modelStringFor(cli: string, providerId: string, modelId: string)
  * The inverse of modelStringFor, and lossier, because the tools disagree
  * about what a model string looks like. Three cases, in order:
  *
- * 1. A prefixed string ("anthropic/claude-sonnet-5") names its provider,
- *    which is the provider agnostic tools' shape.
- * 2. A bare id is looked up among the providers that tool can use. This
- *    is why the search is scoped to the tool rather than the whole
- *    catalog: several providers serve the same model id through
- *    OpenRouter, and the tool decides which one is meant.
+ * 1. A prefixed string ("anthropic/claude-sonnet-5") names its provider
+ *    on the tools that put the provider in the model string (pi,
+ *    opencode, and pool). Codex and Claude Code take bare ids natively,
+ *    so openai/gpt-5-mini is OpenRouter's slug rather than OpenAI's.
+ *    The explicit openrouter/ prefix is the exception both kinds share.
+ * 2. A bare id, or a slug the prefix rule did not claim, is looked up
+ *    among the providers that tool can use. This is why the search is
+ *    scoped to the tool rather than the whole catalog: several
+ *    providers serve the same model id through OpenRouter, and the
+ *    tool decides which one is meant.
  * 3. The tool's own default model belongs to the tool's own provider.
  *    The snapshot trails the tools, so a default can be newer than the
  *    catalog: codex ships gpt-5-codex, which is OpenAI's whether or not
@@ -155,7 +159,7 @@ export function providerForProfile(cli: string, model: string): CatalogProvider 
   if (slash > 0) {
     const prefix = model.slice(0, slash);
     const named = allowed.find((p) => p.id === prefix);
-    if (named) return named;
+    if (named && (namesItsProvider(cli) || prefix === "openrouter")) return named;
   }
 
   const serving = allowed.find((p) => p.models.some((m) => m.id === model));
@@ -172,7 +176,9 @@ export function providerForProfile(cli: string, model: string): CatalogProvider 
  * - `ok`: the tool reaches that model's provider directly.
  * - `routed`: it reaches it only by pointing its own base URL at
  *   OpenRouter. Legitimate, and the reason the pairing is allowed, but
- *   it needs a credential that plain use does not.
+ *   it needs a credential that plain use does not. Codex is the
+ *   exception: the adapter writes OpenRouter as a Codex provider, so
+ *   picking an OpenRouter model is enough.
  * - `unknown`: the model is not in the catalog, so nothing can be
  *   proved either way. The snapshot trails the tools, and people run
  *   models newer than it, so this is not a failure.
@@ -193,7 +199,11 @@ export interface AgentPairing {
 
 /** Tools that name the provider inside the model string. */
 function namesItsProvider(cli: string): boolean {
-  return cli === "opencode" || cli === "pi";
+  // pool's ids carry the vendor prefix ("poolside/laguna-s-2.1"), which
+  // is both what the API takes and how an unpublished Laguna stays
+  // typeable. Claude Code and Codex take bare ids natively, so a
+  // prefix there is an OpenRouter slug rather than a provider name.
+  return cli === "opencode" || cli === "pi" || cli === "pool";
 }
 
 /** Whoever serves this model, ignoring which tool wants to run it. */
@@ -233,10 +243,12 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
   const provider = providerForProfile(cli, model);
   if (!provider) {
     // Not reachable by this tool. Whether that is a mistake or just a
-    // model the catalog has not caught up with depends on whether
-    // anyone else serves it, so ask the whole catalog before judging.
+    // model the catalog has not caught up with depends on whether a
+    // provider this tool cannot use serves it. A slug whose prefix
+    // names a reachable provider (openai/gpt-brand-new on Codex) is
+    // unprovable, not impossible: the snapshot trails the tools.
     const elsewhere = providerOfModel(model);
-    if (elsewhere) {
+    if (elsewhere && !allowed.some((p) => p.id === elsewhere.id)) {
       const reachable = allowed.map((p) => p.name).join(", ");
       return {
         status: "impossible",
@@ -251,8 +263,13 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
   }
 
   if (provider.id === "openrouter" && !namesItsProvider(cli)) {
-    // The tool's own provider is first in its list, and its base URL is
-    // what gets pointed at OpenRouter.
+    // Codex writes OpenRouter as its own model_provider, so an
+    // OpenRouter slug is a first class pairing. Claude Code still
+    // speaks Anthropic's API and needs ANTHROPIC_BASE_URL pointed at
+    // OpenRouter.
+    if (cli === "codex") {
+      return { status: "ok", provider, detail: "Runs on OpenRouter." };
+    }
     const native = allowed[0]?.id.toUpperCase();
     const credential = AGENT_CREDENTIALS.find((c) => c.name === `${native}_BASE_URL`)?.name;
     return {

@@ -476,6 +476,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     mcpArgs,
     cardTools,
     setupWarning: setupFailure,
+    credentials: agentEnv,
   });
 
   const execEnv = mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx));
@@ -1085,6 +1086,12 @@ async function buildRunCommand(
     /** Gateway flags for the org's MCP servers, after the profile args. */
     mcpArgs?: string[];
     /**
+     * The run's resolved credentials, for adapters that pass a stored
+     * value on under another name. Absent on reattach, where the live
+     * process already carries its environment and only argv[0] is read.
+     */
+    credentials?: Record<string, string>;
+    /**
      * Whether Bento's own tools reached the sandbox. The prompt only
      * mentions splitting a card when the tool that does it is there.
      */
@@ -1157,6 +1164,7 @@ async function buildRunCommand(
     cwd: workdir,
     ...(run.cliSessionId ? { resumeSessionId: run.cliSessionId } : {}),
     ...(combinedArgs.length ? { extraArgs: combinedArgs } : {}),
+    ...(input.credentials ? { credentials: input.credentials } : {}),
   };
   /**
    * Live mode: the tool holds a conversation over stdin, so a message

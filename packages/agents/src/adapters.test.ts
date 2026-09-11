@@ -59,6 +59,57 @@ test("codex resume puts the thread id in the command", () => {
   assert.ok(!cmd.includes("--full-auto"), "--full-auto was removed from codex");
 });
 
+/**
+ * Codex 0.153 reads neither variable Bento stores. With OPENAI_API_KEY
+ * set it sent api.openai.com no Authorization header, and with
+ * OPENAI_BASE_URL set it still called api.openai.com. The key has to
+ * arrive as CODEX_API_KEY. OpenRouter is a custom model_provider, not
+ * a base URL on the reserved openai id: a slashed model selects it,
+ * and the OpenRouter key is what that provider reads.
+ */
+test("codex OpenRouter slugs select the OpenRouter provider and keep the key out of argv", () => {
+  const input = {
+    prompt: "do it",
+    model: "openai/gpt-5-mini",
+    cwd: "/workspace",
+    extraArgs: ["-c", 'model_reasoning_effort="high"'],
+    credentials: { OPENROUTER_API_KEY: "sk-or-routed" },
+  };
+  const cmd = codexAdapter.buildCommand(input);
+  const provider = cmd.indexOf('model_provider="openrouter"');
+  assert.ok(provider > 0 && cmd[provider - 1] === "-c", "OpenRouter is selected as the model provider");
+  const base = cmd.indexOf('model_providers.openrouter.base_url="https://openrouter.ai/api/v1"');
+  assert.ok(base > 0 && cmd[base - 1] === "-c", "and its endpoint is set as a config override");
+  assert.ok(base < cmd.indexOf('model_reasoning_effort="high"'), "before the profile's own args");
+  assert.ok(!cmd.some((arg) => arg.includes("sk-or-routed")), "the key never reaches argv");
+  assert.ok(!cmd.some((arg) => arg.startsWith("openai_base_url")), "OpenRouter is not the built-in openai provider");
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(codexAdapter.env?.(input), {});
+  const resumed = codexAdapter.buildCommand({ ...input, resumeSessionId: "th_abc" });
+  assert.ok(resumed.includes('model_provider="openrouter"'));
+});
+
+test("codex without an OpenRouter slug keeps OpenAI's own endpoint", () => {
+  const input = { prompt: "do it", model: "gpt-5-codex", cwd: "/workspace", credentials: { OPENAI_API_KEY: "sk-proj" } };
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.includes("model_provider")));
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.startsWith("openai_base_url")));
+  assert.deepEqual(codexAdapter.env?.(input), { CODEX_API_KEY: "sk-proj" });
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.env?.({ ...input, credentials: {} }), {});
+});
+
+test("codex sends a saved non-OpenRouter base URL as openai_base_url", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "gpt-5-codex",
+    cwd: "/workspace",
+    credentials: { OPENAI_API_KEY: "sk-proj", OPENAI_BASE_URL: "https://gateway.example/v1" },
+  });
+  const override = cmd.indexOf('openai_base_url="https://gateway.example/v1"');
+  assert.ok(override > 0 && cmd[override - 1] === "-c");
+  assert.ok(!cmd.includes('model_provider="openrouter"'));
+});
+
 test("cursor parses stream-json and names tools from the wrapper key", () => {
   const events = parseAll(cursorAdapter, [
     `{"type":"system","subtype":"init","session_id":"c6b6","model":"Claude 4 Sonnet"}`,
@@ -215,6 +266,11 @@ test("every declared cli resolves to an adapter", () => {
 
 test("adapters declare the env they need", () => {
   assert.deepEqual(codexAdapter.requiredEnv, ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  // The OpenRouter key is selected per model, not forwarded on every
+  // Codex run: a native OpenAI sandbox must not receive it.
+  assert.equal((codexAdapter.optionalEnv ?? []).includes("OPENROUTER_API_KEY"), false);
   assert.deepEqual(cursorAdapter.requiredEnv, ["CURSOR_API_KEY"]);
   assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
   assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
