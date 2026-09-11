@@ -1,7 +1,15 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { getAdapter, runAgent } from "@bento/agents";
-import { agentRunPrompt, forgetsBetweenRuns, type AgentEvent } from "@bento/core";
+import { credentialNamesFor, getAdapter, runAgent, runsOnOllama, writeFileCommand } from "@bento/agents";
+import {
+  agentRunPrompt,
+  forgetsBetweenRuns,
+  missingOllamaCredentials,
+  modelGuidanceFor,
+  ollamaCredentialsOnly,
+  ollamaUrlFromSandbox,
+  type AgentEvent,
+} from "@bento/core";
 import {
   DockerDriver,
   LocalProcessDriver,
@@ -159,6 +167,7 @@ export class LocalRunner {
         repositories.map((r) => ({
           name: r.name,
           localPath: r.localPath,
+          defaultBranch: r.defaultBranch,
           ...(feature.startFromBase ? { startFromBranch: r.defaultBranch } : {}),
         })),
         feature.id,
@@ -205,25 +214,60 @@ export class LocalRunner {
       ...(run.role ? { role: run.role } : {}),
     });
 
+    // Credentials come from this machine's environment and never reach
+    // the server, which is the point of running agents locally.
+    // An ollama/ model is given Ollama's credentials only.
+    let credentials: Record<string, string> = {};
+    // Same names the server forwards: requiredEnvFor replaces requiredEnv,
+    // so a Codex OpenRouter run does not also pick up OPENAI_API_KEY here.
+    const names = credentialNamesFor(adapter, agent.model);
+    for (const name of [...names.required, ...names.optional, ...names.alternatives]) {
+      const value = process.env[name];
+      if (value) credentials[name] = value;
+    }
+    // A run on Ollama is given Ollama's credentials only, as on the server,
+    // with the same loopback rewrite for a Docker sandbox and the same
+    // refusal to start Ollama Cloud without a key.
+    if (runsOnOllama(names, credentials)) {
+      credentials = ollamaCredentialsOnly(credentials);
+      if (credentials.OLLAMA_BASE_URL) {
+        credentials.OLLAMA_BASE_URL = ollamaUrlFromSandbox(credentials.OLLAMA_BASE_URL, this.driver.provider);
+      }
+      const missing = missingOllamaCredentials(credentials);
+      if (missing.length > 0) {
+        const label = modelGuidanceFor(agent.cli)?.label ?? agent.cli;
+        await this.complete(run.id, {
+          ok: false,
+          error: `No ${missing.join(", ")} is set, so ${label} cannot start on Ollama Cloud. Export OLLAMA_API_KEY, or OLLAMA_BASE_URL naming an Ollama server you run, then run again.`,
+        });
+        return;
+      }
+    }
+
     const commandInput = {
       prompt,
       model: agent.model,
       cwd: workdir,
       ...(run.resumeSessionId ? { resumeSessionId: run.resumeSessionId } : {}),
       ...(agent.extraArgs.length ? { extraArgs: agent.extraArgs } : {}),
+      credentials,
     };
     const argv = adapter.buildCommand(commandInput);
 
-    // Credentials come from this machine's environment and never reach
-    // the server, which is the point of running agents locally. The
-    // adapter's own variables go under them: pool's model travels this
-    // way, since `pool exec` has no flag for it, and an exported base
-    // URL still wins over the default.
-    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}) };
-    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
-      const value = process.env[name];
-      if (value) env[name] = value;
+    // Files the tool reads settings from, written before every run
+    // because the sandbox outlives it.
+    for (const file of adapter.files?.(commandInput) ?? []) {
+      let exitCode = 0;
+      for await (const chunk of this.driver.exec(handle, writeFileCommand(file), { cwd: workdir })) {
+        if (chunk.kind === "exit") exitCode = chunk.exitCode ?? 0;
+      }
+      if (exitCode !== 0) console.warn(`could not write ${file.path} into the sandbox (exit ${exitCode})`);
     }
+
+    // The adapter's own variables go under the credentials: pool's model
+    // travels this way, since `pool exec` has no flag for it, and an
+    // exported base URL still wins over the default.
+    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}), ...credentials };
 
     let pending: AgentEvent[] = [];
 

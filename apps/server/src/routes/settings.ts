@@ -9,8 +9,8 @@ import { z } from "zod";
 import { getAdapter } from "@bento/agents";
 import { agentCli } from "@bento/core";
 import type { AppContext } from "../context.js";
-import { readSettings, writeSettings } from "../settings.js";
-import { gitIdentityEnv } from "../orchestrator/agent-auth.js";
+import { readSettings, writeSettings, shouldShareAgentAuth } from "../settings.js";
+import { gitIdentityEnv, localAgentAuthEnv } from "../orchestrator/agent-auth.js";
 
 const run = promisify(execFile);
 
@@ -38,9 +38,10 @@ export function settingsRoutes(ctx: AppContext) {
      *
      * The logins are reported because the setting alone says nothing
      * useful: sharing is on, but if the tool was never signed in there
-     * is nothing to share and the run falls back to an API key. What
-     * decides that is whether the tool's own config directory exists,
-     * which is exactly what this checks.
+     * is nothing to share and the run falls back to an API key. A config
+     * directory alone is not proof of a usable login. Token-based tools
+     * use the same credential reader as execution; other tools report
+     * configuration presence without claiming verified authentication.
      */
     .get("/", async (c) => {
       if (!localOnly) return c.json({ mode: "multi", shareAgentAuth: false, logins: [] });
@@ -48,26 +49,13 @@ export function settingsRoutes(ctx: AppContext) {
       const home = homedir();
 
       const logins = await Promise.all(
-        agentCli.options.filter((cli) => cli !== "fake").map(async (cli) => {
-          const paths = getAdapter(cli).configPaths ?? [];
-          const present = await Promise.all(
-            paths.map(async (relative) => {
-              try {
-                await access(path.join(home, relative));
-                return true;
-              } catch {
-                return false;
-              }
-            }),
-          );
-          return { cli, signedIn: present.some(Boolean) };
-        }),
+        agentCli.options.filter((cli) => cli !== "fake").map((cli) => localLoginStatus(cli, home)),
       );
 
       const identity = await gitIdentityEnv(ctx);
       return c.json({
         mode: "local",
-        shareAgentAuth: settings.shareAgentAuth,
+        shareAgentAuth: await shouldShareAgentAuth(ctx),
         gitAuthorName: settings.gitAuthorName,
         gitAuthorEmail: settings.gitAuthorEmail,
         /**
@@ -109,8 +97,40 @@ export function settingsRoutes(ctx: AppContext) {
         ...(body.gitAuthorEmail !== undefined ? { gitAuthorEmail: body.gitAuthorEmail.trim() } : {}),
       };
       await writeSettings(ctx, next);
-      return c.json(next);
+      return c.json({ ...next, shareAgentAuth: await shouldShareAgentAuth(ctx) });
     });
+}
+
+/** Shared execution credentials are checked without returning their values to the UI. */
+export async function localLoginStatus(
+  cli: Parameters<typeof getAdapter>[0],
+  home: string,
+  readAuth = localAgentAuthEnv,
+): Promise<{ cli: string; signedIn: boolean; detail: string }> {
+  const adapter = getAdapter(cli);
+  if (cli === "cursor" || cli === "claude-code") {
+    const signedIn = Object.keys(await readAuth(adapter)).length > 0;
+    return {
+      cli,
+      signedIn,
+      detail: signedIn ? "Ready to share" : "Sign in again or set an API key",
+    };
+  }
+  const present = await Promise.all(
+    (adapter.configPaths ?? []).map(async (relative) => {
+      try {
+        await access(path.join(home, relative));
+        return true;
+      } catch {
+        return false;
+      }
+    }),
+  );
+  return {
+    cli,
+    signedIn: false,
+    detail: present.some(Boolean) ? "Configuration found; sign-in unverified" : "Not configured",
+  };
 }
 
 /**

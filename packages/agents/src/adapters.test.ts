@@ -1,8 +1,9 @@
-import { providerKeyFor } from "./adapter.js";
+import { credentialNamesFor, forwardedEnvNames, providerKeyFor, requiredEnvForModel, runsOnOllama, writeFileCommand } from "./adapter.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AGENT_CREDENTIALS, type AgentEvent } from "@bento/core";
 import { antigravityAdapter } from "./antigravity.js";
+import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
@@ -59,6 +60,76 @@ test("codex resume puts the thread id in the command", () => {
   assert.ok(!cmd.includes("--full-auto"), "--full-auto was removed from codex");
 });
 
+/**
+ * Codex 0.153 reads neither variable Bento stores. With OPENAI_API_KEY
+ * set it sent api.openai.com no Authorization header, and with
+ * OPENAI_BASE_URL set it still called api.openai.com. The key has to
+ * arrive as CODEX_API_KEY. OpenRouter is a custom model_provider, not
+ * a base URL on the reserved openai id: when OpenRouter is the
+ * selected provider (a slash slug on Codex), the adapter passes
+ * `-c model_provider=openrouter`, and the OpenRouter key is what that
+ * provider reads.
+ */
+test("codex OpenRouter slugs select the OpenRouter provider and keep the key out of argv", () => {
+  const input = {
+    prompt: "do it",
+    model: "openai/gpt-5-mini",
+    cwd: "/workspace",
+    extraArgs: ["-c", 'model_reasoning_effort="high"'],
+    credentials: {
+      OPENROUTER_API_KEY: "sk-or-routed",
+      OPENAI_API_KEY: "sk-proj-leftover",
+      OPENAI_BASE_URL: "https://openrouter.ai/api/v1",
+    },
+  };
+  const cmd = codexAdapter.buildCommand(input);
+  const provider = cmd.indexOf('model_provider="openrouter"');
+  assert.ok(provider > 0 && cmd[provider - 1] === "-c", "OpenRouter is selected as the model provider");
+  const base = cmd.indexOf('model_providers.openrouter.base_url="https://openrouter.ai/api/v1"');
+  assert.ok(base > 0 && cmd[base - 1] === "-c", "and its endpoint is set as a config override");
+  assert.ok(base < cmd.indexOf('model_reasoning_effort="high"'), "before the profile's own args");
+  assert.ok(!cmd.some((arg) => arg.includes("sk-or-routed")), "the key never reaches argv");
+  assert.ok(!cmd.some((arg) => arg.startsWith("openai_base_url")), "OpenRouter is not the built-in openai provider");
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(requiredEnvForModel(codexAdapter, "openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  assert.equal(forwardedEnvNames(codexAdapter, "openai/gpt-5-mini").includes("OPENAI_API_KEY"), false);
+  assert.deepEqual(codexAdapter.env?.(input), {});
+  const resumed = codexAdapter.buildCommand({ ...input, resumeSessionId: "th_abc" });
+  assert.ok(resumed.includes('model_provider="openrouter"'));
+});
+
+test("codex without an OpenRouter slug keeps OpenAI's own endpoint", () => {
+  const input = { prompt: "do it", model: "gpt-5-codex", cwd: "/workspace", credentials: { OPENAI_API_KEY: "sk-proj" } };
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.includes("model_provider")));
+  assert.ok(!codexAdapter.buildCommand(input).some((arg) => arg.startsWith("openai_base_url")));
+  assert.deepEqual(codexAdapter.env?.(input), { CODEX_API_KEY: "sk-proj" });
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.env?.({ ...input, credentials: {} }), {});
+});
+
+test("codex selects OpenRouter as model_provider for a slash slug the catalog has not listed", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "openai/gpt-brand-new",
+    cwd: "/workspace",
+  });
+  assert.ok(cmd.includes('model_provider="openrouter"'));
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-brand-new"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("acme/unreleased"), ["OPENROUTER_API_KEY"]);
+});
+
+test("codex sends a saved non-OpenRouter base URL as openai_base_url", () => {
+  const cmd = codexAdapter.buildCommand({
+    prompt: "do it",
+    model: "gpt-5-codex",
+    cwd: "/workspace",
+    credentials: { OPENAI_API_KEY: "sk-proj", OPENAI_BASE_URL: "https://gateway.example/v1" },
+  });
+  const override = cmd.indexOf('openai_base_url="https://gateway.example/v1"');
+  assert.ok(override > 0 && cmd[override - 1] === "-c");
+  assert.ok(!cmd.includes('model_provider="openrouter"'));
+});
+
 test("cursor parses stream-json and names tools from the wrapper key", () => {
   const events = parseAll(cursorAdapter, [
     `{"type":"system","subtype":"init","session_id":"c6b6","model":"Claude 4 Sonnet"}`,
@@ -98,6 +169,35 @@ test("cursor marks error results as failed", () => {
   const outcome = cursorAdapter.extractOutcome(events, 1);
   assert.equal(outcome.ok, false);
   assert.equal(outcome.error, "auth failed");
+});
+
+test("cursor bounds its final background shell wait without limiting the active turn", () => {
+  const argv = cursorAdapter.buildCommand({ cwd: "/workspace", model: "auto", prompt: "Build it" });
+  assert.equal(argv[argv.indexOf("--background-shell-timeout") + 1], "30");
+  assert.ok(!argv.includes("--single-turn"), "background completions still get their follow-up turns");
+  const notice = cursorAdapter.parseEvent(JSON.stringify({
+    type: "system", subtype: "background_shell_timeout", aborted_count: 1, timeout_ms: 30000,
+  }));
+  assert.ok(notice?.type === "message" && notice.role === "system");
+});
+
+test("cursor thinking is live output, never a successful result or raw JSON in an error", async () => {
+  const deltas: unknown[] = [];
+  const result = await runAgent({
+    adapter: cursorAdapter,
+    argv: ["cursor-agent"],
+    exec: async function* () {
+      yield { kind: "stdout", data: '{"type":"thinking","subtype":"delta","text":"Already committed."}\n' };
+      yield { kind: "stdout", data: '{"type":"thinking","subtype":"completed"}\n' };
+      yield { kind: "stderr", data: "exec timeout: the command reached its 7200 second limit" };
+      yield { kind: "exit", exitCode: -1 };
+    },
+    onDelta: (delta) => { deltas.push(delta); },
+  });
+  assert.deepEqual(deltas, [{ channel: "thinking", text: "Already committed.", offset: 0 }]);
+  assert.equal(result.outcome.ok, false);
+  assert.match(result.outcome.error!, /exec timeout/);
+  assert.doesNotMatch(result.outcome.error!, /thinking|Already committed|subtype/);
 });
 
 test("opencode parses its NDJSON envelope", () => {
@@ -186,6 +286,11 @@ test("every declared cli resolves to an adapter", () => {
 
 test("adapters declare the env they need", () => {
   assert.deepEqual(codexAdapter.requiredEnv, ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("gpt-5-codex"), ["OPENAI_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-5-mini"), ["OPENROUTER_API_KEY"]);
+  // The OpenRouter key is selected per model, not forwarded on every
+  // Codex run: a native OpenAI sandbox must not receive it.
+  assert.equal((codexAdapter.optionalEnv ?? []).includes("OPENROUTER_API_KEY"), false);
   assert.deepEqual(cursorAdapter.requiredEnv, ["CURSOR_API_KEY"]);
   assert.deepEqual(poolAdapter.requiredEnv, ["POOLSIDE_API_KEY"]);
   assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
@@ -443,9 +548,15 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
  */
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
+  const sampleModels = ["gpt-5-codex", "openai/gpt-5-mini", "openrouter/auto", "anthropic/claude-sonnet-5"];
   for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
     const adapter = getAdapter(cli);
-    for (const name of [...adapter.requiredEnv, ...(adapter.optionalEnv ?? [])]) {
+    const names = new Set([
+      ...adapter.requiredEnv,
+      ...(adapter.optionalEnv ?? []),
+      ...sampleModels.flatMap((model) => adapter.requiredEnvFor?.(model) ?? []),
+    ]);
+    for (const name of names) {
       // Poolside's enterprise endpoint is a local environment override.
       // Hosted v1 always targets Platform and deliberately offers no
       // organization setting for a custom endpoint.
@@ -899,4 +1010,131 @@ test("muse writes its MCP servers where the CLI reads them", () => {
     schema_version: 1,
     mcp_servers: {},
   });
+});
+
+const OLLAMA = { OLLAMA_API_KEY: "ollama-secret", OLLAMA_BASE_URL: "http://gpu-box:11434/v1" };
+
+/**
+ * An Anthropic key or a Claude subscription token forwarded to an Ollama
+ * run would be sent to whatever server OLLAMA_BASE_URL names, so an
+ * ollama/ model is given Ollama's credentials and no shared login.
+ */
+test("an Ollama run is given Ollama's credentials and no shared login", () => {
+  for (const adapter of [claudeCodeAdapter, dshAdapter]) {
+    const names = credentialNamesFor(adapter, "ollama/glm-5.1");
+    assert.deepEqual(names, {
+      required: [],
+      optional: ["OLLAMA_API_KEY", "OLLAMA_BASE_URL"],
+      alternatives: [],
+      ollama: "always",
+    });
+    // With nothing saved it is still Ollama's, and the run stops naming the key.
+    assert.equal(runsOnOllama(names, {}), true);
+  }
+  assert.deepEqual(credentialNamesFor(claudeCodeAdapter, "claude-sonnet-5"), {
+    required: ["ANTHROPIC_API_KEY"],
+    optional: ["ANTHROPIC_BASE_URL"],
+    alternatives: ["CLAUDE_CODE_OAUTH_TOKEN"],
+    ollama: "never",
+  });
+});
+
+/**
+ * "ollama" is also a provider opencode's own config can define. Bento's
+ * Ollama takes the model over only once Ollama credentials are saved;
+ * until then the run is opencode's, with opencode's credentials.
+ */
+test("opencode keeps its own ollama provider until Ollama credentials are saved", () => {
+  const names = credentialNamesFor(opencodeAdapter, "ollama/qwen3:8b");
+  assert.equal(names.ollama, "when-saved");
+  assert.deepEqual(names.optional, [...(opencodeAdapter.optionalEnv ?? []), "OLLAMA_API_KEY", "OLLAMA_BASE_URL"]);
+  assert.equal(runsOnOllama(names, { ANTHROPIC_API_KEY: "sk-ant" }), false);
+  assert.equal(runsOnOllama(names, { OLLAMA_BASE_URL: "http://gpu-box:11434" }), true);
+  const input = { prompt: "do it", model: "ollama/qwen3:8b", cwd: "/workspace" };
+  assert.deepEqual(opencodeAdapter.env?.({ ...input, credentials: { ANTHROPIC_API_KEY: "sk-ant" } }), {});
+  assert.deepEqual(opencodeAdapter.env?.(input), {});
+});
+
+test("Claude Code on an Ollama model talks to Ollama and nothing of Anthropic's", () => {
+  const input = { prompt: "do it", model: "ollama/glm-5.1", cwd: "/workspace", credentials: OLLAMA };
+  const cmd = claudeCodeAdapter.buildCommand(input);
+  assert.equal(cmd[cmd.indexOf("--model") + 1], "glm-5.1");
+  assert.ok(!cmd.some((arg) => arg.includes("ollama-secret")), "the key never reaches argv");
+  const live = claudeCodeAdapter.live!.buildCommand(input);
+  assert.equal(live[live.indexOf("--model") + 1], "glm-5.1");
+  // Anthropic's credentials are overwritten, not left out: the local
+  // process driver would otherwise inherit the server's own.
+  assert.deepEqual(claudeCodeAdapter.env?.(input), {
+    ANTHROPIC_BASE_URL: "http://gpu-box:11434",
+    ANTHROPIC_AUTH_TOKEN: "ollama-secret",
+    ANTHROPIC_API_KEY: "",
+    CLAUDE_CODE_OAUTH_TOKEN: "",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "glm-5.1",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5.1",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-5.1",
+    CLAUDE_CODE_SUBAGENT_MODEL: "glm-5.1",
+  });
+  assert.equal(
+    claudeCodeAdapter.env?.({ ...input, credentials: { OLLAMA_API_KEY: "k" } }).ANTHROPIC_BASE_URL,
+    "https://ollama.com",
+    "no saved base URL is Ollama Cloud",
+  );
+  assert.deepEqual(claudeCodeAdapter.env?.({ ...input, model: "claude-sonnet-5" }), {});
+});
+
+test("opencode on an Ollama model brings its own provider config", () => {
+  const input = { prompt: "do it", model: "ollama/gpt-oss:120b", cwd: "/workspace", credentials: OLLAMA };
+  const cmd = opencodeAdapter.buildCommand(input);
+  assert.equal(cmd[cmd.indexOf("-m") + 1], "ollama/gpt-oss:120b");
+  const config = opencodeAdapter.env?.(input).OPENCODE_CONFIG_CONTENT ?? "";
+  assert.ok(!config.includes("ollama-secret"), "the key is referenced, not inlined");
+  assert.deepEqual(JSON.parse(config).provider.ollama, {
+    npm: "@ai-sdk/openai-compatible",
+    name: "Ollama",
+    options: { baseURL: "http://gpu-box:11434/v1", apiKey: "{env:OLLAMA_API_KEY}" },
+    models: { "gpt-oss:120b": { name: "gpt-oss:120b" } },
+  });
+  const keyless = opencodeAdapter.env?.({ ...input, credentials: { OLLAMA_BASE_URL: "http://gpu-box:11434" } });
+  assert.equal(JSON.parse(keyless?.OPENCODE_CONFIG_CONTENT ?? "{}").provider.ollama.options.apiKey, undefined);
+  assert.deepEqual(opencodeAdapter.env?.({ ...input, model: "anthropic/claude-sonnet-5" }), {});
+});
+
+test("DeepSeek Harness on an Ollama model points its provider at Ollama with a lower token limit", () => {
+  const input = { prompt: "do it", model: "ollama/gpt-oss:120b", cwd: "/workspace", credentials: OLLAMA };
+  const files = dshAdapter.files?.(input) ?? [];
+  assert.equal(files.length, 1);
+  assert.match(files[0]!.content, /- id: llm-deepseek\n  config:\n    maxTokens: 32768/);
+  assert.deepEqual(dshAdapter.buildCommand(input), ["dsh", "--profile", "headless", "--patch", files[0]!.path, "do it"]);
+  assert.deepEqual(dshAdapter.env?.(input), {
+    DSH_MODEL: "gpt-oss:120b",
+    DSH_TOOLS_MODE: "native",
+    DSH_PERMISSION_MODE: "danger-full-access",
+    DSH_TELEMETRY_DISABLED: "1",
+    DEEPSEEK_BASE_URL: "http://gpu-box:11434/v1",
+    DEEPSEEK_API_KEY: "ollama-secret",
+  });
+  assert.deepEqual(dshAdapter.files?.({ ...input, model: "deepseek-v4-pro" }), []);
+});
+
+test("writeFileCommand writes content a shell would otherwise mangle", async () => {
+  const { execFile } = await import("node:child_process");
+  const { mkdtemp, readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(`${tmpdir()}/bento-write-`);
+  const file = { path: `${dir}/nested/it's here.yml`, content: "- id: x\n  quote: 'single' \"double\" $HOME `tick`\n" };
+  const [command, ...args] = writeFileCommand(file);
+  await new Promise<void>((resolve, reject) => execFile(command!, args, (err) => (err ? reject(err) : resolve())));
+  assert.equal(await readFile(file.path, "utf8"), file.content);
+});
+
+/**
+ * pi reaches no Ollama of Bento's, so an ollama/ model there is pi's own
+ * provider (from its models.json) and keeps pi's credentials and login.
+ */
+test("an ollama/ model on a tool Bento does not point at Ollama keeps that tool's credentials", () => {
+  const names = credentialNamesFor(piAdapter, "ollama/gpt-oss:20b");
+  assert.equal(names.ollama, "never");
+  assert.equal(runsOnOllama(names, { OLLAMA_API_KEY: "k" }), false);
+  assert.deepEqual(names.optional, piAdapter.optionalEnv);
+  assert.ok(!names.optional.includes("OLLAMA_API_KEY"));
 });

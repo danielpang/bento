@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import type { AgentAdapter } from "@bento/agents";
 import type { AppContext } from "../context.js";
 import { readSettings, shouldShareAgentAuth } from "../settings.js";
+import { cursorLoginEnv } from "./cursor-auth.js";
 
 const run = promisify(execFile);
 
@@ -31,6 +32,9 @@ export async function agentAuthMounts(
   adapter: AgentAdapter,
 ): Promise<{ hostPath: string; containerPath: string; readOnly: boolean }[]> {
   if (!(await shouldShareAgentAuth(ctx))) return [];
+  // Cursor writes project state, settings and MCP caches under ~/.cursor.
+  // Share its login through the environment, never a read-only home mount.
+  if (adapter.cli === "cursor") return [];
 
   const home = homedir();
   const mounts: { hostPath: string; containerPath: string; readOnly: boolean }[] = [];
@@ -65,6 +69,27 @@ export async function agentAuthMounts(
  */
 export async function agentAuthEnv(ctx: AppContext, adapter: AgentAdapter): Promise<Record<string, string>> {
   if (!(await shouldShareAgentAuth(ctx))) return {};
+  return localAgentAuthEnv(adapter);
+}
+
+/** Read only on the user's local machine. Callers must exclude multi mode. */
+export async function localAgentAuthEnv(adapter: AgentAdapter): Promise<Record<string, string>> {
+  if (adapter.cli === "cursor") {
+    return cursorLoginEnv({
+      platform: process.platform,
+      home: homedir(),
+      xdgConfigHome: process.env.XDG_CONFIG_HOME,
+      appData: process.env.APPDATA,
+      readKeychain: async (service) => {
+        try {
+          const { stdout } = await run("security", ["find-generic-password", "-s", service, "-a", "cursor-user", "-w"]);
+          return stdout.trim() || null;
+        } catch {
+          return null;
+        }
+      },
+    });
+  }
   if (adapter.cli !== "claude-code") return {};
 
   const readCredentials = async (): Promise<string | null> => {

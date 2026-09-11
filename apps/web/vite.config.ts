@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { BUILD_META } from "@bento/core";
+import { buildIdFor } from "./src/build-id.js";
 
 /**
  * Stamps every icon URL in index.html with a hash of the file it points at.
@@ -89,8 +91,29 @@ function stampIcons(): Plugin {
   };
 }
 
+/**
+ * Stamps the build id into index.html (see src/build-id.ts). The server
+ * reads it from the file it serves and the console compares it with
+ * its own page; a mismatch is the prompt to reload after a deploy.
+ * Build only: the dev server emits no tag.
+ */
+function stampBuild(): Plugin {
+  return {
+    name: "bento-stamp-build",
+    apply: "build",
+    transformIndexHtml: {
+      order: "post", // the fallback id hashes the emitted files
+      handler(_html, ctx) {
+        const id = buildIdFor(process.env.SOURCE_COMMIT, Object.keys(ctx.bundle ?? {}));
+        if (!id) return [];
+        return [{ tag: "meta", attrs: { name: BUILD_META, content: id }, injectTo: "head-prepend" }];
+      },
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), stampIcons()],
+  plugins: [react(), stampIcons(), stampBuild()],
   build: {
     // Written but not linked, so no browser fetches them. The deploy
     // build uploads them to PostHog and deletes them.

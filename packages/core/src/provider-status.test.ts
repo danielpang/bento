@@ -157,3 +157,18 @@ test("a quota refusal is not a capacity spike", () => {
   assert.equal(looksLikeProviderOutage(error), false);
   assert.equal(providerOutageAdvice(error, { cli: "opencode", model: "google/gemini-2.5-pro" }), null);
 });
+
+/**
+ * An ollama/ model sent the request to Ollama, whatever the harness calls
+ * itself in the error, and Ollama has no status page.
+ */
+test("an Ollama run is never blamed on the harness's own provider", () => {
+  assert.equal(outageProvider("DeepSeek API error (HTTP 503)", { cli: "dsh", model: "ollama/glm-5.1" }), null);
+  assert.equal(outageProvider("API Error: 529 Overloaded", { cli: "claude-code", model: "ollama/glm-5.1" }), null);
+  assert.equal(providerOutageAdvice("503 Service Unavailable", { cli: "opencode", model: "ollama/glm-5.1" }), null);
+});
+
+test("an ollama/ string on a tool that cannot reach Ollama keeps that tool's status page", () => {
+  const error = "The server had an error while processing your request. Sorry about that!";
+  assert.equal(outageProvider(error, { cli: "codex", model: "ollama/glm-5.1" }), "openai");
+});

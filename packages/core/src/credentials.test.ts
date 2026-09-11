@@ -36,6 +36,17 @@ test("the provider agnostic tools show how to reach OpenRouter", () => {
       `${cli} should show an OpenRouter example`,
     );
   }
+  const codex = modelGuidanceFor("codex")!;
+  assert.match(codex.format, /OpenRouter/);
+  assert.ok(codex.examples.some((e) => e.includes("/")), "Codex should show an OpenRouter slug");
+  const openrouter = AGENT_CREDENTIALS.find((c) => c.name === "OPENROUTER_API_KEY");
+  assert.match(openrouter?.help ?? "", /Codex/, "Codex reads OPENROUTER_API_KEY for OpenRouter slugs");
+  const openaiBase = AGENT_CREDENTIALS.find((c) => c.name === "OPENAI_BASE_URL");
+  assert.match(
+    openaiBase?.help ?? "",
+    /OpenRouter does not need this/,
+    "OpenRouter is a Codex provider, not a hijacked openai_base_url",
+  );
 });
 
 /**
@@ -189,4 +200,14 @@ test("every storable key can be supplied through a deployment's environment", as
       `${credential.name} is storable but the Compose server never receives it`,
     );
   }
+});
+
+test("the Ollama key and base URL are storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "OLLAMA_API_KEY");
+  assert.ok(key, "OLLAMA_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  const baseUrl = AGENT_CREDENTIALS.find((c) => c.name === "OLLAMA_BASE_URL");
+  assert.ok(baseUrl, "OLLAMA_BASE_URL cannot be stored");
+  assert.equal(baseUrl.secret, false);
+  assert.match(baseUrl.help, /https:\/\/ollama\.com/);
 });

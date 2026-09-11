@@ -12,7 +12,8 @@ const run = promisify(execFile);
  * there.
  */
 function isStaleRegistration(err: unknown): boolean {
-  const text = err instanceof Error ? `${err.message}${"stderr" in err ? String(err.stderr) : ""}` : String(err);
+  const text =
+    err instanceof Error ? `${err.message}${"stderr" in err ? String(err.stderr) : ""}` : String(err);
   return /missing but already registered worktree|already used by worktree/i.test(text);
 }
 
@@ -23,8 +24,8 @@ function isStaleRegistration(err: unknown): boolean {
  * GitHub, which is where a merge lands, and a host checkout's own
  * <name> is only as fresh as the last fetch. Without a remote (a
  * repository added by path, never pushed anywhere) the local branch is
- * the best there is, and with neither the caller gets git's default of
- * wherever the checkout is standing.
+ * the best there is. A named base that cannot be resolved is an error;
+ * silently using the host HEAD would import unrelated work.
  */
 async function startPointIn(cwd: string, startFromBranch?: string): Promise<string | undefined> {
   if (!startFromBranch) return undefined;
@@ -36,7 +37,9 @@ async function startPointIn(cwd: string, startFromBranch?: string): Promise<stri
       // Not in this checkout; try the next spelling.
     }
   }
-  return undefined;
+  throw new Error(
+    `Base branch ${startFromBranch} was not found in ${cwd}. Configure an existing repository base branch.`,
+  );
 }
 
 async function branchExists(cwd: string, branch: string): Promise<boolean> {
@@ -61,16 +64,9 @@ export interface RepositorySpec {
   name: string;
   /** Path to the repository on the host. */
   localPath: string;
-  /**
-   * The branch a branch created here starts from: origin/<name> when
-   * the checkout has it, else <name>, else wherever the checkout is
-   * standing.
-   *
-   * Left unset for an ordinary card, which branches from the checkout
-   * the way it always has. Set when the caller means it, which today
-   * is one case: a card whose pull request was merged starts its next
-   * branch from the base branch, not from the merged one.
-   */
+  /** Base for new cards. Defaults to main for callers without repository metadata. */
+  defaultBranch?: string;
+  /** Explicit base for branch rotation; omitted to carry unpublished work forward. */
   startFromBranch?: string;
 }
 
@@ -140,6 +136,7 @@ export class WorktreeManager {
       const worktreePath = this.worktreePath(workspaceKey, repo.name);
       await this.ensureOne(repo.localPath, worktreePath, branch, {
         startFromBranch: repo.startFromBranch,
+        defaultBranch: repo.defaultBranch ?? "main",
         moveExisting: options.branchChanged === true,
       });
       prepared.push({ ...repo, worktreePath });
@@ -200,7 +197,7 @@ export class WorktreeManager {
     repoPath: string,
     worktreePath: string,
     branch: string,
-    options: { startFromBranch?: string | undefined; moveExisting: boolean },
+    options: { startFromBranch?: string | undefined; defaultBranch: string; moveExisting: boolean },
   ): Promise<void> {
     const { startFromBranch } = options;
     // Existence must be checked on the filesystem, not via `git worktree
@@ -231,7 +228,34 @@ export class WorktreeManager {
       // merged and its branch deleted, or somebody tidied up. Starting
       // a fresh one is what a follow-up prompt wants, and is why the
       // add below is the -b form rather than a failure.
-      const start = await startPointIn(repoPath, startFromBranch);
+      const base = startFromBranch ?? options.defaultBranch;
+      // Refresh only when creating a branch, never for every stage or card read.
+      // Fetch an explicit tracking ref even in repositories with narrow fetch refspecs.
+      const { stdout: remotes } = await run("git", ["-C", repoPath, "remote"]);
+      if (remotes.split("\n").includes("origin")) {
+        try {
+          await run(
+            "git",
+            [
+              "-C",
+              repoPath,
+              "fetch",
+              "--no-tags",
+              "origin",
+              `+refs/heads/${base}:refs/remotes/origin/${base}`,
+            ],
+            {
+              env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+              timeout: 30_000,
+            },
+          );
+        } catch {
+          throw new Error(
+            `Could not refresh origin/${base} for ${repoPath}. Check the base branch and Git remote access, then retry.`,
+          );
+        }
+      }
+      const start = await startPointIn(repoPath, base);
       await this.add(repoPath, ["-b", branch, worktreePath, ...(start ? [start] : [])]);
     }
   }
@@ -310,7 +334,11 @@ export class WorktreeManager {
     let stale: string | null = null;
     for (const line of stdout.split("\n")) {
       if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
-      if (line === `branch refs/heads/${branch}` && current && path.resolve(current) !== path.resolve(worktreePath)) {
+      if (
+        line === `branch refs/heads/${branch}` &&
+        current &&
+        path.resolve(current) !== path.resolve(worktreePath)
+      ) {
         stale = current;
       }
     }
@@ -336,7 +364,14 @@ export class WorktreeManager {
 
   async remove(repoPath: string, workspaceKey: string, repoName: string): Promise<void> {
     try {
-      await run("git", ["-C", repoPath, "worktree", "remove", "--force", this.worktreePath(workspaceKey, repoName)]);
+      await run("git", [
+        "-C",
+        repoPath,
+        "worktree",
+        "remove",
+        "--force",
+        this.worktreePath(workspaceKey, repoName),
+      ]);
     } catch {
       // Already gone or never created.
     }

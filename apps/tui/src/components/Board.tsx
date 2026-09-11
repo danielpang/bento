@@ -1,5 +1,4 @@
-import { Box, Text } from "ink";
-import type { AgentProfile, Feature, Stage } from "@bento/api-client";
+import type { Feature, Stage } from "@bento/api-client";
 
 export function statusColor(status: string): string {
   switch (status) {
@@ -19,120 +18,6 @@ export function statusColor(status: string): string {
 }
 
 /**
- * Vertical lanes read better than columns in a terminal: stage name,
- * then its cards indented beneath it.
- */
-export function Board({
-  stages,
-  features,
-  profiles,
-  selectedIndex,
-  runStatus,
-  gateWait,
-}: {
-  stages: Stage[];
-  features: Feature[];
-  profiles: AgentProfile[];
-  selectedIndex: number;
-  /** Newest run status per card, for the whole board rather than the selection. */
-  runStatus: Record<string, string | undefined>;
-  /** Why a gated card is held, in words, per card. */
-  gateWait: Record<string, string | undefined>;
-}) {
-  const ordered = orderFeatures(stages, features);
-  const finished = features.filter(isFinished);
-
-  return (
-    <Box flexDirection="column">
-      {[{ id: null, name: "Backlog" }, ...stages].map((stage) => {
-        const inStage = features.filter((f) =>
-          stage.id
-            ? inLane(f, stage.id)
-            : inBacklog(f),
-        );
-        const agent = "id" in stage && stage.id ? profiles.find((p) => p.id === findStage(stages, stage.id)?.defaultAgentProfileId) : undefined;
-        return (
-          <Box key={stage.id ?? "backlog"} flexDirection="column" marginBottom={1}>
-            <Box>
-              <Text bold color="white">
-                {stage.name}
-              </Text>
-              <Text color="gray"> ({inStage.length})</Text>
-              {agent && <Text color="magenta"> [{agent.cli}]</Text>}
-            </Box>
-            {inStage.length === 0 && <Text color="gray"> empty</Text>}
-            {inStage.map((feature) => (
-              <CardRow
-                key={feature.id}
-                feature={feature}
-                ordered={ordered}
-                selectedIndex={selectedIndex}
-                runStatus={runStatus[feature.id]}
-                waiting={feature.status === "gated" ? gateWait[feature.id] : undefined}
-              />
-            ))}
-          </Box>
-        );
-      })}
-      {/*
-        Finished work leaves its stage, the way the web console's
-        Completed lane does. A shipped card sitting in Review next to
-        work still being reviewed made the count lie about the queue.
-      */}
-      <Box flexDirection="column" marginBottom={1}>
-        <Box>
-          <Text bold color="white">
-            Completed
-          </Text>
-          <Text color="gray"> ({finished.length})</Text>
-          <Text color="gray"> finished work</Text>
-        </Box>
-        {finished.length === 0 && <Text color="gray"> empty</Text>}
-        {finished.map((feature) => (
-          <CardRow
-            key={feature.id}
-            feature={feature}
-            ordered={ordered}
-            selectedIndex={selectedIndex}
-            runStatus={runStatus[feature.id]}
-          />
-        ))}
-      </Box>
-    </Box>
-  );
-}
-
-function CardRow({
-  feature,
-  ordered,
-  selectedIndex,
-  runStatus,
-  waiting,
-}: {
-  feature: Feature;
-  ordered: Feature[];
-  selectedIndex: number;
-  runStatus: string | undefined;
-  waiting?: string | undefined;
-}) {
-  const index = ordered.findIndex((f) => f.id === feature.id);
-  const selected = index === selectedIndex;
-  const state = cardState(feature, runStatus);
-  const detail = waiting ?? "";
-  return (
-    <Box flexDirection="column">
-      <Box>
-        <Text color={selected ? "cyan" : "gray"}>{selected ? " > " : "   "}</Text>
-        <Text color={statusColor(state)}>●</Text>
-        <Text color={selected ? "cyan" : "white"}> {feature.title}</Text>
-        <Text color="gray"> {state}</Text>
-      </Box>
-      {detail && <Text color="gray">{"     "}{detail}</Text>}
-    </Box>
-  );
-}
-
-/**
  * What a card is doing, in one word: a working agent first, then where
  * the card stands, then its newest run. The run status has to be known
  * for every card and not just the selected one, or a board of working
@@ -145,6 +30,7 @@ function CardRow({
  */
 export function cardState(feature: Feature, runStatus: string | undefined): string {
   if (feature.status === "done") return "completed";
+  if (feature.status === "cancelled") return "cancelled";
   if (runStatus === "queued" || runStatus === "starting" || runStatus === "running") return runStatus;
   if (feature.status === "gated") return "gated";
   if (!feature.currentStageId) return "backlog";
@@ -157,7 +43,8 @@ export function isFinished(feature: Pick<Feature, "status">): boolean {
 }
 
 const inBacklog = (feature: Feature) => !feature.currentStageId && !isFinished(feature);
-const inLane = (feature: Feature, stageId: string) => feature.currentStageId === stageId && !isFinished(feature);
+const inLane = (feature: Feature, stageId: string) =>
+  feature.currentStageId === stageId && !isFinished(feature);
 
 /**
  * Flattened order used for keyboard selection: backlog, then stages,
@@ -170,8 +57,4 @@ export function orderFeatures(stages: Stage[], features: Feature[]): Feature[] {
   const staged = stages.flatMap((stage) => features.filter((f) => inLane(f, stage.id)));
   const finished = features.filter(isFinished);
   return [...backlog, ...staged, ...finished];
-}
-
-function findStage(stages: Stage[], id: string | null): Stage | undefined {
-  return stages.find((s) => s.id === id);
 }

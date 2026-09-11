@@ -1,8 +1,5 @@
-import { Hono } from "hono";
+import { Hono, type Context, type Next } from "hono";
 import { cors } from "hono/cors";
-import { serveStatic } from "@hono/node-server/serve-static";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { ping } from "@bento/db";
 import type { AppContext } from "./context.js";
 import { activeOrg, actorMiddleware, maybeActor } from "./middleware/actor.js";
@@ -37,6 +34,7 @@ import { contactRoutes } from "./routes/contact.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
+import { BUILD_HEADER, cachedStatic, createWebShell } from "./web-shell.js";
 
 export interface AppExtras {
   /**
@@ -50,6 +48,12 @@ export interface AppExtras {
 
 export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   const app = new Hono();
+
+  // Ahead of the routes: the build id rides on every API response.
+  const shell = ctx.env.BENTO_WEB_DIR ? createWebShell(ctx.env.BENTO_WEB_DIR) : null;
+  if (shell && !shell.load()) {
+    console.warn(`BENTO_WEB_DIR=${ctx.env.BENTO_WEB_DIR} has no index.html yet: the console is not being served`);
+  }
 
   /**
    * The last stop for an error no route caught. An HTTPException is a
@@ -95,6 +99,15 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     );
   }
 
+  // The console build this server serves. A tab compares it with its
+  // own and prompts for a reload on a mismatch, at no extra request.
+  if (shell) {
+    app.use("/api/*", async (c, next) => {
+      await next();
+      if (shell.build) c.res.headers.set(BUILD_HEADER, shell.build);
+    });
+  }
+
   app.get("/api/health", async (c) => {
     try {
       await ping(ctx.db);
@@ -105,6 +118,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
         ok: true,
         mode: ctx.env.BENTO_MODE,
         driver: ctx.driver.provider,
+        build: shell?.build ?? undefined,
         // Which social logins are actually configured, so the sign-in
         // page offers real buttons rather than ones that can only 404.
         social: {
@@ -352,16 +366,26 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
    * Unset in local development, where Vite serves the app and proxies
    * /api here instead.
    */
-  if (ctx.env.BENTO_WEB_DIR) {
-    const webDir = ctx.env.BENTO_WEB_DIR;
+  if (shell) {
+    const webDir = ctx.env.BENTO_WEB_DIR!;
+    // no-cache: the shell names hashed chunks, and a cached copy points
+    // at files the next deploy no longer has. The build id is the ETag.
+    const serveShell = (c: Context, next: Next) => {
+      const page = shell.load();
+      if (!page) return next();
+      c.header("cache-control", "no-cache");
+      if (page.build) {
+        const etag = `"${page.build}"`;
+        if (c.req.header("if-none-match") === etag) return c.body(null, 304);
+        c.header("etag", etag);
+      }
+      return c.html(page.html);
+    };
+    // Ahead of the static root, which would serve both with an hour of cache.
+    app.get("/", serveShell);
+    app.get("/index.html", serveShell);
     // Hashed filenames, so assets can be cached indefinitely.
-    app.use(
-      "/assets/*",
-      serveStatic({
-        root: webDir,
-        onFound: (_path, c) => c.header("cache-control", "public, max-age=31536000, immutable"),
-      }),
-    );
+    app.use("/assets/*", cachedStatic(webDir, "public, max-age=31536000, immutable"));
     /**
      * Files that sit at the root of the build: the favicons and the
      * touch icon. Without this they fell through to the shell below and
@@ -373,24 +397,19 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
      * cache is short because these names carry no hash: a new icon has
      * to be able to replace the old one.
      */
-    app.use(
-      "*",
-      serveStatic({
-        root: webDir,
-        onFound: (_path, c) => c.header("cache-control", "public, max-age=3600"),
-      }),
-    );
+    app.use("*", cachedStatic(webDir, "public, max-age=3600"));
     // Every other non-API path is a client route: serve the shell and
     // let the app decide, which is what makes /device and
     // /accept-invitation survive a hard refresh.
-    app.get("*", async (c, next) => {
+    app.get("*", (c, next) => {
       if (c.req.path.startsWith("/api/")) return next();
       if (c.req.path.startsWith("/.well-known/")) return next();
       if (c.req.path === "/mcp" || c.req.path === "/mcp/") return next();
       if (c.req.path.startsWith("/mcp-oauth/")) return next();
-      const index = await readFile(path.join(webDir, "index.html"), "utf8").catch(() => null);
-      if (index === null) return next();
-      return c.html(index);
+      // A missing file (a chunk from the last deploy) is a 404, not the
+      // shell served as a 200 with the wrong type.
+      if (FILE_PATH.test(c.req.path)) return c.text("not found", 404);
+      return serveShell(c, next);
     });
   }
 
@@ -398,6 +417,9 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
 }
 
 export type AppType = ReturnType<typeof createApp>;
+
+/** A path whose last segment has an extension. Client routes never do. */
+const FILE_PATH = /\.[A-Za-z0-9]+$/;
 
 /**
  * The better-auth organization routes that change how many people an

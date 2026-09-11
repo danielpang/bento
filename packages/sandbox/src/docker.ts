@@ -1,4 +1,5 @@
 import type Docker from "dockerode";
+import { randomUUID } from "node:crypto";
 import { createDockerClient } from "./docker-client.js";
 import type { ExecChunk, ExecOptions, ProvisionSpec, SandboxDriver, SandboxHandle } from "./driver.js";
 
@@ -109,7 +110,15 @@ export class DockerDriver implements SandboxDriver {
   }
 
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
+    if (opts?.signal?.aborted) {
+      yield { kind: "stderr", data: "cancelled" };
+      yield { kind: "exit", exitCode: -1 };
+      return;
+    }
     const container = this.docker.getContainer(handle.externalId);
+    // Inherited by child processes, including detached background commands.
+    // Docker's exec PID is a host PID; it cannot safely be killed inside the container.
+    const executionId = randomUUID();
     const exec = await container.exec({
       Cmd: argv,
       AttachStdin: opts?.stdin !== undefined,
@@ -123,7 +132,11 @@ export class DockerDriver implements SandboxDriver {
        * every claude-code run in a container died at exit 1 with no
        * output, because the sandbox image runs as root.
        */
-      Env: ["IS_SANDBOX=1", ...Object.entries(opts?.env ?? {}).map(([k, v]) => `${k}=${v}`)],
+      Env: [
+        "IS_SANDBOX=1",
+        ...Object.entries(opts?.env ?? {}).map(([k, v]) => `${k}=${v}`),
+        `BENTO_EXEC_ID=${executionId}`,
+      ],
     });
     const stream = await exec.start({ hijack: true, stdin: opts?.stdin !== undefined });
 
@@ -151,9 +164,29 @@ export class DockerDriver implements SandboxDriver {
     const queue: ExecChunk[] = [];
     let notify: (() => void) | null = null;
     let done = false;
+    let stopping: Promise<void> | undefined;
     const push = (chunk: ExecChunk) => {
       queue.push(chunk);
       notify?.();
+    };
+    const finish = (exitCode: number) => {
+      if (done) return;
+      done = true;
+      push({ kind: "exit", exitCode });
+    };
+    const stop = (reason: string) => {
+      if (done || stopping) return;
+      push({ kind: "stderr", data: reason });
+      stopping = (async () => {
+        try {
+          await stopDockerExec(container, executionId);
+        } catch (error) {
+          push({ kind: "stderr", data: `Could not stop sandbox processes: ${String(error)}` });
+        } finally {
+          finish(-1);
+          stream.destroy();
+        }
+      })();
     };
 
     // Docker multiplexes stdout/stderr over one stream; demux into chunks.
@@ -162,29 +195,25 @@ export class DockerDriver implements SandboxDriver {
     this.docker.modem.demuxStream(stream, stdout, stderr);
 
     stream.on("end", async () => {
+      if (stopping || done) return;
       try {
         const info = await exec.inspect();
-        push({ kind: "exit", exitCode: info.ExitCode ?? -1 });
+        if (!stopping) finish(info.ExitCode ?? -1);
       } catch (err) {
-        push({ kind: "stderr", data: String(err) });
-        push({ kind: "exit", exitCode: -1 });
+        stop(String(err));
       }
-      done = true;
-      notify?.();
     });
     stream.on("error", (err: Error) => {
-      push({ kind: "stderr", data: String(err) });
-      push({ kind: "exit", exitCode: -1 });
-      done = true;
-      notify?.();
+      stop(String(err));
     });
 
-    const onAbort = () => stream.destroy(new Error("cancelled"));
+    const onAbort = () => stop("cancelled");
     opts?.signal?.addEventListener("abort", onAbort, { once: true });
+    if (opts?.signal?.aborted) onAbort();
 
     const timeout = opts?.timeoutMs
       ? setTimeout(() => {
-          stream.destroy(new Error("exec timeout"));
+          stop(`exec timeout: the command reached its ${opts.timeoutMs! / 1000} second limit`);
         }, opts.timeoutMs)
       : null;
 
@@ -204,6 +233,9 @@ export class DockerDriver implements SandboxDriver {
     } finally {
       if (timeout) clearTimeout(timeout);
       opts?.signal?.removeEventListener("abort", onAbort);
+      if (!done) stop("execution stream closed");
+      await stopping;
+      stream.destroy();
     }
   }
 
@@ -249,6 +281,37 @@ export class DockerDriver implements SandboxDriver {
     } catch (err) {
       if ((err as { statusCode?: number }).statusCode !== 404) throw err;
     }
+  }
+}
+
+/** Closing a Docker exec socket only detaches. Explicitly stop this exec and its children. */
+async function stopDockerExec(container: Docker.Container, executionId: string): Promise<void> {
+  const command = await container.exec({
+    Cmd: ["sh", "-c", `
+set -eu
+command -v grep >/dev/null
+bento_marker="BENTO_EXEC_ID=$1"
+for pass in 1 2 3; do
+  for process in /proc/[0-9]*; do
+    if grep -zqxF -- "$bento_marker" "$process/environ" 2>/dev/null; then
+      kill -KILL "\${process##*/}" 2>/dev/null || true
+    fi
+  done
+done
+`, "bento-stop-exec", executionId],
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+  const stream = await command.start({ hijack: true });
+  const timer = setTimeout(() => stream.destroy(new Error("process cleanup timed out")), 5000);
+  try {
+    // The script never prints process environments or credentials.
+    for await (const _chunk of stream) { /* Drain Docker's framed output. */ }
+    const info = await command.inspect();
+    if (info.ExitCode !== 0) throw new Error(`process cleanup exited with ${info.ExitCode}`);
+  } finally {
+    clearTimeout(timer);
+    stream.destroy();
   }
 }
 

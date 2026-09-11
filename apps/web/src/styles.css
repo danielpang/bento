@@ -2091,9 +2091,16 @@ a.pr-row:hover .pr-external {
 /* How a run ended, as a pill in the conversation's own colours. */
 .chat-result {
   font-size: 11px;
-  border-radius: 999px;
-  padding: 2px 10px;
+  /* Rectangular like chat bubbles: a pill radius clips multi-line
+     failure text at the curved ends. */
+  border-radius: var(--radius);
+  padding: 8px 12px;
   border: 1px solid var(--line);
+  max-width: 92%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
 }
 .chat-result[data-ok="true"] {
   color: var(--succeeded);
@@ -2102,7 +2109,8 @@ a.pr-row:hover .pr-external {
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
-  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--failed) 8%, transparent);
+  text-align: left;
 }
 
 .field {
@@ -2395,8 +2403,24 @@ a.pr-row:hover .pr-external {
   overflow-wrap: anywhere;
 }
 
+/* Run failure in the card summary: same rectangular box as the
+   transcript result, so the reason is easy to spot above the actions. */
+.error-box {
+  display: block;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--failed) 55%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--failed) 12%, transparent);
+  max-width: 100%;
+  min-width: 0;
+  word-break: break-word;
+  line-height: 1.45;
+}
+
 .error a,
-.chat-result a {
+.chat-result a,
+.error-box a {
   color: inherit;
   text-decoration: underline;
 }
@@ -4960,6 +4984,18 @@ button.lane-agent[data-saving] {
 
 .toast[data-tone="info"] {
   border-left-color: var(--succeeded);
+}
+
+/* The reload prompt after a deploy. */
+.toast[data-tone="update"] {
+  border-left-color: var(--brand);
+  align-items: center;
+}
+
+.toast-action {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .toast-text {

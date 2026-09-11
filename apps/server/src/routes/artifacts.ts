@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { AppContext } from "../context.js";
 import { getAccessibleArtifact } from "../access.js";
+import { artifactPreviewPage, ARTIFACT_PREVIEW_POLICY } from "../artifact-preview.js";
 
 /**
  * Serves one run artifact: metadata, and the bytes.
@@ -30,6 +31,21 @@ function headerSafeName(path: string): string {
 
 export function artifactRoutes(ctx: AppContext) {
   return new Hono()
+    .get("/:id/preview", async (c) => {
+      const artifact = await getAccessibleArtifact(ctx, c, c.req.param("id"));
+      if (!artifact) return c.json({ error: "not found" }, 404);
+      let bytes: Buffer | null = artifact.content !== null ? Buffer.from(artifact.content, "utf8") : null;
+      if (bytes === null && artifact.storageKey) {
+        if (!ctx.artifacts) return c.json({ error: "this deployment has no artifact storage configured" }, 503);
+        bytes = await ctx.artifacts.get(artifact.storageKey);
+      }
+      if (bytes === null) return c.json({ error: "not found" }, 404);
+      c.header("content-security-policy", ARTIFACT_PREVIEW_POLICY);
+      c.header("x-content-type-options", "nosniff");
+      c.header("referrer-policy", "no-referrer");
+      c.header("cache-control", "no-store");
+      return c.html(artifactPreviewPage(artifact, bytes));
+    })
     .get("/:id", async (c) => {
       const artifact = await getAccessibleArtifact(ctx, c, c.req.param("id"));
       if (!artifact) return c.json({ error: "not found" }, 404);

@@ -59,7 +59,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { antigravityAdapter, claudeCodeAdapter, museAdapter, opencodeAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, codexAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 import { runsInContainer } from "./routes/settings.js";
@@ -2117,6 +2117,46 @@ test("a Muse Code run with no Meta key is missing it by name", async () => {
   await withEnv({ META_API_KEY: null }, async () => {
     const { missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
     assert.deepEqual(missing, ["META_API_KEY"]);
+  });
+});
+
+/**
+ * The path a person actually takes to run Codex through OpenRouter:
+ * pick Codex, pick an OpenRouter model, paste the OpenRouter key.
+ * Codex no longer reads OPENAI_BASE_URL, so the key under OpenRouter
+ * has to be enough on its own.
+ */
+test("a pasted OpenRouter key is what reaches a Codex OpenRouter run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "OPENROUTER_API_KEY", value: "sk-or-pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ OPENROUTER_API_KEY: null, OPENAI_API_KEY: null, OPENAI_BASE_URL: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini");
+      assert.deepEqual(missing, [], "the OpenRouter key is the credential, so nothing is missing");
+      assert.equal(env.OPENROUTER_API_KEY, "sk-or-pasted-by-the-user");
+      assert.equal(env.OPENAI_API_KEY, undefined, "an OpenRouter run does not take the OpenAI key with it");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+test("a Codex OpenRouter run with no OpenRouter key is missing it by name", async () => {
+  await withEnv({ OPENROUTER_API_KEY: null, OPENAI_API_KEY: "sk-proj-unused" }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini");
+    assert.deepEqual(missing, ["OPENROUTER_API_KEY"]);
+  });
+});
+
+test("a Codex OpenAI run still names the OpenAI key", async () => {
+  await withEnv({ OPENAI_API_KEY: null, OPENROUTER_API_KEY: "sk-or-unused" }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, codexAdapter, "gpt-5-codex");
+    assert.deepEqual(missing, ["OPENAI_API_KEY"]);
   });
 });
 
@@ -4770,7 +4810,12 @@ test("a repository's setup command runs before the agent, once per sandbox", { t
   assert.doesNotMatch(secondTranscript, /Setting up/);
 });
 
-test("a setup command that fails stops the run before the agent starts", { timeout: 120_000 }, async () => {
+test("a setup command that fails reaches the agent instead of preventing startup", { timeout: 120_000 }, async () => {
+  const adapter = getAdapter("fake");
+  const build = adapter.buildCommand.bind(adapter);
+  const prompts: string[] = [];
+  const spy = mock.method(adapter, "buildCommand", (input) => { prompts.push(input.prompt); return build(input); });
+  try {
   const checkout = await fixtureRepo("setup-fails");
   const project = await json<{ id: string }>(
     await app.request("/api/projects", {
@@ -4798,13 +4843,53 @@ test("a setup command that fails stops the run before the agent starts", { timeo
     }),
   );
 
-  assert.equal(await waitForRun(started.id, 90_000), "failed");
+  assert.equal(await waitForRun(started.id, 90_000), "succeeded");
   const detail = await json<{ error: string | null }>(await app.request(`/api/runs/${started.id}`));
-  assert.match(detail.error ?? "", /exited 7/);
+  assert.equal(detail.error, null);
   const transcript = await (await app.request(`/api/runs/${started.id}/transcript`)).text();
   assert.match(transcript, /no such package/, "the command's own output says why");
-  // The agent never ran, so nothing of its own is in the transcript.
-  assert.doesNotMatch(transcript, /Working on it/);
+  assert.match(transcript, /Starting the agent with the error details/);
+  assert.match(transcript, /Working on it/);
+  assert.ok(prompts.some((prompt) => prompt.includes("no such package") && prompt.includes("Diagnose and repair")), "the agent receives setup diagnostics, not just the UI");
+  } finally { spy.mock.restore(); }
+});
+
+test("a build-only setup command is deferred to agent checks", { timeout: 120_000 }, async () => {
+  const checkout = await fixtureRepo("setup-build-only");
+  const project = await json<{ id: string }>(await app.request("/api/projects", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Deferred build", localPath: checkout }),
+  }));
+  await unassignStages(project.id);
+  const [repo] = await json<{ id: string }[]>(await app.request(`/api/projects/${project.id}/repositories`));
+  await app.request(`/api/projects/${project.id}/repositories/${repo!.id}`, {
+    method: "PATCH", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ setupCommand: "turbo run build", testCommand: "pnpm test" }),
+  });
+  const adapter = getAdapter("fake"), build = adapter.buildCommand.bind(adapter);
+  const prompts: string[] = [];
+  const spy = mock.method(adapter, "buildCommand", (input) => { prompts.push(input.prompt); return build(input); });
+  try {
+    const feature = await createFeature(project.id, "Build after editing");
+    const profile = await fakeProfile("deferred-build-fake");
+    await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+    const started = await json<{ id: string }>(await app.request("/api/runs", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+    }));
+    assert.equal(await waitForRun(started.id, 90_000), "succeeded");
+    const transcript = await (await app.request(`/api/runs/${started.id}/transcript`)).text();
+    assert.doesNotMatch(transcript, /Setting up .*: turbo/);
+    assert.match(transcript, /after edits/);
+    assert.ok(prompts.some((prompt) => prompt.includes("turbo run build && pnpm test") && prompt.includes("Build and test after making your changes")));
+    const followUp = await json<{ id: string }>(await app.request("/api/runs", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "Check again" }),
+    }));
+    assert.equal(await waitForRun(followUp.id, 90_000), "succeeded");
+    assert.match(prompts.at(-1)!, /turbo run build && pnpm test/);
+    assert.match(prompts.at(-1)!, /Build and test after making your changes/);
+  } finally { spy.mock.restore(); }
 });
 
 /**
@@ -6537,4 +6622,86 @@ test("a card keeps every pull request it has opened, and answers only for the li
     { number: 12, url: "https://github.com/acme/history/pull/12", state: "unknown" },
     { number: 11, url: "https://github.com/acme/history/pull/11", state: "unknown" },
   ]);
+  // Old branches can still have open PRs. Their conflicts and CI must remain visible too.
+  for (const route of ["merge-status", "check-status"]) {
+    const statuses = await json<{ number: number; state: string }[]>(
+      await app.request(`/api/features/${feature.id}/${route}?history=all`),
+    );
+    assert.deepEqual(statuses.map((pr) => pr.number), [12, 11]);
+    assert.ok(statuses.every((pr) => pr.state === "unknown"));
+    const current = await json<{ number: number }[]>(await app.request(`/api/features/${feature.id}/${route}`));
+    assert.deepEqual(current.map((pr) => pr.number), [12], "default status reads remain scoped to the current branch");
+  }
+});
+
+/**
+ * An Ollama run is given Ollama's credentials and nothing else. The
+ * Anthropic key and the subscription token sit right beside it in the
+ * environment, and either one forwarded would be sent to the server
+ * OLLAMA_BASE_URL names.
+ */
+test("an Ollama run on Claude Code gets Ollama's credentials and no Anthropic ones", async () => {
+  await withEnv(
+    {
+      ANTHROPIC_API_KEY: "sk-ant-api-local",
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-local",
+      ANTHROPIC_BASE_URL: null,
+      OLLAMA_API_KEY: "ollama-key",
+      OLLAMA_BASE_URL: null,
+    },
+    async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+      assert.deepEqual(missing, []);
+      assert.deepEqual(env, { OLLAMA_API_KEY: "ollama-key" });
+    },
+  );
+});
+
+test("Ollama Cloud without a key is missing it, and a server of your own is not", async () => {
+  await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+    assert.deepEqual(missing, ["OLLAMA_API_KEY"]);
+  });
+  await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://gpu-box:11434" }, async () => {
+    const { env, missing } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+    assert.deepEqual(missing, []);
+    assert.equal(env.OLLAMA_BASE_URL, "http://gpu-box:11434");
+  });
+});
+
+test("a Docker sandbox reaches an Ollama server on this machine's loopback", async () => {
+  const driver = ctx.driver;
+  ctx.driver = { provider: "docker" } as unknown as AppContext["driver"];
+  try {
+    await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://localhost:11434" }, async () => {
+      const { env } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
+      assert.equal(env.OLLAMA_BASE_URL, "http://host.docker.internal:11434");
+    });
+  } finally {
+    ctx.driver = driver;
+  }
+});
+
+/**
+ * "ollama" is also a provider opencode's own config can define. Until
+ * Ollama credentials are saved, an ollama/ model on opencode is that
+ * provider's, with opencode's own credentials, rather than a run stopped
+ * for want of an Ollama key.
+ */
+test("an opencode run keeps its own ollama provider until Ollama credentials are saved", async () => {
+  await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: null, ANTHROPIC_API_KEY: "sk-ant-api-local" }, async () => {
+    const { env, missing, ollama } = await resolveAgentEnv(ctx, null, opencodeAdapter, "ollama/qwen3:8b");
+    assert.equal(ollama, false);
+    assert.deepEqual(missing, []);
+    assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-api-local");
+  });
+  await withEnv(
+    { OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://gpu-box:11434", ANTHROPIC_API_KEY: "sk-ant-api-local" },
+    async () => {
+      const { env, missing, ollama } = await resolveAgentEnv(ctx, null, opencodeAdapter, "ollama/qwen3:8b");
+      assert.equal(ollama, true);
+      assert.deepEqual(missing, []);
+      assert.deepEqual(env, { OLLAMA_BASE_URL: "http://gpu-box:11434" });
+    },
+  );
 });

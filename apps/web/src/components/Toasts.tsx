@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { StaleBuildToast } from "./StaleBuildToast.js";
 
 /**
  * Transient messages, bottom left, instead of text pushed into a panel.
@@ -90,6 +91,8 @@ export function ToastHost({ children }: { children: ReactNode }) {
             </button>
           </div>
         ))}
+        {/* Last, so it holds its place while transient toasts come and go. */}
+        <StaleBuildToast />
       </div>
     </ToastContext.Provider>
   );

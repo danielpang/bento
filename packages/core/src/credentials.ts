@@ -1,3 +1,5 @@
+import { isOllamaModel } from "./ollama.js";
+
 /**
  * Credentials an organization can store for its agents.
  *
@@ -5,10 +7,11 @@
  * by the server, so a hosted deployment never puts the operator's
  * credentials inside a tenant's sandbox.
  *
- * OpenRouter is supported the way it actually works, by pointing a
- * provider's base URL at it rather than being a separate CLI. Store the
- * OpenRouter key plus the matching base URL and any adapter that speaks
- * that provider's API will route through it.
+ * OpenRouter is a stored key of its own. pi, opencode, and Codex read
+ * OPENROUTER_API_KEY directly (Codex because Bento writes it as a
+ * Codex model_provider). Claude Code still speaks Anthropic's API, so
+ * the OpenRouter key is saved as ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL
+ * points at https://openrouter.ai/api/v1.
  */
 export interface AgentCredential {
   name: string;
@@ -41,7 +44,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "OPENROUTER_API_KEY",
     label: "OpenRouter",
-    help: "Used by opencode and pi directly. To send Claude Code or Codex through OpenRouter, also set that provider's base URL to https://openrouter.ai/api/v1.",
+    help: "Used by opencode, pi, and Codex. Claude Code does not read it: to send Claude Code through OpenRouter, save the OpenRouter key as the Anthropic key and set ANTHROPIC_BASE_URL to https://openrouter.ai/api/v1.",
     secret: true,
   },
   {
@@ -75,6 +78,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     secret: true,
   },
   {
+    name: "OLLAMA_API_KEY",
+    label: "Ollama",
+    help: "Used by Claude Code, opencode, and DeepSeek Harness when an agent's model starts with ollama/. Create one in your ollama.com account to run on Ollama Cloud. A server of your own, set as the Ollama base URL, may not need one.",
+    secret: true,
+  },
+  {
     name: "GITHUB_TOKEN",
     label: "GitHub token (pull requests)",
     help: "Lets stages with Create a pull request enabled push the feature branch and open the pull request, without installing the GitHub App. Use a fine grained personal access token with contents and pull request write access. It stays on the server and is never given to an agent.",
@@ -89,7 +98,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "OPENAI_BASE_URL",
     label: "OpenAI base URL",
-    help: "Point Codex somewhere else, for example https://openrouter.ai/api/v1.",
+    help: "Point Codex at an OpenAI compatible gateway. OpenRouter does not need this: pick an OpenRouter model and save the OpenRouter key.",
     secret: false,
   },
   {
@@ -102,6 +111,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     name: "GOOGLE_GEMINI_BASE_URL",
     label: "Gemini base URL",
     help: "Point the Antigravity CLI at a Gemini compatible endpoint instead of the default API.",
+    secret: false,
+  },
+  {
+    name: "OLLAMA_BASE_URL",
+    label: "Ollama base URL",
+    help: "Where ollama/ models run. Leave it empty for Ollama Cloud (https://ollama.com), or enter the address of an Ollama server you run, for example http://gpu-box:11434. Bento does not run Ollama itself, so the agent's sandbox has to be able to reach this address.",
     secret: false,
   },
 ];
@@ -146,8 +161,8 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     cli: "claude-code",
     label: "Claude Code",
     defaultModel: "claude-sonnet-5",
-    format: "A model id. Route through OpenRouter by also setting ANTHROPIC_BASE_URL.",
-    examples: ["claude-sonnet-5", "claude-opus-5"],
+    format: "A model id. Route through OpenRouter by also setting ANTHROPIC_BASE_URL, or prefix a model Ollama serves with ollama/.",
+    examples: ["claude-sonnet-5", "claude-opus-5", "ollama/glm-5.1"],
     binary: "claude",
     installUrl: "https://docs.claude.com/en/docs/claude-code/setup",
     installCommand: "curl -fsSL https://claude.ai/install.sh | bash",
@@ -156,8 +171,9 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     cli: "codex",
     label: "Codex CLI",
     defaultModel: "gpt-5-codex",
-    format: "A model id. Route through OpenRouter by also setting OPENAI_BASE_URL.",
-    examples: ["gpt-5-codex", "gpt-5"],
+    format:
+      "A bare OpenAI id, or pick OpenRouter for a slug such as openai/gpt-5-mini. Selecting OpenRouter uses the OpenRouter key.",
+    examples: ["gpt-5-codex", "gpt-5", "openai/gpt-5-mini"],
     binary: "codex",
     installUrl: "https://github.com/openai/codex",
     installCommand: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
@@ -178,7 +194,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     label: "opencode",
     defaultModel: "anthropic/claude-sonnet-5",
     format:
-      "provider/model. Prefix with openrouter/ to route through OpenRouter, or use openrouter/openrouter/auto to let it pick per request.",
+      "provider/model. Prefix with openrouter/ to route through OpenRouter, or use openrouter/openrouter/auto to let it pick per request. Prefix with ollama/ for a model Ollama serves.",
     examples: ["anthropic/claude-sonnet-5", "openrouter/z-ai/glm-4.6", "openrouter/openrouter/auto"],
     binary: "opencode",
     installUrl: "https://opencode.ai/docs/",
@@ -210,7 +226,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     cli: "dsh",
     label: "DeepSeek Harness",
     defaultModel: "deepseek-v4-pro",
-    format: "A bare DeepSeek model id, without a provider prefix.",
+    format: "A bare DeepSeek model id, without a provider prefix, or ollama/ followed by a model Ollama serves.",
     examples: ["deepseek-v4-pro", "deepseek-v4-flash"],
     bareModelId: true,
     binary: "dsh",
@@ -261,7 +277,10 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
  * unmeasured one, so anywhere spend is shown, this decides whether to
  * say the number is partial.
  */
-export function reportsCost(cli: string): boolean {
+export function reportsCost(cli: string, model?: string): boolean {
+  // Claude Code prices every model as a Claude model, so on an Ollama
+  // model its figure is wrong, and Bento records none.
+  if (cli === "claude-code" && model && isOllamaModel(model)) return false;
   return cli === "claude-code" || cli === "pi" || cli === "fake";
 }
 
@@ -301,7 +320,7 @@ export function spendReportingTools(): { reporting: string[]; silent: string[] }
  */
 export function spendCoverageNote(): string {
   const { reporting, silent } = spendReportingTools();
-  return `Only ${joinNames(reporting)} report what a run cost, and ${joinNames(silent)} report none. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
+  return `Only ${joinNames(reporting)} report what a run cost, and ${joinNames(silent)} report none. Claude Code runs on Ollama models report none either, because Claude Code would price them as Claude models. A run that fails before finishing reports nothing either, whichever tool it used. Any figure here is a floor rather than a full total.`;
 }
 
 export function modelGuidanceFor(cli: string): ModelGuidance | undefined {

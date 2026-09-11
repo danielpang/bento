@@ -9,6 +9,9 @@ interface CursorLine {
   model?: string;
   is_error?: boolean;
   result?: string;
+  text?: string;
+  aborted_count?: number;
+  timeout_ms?: number;
   message?: { role?: string; content?: { type?: string; text?: string; name?: string }[] };
   /** Discriminated by tool name: { readToolCall: {...} }, { shellToolCall: {...} }, ... */
   tool_call?: Record<string, unknown>;
@@ -24,11 +27,13 @@ interface CursorLine {
 export const cursorAdapter: AgentAdapter = {
   cli: "cursor",
   requiredEnv: ["CURSOR_API_KEY"],
-  configPaths: [".cursor"],
+  authAlternatives: ["CURSOR_AUTH_TOKEN"],
+  // Login discovery only. The server reads the native credential store
+  // and shares a token, so Cursor's sandbox home stays writable.
+  configPaths: [".cursor", ".config/cursor/auth.json"],
 
   // cursor-agent reads the global ~/.cursor/mcp.json; the sandbox's
-  // home is Bento's to write, and the orchestrator skips this adapter
-  // when local mode has the real ~/.cursor mounted read-only over it.
+  // home stays writable even when sharing the user's local login.
   mcp: {
     renderConfig(servers) {
       const mcpServers = Object.fromEntries(
@@ -44,6 +49,11 @@ export const cursorAdapter: AgentAdapter = {
       "-p",
       "--output-format",
       "stream-json",
+      // Headless Cursor otherwise waits forever for background dev servers,
+      // even after recording a successful final turn. This limit starts only
+      // after the turn ends; delegated agents retain their normal lifetime.
+      "--background-shell-timeout",
+      "30",
       // Our container is the boundary: allow everything, disable
       // Cursor's sandbox, and trust the workspace (--trust needs -p).
       "--force",
@@ -61,6 +71,20 @@ export const cursorAdapter: AgentAdapter = {
     return cmd;
   },
 
+  parseDelta(line) {
+    let parsed: CursorLine;
+    try {
+      parsed = JSON.parse(line) as CursorLine;
+    } catch {
+      return null;
+    }
+    if (parsed?.type !== "thinking") return null;
+    return {
+      channel: "thinking",
+      text: parsed.subtype === "delta" && typeof parsed.text === "string" ? parsed.text : "",
+    };
+  },
+
   parseEvent(line: string): AgentEvent | null {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) return null;
@@ -71,6 +95,15 @@ export const cursorAdapter: AgentAdapter = {
       return null;
     }
     const sessionId = parsed.session_id ?? parsed.chat_id;
+
+    if (parsed.type === "system" && parsed.subtype === "background_shell_timeout") {
+      return {
+        type: "message",
+        role: "system",
+        text: "Cursor finished its reply and stopped background commands that were still running.",
+        raw: parsed,
+      };
+    }
 
     if (parsed.type === "system" || parsed.type === "session" || parsed.subtype === "init") {
       const ev: AgentEvent = { type: "init", raw: parsed };

@@ -1,8 +1,20 @@
 #!/usr/bin/env node
 import { render } from "ink";
 import { App } from "./app.js";
+import { MouseProvider } from "./mouse.js";
 import { HELP, parseCliOptions } from "./cli-options.js";
-import { runAgents, runLogin, runMcp, runPipeline, runRepos, runRunner, runServe, runSessions, runSpend } from "./headless.js";
+import { redirectTerminalLogs } from "./terminal-log.js";
+import {
+  runAgents,
+  runLogin,
+  runMcp,
+  runPipeline,
+  runRepos,
+  runRunner,
+  runServe,
+  runSessions,
+  runSpend,
+} from "./headless.js";
 
 let options;
 try {
@@ -29,7 +41,23 @@ if (options.version) {
 
 // Headless commands exist so another application can supervise the
 // stack: the desktop app spawns these and reads their status lines.
-if (options.command === "serve") {
+if (options.command === "update") {
+  try {
+    const { runUpdate } = await import("./update.js");
+    await runUpdate();
+  } catch (error) {
+    console.error(`Update failed: ${(error as Error).message}`);
+    process.exitCode = 1;
+  }
+} else if (options.command === "uninstall") {
+  try {
+    const { runUninstall } = await import("./uninstall.js");
+    await runUninstall();
+  } catch (error) {
+    console.error(`Uninstall failed: ${(error as Error).message}`);
+    process.exitCode = 1;
+  }
+} else if (options.command === "serve") {
   await runServe(options);
 } else if (options.command === "runner") {
   await runRunner(options);
@@ -52,8 +80,24 @@ if (options.command === "serve") {
 }
 
 async function runBoard() {
-  const { waitUntilExit } = render(<App options={options!} />);
-  await waitUntilExit();
+  const fullScreen = Boolean(process.stdout.isTTY) && process.env.INK_SCREEN_READER !== "true";
+  const restoreLogs = fullScreen ? await redirectTerminalLogs(options!.dataDir) : undefined;
+  try {
+    // Mouse coordinates are relative to the viewport. Keep the app at a stable origin
+    // and restore the user's shell screen when it exits.
+    const { waitUntilExit } = render(
+      <MouseProvider>
+        <App options={options!} />
+      </MouseProvider>,
+      {
+        alternateScreen: process.env.INK_SCREEN_READER !== "true",
+        patchConsole: !fullScreen,
+      },
+    );
+    await waitUntilExit();
+  } finally {
+    await restoreLogs?.();
+  }
   // The embedded server keeps handles open; leaving is the user's intent.
   process.exit(0);
 }

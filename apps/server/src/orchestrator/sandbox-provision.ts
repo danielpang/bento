@@ -82,6 +82,7 @@ export async function provisionWorkspace(
           repoRows.map((r) => ({
             name: r.name,
             localPath: r.localPath,
+            defaultBranch: r.defaultBranch,
             ...(r.repoUrl && restarted.has(r.repoUrl) ? { startFromBranch: r.defaultBranch } : {}),
           })),
           workspaceKey,

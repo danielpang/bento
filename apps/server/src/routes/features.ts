@@ -1,6 +1,8 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { messageAttachments, writeMessageAttachments } from "../message-attachments.js";
 import { z } from "zod";
 import { DEFAULT_MODELS } from "@bento/agents";
 import {
@@ -664,13 +666,16 @@ export function featureRoutes(ctx: AppContext) {
      * and is delivered as a resume the moment the run ends. The caller
      * learns which happened.
      */
-    .post("/:id/message", zValidator("json", z.object({ text: z.string().min(1).max(20000) })), async (c) => {
+    .post("/:id/message", bodyLimit({ maxSize: 12 * 1024 * 1024 }), zValidator("json", z.object({ text: z.string().max(20000), attachments: messageAttachments.optional() })), async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
       if (!feature) return c.json({ error: "not found" }, 404);
       if (feature.status === "done" || feature.status === "cancelled") {
         return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
       }
-      const text = c.req.valid("json").text.trim();
+      const body = c.req.valid("json");
+      let text = body.text.trim();
+      if (!text && !body.attachments?.length) return c.json({ error: "Enter a message or attach a file." }, 400);
+      if (body.attachments?.length && !(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
       const [newest] = await db(c, ctx)
         .select()
         .from(agentRuns)
@@ -681,6 +686,20 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
       const latest = asPipelineRun(newest);
+
+      if (body.attachments?.length) {
+        const [sandbox] = await db(c, ctx).select().from(sandboxes)
+          .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
+          .orderBy(desc(sandboxes.createdAt)).limit(1);
+        if (!sandbox) return c.json({ error: "This card has no available agent workspace. Start an agent before attaching files." }, 409);
+        if (sandbox.provider !== ctx.driver.provider && !(sandbox.provider === "docker" && ctx.driver.provider === "local-process")) return c.json({ error: "This workspace cannot receive attachments from this server." }, 409);
+        try {
+          const files = await writeMessageAttachments(ctx.driver, { externalId: sandbox.externalId, provider: ctx.driver.provider, workdir: sandbox.workdir }, body.attachments);
+          text = `${text || "Please review the attached files."}\n\nAttached files in your workspace (use your file or image-reading tools to inspect them):\n${files.map(file => JSON.stringify(file)).join("\n")}`;
+        } catch (error) {
+          return c.json({ error: error instanceof Error ? error.message : "Could not attach files." }, 503);
+        }
+      }
 
       /**
        * Durable before anything else: the row is the message's
@@ -1146,7 +1165,7 @@ export function featureRoutes(ctx: AppContext) {
         // time, and a fresh one at the branch still answers correctly
         // (no commits beyond the base means nothing to publish).
         const prepared = await ctx.worktrees.ensureAll(
-          repoRows.map((r) => ({ name: r.name, localPath: r.localPath })),
+          repoRows.map((r) => ({ name: r.name, localPath: r.localPath, defaultBranch: r.defaultBranch })),
           feature.id,
           feature.branchName,
         );
@@ -1226,7 +1245,9 @@ export function featureRoutes(ctx: AppContext) {
     .get("/:id/merge-status", async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
       if (!feature) return c.json({ error: "not found" }, 404);
-      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      const rows = c.req.query("history") === "all"
+        ? await featurePullRequestHistory(db(c, ctx), feature)
+        : await featurePullRequestTargets(db(c, ctx), feature);
       if (rows.length === 0) return c.json([]);
       const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
       const states = await readMergeStates(connection, rows);
@@ -1258,7 +1279,9 @@ export function featureRoutes(ctx: AppContext) {
     .get("/:id/check-status", async (c) => {
       const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
       if (!feature) return c.json({ error: "not found" }, 404);
-      const rows = await featurePullRequestTargets(db(c, ctx), feature);
+      const rows = c.req.query("history") === "all"
+        ? await featurePullRequestHistory(db(c, ctx), feature)
+        : await featurePullRequestTargets(db(c, ctx), feature);
       if (rows.length === 0) return c.json([]);
       const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
       const states = await readCheckStates(connection, rows);

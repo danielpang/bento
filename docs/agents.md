@@ -6,7 +6,7 @@ Each stage runs one agent: harness, model, and skill. Tools differ in authentica
 | --- | --- | --- | --- | --- |
 | Claude Code | `claude-sonnet-5` | `ANTHROPIC_API_KEY` or subscription token | Queued in same session | Yes |
 | pi | `anthropic/claude-sonnet-5` | Provider key for selected model | Steering after current tool call | Yes |
-| Codex CLI | `gpt-5-codex` | `OPENAI_API_KEY` | Between runs (session resume) | No |
+| Codex CLI | `gpt-5-codex` or `openai/gpt-5-mini` | `OPENAI_API_KEY` or `OPENROUTER_API_KEY` | Between runs (session resume) | No |
 | Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY` | Between runs (session resume) | No |
 | opencode | `anthropic/claude-sonnet-5` | Provider key for selected model | Between runs (session resume) | No |
 | Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs (new run, no session id) | No |
@@ -16,7 +16,9 @@ Each stage runs one agent: harness, model, and skill. Tools differ in authentica
 
 Keys are stored encrypted (per organization in multi mode; local scope in local mode) via the web console, `bento setup`, or the Mac app.
 
-OpenRouter routing for Claude Code or Codex: save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
+OpenRouter: pick an OpenRouter model on Codex, pi, or opencode and save `OPENROUTER_API_KEY`. Claude Code still needs the OpenRouter key saved as `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` set to `https://openrouter.ai/api/v1`.
+
+**Ollama:** Claude Code, opencode, and DeepSeek Harness run a model on Ollama when the agent's model starts with `ollama/`, for example `ollama/glm-5.1`. Runs go to Ollama Cloud with `OLLAMA_API_KEY`, or to a server you run when `OLLAMA_BASE_URL` names it. See [Ollama](#ollama).
 
 **DeepSeek:** use pi or opencode for streamed runs with `DEEPSEEK_API_KEY` or `openrouter/deepseek/...`. DeepSeek Harness (`dsh`) is preview-only (see below). Warm sandboxes reinstall pi below 0.70.1, opencode below 1.14.24, or dsh when `--version` does not match the pin.
 
@@ -55,6 +57,23 @@ Do not use macOS Keychain login for server deployments. Keychain tokens rotate f
 
 On "OAuth access token has been revoked", regenerate with `claude setup-token` and update the stored token.
 
+## Ollama
+
+Three tools can run a model on Ollama: Claude Code, opencode, and DeepSeek Harness. The agent's model names it with Bento's `ollama/` prefix (`ollama/glm-5.1`, `ollama/gpt-oss:120b`), which Bento strips before the tool sees the id. Other agents keep their own provider, so one Claude Code agent can run on Ollama while the rest stay on Anthropic.
+
+Bento does not run Ollama. Runs go to one of two places:
+
+- **Ollama Cloud**, by default. Save `OLLAMA_API_KEY` under Agents, Ollama. The model picker lists the models Ollama Cloud serves.
+- **A server you run**, when `OLLAMA_BASE_URL` is saved, for example `http://gpu-box:11434`. A key is optional there. Type the model's name as that server knows it. The sandbox has to reach the address: in local mode with Docker sandboxes, `localhost` is rewritten to `host.docker.internal`, and Ollama has to listen on an address the container can reach. A Sprite cannot reach a server on your machine.
+
+How each tool is pointed at it:
+
+- **Claude Code** uses Ollama's Anthropic compatible API. Bento sets `ANTHROPIC_BASE_URL`, passes the key as `ANTHROPIC_AUTH_TOKEN`, and sets every model slot (subagents and session titles included) to the one model. Anthropic keys, the subscription token, and shared logins are withheld from these runs. Claude Code prices every model as a Claude model, so Bento records no cost for them, drops the figure from the transcript, and the console shows these agents as reporting no cost.
+- **opencode** gets an `ollama` provider (`@ai-sdk/openai-compatible` at `<server>/v1`) through `OPENCODE_CONFIG_CONTENT`, which leaves its config files alone. Until Ollama credentials are saved in Bento, an `ollama/` model on opencode runs with opencode's own configuration instead, so an `ollama` provider you already defined there keeps working.
+- **DeepSeek Harness** keeps its DeepSeek provider and points it at `<server>/v1`. A patch lowers its token limit to 32768: dsh asks for 256000, and Ollama refuses more than a model's output limit.
+
+Ollama recommends a context window of at least 64k tokens for coding agents. A server you run may need its context length raised.
+
 ## Per tool notes
 
 ### Claude Code
@@ -67,7 +86,9 @@ Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API
 
 ### Codex CLI
 
-Bare model ids. `OPENAI_API_KEY` or OpenRouter via `OPENAI_BASE_URL`. Does not report cost.
+Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. You do not set `OPENAI_BASE_URL` for that route.
+
+Codex 0.153 ignores `OPENAI_API_KEY` for its built in provider. Bento hands the saved OpenAI key over as `CODEX_API_KEY`. `OPENAI_BASE_URL` is still honored for other OpenAI compatible gateways, as `-c openai_base_url=...`. Does not report cost.
 
 ### Cursor CLI
 
@@ -87,7 +108,7 @@ OpenRouter alternative: pi or opencode with `openrouter/poolside/laguna-s-2.1`. 
 
 ### DeepSeek Harness (dsh)
 
-Preview. Pinned `@deepseek-ai/dsh@0.1.1-rc.2`. Bare model id (e.g. `deepseek-v4-pro`). `DEEPSEEK_API_KEY`; optional `DEEPSEEK_BASE_URL`.
+Preview. Pinned `@deepseek-ai/dsh@0.1.1-rc.2`. Bare model id (e.g. `deepseek-v4-pro`). `DEEPSEEK_API_KEY`; optional `DEEPSEEK_BASE_URL`. Or a model on Ollama, `ollama/<model>` (see [Ollama](#ollama)).
 
 Outputs final message only (no streamed tool/thinking events). No session id. Use **Changes** for file-level results.
 
