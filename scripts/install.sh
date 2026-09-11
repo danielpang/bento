@@ -64,8 +64,15 @@ cleanup() {
 trap cleanup 0
 
 echo "Downloading Bento $VERSION for $PLATFORM"
-curl --fail --silent --show-error --location --retry 3 "$RELEASE_URL/$ASSET" -o "$TMP/$ASSET"
+# stdin is a pipe for curl | sh, so detect the terminal on curl's stderr.
+# Keep redirected output and CI logs free of animated progress frames.
+if [ -t 2 ] && [ "${TERM:-dumb}" != dumb ]; then
+  curl --fail --progress-bar --show-error --location --retry 3 "$RELEASE_URL/$ASSET" -o "$TMP/$ASSET"
+else
+  curl --fail --silent --show-error --location --retry 3 "$RELEASE_URL/$ASSET" -o "$TMP/$ASSET"
+fi
 curl --fail --silent --show-error --location --retry 3 "$RELEASE_URL/SHA256SUMS" -o "$TMP/SHA256SUMS"
+echo "Verifying download..."
 node - "$TMP/$ASSET" "$TMP/SHA256SUMS" "$ASSET" <<'NODE'
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -78,10 +85,6 @@ if (!expected || !/^[a-f0-9]{64}$/.test(expected) || expected !== actual) {
   process.exit(1);
 }
 NODE
-
-tar -xzf "$TMP/$ASSET" -C "$TMP"
-EXTRACTED="$TMP/bento-$VERSION"
-[ -f "$EXTRACTED/dist/cli.js" ] && [ -x "$EXTRACTED/bento" ] || err "The release archive is missing the CLI."
 
 if [ -n "${BENTO_INSTALL_DIR:-}" ]; then
   INSTALL_ROOT="$BENTO_INSTALL_DIR"
@@ -115,7 +118,12 @@ fi
 [ ! -d "$BIN_DIR/bento" ] || err "$BIN_DIR/bento is a directory. Choose another BENTO_BIN_DIR."
 
 STAGING="$(mktemp -d "$(dirname "$INSTALL_ROOT")/.bento-install.XXXXXX")"
-cp -R "$EXTRACTED/." "$STAGING/"
+# Extract onto the destination filesystem once. Copying the unpacked dependency
+# tree from TMP used to duplicate every file before the atomic rename.
+echo "Extracting Bento..."
+tar -xzf "$TMP/$ASSET" -C "$STAGING" --strip-components=1
+[ -f "$STAGING/dist/cli.js" ] && [ -x "$STAGING/bento" ] || err "The release archive is missing the CLI."
+echo "Checking installation..."
 INSTALLED_VERSION="$("$STAGING/bento" --version)" || err "The downloaded CLI could not start."
 [ "$INSTALLED_VERSION" = "${VERSION#v}" ] || err "The downloaded CLI reports the wrong version: $INSTALLED_VERSION"
 node - "$STAGING/.bento-install.json" "$BIN_DIR" <<'NODE'

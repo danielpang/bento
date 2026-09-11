@@ -13,7 +13,7 @@ import path from "node:path";
 export type Mode = "client" | "runner" | "local";
 
 /** A subcommand, or the interactive board when none is given. */
-export type Command = "board" | "serve" | "runner" | "login" | "update" | "setup" | "repos" | "agents" | "pipeline" | "spend" | "sessions" | "mcp";
+export type Command = "board" | "serve" | "runner" | "login" | "update" | "uninstall" | "setup" | "repos" | "agents" | "pipeline" | "spend" | "sessions" | "mcp";
 
 export interface CliOptions {
   command: Command;
@@ -72,6 +72,8 @@ Interactive keys
 Commands
   update               Install the latest stable CLI release in place.
                        Restart the TUI afterward. Source checkouts use Git.
+  uninstall            Remove this CLI installation after confirming with Y.
+                       Keep your projects, settings, and credentials.
   setup                Connect repositories, add coding agents, assign them to
                        stages, and save provider keys. Everything a board needs
                        before agents can work, in one screen you can reopen.
@@ -197,6 +199,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
       first !== "runner" &&
       first !== "login" &&
       first !== "update" &&
+      first !== "uninstall" &&
       first !== "setup" &&
       first !== "repos" &&
       first !== "pipeline" &&
@@ -206,7 +209,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
       first !== "mcp"
     ) {
       throw new Error(
-        `unknown command "${first}". Use setup, serve, runner, login, update, repos, pipeline, agents, spend, sessions, or mcp, or no command for the board.`,
+        `unknown command "${first}". Use setup, serve, runner, login, update, uninstall, repos, pipeline, agents, spend, sessions, or mcp, or no command for the board.`,
       );
     }
     command = first;
