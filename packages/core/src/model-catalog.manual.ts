@@ -175,6 +175,30 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
     ],
   },
   {
+    id: "vercel",
+    name: "Vercel AI Gateway",
+    env: ["AI_GATEWAY_API_KEY"],
+    // Official mark: the Vercel triangle. Same treatment as Cursor's
+    // own mark, which is also drawn by hand because models.dev has no
+    // Vercel provider for us to inherit from.
+    logo: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBmaWxsPSJjdXJyZW50Q29sb3IiIGQ9Ik0xMiAzLjIgMjIuNCAyMS4ySDEuNkwxMiAzLjJ6Ii8+PC9zdmc+",
+    /**
+     * Gateway slugs, which is what `FX_MODEL` and `fx ask` take. They
+     * look like OpenRouter ids (`moonshotai/kimi-k3`) and are a
+     * different endpoint, a different key, and a different bill, so
+     * this is a provider of its own rather than ids appended to
+     * OpenRouter or to the vendor behind the slug.
+     *
+     * Only the ids fx's own docs name. The Gateway catalog is large
+     * and changes with the Vercel team; unlisted slugs stay typeable,
+     * the same as any other unlisted id. See checkAgentPairing.
+     */
+    models: [
+      { id: "moonshotai/kimi-k3", name: "Kimi K3" },
+      { id: "openai/gpt-5.4", name: "GPT-5.4" },
+    ],
+  },
+  {
     id: "ollama",
     name: "Ollama",
     env: ["OLLAMA_API_KEY"],

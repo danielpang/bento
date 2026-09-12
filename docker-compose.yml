@@ -115,6 +115,7 @@ services:
       - POOLSIDE_API_KEY=${POOLSIDE_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - META_API_KEY=${META_API_KEY:-}
+      - AI_GATEWAY_API_KEY=${AI_GATEWAY_API_KEY:-}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
       # Lets stages with "Create a pull request" enabled push and open

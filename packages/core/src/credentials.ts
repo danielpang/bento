@@ -78,6 +78,12 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
     secret: true,
   },
   {
+    name: "AI_GATEWAY_API_KEY",
+    label: "Vercel AI Gateway (fx)",
+    help: "Used by fx, whichever model it runs. Create one in the Vercel AI Gateway dashboard. fx bills every model through this key, so Claude and GPT runs need no Anthropic or OpenAI key of their own. To use a vendor key instead, pick pi or opencode.",
+    secret: true,
+  },
+  {
     name: "OLLAMA_API_KEY",
     label: "Ollama",
     help: "Used by Claude Code, opencode, and DeepSeek Harness when an agent's model starts with ollama/. Create one in your ollama.com account to run on Ollama Cloud. A server of your own, set as the Ollama base URL, may not need one.",
@@ -255,6 +261,17 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     binary: "muse",
     installUrl: "https://dev.meta.ai/docs/muse-code",
     installCommand: "curl -fsSL https://dev.meta.ai/install.sh | bash",
+  },
+  {
+    cli: "fx",
+    label: "fx",
+    defaultModel: "moonshotai/kimi-k3",
+    format:
+      "A Vercel AI Gateway slug, vendor prefix included. Billed through AI_GATEWAY_API_KEY, not that vendor's own key. To use a vendor key instead, pick pi or opencode.",
+    examples: ["moonshotai/kimi-k3", "openai/gpt-5.4"],
+    binary: "fx",
+    installUrl: "https://fx.sh/docs",
+    installCommand: "curl -fsSL https://fx.sh/setup.sh | bash",
   },
   {
     cli: "fake",

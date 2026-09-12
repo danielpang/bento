@@ -76,6 +76,26 @@ test("muse only offers Muse Spark and requires its bare model ids", () => {
   assert.equal(checkAgentPairing("muse", "muse-spark-1.4").status, "unknown");
 });
 
+/**
+ * fx reaches Vercel AI Gateway and nothing else here. Slugs carry a
+ * vendor prefix (`moonshotai/kimi-k3`), which is what the Gateway
+ * takes, not a Bento provider name. A slash is therefore Gateway the
+ * way a slash on Codex is OpenRouter, so an unlisted slug stays
+ * typeable and still resolves to Vercel rather than to Anthropic or
+ * OpenAI.
+ */
+test("fx only offers Vercel AI Gateway, and a slash is a Gateway slug", () => {
+  assert.deepEqual(providersForCli("fx").map((provider) => provider.id), ["vercel"]);
+  assert.equal(modelStringFor("fx", "vercel", "moonshotai/kimi-k3"), "moonshotai/kimi-k3");
+  assert.equal(providerForProfile("fx", "moonshotai/kimi-k3")?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "moonshotai/kimi-k3").status, "ok");
+  assert.equal(checkAgentPairing("fx", "openai/gpt-5.4").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "anthropic/claude-sonnet-5").status, "ok");
+  assert.equal(checkAgentPairing("fx", "anthropic/claude-sonnet-5").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "acme/unreleased").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "kimi-k3").status, "unknown");
+});
+
 test("a bare model id is resolved against the tool's own providers", () => {
   assert.equal(providerForProfile("claude-code", "claude-sonnet-5")?.id, "anthropic");
 });
@@ -103,7 +123,7 @@ test("a tool's default model resolves even when the snapshot lacks it", () => {
  * whose logo was shown when it was created.
  */
 test("every string modelStringFor composes resolves back to its provider", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity", "muse"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity", "muse", "fx"]) {
     for (const provider of providersForCli(cli)) {
       const model = provider.models[0];
       if (!model) continue;
@@ -471,7 +491,7 @@ test("agents that saved before Ollama was listed still save", () => {
 
 test("only the tools Bento points at Ollama send ollama/ runs there", () => {
   for (const cli of ["claude-code", "opencode", "dsh"]) assert.equal(routesToOllama(cli, "ollama/glm-5.1"), true);
-  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse", "fake"]) {
+  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse", "fx", "fake"]) {
     assert.equal(routesToOllama(cli, "ollama/glm-5.1"), false, cli);
   }
   assert.equal(routesToOllama("claude-code", "glm-5.1"), false);

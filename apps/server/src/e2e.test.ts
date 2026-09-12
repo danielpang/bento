@@ -3083,6 +3083,11 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   assert.equal(prefixedMuse.status, 400, "Muse Code cannot accept provider-prefixed model ids");
   assert.match(((await prefixedMuse.json()) as { error: string }).error, /bare model id/);
 
+  const fx = await post({ name: "fx", cli: "fx", model: "moonshotai/kimi-k3" });
+  assert.equal(fx.status, 201, "fx accepts a Gateway slug");
+  const fxClaude = await post({ name: "fx claude", cli: "fx", model: "anthropic/claude-sonnet-5" });
+  assert.equal(fxClaude.status, 201, "a slash on fx is a Gateway slug, not a vendor prefix");
+
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.
   const unknown = await post({ name: "next week's model", cli: "claude-code", model: "claude-opus-9" });

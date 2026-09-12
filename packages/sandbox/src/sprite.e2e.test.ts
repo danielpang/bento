@@ -50,7 +50,7 @@ const runTag = process.env.GITHUB_RUN_ID
   : `local-${Date.now()}`;
 const featureId = `e2e-${runTag}`;
 
-/** Long: a cold sprite installs nine CLIs and a private Node. */
+/** Long: a cold sprite installs ten CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
 
 const DSH_MOCK_SERVER = `import { appendFileSync, writeFileSync } from "node:fs";
@@ -257,6 +257,21 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.match(requests.out, /\"model\":\"deepseek-v4-pro\"/);
     assert.match(requests.out, /\"hasToolResult\":true/);
     await shell("rm -f /workspace/dsh-e2e-marker /tmp/bento-dsh-*");
+  });
+
+  /**
+   * fx is in AGENT_BINARIES, so install and --version are covered.
+   * `--json` and `--full-access` are what a headless run depends on,
+   * and a CLI that dropped either would leave Bento with no parseable
+   * result or hang every card on an approval nobody is there to give.
+   */
+  await t.test("fx ask exposes the headless flags Bento uses", { skip: needsSprite() }, async () => {
+    const help = await shell("fx ask --help");
+    assert.equal(help.exitCode, 0, help.stderr);
+    const text = `${help.out}\n${help.stderr}`;
+    assert.match(text, /--json/);
+    assert.match(text, /--full-access/);
+    assert.match(text, /--resume/);
   });
 
   /**

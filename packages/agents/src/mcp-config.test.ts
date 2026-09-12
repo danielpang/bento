@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { cursorAdapter } from "./cursor.js";
+import { fxAdapter } from "./fx.js";
 import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { codexAdapter } from "./codex.js";
@@ -81,7 +82,7 @@ test("codex escapes a slug that is not a bare TOML key", () => {
 });
 
 test("an empty server set still renders a config, so a removed server is cleared", () => {
-  for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter, museAdapter]) {
+  for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter, museAdapter, fxAdapter]) {
     const files = adapter.mcp!.renderConfig([]);
     assert.equal(files.length, 1, `${adapter.cli} must still write its config file`);
     const parsed = JSON.parse(files[0]!.content) as Record<string, Record<string, unknown>>;

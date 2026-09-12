@@ -93,6 +93,14 @@ test("a Muse Code outage names the Meta status page", () => {
   assert.equal(outageProvider("muse-spark-1.3 is overloaded"), "meta");
 });
 
+test("an fx outage names Vercel AI Gateway, not the vendor behind the slug", () => {
+  const error = "503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "fx", model: "anthropic/claude-sonnet-5" }), "vercel");
+  assert.equal(outageProvider(error, { cli: "fx", model: "moonshotai/kimi-k3" }), "vercel");
+  assert.match(providerOutageAdvice(error, { cli: "fx" }) ?? "", /vercel-status\.com/);
+  assert.equal(outageProvider("AI_GATEWAY_API_KEY rejected"), "vercel");
+});
+
 test("every provider page is an https status URL", () => {
   for (const [id, page] of Object.entries(PROVIDER_STATUS_PAGES)) {
     assert.match(page.url, /^https:\/\//, `${id} is not an https URL`);

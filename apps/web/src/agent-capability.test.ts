@@ -9,6 +9,13 @@ test("DeepSeek Harness capabilities admit its quiet cold-run behavior", () => {
   assert.match(copy, /Cost is not reported/);
 });
 
+test("fx is quiet until the run ends and then resumes the session", () => {
+  const copy = toolCapability("fx");
+  assert.match(copy, /Prints nothing until the run ends/);
+  assert.match(copy, /resuming the same session/);
+  assert.match(copy, /Cost is not reported/);
+});
+
 test("existing live tools retain their distinct delivery promises", () => {
   assert.match(toolCapability("pi"), /Messages steer it while it works/);
   assert.match(toolCapability("claude-code"), /same conversation/);
@@ -21,7 +28,7 @@ test("existing live tools retain their distinct delivery promises", () => {
  * the row decoration rather than information.
  */
 test("every tool offers exactly one messaging fact and one cost fact", () => {
-  for (const cli of ["pi", "claude-code", "dsh", "codex", "antigravity", "muse"]) {
+  for (const cli of ["pi", "claude-code", "dsh", "codex", "antigravity", "muse", "fx"]) {
     const chips = toolCapabilities(cli);
     assert.equal(chips.length, 2, `${cli} shows two chips`);
     assert.ok(
@@ -43,6 +50,8 @@ test("mid-run messaging is distinguished, not flattened to one icon", () => {
   assert.equal(toolCapabilities("antigravity")[0]!.icon, "between-runs");
   assert.equal(toolCapabilities("muse")[0]!.icon, "between-runs");
   assert.equal(toolCapabilities("muse")[1]!.icon, "no-cost");
+  assert.equal(toolCapabilities("fx")[0]!.icon, "between-runs");
+  assert.equal(toolCapabilities("fx")[1]!.icon, "no-cost");
 });
 
 /** The sentence and the chips come from one source, so they cannot drift. */

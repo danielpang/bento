@@ -77,6 +77,12 @@ export function mergeCatalogs(
  * both what the API takes and what makes the single chip in the picker
  * worth drawing. Laguna weights through OpenRouter stay reachable the
  * way they always were, with pi or opencode.
+ *
+ * fx is the other gateway: Vercel AI Gateway, one key, slugs that look
+ * like OpenRouter's (`moonshotai/kimi-k3`). It is a harness, not a
+ * vendor. The existing Anthropic and OpenAI keys are not used; the
+ * picker shows Gateway, and a slash is a Gateway slug the way a slash
+ * on Codex is OpenRouter.
  */
 const BY_CLI: Record<string, readonly string[]> = {
   // Ollama is last wherever it appears, and only ever named by its
@@ -95,6 +101,7 @@ const BY_CLI: Record<string, readonly string[]> = {
   // Muse Code reaches Muse Spark and nothing else here, under Meta's
   // own bare ids rather than the OpenRouter `meta/muse-spark-*` strings.
   muse: ["meta"],
+  fx: ["vercel"],
   fake: [],
 };
 
@@ -229,6 +236,11 @@ export function providerForProfile(cli: string, model: string): CatalogProvider 
     // id uses the same shape. The adapter then selects Codex's own
     // `model_provider=openrouter` from this same answer.
     if (cli === "codex") return allowed.find((p) => p.id === "openrouter");
+    // fx native ids are Gateway slugs. The prefix names the vendor
+    // behind the gateway, not a Bento provider, so a slash is Vercel
+    // the way a slash on Codex is OpenRouter. Unlisted slugs stay
+    // typeable and still wear the Gateway mark.
+    if (cli === "fx") return allowed.find((p) => p.id === "vercel");
   }
 
   // Never Ollama: its cloud ids are bare (glm-5.1), and matching one here
