@@ -88,6 +88,7 @@ export function Conversation({
   const [messageText, setMessageText] = useState(initialView?.messageText ?? "");
   const [composing, setComposing] = useState(initialCompose || (initialView?.composing ?? false));
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [messageError, setMessageError] = useState("");
   const [delivery, setDelivery] = useState("");
   const [attachments, setAttachments] = useState(initialView?.attachments ?? []);
@@ -96,6 +97,7 @@ export function Conversation({
   const attachmentDraft = useRef(attachments);
   attachmentDraft.current = attachments;
   const sendingRef = useRef(false);
+  const stoppingRef = useRef(false);
   const mounted = useRef(true);
   useEffect(
     () => () => {
@@ -180,6 +182,30 @@ export function Conversation({
     } finally {
       sendingRef.current = false;
       if (mounted.current) setSending(false);
+    }
+  }
+  async function stopAgent() {
+    if (!run || stoppingRef.current) return;
+    stoppingRef.current = true;
+    setStopping(true);
+    setMessageError("");
+    setDelivery("");
+    try {
+      await client.cancelRun(run.id);
+      if (!mounted.current) return;
+      setRun(null);
+      setDelivery("Stopped the agent.");
+      setFollowing(true);
+      reload.current();
+      // Keep the board card and every other run control in sync too.
+      void Promise.resolve()
+        .then(onMessageSent)
+        .catch(() => {});
+    } catch (error) {
+      if (mounted.current) setMessageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      stoppingRef.current = false;
+      if (mounted.current) setStopping(false);
     }
   }
   useEffect(() => {
@@ -300,6 +326,7 @@ export function Conversation({
   // MouseActions has a one-row gap between wrapped rows, as well as between buttons.
   const actionLabels = [
     composing ? "Send" : "Message",
+    ...(run ? [stopping ? "Stopping…" : "Stop"] : []),
     ...(!compact && composing ? ["History"] : []),
     "PRs",
     "Artifacts",
@@ -401,6 +428,7 @@ export function Conversation({
       if (composing) return;
       if (key.escape || input === "q") close();
       else if (input === "c") focusComposer();
+      else if (input === "x" && run) void stopAgent();
       else if (input === "a") openArtifacts();
       else if (input === "p") setPrPicker({});
       else if (key.upArrow || input === "k") scroll(-1);
@@ -634,6 +662,15 @@ export function Conversation({
             ) : (
               <MouseButton label="Message" onClick={focusComposer} />
             )}
+            {run && (
+              <MouseButton
+                label={stopping ? "Stopping…" : "Stop"}
+                onClick={() => {
+                  void stopAgent();
+                }}
+                disabled={stopping}
+              />
+            )}
             {!compact && composing && <MouseButton label="History" onClick={() => setComposing(false)} />}
             <MouseButton label="PRs" onClick={() => setPrPicker({})} disabled={sending} />
             <MouseButton label="Artifacts" onClick={() => openArtifacts()} disabled={sending} />
@@ -649,15 +686,20 @@ export function Conversation({
             {!compact && <MouseButton label="Back" onClick={close} disabled={sending} />}
           </MouseActions>
         </Box>
-        <Text color={messageError || error ? "yellow" : delivery ? "green" : "gray"} wrap="truncate-end">
+        <Text
+          color={messageError || error ? "yellow" : stopping ? "cyan" : delivery ? "green" : "gray"}
+          wrap="truncate-end"
+        >
           {messageError
             ? terminalText(messageError)
-            : delivery ||
+            : stopping
+              ? "Stopping the agent…"
+              : delivery ||
               (error
                 ? `${terminalText(error)}. Retrying…`
                 : composing
                   ? "Enter send · Ctrl+J newline · Esc history"
-                  : "c reply · p PRs · a artifacts · g/G first/latest")}
+                  : `c reply${run ? " · x stop" : ""} · p PRs · a artifacts · g/G first/latest`)}
         </Text>
       </Box>
     </Box>
