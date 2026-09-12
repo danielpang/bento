@@ -47,6 +47,7 @@ Bento runs inside Ubuntu on WSL 2. Native PowerShell and Command Prompt installa
   ```
    After restart, open Ubuntu (run `wsl`), finish the first-run username and password prompts, then confirm WSL 2 in PowerShell:
    The `VERSION` column for Ubuntu should be `2`.
+
 2. Inside **Ubuntu**, install Git, `curl`, and Node.js. See full instructions at **[Linux Node.js 22.19+](https://learn.microsoft.com/en-us/windows/dev-environment/javascript/nodejs-on-wsl)**:
   ```sh
   wsl
@@ -63,11 +64,13 @@ Bento runs inside Ubuntu on WSL 2. Native PowerShell and Command Prompt installa
   node -p 'process.platform' # should print 'linux'
   ```
    `process.platform` should print `linux`. `node --version` should be v22.19.0 or newer.
+
 3. For local agents, install [Docker Desktop on Windows](https://docs.docker.com/desktop/setup/install/windows-install/), enable **Use the WSL 2 based engine**, then enable **Settings → Resources → WSL Integration → Ubuntu**. See [Docker's WSL guide](https://docs.docker.com/desktop/features/wsl/). Or install Docker via PowerShell:
   ```powershell
    winget install Docker.DockerDesktop
   ```
    After Docker Desktop starts and WSL integration is on, run `docker info` inside **Ubuntu to confirm setup is complete.**
+
 4. Install Bento inside **Ubuntu**, then follow the setup for your mode.
   Release install:
 
