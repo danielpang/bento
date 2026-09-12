@@ -19,7 +19,7 @@ Keys are stored encrypted (per organization in multi mode; local scope in local 
 
 OpenRouter: pick an OpenRouter model on Codex, pi, or opencode and save `OPENROUTER_API_KEY`. Claude Code still needs the OpenRouter key saved as `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` set to `https://openrouter.ai/api/v1`.
 
-**Vercel AI Gateway:** one key, many models, billed through that key: the same shape as OpenRouter, a different catalog and bill. Save `AI_GATEWAY_API_KEY` under Agents, Vercel AI Gateway.
+**Vercel AI Gateway:** one key, many models, billed through that key: the same shape as OpenRouter, a different catalog and bill. Save `AI_GATEWAY_API_KEY` under Agents, Vercel AI Gateway. The picker lists the Gateway's language models. Image, video, and embedding ids stay out. Unlisted slugs stay typeable.
 
 - **fx** speaks Gateway only. Model ids are Gateway slugs (`moonshotai/kimi-k3`, `openai/gpt-5.4`). No Anthropic or OpenAI key is read.
 - **pi, opencode, Codex** pick Gateway with a `vercel/` prefix (`vercel/moonshotai/kimi-k3`). The same slug without that prefix still uses the vendor key or OpenRouter.

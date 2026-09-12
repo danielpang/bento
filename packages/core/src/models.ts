@@ -1,5 +1,6 @@
 import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
+import { GATEWAY_CATALOG } from "./model-catalog.gateway.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
 import { isOllamaModel } from "./ollama.js";
 
@@ -21,8 +22,10 @@ export interface CatalogProvider {
 /**
  * Every provider Bento knows, refreshed ones first.
  *
- * The generated half comes from models.dev. The manual half is what that
- * snapshot cannot describe (Cursor's own Composer ids, Poolside's own
+ * The generated half comes from models.dev. Vercel AI Gateway is a
+ * second snapshot, from the Gateway's own model list, because those
+ * slugs are not a models.dev provider. The manual half is what neither
+ * snapshot can describe (Cursor's own Composer ids, Poolside's own
  * inference) or does not describe yet (a model released after the
  * snapshot was taken). Where both halves name the same provider,
  * generated models come first and manual ids that the snapshot missed
@@ -30,7 +33,10 @@ export interface CatalogProvider {
  * Cursor provider of its own, and a hand-added id drops out of the
  * manual list's way once a refresh carries it.
  */
-export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(GENERATED_CATALOG, MANUAL_CATALOG);
+export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(
+  mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG),
+  MANUAL_CATALOG,
+);
 
 /** Generated providers first; manual ids fill gaps on the same provider. */
 export function mergeCatalogs(

@@ -183,16 +183,10 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
     // Vercel provider for us to inherit from.
     logo: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBmaWxsPSJjdXJyZW50Q29sb3IiIGQ9Ik0xMiAzLjIgMjIuNCAyMS4ySDEuNkwxMiAzLjJ6Ii8+PC9zdmc+",
     /**
-     * Gateway slugs, which is what `FX_MODEL`, `fx ask`, and a
-     * `vercel/` prefix on pi, opencode, and Codex take. They look like
-     * OpenRouter ids (`moonshotai/kimi-k3`) and are a different
-     * endpoint, a different key, and a different bill, so this is a
-     * provider of its own rather than ids appended to OpenRouter or to
-     * the vendor behind the slug.
-     *
-     * Only the ids fx's own docs name. The Gateway catalog is large
-     * and changes with the Vercel team; unlisted slugs stay typeable,
-     * the same as any other unlisted id. See checkAgentPairing.
+     * The language-model list lives in model-catalog.gateway.ts, snapshotted
+     * from the Gateway API. These two stay as pins so a refresh that
+     * drops them still offers fx's default and the other slug its docs
+     * name. Unlisted slugs stay typeable. See checkAgentPairing.
      */
     models: [
       { id: "moonshotai/kimi-k3", name: "Kimi K3" },

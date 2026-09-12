@@ -108,12 +108,37 @@ test("pi, opencode, and Codex reach Vercel AI Gateway through a vercel/ prefix",
     assert.equal(providerForProfile(cli, "vercel/moonshotai/kimi-k3")?.id, "vercel");
     assert.equal(checkAgentPairing(cli, "vercel/moonshotai/kimi-k3").status, "ok");
     assert.equal(providerForProfile(cli, "anthropic/claude-sonnet-5")?.id, "anthropic");
+    // OpenRouter lists the same slug. Without vercel/ it stays OpenRouter,
+    // which is why the prefix is the selection and not the id alone.
+    assert.equal(providerForProfile(cli, "moonshotai/kimi-k3")?.id, "openrouter");
   }
   assert.equal(modelStringFor("codex", "vercel", "moonshotai/kimi-k3"), "vercel/moonshotai/kimi-k3");
   assert.equal(providerForProfile("codex", "vercel/moonshotai/kimi-k3")?.id, "vercel");
   assert.equal(checkAgentPairing("codex", "vercel/openai/gpt-5.4").status, "ok");
   assert.equal(providerForProfile("codex", "openai/gpt-5-mini")?.id, "openrouter");
   assert.equal(providerForProfile("codex", "acme/unreleased")?.id, "openrouter");
+});
+
+/**
+ * The picker has to offer what the Gateway actually serves, not only
+ * the two slugs fx's docs name. Image and embedding ids are not agent
+ * models. Kimi K3 stays first: it is fx's default.
+ */
+test("Vercel AI Gateway lists language models from the Gateway snapshot", () => {
+  const vercel = providersForCli("fx")[0];
+  assert.ok(vercel, "fx has no Gateway provider");
+  assert.equal(vercel.env[0], "AI_GATEWAY_API_KEY");
+  assert.ok(vercel.logo.startsWith("data:image/svg+xml"), "Gateway needs a provider mark");
+  const ids = vercel.models.map((model) => model.id);
+  assert.ok(ids.length > 50, `Gateway picker is too thin: ${ids.length} models`);
+  assert.equal(ids[0], "moonshotai/kimi-k3");
+  assert.equal(ids[1], "openai/gpt-5.4");
+  assert.ok(ids.includes("anthropic/claude-sonnet-5"));
+  assert.ok(ids.includes("spacexai/grok-4.6"));
+  assert.ok(
+    ids.every((id) => !id.includes("embedding") && !id.includes("imagine")),
+    "Gateway picker listed a non-language model",
+  );
 });
 
 test("a bare model id is resolved against the tool's own providers", () => {
