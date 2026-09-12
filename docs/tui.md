@@ -1,4 +1,4 @@
-# Bento CLI guide
+<h1 align="center">Bento CLI guide</h1>
 
 Run coding agents from a Kanban board in your terminal, locally or through your team's Bento server.
 
@@ -39,14 +39,49 @@ The installer uses `/usr/local/lib/bento` when writable, otherwise `~/.local/lib
 
 ### Windows (WSL 2)
 
-Experimental, not tested yet.
-
 Bento runs inside Ubuntu on WSL 2. Native PowerShell and Command Prompt installations are not supported.
 
-1. Open **PowerShell as Administrator** and run `wsl --install -d Ubuntu`. Restart if prompted, open Ubuntu, and create your Linux user. Check `wsl -l -v` in PowerShell shows version **2**. See [Microsoft's WSL setup](https://learn.microsoft.com/en-us/windows/wsl/install).
-2. Inside Ubuntu, install **[Linux Node.js 22.19+](https://learn.microsoft.com/en-us/windows/dev-environment/javascript/nodejs-on-wsl)**, Git, `curl`, and `tar`. Confirm `node -p 'process.platform'` prints `linux` and `node --version` meets the minimum.
-3. For local agents, install Docker Desktop on Windows. Enable **Use the WSL 2 based engine**, then **Settings → Resources → WSL Integration → Ubuntu**. Run `docker info` inside Ubuntu to check the connection. See [Docker's WSL guide](https://docs.docker.com/desktop/features/wsl/).
-4. Run the [release install command](#release-installation) inside Ubuntu, then follow [local setup](#local). Until the first release, use [source installation](#install-from-source) there instead. Cloud-only users can skip Docker and follow [cloud setup](#cloud).
+1. In **PowerShell as Administrator**, install Ubuntu on WSL 2. Restart if prompted, then open Ubuntu and create your Linux user. See [Microsoft's WSL setup](https://learn.microsoft.com/en-us/windows/wsl/install).
+  ```powershell
+   wsl --install -d Ubuntu
+  ```
+   After restart, open Ubuntu (run `wsl`), finish the first-run username and password prompts, then confirm WSL 2 in PowerShell:
+   The `VERSION` column for Ubuntu should be `2`.
+
+2. Inside **Ubuntu**, install Git, `curl`, and Node.js. See full instructions at **[Linux Node.js 22.19+](https://learn.microsoft.com/en-us/windows/dev-environment/javascript/nodejs-on-wsl)**:
+  ```sh
+  wsl
+  sudo apt-get install curl
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash # restart powershell or open a new window
+  command -v nvm # should return 'nvm'. if you get no response or see 'command not found', re-open terminal
+  nvm install --lts
+  nvm install node
+
+  # confirm install
+  which node
+  which npm
+
+  node -p 'process.platform' # should print 'linux'
+  ```
+   `process.platform` should print `linux`. `node --version` should be v22.19.0 or newer.
+
+3. For local agents, install [Docker Desktop on Windows](https://docs.docker.com/desktop/setup/install/windows-install/), enable **Use the WSL 2 based engine**, then enable **Settings → Resources → WSL Integration → Ubuntu**. See [Docker's WSL guide](https://docs.docker.com/desktop/features/wsl/). Or install Docker via PowerShell:
+  ```powershell
+   winget install Docker.DockerDesktop
+  ```
+   After Docker Desktop starts and WSL integration is on, run `docker info` inside **Ubuntu to confirm setup is complete.**
+
+4. Install Bento inside **Ubuntu**, then follow the setup for your mode.
+  Release install:
+
+```powershell
+curl -fsSL https://usebento.ai/install.sh | sh
+```
+
+   Then:
+
+- **Local stack:** follow [local setup](#local) (`docker build …` and `bento setup`, or `./scripts/dev-cli.sh setup` from source).
+- **Cloud only:** skip Docker and follow [cloud setup](#cloud).
 
 Keep repositories under `~/projects` inside Ubuntu for better filesystem performance. Use Linux paths in Bento, such as `/home/you/projects/app`. See [Docker's filesystem guidance](https://docs.docker.com/desktop/features/wsl/best-practices/).
 
@@ -257,7 +292,7 @@ Use `bento repos`, `bento agents`, `bento sessions`, `bento spend`, and `bento m
 
 | Problem                             | Fix                                                                                       |
 | ----------------------------------- | ----------------------------------------------------------------------------------------- |
-| Installer URL returns 404           | Use source installation until the first release is published.                             |
+| Installer URL returns 404           | Use [source installation](#install-from-source) instead.                                  |
 | `bento: command not found`          | Add `~/.local/bin` to PATH and reopen your shell.                                         |
 | Docker connection or missing image  | Start Docker and build the sandbox image.                                                 |
 | Missing API key despite local login | Enable **Local agent sign-ins** sharing and check its status.                             |

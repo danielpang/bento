@@ -1,4 +1,4 @@
-# Pull requests
+<h1 align="center">Pull requests</h1>
 
 Agents commit in the sandbox. GitHub publication is a separate server-side step.
 

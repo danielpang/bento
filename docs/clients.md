@@ -1,4 +1,4 @@
-# Other clients
+<h1 align="center">Other clients</h1>
 
 Bento has three clients: the web console (`apps/web`), the terminal (`apps/tui`), and a macOS app (`apps/mac`). All three use the same API. The web console has the broadest feature set. TUI and macOS app are still in development and probably don't even work. I wouldn't try it unless you want to help build it.
 

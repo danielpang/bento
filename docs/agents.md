@@ -1,4 +1,4 @@
-# Supported coding agents
+<h1 align="center">Supported coding agents</h1>
 
 Each stage runs one agent: harness, model, and skill. Tools differ in authentication, mid-run messaging, and cost reporting.
 

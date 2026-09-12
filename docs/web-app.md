@@ -1,4 +1,4 @@
-# Running the web console
+<h1 align="center">Running the web console</h1>
 
 For the terminal client, see [Bento in the terminal](./tui.md).
 

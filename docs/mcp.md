@@ -1,4 +1,4 @@
-# MCP servers
+<h1 align="center">MCP servers</h1>
 
 An organization defines remote MCP servers once. Every supported harness receives them on each run. Agents never hold upstream credentials. Each run uses a gateway token scoped to that run.
 
