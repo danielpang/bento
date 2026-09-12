@@ -49,7 +49,11 @@ export const fxAdapter: AgentAdapter = {
 
   env(input: BuildCommandInput): Record<string, string> {
     return {
-      FX_MODEL: input.model,
+      // The picker stores a bare Gateway slug. A vercel/ prefix is
+      // Bento's shared catalog selection, the same one pi and Codex
+      // strip before they call Gateway. fx has no other provider, so
+      // the prefix is never part of FX_MODEL.
+      FX_MODEL: gatewaySlug(input.model),
       FX_PERMISSION_MODE: "full-access",
       FX_AUTO_UPGRADE: "0",
       FX_NO_OPEN_BROWSER: "1",
@@ -157,6 +161,10 @@ export const fxAdapter: AgentAdapter = {
 };
 
 const FX_GRANT_ENV = "BENTO_MCP_GRANT";
+
+function gatewaySlug(model: string): string {
+  return model.startsWith("vercel/") ? model.slice("vercel/".length) : model;
+}
 
 /** The raw run grant, never the "Bearer " prefix fx adds itself. */
 function grantToken(headers: Record<string, string>): string | undefined {

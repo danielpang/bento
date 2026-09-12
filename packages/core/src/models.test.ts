@@ -94,6 +94,10 @@ test("fx only offers Vercel AI Gateway, and a slash is a Gateway slug", () => {
   assert.equal(checkAgentPairing("fx", "anthropic/claude-sonnet-5").provider?.id, "vercel");
   assert.equal(checkAgentPairing("fx", "acme/unreleased").provider?.id, "vercel");
   assert.equal(checkAgentPairing("fx", "kimi-k3").status, "unknown");
+  // A vercel/ prefix is Bento's catalog selection. Pairing allows it;
+  // the fx adapter strips it before FX_MODEL reaches Gateway.
+  assert.equal(checkAgentPairing("fx", "vercel/moonshotai/kimi-k3").status, "ok");
+  assert.equal(checkAgentPairing("fx", "vercel/moonshotai/kimi-k3").provider?.id, "vercel");
 });
 
 /**

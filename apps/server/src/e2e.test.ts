@@ -3119,6 +3119,8 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   assert.equal(fx.status, 201, "fx accepts a Gateway slug");
   const fxClaude = await post({ name: "fx claude", cli: "fx", model: "anthropic/claude-sonnet-5" });
   assert.equal(fxClaude.status, 201, "a slash on fx is a Gateway slug, not a vendor prefix");
+  const fxPrefixed = await post({ name: "fx prefixed", cli: "fx", model: "vercel/moonshotai/kimi-k3" });
+  assert.equal(fxPrefixed.status, 201, "a vercel/ prefix on fx is still Gateway");
   const piGateway = await post({ name: "pi gateway", cli: "pi", model: "vercel/moonshotai/kimi-k3" });
   assert.equal(piGateway.status, 201, "pi reaches Gateway with a vercel/ prefix");
   const codexGateway = await post({ name: "codex gateway", cli: "codex", model: "vercel/openai/gpt-5.4" });

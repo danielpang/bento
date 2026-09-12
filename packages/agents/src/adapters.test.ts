@@ -1274,6 +1274,10 @@ test("fx builds its headless command and resumes by session", () => {
     FX_AUTO_UPGRADE: "0",
     FX_NO_OPEN_BROWSER: "1",
   });
+  assert.equal(
+    fxAdapter.env?.({ ...input, model: "vercel/moonshotai/kimi-k3" })?.FX_MODEL,
+    "moonshotai/kimi-k3",
+  );
   const resumed = fxAdapter.buildCommand({ ...input, resumeSessionId: "ses_1" });
   assert.deepEqual(resumed, [
     "fx",
