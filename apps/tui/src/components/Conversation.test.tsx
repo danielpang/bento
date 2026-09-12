@@ -85,17 +85,19 @@ function fixture() {
   let stream: Parameters<BentoClient["streamRun"]>[1] | undefined;
   let subscriptions = 0,
     stops = 0,
-    finished = false;
+    finished = false,
+    cancelled = false,
+    cancellations = 0;
   const client = {
     getConversation: async () => ({
-      blocks: finished
+      blocks: finished || cancelled
         ? [
             {
               runId: active.id,
               agentName: "Software Engineer",
-              status: "succeeded",
+              status: cancelled ? "cancelled" : "succeeded",
               queuedAt: active.queuedAt,
-              events: [{ type: "message", role: "assistant", text: "Final response" }],
+              events: finished ? [{ type: "message", role: "assistant", text: "Final response" }] : [],
             },
           ]
         : [],
@@ -103,8 +105,14 @@ function fixture() {
     }),
     getFeature: async () => ({
       ...feature,
-      runs: [{ ...active, status: finished ? "succeeded" : "running" }],
+      runs: [{ ...active, status: cancelled ? "cancelled" : finished ? "succeeded" : "running" }],
     }),
+    cancelRun: async (id: string) => {
+      assert.equal(id, active.id);
+      cancellations++;
+      cancelled = true;
+      return { ...active, status: "cancelled" };
+    },
     listArtifacts: async () => [],
     streamBoard: (_id: string, refresh: () => void) => {
       board = refresh;
@@ -125,12 +133,68 @@ function fixture() {
     stream: () => stream!,
     count: () => subscriptions,
     stops: () => stops,
+    cancellations: () => cancellations,
     finish: () => {
       finished = true;
       stream!.onDone?.();
     },
   };
 }
+
+test("active conversation has a Stop button and x stops the agent", async () => {
+  const f = fixture();
+  const ui = render(
+    <Conversation
+      client={f.client}
+      feature={feature}
+      stages={stages}
+      profiles={profiles}
+      onClose={() => {}}
+      onArtifacts={() => {}}
+    />,
+  );
+  try {
+    await ready(ui, "Waiting for agent output");
+    assert.match(ui.lastFrame()!, /\[Stop\]/);
+    assert.match(ui.lastFrame()!, /x stop/);
+    ui.stdin.write("x");
+    await ready(ui, "Stopped the agent.");
+    assert.equal(f.cancellations(), 1);
+    assert.doesNotMatch(ui.lastFrame()!, /\[Stop\]/);
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
+});
+
+test("conversation Stop button stops the active agent", async () => {
+  const f = fixture();
+  const ui = render(
+    <MouseProvider enabled>
+      <Conversation
+        client={f.client}
+        feature={feature}
+        stages={stages}
+        profiles={profiles}
+        onClose={() => {}}
+        onArtifacts={() => {}}
+      />
+    </MouseProvider>,
+  );
+  try {
+    await ready(ui, "Waiting for agent output");
+    const lines = ui.lastFrame()!.split("\n");
+    const y = lines.findIndex((line) => line.includes("[Stop]"));
+    assert.ok(y >= 0, "Stop button is visible");
+    const x = lines[y]!.indexOf("Stop");
+    ui.stdin.write(`\x1b[<0;${x + 1};${y + 1}M\x1b[<0;${x + 1};${y + 1}m`);
+    await ready(ui, "Stopped the agent.");
+    assert.equal(f.cancellations(), 1);
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
+});
 
 test("conversation keeps roles, tool details and terminal escape protection", () => {
   const messages = [
@@ -384,23 +448,23 @@ test("conversation shortcuts are ordinary text while composing and draft survive
   const ui = render(<Conversation {...props} initialCompose />);
   try {
     await ready(ui, "Reply to agent");
-    ui.stdin.write("a c q / t g G");
-    await ready(ui, "a c q / t g G");
+    ui.stdin.write("a c q x / t g G");
+    await ready(ui, "a c q x / t g G");
     assert.equal(opened, 0);
     assert.equal(closed, 0);
     ui.stdin.write("\x1b");
     await pause();
-    assert.match(ui.lastFrame()!, /a c q \/ t g G/);
+    assert.match(ui.lastFrame()!, /a c q x \/ t g G/);
     ui.stdin.write("a");
     await pause();
     assert.equal(opened, 1);
     const saved = view;
-    assert.equal(saved?.messageText, "a c q / t g G");
+    assert.equal(saved?.messageText, "a c q x / t g G");
     ui.unmount();
     ui.cleanup();
     const restored = render(<Conversation {...props} initialView={saved} />);
     try {
-      await ready(restored, "a c q / t g G");
+      await ready(restored, "a c q x / t g G");
     } finally {
       restored.unmount();
       restored.cleanup();
