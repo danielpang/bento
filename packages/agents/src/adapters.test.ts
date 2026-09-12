@@ -119,6 +119,24 @@ test("codex selects OpenRouter as model_provider for a slash slug the catalog ha
   assert.deepEqual(codexAdapter.requiredEnvFor?.("acme/unreleased"), ["OPENROUTER_API_KEY"]);
 });
 
+test("codex vercel/ slugs select the Gateway provider and strip the prefix", () => {
+  const input = {
+    prompt: "do it",
+    model: "vercel/moonshotai/kimi-k3",
+    cwd: "/workspace",
+    credentials: { AI_GATEWAY_API_KEY: "vck_routed", OPENAI_API_KEY: "sk-proj-leftover" },
+  };
+  const cmd = codexAdapter.buildCommand(input);
+  assert.ok(cmd.includes("-m"));
+  assert.equal(cmd[cmd.indexOf("-m") + 1], "moonshotai/kimi-k3");
+  assert.ok(cmd.includes('model_provider="vercel"'));
+  assert.ok(cmd.includes('model_providers.vercel.base_url="https://ai-gateway.vercel.sh/codex/v1"'));
+  assert.ok(cmd.includes('model_providers.vercel.env_key="AI_GATEWAY_API_KEY"'));
+  assert.ok(!cmd.includes('model_provider="openrouter"'));
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
+  assert.deepEqual(codexAdapter.env?.(input), {});
+});
+
 test("codex sends a saved non-OpenRouter base URL as openai_base_url", () => {
   const cmd = codexAdapter.buildCommand({
     prompt: "do it",
@@ -397,6 +415,26 @@ test("pi builds a headless json-mode command", () => {
   assert.deepEqual(piAdapter.requiredEnv, []);
 });
 
+test("pi rewrites a vercel/ slug to its vercel-ai-gateway provider", () => {
+  const argv = piAdapter.buildCommand({
+    prompt: "Add a dark theme",
+    model: "vercel/moonshotai/kimi-k3",
+    cwd: "/workspace",
+  });
+  assert.deepEqual(argv, [
+    "pi",
+    "--mode",
+    "json",
+    "--print",
+    "--provider",
+    "vercel-ai-gateway",
+    "--model",
+    "moonshotai/kimi-k3",
+    "Add a dark theme",
+  ]);
+  assert.deepEqual(piAdapter.requiredEnvFor?.("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
+});
+
 test("pi resumes by session id", () => {
   const argv = piAdapter.buildCommand({
     prompt: "also handle the empty case",
@@ -626,6 +664,7 @@ test("a reasonless error result still carries the stderr tail", async () => {
 
 test("provider agnostic tools require the key their model implies", () => {
   assert.deepEqual(providerKeyFor("openrouter/openai/gpt-5.6-sol"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(providerKeyFor("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
   assert.deepEqual(providerKeyFor("anthropic/claude-sonnet-5"), ["ANTHROPIC_API_KEY"]);
   assert.deepEqual(providerKeyFor("google/gemini-3.6-flash"), ["GEMINI_API_KEY"]);
   assert.deepEqual(providerKeyFor("deepseek/deepseek-v4-pro"), ["DEEPSEEK_API_KEY"]);
@@ -1099,6 +1138,22 @@ test("opencode on an Ollama model brings its own provider config", () => {
   const keyless = opencodeAdapter.env?.({ ...input, credentials: { OLLAMA_BASE_URL: "http://gpu-box:11434" } });
   assert.equal(JSON.parse(keyless?.OPENCODE_CONFIG_CONTENT ?? "{}").provider.ollama.options.apiKey, undefined);
   assert.deepEqual(opencodeAdapter.env?.({ ...input, model: "anthropic/claude-sonnet-5" }), {});
+});
+
+test("opencode on a vercel/ model points its built-in Gateway provider at the stored key", () => {
+  const input = {
+    prompt: "do it",
+    model: "vercel/moonshotai/kimi-k3",
+    cwd: "/workspace",
+    credentials: { AI_GATEWAY_API_KEY: "vck_routed" },
+  };
+  const config = opencodeAdapter.env?.(input).OPENCODE_CONFIG_CONTENT ?? "";
+  assert.ok(!config.includes("vck_routed"), "the key is referenced, not inlined");
+  assert.deepEqual(JSON.parse(config).provider.vercel, {
+    options: { apiKey: "{env:AI_GATEWAY_API_KEY}" },
+  });
+  assert.deepEqual(opencodeAdapter.env?.({ ...input, credentials: {} }), {});
+  assert.deepEqual(opencodeAdapter.requiredEnvFor?.("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
 });
 
 test("DeepSeek Harness on an Ollama model points its provider at Ollama with a lower token limit", () => {

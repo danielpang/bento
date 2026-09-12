@@ -266,6 +266,7 @@ export function lastResultEvent(events: AgentEvent[]): Extract<AgentEvent, { typ
 export function providerKeyFor(model: string): string[] {
   const byProvider: Record<string, string> = {
     openrouter: "OPENROUTER_API_KEY",
+    vercel: "AI_GATEWAY_API_KEY",
     anthropic: "ANTHROPIC_API_KEY",
     openai: "OPENAI_API_KEY",
     google: "GEMINI_API_KEY",

@@ -96,6 +96,26 @@ test("fx only offers Vercel AI Gateway, and a slash is a Gateway slug", () => {
   assert.equal(checkAgentPairing("fx", "kimi-k3").status, "unknown");
 });
 
+/**
+ * pi, opencode, and Codex pick Gateway the way they pick OpenRouter:
+ * an explicit vercel/ prefix. A slash without that prefix is still
+ * whatever it was (OpenRouter on Codex, the named vendor on pi).
+ */
+test("pi, opencode, and Codex reach Vercel AI Gateway through a vercel/ prefix", () => {
+  for (const cli of ["pi", "opencode"]) {
+    assert.ok(providersForCli(cli).some((provider) => provider.id === "vercel"));
+    assert.equal(modelStringFor(cli, "vercel", "moonshotai/kimi-k3"), "vercel/moonshotai/kimi-k3");
+    assert.equal(providerForProfile(cli, "vercel/moonshotai/kimi-k3")?.id, "vercel");
+    assert.equal(checkAgentPairing(cli, "vercel/moonshotai/kimi-k3").status, "ok");
+    assert.equal(providerForProfile(cli, "anthropic/claude-sonnet-5")?.id, "anthropic");
+  }
+  assert.equal(modelStringFor("codex", "vercel", "moonshotai/kimi-k3"), "vercel/moonshotai/kimi-k3");
+  assert.equal(providerForProfile("codex", "vercel/moonshotai/kimi-k3")?.id, "vercel");
+  assert.equal(checkAgentPairing("codex", "vercel/openai/gpt-5.4").status, "ok");
+  assert.equal(providerForProfile("codex", "openai/gpt-5-mini")?.id, "openrouter");
+  assert.equal(providerForProfile("codex", "acme/unreleased")?.id, "openrouter");
+});
+
 test("a bare model id is resolved against the tool's own providers", () => {
   assert.equal(providerForProfile("claude-code", "claude-sonnet-5")?.id, "anthropic");
 });

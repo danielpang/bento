@@ -6,7 +6,7 @@ Each stage runs one agent: harness, model, and skill. Tools differ in authentica
 | --- | --- | --- | --- | --- |
 | Claude Code | `claude-sonnet-5` | `ANTHROPIC_API_KEY` or subscription token | Queued in same session | Yes |
 | pi | `anthropic/claude-sonnet-5` | Provider key for selected model | Steering after current tool call | Yes |
-| Codex CLI | `gpt-5-codex` or `openai/gpt-5-mini` | `OPENAI_API_KEY` or `OPENROUTER_API_KEY` | Between runs (session resume) | No |
+| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `AI_GATEWAY_API_KEY` | Between runs (session resume) | No |
 | Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY` | Between runs (session resume) | No |
 | opencode | `anthropic/claude-sonnet-5` | Provider key for selected model | Between runs (session resume) | No |
 | Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs (new run, no session id) | No |
@@ -19,7 +19,12 @@ Keys are stored encrypted (per organization in multi mode; local scope in local 
 
 OpenRouter: pick an OpenRouter model on Codex, pi, or opencode and save `OPENROUTER_API_KEY`. Claude Code still needs the OpenRouter key saved as `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` set to `https://openrouter.ai/api/v1`.
 
-**Vercel AI Gateway:** fx is the harness; the Gateway is the provider. Save `AI_GATEWAY_API_KEY` under Agents, Vercel AI Gateway. Model ids are Gateway slugs (`moonshotai/kimi-k3`, `openai/gpt-5.4`). They look like OpenRouter ids and are a different key and a different bill. fx does not read Anthropic, OpenAI, or other vendor keys. To run the same model on a vendor key, pick pi or opencode. To bill it through OpenRouter, pick pi, opencode, or Codex and save `OPENROUTER_API_KEY`.
+**Vercel AI Gateway:** one key, many models, billed through that key: the same shape as OpenRouter, a different catalog and bill. Save `AI_GATEWAY_API_KEY` under Agents, Vercel AI Gateway.
+
+- **fx** speaks Gateway only. Model ids are Gateway slugs (`moonshotai/kimi-k3`, `openai/gpt-5.4`). No Anthropic or OpenAI key is read.
+- **pi, opencode, Codex** pick Gateway with a `vercel/` prefix (`vercel/moonshotai/kimi-k3`). The same slug without that prefix still uses the vendor key or OpenRouter.
+
+To use a vendor key, pick pi or opencode without the prefix. To bill through OpenRouter, pick pi, opencode, or Codex and save `OPENROUTER_API_KEY`.
 
 **Ollama:** Claude Code, opencode, and DeepSeek Harness run a model on Ollama when the agent's model starts with `ollama/`, for example `ollama/glm-5.1`. Runs go to Ollama Cloud with `OLLAMA_API_KEY`, or to a server you run when `OLLAMA_BASE_URL` names it. See [Ollama](#ollama).
 
@@ -85,11 +90,11 @@ Bare model ids (`claude-sonnet-5`, `claude-opus-5`). Reports cost. Mid-run inter
 
 ### pi
 
-Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Reports cost.
+Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Prefix with `vercel/` to bill through Vercel AI Gateway. Reports cost.
 
 ### Codex CLI
 
-Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. You do not set `OPENAI_BASE_URL` for that route.
+Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. When Vercel AI Gateway is selected, the model is `vercel/` plus a Gateway slug (`vercel/moonshotai/kimi-k3`) and Bento passes `-c model_provider=vercel` so Codex reads `AI_GATEWAY_API_KEY`. You do not set `OPENAI_BASE_URL` for either route.
 
 Codex 0.153 ignores `OPENAI_API_KEY` for its built in provider. Bento hands the saved OpenAI key over as `CODEX_API_KEY`. `OPENAI_BASE_URL` is still honored for other OpenAI compatible gateways, as `-c openai_base_url=...`. Does not report cost.
 
@@ -99,7 +104,7 @@ Bare model ids per Cursor plan. Single `CURSOR_API_KEY`. Unlisted model ids may 
 
 ### opencode
 
-`provider/id` format including `openrouter/`. Same provider keys as pi. Does not report cost.
+`provider/id` format including `openrouter/` and `vercel/`. Same provider keys as pi. Does not report cost.
 
 ### Poolside (pool)
 

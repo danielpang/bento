@@ -68,6 +68,9 @@ test("codex renders TOML tables with a static Authorization header", () => {
   assert.match(toml, /\[model_providers\.openrouter\]/);
   assert.match(toml, /env_key = "OPENROUTER_API_KEY"/);
   assert.match(toml, /base_url = "https:\/\/openrouter\.ai\/api\/v1"/);
+  assert.match(toml, /\[model_providers\.vercel\]/);
+  assert.match(toml, /env_key = "AI_GATEWAY_API_KEY"/);
+  assert.match(toml, /base_url = "https:\/\/ai-gateway\.vercel\.sh\/codex\/v1"/);
   assert.match(toml, /\[mcp_servers\.docs\]/);
   assert.match(toml, /url = "https:\/\/bento\.test\/api\/mcp-gateway\/abc"/);
   assert.match(toml, /http_headers = \{ "Authorization" = "Bearer bmg_token" \}/);
@@ -107,5 +110,6 @@ test("an empty server set still renders a config, so a removed server is cleared
   // not drop the route, and writes no mcp_servers tables.
   const emptyCodex = codexAdapter.mcp!.renderConfig([])[0]!.content;
   assert.match(emptyCodex, /\[model_providers\.openrouter\]/);
+  assert.match(emptyCodex, /\[model_providers\.vercel\]/);
   assert.doesNotMatch(emptyCodex, /\[mcp_servers\./);
 });

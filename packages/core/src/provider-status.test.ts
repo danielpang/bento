@@ -93,6 +93,13 @@ test("a Muse Code outage names the Meta status page", () => {
   assert.equal(outageProvider("muse-spark-1.3 is overloaded"), "meta");
 });
 
+test("a vercel/ slug on pi or Codex names Vercel AI Gateway, not the vendor behind it", () => {
+  const error = "API Error: 503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "pi", model: "vercel/anthropic/claude-sonnet-5" }), "vercel");
+  assert.equal(outageProvider(error, { cli: "codex", model: "vercel/openai/gpt-5.4" }), "vercel");
+  assert.match(providerOutageAdvice(error, { cli: "pi", model: "vercel/anthropic/claude-sonnet-5" }) ?? "", /vercel-status\.com/);
+});
+
 test("an fx outage names Vercel AI Gateway, not the vendor behind the slug", () => {
   const error = "503 Service Unavailable";
   assert.equal(outageProvider(error, { cli: "fx", model: "anthropic/claude-sonnet-5" }), "vercel");

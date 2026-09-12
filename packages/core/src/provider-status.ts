@@ -98,11 +98,12 @@ export function outageProvider(
   }
 
   const model = hint?.model?.trim();
-  // fx slugs look like OpenRouter's (`anthropic/claude-sonnet-4`).
+  // Gateway slugs look like OpenRouter's (`anthropic/claude-sonnet-4`).
   // The API the tool called is the Gateway, so a generic 503 is
   // Vercel's to report, the way a Cursor 503 is Cursor's and not
   // Claude's. A mention of another provider still wins above.
-  if (model && hint?.cli !== "fx") {
+  if (hint?.cli === "fx" || model?.startsWith("vercel/")) return "vercel";
+  if (model) {
     const prefix = model.split("/")[0] ?? "";
     const named = BY_ID[prefix];
     if (named) return named;

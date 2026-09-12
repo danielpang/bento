@@ -52,7 +52,14 @@ export const opencodeAdapter: AgentAdapter = {
   // is forwarded, and the model string decides which one gets used.
   requiredEnv: [],
   requiredEnvFor: providerKeyFor,
-  optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
+  optionalEnv: [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY",
+  ],
   configPaths: [".config/opencode", ".local/share/opencode"],
 
   /**
@@ -66,19 +73,34 @@ export const opencodeAdapter: AgentAdapter = {
     // Without Ollama credentials saved in Bento, ollama/ is the provider
     // of that name in the user's own opencode config, as it was before
     // Bento offered Ollama.
-    if (!isOllamaModel(input.model) || !hasOllamaCredentials(input.credentials ?? {})) return {};
-    const id = ollamaModelId(input.model);
-    const options: Record<string, string> = {
-      baseURL: `${ollamaServerUrl(input.credentials?.OLLAMA_BASE_URL)}/v1`,
-    };
-    if (input.credentials?.OLLAMA_API_KEY) options.apiKey = "{env:OLLAMA_API_KEY}";
-    const config = {
-      $schema: "https://opencode.ai/config.json",
-      provider: {
-        ollama: { npm: "@ai-sdk/openai-compatible", name: "Ollama", options, models: { [id]: { name: id } } },
-      },
-    };
-    return { OPENCODE_CONFIG_CONTENT: JSON.stringify(config) };
+    if (isOllamaModel(input.model) && hasOllamaCredentials(input.credentials ?? {})) {
+      const id = ollamaModelId(input.model);
+      const options: Record<string, string> = {
+        baseURL: `${ollamaServerUrl(input.credentials?.OLLAMA_BASE_URL)}/v1`,
+      };
+      if (input.credentials?.OLLAMA_API_KEY) options.apiKey = "{env:OLLAMA_API_KEY}";
+      const config = {
+        $schema: "https://opencode.ai/config.json",
+        provider: {
+          ollama: { npm: "@ai-sdk/openai-compatible", name: "Ollama", options, models: { [id]: { name: id } } },
+        },
+      };
+      return { OPENCODE_CONFIG_CONTENT: JSON.stringify(config) };
+    }
+    // /connect stores the Gateway key in opencode's own auth. A sandbox
+    // has none of that, so the built-in vercel provider is pointed at
+    // the key Bento already forwarded.
+    if (input.model.startsWith("vercel/") && input.credentials?.AI_GATEWAY_API_KEY) {
+      return {
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            vercel: { options: { apiKey: "{env:AI_GATEWAY_API_KEY}" } },
+          },
+        }),
+      };
+    }
+    return {};
   },
 
   // The sandbox home carries no opencode config of its own, so the

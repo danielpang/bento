@@ -27,25 +27,34 @@ test("every agent CLI has model guidance", () => {
   assert.equal(MODEL_GUIDANCE.length, 11);
 });
 
-test("the provider agnostic tools show how to reach OpenRouter", () => {
+test("the provider agnostic tools show how to reach OpenRouter and Vercel AI Gateway", () => {
   for (const cli of ["opencode", "pi"]) {
     const guidance = modelGuidanceFor(cli)!;
     assert.match(guidance.format, /openrouter/i, `${cli} should explain OpenRouter routing`);
+    assert.match(guidance.format, /vercel/i, `${cli} should explain Gateway routing`);
     assert.ok(
       guidance.examples.some((e) => e.startsWith("openrouter/")),
       `${cli} should show an OpenRouter example`,
     );
+    assert.ok(
+      guidance.examples.some((e) => e.startsWith("vercel/")),
+      `${cli} should show a Vercel AI Gateway example`,
+    );
   }
   const codex = modelGuidanceFor("codex")!;
   assert.match(codex.format, /OpenRouter/);
-  assert.ok(codex.examples.some((e) => e.includes("/")), "Codex should show an OpenRouter slug");
+  assert.match(codex.format, /vercel\//);
+  assert.ok(codex.examples.some((e) => e.startsWith("vercel/")), "Codex should show a Gateway slug");
   const openrouter = AGENT_CREDENTIALS.find((c) => c.name === "OPENROUTER_API_KEY");
   assert.match(openrouter?.help ?? "", /Codex/, "Codex reads OPENROUTER_API_KEY for OpenRouter slugs");
+  const gateway = AGENT_CREDENTIALS.find((c) => c.name === "AI_GATEWAY_API_KEY");
+  assert.match(gateway?.help ?? "", /Codex/, "Codex reads AI_GATEWAY_API_KEY for vercel/ slugs");
+  assert.match(gateway?.help ?? "", /opencode/);
   const openaiBase = AGENT_CREDENTIALS.find((c) => c.name === "OPENAI_BASE_URL");
   assert.match(
     openaiBase?.help ?? "",
-    /OpenRouter does not need this/,
-    "OpenRouter is a Codex provider, not a hijacked openai_base_url",
+    /OpenRouter and Vercel AI Gateway do not need this/,
+    "OpenRouter and Gateway are Codex providers, not a hijacked openai_base_url",
   );
 });
 

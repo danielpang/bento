@@ -79,8 +79,8 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   },
   {
     name: "AI_GATEWAY_API_KEY",
-    label: "Vercel AI Gateway (fx)",
-    help: "Used by fx, whichever model it runs. Create one in the Vercel AI Gateway dashboard. fx bills every model through this key, so Claude and GPT runs need no Anthropic or OpenAI key of their own. To use a vendor key instead, pick pi or opencode.",
+    label: "Vercel AI Gateway",
+    help: "Used by fx, and by opencode, pi, and Codex when a model is prefixed with vercel/. Create one in the Vercel AI Gateway dashboard. Gateway bills every model through this key, so those runs need no Anthropic or OpenAI key of their own. To use a vendor key instead, pick pi or opencode without the vercel/ prefix.",
     secret: true,
   },
   {
@@ -104,7 +104,7 @@ export const AGENT_CREDENTIALS: readonly AgentCredential[] = [
   {
     name: "OPENAI_BASE_URL",
     label: "OpenAI base URL",
-    help: "Point Codex at an OpenAI compatible gateway. OpenRouter does not need this: pick an OpenRouter model and save the OpenRouter key.",
+    help: "Point Codex at an OpenAI compatible gateway. OpenRouter and Vercel AI Gateway do not need this: pick that provider's model and save its key.",
     secret: false,
   },
   {
@@ -178,8 +178,8 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     label: "Codex CLI",
     defaultModel: "gpt-5-codex",
     format:
-      "A bare OpenAI id, or pick OpenRouter for a slug such as openai/gpt-5-mini. Selecting OpenRouter uses the OpenRouter key.",
-    examples: ["gpt-5-codex", "gpt-5", "openai/gpt-5-mini"],
+      "A bare OpenAI id, an OpenRouter slug such as openai/gpt-5-mini, or vercel/ plus a Gateway slug. Selecting OpenRouter or Vercel AI Gateway uses that provider's key.",
+    examples: ["gpt-5-codex", "openai/gpt-5-mini", "vercel/moonshotai/kimi-k3"],
     binary: "codex",
     installUrl: "https://github.com/openai/codex",
     installCommand: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
@@ -200,8 +200,8 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     label: "opencode",
     defaultModel: "anthropic/claude-sonnet-5",
     format:
-      "provider/model. Prefix with openrouter/ to route through OpenRouter, or use openrouter/openrouter/auto to let it pick per request. Prefix with ollama/ for a model Ollama serves.",
-    examples: ["anthropic/claude-sonnet-5", "openrouter/z-ai/glm-4.6", "openrouter/openrouter/auto"],
+      "provider/model. Prefix with openrouter/ to route through OpenRouter, or vercel/ to route through Vercel AI Gateway. Use openrouter/openrouter/auto to let OpenRouter pick per request. Prefix with ollama/ for a model Ollama serves.",
+    examples: ["anthropic/claude-sonnet-5", "openrouter/z-ai/glm-4.6", "vercel/moonshotai/kimi-k3"],
     binary: "opencode",
     installUrl: "https://opencode.ai/docs/",
     installCommand: "curl -fsSL https://opencode.ai/install | bash",
@@ -211,8 +211,8 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     label: "pi",
     defaultModel: "anthropic/claude-sonnet-5",
     format:
-      "provider/model, optionally with :thinking. Prefix with openrouter/ for OpenRouter, or use openrouter/openrouter/auto to let it pick per request.",
-    examples: ["anthropic/claude-sonnet-5", "openrouter/z-ai/glm-4.6", "openrouter/openrouter/auto"],
+      "provider/model, optionally with :thinking. Prefix with openrouter/ for OpenRouter, or vercel/ for Vercel AI Gateway. Use openrouter/openrouter/auto to let OpenRouter pick per request.",
+    examples: ["anthropic/claude-sonnet-5", "openrouter/z-ai/glm-4.6", "vercel/moonshotai/kimi-k3"],
     binary: "pi",
     installUrl: "https://github.com/earendil-works/pi",
     installCommand: "npm install -g @earendil-works/pi-coding-agent",
@@ -267,7 +267,7 @@ export const MODEL_GUIDANCE: readonly ModelGuidance[] = [
     label: "fx",
     defaultModel: "moonshotai/kimi-k3",
     format:
-      "A Vercel AI Gateway slug, vendor prefix included. Billed through AI_GATEWAY_API_KEY, not that vendor's own key. To use a vendor key instead, pick pi or opencode.",
+      "A Vercel AI Gateway slug, vendor prefix included. Billed through AI_GATEWAY_API_KEY, not that vendor's own key. pi, opencode, and Codex can also pick Gateway: prefix the same slug with vercel/.",
     examples: ["moonshotai/kimi-k3", "openai/gpt-5.4"],
     binary: "fx",
     installUrl: "https://fx.sh/docs",
