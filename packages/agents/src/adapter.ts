@@ -130,6 +130,14 @@ export interface McpCapability {
   renderConfig(servers: McpRemoteServer[]): McpFile[];
   /** argv appended after profile extraArgs when at least one server attached. */
   extraArgs?(): string[];
+  /**
+   * Extra sandbox env this config needs. fx is the case: it refuses a
+   * literal Authorization header, so the run grant travels as
+   * BENTO_MCP_GRANT and the file names that variable. Resume attach
+   * inherits the process environment, so this is only read on the
+   * first spawn.
+   */
+  env?(servers: McpRemoteServer[]): Record<string, string>;
 }
 
 export interface AgentAdapter {
@@ -258,6 +266,7 @@ export function lastResultEvent(events: AgentEvent[]): Extract<AgentEvent, { typ
 export function providerKeyFor(model: string): string[] {
   const byProvider: Record<string, string> = {
     openrouter: "OPENROUTER_API_KEY",
+    vercel: "AI_GATEWAY_API_KEY",
     anthropic: "ANTHROPIC_API_KEY",
     openai: "OPENAI_API_KEY",
     google: "GEMINI_API_KEY",

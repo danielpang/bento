@@ -386,7 +386,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP servers are attached before the command is built, so the
   // gateway flags can join the argv. Never fails the run: an
   // unattachable server is left out with a transcript note.
-  const { extraArgs: mcpArgs, cardTools } = await prepareRunMcp(ctx, {
+  const { extraArgs: mcpArgs, cardTools, env: mcpEnv } = await prepareRunMcp(ctx, {
     runId,
     organizationId: feature.organizationId,
     actingUserId: run.startedBy,
@@ -504,7 +504,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     credentials: agentEnv,
   });
 
-  const execEnv = mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx));
+  const execEnv = {
+    ...mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx)),
+    ...mcpEnv,
+  };
 
   // Files the tool reads settings from, written before every run because
   // the sandbox outlives it. A failed write is said in the transcript,

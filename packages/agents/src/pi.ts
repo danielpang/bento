@@ -19,11 +19,18 @@ export const piAdapter: AgentAdapter = {
   requiredEnv: [],
   requiredEnvFor: providerKeyFor,
   // Whichever of these is present decides which provider pi can reach.
-  optionalEnv: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
+  optionalEnv: [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY",
+  ],
   configPaths: [".pi"],
 
   buildCommand(input: BuildCommandInput): string[] {
-    const argv = ["pi", "--mode", "json", "--print", "--model", input.model];
+    const argv = ["pi", "--mode", "json", "--print", ...piModelArgs(input.model)];
     // A partial id is accepted, so the stored session id works as is.
     if (input.resumeSessionId) argv.push("--session", input.resumeSessionId);
     if (input.extraArgs?.length) argv.push(...input.extraArgs);
@@ -40,7 +47,7 @@ export const piAdapter: AgentAdapter = {
   live: {
     delivery: "steer",
     buildCommand(input: BuildCommandInput): string[] {
-      const argv = ["pi", "--mode", "rpc", "--model", input.model];
+      const argv = ["pi", "--mode", "rpc", ...piModelArgs(input.model)];
       if (input.resumeSessionId) argv.push("--session", input.resumeSessionId);
       if (input.extraArgs?.length) argv.push(...input.extraArgs);
       return argv;
@@ -204,4 +211,16 @@ function assistantText(message: PiMessage | undefined): string {
     if (candidate?.type === "text" && candidate.text) parts.push(candidate.text);
   }
   return parts.join("").trim();
+}
+
+/**
+ * pi's first-class Gateway provider is `vercel-ai-gateway`, not
+ * `vercel`. The picker writes `vercel/<slug>` so every tool shares one
+ * catalog id; this is the rewrite that provider expects.
+ */
+function piModelArgs(model: string): string[] {
+  if (model.startsWith("vercel/")) {
+    return ["--provider", "vercel-ai-gateway", "--model", model.slice("vercel/".length)];
+  }
+  return ["--model", model];
 }

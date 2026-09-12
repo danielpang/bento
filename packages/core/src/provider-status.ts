@@ -20,6 +20,7 @@ export const PROVIDER_STATUS_PAGES = {
   google: { name: "Gemini", url: "https://aistudio.google.com/status" },
   poolside: { name: "Poolside", url: "https://status.poolside.ai" },
   meta: { name: "Meta", url: "https://dev.meta.ai/status" },
+  vercel: { name: "Vercel AI Gateway", url: "https://www.vercel-status.com" },
 } as const;
 
 export type StatusProvider = keyof typeof PROVIDER_STATUS_PAGES;
@@ -39,6 +40,7 @@ const BY_ID: Record<string, StatusProvider> = {
   antigravity: "google",
   poolside: "poolside",
   meta: "meta",
+  vercel: "vercel",
 };
 
 /**
@@ -54,6 +56,7 @@ const BY_CLI: Record<string, StatusProvider> = {
   pool: "poolside",
   antigravity: "google",
   muse: "meta",
+  fx: "vercel",
 };
 
 /**
@@ -71,6 +74,7 @@ const MENTIONS: readonly [RegExp, StatusProvider][] = [
   [/gemini|antigravity|aistudio\.google|generativelanguage\.googleapis|\bgoogle\b/i, "google"],
   [/poolside|\blaguna\b/i, "poolside"],
   [/\bmuse\b|muse-spark|meta\.ai|META_API_KEY/i, "meta"],
+  [/ai gateway|ai-gateway|AI_GATEWAY|vercel/i, "vercel"],
 ];
 
 /**
@@ -94,6 +98,11 @@ export function outageProvider(
   }
 
   const model = hint?.model?.trim();
+  // Gateway slugs look like OpenRouter's (`anthropic/claude-sonnet-4`).
+  // The API the tool called is the Gateway, so a generic 503 is
+  // Vercel's to report, the way a Cursor 503 is Cursor's and not
+  // Claude's. A mention of another provider still wins above.
+  if (hint?.cli === "fx" || model?.startsWith("vercel/")) return "vercel";
   if (model) {
     const prefix = model.split("/")[0] ?? "";
     const named = BY_ID[prefix];

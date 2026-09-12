@@ -26,6 +26,7 @@ test("bento --help lists all preview and production tool values", () => {
   assert.match(HELP, /--tool[\s\S]*dsh/);
   assert.match(HELP, /--tool[\s\S]*antigravity/);
   assert.match(HELP, /--tool[\s\S]*muse/);
+  assert.match(HELP, /--tool[\s\S]*fx/);
 });
 
 test("bento --help lists spend, sessions, and mcp", () => {
