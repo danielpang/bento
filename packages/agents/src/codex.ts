@@ -202,7 +202,10 @@ function openRouterSelected(model: string): boolean {
 }
 
 function vercelSelected(model: string): boolean {
-  return providerForProfile("codex", model)?.id === "vercel";
+  // The prefix is the selection. Do not ask providerForProfile: a
+  // slash on Codex is otherwise OpenRouter, and that answer is what
+  // this prefix exists to override.
+  return model.startsWith("vercel/");
 }
 
 function openRouterConfigOverrides(): string[] {

@@ -134,6 +134,7 @@ test("codex vercel/ slugs select the Gateway provider and strip the prefix", () 
   assert.ok(cmd.includes('model_providers.vercel.env_key="AI_GATEWAY_API_KEY"'));
   assert.ok(!cmd.includes('model_provider="openrouter"'));
   assert.deepEqual(codexAdapter.requiredEnvFor?.("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("vercel/acme/unreleased"), ["AI_GATEWAY_API_KEY"]);
   assert.deepEqual(codexAdapter.env?.(input), {});
 });
 
