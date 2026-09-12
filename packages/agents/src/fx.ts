@@ -60,6 +60,12 @@ export const fxAdapter: AgentAdapter = {
    * fx reads MCP servers from ~/.fx/mcp.json. The whole file is
    * Bento's to overwrite each run. The orchestrator skips this
    * adapter when local mode has the real ~/.fx mounted over it.
+   *
+   * A literal Authorization header is rejected (McpConfigInvalidHeaders
+   * on fx 0.0.9), and header_env for that name is rejected too. The
+   * documented Bearer path is bearer_token_env. required stays false
+   * so a down gateway does not block the model turn; Muse uses the
+   * same optional stance.
    */
   mcp: {
     renderConfig(servers) {
@@ -69,9 +75,9 @@ export const fxAdapter: AgentAdapter = {
           {
             type: s.transport === "sse" ? "sse" : "http",
             url: s.url,
-            headers: s.headers,
+            ...(grantToken(s.headers) ? { bearer_token_env: FX_GRANT_ENV } : {}),
             enabled: true,
-            required: true,
+            required: false,
           },
         ]),
       );
@@ -81,6 +87,10 @@ export const fxAdapter: AgentAdapter = {
           content: JSON.stringify({ mcp }, null, 2),
         },
       ];
+    },
+    env(servers) {
+      const token = servers.map((s) => grantToken(s.headers)).find(Boolean);
+      return token ? { [FX_GRANT_ENV]: token } : {};
     },
   },
 
@@ -145,6 +155,15 @@ export const fxAdapter: AgentAdapter = {
     return outcome;
   },
 };
+
+const FX_GRANT_ENV = "BENTO_MCP_GRANT";
+
+/** The raw run grant, never the "Bearer " prefix fx adds itself. */
+function grantToken(headers: Record<string, string>): string | undefined {
+  const value = headers.Authorization ?? headers.authorization;
+  if (!value) return undefined;
+  return nonempty(value.replace(/^Bearer\s+/i, ""));
+}
 
 function parseAskJson(line: string): FxAskJson | null {
   const trimmed = line.trim();

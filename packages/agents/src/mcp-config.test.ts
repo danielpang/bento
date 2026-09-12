@@ -81,6 +81,20 @@ test("codex escapes a slug that is not a bare TOML key", () => {
   assert.match(toml, /\[mcp_servers\."has space"\]/);
 });
 
+test("fx names the grant through bearer_token_env, never a literal Authorization header", () => {
+  const files = fxAdapter.mcp!.renderConfig(servers);
+  assert.equal(files[0]!.path, "/root/.fx/mcp.json");
+  const parsed = JSON.parse(files[0]!.content) as {
+    mcp: Record<string, { type: string; bearer_token_env?: string; headers?: unknown }>;
+  };
+  assert.equal(parsed.mcp.docs!.type, "http");
+  assert.equal(parsed.mcp.issues!.type, "sse");
+  assert.equal(parsed.mcp.docs!.bearer_token_env, "BENTO_MCP_GRANT");
+  assert.equal(parsed.mcp.docs!.headers, undefined);
+  assert.doesNotMatch(files[0]!.content, /Authorization/);
+  assert.deepEqual(fxAdapter.mcp!.env?.(servers), { BENTO_MCP_GRANT: "bmg_token" });
+});
+
 test("an empty server set still renders a config, so a removed server is cleared", () => {
   for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter, museAdapter, fxAdapter]) {
     const files = adapter.mcp!.renderConfig([]);

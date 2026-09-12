@@ -58,7 +58,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { antigravityAdapter, claudeCodeAdapter, codexAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, codexAdapter, fxAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 import { runsInContainer } from "./routes/settings.js";
@@ -2090,6 +2090,38 @@ test("a Muse Code run with no Meta key is missing it by name", async () => {
   await withEnv({ META_API_KEY: null }, async () => {
     const { missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
     assert.deepEqual(missing, ["META_API_KEY"]);
+  });
+});
+
+/**
+ * The path a person actually takes to run fx: pick the tool, pick a
+ * Gateway slug, paste an AI Gateway key. fx can also sign in with
+ * Vercel, or with a Codex or Grok subscription, which no sandbox can
+ * do, so the key is the whole of its authentication here.
+ */
+test("a pasted AI Gateway key is what reaches an fx run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "AI_GATEWAY_API_KEY", value: "vck_pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ AI_GATEWAY_API_KEY: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, fxAdapter, "moonshotai/kimi-k3");
+      assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
+      assert.equal(env.AI_GATEWAY_API_KEY, "vck_pasted-by-the-user");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+test("an fx run with no AI Gateway key is missing it by name", async () => {
+  await withEnv({ AI_GATEWAY_API_KEY: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, fxAdapter, "moonshotai/kimi-k3");
+    assert.deepEqual(missing, ["AI_GATEWAY_API_KEY"]);
   });
 });
 

@@ -143,4 +143,4 @@ Authentication is `AI_GATEWAY_API_KEY`. fx can also sign in with Vercel, or with
 
 `--full-access` disables fx's own permission checks: Bento's sandbox is the boundary. `fx ask --json` prints one object when the process exits (no streamed tool or thinking events). Runs resume by session id (`--resume`). Headless mode accepts no mid-run input. Does not report cost: the JSON carries token counts, not a dollar figure.
 
-MCP servers attach through `~/.fx/mcp.json`, which Bento rewrites before every run.
+MCP servers attach through `~/.fx/mcp.json`, which Bento rewrites before every run. fx refuses a literal Authorization header, so the run grant travels as `BENTO_MCP_GRANT` and the file names that variable.

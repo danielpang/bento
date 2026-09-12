@@ -1242,11 +1242,16 @@ test("fx writes its MCP servers where the CLI reads them", () => {
       docs: {
         type: "http",
         url: "https://bento.test/mcp",
-        headers: { Authorization: "Bearer t" },
+        bearer_token_env: "BENTO_MCP_GRANT",
         enabled: true,
-        required: true,
+        required: false,
       },
     },
   });
+  assert.doesNotMatch(files[0]!.content, /Authorization/);
+  assert.deepEqual(fxAdapter.mcp!.env?.([
+    { slug: "docs", url: "https://bento.test/mcp", transport: "http", headers: { Authorization: "Bearer t" } },
+  ]), { BENTO_MCP_GRANT: "t" });
   assert.deepEqual(JSON.parse(fxAdapter.mcp!.renderConfig([])[0]!.content), { mcp: {} });
+  assert.deepEqual(fxAdapter.mcp!.env?.([]), {});
 });
