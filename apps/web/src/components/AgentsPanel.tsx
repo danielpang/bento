@@ -46,10 +46,8 @@ function growSkill(el: HTMLTextAreaElement | null): void {
   // we set. min-height still floors the used size after this.
   el.style.height = "0px";
   const content = el.scrollHeight;
-  const cssMax = parseFloat(getComputedStyle(el).maxHeight);
-  const max = Number.isFinite(cssMax) && cssMax > 0 ? Math.min(SKILL_MAX_HEIGHT, cssMax) : SKILL_MAX_HEIGHT;
-  el.style.height = `${Math.min(content, max)}px`;
-  el.style.overflowY = content > max ? "auto" : "hidden";
+  el.style.height = `${Math.min(content, SKILL_MAX_HEIGHT)}px`;
+  el.style.overflowY = content > SKILL_MAX_HEIGHT ? "auto" : "hidden";
 }
 
 /**

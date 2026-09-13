@@ -2,60 +2,6 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useRef, type ReactNode } from "react";
 
 /**
- * How many dialogs are currently pinning the overlay to the visible
- * viewport. Nested confirms (remove, while an editor is open) must not
- * clear the variables the parent still needs.
- */
-let visualViewportLocks = 0;
-let stopVisualViewport: (() => void) | null = null;
-
-/**
- * Size and place the overlay in the pixels the user can actually see.
- *
- * On a phone the layout viewport stays tall when the keyboard opens;
- * only visualViewport shrinks. A panel sized to 100dvh then keeps Save
- * behind the keyboard, and scrolling the fields cannot reveal a footer
- * that is pinned to that taller box. These variables are what the
- * backdrop and the max-height read.
- */
-function lockVisualViewport(): () => void {
-  if (visualViewportLocks === 0) {
-    const root = document.documentElement.style;
-    const apply = () => {
-      const vv = window.visualViewport;
-      // The smallest reported height is the one the user can see.
-      // After the keyboard drops, visualViewport can stay on the large
-      // viewport while the URL bar is back, and a panel sized to that
-      // keeps Save under the chrome.
-      const heights = [vv?.height, window.innerHeight, document.documentElement.clientHeight].filter(
-        (n): n is number => typeof n === "number" && n > 0,
-      );
-      root.setProperty("--visual-viewport-height", `${Math.min(...heights)}px`);
-      root.setProperty("--visual-viewport-offset-top", `${vv?.offsetTop ?? 0}px`);
-    };
-    apply();
-    window.visualViewport?.addEventListener("resize", apply);
-    window.visualViewport?.addEventListener("scroll", apply);
-    window.addEventListener("resize", apply);
-    stopVisualViewport = () => {
-      window.visualViewport?.removeEventListener("resize", apply);
-      window.visualViewport?.removeEventListener("scroll", apply);
-      window.removeEventListener("resize", apply);
-      root.removeProperty("--visual-viewport-height");
-      root.removeProperty("--visual-viewport-offset-top");
-    };
-  }
-  visualViewportLocks += 1;
-  return () => {
-    visualViewportLocks -= 1;
-    if (visualViewportLocks === 0) {
-      stopVisualViewport?.();
-      stopVisualViewport = null;
-    }
-  };
-}
-
-/**
  * A dialog in Bento's own chrome, replacing the browser's prompt,
  * confirm, and alert.
  *
@@ -137,74 +83,6 @@ export function Modal({
       if (target?.isConnected) requestAnimationFrame(() => target.focus());
     };
   }, []);
-  useEffect(() => lockVisualViewport(), []);
-
-  /**
-   * A growing textarea swallows the swipe. Overflow hidden (while it
-   * is still growing) does not pass the gesture to the dialog, and
-   * Radix's scroll lock will not scroll the page behind it. The
-   * dialog itself has to take the leftover movement, or Save stays
-   * below the fold after the keyboard is put away.
-   */
-  useEffect(() => {
-    const root = panel.current;
-    if (!root) return;
-
-    const fieldFrom = (target: EventTarget | null): HTMLTextAreaElement | null =>
-      target instanceof Element ? target.closest("textarea") : null;
-
-    const handOff = (field: HTMLTextAreaElement, deltaY: number): boolean => {
-      const can = field.scrollHeight > field.clientHeight + 1;
-      const atTop = field.scrollTop <= 0;
-      const atBottom = field.scrollTop + field.clientHeight >= field.scrollHeight - 1;
-      if (can && ((deltaY < 0 && !atTop) || (deltaY > 0 && !atBottom))) return false;
-      root.scrollTop += deltaY;
-      return true;
-    };
-
-    const onWheel = (event: WheelEvent) => {
-      const field = fieldFrom(event.target);
-      if (!field) return;
-      if (handOff(field, event.deltaY)) event.preventDefault();
-    };
-
-    let lastY = 0;
-    const onTouchStart = (event: TouchEvent) => {
-      lastY = event.touches[0]?.clientY ?? 0;
-    };
-    const onTouchMove = (event: TouchEvent) => {
-      const field = fieldFrom(event.target);
-      if (!field) return;
-      const y = event.touches[0]?.clientY ?? lastY;
-      const deltaY = lastY - y;
-      lastY = y;
-      if (deltaY !== 0 && handOff(field, deltaY)) event.preventDefault();
-    };
-
-    const revealActions = () => {
-      const actions = root.querySelector(".modal-actions");
-      if (!(actions instanceof HTMLElement)) return;
-      const box = actions.getBoundingClientRect();
-      const top = window.visualViewport?.offsetTop ?? 0;
-      const bottom = top + (window.visualViewport?.height ?? window.innerHeight);
-      if (box.bottom > bottom - 4 || box.top < top + 4) {
-        actions.scrollIntoView({ block: "nearest", inline: "nearest" });
-      }
-    };
-
-    root.addEventListener("wheel", onWheel, { passive: false });
-    root.addEventListener("touchstart", onTouchStart, { passive: true });
-    root.addEventListener("touchmove", onTouchMove, { passive: false });
-    window.visualViewport?.addEventListener("resize", revealActions);
-    window.addEventListener("resize", revealActions);
-    return () => {
-      root.removeEventListener("wheel", onWheel);
-      root.removeEventListener("touchstart", onTouchStart);
-      root.removeEventListener("touchmove", onTouchMove);
-      window.visualViewport?.removeEventListener("resize", revealActions);
-      window.removeEventListener("resize", revealActions);
-    };
-  }, []);
 
   return (
     <Dialog.Root
@@ -252,13 +130,7 @@ export function Modal({
                 {description && <Dialog.Description className="muted">{description}</Dialog.Description>}
               </>
             )}
-            {/*
-              The panel itself is the scroller. A nested body left Save
-              pinned to a box taller than the visible phone screen, and
-              swiping the skill could not move that footer. Actions sit
-              in the same flow so a swipe down reaches them.
-            */}
-            {children ? <div className="modal-body">{children}</div> : null}
+            {children}
             <div className="modal-actions">{actions}</div>
           </Dialog.Content>
         </Dialog.Overlay>
