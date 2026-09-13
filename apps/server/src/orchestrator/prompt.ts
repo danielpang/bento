@@ -4,6 +4,40 @@ import type { features, stages } from "@bento/db";
 type Feature = typeof features.$inferSelect;
 type Stage = typeof stages.$inferSelect;
 
+type PromptRepository = { name: string; mountPath: string; testCommand?: string | null };
+
+/** Shared with resumed turns, which do not repeat the full stage prompt. */
+export function repositoryInstructions(repositories: PromptRepository[]): string[] {
+  const lines: string[] = [];
+  if (repositories.length) {
+    lines.push(
+      "Repository environment: inspect the repository instructions, manifests, lockfiles and runtime version files. Install missing tools and dependencies inside the sandbox as needed for this stage. An empty setup command means you manage setup, not that the repository is ready.",
+      "Build and test after making your changes, before reporting completion, so you can fix failures. Use the repository's package manager to run local tools (for example pnpm exec turbo or pnpm run build), rather than assuming turbo or other project tools are installed globally. Do not build the application as a prerequisite to beginning the task.",
+      "",
+    );
+  }
+  /**
+   * How this project proves its own work. Given to the agent rather
+   * than run by the server on purpose: an agent that sees the failures
+   * while it is still working can fix them, and a check that only runs
+   * afterwards arrives when nobody is left to act on it.
+   */
+  const checked = repositories.filter((repo) => repo.testCommand?.trim());
+  if (checked.length > 0) {
+    lines.push(
+      checked.length === 1 && repositories.length === 1
+        ? `Check your work by running: ${checked[0]!.testCommand!.trim()}`
+        : "Check your work in each repository you changed, by running:",
+      ...(checked.length === 1 && repositories.length === 1
+        ? []
+        : checked.map((repo) => `- in ${repo.mountPath}: ${repo.testCommand!.trim()}`)),
+      "It must pass before you finish. If it cannot pass, say so in your summary and explain why, rather than leaving it broken quietly.",
+      "",
+    );
+  }
+  return lines;
+}
+
 /**
  * Builds the prompt an agent receives for one stage run. Prior stage
  * output lives in committed artifact files in the worktree, which is how
@@ -57,25 +91,7 @@ export function buildStagePrompt(
       "",
     );
   }
-  /**
-   * How this project proves its own work. Given to the agent rather
-   * than run by the server on purpose: an agent that sees the failures
-   * while it is still working can fix them, and a check that only runs
-   * afterwards arrives when nobody is left to act on it.
-   */
-  const checked = repositories.filter((repo) => repo.testCommand?.trim());
-  if (checked.length > 0) {
-    lines.push(
-      checked.length === 1 && repositories.length === 1
-        ? `Check your work by running: ${checked[0]!.testCommand!.trim()}`
-        : "Check your work in each repository you changed, by running:",
-      ...(checked.length === 1 && repositories.length === 1
-        ? []
-        : checked.map((repo) => `- in ${repo.mountPath}: ${repo.testCommand!.trim()}`)),
-      "It must pass before you finish. If it cannot pass, say so in your summary and explain why, rather than leaving it broken quietly.",
-      "",
-    );
-  }
+  lines.push(...repositoryInstructions(repositories));
   if (priorArtifacts.length > 0) {
     lines.push(
       "Earlier stages committed their output to these files; read the ones that exist before starting:",
@@ -83,6 +99,13 @@ export function buildStagePrompt(
       "",
     );
   }
+  lines.push(
+    "Bento's server owns GitHub publication. Commit locally; do not run git push or gh pr create, and do not ask the user for GitHub tokens inside the sandbox.",
+    stage.createPr
+      ? "Automatic PR creation is enabled for this stage. After a successful run, Bento pushes the committed changes and opens or updates the pull requests using its GitHub connection."
+      : "Automatic PR creation is off for this stage. To publish, the user can choose Create or update PRs in the card's Pull requests panel or enable automatic PR creation in stage settings.",
+    "",
+  );
   const artifactRepo = repositories[0];
   const artifactPath = artifactRepo ? `${artifactRepo.mountPath}/${artifact}` : artifact;
   lines.push(

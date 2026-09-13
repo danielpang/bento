@@ -103,3 +103,13 @@ test("the merge prohibition still comes last, after the split paragraph", () => 
   assert.ok(prompt.indexOf("create_card") < prompt.indexOf("Stay on your branch"));
   assert.ok(prompt.trimEnd().endsWith("once this run finishes."));
 });
+
+
+test("stage prompts describe server-owned publication and the actual automatic PR setting", () => {
+  for (const createPr of [true, false]) {
+    const prompt = buildStagePrompt(feature, { ...stage, createPr }, [stage]);
+    assert.match(prompt, /do not run git push or gh pr create/);
+    assert.match(prompt, /do not ask the user for GitHub tokens/);
+    assert.match(prompt, createPr ? /Automatic PR creation is enabled/ : /Automatic PR creation is off/);
+  }
+});

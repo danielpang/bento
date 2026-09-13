@@ -1,20 +1,22 @@
 name: Release
 
-# Tags are the release trigger. The tag must be on main, which is
-# enforced below rather than assumed, so a tag pushed from a branch does
-# not quietly publish.
 on:
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   verify:
-    name: Verify the tag and run checks
-    runs-on: ubuntu-latest
+    name: Verify the version and CLI dependencies
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17-alpine
@@ -34,34 +36,38 @@ jobs:
       BENTO_SANDBOX_DRIVER: local-process
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Refuse tags that are not on main
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          if ! git branch -r --contains "refs/tags/$TAG" | grep -qE 'origin/main$'; then
-            echo "::error::$TAG is not on main. Releases are cut from main."
-            exit 1
-          fi
-
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
-
+      - name: Validate the release tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/release-version.mjs "$TAG"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm typecheck
+      - run: pnpm exec turbo run build typecheck --filter=@bento/tui...
       - run: pnpm db:migrate
-      - run: pnpm test
+      - run: pnpm exec turbo run test --filter=@bento/tui...
+      - run: node --test scripts/install.test.mjs
 
   cli:
-    name: Package the CLI
+    name: Package CLI (${{ matrix.platform }})
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x64
+          - runner: ubuntu-22.04-arm
+            platform: linux-arm64
+          - runner: macos-15-intel
+            platform: darwin-x64
+          - runner: macos-15
+            platform: darwin-arm64
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -69,40 +75,84 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-
-      # pnpm deploy resolves the workspace links into a self-contained
-      # directory, so the tarball runs anywhere Node 22 is installed
-      # without pnpm or the monorepo.
-      - name: Build a standalone package
+      - run: pnpm exec turbo run build --filter=@bento/tui...
+      - name: Package native dependencies and stamp the version
         env:
           TAG: ${{ github.ref_name }}
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
         run: |
-          pnpm deploy --filter @bento/tui --prod dist-cli
-          rm -rf dist-cli/src dist-cli/tsconfig.json
-          cat > dist-cli/bento <<'LAUNCHER'
-          #!/bin/sh
-          exec node "$(dirname "$0")/dist/cli.js" "$@"
-          LAUNCHER
-          chmod +x dist-cli/bento
-          mv dist-cli "bento-$TAG"
-          tar -czf "bento-cli-$TAG.tar.gz" "bento-$TAG"
-
-      - name: Check the packaged CLI starts
+          test "$(node -p 'process.platform + "-" + process.arch')" = "$EXPECTED_PLATFORM"
+          node scripts/package-cli.mjs "$TAG"
+      - name: Install and test the release outside the checkout
         env:
           TAG: ${{ github.ref_name }}
-        run: "./bento-$TAG/bento --help"
-
+          PLATFORM: ${{ matrix.platform }}
+        run: BENTO_TEST_ARCHIVE="$PWD/release-dist/bento-cli-$TAG-$PLATFORM.tar.gz" node --test scripts/install.test.mjs
       - uses: actions/upload-artifact@v6
         with:
-          name: cli
-          path: bento-cli-*.tar.gz
+          name: cli-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            release-dist/bento-cli-*.tar.gz
+            release-dist/bento-cli-*.sha256
+            release-dist/install.sh
+
+  release:
+    name: Publish CLI release
+    needs: cli
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: cli-*
+          path: artifacts
+          merge-multiple: true
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat artifacts/*.sha256 > artifacts/SHA256SUMS
+          (cd artifacts && sha256sum install.sh >> SHA256SUMS && sha256sum --check SHA256SUMS)
+          {
+            echo 'Install or update Bento:'
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://github.com/$REPO/releases/download/$TAG/install.sh | bash"
+            echo 'bento --version'
+            echo '```'
+            echo
+            echo 'Requires Node.js 22.19 or newer. The installer selects macOS or glibc Linux, x64 or arm64, and verifies SHA-256 checksums.'
+            echo 'No pnpm or source checkout is required. Run the installer again to update.'
+            echo
+            echo "See [the CLI guide](https://github.com/$REPO/blob/$TAG/docs/tui.md) for local Docker setup and hosted connections."
+            echo 'The optional Mac app is attached separately when its build finishes.'
+          } > notes.md
+          flags=()
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          # Draft first: an incomplete upload never becomes the latest installer.
+          # A rerun may repair a draft, but never replace published CLI assets.
+          if gh release view "$TAG" --json isDraft --jq .isDraft > is-draft.txt 2>/dev/null; then
+            if [ "$(cat is-draft.txt)" != true ]; then
+              echo "::error::$TAG is already published. Push a new version tag."
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
+          fi
+          gh release upload "$TAG" artifacts/*.tar.gz artifacts/install.sh artifacts/SHA256SUMS --clobber
+          gh release edit "$TAG" --draft=false --notes-file notes.md "${flags[@]}"
 
   mac:
     name: Package the Mac app
-    needs: verify
+    needs: release
+    permissions:
+      contents: write
     runs-on: macos-latest
     # The secrets context is not available in step-level `if`, so the
     # presence of each optional secret is hoisted into env here.
@@ -115,7 +165,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           # The Native SDK toolchain requires 22.15 or newer.
-          node-version: "22.15"
+          node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -172,56 +222,8 @@ jobs:
         run: |
           ditto -c -k --keepParent apps/mac/zig-out/package/mac.app "bento-mac-$TAG.zip"
 
-      - uses: actions/upload-artifact@v6
-        with:
-          name: mac
-          path: bento-mac-*.zip
-
-  release:
-    name: Publish the release
-    needs: [cli, mac]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v7
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Create the release
+      - name: Attach the Mac app to the CLI release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: |
-          {
-            echo "## Install"
-            echo
-            echo '### Terminal'
-            echo
-            echo '```bash'
-            echo "tar -xzf bento-cli-$TAG.tar.gz"
-            echo "sudo mv bento-$TAG /usr/local/lib/bento"
-            echo 'sudo ln -sf /usr/local/lib/bento/bento /usr/local/bin/bento'
-            echo 'bento --help'
-            echo '```'
-            echo
-            echo 'Requires Node 22. Docker is needed only when agents run on your machine.'
-            echo
-            echo '| Command | What it does |'
-            echo '|---|---|'
-            echo '| `bento --server <url>` | Join a server, agents run there |'
-            echo '| `bento --server <url> --agents local` | Join a server, agents run here |'
-            echo '| `bento` | Everything on this machine |'
-            echo
-            echo '### Mac app'
-            echo
-            echo "Unzip \`bento-mac-$TAG.zip\` and move the app to Applications."
-            echo 'The two local modes spawn the `bento` command, so install that first'
-            echo 'and make sure it is on your PATH.'
-          } > notes.md
-
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes-file notes.md \
-            --verify-tag \
-            artifacts/*
+        run: gh release upload "$TAG" "bento-mac-$TAG.zip" --clobber

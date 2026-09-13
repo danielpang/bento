@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { cursorAdapter } from "./cursor.js";
+import { fxAdapter } from "./fx.js";
+import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { codexAdapter } from "./codex.js";
 import type { McpRemoteServer } from "./adapter.js";
@@ -63,6 +65,12 @@ test("codex renders TOML tables with a static Authorization header", () => {
   const files = codexAdapter.mcp!.renderConfig(servers);
   assert.equal(files[0]!.path, "/root/.codex/config.toml");
   const toml = files[0]!.content;
+  assert.match(toml, /\[model_providers\.openrouter\]/);
+  assert.match(toml, /env_key = "OPENROUTER_API_KEY"/);
+  assert.match(toml, /base_url = "https:\/\/openrouter\.ai\/api\/v1"/);
+  assert.match(toml, /\[model_providers\.vercel\]/);
+  assert.match(toml, /env_key = "AI_GATEWAY_API_KEY"/);
+  assert.match(toml, /base_url = "https:\/\/ai-gateway\.vercel\.sh\/codex\/v1"/);
   assert.match(toml, /\[mcp_servers\.docs\]/);
   assert.match(toml, /url = "https:\/\/bento\.test\/api\/mcp-gateway\/abc"/);
   assert.match(toml, /http_headers = \{ "Authorization" = "Bearer bmg_token" \}/);
@@ -76,15 +84,32 @@ test("codex escapes a slug that is not a bare TOML key", () => {
   assert.match(toml, /\[mcp_servers\."has space"\]/);
 });
 
+test("fx names the grant through bearer_token_env, never a literal Authorization header", () => {
+  const files = fxAdapter.mcp!.renderConfig(servers);
+  assert.equal(files[0]!.path, "/root/.fx/mcp.json");
+  const parsed = JSON.parse(files[0]!.content) as {
+    mcp: Record<string, { type: string; bearer_token_env?: string; headers?: unknown }>;
+  };
+  assert.equal(parsed.mcp.docs!.type, "http");
+  assert.equal(parsed.mcp.issues!.type, "sse");
+  assert.equal(parsed.mcp.docs!.bearer_token_env, "BENTO_MCP_GRANT");
+  assert.equal(parsed.mcp.docs!.headers, undefined);
+  assert.doesNotMatch(files[0]!.content, /Authorization/);
+  assert.deepEqual(fxAdapter.mcp!.env?.(servers), { BENTO_MCP_GRANT: "bmg_token" });
+});
+
 test("an empty server set still renders a config, so a removed server is cleared", () => {
-  for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter]) {
+  for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter, museAdapter, fxAdapter]) {
     const files = adapter.mcp!.renderConfig([]);
     assert.equal(files.length, 1, `${adapter.cli} must still write its config file`);
-    // The file parses and holds no servers.
     const parsed = JSON.parse(files[0]!.content) as Record<string, Record<string, unknown>>;
-    const bag = parsed.mcpServers ?? parsed.mcp ?? {};
+    const bag = parsed.mcpServers ?? parsed.mcp ?? parsed.mcp_servers ?? {};
     assert.equal(Object.keys(bag).length, 0, `${adapter.cli} must clear stale servers`);
   }
-  // Codex clears by writing an empty file.
-  assert.equal(codexAdapter.mcp!.renderConfig([])[0]!.content, "");
+  // Codex keeps the OpenRouter provider so a removed MCP server does
+  // not drop the route, and writes no mcp_servers tables.
+  const emptyCodex = codexAdapter.mcp!.renderConfig([])[0]!.content;
+  assert.match(emptyCodex, /\[model_providers\.openrouter\]/);
+  assert.match(emptyCodex, /\[model_providers\.vercel\]/);
+  assert.doesNotMatch(emptyCodex, /\[mcp_servers\./);
 });

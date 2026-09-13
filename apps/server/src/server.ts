@@ -23,6 +23,7 @@ import { EventBus } from "./events.js";
 import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
 import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
+import { applyInitialAgentAuthSharing } from "./settings.js";
 
 export interface StartOptions {
   /** Overrides applied on top of the process environment. */
@@ -31,6 +32,8 @@ export interface StartOptions {
   migrate?: boolean;
   /** Suppress the startup banner (the TUI draws its own chrome). */
   quiet?: boolean;
+  /** Save an initial local login-sharing choice. Settings can change it after startup. */
+  initialShareAgentAuth?: boolean;
 }
 
 /**
@@ -61,6 +64,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // inbox) are deliberately unknown to this schema.
   const rawEnv = { ...process.env, ...options.env } as NodeJS.ProcessEnv;
   const env = loadEnv(rawEnv);
+  await applyInitialAgentAuthSharing({ env }, options.initialShareAgentAuth);
 
   if (options.migrate) await runMigrations(env.DATABASE_URL);
 
@@ -324,6 +328,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         `bento server listening on http://${hostname}:${server.port} (${env.BENTO_MODE} mode, ${env.BENTO_SANDBOX_DRIVER} sandboxes, ${env.BENTO_MAX_CONCURRENT_RUNS} run workers)`,
       );
       if (env.BENTO_MODE === "multi") console.log(`invitation mail: ${mailer.description}`);
+      if (logExport) {
+        const via = logExport.destination === "posthog" ? "PostHog" : "OTLP";
+        console.log(`log export: ${via}, ${withoutUserinfo(logExport.url)}`);
+      }
     }
 
     return {
@@ -369,5 +377,21 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     await featureFlags.shutdown().catch(() => {});
     await logExport?.stop().catch(() => {});
     throw err;
+  }
+}
+
+/**
+ * The boot line prints where logs go, and an operator may have put
+ * basic auth in the endpoint URL. The exporter gets the URL intact;
+ * the log gets it without the secret.
+ */
+function withoutUserinfo(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return url;
   }
 }

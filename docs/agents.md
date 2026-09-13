@@ -1,4 +1,4 @@
-# Supported coding agents
+<h1 align="center">Supported coding agents</h1>
 
 Each stage runs one agent: harness, model, and skill. Tools differ in authentication, mid-run messaging, and cost reporting.
 
@@ -6,16 +6,27 @@ Each stage runs one agent: harness, model, and skill. Tools differ in authentica
 | --- | --- | --- | --- | --- |
 | Claude Code | `claude-sonnet-5` | `ANTHROPIC_API_KEY` or subscription token | Queued in same session | Yes |
 | pi | `anthropic/claude-sonnet-5` | Provider key for selected model | Steering after current tool call | Yes |
-| Codex CLI | `gpt-5-codex` | `OPENAI_API_KEY` | Between runs (session resume) | No |
+| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `AI_GATEWAY_API_KEY` | Between runs (session resume) | No |
 | Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY` | Between runs (session resume) | No |
 | opencode | `anthropic/claude-sonnet-5` | Provider key for selected model | Between runs (session resume) | No |
 | Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs (new run, no session id) | No |
 | DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | Between runs (new run, no session id) | No |
 | Antigravity CLI | `gemini-3.1-pro-high` | `GEMINI_API_KEY` | Between runs (conversation resume) | No |
+| Muse Code | `muse-spark-1.3` | `META_API_KEY` | Between runs (session resume) | No |
+| fx | `moonshotai/kimi-k3` | `AI_GATEWAY_API_KEY` | Between runs (session resume) | No |
 
 Keys are stored encrypted (per organization in multi mode; local scope in local mode) via the web console, `bento setup`, or the Mac app.
 
-OpenRouter routing for Claude Code or Codex: save the OpenRouter key and set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` to `https://openrouter.ai/api/v1`.
+OpenRouter: pick an OpenRouter model on Codex, pi, or opencode and save `OPENROUTER_API_KEY`. Claude Code still needs the OpenRouter key saved as `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` set to `https://openrouter.ai/api/v1`.
+
+**Vercel AI Gateway:** one key, many models, billed through that key: the same shape as OpenRouter, a different catalog and bill. Save `AI_GATEWAY_API_KEY` under Agents, Vercel AI Gateway. The picker lists the Gateway's language models. Image, video, and embedding ids stay out. Unlisted slugs stay typeable.
+
+- **fx** speaks Gateway only. Model ids are Gateway slugs (`moonshotai/kimi-k3`, `openai/gpt-5.4`). No Anthropic or OpenAI key is read.
+- **pi, opencode, Codex** pick Gateway with a `vercel/` prefix (`vercel/moonshotai/kimi-k3`). The same slug without that prefix still uses the vendor key or OpenRouter.
+
+To use a vendor key, pick pi or opencode without the prefix. To bill through OpenRouter, pick pi, opencode, or Codex and save `OPENROUTER_API_KEY`.
+
+**Ollama:** Claude Code, opencode, and DeepSeek Harness run a model on Ollama when the agent's model starts with `ollama/`, for example `ollama/glm-5.1`. Runs go to Ollama Cloud with `OLLAMA_API_KEY`, or to a server you run when `OLLAMA_BASE_URL` names it. See [Ollama](#ollama).
 
 **DeepSeek:** use pi or opencode for streamed runs with `DEEPSEEK_API_KEY` or `openrouter/deepseek/...`. DeepSeek Harness (`dsh`) is preview-only (see below). Warm sandboxes reinstall pi below 0.70.1, opencode below 1.14.24, or dsh when `--version` does not match the pin.
 
@@ -27,7 +38,7 @@ The card composer accepts input during runs. Behavior by tool:
 
 - **pi:** message delivered after the current tool call (steering). Manual stages keep the session open after a turn.
 - **Claude Code:** message queued for the next step in the same session. Manual stages keep the session open.
-- **Codex, Cursor, opencode, Antigravity:** message delivered when the current run ends; next run resumes the session.
+- **Codex, Cursor, opencode, Antigravity, Muse Code, fx:** message delivered when the current run ends; next run resumes the session.
 - **pool, dsh:** message delivered when the current run ends; next run starts fresh with stage prompt and compacted transcript.
 
 If the session is unavailable (sandbox recreated or CLI session lost), Bento starts a new run with the same instructions and compacted transcript.
@@ -54,6 +65,23 @@ Do not use macOS Keychain login for server deployments. Keychain tokens rotate f
 
 On "OAuth access token has been revoked", regenerate with `claude setup-token` and update the stored token.
 
+## Ollama
+
+Three tools can run a model on Ollama: Claude Code, opencode, and DeepSeek Harness. The agent's model names it with Bento's `ollama/` prefix (`ollama/glm-5.1`, `ollama/gpt-oss:120b`), which Bento strips before the tool sees the id. Other agents keep their own provider, so one Claude Code agent can run on Ollama while the rest stay on Anthropic.
+
+Bento does not run Ollama. Runs go to one of two places:
+
+- **Ollama Cloud**, by default. Save `OLLAMA_API_KEY` under Agents, Ollama. The model picker lists the models Ollama Cloud serves.
+- **A server you run**, when `OLLAMA_BASE_URL` is saved, for example `http://gpu-box:11434`. A key is optional there. Type the model's name as that server knows it. The sandbox has to reach the address: in local mode with Docker sandboxes, `localhost` is rewritten to `host.docker.internal`, and Ollama has to listen on an address the container can reach. A Sprite cannot reach a server on your machine.
+
+How each tool is pointed at it:
+
+- **Claude Code** uses Ollama's Anthropic compatible API. Bento sets `ANTHROPIC_BASE_URL`, passes the key as `ANTHROPIC_AUTH_TOKEN`, and sets every model slot (subagents and session titles included) to the one model. Anthropic keys, the subscription token, and shared logins are withheld from these runs. Claude Code prices every model as a Claude model, so Bento records no cost for them, drops the figure from the transcript, and the console shows these agents as reporting no cost.
+- **opencode** gets an `ollama` provider (`@ai-sdk/openai-compatible` at `<server>/v1`) through `OPENCODE_CONFIG_CONTENT`, which leaves its config files alone. Until Ollama credentials are saved in Bento, an `ollama/` model on opencode runs with opencode's own configuration instead, so an `ollama` provider you already defined there keeps working.
+- **DeepSeek Harness** keeps its DeepSeek provider and points it at `<server>/v1`. A patch lowers its token limit to 32768: dsh asks for 256000, and Ollama refuses more than a model's output limit.
+
+Ollama recommends a context window of at least 64k tokens for coding agents. A server you run may need its context length raised.
+
 ## Per tool notes
 
 ### Claude Code
@@ -62,11 +90,13 @@ Bare model ids (`claude-sonnet-5`, `claude-opus-5`). Reports cost. Mid-run inter
 
 ### pi
 
-Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Reports cost.
+Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Prefix with `vercel/` to bill through Vercel AI Gateway. Reports cost.
 
 ### Codex CLI
 
-Bare model ids. `OPENAI_API_KEY` or OpenRouter via `OPENAI_BASE_URL`. Does not report cost.
+Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. When Vercel AI Gateway is selected, the model is `vercel/` plus a Gateway slug (`vercel/moonshotai/kimi-k3`) and Bento passes `-c model_provider=vercel` so Codex reads `AI_GATEWAY_API_KEY`. You do not set `OPENAI_BASE_URL` for either route.
+
+Codex 0.153 ignores `OPENAI_API_KEY` for its built in provider. Bento hands the saved OpenAI key over as `CODEX_API_KEY`. `OPENAI_BASE_URL` is still honored for other OpenAI compatible gateways, as `-c openai_base_url=...`. Does not report cost.
 
 ### Cursor CLI
 
@@ -74,7 +104,7 @@ Bare model ids per Cursor plan. Single `CURSOR_API_KEY`. Unlisted model ids may 
 
 ### opencode
 
-`provider/id` format including `openrouter/`. Same provider keys as pi. Does not report cost.
+`provider/id` format including `openrouter/` and `vercel/`. Same provider keys as pi. Does not report cost.
 
 ### Poolside (pool)
 
@@ -86,7 +116,7 @@ OpenRouter alternative: pi or opencode with `openrouter/poolside/laguna-s-2.1`. 
 
 ### DeepSeek Harness (dsh)
 
-Preview. Pinned `@deepseek-ai/dsh@0.1.1-rc.2`. Bare model id (e.g. `deepseek-v4-pro`). `DEEPSEEK_API_KEY`; optional `DEEPSEEK_BASE_URL`.
+Preview. Pinned `@deepseek-ai/dsh@0.1.1-rc.2`. Bare model id (e.g. `deepseek-v4-pro`). `DEEPSEEK_API_KEY`; optional `DEEPSEEK_BASE_URL`. Or a model on Ollama, `ollama/<model>` (see [Ollama](#ollama)).
 
 Outputs final message only (no streamed tool/thinking events). No session id. Use **Changes** for file-level results.
 
@@ -99,3 +129,23 @@ Authentication is `GEMINI_API_KEY`. Antigravity normally signs in with a Google 
 Runs resume by conversation id (`--conversation`), so a follow-up continues the same conversation. Headless mode accepts no mid-run input. Does not report cost: Antigravity bills against a plan's quota rather than per run.
 
 MCP servers attach through `~/.gemini/config/mcp_config.json`, which Bento rewrites before every run.
+
+### Muse Code
+
+Meta's `muse`, run headlessly (`muse exec --json --yolo --user-input-auto-resolve`). Bare Muse Spark ids: `muse-spark-1.3`, `muse-spark-1.2`, `muse-spark-1.3-contributor`. Unlisted ids may be typed manually. Reasoning effort is a `--reasoning-effort` extra arg, not part of the model id.
+
+Authentication is `META_API_KEY`. Muse Code normally signs in with a browser, which no sandbox can do, so the key is the whole of its authentication here. Local mode can share this machine's `~/.config/muse` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
+
+`--yolo` disables Muse's own approvals and OS sandbox: Bento's sandbox is the boundary. `--user-input-auto-resolve` cancels prompts for a person so a headless run cannot hang. Runs resume by session id (`--session-id`). Headless mode accepts no mid-run input. Does not report cost.
+
+MCP servers attach through `~/.config/muse/settings.json`, which Bento rewrites before every run.
+
+### fx
+
+Vercel's `fx`, run headlessly (`fx ask --json --full-access`). Gateway slugs, vendor prefix included: `moonshotai/kimi-k3`, `openai/gpt-5.4`. Unlisted slugs may be typed manually. `fx ask` has no `--model` flag; Bento sets `FX_MODEL`.
+
+Authentication is `AI_GATEWAY_API_KEY`. fx can also sign in with Vercel, or with a Codex or Grok subscription, which no sandbox can do. The key is the whole of its authentication here. Local mode can share this machine's `~/.fx` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
+
+`--full-access` disables fx's own permission checks: Bento's sandbox is the boundary. `fx ask --json` prints one object when the process exits (no streamed tool or thinking events). Runs resume by session id (`--resume`). Headless mode accepts no mid-run input. Does not report cost: the JSON carries token counts, not a dollar figure.
+
+MCP servers attach through `~/.fx/mcp.json`, which Bento rewrites before every run. fx refuses a literal Authorization header, so the run grant travels as `BENTO_MCP_GRANT` and the file names that variable.

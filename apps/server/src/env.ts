@@ -224,6 +224,29 @@ const envSchema = z.object({
   BENTO_ENVIRONMENT: z.enum(["development", "production"]).default("development"),
 
   /**
+   * Where the server's logs go, as OTLP over HTTP. These are the
+   * standard OpenTelemetry names, so a self-hosted install can point
+   * the export at its own collector, Loki, Datadog, or anything else
+   * that speaks OTLP, without a PostHog account. Setting either
+   * endpoint takes precedence over PostHog for logs (events, errors,
+   * and flags still go to PostHog when its key is set), and works in
+   * local mode too: unlike a leftover PostHog key, naming a collector
+   * is a deliberate act. The signal specific LOGS names win over the
+   * general ones; the general endpoint gets /v1/logs appended, the
+   * logs endpoint is used as written. Headers are `key=value` pairs
+   * separated by commas, the way the OpenTelemetry specification
+   * defines them. The exporter also reads OTEL_EXPORTER_OTLP_TIMEOUT,
+   * _COMPRESSION, and the certificate variables from the process
+   * environment on its own.
+   */
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: z.string().optional(),
+  OTEL_EXPORTER_OTLP_HEADERS: z.string().optional(),
+  OTEL_EXPORTER_OTLP_LOGS_HEADERS: z.string().optional(),
+  /** The service.name resource attribute on every record. */
+  OTEL_SERVICE_NAME: z.string().default("bento-server"),
+
+  /**
    * Fly sets both on every machine; absent anywhere else. Stamped onto
    * the run queue snapshot so two snapshots a minute read as two
    * machines rather than a doubled queue.
@@ -266,6 +289,84 @@ export function posthogApiKey(env: Env): string | null {
   if (env.BENTO_MODE !== "multi") return null;
   const key = env.POSTHOG_API_KEY?.trim();
   return key ? key : null;
+}
+
+export interface LogExportTarget {
+  /** Which configuration chose the destination. */
+  destination: "otlp" | "posthog";
+  /** The full OTLP logs URL, ready for the exporter. */
+  url: string;
+  /** Sent with every export request. Credentials live here. */
+  headers: Record<string, string>;
+}
+
+/**
+ * Where this process ships its logs, or null when it must not.
+ *
+ * An OTLP endpoint named through the standard OpenTelemetry variables
+ * wins outright and in any mode: an operator who wrote it down meant
+ * it. Without one, PostHog is the destination whenever posthogApiKey
+ * allows, which keeps the hosted deployment working with nothing but
+ * its project token, and keeps a laptop quiet.
+ */
+export function logExportTarget(env: Env): LogExportTarget | null {
+  const logsEndpoint = env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT?.trim();
+  const baseEndpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+  if (logsEndpoint || baseEndpoint) {
+    // The specification appends the signal path to the general
+    // endpoint and takes the signal specific one as written.
+    const url = logsEndpoint ?? `${baseEndpoint!.replace(/\/+$/, "")}/v1/logs`;
+    return {
+      destination: "otlp",
+      url,
+      // General headers first, so a logs specific header of the same
+      // name overrides rather than duplicates.
+      headers: {
+        ...parseOtlpHeaders(env.OTEL_EXPORTER_OTLP_HEADERS),
+        ...parseOtlpHeaders(env.OTEL_EXPORTER_OTLP_LOGS_HEADERS),
+      },
+    };
+  }
+  const apiKey = posthogApiKey(env);
+  if (!apiKey) return null;
+  // posthog-node strips a trailing slash from the same variable; a
+  // host that works for analytics must not silently 404 every log.
+  const host = env.POSTHOG_HOST.replace(/\/+$/, "");
+  return {
+    destination: "posthog",
+    url: `${host}/i/v1/logs`,
+    headers: { Authorization: `Bearer ${apiKey}` },
+  };
+}
+
+/**
+ * Parses the OTEL_EXPORTER_OTLP_HEADERS format: comma separated
+ * `key=value` pairs, values optionally percent encoded so a comma or
+ * an equals sign can appear in one. A pair with no `=` is dropped
+ * rather than failing the boot over a stray comma.
+ */
+export function parseOtlpHeaders(raw: string | undefined): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (!raw) return headers;
+  for (const pair of raw.split(",")) {
+    const at = pair.indexOf("=");
+    if (at < 0) continue;
+    const key = pair.slice(0, at).trim();
+    const value = pair.slice(at + 1).trim();
+    if (!key) continue;
+    headers[key] = decodeHeaderValue(value);
+  }
+  return headers;
+}
+
+function decodeHeaderValue(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    // Not percent encoded after all (a bare `%` in a token). Send it
+    // as written rather than dropping the credential.
+    return value;
+  }
 }
 
 /**

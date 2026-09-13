@@ -2161,9 +2161,56 @@ select.input,
   font-size: 12px;
 }
 
-.pr-row-with-actions {
-  justify-content: space-between;
-  gap: 12px;
+/*
+ * One table, not a stack of independently sized rows.
+ *
+ * Each row used to lay itself out, so the number, the chips and the
+ * buttons landed wherever that row's own text ran out: two pull
+ * requests on the same card put their #numbers in different places and
+ * the eye had to hunt for each one. The list owns the columns and the
+ * rows borrow them, which is what subgrid is for, and the row stays a
+ * row so it keeps its border and its background.
+ *
+ * Guarded rather than assumed: without subgrid the declaration is
+ * dropped and every cell would stack, so the flex layout above stands
+ * as it always did.
+ */
+@supports (grid-template-columns: subgrid) {
+  .pr-list {
+    display: grid;
+    /*
+     * repository | state | actions | number
+     *
+     * The number last, hard against the right edge, because it is the
+     * one thing every row has and the thing people click: down a list
+     * of four it wants to be a straight edge, not a column that shifts
+     * left whenever a row happens to carry a button.
+     */
+    grid-template-columns: auto 1fr auto auto;
+  }
+
+  .pr-row {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    align-items: center;
+    row-gap: 2px;
+  }
+
+  /*
+   * The branch takes a line of its own under the repository it was
+   * opened in, rather than a column between them.
+   *
+   * Squeezed into the row it lost its ending to an ellipsis, and the
+   * ending is the whole of what distinguishes a card's second branch
+   * from its first. Underneath, it has the width of the row and needs
+   * no trimming, while the chips, the numbers and the buttons keep the
+   * columns they line up in.
+   */
+  .pr-branch {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
 }
 
 .pr-row-actions {
@@ -2175,27 +2222,26 @@ select.input,
   flex: none;
 }
 
-/*
- * On a history row the repository name is short and the branch is the
- * long half, so the name takes only what it needs. Sharing the row
- * evenly, as the action rows do, spent half the width on white space
- * and cut the branch off at the counter that tells two rows apart.
- */
-.pr-row-history .pr-repo {
-  flex: 0 0 auto;
+/* Holds its column open on a row with nothing to say in it. */
+.pr-flags {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 /*
- * The branch a pull request in the history came from, kept out of the
- * way but not cut short: what tells two rows apart is the counter on
- * the end of the name, so the row gives the branch the width left
- * over rather than a fixed box, and only a name too long for the
- * drawer ellipsizes.
+ * The branch a pull request came from, kept out of the way but not cut
+ * short: what tells two of them apart is the counter on the end of the
+ * name, so the branch takes the width the fixed columns leave and only
+ * a name too long for the drawer ellipsizes. Empty on the rows of the
+ * branch the card is on now, which the header already names.
  */
 .pr-branch {
   color: var(--text-faint);
   font-family: var(--mono);
   font-size: 11px;
+  /* For the flex fallback only; a grid item ignores it. */
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -2206,6 +2252,7 @@ select.input,
 .pr-open {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   color: var(--text-dim);
   font-family: var(--mono);
@@ -2704,9 +2751,16 @@ a.pr-row:hover .pr-external {
 /* How a run ended, as a pill in the conversation's own colours. */
 .chat-result {
   font-size: 11px;
-  border-radius: 999px;
-  padding: 2px 10px;
+  /* Rectangular like chat bubbles: a pill radius clips multi-line
+     failure text at the curved ends. */
+  border-radius: var(--radius);
+  padding: 8px 12px;
   border: 1px solid var(--line);
+  max-width: 92%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
 }
 .chat-result[data-ok="true"] {
   color: var(--succeeded);
@@ -2715,7 +2769,8 @@ a.pr-row:hover .pr-external {
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
-  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--failed) 8%, transparent);
+  text-align: left;
 }
 
 .field {
@@ -3008,8 +3063,24 @@ a.pr-row:hover .pr-external {
   overflow-wrap: anywhere;
 }
 
+/* Run failure in the card summary: same rectangular box as the
+   transcript result, so the reason is easy to spot above the actions. */
+.error-box {
+  display: block;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--failed) 55%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--failed) 12%, transparent);
+  max-width: 100%;
+  min-width: 0;
+  word-break: break-word;
+  line-height: 1.45;
+}
+
 .error a,
-.chat-result a {
+.chat-result a,
+.error-box a {
   color: inherit;
   text-decoration: underline;
 }
@@ -3546,6 +3617,17 @@ a.pr-row:hover .pr-external {
   width: min(460px, 100%);
   max-width: 100%;
   min-width: 0;
+  /*
+   * This panel is a flex item of the backdrop. The default
+   * min-height: auto is the content height, and when that is taller
+   * than max-height the max is ignored: the dialog grows off screen,
+   * overflow never starts, and Save sits below the fold. Zero lets
+   * the max apply. 100% is the backdrop's padded box, so the panel
+   * stays inside the viewport and the actions at the end stay in
+   * the scroll.
+   */
+  min-height: 0;
+  max-height: 100%;
   background: var(--panel);
   border: 1px solid var(--line-bright);
   border-radius: var(--radius-lg);
@@ -3558,6 +3640,7 @@ a.pr-row:hover .pr-external {
      of stretching it past the viewport. Large editors get more width;
      this is the backstop when they still overflow. */
   overflow-x: hidden;
+  overflow-y: auto;
   animation: modal-rise 140ms ease-out;
 }
 
@@ -5418,6 +5501,79 @@ button.session-expand[aria-pressed="true"] {
   color: var(--text-faint);
 }
 
+/* The pill is a menu trigger on a stage. Backlog and Completed keep
+   the span, so these rules only apply where it is a button. */
+button.lane-agent {
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+button.lane-agent:hover,
+button.lane-agent:focus-visible {
+  border-color: var(--field-line);
+}
+button.lane-agent[data-state="open"] {
+  border-color: var(--brand);
+}
+button.lane-agent:disabled,
+button.lane-agent[data-saving] {
+  opacity: 0.65;
+  cursor: default;
+}
+.lane-agent .picker-caret {
+  margin-left: 1px;
+  border-left-width: 3px;
+  border-right-width: 3px;
+  border-top-width: 4px;
+}
+.lane-agent-spinner {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  margin-left: 1px;
+  border: 1.5px solid var(--text-faint);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: lane-agent-spin 0.6s linear infinite;
+}
+@keyframes lane-agent-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.lane-agent-kicker {
+  padding: 6px 9px 4px;
+}
+.lane-agent-menu .picker-item {
+  align-items: flex-start;
+}
+.lane-agent-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.lane-agent-item-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lane-agent-empty-note,
+.lane-agent-footnote {
+  margin: 0;
+  padding: 6px 9px;
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+.lane-agent-footnote {
+  font-size: 11px;
+}
+
 /* The project switcher. A board is always about one project, so the
    control says which, rather than making its name look like a value in
    a form. */
@@ -5830,6 +5986,18 @@ button.session-expand[aria-pressed="true"] {
   border-left-color: var(--succeeded);
 }
 
+/* The reload prompt after a deploy. */
+.toast[data-tone="update"] {
+  border-left-color: var(--brand);
+  align-items: center;
+}
+
+.toast-action {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .toast-text {
   flex: 1;
   min-width: 0;
@@ -6174,7 +6342,7 @@ button.session-expand[aria-pressed="true"] {
 }
 
 .modal.modal-large {
-  max-height: min(92vh, 980px);
+  max-height: min(92vh, 980px, 100%);
 }
 
 .modal-large .skill-input {

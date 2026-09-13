@@ -7,6 +7,9 @@ import {
   modelStringFor,
   providerForProfile,
   providersForCli,
+  routesToOllama,
+  trustedCostUsd,
+  withTrustedCost,
 } from "./models.js";
 
 test("a prefixed model string names its own provider", () => {
@@ -27,8 +30,8 @@ test("pi and opencode offer current native DeepSeek models", () => {
   assert.equal(providerForProfile("pi", "openrouter/deepseek/deepseek-v4-pro")?.id, "openrouter");
 });
 
-test("dsh only offers DeepSeek and requires its bare model ids", () => {
-  assert.deepEqual(providersForCli("dsh").map((provider) => provider.id), ["deepseek"]);
+test("dsh offers DeepSeek and Ollama, and requires bare DeepSeek ids", () => {
+  assert.deepEqual(providersForCli("dsh").map((provider) => provider.id), ["deepseek", "ollama"]);
   assert.equal(modelStringFor("dsh", "deepseek", "deepseek-v4-pro"), "deepseek-v4-pro");
   assert.equal(providerForProfile("dsh", "deepseek-v4-pro")?.id, "deepseek");
   assert.equal(checkAgentPairing("dsh", "deepseek-v4-pro").status, "ok");
@@ -61,6 +64,87 @@ test("antigravity only offers its own slugs and requires them bare", () => {
   assert.equal(checkAgentPairing("antigravity", "gemini-3.8-flash-high").status, "unknown");
 });
 
+test("muse only offers Muse Spark and requires its bare model ids", () => {
+  assert.deepEqual(providersForCli("muse").map((provider) => provider.id), ["meta"]);
+  assert.equal(modelStringFor("muse", "meta", "muse-spark-1.3"), "muse-spark-1.3");
+  assert.equal(providerForProfile("muse", "muse-spark-1.3")?.id, "meta");
+  assert.equal(checkAgentPairing("muse", "muse-spark-1.3").status, "ok");
+  assert.deepEqual(checkAgentPairing("muse", "meta/muse-spark-1.3"), {
+    status: "impossible",
+    detail: "Muse Code takes a bare model id, for example muse-spark-1.3, without a provider prefix.",
+  });
+  assert.equal(checkAgentPairing("muse", "muse-spark-1.4").status, "unknown");
+});
+
+/**
+ * fx reaches Vercel AI Gateway and nothing else here. Slugs carry a
+ * vendor prefix (`moonshotai/kimi-k3`), which is what the Gateway
+ * takes, not a Bento provider name. A slash is therefore Gateway the
+ * way a slash on Codex is OpenRouter, so an unlisted slug stays
+ * typeable and still resolves to Vercel rather than to Anthropic or
+ * OpenAI.
+ */
+test("fx only offers Vercel AI Gateway, and a slash is a Gateway slug", () => {
+  assert.deepEqual(providersForCli("fx").map((provider) => provider.id), ["vercel"]);
+  assert.equal(modelStringFor("fx", "vercel", "moonshotai/kimi-k3"), "moonshotai/kimi-k3");
+  assert.equal(providerForProfile("fx", "moonshotai/kimi-k3")?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "moonshotai/kimi-k3").status, "ok");
+  assert.equal(checkAgentPairing("fx", "openai/gpt-5.4").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "anthropic/claude-sonnet-5").status, "ok");
+  assert.equal(checkAgentPairing("fx", "anthropic/claude-sonnet-5").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "acme/unreleased").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "kimi-k3").status, "unknown");
+  // A vercel/ prefix is Bento's catalog selection. Pairing allows it;
+  // the fx adapter strips it before FX_MODEL reaches Gateway.
+  assert.equal(checkAgentPairing("fx", "vercel/moonshotai/kimi-k3").status, "ok");
+  assert.equal(checkAgentPairing("fx", "vercel/moonshotai/kimi-k3").provider?.id, "vercel");
+});
+
+/**
+ * pi, opencode, and Codex pick Gateway the way they pick OpenRouter:
+ * an explicit vercel/ prefix. A slash without that prefix is still
+ * whatever it was (OpenRouter on Codex, the named vendor on pi).
+ */
+test("pi, opencode, and Codex reach Vercel AI Gateway through a vercel/ prefix", () => {
+  for (const cli of ["pi", "opencode"]) {
+    assert.ok(providersForCli(cli).some((provider) => provider.id === "vercel"));
+    assert.equal(modelStringFor(cli, "vercel", "moonshotai/kimi-k3"), "vercel/moonshotai/kimi-k3");
+    assert.equal(providerForProfile(cli, "vercel/moonshotai/kimi-k3")?.id, "vercel");
+    assert.equal(checkAgentPairing(cli, "vercel/moonshotai/kimi-k3").status, "ok");
+    assert.equal(providerForProfile(cli, "anthropic/claude-sonnet-5")?.id, "anthropic");
+    // OpenRouter lists the same slug. Without vercel/ it stays OpenRouter,
+    // which is why the prefix is the selection and not the id alone.
+    assert.equal(providerForProfile(cli, "moonshotai/kimi-k3")?.id, "openrouter");
+  }
+  assert.equal(modelStringFor("codex", "vercel", "moonshotai/kimi-k3"), "vercel/moonshotai/kimi-k3");
+  assert.equal(providerForProfile("codex", "vercel/moonshotai/kimi-k3")?.id, "vercel");
+  assert.equal(checkAgentPairing("codex", "vercel/openai/gpt-5.4").status, "ok");
+  assert.equal(providerForProfile("codex", "openai/gpt-5-mini")?.id, "openrouter");
+  assert.equal(providerForProfile("codex", "acme/unreleased")?.id, "openrouter");
+});
+
+/**
+ * The picker has to offer what the Gateway actually serves, not only
+ * the two slugs fx's docs name. Image and embedding ids are not agent
+ * models. Kimi K3 stays first: it is fx's default.
+ */
+test("Vercel AI Gateway lists language models from the Gateway snapshot", () => {
+  const vercel = providersForCli("fx")[0];
+  assert.ok(vercel, "fx has no Gateway provider");
+  assert.equal(vercel.env[0], "AI_GATEWAY_API_KEY");
+  assert.ok(vercel.logo.startsWith("data:image/svg+xml"), "Gateway needs a provider mark");
+  const ids = vercel.models.map((model) => model.id);
+  assert.ok(ids.length > 50, `Gateway picker is too thin: ${ids.length} models`);
+  assert.equal(ids[0], "moonshotai/kimi-k3");
+  assert.equal(ids[1], "openai/gpt-5.4");
+  assert.ok(ids.includes("anthropic/claude-sonnet-5"));
+  assert.ok(ids.includes("spacexai/grok-4.6"));
+  assert.ok(
+    ids.every((id) => !id.includes("embedding") && !id.includes("imagine")),
+    "Gateway picker listed a non-language model",
+  );
+});
+
 test("a bare model id is resolved against the tool's own providers", () => {
   assert.equal(providerForProfile("claude-code", "claude-sonnet-5")?.id, "anthropic");
 });
@@ -88,7 +172,7 @@ test("a tool's default model resolves even when the snapshot lacks it", () => {
  * whose logo was shown when it was created.
  */
 test("every string modelStringFor composes resolves back to its provider", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity", "muse", "fx"]) {
     for (const provider of providersForCli(cli)) {
       const model = provider.models[0];
       if (!model) continue;
@@ -249,6 +333,29 @@ test("OpenRouter through a provider naming tool needs no base URL", () => {
 });
 
 /**
+ * Codex takes bare OpenAI ids natively, so an openai/ slug from the
+ * OpenRouter catalog is OpenRouter's, not OpenAI's. Treating the
+ * prefix as a provider would mark the pairing as a plain OpenAI run
+ * and never select Codex's OpenRouter provider.
+ *
+ * A slash on Codex is that selection even when the snapshot has not
+ * listed the slug yet: the picker and a typed id use the same shape,
+ * and the adapter reads this answer to pass model_provider=openrouter.
+ */
+test("Codex OpenRouter slugs belong to OpenRouter, not OpenAI", () => {
+  assert.equal(providerForProfile("codex", "openai/gpt-5-mini")?.id, "openrouter");
+  assert.equal(modelStringFor("codex", "openrouter", "openai/gpt-5-mini"), "openai/gpt-5-mini");
+  assert.equal(checkAgentPairing("codex", "openai/gpt-5-mini").status, "ok");
+  assert.equal(checkAgentPairing("codex", "openai/gpt-5-mini").provider?.id, "openrouter");
+  assert.equal(checkAgentPairing("codex", "openrouter/auto").status, "ok");
+  assert.equal(providerForProfile("codex", "gpt-5-codex")?.id, "openai");
+  assert.equal(checkAgentPairing("codex", "gpt-5-codex").status, "ok");
+  assert.equal(providerForProfile("codex", "openai/gpt-brand-new")?.id, "openrouter");
+  assert.equal(checkAgentPairing("codex", "openai/gpt-brand-new").status, "ok");
+  assert.equal(checkAgentPairing("codex", "acme/unreleased").provider?.id, "openrouter");
+});
+
+/**
  * The catalog trails the tools, so an unrecognised model must not be
  * called impossible: that would block a model released this week.
  */
@@ -371,8 +478,85 @@ test("a DeepSeek model is refused by the tools that cannot reach DeepSeek", () =
   for (const cli of ["claude-code", "codex", "cursor", "pool"]) {
     assert.equal(checkAgentPairing(cli, "deepseek-v4-pro").status, "impossible", `${cli} accepted a bare DeepSeek id`);
   }
-  // Claude Code and Codex can still be pointed at OpenRouter, which is
+  // Claude Code can still be pointed at OpenRouter, which is
   // what the prefixed form means to a tool that names no provider.
+  // Codex configures OpenRouter as its own provider, so the same
+  // slug is a first class pairing rather than a base URL redirect.
   assert.equal(checkAgentPairing("claude-code", "deepseek/deepseek-v4-pro").credential, "ANTHROPIC_BASE_URL");
-  assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").credential, "OPENAI_BASE_URL");
+  assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").status, "ok");
+  assert.equal(checkAgentPairing("codex", "deepseek/deepseek-v4-pro").provider?.id, "openrouter");
+});
+
+/**
+ * Ollama is named only by Bento's prefix. The three tools that reach it
+ * take the prefixed string, DeepSeek Harness's bare ids included, and
+ * the picker composes it for them.
+ */
+test("the tools that reach Ollama take its prefixed model string", () => {
+  for (const cli of ["claude-code", "opencode", "dsh"]) {
+    assert.equal(modelStringFor(cli, "ollama", "glm-5.1"), "ollama/glm-5.1");
+    assert.equal(providerForProfile(cli, "ollama/glm-5.1")?.id, "ollama");
+    assert.equal(checkAgentPairing(cli, "ollama/glm-5.1").status, "ok", `${cli} refused an Ollama model`);
+    // A model pulled onto a server of the organization's own is in no
+    // catalog, and still belongs to Ollama by its prefix.
+    assert.equal(checkAgentPairing(cli, "ollama/my-team/coder:7b").status, "ok");
+  }
+});
+
+/**
+ * A bare id Ollama serves is still allowed: Claude Code with its base URL
+ * pointed at an Ollama server runs glm-5.1 exactly that way, which is
+ * Ollama's own documented setup. The prefix is offered, not demanded.
+ */
+test("a bare Ollama id stays unknown, with the prefix as a hint", () => {
+  const verdict = checkAgentPairing("claude-code", "glm-5.1");
+  assert.equal(verdict.status, "unknown");
+  assert.match(verdict.detail, /ollama\/glm-5\.1/);
+  // Never read as Ollama's either, or the agent would wear Ollama's mark
+  // while its runs went to Anthropic.
+  assert.notEqual(providerForProfile("claude-code", "glm-5.1")?.id, "ollama");
+});
+
+/**
+ * Listing Ollama must not refuse an agent that saved before it was
+ * listed. These were "unknown" then: Codex on an Ollama server of
+ * its own through OPENAI_BASE_URL, and pi with an ollama provider in its
+ * own models.json, among them.
+ */
+test("agents that saved before Ollama was listed still save", () => {
+  for (const [cli, model] of [
+    ["codex", "gpt-oss:20b"],
+    ["claude-code", "glm-5.1"],
+    ["cursor", "kimi-k2.6"],
+    ["pi", "ollama/gpt-oss:20b"],
+  ] as const) {
+    assert.equal(checkAgentPairing(cli, model).status, "unknown", `${cli} on ${model}`);
+  }
+  // Tools that take bare ids refuse any prefix, as they always did.
+  for (const cli of ["antigravity", "muse"]) {
+    assert.match(checkAgentPairing(cli, "ollama/glm-5.1").detail, /takes a bare model id/);
+  }
+});
+
+test("only the tools Bento points at Ollama send ollama/ runs there", () => {
+  for (const cli of ["claude-code", "opencode", "dsh"]) assert.equal(routesToOllama(cli, "ollama/glm-5.1"), true);
+  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse", "fx", "fake"]) {
+    assert.equal(routesToOllama(cli, "ollama/glm-5.1"), false, cli);
+  }
+  assert.equal(routesToOllama("claude-code", "glm-5.1"), false);
+});
+
+test("a cost reported for an Ollama run is not kept, and every other cost is", () => {
+  assert.equal(trustedCostUsd("claude-code", "ollama/gpt-oss:120b", 0.117262), undefined);
+  assert.equal(trustedCostUsd("claude-code", "claude-sonnet-5", 0.42), 0.42);
+  // pi's own ollama provider prices its runs itself.
+  assert.equal(trustedCostUsd("pi", "ollama/gpt-oss:20b", 0.01), 0.01);
+});
+
+test("a result event on an Ollama run loses its cost, and nothing else does", () => {
+  const result = { type: "result", ok: true, costUsd: 0.117262, numTurns: 2 };
+  assert.deepEqual(withTrustedCost("claude-code", "ollama/glm-5.1", result), { type: "result", ok: true, numTurns: 2 });
+  assert.equal(withTrustedCost("claude-code", "claude-sonnet-5", result), result);
+  const message = { type: "message", role: "assistant", text: "done" };
+  assert.equal(withTrustedCost("claude-code", "ollama/glm-5.1", message), message);
 });

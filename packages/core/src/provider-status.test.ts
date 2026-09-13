@@ -86,6 +86,28 @@ test("a Poolside outage names the Poolside status page", () => {
   assert.match(providerOutageAdvice(error, { cli: "pool" }) ?? "", /status\.poolside\.ai/);
 });
 
+test("a Muse Code outage names the Meta status page", () => {
+  const error = "503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "muse", model: "muse-spark-1.3" }), "meta");
+  assert.match(providerOutageAdvice(error, { cli: "muse" }) ?? "", /dev\.meta\.ai\/status/);
+  assert.equal(outageProvider("muse-spark-1.3 is overloaded"), "meta");
+});
+
+test("a vercel/ slug on pi or Codex names Vercel AI Gateway, not the vendor behind it", () => {
+  const error = "API Error: 503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "pi", model: "vercel/anthropic/claude-sonnet-5" }), "vercel");
+  assert.equal(outageProvider(error, { cli: "codex", model: "vercel/openai/gpt-5.4" }), "vercel");
+  assert.match(providerOutageAdvice(error, { cli: "pi", model: "vercel/anthropic/claude-sonnet-5" }) ?? "", /vercel-status\.com/);
+});
+
+test("an fx outage names Vercel AI Gateway, not the vendor behind the slug", () => {
+  const error = "503 Service Unavailable";
+  assert.equal(outageProvider(error, { cli: "fx", model: "anthropic/claude-sonnet-5" }), "vercel");
+  assert.equal(outageProvider(error, { cli: "fx", model: "moonshotai/kimi-k3" }), "vercel");
+  assert.match(providerOutageAdvice(error, { cli: "fx" }) ?? "", /vercel-status\.com/);
+  assert.equal(outageProvider("AI_GATEWAY_API_KEY rejected"), "vercel");
+});
+
 test("every provider page is an https status URL", () => {
   for (const [id, page] of Object.entries(PROVIDER_STATUS_PAGES)) {
     assert.match(page.url, /^https:\/\//, `${id} is not an https URL`);
@@ -149,4 +171,19 @@ test("a quota refusal is not a capacity spike", () => {
   const error = '429 {"error":{"status":"RESOURCE_EXHAUSTED","message":"You exceeded your current quota"}}';
   assert.equal(looksLikeProviderOutage(error), false);
   assert.equal(providerOutageAdvice(error, { cli: "opencode", model: "google/gemini-2.5-pro" }), null);
+});
+
+/**
+ * An ollama/ model sent the request to Ollama, whatever the harness calls
+ * itself in the error, and Ollama has no status page.
+ */
+test("an Ollama run is never blamed on the harness's own provider", () => {
+  assert.equal(outageProvider("DeepSeek API error (HTTP 503)", { cli: "dsh", model: "ollama/glm-5.1" }), null);
+  assert.equal(outageProvider("API Error: 529 Overloaded", { cli: "claude-code", model: "ollama/glm-5.1" }), null);
+  assert.equal(providerOutageAdvice("503 Service Unavailable", { cli: "opencode", model: "ollama/glm-5.1" }), null);
+});
+
+test("an ollama/ string on a tool that cannot reach Ollama keeps that tool's status page", () => {
+  const error = "The server had an error while processing your request. Sorry about that!";
+  assert.equal(outageProvider(error, { cli: "codex", model: "ollama/glm-5.1" }), "openai");
 });

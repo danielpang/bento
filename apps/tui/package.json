@@ -4,6 +4,9 @@
   "private": true,
   "license": "Elastic-2.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "bin": {
     "bento": "./dist/cli.js"
   },
@@ -11,7 +14,8 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/cli.tsx",
-    "test": "node --test --import tsx \"src/**/*.test.tsx\" || true"
+    "test": "node --test --import tsx \"src/**/*.test.tsx\"",
+    "test:previews": "BENTO_PREVIEW_E2E=1 node --test --import tsx src/components/ArtifactPreview.test.tsx"
   },
   "dependencies": {
     "@bento/agents": "workspace:*",
@@ -20,7 +24,11 @@
     "@bento/sandbox": "workspace:*",
     "@bento/server": "workspace:*",
     "ink": "^7.1.1",
+    "mermaid": "^11.12.0",
+    "playwright": "^1.63.0",
     "react": "^19.0.0",
+    "sharp": "^0.35.4",
+    "string-width": "8.2.2",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

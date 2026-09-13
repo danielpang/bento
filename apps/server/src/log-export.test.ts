@@ -26,6 +26,27 @@ test("local mode never wraps the console, even with a leftover key", () => {
   assert.equal(console.log, before);
 });
 
+test("an OTLP endpoint starts the export without PostHog, even in local mode", async () => {
+  const before = console.log;
+  const logExport = startLogExport(
+    loadEnv({ BENTO_MODE: "local", OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:1" }),
+  );
+  assert.ok(logExport);
+  assert.equal(logExport.destination, "otlp");
+  assert.equal(logExport.url, "http://127.0.0.1:1/v1/logs");
+  assert.notEqual(console.log, before);
+  await logExport.stop();
+  assert.equal(console.log, before);
+});
+
+test("a PostHog key alone reports PostHog as the destination", async () => {
+  const logExport = startLogExport(loadEnv(FAKE_ENV));
+  assert.ok(logExport);
+  assert.equal(logExport.destination, "posthog");
+  assert.equal(logExport.url, "http://127.0.0.1:1/i/v1/logs");
+  await logExport.stop();
+});
+
 test("stop restores the exact console functions, aliasing included", async () => {
   const originals = {
     debug: console.debug,

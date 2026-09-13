@@ -6,12 +6,14 @@ import type { AppContext } from "../context.js";
 /**
  * Run-scoped gateway tokens: the only credential a sandbox ever holds.
  *
- * The raw token exists in exactly two places, both outside this
- * database: the harness config files written into the run's sandbox,
- * and the Authorization header of gateway requests. The row keeps its
- * sha256, so a database read yields nothing replayable. Revocation on
- * the run's terminal paths is what makes exfiltrating one worth so
- * little: the token outlives its run only by the sweep interval.
+ * The raw token exists outside this database: the harness config
+ * files written into the run's sandbox (or, for fx, the
+ * BENTO_MCP_GRANT process environment that file names, because fx
+ * rejects a literal Authorization header), and the Authorization
+ * header of gateway requests. The row keeps its sha256, so a
+ * database read yields nothing replayable. Revocation on the run's
+ * terminal paths is what makes exfiltrating one worth so little: the
+ * token outlives its run only by the sweep interval.
  */
 
 const TOKEN_PREFIX = "bmg_";

@@ -130,9 +130,15 @@ test("a card's new branch starts from the base branch and the worktree follows",
   await writeFile(path.join(worked!.worktreePath, "card.md"), "the card's work\n");
   await run("git", ["-C", worked!.worktreePath, "add", "-A"]);
   await run("git", [
-    "-C", worked!.worktreePath,
-    "-c", "user.email=t@t.test", "-c", "user.name=t",
-    "commit", "-qm", "card work",
+    "-C",
+    worked!.worktreePath,
+    "-c",
+    "user.email=t@t.test",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-qm",
+    "card work",
   ]);
 
   // The pull request merges, and main moves on without this checkout.
@@ -159,19 +165,23 @@ test("a card's new branch starts from the base branch and the worktree follows",
   assert.equal(at.trim(), landed.trim(), "the new branch starts at the merge, not at the branch that merged");
 });
 
-/**
- * Only a rotated branch starts from the base branch. An ordinary card
- * branches from the checkout, which is where every card before this
- * change started, and where somebody working on a stacked branch means
- * it to start.
- */
-test("without a base branch a card still branches from the checkout", async () => {
+test("a new card starts from main and does not inherit the host feature branch", async () => {
   const repo = await fixtureRepo();
   await run("git", ["-C", repo, "checkout", "-qb", "stacked"]);
   await writeFile(path.join(repo, "stacked.md"), "unmerged work\n");
   await run("git", ["-C", repo, "add", "-A"]);
-  await run("git", ["-C", repo, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "-qm", "stacked"]);
-  const { stdout: tip } = await run("git", ["-C", repo, "rev-parse", "HEAD"]);
+  await run("git", [
+    "-C",
+    repo,
+    "-c",
+    "user.email=t@t.test",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-qm",
+    "stacked",
+  ]);
+  const { stdout: tip } = await run("git", ["-C", repo, "rev-parse", "main"]);
 
   const manager = new WorktreeManager(await scratchDir("bento-stacked-data-"));
   const [prepared] = await manager.ensureAll([{ name: "app", localPath: repo }], "feat-6", "feature/on-top");
@@ -193,9 +203,15 @@ test("a repository with nothing merged carries its commits onto the new branch",
   await writeFile(path.join(worked!.worktreePath, "unpublished.md"), "never opened a pull request\n");
   await run("git", ["-C", worked!.worktreePath, "add", "-A"]);
   await run("git", [
-    "-C", worked!.worktreePath,
-    "-c", "user.email=t@t.test", "-c", "user.name=t",
-    "commit", "-qm", "work nobody published",
+    "-C",
+    worked!.worktreePath,
+    "-c",
+    "user.email=t@t.test",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-qm",
+    "work nobody published",
   ]);
   const { stdout: before } = await run("git", ["-C", worked!.worktreePath, "rev-parse", "HEAD"]);
 
@@ -223,12 +239,88 @@ test("a repository with nothing merged carries its commits onto the new branch",
 test("an ordinary run leaves a worktree on whatever branch it found", async () => {
   const repo = await fixtureRepo();
   const manager = new WorktreeManager(await scratchDir("bento-drifted-data-"));
-  const [worked] = await manager.ensureAll([{ name: "app", localPath: repo }], "feat-8", "feature/agent-wandered");
+  const [worked] = await manager.ensureAll(
+    [{ name: "app", localPath: repo }],
+    "feat-8",
+    "feature/agent-wandered",
+  );
   await run("git", ["-C", worked!.worktreePath, "checkout", "-qb", "agent/side-quest"]);
   await writeFile(path.join(worked!.worktreePath, "scratch.txt"), "uncommitted\n");
 
-  const [again] = await manager.ensureAll([{ name: "app", localPath: repo }], "feat-8", "feature/agent-wandered");
+  const [again] = await manager.ensureAll(
+    [{ name: "app", localPath: repo }],
+    "feat-8",
+    "feature/agent-wandered",
+  );
 
   const { stdout } = await run("git", ["-C", again!.worktreePath, "rev-parse", "--abbrev-ref", "HEAD"]);
   assert.equal(stdout.trim(), "agent/side-quest", "the run works where the agent was, as it always has");
+});
+
+test("a new card fetches its configured base while existing worktrees keep their commits and edits", async () => {
+  const repo = await fixtureRepo();
+  const remote = await scratchDir("bento-base-remote-");
+  await run("git", ["clone", "--bare", repo, remote]);
+  await run("git", ["-C", repo, "remote", "add", "origin", remote]);
+  const upstream = await scratchDir("bento-base-upstream-");
+  await run("git", ["clone", remote, upstream]);
+  await run("git", ["-C", upstream, "checkout", "-b", "develop"]);
+  await writeFile(path.join(upstream, "base.md"), "fresh upstream change");
+  await run("git", ["-C", upstream, "add", "-A"]);
+  await run("git", [
+    "-C",
+    upstream,
+    "-c",
+    "user.email=t@t.test",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-qm",
+    "base update",
+  ]);
+  await run("git", ["-C", upstream, "push", "origin", "develop"]);
+  const { stdout: base } = await run("git", ["-C", upstream, "rev-parse", "HEAD"]);
+  await run("git", ["-C", repo, "checkout", "-b", "unrelated"]);
+  await writeFile(path.join(repo, "host-only.md"), "uncommitted host work");
+  const manager = new WorktreeManager(await scratchDir("bento-base-data-"));
+  const specs = [{ name: "app", localPath: repo, defaultBranch: "develop" }];
+  const [work] = await manager.ensureAll(specs, "fresh", "feature/fresh");
+  const { stdout: head } = await run("git", ["-C", work!.worktreePath, "rev-parse", "HEAD"]);
+  assert.equal(head.trim(), base.trim());
+  assert.equal((await run("git", ["-C", work!.worktreePath, "status", "--porcelain"])).stdout, "");
+  await writeFile(path.join(work!.worktreePath, "agent.md"), "agent work");
+  await run("git", ["-C", work!.worktreePath, "add", "agent.md"]);
+  await run("git", [
+    "-C",
+    work!.worktreePath,
+    "-c",
+    "user.email=t@t.test",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-qm",
+    "agent update",
+  ]);
+  const { stdout: worked } = await run("git", ["-C", work!.worktreePath, "rev-parse", "HEAD"]);
+  await writeFile(path.join(work!.worktreePath, "draft.md"), "unfinished");
+  await manager.ensureAll(specs, "fresh", "feature/fresh");
+  assert.equal((await run("git", ["-C", work!.worktreePath, "rev-parse", "HEAD"])).stdout, worked);
+  assert.match((await run("git", ["-C", work!.worktreePath, "status", "--porcelain"])).stdout, /draft.md/);
+  await assert.rejects(
+    manager.ensureAll([{ ...specs[0]!, defaultBranch: "missing" }], "bad", "feature/bad"),
+    /Could not refresh origin\/missing/,
+  );
+});
+
+test("a missing local base fails instead of silently inheriting HEAD", async () => {
+  const repo = await fixtureRepo();
+  const manager = new WorktreeManager(await scratchDir("bento-missing-base-"));
+  await assert.rejects(
+    manager.ensureAll(
+      [{ name: "app", localPath: repo, defaultBranch: "missing" }],
+      "missing",
+      "feature/missing",
+    ),
+    /Base branch missing was not found/,
+  );
 });

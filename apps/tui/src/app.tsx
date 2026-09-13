@@ -1,5 +1,8 @@
+import { useKeyboardInput as useInput } from "./mouse.js";
+import { useBoardMouse } from "./mouse.js";
+import { MouseActions, MouseButton } from "./components/MouseControls.js";
 import { useEffect, useRef, useState } from "react";
-import { Box, Text, useApp, useInput, useStdin } from "ink";
+import { Box, Text, useApp, useStdin, useWindowSize, usePaste, type DOMElement } from "ink";
 import {
   ApiError,
   BentoClient,
@@ -9,20 +12,22 @@ import {
   type FeatureEvent,
   type FeatureMergeStatus,
   type GateState,
-  type ProjectSession,
-  type ProjectUsage,
+  type Project,
   type Stage,
 } from "@bento/api-client";
 import { actorDisplayName, forgetsBetweenRuns, hasNoLiveTranscript, historyTriggerLabel } from "@bento/core";
-import { Board, orderFeatures, statusColor } from "./components/Board.js";
+import { Workbench, type WorkbenchPage } from "./components/Workbench.js";
+import { Reader } from "./components/Navigator.js";
+import { terminalText } from "./terminal.js";
+import { Kanban, boardLanes, kanbanSelection, moveKanban } from "./components/Kanban.js";
 import { describeCriterion } from "./criteria.js";
 import { Login } from "./components/Login.js";
 import { Setup } from "./components/Setup.js";
+import { Startup } from "./components/Startup.js";
 import { FileTokenStore } from "./credentials.js";
 import type { CliOptions } from "./cli-options.js";
 import { startEmbedded, type EmbeddedHandle } from "./embedded.js";
 import { LocalRunner } from "./runner.js";
-import { RunnerNotice } from "./components/RunnerNotice.js";
 import { describeMode } from "./cli-options.js";
 import { repositoryPathOwnerForMode } from "./repository-path.js";
 
@@ -79,11 +84,12 @@ export function App({ options }: { options: CliOptions }) {
         <Text>{startupRemedy(bootError)}</Text>
         <Box marginTop={1}>
           <Text color="gray">{isRawModeSupported ? "q quit" : "press Ctrl-C to quit"}</Text>
+          <MouseButton label="Quit" onClick={() => exit()} />
         </Box>
       </Box>
     );
   }
-  if (!baseUrl) return <Text color="gray">{bootMessage}</Text>;
+  if (!baseUrl) return <Startup message={bootMessage} />;
 
   return <Console baseUrl={baseUrl} options={options} embedded={embedded} />;
 }
@@ -102,7 +108,11 @@ function startupRemedy(error: string): string {
   if (lower.includes("eaddrinuse")) {
     return "Something already holds that port. Pass --port <number> for a different one, or stop the other process.";
   }
-  if (lower.includes("econnrefused") || lower.includes("password authentication") || lower.includes("database")) {
+  if (
+    lower.includes("econnrefused") ||
+    lower.includes("password authentication") ||
+    lower.includes("database")
+  ) {
     return "Check the database is running and that --db <url> points at it.";
   }
   return "Run bento --help for the options. Passing --db <url> uses a Postgres you already run, which skips the container.";
@@ -130,37 +140,6 @@ function describeEvent(event: FeatureEvent, stages: Stage[]): string {
 
 function triggerLabel(event: FeatureEvent): string {
   return historyTriggerLabel(event.trigger, actorDisplayName(event.actorName, event.actorEmail));
-}
-
-/**
- * Why each held card is held.
- *
- * A card that says only "gated" tells you it stopped, not what would
- * start it again, and the answer is one line long. Manual stages
- * answer without asking the server at all, and only cards that are
- * actually held are asked, so a board that is moving costs nothing.
- */
-async function gateWaits(
-  client: BentoClient,
-  stages: Stage[],
-  features: Feature[],
-  profiles: AgentProfile[],
-): Promise<Record<string, string>> {
-  const waits: Record<string, string> = {};
-  await Promise.all(
-    features
-      .filter((feature) => feature.status === "gated")
-      .map(async (feature) => {
-        const stage = stages.find((s) => s.id === feature.currentStageId);
-        if (stage && stage.gateType !== "auto") {
-          waits[feature.id] = "waiting for your approval";
-          return;
-        }
-        const gate = await client.getGate(feature.id).catch(() => null);
-        waits[feature.id] = gate ? describeGateWait(gate, profiles) : "waiting at its gate";
-      }),
-  );
-  return waits;
 }
 
 /**
@@ -215,7 +194,7 @@ function describeGateWait(gate: GateState, profiles: AgentProfile[]): string {
   return `waiting: ${named.slice(0, 2).join(", ")}${rest}`;
 }
 
-function Console({
+export function Console({
   baseUrl,
   options,
   embedded,
@@ -231,37 +210,36 @@ function Console({
   const [tokens] = useState(() => new FileTokenStore(baseUrl));
   const [client] = useState(() => new BentoClient({ baseUrl, tokens }));
   const [screen, setScreen] = useState<Screen>("loading");
-  const [error, setError] = useState("");
+  const [connectionFailed, setConnectionFailed] = useState(false);
 
+  const { rows: terminalRows, columns: terminalColumns } = useWindowSize();
+  const compactBoard = terminalRows < 24 || terminalColumns < 70;
+  const [focusedLaneId, setFocusedLaneId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const projectRef = useRef<string | null>(null);
+  const refreshSerial = useRef(0);
+  const [beta, setBeta] = useState(false);
+  const [serverMode, setServerMode] = useState<"local" | "multi">("local");
+  const [workbench, setWorkbench] = useState<WorkbenchPage | null>(null);
+  const [activity, setActivity] = useState(false);
+  const actionRef = useRef<(input: string) => void>(() => {});
   const [projectName, setProjectName] = useState("");
   const [projectId, setProjectId] = useState<string | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
   const [features, setFeatures] = useState<Feature[]>([]);
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [runStatus, setRunStatus] = useState<Record<string, string | undefined>>({});
-  /** Why each held card is held, in words, so "gated" says what for. */
-  const [gateWait, setGateWait] = useState<Record<string, string | undefined>>({});
-  // By id, not index: the board refetches every 3s and a card changing
+  // By id, not index: a board event can move a card between lanes, and
   // lanes would silently move the highlight to a different card.
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
-  const [transcript, setTranscript] = useState<string[]>([]);
-  /**
-   * The message the agent is typing right now, streamed as fragments.
-   * The transcript endpoint cannot render it (fragments are never
-   * persisted), so the draft lives here and is dropped the moment the
-   * finished message makes it into the transcript.
-   */
-  const [draft, setDraft] = useState("");
   const [history, setHistory] = useState<FeatureEvent[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
-  const [showChanges, setShowChanges] = useState(false);
-  const [changeLines, setChangeLines] = useState<string[]>([]);
+  const [setupHint, setSetupHint] = useState("");
   const [notice, setNotice] = useState("");
   const [offline, setOffline] = useState(false);
 
   // Notices expire: "Approved X" from an hour ago reads as new news.
   // Standing conditions (no projects, no agents) are re-set by every
-  // 3s refresh, so they survive the expiry without special cases.
+  // periodic refresh, so they survive the expiry without special cases.
   useEffect(() => {
     if (!notice) return;
     // The sign in screen's notice says why that screen is up at all,
@@ -271,23 +249,28 @@ function Console({
     return () => clearTimeout(timer);
   }, [notice, screen]);
   const [runnerStatus, setRunnerStatus] = useState("Waiting for work");
-  // When set, keystrokes compose a follow-up prompt instead of driving
-  // the board. This is how a person takes over from an agent.
-  const [takeover, setTakeover] = useState<string | null>(null);
-  // Same composer shape for a new card: the title is one line, and the
-  // board keys have to stand down while it is being typed.
-  const [newCard, setNewCard] = useState<string | null>(null);
   // A second D confirms. One press that removed a card (and its
   // sandbox) would be the wrong moment to learn there is no undo.
-  const [deleteConfirm, setDeleteConfirm] = useState(false);
-  const [overlay, setOverlay] = useState<"none" | "spend" | "sessions">("none");
-  const [overlayIndex, setOverlayIndex] = useState(0);
-  const [usage, setUsage] = useState<ProjectUsage | null>(null);
-  const [sessionRows, setSessionRows] = useState<ProjectSession[] | null>(null);
+  const mutationPending = useRef(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<Feature | null>(null);
   const [latestRunId, setLatestRunId] = useState<string | null>(null);
   const [cardRuns, setCardRuns] = useState<AgentRun[]>([]);
   const [latestRunStatus, setLatestRunStatus] = useState<string>("");
   const [mergeStates, setMergeStates] = useState<FeatureMergeStatus[]>([]);
+
+  const queuedAction = useRef<{ key: string; featureId?: string | undefined } | null>(null);
+  useEffect(() => {
+    if (!workbench && queuedAction.current) {
+      const action = queuedAction.current;
+      queuedAction.current = null;
+      if (action.featureId && !features.some((f) => f.id === action.featureId)) {
+        setNotice("That card is no longer available.");
+        return;
+      }
+      actionRef.current(action.key);
+    }
+  }, [workbench]);
 
   // Where to land once the server is reachable and, in multi mode,
   // signed in: the board normally, the credentials wizard for `setup`.
@@ -300,28 +283,54 @@ function Console({
   };
 
   // Local mode needs no sign in; multi mode requires a stored token.
-  useEffect(() => {
-    void (async () => {
-      try {
-        const health = await client.health();
-        if (health.mode === "multi" && !(await tokens.get())) {
-          setScreen("login");
-          return;
-        }
-        setScreen(landing);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+  const connect = async () => {
+    try {
+      setConnectionFailed(false);
+      setScreen("loading");
+      const health = await client.health();
+      setServerMode(health.mode === "multi" ? "multi" : "local");
+      if (health.mode === "multi" && !(await tokens.get())) {
+        setScreen("login");
+        return;
       }
-    })();
+      setBeta((await client.flags().catch(() => ({ betaTesters: false }))).betaTesters);
+      await refresh();
+      setScreen(landing);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setScreen("login");
+        setNotice("Your session expired. Sign in again.");
+        return;
+      }
+      // A wrong server URL often returns an entire HTML page. Keep response
+      // bodies out of the connection screen and show an actionable message.
+      setConnectionFailed(true);
+    }
+  };
+  useEffect(() => {
+    void connect();
   }, [client]);
 
   const refresh = async () => {
-    const projects = await client.listProjects();
-    const project = projects[0];
+    const serial = ++refreshSerial.current;
+    const projectRows = await client.listProjects();
+    if (serial !== refreshSerial.current) return;
+    setProjects(projectRows);
+    const requested = projectRef.current ?? options.project;
+    const project = projectRows.find((p) => p.id === requested || p.name === requested) ?? projectRows[0];
     if (!project) {
-      setNotice(`No projects yet. Run \`bento setup\` to connect a repository, or open ${baseUrl} in a browser.`);
+      projectRef.current = null;
+      setProjectId(null);
+      setProjectName("");
+      setFeatures([]);
+      setStages([]);
+      setNotice("No projects yet. Press p to create one, or comma to open settings.");
       return;
     }
+    if (requested && !projectRows.some((p) => p.id === requested || p.name === requested)) {
+      setNotice(`Project ${requested} is unavailable. Opened ${project.name}. Press p to choose another.`);
+    }
+    projectRef.current = project.id;
     setProjectName(project.name);
     setProjectId(project.id);
     const [pipeline, featureRows, profileRows, statuses] = await Promise.all([
@@ -333,21 +342,21 @@ function Console({
       // as running the moment the board next refreshes.
       client.getRunStatuses(project.id).catch(() => ({})),
     ]);
+    if (serial !== refreshSerial.current || projectRef.current !== project.id) return;
     setStages(pipeline.stages);
     setFeatures(featureRows);
     setProfiles(profileRows);
     setRunStatus(statuses);
-    setGateWait(await gateWaits(client, pipeline.stages, featureRows, profileRows));
 
     // A board with no agent cannot run anything, and the reason is not
     // visible from the cards, so say it here rather than let a person
     // press start and watch nothing happen.
     if (profileRows.length === 0) {
-      setNotice("No coding agents yet. Run `bento setup` to choose a tool and model.");
+      setSetupHint("No coding agents yet. Press comma to choose a tool and model.");
     } else if (!pipeline.stages.some((stage) => stage.defaultAgentProfileId)) {
-      setNotice("No stage has an agent. Run `bento setup` to assign one.");
-    } else if (featureRows.length === 0) {
-      setNotice("No cards yet. Press n to add one.");
+      setSetupHint("No stage has an agent. Press comma to assign one.");
+    } else {
+      setSetupHint("");
     }
   };
 
@@ -364,18 +373,41 @@ function Console({
 
   useEffect(() => {
     if (screen !== "board") return;
-    void refresh().then(() => setOffline(false)).catch(onRefreshError);
+    void refresh()
+      .then(() => setOffline(false))
+      .catch(onRefreshError);
     const timer = setInterval(
-      () => void refresh().then(() => setOffline(false)).catch(onRefreshError),
-      3000,
+      () =>
+        void refresh()
+          .then(() => setOffline(false))
+          .catch(onRefreshError),
+      15000,
     );
     return () => clearInterval(timer);
   }, [screen]);
 
+  useEffect(() => {
+    if (screen !== "board" || !projectId) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      timer ??= setTimeout(() => {
+        timer = undefined;
+        void refresh()
+          .then(() => setOffline(false))
+          .catch(onRefreshError);
+      }, 150);
+    };
+    const stop = client.streamBoard(projectId, schedule, schedule);
+    return () => {
+      stop();
+      clearTimeout(timer);
+    };
+  }, [client, projectId, screen]);
+
   // In runner mode this machine executes the agent runs the server holds
   // for it, so the board is shared but the containers are local.
   useEffect(() => {
-    if (options.mode !== "runner" || screen !== "board") return;
+    if (options.mode !== "runner" || (screen !== "board" && screen !== "setup")) return;
     const runner = new LocalRunner({
       baseUrl,
       tokens,
@@ -386,25 +418,49 @@ function Console({
     });
     void runner.start();
     return () => runner.stop();
-  }, [options.mode, screen, baseUrl]);
+  }, [options.mode, screen === "board" || screen === "setup", baseUrl]);
 
-  const ordered = orderFeatures(stages, features);
-  const found = selectedFeatureId ? ordered.findIndex((f) => f.id === selectedFeatureId) : 0;
-  /**
-   * Where the selection sat while it still resolved.
-   *
-   * A card deleted in the web console leaves this terminal holding an
-   * id that matches nothing. Falling back to index 0 put the highlight
-   * on the first backlog card while selectedFeatureId kept the dead id,
-   * so every per-card fetch went on 404ing into a swallowed catch and
-   * the board answered nothing until somebody pressed j or k. The card
-   * that took the deleted one's place is at the same index, and the one
-   * before it when the deleted card was last.
-   */
-  const lastIndex = useRef(0);
-  if (found >= 0) lastIndex.current = found;
-  const selected = found >= 0 ? found : Math.max(0, Math.min(lastIndex.current, ordered.length - 1));
-  const current = ordered[selected];
+  const lanes = boardLanes(stages, features);
+  const columnSelection = kanbanSelection(lanes, selectedFeatureId, focusedLaneId);
+  const current = columnSelection.feature;
+  const boardRoot = useRef<DOMElement | null>(null);
+  const mouseSelection = useRef({ cardId: current?.id ?? null, laneId: columnSelection.lane.id });
+  mouseSelection.current = { cardId: current?.id ?? null, laneId: columnSelection.lane.id };
+  const mouse = useBoardMouse({
+    enabled: screen === "board" && !workbench && !activity && !deleteConfirm && !connectionFailed,
+    root: boardRoot,
+    onSelect: (target) => {
+      const lane = lanes.find((lane) => lane.id === target.laneId);
+      const cardId =
+        target.cardId ??
+        (lane?.cards.some((card) => card.id === mouseSelection.current.cardId)
+          ? mouseSelection.current.cardId
+          : (lane?.cards[0]?.id ?? null));
+      if (target.laneId) setFocusedLaneId(target.laneId);
+      if (cardId || target.laneId) {
+        mouseSelection.current = { cardId, laneId: target.laneId ?? mouseSelection.current.laneId };
+        setSelectedFeatureId(cardId);
+      }
+    },
+    onOpen: (target) => {
+      if (target.cardId) {
+        setSelectedFeatureId(target.cardId);
+        setWorkbench("conversation");
+      }
+    },
+    onScroll: (target, direction) => {
+      const laneId =
+        direction === "left" || direction === "right"
+          ? mouseSelection.current.laneId
+          : (target.laneId ?? mouseSelection.current.laneId);
+      const cardId =
+        laneId === mouseSelection.current.laneId ? mouseSelection.current.cardId : (target.cardId ?? null);
+      const next = moveKanban(lanes, cardId, laneId, direction);
+      mouseSelection.current = next;
+      setSelectedFeatureId(next.cardId);
+      setFocusedLaneId(next.laneId);
+    },
+  });
 
   // Said out loud, and the id written back, so the selection is a card
   // that exists rather than one the board is quietly pretending about.
@@ -414,34 +470,17 @@ function Console({
     setNotice("That card was deleted.");
   }, [features, selectedFeatureId, current?.id]);
 
-  /**
-   * What the card has cost so far, and how much of it is known. Codex,
-   * Cursor, and opencode print no cost, so a bare total would read as a
-   * cheap card rather than an unmeasured one.
-   */
-  const spend = (() => {
-    const finished = cardRuns.filter((r) => ["succeeded", "failed", "cancelled"].includes(r.status));
-    if (finished.length === 0) return "";
-    const measured = finished.filter((r) => r.costUsd !== null && r.costUsd !== undefined);
-    if (measured.length === 0) return "cost not reported";
-    const total = measured.reduce((sum, r) => sum + Number(r.costUsd), 0);
-    const silent = finished.length - measured.length;
-    return silent > 0 ? `$${total.toFixed(2)}+ (${silent} unmeasured)` : `$${total.toFixed(2)}`;
-  })();
-
-  /** The agent on the newest run, which decides what a message does to it. */
-  const cardAgent = profiles.find((profile) => profile.id === cardRuns[0]?.agentProfileId);
-  const runActive = Boolean(latestRunStatus) && !["succeeded", "failed", "cancelled"].includes(latestRunStatus);
-  const quietLine = quietRunStatus(cardAgent?.cli, runActive);
+  const runActive = ["queued", "starting", "running"].includes(
+    runStatus[current?.id ?? ""] ?? latestRunStatus,
+  );
   const latestSettledRunId =
     latestRunId && ["succeeded", "failed", "cancelled"].includes(latestRunStatus) ? latestRunId : null;
   const hasConflicts = mergeStates.some((state) => state.state === "conflicted");
-  const canResolveConflicts =
-    hasConflicts && current?.status !== "done" && current?.status !== "cancelled";
+  const canResolveConflicts = hasConflicts && current?.status !== "done" && current?.status !== "cancelled";
 
   /**
    * Merge state on its own cadence: when the selected card changes, and
-   * again when a run settles. The 3s board refresh must not ask GitHub;
+   * again when a run settles. The board refresh must not ask GitHub;
    * that is a round trip per pull request per viewer. No pull requests
    * answers [] without a GitHub call.
    */
@@ -465,503 +504,293 @@ function Console({
     };
   }, [client, current?.id, latestSettledRunId]);
 
-  // Follow the selected card's newest run.
   useEffect(() => {
-      if (!current) return;
+    setLatestRunId(null);
+    setLatestRunStatus("");
+    setCardRuns([]);
+    setHistory([]);
+    setDeleteConfirm(null);
+  }, [current?.id]);
+
+  // Read the selected card's run state for board actions. Conversation owns transcript streaming.
+  useEffect(() => {
+    if (!current || screen !== "board" || workbench) return;
     let cancelled = false;
     void (async () => {
-      client.getHistory(current.id).then(setHistory).catch(() => {});
+      client
+        .getHistory(current.id)
+        .then((rows) => {
+          if (!cancelled) setHistory(rows);
+        })
+        .catch(() => {});
       const detail = await client.getFeature(current.id);
+      if (cancelled) return;
       setCardRuns(detail.runs);
       // The server sends runs newest first.
       const latest = detail.runs[0];
       if (cancelled) return;
       if (!latest) {
-        // A card with no runs must also forget the previous card's:
-        // stale latestRunId kept the live follow subscribed to it and
-        // streamed another card's conversation into this pane.
+        // A card with no runs must not inherit the previous card's run actions.
         setLatestRunId(null);
         setLatestRunStatus("");
-        setTranscript([]);
         return;
       }
       setRunStatus((prev) => ({ ...prev, [current.id]: latest.status }));
       setLatestRunId(latest.id);
       setLatestRunStatus(latest.status);
-      const { cursor, lines } = await client.getTranscript(latest.id);
-      if (cancelled) return;
-      setTranscript(lines);
-      transcriptCursor.current = { runId: latest.id, cursor };
     })().catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [current?.id, features]);
+  }, [current?.id, features, screen, workbench]);
 
-  /**
-   * Live follow of the run being watched. The 3 second board refresh
-   * above keeps working as the fallback; this subscription is what
-   * makes output appear the moment it happens, and it carries the
-   * fragments of the message being typed, which no transcript fetch
-   * can ever return. Fragment bursts are coalesced on short timers so
-   * the terminal is not redrawn per token.
-   */
-  const followedRunId = runActive ? latestRunId : null;
-  const transcriptCursor = useRef<{ runId: string; cursor: number } | null>(null);
-  useEffect(() => {
-    setDraft("");
-    if (!followedRunId) return;
-    let stopped = false;
-    let draftText = "";
-    let draftTimer: ReturnType<typeof setTimeout> | null = null;
-    let refetchTimer: ReturnType<typeof setTimeout> | null = null;
-    const dropDraft = () => {
-      // Both halves, or a flush timer scheduled just before the drop
-      // would put the stale text right back on screen.
-      draftText = "";
-      if (draftTimer) {
-        clearTimeout(draftTimer);
-        draftTimer = null;
-      }
-      setDraft("");
-    };
-    const refetchTranscript = () => {
-      refetchTimer ??= setTimeout(() => {
-        refetchTimer = null;
-        /**
-         * From the cursor, not from zero: a chatty run fires this
-         * four times a second, and re-reading the whole transcript
-         * each time made the run cost quadratic in its own length.
-         * The card-switch effect above resets the cursor whenever it
-         * replaces the transcript outright.
-         */
-        const since =
-          transcriptCursor.current?.runId === followedRunId ? transcriptCursor.current.cursor : 0;
-        client
-          .getTranscript(followedRunId, since)
-          .then(({ cursor, lines }) => {
-            if (stopped) return;
-            // Another fetch replaced the transcript meanwhile; these
-            // rows would double-append.
-            const held = transcriptCursor.current;
-            if (since > 0 && (held?.runId !== followedRunId || held.cursor !== since)) return;
-            transcriptCursor.current = { runId: followedRunId, cursor };
-            if (since > 0) setTranscript((prev) => [...prev, ...lines]);
-            else setTranscript(lines);
-          })
-          .catch(() => {});
-      }, 250);
-    };
-    const stop = client.streamRun(followedRunId, {
-      onEvent: (event) => {
-        if (stopped) return;
-        // The persisted line supersedes the draft that previewed it.
-        // Assistant lines and results only: the user's own steer says
-        // nothing about the message still being typed, and clearing
-        // on it froze the draft mid sentence.
-        if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
-          dropDraft();
-        }
-        refetchTranscript();
-      },
-      onDelta: (delta) => {
-        if (stopped || delta.channel !== "text") return;
-        // Offset zero starts a draft (new message or the server's
-        // catch-up snapshot); anything else must continue this one.
-        if (delta.offset === 0) draftText = delta.text;
-        else if (delta.offset === draftText.length) draftText += delta.text;
-        else return;
-        draftTimer ??= setTimeout(() => {
-          draftTimer = null;
-          if (!stopped) setDraft(draftText);
-        }, 150);
-      },
-      onDone: () => {
-        if (stopped) return;
-        dropDraft();
-        refetchTranscript();
-      },
-      onError: () => {
-        if (stopped) return;
-        // The stream is gone (token rejected, connection dropped).
-        // The 3 second poll still covers the transcript; what must
-        // not survive is a frozen half sentence posing as live.
-        dropDraft();
-      },
-    });
-    return () => {
-      stopped = true;
-      stop();
-      if (draftTimer) clearTimeout(draftTimer);
-      if (refetchTimer) clearTimeout(refetchTimer);
-    };
-  }, [client, followedRunId]);
-
-  // What the card's agents committed: files touched and the stage
-  // write-ups, summarised to fit the pane.
-  useEffect(() => {
-    if (!showChanges || !current) return;
-    let cancelled = false;
-    void client
-      .getChanges(current.id)
-      .then((committed) => {
-        if (cancelled) return;
-        const lines: string[] = [];
-        for (const repo of committed.repositories) {
-          const adds = repo.files.reduce((n, f) => n + f.additions, 0);
-          const dels = repo.files.reduce((n, f) => n + f.deletions, 0);
-          lines.push(`${repo.name}  +${adds} -${dels} in ${repo.files.length} file${repo.files.length === 1 ? "" : "s"}`);
-          for (const f of repo.files) lines.push(`  +${f.additions} -${f.deletions}  ${f.path}`);
-          for (const artifact of repo.artifacts) lines.push(`  write-up: ${artifact.path}`);
-        }
-        if (lines.length === 0) lines.push("Nothing committed yet.");
-        setChangeLines(lines);
+  function mutate(work: () => Promise<unknown>, success: string) {
+    if (mutationPending.current) return;
+    mutationPending.current = true;
+    setActionBusy(true);
+    void work()
+      .then(async () => {
+        setNotice(success);
+        await refresh().catch(onRefreshError);
       })
-      .catch((err: unknown) => setChangeLines([err instanceof Error ? err.message : String(err)]));
-    return () => {
-      cancelled = true;
-    };
-  }, [showChanges, current?.id, features]);
+      .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)))
+      .finally(() => {
+        mutationPending.current = false;
+        setActionBusy(false);
+      });
+  }
 
-  useInput(
-    (input, key) => {
-      // The connection screen has no board to drive, and leaving is the
-      // only thing it can offer.
-      if (error) {
-        if (input === "q") quit();
-        return;
-      }
-      if (screen !== "board") return;
+  usePaste(() => setNotice("Open a text field before pasting. Press n for a card or c for a message."), {
+    isActive: isRawModeSupported === true && screen === "board" && !workbench && !activity,
+  });
 
-      if (overlay !== "none") {
-        if (key.escape || input === "q") {
-          setOverlay("none");
-          return;
-        }
-        const rows =
-          overlay === "spend" ? (usage?.byFeature.length ?? 0) : (sessionRows?.length ?? 0);
-        if (key.downArrow || input === "j") {
-          setOverlayIndex((i) => Math.min(i + 1, Math.max(0, rows - 1)));
-          return;
-        }
-        if (key.upArrow || input === "k") {
-          setOverlayIndex((i) => Math.max(i - 1, 0));
-          return;
-        }
-        if (key.return) {
-          const featureId =
-            overlay === "spend" ? usage?.byFeature[overlayIndex]?.featureId : sessionRows?.[overlayIndex]?.featureId;
-          if (featureId) {
-            setSelectedFeatureId(featureId);
-            setOverlay("none");
-          }
-          return;
-        }
-        return;
-      }
-
-      if (newCard !== null) {
-        if (key.escape) {
-          setNewCard(null);
-          return;
-        }
-        if (key.return) {
-          const title = newCard.trim();
-          setNewCard(null);
-          if (!title || !projectId) return;
-          void client
-            .createFeature({ projectId, title })
-            .then((created) => {
-              setSelectedFeatureId(created.id);
-              setNotice(`Added ${created.title}`);
-            })
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-          return;
-        }
-        if (key.backspace || key.delete) {
-          setNewCard(newCard.slice(0, -1));
-          return;
-        }
-        if (input) setNewCard(newCard + input);
-        return;
-      }
-
-      if (deleteConfirm) {
-        if (input === "y" || input === "D") {
-          setDeleteConfirm(false);
-          if (!current) return;
-          void client
-            .deleteFeature(current.id)
-            .then(() => setNotice(`Deleted ${current.title}`))
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-          return;
-        }
-        if (key.escape || input === "n") {
-          setDeleteConfirm(false);
-          setNotice("Kept the card.");
-          return;
-        }
-        return;
-      }
-
-      // Composing a follow-up prompt: everything goes into the text.
-      if (takeover !== null) {
-        if (key.escape) {
-          setTakeover(null);
-          return;
-        }
-        if (key.return) {
-          const prompt = takeover.trim();
-          setTakeover(null);
-          if (!prompt || !current) return;
-          // Not resumeRun: that refuses while a run is active, and the
-          // whole point of the composer is to be able to say something
-          // to an agent that is working. The message endpoint decides
-          // between steering a live session and parking the text for
-          // the end of the run, and says which it did.
-          void client
-            .messageFeature(current.id, prompt)
-            .then((result) =>
-              setNotice(
-                result.queued
-                  ? "Queued. The agent reads it when this run ends."
-                  : result.live
-                    ? result.delivery === "steer"
-                      ? "Sent. The agent is changing course now."
-                      : "Sent. The agent reads it after the current step."
-                    : "Continuing with your instructions",
-              ),
-            )
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-          return;
-        }
-        if (key.backspace || key.delete) {
-          setTakeover(takeover.slice(0, -1));
-          return;
-        }
-        if (input) setTakeover(takeover + input);
-        return;
-      }
+  const handleInput = (input: string, key: Partial<import("ink").Key> = {}) => {
+    // The connection screen has no board to drive, and leaving is the
+    // only thing it can offer.
+    if (connectionFailed) {
       if (input === "q") quit();
-      if (key.downArrow || input === "j") {
-        setDeleteConfirm(false);
-        setSelectedFeatureId(ordered[Math.min(selected + 1, ordered.length - 1)]?.id ?? null);
-      }
-      if (key.upArrow || input === "k") {
-        setDeleteConfirm(false);
-        setSelectedFeatureId(ordered[Math.max(selected - 1, 0)]?.id ?? null);
-      }
-      if (input === "n") {
-        if (!projectId) {
-          setNotice("No project yet. Run `bento setup` to connect a repository.");
-          return;
-        }
-        setDeleteConfirm(false);
-        setNewCard("");
-        return;
-      }
-      if (!current) return;
-      /**
-       * Three places a card can be, and the keys mean different things
-       * in each. Every key answers in every state: an action that
-       * cannot apply says what would apply instead, because the raw
-       * server refusal ({"error":"feature is not in a stage"}) tells
-       * the person nothing about which key they wanted.
-       */
-      const inAStage = Boolean(current.currentStageId) && current.status !== "done";
-      const isDone = current.status === "done";
-      const finishedHint = "This card is finished. Press b to reopen it.";
-      if (input === "a") {
-        if (isDone) {
-          setNotice(finishedHint);
-        } else {
-          // From the backlog the key moves the card forward, which is
-          // what approve means before there is a gate to approve.
-          void (inAStage ? client.approveFeature(current.id) : client.advanceFeature(current.id))
-            .then(() => setNotice(inAStage ? `Approved ${current.title}` : `Started ${current.title}`))
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        }
-      }
-      // Reject is the other half of a manual gate: capital R, since r
-      // already re-checks and the two are easy to confuse.
-      if (input === "R") {
-        if (!inAStage) {
-          setNotice(isDone ? finishedHint : "Nothing to reject yet. Press a to start the pipeline.");
-        } else {
-          void client
-            .rejectFeature(current.id)
-            .then(() => setNotice(`Rejected ${current.title}, sent back`))
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        }
-      }
-      if (input === "r") {
-        if (!inAStage) {
-          setNotice(isDone ? finishedHint : "No gate to check yet. Press a to start the pipeline.");
-        } else {
-          void client
-            .recheckGate(current.id)
-            .then(() => setNotice("Re-checked the requirements"))
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        }
-      }
-      // Stop the agent, so a person can take over.
-      if (input === "x") {
-        if (latestRunId && !["succeeded", "failed", "cancelled"].includes(latestRunStatus)) {
-          void client
-            .cancelRun(latestRunId)
-            .then(() => setNotice("Stopped the agent"))
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        } else {
-          setNotice("No agent is running on this card.");
-        }
-      }
-      // Continue in your own words, reusing the agent's session.
-      if (input === "c") {
-        if (isDone) setNotice(finishedHint);
-        else if (latestRunId) setTakeover("");
-        else setNotice("Nothing to continue: no agent has run on this card yet.");
-      }
-      if (input === "h") {
-        setShowHistory(!showHistory);
-        setShowChanges(false);
-      }
-      if (input === "d") {
-        setShowChanges(!showChanges);
-        setShowHistory(false);
-      }
-      if (input === "b") {
-        if (!current.currentStageId) {
-          setNotice("Already in the backlog.");
-        } else {
-          // On a finished card the same request reopens it into the
-          // stage it finished in; the server tells the two apart.
-          void client
-            .moveFeatureBack(current.id)
-            .then(() => setNotice(isDone ? `Reopened ${current.title}` : "Sent back a stage"))
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        }
-      }
-      if (input === "f") {
-        if (isDone) {
-          setNotice(finishedHint);
-        } else if (current.status === "cancelled") {
-          setNotice("This card was cancelled. It has no further actions.");
-        } else {
-          void client
-            .finishFeature(current.id)
-            .then(() => setNotice(`Marked ${current.title} completed`))
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        }
-      }
-      if (input === "D") {
-        if (latestRunId && !["succeeded", "failed", "cancelled"].includes(latestRunStatus)) {
-          setNotice("An agent is working this card. Stop it (x) or wait for it to finish.");
-          return;
-        }
-        setDeleteConfirm(true);
-        return;
-      }
-      if (input === "m") {
-        if (isDone) {
-          setNotice(finishedHint);
-        } else if (current.status === "cancelled") {
-          setNotice("This card was cancelled. It has no further actions.");
-        } else if (!canResolveConflicts) {
-          setNotice("GitHub reports no merge conflicts on this card's pull requests.");
-        } else if (runActive) {
-          setNotice("An agent is working this card. Resolve conflicts when it finishes.");
-        } else {
-          void client
-            .resolveConflicts(current.id)
-            .then(() =>
-              setNotice(
-                "Resolving conflicts. The stage agent rebases the branch, and the pull request updates when it finishes.",
-              ),
-            )
-            .then(refresh)
-            .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        }
-      }
-      if (input === "u") {
-        if (!projectId) {
-          setNotice("No project yet. Run `bento setup` to connect a repository.");
-          return;
-        }
-        setOverlayIndex(0);
-        setOverlay("spend");
-        void client
-          .getUsage(projectId)
-          .then(setUsage)
-          .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        return;
-      }
-      if (input === "e") {
-        if (!projectId) {
-          setNotice("No project yet. Run `bento setup` to connect a repository.");
-          return;
-        }
-        setOverlayIndex(0);
-        setOverlay("sessions");
-        void client
-          .listSessions(projectId)
-          .then((result) => setSessionRows(result.sessions))
-          .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-        return;
-      }
-      if (input === "s") {
-        if (!inAStage) {
-          setNotice(isDone ? finishedHint : "Start the pipeline first: press a.");
-          return;
-        }
-        const stage = stages.find((st) => st.id === current.currentStageId);
-        const profileId = stage?.defaultAgentProfileId ?? profiles[0]?.id;
-        if (!profileId) {
-          setNotice("Assign an agent to this stage first.");
-          return;
-        }
-        const startedName = profiles.find((pr) => pr.id === profileId)?.name ?? "the agent";
-        void client
-          .startRun({ featureId: current.id, agentProfileId: profileId })
-          .then(() => setNotice(`Started ${startedName}`))
-          .then(refresh)
-          .catch((err: unknown) => setNotice(err instanceof Error ? err.message : String(err)));
-      }
-    },
-    // Must be a real boolean: Ink only honours isActive when it is
-    // strictly false, and isRawModeSupported is undefined without a TTY.
-    { isActive: isRawModeSupported === true },
-  );
+      if (input === "r") void connect();
+      return;
+    }
+    if (screen !== "board") return;
 
-  if (error) {
+    if (workbench || activity) return;
+    if (deleteConfirm) {
+      if (input === "y" || input === "D") {
+        setDeleteConfirm(null);
+        const target = deleteConfirm;
+        mutate(() => client.deleteFeature(target.id), `Deleted ${target.title}`);
+        return;
+      }
+      if (key.escape || input === "n") {
+        setDeleteConfirm(null);
+        setNotice("Kept the card.");
+        return;
+      }
+      return;
+    }
+
+    if (input === ":" || input === "?" || (key.ctrl && input === "p")) {
+      setWorkbench("commands");
+      return;
+    }
+    if (
+      key.leftArrow ||
+      key.rightArrow ||
+      key.tab ||
+      key.upArrow ||
+      key.downArrow ||
+      input === "j" ||
+      input === "k" ||
+      input === "g" ||
+      input === "G"
+    ) {
+      const direction =
+        key.leftArrow || (key.tab && key.shift)
+          ? "left"
+          : key.rightArrow || key.tab
+            ? "right"
+            : key.upArrow || input === "k"
+              ? "up"
+              : input === "g"
+                ? "first"
+                : input === "G"
+                  ? "last"
+                  : "down";
+      const next = moveKanban(lanes, selectedFeatureId, focusedLaneId, direction);
+      setFocusedLaneId(next.laneId);
+      setSelectedFeatureId(next.cardId);
+      return;
+    }
+    if (input === "/") {
+      setWorkbench("search");
+      return;
+    }
+    if (input === "p") {
+      setWorkbench("projects");
+      return;
+    }
+    if (input === ",") {
+      setScreen("setup");
+      return;
+    }
+    if (input === "u" && projectId) {
+      setWorkbench("spend");
+      return;
+    }
+    if ((input === "v" || input === "e") && projectId) {
+      setWorkbench("sessions");
+      return;
+    }
+    if (input === "n") {
+      setWorkbench(projectId ? "new" : "projects");
+      return;
+    }
+    if (current && key.return) {
+      setWorkbench("conversation");
+      return;
+    }
+    if (current && input === "d") {
+      setWorkbench("changes");
+      return;
+    }
+    if (current && input === "h") {
+      setActivity(true);
+      return;
+    }
+    if (input === "q") quit();
+    if (!current) return;
+    if (mutationPending.current) return;
+    const isDone = current.status === "done";
+    const inAStage = Boolean(current.currentStageId) && !isDone;
+    const finishedHint = "This card is finished. Press b to reopen it.";
+    if (input === "D") {
+      if (runActive) setNotice("An agent is working. Stop it with x before deleting the card.");
+      else setDeleteConfirm(current);
+      return;
+    }
+    if (input === "b") {
+      if (!current.currentStageId && !isDone) setNotice("Already in the backlog.");
+      else mutate(() => client.moveFeatureBack(current.id), isDone ? "Card reopened" : "Sent back a stage");
+      return;
+    }
+    if (input === "x") {
+      const run = cardRuns.find(
+        (r) => r.featureId === current.id && ["queued", "starting", "running"].includes(r.status),
+      );
+      if (run) mutate(() => client.cancelRun(run.id), "Stopped the agent");
+      else
+        setNotice(
+          runActive ? "Loading the active run. Try again in a moment." : "No agent is running on this card.",
+        );
+      return;
+    }
+    if (isDone) {
+      if ("acsfmRr".includes(input) && input) setNotice(finishedHint);
+      return;
+    }
+    if (current.status === "cancelled") {
+      setNotice("This card was cancelled.");
+      return;
+    }
+    if (input === "c") {
+      if (cardRuns.some((r) => r.featureId === current.id)) setWorkbench("message");
+      else setWorkbench("agents");
+    }
+    if (input === "a")
+      mutate(
+        () => (inAStage ? client.approveFeature(current.id) : client.advanceFeature(current.id)),
+        inAStage ? "Card approved" : "Pipeline started",
+      );
+    if (input === "R") {
+      if (inAStage) setWorkbench("reject");
+      else setNotice("No stage to reject. Press a to start the pipeline.");
+    }
+    if (input === "r") {
+      if (inAStage) mutate(() => client.recheckGate(current.id), "Rechecked the requirements");
+      else setNotice("No gate to check. Press a to start the pipeline.");
+    }
+    if (input === "f") mutate(() => client.finishFeature(current.id), "Card marked done");
+    if (input === "m") {
+      if (runActive) setNotice("Wait for the agent to finish before resolving conflicts.");
+      else if (!canResolveConflicts) setNotice("GitHub reports no merge conflicts on this card.");
+      else
+        mutate(
+          () => client.resolveConflicts(current.id),
+          "Resolving conflicts. The pull request updates when the agent finishes.",
+        );
+    }
+    if (input === "s") {
+      if (runActive) {
+        setNotice("An agent is already working. Press c to send instructions.");
+        return;
+      }
+      const profileId = stages.find((stage) => stage.id === current.currentStageId)?.defaultAgentProfileId;
+      if (!inAStage || !profileId) {
+        setWorkbench("agents");
+        return;
+      }
+      mutate(() => client.startRun({ featureId: current.id, agentProfileId: profileId }), "Agent started");
+    }
+  };
+  actionRef.current = (input) => handleInput(input);
+  useInput(handleInput, { isActive: isRawModeSupported === true });
+
+  if (connectionFailed) {
     return (
       <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1} paddingY={1}>
         <Text bold color="red">
-          Could not reach {baseUrl}
+          Could not connect to Bento at {terminalText(baseUrl)}
         </Text>
-        <Text color="gray">{error}</Text>
-        <Text>Check the address, and that the server is running.</Text>
+        <Text>Check the server URL and make sure Bento is running there.</Text>
+        <Text color="gray">For hosted Bento, run: bento --server https://app.usebento.ai</Text>
         <Box marginTop={1}>
-          <Text color="gray">{isRawModeSupported ? "q quit" : "press Ctrl-C to quit"}</Text>
+          <Text color="gray">{isRawModeSupported ? "r retry · q quit" : "press Ctrl-C to quit"}</Text>
+          <MouseActions>
+            <MouseButton
+              label="Retry"
+              onClick={() => {
+                void connect();
+              }}
+            />
+            <MouseButton label="Quit" onClick={quit} />
+          </MouseActions>
         </Box>
       </Box>
     );
   }
-  if (screen === "loading") return <Text color="gray">Connecting to {baseUrl}...</Text>;
-  if (screen === "setup") {
+  async function resetSessionView(signedOut = false) {
+    refreshSerial.current += 1;
+    projectRef.current = null;
+    setWorkbench(null);
+    setActivity(false);
+    setProjects([]);
+    setProjectId(null);
+    setProjectName("");
+    setFeatures([]);
+    setStages([]);
+    setProfiles([]);
+    setSelectedFeatureId(null);
+    setFocusedLaneId(null);
+    setRunStatus({});
+    setHistory([]);
+    setBeta(false);
+    setNotice("");
+    setConnectionFailed(false);
+    setScreen(signedOut ? "login" : "loading");
+    if (!signedOut) await connect();
+  }
+
+  if (screen === "loading") return <Startup message={`Connecting to ${baseUrl}...`} />;
+  if (screen === "setup" && !workbench) {
     return (
       <Setup
         client={client}
         repositoryPathOwner={repositoryPathOwnerForMode(options.mode)}
         agentsRunLocally={options.mode !== "client"}
+        selectedProjectId={projectId ?? options.project}
+        serverMode={serverMode}
+        onSection={setWorkbench}
         // Setup is a screen, not a program: everything it configures is
         // for the board, which is already running behind it.
         onDone={() => setScreen("board")}
@@ -974,183 +803,135 @@ function Console({
         baseUrl={baseUrl}
         {...(notice ? { notice } : {})}
         onToken={(token) => {
-          void tokens.set(token).then(() => {
-            setNotice("");
-            setScreen(landing);
-          });
+          void tokens
+            .set(token)
+            .then(() => resetSessionView())
+            .catch((err: unknown) => {
+              setNotice(err instanceof Error ? err.message : String(err));
+            });
         }}
         onQuit={quit}
       />
     );
   }
 
+  if (workbench)
+    return (
+      <Workbench
+        client={client}
+        baseUrl={baseUrl}
+        initial={workbench}
+        project={projects.find((p) => p.id === projectId)}
+        projects={projects}
+        feature={current}
+        features={features}
+        stages={stages}
+        profiles={profiles}
+        beta={beta}
+        onProject={(id) => {
+          refreshSerial.current += 1;
+          projectRef.current = id;
+          setProjectId(id);
+          setFeatures([]);
+          setSelectedFeatureId(null);
+          setFocusedLaneId(null);
+          void refresh().catch(onRefreshError);
+        }}
+        onFeature={setSelectedFeatureId}
+        onSetup={() => {
+          setWorkbench(null);
+          setScreen("setup");
+        }}
+        onAction={(key, featureId) => {
+          if (featureId) setSelectedFeatureId(featureId);
+          setWorkbench(null);
+          queuedAction.current = { key, featureId };
+        }}
+        onClose={() => setWorkbench(null)}
+        onChanged={refresh}
+        onSessionChanged={resetSessionView}
+      />
+    );
+  if (activity)
+    return (
+      <Reader
+        title="Card activity"
+        lines={history.map(
+          (event) =>
+            `${new Date(event.at).toLocaleString()} ${describeEvent(event, stages)} ${triggerLabel(event)}`,
+        )}
+        onClose={() => setActivity(false)}
+      />
+    );
+
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <Box marginBottom={1}>
-        <Text bold color="magenta">
-          Bento
+    <Box ref={boardRoot} flexDirection="column" paddingX={1}>
+      <Box flexDirection="column" marginBottom={1}>
+        <Text wrap="truncate-end">
+          <Text bold color="magenta">
+            Bento
+          </Text>{" "}
+          <Text bold>{terminalText(projectName || "Workspace")}</Text>
         </Text>
-        <Text color="gray"> {projectName}</Text>
-        <Text color="gray">
-          {"  "}
+        <Text dimColor wrap="truncate-end">
           {describeMode(options, embedded?.sandbox)}
         </Text>
-        <Text color="gray">
-          {"  "}
-          {baseUrl}
-        </Text>
       </Box>
-      {offline && <Text color="yellow">Lost the connection to {baseUrl}. Retrying...</Text>}
-
-      {options.mode === "runner" && <RunnerNotice server={options.server ?? baseUrl} sandbox={options.sandbox} />}
-
-      {overlay === "spend" && (
-        <Box flexDirection="column" marginBottom={1}>
-          <Text bold>Spend</Text>
-          <Text color="gray">
-            Bento records the figure an agent CLI prints. It does not price tokens itself. Escape
-            goes back to the board.
-          </Text>
-          {usage ? (
-            usage.byFeature.length === 0 ? (
-              <Text color="gray">No cards yet. Add one from the board to start tracking spend.</Text>
-            ) : (
-              usage.byFeature.map((row, i) => (
-                <Text key={row.featureId} color={i === overlayIndex ? "cyan" : "white"}>
-                  {i === overlayIndex ? " > " : "   "}
-                  {row.title}{" "}
-                  {row.runs === 0
-                    ? "No runs"
-                    : row.costUsd === null
-                      ? "Not reported"
-                      : `$${row.costUsd.toFixed(2)}${row.runsWithoutCost > 0 ? "+" : ""}`}
-                </Text>
-              ))
-            )
-          ) : (
-            <Text color="gray">Loading spend...</Text>
-          )}
-        </Box>
+      {offline && (
+        <Text color="yellow" wrap="truncate-end">
+          Lost the connection to {baseUrl}. Retrying...
+        </Text>
       )}
 
-      {overlay === "sessions" && (
-        <Box flexDirection="column" marginBottom={1}>
-          <Text bold>Sessions</Text>
-          <Text color="gray">
-            Every conversation in this project. Enter opens the card. Escape goes back.
-          </Text>
-          {sessionRows ? (
-            sessionRows.length === 0 ? (
-              <Text color="gray">No sessions yet. Start an agent from the board to begin a conversation.</Text>
-            ) : (
-              sessionRows.map((row, i) => (
-                <Text key={row.featureId} color={i === overlayIndex ? "cyan" : "white"}>
-                  {i === overlayIndex ? " > " : "   "}
-                  {row.title} {row.latestRun.status} {row.runCount} runs
-                </Text>
-              ))
-            )
-          ) : (
-            <Text color="gray">Loading sessions...</Text>
-          )}
-        </Box>
-      )}
-
-      {overlay === "none" && (
-        <Board
-          stages={stages}
-          features={features}
-          profiles={profiles}
-          selectedIndex={selected}
+      {!deleteConfirm && (
+        <Kanban
+          lanes={lanes}
+          cardId={selectedFeatureId}
+          laneId={focusedLaneId}
           runStatus={runStatus}
-          gateWait={gateWait}
+          mouse={mouse}
+          width={Math.max(1, terminalColumns - 2)}
+          height={Math.max(
+            4,
+            terminalRows -
+              7 -
+              Number(terminalColumns < 65) -
+              Number(offline) -
+              Number(actionBusy) -
+              Number(Boolean(notice || (!runActive && setupHint))) -
+              Number(options.mode === "runner"),
+          )}
         />
       )}
-
-      {current && (
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
-          <Box>
-            <Text bold>{current.title}</Text>
-            <Text color={statusColor(current.status)}> {current.status}</Text>
-            {spend && <Text color="gray"> {spend}</Text>}
-          </Box>
-          {canResolveConflicts && (
-            <Text color="yellow">
-              GitHub cannot merge {mergeStates.filter((s) => s.state === "conflicted").length === 1
-                ? "this card's pull request"
-                : "some of this card's pull requests"}
-              : the base branch has moved and the changes collide. Press m to resolve conflicts.
-            </Text>
-          )}
-          <Text bold color="gray">{showChanges ? "Changes" : showHistory ? "History" : "Agent logs"}</Text>
-          {showChanges ? (
-            <>
-              {changeLines.slice(0, 8).map((line, i) => (
-                <Text key={i} color="gray">
-                  {line.slice(0, 100)}
-                </Text>
-              ))}
-              {changeLines.length > 8 && <Text color="gray">... {changeLines.length - 8} more in the web console</Text>}
-              {changeLines.length === 0 && <Text color="gray">Nothing committed yet.</Text>}
-            </>
-          ) : showHistory ? (
-            <>
-              {history.slice(-8).map((event) => (
-                <Text key={event.id} color="gray">
-                  {new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{" "}
-                  {describeEvent(event, stages)} {triggerLabel(event)}
-                </Text>
-              ))}
-              {history.length === 0 && <Text color="gray">Nothing has happened yet.</Text>}
-            </>
-          ) : (
-            <>
-              {transcript.length > 8 && <Text color="gray">... {transcript.length - 8} earlier lines</Text>}
-              {transcript.slice(-8).map((line, i) => (
-                <Text key={i} color="gray">
-                  {line.slice(0, 100)}
-                </Text>
-              ))}
-              {draft !== "" && (
-                // The typing edge of the message in progress: its tail,
-                // because that is where the new words appear. Flattened
-                // to one line; embedded newlines grew the fixed pane
-                // and bounced the panels below it on every flush.
-                <Text>{`${cardAgent?.name ?? "agent"}> ${draft}`.replaceAll(/\s+/g, " ").slice(-100)}</Text>
-              )}
-              {quietLine && draft === "" && <Text color="gray">{quietLine}</Text>}
-              {!quietLine && transcript.length === 0 && draft === "" && (
-                <Text color="gray">No output yet.</Text>
-              )}
-            </>
-          )}
-        </Box>
-      )}
-
-      {newCard !== null && (
-        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text color="cyan">New card. Enter to add it to the backlog, Escape to cancel.</Text>
-          <Text>{newCard}▊</Text>
-        </Box>
-      )}
-      {deleteConfirm && current && (
+      {deleteConfirm && (
         <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
-          <Text color="red">Delete {current.title}?</Text>
+          <Text color="red" wrap="truncate-end">
+            Delete {terminalText(deleteConfirm.title)}?
+          </Text>
           <Text color="gray">
-            It leaves the board for everyone. The branch and any pull request stay. There is no undo.
+            {compactBoard
+              ? "Deletes this card permanently."
+              : "It leaves the board for everyone. The branch and any pull request stay. There is no undo."}
           </Text>
           <Text color="gray">y delete · n cancel</Text>
-        </Box>
-      )}
-      {takeover !== null && (
-        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text color="cyan">{takeoverTitle(cardAgent?.cli, runActive, cardAgent?.name ?? "The agent")}</Text>
-          <Text color="gray">Enter to send, Escape to cancel.</Text>
-          <Text>{takeover}▊</Text>
+          <MouseActions>
+            <MouseButton label="Cancel" onClick={() => handleInput("n")} />
+            <MouseButton label="Delete card" onClick={() => handleInput("y")} danger />
+          </MouseActions>
         </Box>
       )}
       {options.mode === "runner" && <Text color="cyan">runner: {runnerStatus}</Text>}
-      {notice && <Text color="yellow">{notice}</Text>}
+      {!notice && !runActive && setupHint && (
+        <Text dimColor wrap="truncate-end">
+          {setupHint}
+        </Text>
+      )}
+      {actionBusy && <Text color="cyan">Saving…</Text>}
+      {notice && (
+        <Text color="yellow" wrap="truncate-end">
+          {terminalText(notice)}
+        </Text>
+      )}
       {/*
         Two lines, grouped by what they do. One line of every key ran
         past eighty columns and wrapped mid-word, which is where the
@@ -1158,14 +939,21 @@ function Console({
       */}
       {isRawModeSupported ? (
         <Box flexDirection="column">
-          <Text color="gray">
-            look: j/k move · h {showHistory ? "logs" : "history"} · d {showChanges ? "logs" : "changes"} · r recheck ·
-            u spend · e sessions · q quit
+          <Text color="gray" wrap="truncate-end">
+            {compactBoard
+              ? "←/→ stages · ↑/↓ cards · v sessions"
+              : "←/→ stages · ↑/↓ cards · Enter read · / search · v sessions · : commands"}
           </Text>
-          <Text color="gray">
-            act: n new card · s start · x stop · c message · a approve · shift+R reject · b send back · f completed ·
-            m resolve · shift+D delete
-          </Text>
+          {!deleteConfirm && (
+            <MouseActions>
+              <MouseButton label="Commands" onClick={() => handleInput(":")} />
+              <MouseButton label="Projects" onClick={() => handleInput("p")} />
+              <MouseButton label="Settings" onClick={() => handleInput(",")} />
+              <MouseButton label="New" onClick={() => handleInput("n")} />
+              <MouseButton label="Sessions" onClick={() => handleInput("v")} disabled={!projectId} />
+              <MouseButton label="Quit" onClick={quit} />
+            </MouseActions>
+          )}
         </Box>
       ) : (
         <Text color="gray">read only: no terminal input available</Text>

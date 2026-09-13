@@ -1,4 +1,4 @@
-# Pipelines
+<h1 align="center">Pipelines</h1>
 
 A pipeline is an ordered set of stages. Each stage has an agent and requirements for advancement. Configure under **Pipeline**.
 

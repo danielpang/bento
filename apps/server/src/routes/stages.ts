@@ -189,6 +189,7 @@ export function stageRoutes(ctx: AppContext) {
 
       const [updated] = await db(c, ctx).update(stages).set(patch).where(eq(stages.id, c.req.param("id"))).returning();
       if (!updated) return c.json({ error: "not found" }, 404);
+      ctx.bus.emitBoardEvent({ type: "stage_updated", projectId: found.projectId, stageId: updated.id });
       return c.json(updated);
     });
 }

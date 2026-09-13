@@ -1,4 +1,5 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
+import { isOllamaModel, ollamaModelId, ollamaServerUrl } from "@bento/core";
 import {
   lastResultEvent,
   type AgentAdapter,
@@ -56,6 +57,33 @@ export const claudeCodeAdapter: AgentAdapter = {
   // mints one, and it travels as an env var or a stored secret.
   authAlternatives: ["CLAUDE_CODE_OAUTH_TOKEN"],
   configPaths: [".claude", ".claude.json"],
+
+  /**
+   * An ollama/ model runs against Ollama's Anthropic compatible API.
+   * Every Anthropic credential is overwritten rather than left out,
+   * because the local process driver inherits the server's environment,
+   * where an unset ANTHROPIC_API_KEY would be the operator's own key,
+   * sent to whatever server OLLAMA_BASE_URL names. All four model slots
+   * name the one model, or Claude Code's background calls (session
+   * titles, subagents) ask Ollama for a Claude model it does not have.
+   */
+  env(input: BuildCommandInput): Record<string, string> {
+    if (!isOllamaModel(input.model)) return {};
+    const model = ollamaModelId(input.model);
+    return {
+      ANTHROPIC_BASE_URL: ollamaServerUrl(input.credentials?.OLLAMA_BASE_URL),
+      // Sent as a bearer token, which is what Ollama Cloud checks. A
+      // server that asks for no key ignores the placeholder, the value
+      // Ollama's own Claude Code instructions use.
+      ANTHROPIC_AUTH_TOKEN: input.credentials?.OLLAMA_API_KEY || "ollama",
+      ANTHROPIC_API_KEY: "",
+      CLAUDE_CODE_OAUTH_TOKEN: "",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+      CLAUDE_CODE_SUBAGENT_MODEL: model,
+    };
+  },
 
   /**
    * Servers arrive as an explicit config file outside the workspace, so
@@ -291,7 +319,7 @@ function sharedFlags(input: BuildCommandInput): string[] {
     "--include-partial-messages",
     "--dangerously-skip-permissions",
     "--model",
-    input.model,
+    ollamaModelId(input.model),
   ];
   if (input.resumeSessionId) flags.push("--resume", input.resumeSessionId);
   if (input.extraArgs?.length) flags.push(...input.extraArgs);

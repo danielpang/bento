@@ -1,10 +1,12 @@
-# Pull requests
+<h1 align="center">Pull requests</h1>
 
 Agents commit in the sandbox. GitHub publication is a separate server-side step.
 
 ## Opening a pull request
 
 If you want an agent to create a PR for their changes you can Enable **Create a pull request** on a stage. After a successful run, the server pushes the feature branch and opens or updates one pull request per repository with commits. All stages on a card share one branch.
+
+A new card starts from the repository's configured base branch, not whichever branch is checked out on the host. Worktree-based sandboxes fetch `origin/<base>` before creating the branch. Repositories without an origin use the local base branch. If the base cannot be fetched or found, setup stops with an error instead of inheriting unrelated commits. Existing card worktrees retain their commits and unfinished work.
 
 **You can also click the Create PR** button in the card drawer publishes current commits without waiting for stage completion.
 

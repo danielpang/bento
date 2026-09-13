@@ -135,7 +135,7 @@ export interface ToolCapability {
   detail: string;
 }
 
-export function toolCapabilities(cli: string): ToolCapability[] {
+export function toolCapabilities(cli: string, model?: string): ToolCapability[] {
   const messaging: ToolCapability =
     LIVE_TOOLS[cli] === "steer"
       ? { icon: "steer", label: "Steer mid-run", detail: "Messages steer it while it works." }
@@ -153,9 +153,17 @@ export function toolCapabilities(cli: string): ToolCapability[] {
               : "Messages are delivered when the run ends, resuming the same session.",
           };
 
-  const cost: ToolCapability = reportsCost(cli)
+  // A tool that reports cost but not on this model is Claude Code on
+  // Ollama: its figure would be priced as a Claude model, so it is skipped.
+  const cost: ToolCapability = reportsCost(cli, model)
     ? { icon: "cost", label: "Reports cost", detail: "Reports what a run cost." }
-    : { icon: "no-cost", label: "No cost", detail: "Cost is not reported." };
+    : reportsCost(cli)
+      ? {
+          icon: "no-cost",
+          label: "No cost on Ollama",
+          detail: "Cost is not reported on Ollama models. Claude Code would price them as Claude models, so the figure would be wrong.",
+        }
+      : { icon: "no-cost", label: "No cost", detail: "Cost is not reported." };
 
   return [messaging, cost];
 }
@@ -164,7 +172,7 @@ export function toolCapabilities(cli: string): ToolCapability[] {
  * The same two facts as one sentence, for anywhere a chip does not fit.
  * Kept beside the chips so the two can never drift apart.
  */
-export function toolCapability(cli: string): string {
+export function toolCapability(cli: string, model?: string): string {
   const quiet = hasNoLiveTranscript(cli) ? "Prints nothing until the run ends. " : "";
-  return quiet + toolCapabilities(cli).map((c) => c.detail).join(" ");
+  return quiet + toolCapabilities(cli, model).map((c) => c.detail).join(" ");
 }

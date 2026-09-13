@@ -11,6 +11,8 @@ test("tools without session ids do not promise a session they cannot resume", ()
 
 test("other between-run tools still promise their resumable session", () => {
   assert.match(takeoverTitle("codex", true, "Codex"), /resume of the same session/);
+  assert.match(takeoverTitle("muse", true, "Muse Code"), /resume of the same session/);
+  assert.match(takeoverTitle("fx", true, "fx"), /resume of the same session/);
 });
 
 test("a quiet tool names the stall as the tool, not a hang", () => {
@@ -19,4 +21,6 @@ test("a quiet tool names the stall as the tool, not a hang", () => {
   assert.equal(quietRunStatus("dsh", false), null);
   assert.equal(quietRunStatus("codex", true), null);
   assert.equal(quietRunStatus("pool", true), null);
+  assert.equal(quietRunStatus("muse", true), null);
+  assert.match(quietRunStatus("fx", true) ?? "", /No live output from this tool/);
 });

@@ -3,9 +3,13 @@ import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs";
-import { posthogApiKey, type Env } from "./env.js";
+import { logExportTarget, type Env } from "./env.js";
 
 export interface LogExport {
+  /** Which configuration chose the destination: the standard OTLP variables, or the PostHog key. */
+  destination: "otlp" | "posthog";
+  /** The OTLP logs URL records go to. Headers, and so credentials, stay out of it. */
+  url: string;
   /** Restores console and flushes what is buffered. */
   stop(): Promise<void>;
 }
@@ -38,10 +42,15 @@ let active = false;
 const STOP_BUDGET_MS = 3000;
 
 /**
- * Ships the server's logs to PostHog over OTLP, or returns null when
- * this process must not send (local mode, or no key). The missing key
- * is announced by server.ts; it is the same variable, and one line is
- * enough.
+ * Ships the server's logs over OTLP, or returns null when this process
+ * must not send. The destination comes from logExportTarget: an OTLP
+ * collector named through the standard OpenTelemetry variables, or
+ * PostHog when only its key is set. A missing PostHog key is announced
+ * by server.ts; it is the same variable, and one line is enough.
+ *
+ * OTLP is the one wire format every log backend accepts, which is why
+ * the export speaks it even to PostHog: a self-hosted install points
+ * the same code at its own collector and nothing else changes.
  *
  * This server logs through console, everywhere and on purpose, so the
  * bridge wraps the console methods rather than introducing a logger
@@ -51,17 +60,14 @@ const STOP_BUDGET_MS = 3000;
  * console it wraps, which is why the wrapper never recurses into it.
  */
 export function startLogExport(env: Env): LogExport | null {
-  const apiKey = posthogApiKey(env);
-  if (!apiKey) return null;
+  const target = logExportTarget(env);
+  if (!target) return null;
   if (active) return null;
   active = true;
 
-  // posthog-node strips a trailing slash from the same variable; a
-  // host that works for analytics must not silently 404 every log.
-  const host = env.POSTHOG_HOST.replace(/\/+$/, "");
   const provider = new LoggerProvider({
     resource: resourceFromAttributes({
-      "service.name": "bento-server",
+      "service.name": env.OTEL_SERVICE_NAME,
       "bento.mode": env.BENTO_MODE,
       // The same name and values the events carry, so one filter works
       // across metrics, errors, and logs.
@@ -69,14 +75,19 @@ export function startLogExport(env: Env): LogExport | null {
     }),
     processors: [
       new BatchLogRecordProcessor({
+        // Explicit url and headers, resolved from the same env the
+        // rest of the server reads (the embedded TUI passes overrides
+        // that never reach process.env). The exporter still reads its
+        // timeout, compression, and TLS settings from the process
+        // environment on its own.
         exporter: new OTLPLogExporter({
-          url: `${host}/i/v1/logs`,
-          headers: { Authorization: `Bearer ${apiKey}` },
+          url: target.url,
+          headers: target.headers,
         }),
       }),
     ],
   });
-  const logger: Logger = provider.getLogger("bento-server");
+  const logger: Logger = provider.getLogger(env.OTEL_SERVICE_NAME);
 
   /**
    * Plain references, not bound copies: restore must hand back the
@@ -106,6 +117,8 @@ export function startLogExport(env: Env): LogExport | null {
   }
 
   return {
+    destination: target.destination,
+    url: target.url,
     async stop(): Promise<void> {
       for (const { method, original, wrapper } of wrapped) {
         // Only restore what is still ours: if someone else wrapped on

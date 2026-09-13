@@ -1,4 +1,5 @@
-import { providerForProfile } from "./models.js";
+import { providerForProfile, routesToOllama } from "./models.js";
+import { isOllamaModel } from "./ollama.js";
 
 /**
  * Official status pages for every model provider a Bento tool can
@@ -18,6 +19,8 @@ export const PROVIDER_STATUS_PAGES = {
   deepseek: { name: "DeepSeek", url: "https://status.deepseek.com" },
   google: { name: "Gemini", url: "https://aistudio.google.com/status" },
   poolside: { name: "Poolside", url: "https://status.poolside.ai" },
+  meta: { name: "Meta", url: "https://dev.meta.ai/status" },
+  vercel: { name: "Vercel AI Gateway", url: "https://www.vercel-status.com" },
 } as const;
 
 export type StatusProvider = keyof typeof PROVIDER_STATUS_PAGES;
@@ -36,6 +39,8 @@ const BY_ID: Record<string, StatusProvider> = {
   // API key, so an outage there is Gemini's to report.
   antigravity: "google",
   poolside: "poolside",
+  meta: "meta",
+  vercel: "vercel",
 };
 
 /**
@@ -50,6 +55,8 @@ const BY_CLI: Record<string, StatusProvider> = {
   dsh: "deepseek",
   pool: "poolside",
   antigravity: "google",
+  muse: "meta",
+  fx: "vercel",
 };
 
 /**
@@ -66,6 +73,8 @@ const MENTIONS: readonly [RegExp, StatusProvider][] = [
   [/deepseek/i, "deepseek"],
   [/gemini|antigravity|aistudio\.google|generativelanguage\.googleapis|\bgoogle\b/i, "google"],
   [/poolside|\blaguna\b/i, "poolside"],
+  [/\bmuse\b|muse-spark|meta\.ai|META_API_KEY/i, "meta"],
+  [/ai gateway|ai-gateway|AI_GATEWAY|vercel/i, "vercel"],
 ];
 
 /**
@@ -79,11 +88,21 @@ export function outageProvider(
   error: string,
   hint?: { cli?: string | undefined; model?: string | undefined },
 ): StatusProvider | null {
+  // An Ollama run went to Ollama, whatever the harness calls itself in
+  // its error ("DeepSeek API error", "Claude Code"), and Ollama has no
+  // status page to send anyone to.
+  const hinted = hint?.model?.trim() ?? "";
+  if (isOllamaModel(hinted) && (!hint?.cli || routesToOllama(hint.cli, hinted))) return null;
   for (const [pattern, provider] of MENTIONS) {
     if (pattern.test(error)) return provider;
   }
 
   const model = hint?.model?.trim();
+  // Gateway slugs look like OpenRouter's (`anthropic/claude-sonnet-4`).
+  // The API the tool called is the Gateway, so a generic 503 is
+  // Vercel's to report, the way a Cursor 503 is Cursor's and not
+  // Claude's. A mention of another provider still wins above.
+  if (hint?.cli === "fx" || model?.startsWith("vercel/")) return "vercel";
   if (model) {
     const prefix = model.split("/")[0] ?? "";
     const named = BY_ID[prefix];

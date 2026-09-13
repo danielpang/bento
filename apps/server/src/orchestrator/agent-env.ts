@@ -1,4 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
+import { credentialNamesFor, runsOnOllama } from "@bento/agents";
+import { missingOllamaCredentials, ollamaCredentialsOnly, ollamaUrlFromSandbox } from "@bento/core";
 import { secrets } from "@bento/db";
 import type { AppContext } from "../context.js";
 
@@ -12,25 +14,30 @@ import type { AppContext } from "../context.js";
  *
  * Local mode has one trusted user, so the process environment is theirs
  * to use, with stored secrets layered on top.
+ *
+ * `ollama` says the run goes to Bento's Ollama, which shares no login.
  */
 export async function resolveAgentEnv(
   ctx: AppContext,
   organizationId: string | null,
   adapter: {
+    cli?: string;
     requiredEnv: string[];
     optionalEnv?: string[];
     authAlternatives?: string[];
     requiredEnvFor?(model: string): string[];
   },
   model?: string,
-): Promise<{ env: Record<string, string>; missing: string[] }> {
+): Promise<{ env: Record<string, string>; missing: string[]; ollama: boolean }> {
   const env: Record<string, string> = {};
-  // Provider agnostic tools require nothing in general and something
-  // specific per model: an openrouter/ model needs the OpenRouter key.
-  const required = (model && adapter.requiredEnvFor?.(model)) || adapter.requiredEnv;
-  const alternatives = adapter.authAlternatives ?? [];
-  const wanted = [...required, ...(adapter.optionalEnv ?? []), ...alternatives];
-  if (wanted.length === 0) return { env, missing: [] };
+  // requiredEnvFor replaces requiredEnv, so a Codex OpenRouter run does
+  // not also take OPENAI_API_KEY into the sandbox. An ollama/ model looks
+  // up Ollama's credentials: see credentialNamesFor.
+  const names = credentialNamesFor(adapter, model);
+  const required = names.required;
+  const alternatives = names.alternatives;
+  const wanted = [...required, ...names.optional, ...alternatives];
+  if (wanted.length === 0) return { env, missing: [], ollama: false };
 
   if (ctx.env.BENTO_MODE !== "multi") {
     for (const name of wanted) {
@@ -58,6 +65,18 @@ export async function resolveAgentEnv(
   }
 
   /**
+   * A run on Bento's Ollama keeps Ollama's credentials and nothing else,
+   * so no Anthropic key or login token reaches the server OLLAMA_BASE_URL
+   * names. Ollama Cloud needs a key; a server the organization named may
+   * not, so a saved base URL is enough to start.
+   */
+  if (runsOnOllama(names, env)) {
+    const ollama = ollamaCredentialsOnly(env);
+    if (ollama.OLLAMA_BASE_URL) ollama.OLLAMA_BASE_URL = ollamaUrlFromSandbox(ollama.OLLAMA_BASE_URL, ctx.driver.provider);
+    return { env: ollama, missing: missingOllamaCredentials(ollama), ollama: true };
+  }
+
+  /**
    * A login token stands in for the API key wholesale, so exactly one
    * of the two may reach the CLI. Forwarding both leaves the choice to
    * the tool, and Claude Code takes the key: an organization that saved
@@ -77,8 +96,8 @@ export async function resolveAgentEnv(
   const redirected = wanted.some((name) => name.endsWith("_BASE_URL") && env[name]);
   if (!redirected && alternatives.some((name) => env[name])) {
     for (const name of required) delete env[name];
-    return { env, missing: [] };
+    return { env, missing: [], ollama: false };
   }
   for (const name of alternatives) delete env[name];
-  return { env, missing: required.filter((name) => !env[name]) };
+  return { env, missing: required.filter((name) => !env[name]), ollama: false };
 }

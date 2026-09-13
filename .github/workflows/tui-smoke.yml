@@ -1,0 +1,78 @@
+name: TUI startup
+
+on:
+  pull_request:
+    paths:
+      - "apps/tui/**"
+      - "apps/server/**"
+      - "packages/**"
+      - "scripts/tui-smoke.py"
+      - ".github/workflows/tui-smoke.yml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "tsconfig.base.json"
+      - "turbo.json"
+  push:
+    branches: [main]
+    paths:
+      - "apps/tui/**"
+      - "apps/server/**"
+      - "packages/**"
+      - "scripts/tui-smoke.py"
+      - ".github/workflows/tui-smoke.yml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "tsconfig.base.json"
+      - "turbo.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tui-startup-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  startup:
+    name: Build and start TUI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bento_tui_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/bento_tui_smoke
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the CLI and its dependencies
+        run: pnpm exec turbo run build --filter=@bento/tui...
+      - name: Boot the TUI in a real terminal
+        run: python3 scripts/tui-smoke.py
+      - name: Save startup diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-startup-diagnostics
+          path: tui-smoke-results/
+          if-no-files-found: ignore
+          retention-days: 7

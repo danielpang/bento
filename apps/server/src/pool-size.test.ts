@@ -7,6 +7,7 @@ import {
   POOL_IDLE_TIMEOUT_MS,
   POOL_KEEPALIVE_INITIAL_DELAY_MS,
   POOL_MAX_LIFETIME_SECONDS,
+  POOL_QUERY_TIMEOUT_MS,
   poolMaxForRuns,
   postgresPoolConfig,
 } from "@bento/db";
@@ -27,6 +28,7 @@ test("the pool recycles idle clients and probes dead sockets", async () => {
     assert.equal(pool.options.idleTimeoutMillis, POOL_IDLE_TIMEOUT_MS);
     assert.equal(pool.options.connectionTimeoutMillis, POOL_CONNECTION_TIMEOUT_MS);
     assert.equal(pool.options.maxLifetimeSeconds, POOL_MAX_LIFETIME_SECONDS);
+    assert.equal(pool.options.query_timeout, POOL_QUERY_TIMEOUT_MS);
     assert.equal(pool.options.max, 4);
   } finally {
     await pool.end();
@@ -39,6 +41,7 @@ test("pg-boss receives the same pool options the app pool uses", () => {
   assert.equal(config.idleTimeoutMillis, POOL_IDLE_TIMEOUT_MS);
   assert.equal(config.connectionTimeoutMillis, POOL_CONNECTION_TIMEOUT_MS);
   assert.equal(config.maxLifetimeSeconds, POOL_MAX_LIFETIME_SECONDS);
+  assert.equal(config.query_timeout, POOL_QUERY_TIMEOUT_MS);
   assert.equal(config.max, 16);
 });
 

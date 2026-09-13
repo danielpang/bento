@@ -19,23 +19,43 @@ test("dsh is a registered agent CLI", () => {
 test("every agent CLI has model guidance", () => {
   // A tool with no guidance leaves the model field unexplained, and the
   // formats genuinely differ between tools.
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "fake"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fx", "fake"]) {
     const guidance = modelGuidanceFor(cli);
     assert.ok(guidance, `${cli} has no model guidance`);
     assert.ok(guidance.examples.length > 0, `${cli} offers no example model`);
   }
-  assert.equal(MODEL_GUIDANCE.length, 9);
+  assert.equal(MODEL_GUIDANCE.length, 11);
 });
 
-test("the provider agnostic tools show how to reach OpenRouter", () => {
+test("the provider agnostic tools show how to reach OpenRouter and Vercel AI Gateway", () => {
   for (const cli of ["opencode", "pi"]) {
     const guidance = modelGuidanceFor(cli)!;
     assert.match(guidance.format, /openrouter/i, `${cli} should explain OpenRouter routing`);
+    assert.match(guidance.format, /vercel/i, `${cli} should explain Gateway routing`);
     assert.ok(
       guidance.examples.some((e) => e.startsWith("openrouter/")),
       `${cli} should show an OpenRouter example`,
     );
+    assert.ok(
+      guidance.examples.some((e) => e.startsWith("vercel/")),
+      `${cli} should show a Vercel AI Gateway example`,
+    );
   }
+  const codex = modelGuidanceFor("codex")!;
+  assert.match(codex.format, /OpenRouter/);
+  assert.match(codex.format, /vercel\//);
+  assert.ok(codex.examples.some((e) => e.startsWith("vercel/")), "Codex should show a Gateway slug");
+  const openrouter = AGENT_CREDENTIALS.find((c) => c.name === "OPENROUTER_API_KEY");
+  assert.match(openrouter?.help ?? "", /Codex/, "Codex reads OPENROUTER_API_KEY for OpenRouter slugs");
+  const gateway = AGENT_CREDENTIALS.find((c) => c.name === "AI_GATEWAY_API_KEY");
+  assert.match(gateway?.help ?? "", /Codex/, "Codex reads AI_GATEWAY_API_KEY for vercel/ slugs");
+  assert.match(gateway?.help ?? "", /opencode/);
+  const openaiBase = AGENT_CREDENTIALS.find((c) => c.name === "OPENAI_BASE_URL");
+  assert.match(
+    openaiBase?.help ?? "",
+    /OpenRouter and Vercel AI Gateway do not need this/,
+    "OpenRouter and Gateway are Codex providers, not a hijacked openai_base_url",
+  );
 });
 
 /**
@@ -48,7 +68,7 @@ test("the spend note names exactly the tools that report a cost", () => {
   assert.match(note, /Only Claude Code and pi report/);
   assert.match(
     note,
-    /Codex CLI, Cursor CLI, opencode, Poolside \(pool\), DeepSeek Harness and Antigravity CLI report none/,
+    /Codex CLI, Cursor CLI, opencode, Poolside \(pool\), DeepSeek Harness, Antigravity CLI, Muse Code and fx report none/,
   );
   // The commoner reason a figure is missing, and the one the tool list
   // alone would misattribute.
@@ -68,6 +88,8 @@ test("the spend page's two lists match the coverage sentence", () => {
     "Poolside (pool)",
     "DeepSeek Harness",
     "Antigravity CLI",
+    "Muse Code",
+    "fx",
   ]);
 });
 
@@ -114,7 +136,7 @@ test("dsh guidance uses bare DeepSeek ids and the pinned installer", () => {
   assert.equal(guidance.defaultModel, "deepseek-v4-pro");
   assert.equal(guidance.bareModelId, true);
   assert.equal(guidance.installCommand, "npm install -g @deepseek-ai/dsh@0.1.1-rc.2");
-  assert.equal(MODEL_GUIDANCE.at(-3)?.cli, "dsh");
+  assert.equal(MODEL_GUIDANCE.at(-5)?.cli, "dsh");
   assert.equal(MODEL_GUIDANCE.at(-1)?.cli, "fake");
 });
 
@@ -129,7 +151,39 @@ test("antigravity guidance uses Antigravity's own slugs and its installer", () =
   assert.equal(guidance.bareModelId, true);
   assert.equal(guidance.binary, "agy");
   assert.match(guidance.installCommand, /antigravity\.google\/cli\/install\.sh/);
-  assert.equal(MODEL_GUIDANCE.at(-2)?.cli, "antigravity");
+  assert.equal(MODEL_GUIDANCE.at(-4)?.cli, "antigravity");
+});
+
+test("muse guidance uses bare Muse Spark ids and its installer", () => {
+  const guidance = modelGuidanceFor("muse")!;
+  assert.equal(guidance.defaultModel, "muse-spark-1.3");
+  assert.equal(guidance.bareModelId, true);
+  assert.equal(guidance.binary, "muse");
+  assert.match(guidance.installCommand, /dev\.meta\.ai\/install\.sh/);
+  assert.equal(MODEL_GUIDANCE.at(-3)?.cli, "muse");
+});
+
+test("fx guidance uses Gateway slugs and its installer", () => {
+  const guidance = modelGuidanceFor("fx")!;
+  assert.equal(guidance.defaultModel, "moonshotai/kimi-k3");
+  assert.equal(guidance.binary, "fx");
+  assert.match(guidance.installCommand, /fx\.sh\/setup\.sh/);
+  assert.match(guidance.format, /AI_GATEWAY_API_KEY/);
+  assert.equal(MODEL_GUIDANCE.at(-2)?.cli, "fx");
+});
+
+test("the Vercel AI Gateway key is storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "AI_GATEWAY_API_KEY");
+  assert.ok(key, "AI_GATEWAY_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  assert.match(key.help, /fx/);
+});
+
+test("the Meta key is storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "META_API_KEY");
+  assert.ok(key, "META_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  assert.match(key.help, /Muse Code/);
 });
 
 test("the Gemini key and Antigravity's base URL are storable", () => {
@@ -172,4 +226,14 @@ test("every storable key can be supplied through a deployment's environment", as
       `${credential.name} is storable but the Compose server never receives it`,
     );
   }
+});
+
+test("the Ollama key and base URL are storable", () => {
+  const key = AGENT_CREDENTIALS.find((c) => c.name === "OLLAMA_API_KEY");
+  assert.ok(key, "OLLAMA_API_KEY cannot be stored");
+  assert.equal(key.secret, true);
+  const baseUrl = AGENT_CREDENTIALS.find((c) => c.name === "OLLAMA_BASE_URL");
+  assert.ok(baseUrl, "OLLAMA_BASE_URL cannot be stored");
+  assert.equal(baseUrl.secret, false);
+  assert.match(baseUrl.help, /https:\/\/ollama\.com/);
 });

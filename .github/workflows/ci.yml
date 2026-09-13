@@ -37,3 +37,5 @@ jobs:
       - run: pnpm db:migrate
       - run: pnpm db:migrate # idempotency check
       - run: pnpm test
+      - name: Verify release installer behavior
+        run: node --test scripts/install.test.mjs

@@ -127,6 +127,28 @@ waiting on its jobs and one worker covers it. Today that is
 `gate.evaluate`, `slack.inbound`, `slack.notify`, `linear.inbound`,
 `linear.create-issue`, and `linear.outbound`.
 
+## Postgres connections come from createPool, and outlive a suspend
+
+Every pool is built by `createPool` in `packages/db/src/client.ts`, and
+pg-boss gets one through `pgBossDatabase` rather than a connection
+string. A bare `new pg.Pool(...)` has none of what that factory adds:
+keepalive, short idle and lifetime limits, a query timeout, and a check
+that retires idle clients after the process was frozen.
+
+The last one is there because a Fly machine on `auto_stop_machines =
+"suspend"` (the development app, and any production machine past the
+warm one) resumes with every pooled socket still established locally
+and long dropped by Neon. The kernel does not know, the idle timer did
+not run, and a query written to that socket hangs until TCP gives up,
+about fifteen minutes, then fails with `read ETIMEDOUT`. pg-boss
+swallows that on worker fetches and reports it from Timekeeper cron,
+which is the shape it took in PostHog. A pool with a warm connection
+at the moment of suspend is the precondition, so the queue pool, which
+polls until the instant the machine sleeps, is the one that hits it.
+
+A dedicated `pg.Client` (the LISTEN connection in `pg-bus.ts`) is
+outside this and has to handle its own reconnect.
+
 ## Agent credentials belong to the organization, never the server
 
 `resolveAgentEnv` reads keys from the organization's encrypted secrets.

@@ -826,7 +826,9 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/features/${feature.id}/related`],
     ["GET", `/api/artifacts/${artifact!.id}`],
     ["GET", `/api/artifacts/${artifact!.id}/content`],
+    ["GET", `/api/artifacts/${artifact!.id}/preview`],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected" }) }],
+    ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected", attachments: [{ name: "image.png", mime: "image/png", data: "dGVzdA==" }] }) }],
     ["GET", `/api/features/${feature.id}/conversation`],
     ["POST", "/api/stages", { body: JSON.stringify({ pipelineId: pipeline.id, name: "Injected" }) }],
     ["DELETE", `/api/stages/${stageId}`],
@@ -3080,4 +3082,36 @@ test("sign in and sign up outcomes reach PostHog through better-auth's own hooks
   for (const event of events) {
     if (event.event.endsWith("failed")) assert.equal(JSON.stringify(event).includes("outcome-metrics"), false);
   }
+});
+
+test("creating an agent tags the active organization and refuses a removed membership", async () => {
+  const signup = await app.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "http://localhost:4400" },
+    body: JSON.stringify({ email: "profile-organization@bento.test", password: "correct-horse-battery", name: "Profile organization" }),
+  });
+  assert.equal(signup.status, 200);
+  const token = signup.headers.get("set-auth-token")!;
+  const signedUp = await signup.json() as { user: { id: string } };
+  const makeOrg = async (name: string, slug: string) => {
+    const response = await jsonPost("/api/auth/organization/create", { name, slug }, token);
+    assert.equal(response.status, 200);
+    return await response.json() as { id: string };
+  };
+  const first = await makeOrg("Profile first", "profile-first");
+  const second = await makeOrg("Profile second", "profile-second");
+  for (const org of [first, second]) {
+    assert.equal((await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token)).status, 200);
+    const response = await jsonPost("/api/profiles", { name: "Same agent name", cli: "fake", model: "fake-1" }, token);
+    assert.equal(response.status, 201, await response.clone().text());
+    const profile = await response.json() as { id: string; organizationId: string };
+    assert.equal(profile.organizationId, org.id);
+    const [stored] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, profile.id));
+    assert.equal(stored?.organizationId, org.id);
+  }
+  await ctx.db.delete(member).where(and(eq(member.organizationId, second.id), eq(member.userId, signedUp.user.id)));
+  const rejected = await jsonPost("/api/profiles", { name: "Must not exist", cli: "fake", model: "fake-1" }, token);
+  assert.equal(rejected.status, 404);
+  const unwanted = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.name, "Must not exist"));
+  assert.equal(unwanted.length, 0);
 });
