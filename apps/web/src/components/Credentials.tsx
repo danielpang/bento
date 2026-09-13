@@ -38,6 +38,7 @@ export const PROVIDER_TABS = [
   { id: "anthropic", label: "Anthropic", keys: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
   { id: "openai", label: "OpenAI", keys: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
   { id: "openrouter", label: "OpenRouter", keys: ["OPENROUTER_API_KEY"] },
+  { id: "vercel", label: "Vercel AI Gateway", keys: ["AI_GATEWAY_API_KEY"] },
   { id: "cursor", label: "Cursor", keys: ["CURSOR_API_KEY"] },
   { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"] },
   { id: "poolside", label: "Poolside", keys: ["POOLSIDE_API_KEY"] },
