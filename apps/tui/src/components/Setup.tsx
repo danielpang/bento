@@ -119,12 +119,12 @@ export const PROVIDER_KEYS = [
   { label: "Anthropic", name: "ANTHROPIC_API_KEY" },
   { label: "OpenAI", name: "OPENAI_API_KEY" },
   { label: "OpenRouter", name: "OPENROUTER_API_KEY" },
-  { label: "Vercel AI Gateway", name: "AI_GATEWAY_API_KEY" },
   { label: "Cursor", name: "CURSOR_API_KEY" },
   { label: "Gemini", name: "GEMINI_API_KEY" },
   { label: "Poolside", name: "POOLSIDE_API_KEY" },
   { label: "DeepSeek", name: "DEEPSEEK_API_KEY" },
   { label: "Meta", name: "META_API_KEY" },
+  { label: "Vercel AI Gateway", name: "AI_GATEWAY_API_KEY" },
 ] as const;
 
 type SetupPointer = {
