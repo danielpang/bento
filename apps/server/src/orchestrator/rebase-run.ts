@@ -1,7 +1,8 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { agentRuns, repositories, type Db } from "@bento/db";
 import type { GitHubPublisher } from "@bento/github";
 import type { AppContext } from "../context.js";
+import { asPipelineRun } from "./pipeline-run.js";
 import { CARD_BUSY, startRunIfIdle } from "./start-run.js";
 import { enqueueRun } from "./queue.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
@@ -38,7 +39,7 @@ export async function startFeatureFollowUpRun(
   },
   prompt: string,
   startedBy: string,
-  kind: "rebase" | "task",
+  role: "rebase" | "stage",
   defer?: (task: () => void) => void,
 ): Promise<StartRebaseResult> {
   if (feature.status === "done" || feature.status === "cancelled") {
@@ -54,14 +55,14 @@ export async function startFeatureFollowUpRun(
     : await db
         .select()
         .from(agentRuns)
-        .where(eq(agentRuns.featureId, feature.id))
+        .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.type, "pipeline")))
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
   if (!latest) {
     return { ok: false, status: 400, error: "no agent has run on this card yet; start one first" };
   }
 
-  const resumeFrom = await resolveFollowUpRun(db, feature, conversation ?? latest);
+  const resumeFrom = await resolveFollowUpRun(db, feature, asPipelineRun(conversation ?? latest));
   if (resumeFrom.executor !== "server") {
     return {
       ok: false,
@@ -82,13 +83,14 @@ export async function startFeatureFollowUpRun(
   const run = await startRunIfIdle(
     db,
     {
+      type: "pipeline" as const,
       featureId: feature.id,
       stageId: resumeFrom.stageId,
       agentProfileId: resumeFrom.agentProfileId,
       prompt,
       cliSessionId: resumeFrom.cliSessionId,
       executor: resumeFrom.executor,
-      kind,
+      role,
       startedBy,
     },
     ctx.entitlements,

@@ -83,7 +83,7 @@ test("the spend clause names the figure, and is dropped when no run reported one
 });
 
 test("a judge run is deleted with the card but does not change the spend drop", () => {
-  const judge = { ...finishedRun("99.00"), id: "judge", kind: "judge" as const };
+  const judge = { ...finishedRun("99.00"), id: "judge", role: "judge" as const };
   const body = deleteConsequences(worked, [finishedRun("10.00"), judge], []);
   assert.match(body, /Its 2 runs go with it/);
   assert.match(body, /spend drops by \$10\.00/);

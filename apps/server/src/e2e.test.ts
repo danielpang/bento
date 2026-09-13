@@ -21,6 +21,7 @@ import {
   pipelines,
   projects,
   repositories,
+  runArtifacts,
   runEvents,
   runMigrations,
   sandboxes,
@@ -438,6 +439,16 @@ test("a run's artifacts are captured, listed, and served safely", { timeout: 90_
   assert.ok(shot, "the image artifact is listed");
   assert.equal(plan.kind, "markdown");
   assert.equal(shot.kind, "image");
+
+  // Every row says which board it is on. The capture path writes for
+  // both, and a card's artifact that did not say so would be a swarm's
+  // by the only rule the reader had left.
+  const boards = await ctx.db
+    .select({ type: runArtifacts.type })
+    .from(runArtifacts)
+    .where(eq(runArtifacts.featureId, feature.id));
+  assert.ok(boards.length >= 2);
+  assert.ok(boards.every((row) => row.type === "pipeline"), "a card's artifacts are the pipeline's, said outright");
 
   // The write-up came back inline, sandboxed and unsniffable: agent
   // bytes served by the console must never be able to act as it.
@@ -936,6 +947,7 @@ test("concurrent transcript appends all land, with contiguous seqs", async () =>
   const [run] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: projectStages[0]!.id,
       agentProfileId: profile.id,
@@ -983,6 +995,7 @@ test("resuming a session recovers the messages the agent sent while detached", a
     const [run] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: projectStages[0]!.id,
         agentProfileId: profile.id,
@@ -1096,6 +1109,7 @@ test("a run already ended cannot be cancelled over its terminal state", async ()
   const [run] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: projectStages[0]!.id,
       agentProfileId: profile.id,
@@ -1129,6 +1143,7 @@ test("the run stream resumes from Last-Event-ID instead of replaying everything"
   const [run] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: projectStages[0]!.id,
       agentProfileId: profile.id,
@@ -1181,6 +1196,7 @@ test(
       const [run] = await ctx.db
         .insert(agentRuns)
         .values({
+          type: "pipeline",
           featureId: feature.id,
           stageId: stage.id,
           agentProfileId: profile.id,
@@ -1200,6 +1216,7 @@ test(
     const [onARunner] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: runnerCard.id,
         stageId: stage.id,
         agentProfileId: profile.id,
@@ -1283,6 +1300,7 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1369,6 +1387,7 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     const [run] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: stage.id,
         agentProfileId: profile.id,
@@ -1442,6 +1461,7 @@ test("a resumed live conversation hears new messages and never repeats the promp
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1529,6 +1549,7 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1574,6 +1595,7 @@ test("two messages racing into the parking slot both survive", { timeout: 60_000
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1624,18 +1646,19 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   const plant = async (values: {
     profileId: string;
     prompt: string;
-    kind?: "task" | "judge";
+    role?: "stage" | "judge";
     cliSessionId: string;
     queuedAt: Date;
   }) => {
     const [run] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: stage.id,
         agentProfileId: values.profileId,
         prompt: values.prompt,
-        kind: values.kind ?? "task",
+        role: values.role ?? "stage",
         status: "succeeded",
         executor: "server",
         cliSessionId: values.cliSessionId,
@@ -1653,7 +1676,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   await plant({
     profileId: judge.id,
     prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build". Decide whether it is complete.`,
-    kind: "judge",
+    role: "judge",
     cliSessionId: "judge-sess",
     queuedAt: new Date(),
   });
@@ -1691,6 +1714,7 @@ test("a follow-up after a send-back talks to the current stage's agent", { timeo
     .set({ currentStageId: impl.id, status: "active", updatedAt: new Date() })
     .where(eq(features.id, feature.id));
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: quality.id,
     agentProfileId: qa.id,
@@ -1731,6 +1755,7 @@ test("a message the agent never confirmed is redelivered to the next run", { tim
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1788,6 +1813,7 @@ test("a run's own prompt is never handed to another run", { timeout: 60_000 }, a
   const [previous] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1839,6 +1865,7 @@ test("boot recovery delivers a message stranded with no active run", { timeout: 
   const stage = projectStages[0]!;
 
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -2304,6 +2331,7 @@ test("sending a card back stops the current agent and starts nothing", { timeout
     const [live] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: quality.id,
         agentProfileId: qa.id,
@@ -2350,6 +2378,7 @@ test("sending a card back onto an automatic stage does not bounce it forward", {
     .where(eq(features.id, feature.id));
   await ctx.db.insert(agentRuns).values([
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: review.id,
       agentProfileId: reviewer.id,
@@ -2358,6 +2387,7 @@ test("sending a card back onto an automatic stage does not bounce it forward", {
       executor: "runner",
     },
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: quality.id,
       agentProfileId: qa.id,
@@ -2408,6 +2438,7 @@ test("parked messages survive send-back and reach the new agent", { timeout: 60_
   const [live] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: quality.id,
       agentProfileId: qa.id,
@@ -3343,31 +3374,34 @@ test("usage ignores judge runs and in-flight runs", async () => {
 
   await ctx.db.insert(agentRuns).values([
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: worker.id,
       prompt: "build it",
-      kind: "task",
+      role: "stage",
       status: "succeeded",
       executor: "server",
       costUsd: "4.20",
     },
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: judge.id,
       prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build".`,
-      kind: "judge",
+      role: "judge",
       status: "succeeded",
       executor: "server",
       costUsd: "9.99",
     },
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: worker.id,
       prompt: "still going",
-      kind: "task",
+      role: "stage",
       status: "running",
       executor: "server",
       costUsd: null,
@@ -3863,6 +3897,7 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     const [planted] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: pipeline.stages[0]!.id,
         agentProfileId: worker.id,
@@ -3877,10 +3912,10 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.match(((await onRunner.json()) as { error: string }).error, /runner/);
 
     await ctx.db.update(agentRuns).set({ executor: "server" }).where(eq(agentRuns.id, planted!.id));
-    const started = await json<{ id: string; kind: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
+    const started = await json<{ id: string; role: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
       await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" }),
     );
-    assert.equal(started.kind, "rebase");
+    assert.equal(started.role, "rebase");
     assert.equal(started.agentProfileId, worker.id, "the card's own agent resolves");
     assert.equal(started.cliSessionId, "conflict-sess", "inside the work conversation, where the intent lives");
     assert.match(started.prompt, /rebase/i);
@@ -4337,6 +4372,7 @@ test("a card an agent is working cannot be deleted", async () => {
   const [working] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: pipelineStages[0]!.id,
       agentProfileId: profile.id,
@@ -5553,6 +5589,65 @@ test("a runner executes work the server holds for it", { timeout: 90_000 }, asyn
 });
 
 /**
+ * A judge's prompt is a complete instruction, and the stage's must
+ * never be put in front of it: an agent told to judge and to do the
+ * stage's work does the work.
+ *
+ * Which runs take a stage prompt is the run row's business, not the
+ * claiming machine's. It used to be neither: the payload said `role`
+ * and the runner decided again from it, so a machine built before that
+ * field was renamed read nothing, defaulted to ordinary work, and put
+ * the stage's instructions in front of every judge it claimed. The
+ * server resolves the role and sends only what the role takes, so a
+ * runner that says nothing about roles still gets the right prompt.
+ */
+test("a judge run claimed by a runner is handed no stage prompt", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("Judge on a runner");
+  await ctx.db.execute(sql`update projects set executor = 'runner' where id = ${project.id}`);
+
+  const feature = await createFeature(project.id, "Judged feature");
+  const profile = await fakeProfile("judge-runner-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  const created = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+    }),
+  );
+
+  // What the gate evaluator writes when it puts a judge on a card,
+  // without waiting for a gate to ask for one.
+  await ctx.db.execute(
+    sql`update agent_runs set role = 'judge', prompt = 'Decide whether this stage passed.' where id = ${created.id}`,
+  );
+
+  const claim = (await (
+    await app.request("/api/runner/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runnerId: "judge-laptop" }),
+    })
+  ).json()) as {
+    run: { id: string; role: string; prompt: string } | null;
+    stagePrompt?: string;
+    compactedConversation?: string;
+  };
+  assert.equal(claim.run?.id, created.id);
+  assert.equal(claim.run?.role, "judge", "the role still travels for a runner that reads it");
+  assert.equal(claim.run?.prompt, "Decide whether this stage passed.");
+  assert.equal(claim.stagePrompt, "", "and the stage's instructions do not travel at all");
+  assert.equal(claim.compactedConversation, "", "nor does a history a judge would never read");
+
+  // Nothing left queued: the tests after this one claim from the same pool.
+  await app.request(`/api/runner/runs/${created.id}/complete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runnerId: "judge-laptop", ok: true, exitCode: 0 }),
+  });
+});
+
+/**
  * One card, one agent. A second Start while a run is queued or working
  * would put two agents on the same branch, so every door refuses it,
  * and cancelling the run opens the door again.
@@ -6053,6 +6148,7 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
   // Three runs on this stage already, which is the ceiling.
   for (let i = 0; i < 3; i++) {
     await ctx.db.insert(agentRuns).values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -6081,6 +6177,7 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
   const human = await createFeature(project.id, "Card someone talks to");
   for (let i = 0; i < 3; i++) {
     await ctx.db.insert(agentRuns).values({
+      type: "pipeline",
       featureId: human.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -6148,6 +6245,7 @@ test("a failed gate holds the card, writes the reason, and records history", asy
   await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
   await placeOnStage(feature.id, stage.id);
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -6205,6 +6303,7 @@ test("a late failed gate does not drag a finished card back to gated", async () 
     workdir: path.dirname(repoDir),
   });
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -6247,6 +6346,7 @@ test("a late failed gate does not hold a card that has already left the stage", 
     workdir: path.dirname(repoDir),
   });
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -6286,6 +6386,7 @@ test("a hold that cannot be recorded does not happen", async () => {
   await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
   await placeOnStage(feature.id, stage.id);
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,

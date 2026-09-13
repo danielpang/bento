@@ -58,6 +58,7 @@ import {
   requeueMessages,
 } from "../orchestrator/messages.js";
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
+import { asPipelineRun } from "../orchestrator/pipeline-run.js";
 import { buildCiFixPrompt, buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { startFeatureFollowUpRun, startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
@@ -675,15 +676,16 @@ export function featureRoutes(ctx: AppContext) {
       let text = body.text.trim();
       if (!text && !body.attachments?.length) return c.json({ error: "Enter a message or attach a file." }, 400);
       if (body.attachments?.length && !(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
-      const [latest] = await db(c, ctx)
+      const [newest] = await db(c, ctx)
         .select()
         .from(agentRuns)
-        .where(eq(agentRuns.featureId, feature.id))
+        .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.type, "pipeline")))
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
-      if (!latest) {
+      if (!newest) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
+      const latest = asPipelineRun(newest);
 
       if (body.attachments?.length) {
         const [sandbox] = await db(c, ctx).select().from(sandboxes)
@@ -748,6 +750,7 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ queued: true as const });
       }
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId: resumeFrom.stageId,
         agentProfileId: resumeFrom.agentProfileId,
@@ -1328,7 +1331,7 @@ export function featureRoutes(ctx: AppContext) {
         feature,
         buildCiFixPrompt(failing),
         actor(c),
-        "task",
+        "stage",
         (task) => deferAfterCommit(c, async () => task()),
       );
       if (!result.ok) {
@@ -1500,6 +1503,7 @@ export function featureRoutes(ctx: AppContext) {
       const executor = project?.executor ?? "server";
 
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId: feature.currentStageId,
         agentProfileId: profile.id,

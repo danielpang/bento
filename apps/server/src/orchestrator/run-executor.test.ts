@@ -262,6 +262,7 @@ function dbReturning(rows: unknown[]) {
   obj.select = next;
   obj.from = next;
   obj.innerJoin = next;
+  obj.leftJoin = next;
   obj.where = next;
   obj.limit = next;
   obj.then = (onFulfilled: (value: unknown) => unknown, onRejected: (reason: unknown) => unknown) =>
@@ -271,9 +272,12 @@ function dbReturning(rows: unknown[]) {
 
 const FINISHED_ROW = {
   startedBy: "user-1",
+  type: "pipeline",
   featureId: "feature-1",
   stageId: "stage-1",
-  kind: "task",
+  swarmId: null,
+  swarmTaskId: null,
+  role: "stage",
   executor: "server",
   costUsd: "0.42",
   numTurns: 7,
@@ -281,11 +285,14 @@ const FINISHED_ROW = {
   error: null,
   startedAt: new Date("2026-09-01T10:00:00Z"),
   endedAt: new Date("2026-09-01T10:02:30Z"),
-  organizationId: "org-1",
-  projectId: "project-1",
   agentProfileId: "profile-1",
   harness: "claude-code",
   model: "claude-opus-5",
+  // Both parents are read, and only the run's own board fills one in.
+  featureOrganizationId: "org-1",
+  featureProjectId: "project-1",
+  swarmOrganizationId: null,
+  swarmProjectId: null,
 };
 
 test("a finished run reports which harness and model ran it", async () => {
@@ -309,10 +316,13 @@ test("a finished run reports which harness and model ran it", async () => {
     status: "succeeded",
     success: true,
     run_id: "run-1",
+    type: "pipeline",
     feature_id: "feature-1",
     stage_id: "stage-1",
+    swarm_id: null,
+    swarm_task_id: null,
     project_id: "project-1",
-    kind: "task",
+    role: "stage",
     executor: "server",
     agent_profile_id: "profile-1",
     harness: "claude-code",

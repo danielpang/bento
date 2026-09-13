@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { ExecChunk, ExecOptions, ProvisionSpec, SandboxDriver, SandboxHandle } from "./driver.js";
 
 /**
- * Runs commands as plain host processes in the feature's worktree.
+ * Runs commands as plain host processes in the workspace's worktree.
  * NO isolation: intended for tests (fake adapter) and for users who
  * explicitly opt out of Docker. Never pair with skip-permissions flags
  * on real agent CLIs outside CI.
@@ -13,7 +13,7 @@ export class LocalProcessDriver implements SandboxDriver {
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
     return {
-      externalId: `local-${spec.featureId}`,
+      externalId: `local-${spec.workspaceKey}`,
       provider: "local-process",
       workdir: spec.hostWorkspacePath,
     };

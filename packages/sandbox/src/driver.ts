@@ -8,7 +8,17 @@ export interface SandboxHandle {
 
 export interface ProvisionSpec {
   projectId: string;
-  featureId: string;
+  /**
+   * What this workspace is called: the stem of the container or sprite
+   * name, and the directory the worktrees live in.
+   *
+   * A card passes its feature id, which is what every machine already
+   * provisioned is named after. A swarm passes a key of its own. A
+   * driver only ever uses it as a name, so it is a key rather than an
+   * id of any one table: naming it after one board's rows would say
+   * the other board's machines belong to a card that does not exist.
+   */
+  workspaceKey: string;
   /** Host path of the git worktree to expose at workdir (docker/local). */
   hostWorkspacePath: string;
   /**
