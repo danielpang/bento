@@ -7,6 +7,7 @@ import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
+import { fxAdapter } from "./fx.js";
 import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
@@ -116,6 +117,25 @@ test("codex selects OpenRouter as model_provider for a slash slug the catalog ha
   assert.ok(cmd.includes('model_provider="openrouter"'));
   assert.deepEqual(codexAdapter.requiredEnvFor?.("openai/gpt-brand-new"), ["OPENROUTER_API_KEY"]);
   assert.deepEqual(codexAdapter.requiredEnvFor?.("acme/unreleased"), ["OPENROUTER_API_KEY"]);
+});
+
+test("codex vercel/ slugs select the Gateway provider and strip the prefix", () => {
+  const input = {
+    prompt: "do it",
+    model: "vercel/moonshotai/kimi-k3",
+    cwd: "/workspace",
+    credentials: { AI_GATEWAY_API_KEY: "vck_routed", OPENAI_API_KEY: "sk-proj-leftover" },
+  };
+  const cmd = codexAdapter.buildCommand(input);
+  assert.ok(cmd.includes("-m"));
+  assert.equal(cmd[cmd.indexOf("-m") + 1], "moonshotai/kimi-k3");
+  assert.ok(cmd.includes('model_provider="vercel"'));
+  assert.ok(cmd.includes('model_providers.vercel.base_url="https://ai-gateway.vercel.sh/codex/v1"'));
+  assert.ok(cmd.includes('model_providers.vercel.env_key="AI_GATEWAY_API_KEY"'));
+  assert.ok(!cmd.includes('model_provider="openrouter"'));
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
+  assert.deepEqual(codexAdapter.requiredEnvFor?.("vercel/acme/unreleased"), ["AI_GATEWAY_API_KEY"]);
+  assert.deepEqual(codexAdapter.env?.(input), {});
 });
 
 test("codex sends a saved non-OpenRouter base URL as openai_base_url", () => {
@@ -279,7 +299,7 @@ test("opencode builds a provider qualified model command", () => {
 });
 
 test("every declared cli resolves to an adapter", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fx", "fake"] as const) {
     assert.equal(getAdapter(cli).cli, cli);
   }
 });
@@ -296,6 +316,7 @@ test("adapters declare the env they need", () => {
   assert.deepEqual(dshAdapter.requiredEnv, ["DEEPSEEK_API_KEY"]);
   assert.deepEqual(antigravityAdapter.requiredEnv, ["GEMINI_API_KEY"]);
   assert.deepEqual(museAdapter.requiredEnv, ["META_API_KEY"]);
+  assert.deepEqual(fxAdapter.requiredEnv, ["AI_GATEWAY_API_KEY"]);
 });
 
 test("dsh builds its headless command and isolated environment", () => {
@@ -393,6 +414,26 @@ test("pi builds a headless json-mode command", () => {
   ]);
   // pi is provider agnostic, so it demands no particular credential.
   assert.deepEqual(piAdapter.requiredEnv, []);
+});
+
+test("pi rewrites a vercel/ slug to its vercel-ai-gateway provider", () => {
+  const argv = piAdapter.buildCommand({
+    prompt: "Add a dark theme",
+    model: "vercel/moonshotai/kimi-k3",
+    cwd: "/workspace",
+  });
+  assert.deepEqual(argv, [
+    "pi",
+    "--mode",
+    "json",
+    "--print",
+    "--provider",
+    "vercel-ai-gateway",
+    "--model",
+    "moonshotai/kimi-k3",
+    "Add a dark theme",
+  ]);
+  assert.deepEqual(piAdapter.requiredEnvFor?.("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
 });
 
 test("pi resumes by session id", () => {
@@ -549,7 +590,7 @@ test("streamed fragments reach onDelta and stay out of the transcript and the fa
 test("every credential an adapter can use is storable", () => {
   const storable = new Set(AGENT_CREDENTIALS.map((c) => c.name));
   const sampleModels = ["gpt-5-codex", "openai/gpt-5-mini", "openrouter/auto", "anthropic/claude-sonnet-5"];
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fake"] as const) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "pool", "dsh", "antigravity", "muse", "fx", "fake"] as const) {
     const adapter = getAdapter(cli);
     const names = new Set([
       ...adapter.requiredEnv,
@@ -624,6 +665,7 @@ test("a reasonless error result still carries the stderr tail", async () => {
 
 test("provider agnostic tools require the key their model implies", () => {
   assert.deepEqual(providerKeyFor("openrouter/openai/gpt-5.6-sol"), ["OPENROUTER_API_KEY"]);
+  assert.deepEqual(providerKeyFor("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
   assert.deepEqual(providerKeyFor("anthropic/claude-sonnet-5"), ["ANTHROPIC_API_KEY"]);
   assert.deepEqual(providerKeyFor("google/gemini-3.6-flash"), ["GEMINI_API_KEY"]);
   assert.deepEqual(providerKeyFor("deepseek/deepseek-v4-pro"), ["DEEPSEEK_API_KEY"]);
@@ -1099,6 +1141,22 @@ test("opencode on an Ollama model brings its own provider config", () => {
   assert.deepEqual(opencodeAdapter.env?.({ ...input, model: "anthropic/claude-sonnet-5" }), {});
 });
 
+test("opencode on a vercel/ model points its built-in Gateway provider at the stored key", () => {
+  const input = {
+    prompt: "do it",
+    model: "vercel/moonshotai/kimi-k3",
+    cwd: "/workspace",
+    credentials: { AI_GATEWAY_API_KEY: "vck_routed" },
+  };
+  const config = opencodeAdapter.env?.(input).OPENCODE_CONFIG_CONTENT ?? "";
+  assert.ok(!config.includes("vck_routed"), "the key is referenced, not inlined");
+  assert.deepEqual(JSON.parse(config).provider.vercel, {
+    options: { apiKey: "{env:AI_GATEWAY_API_KEY}" },
+  });
+  assert.deepEqual(opencodeAdapter.env?.({ ...input, credentials: {} }), {});
+  assert.deepEqual(opencodeAdapter.requiredEnvFor?.("vercel/moonshotai/kimi-k3"), ["AI_GATEWAY_API_KEY"]);
+});
+
 test("DeepSeek Harness on an Ollama model points its provider at Ollama with a lower token limit", () => {
   const input = { prompt: "do it", model: "ollama/gpt-oss:120b", cwd: "/workspace", credentials: OLLAMA };
   const files = dshAdapter.files?.(input) ?? [];
@@ -1137,4 +1195,123 @@ test("an ollama/ model on a tool Bento does not point at Ollama keeps that tool'
   assert.equal(runsOnOllama(names, { OLLAMA_API_KEY: "k" }), false);
   assert.deepEqual(names.optional, piAdapter.optionalEnv);
   assert.ok(!names.optional.includes("OLLAMA_API_KEY"));
+});
+
+/**
+ * Captured from `fx ask --json --full-access` on fx 0.0.9: one compact
+ * object on stdout, even when the request fails before a model is
+ * chosen. Progress and the human-readable reason stay on stderr.
+ */
+function fxAsk(fields: Record<string, unknown>): string {
+  return JSON.stringify({
+    output: "",
+    final_output: "",
+    exit_code: 0,
+    model: "moonshotai/kimi-k3",
+    session_id: "ses_1",
+    steps: 1,
+    tool_calls: [],
+    usage: { input_tokens: 10, output_tokens: 4 },
+    ...fields,
+  });
+}
+
+test("fx parses a successful ask document", () => {
+  const events = parseAll(fxAdapter, [
+    fxAsk({
+      output: "Read the readme.\n\nDone.",
+      final_output: "Done.",
+      tool_calls: [{ name: "read_file", status: "success" }],
+    }),
+  ]);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.type, "message");
+  assert.ok(events[0]?.type === "message" && events[0].text === "Done.");
+  const outcome = fxAdapter.extractOutcome(events, 0);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.sessionId, "ses_1");
+  assert.equal(outcome.numTurns, 1);
+});
+
+test("fx prefers final_output and falls back to output", () => {
+  assert.equal(fxAdapter.parseEvent(fxAsk({ final_output: "", output: "Working notes." }))?.type, "message");
+  const fallback = fxAdapter.parseEvent(fxAsk({ final_output: "", output: "Working notes." }));
+  assert.ok(fallback?.type === "message" && fallback.text === "Working notes.");
+});
+
+test("fx reports MissingCredentials as a failed result", () => {
+  const events = parseAll(fxAdapter, [
+    fxAsk({
+      exit_code: 1,
+      model: "",
+      session_id: "",
+      steps: 0,
+      error: "MissingCredentials",
+      usage: { input_tokens: null, output_tokens: null },
+    }),
+  ]);
+  const outcome = fxAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.error, "MissingCredentials");
+  assert.equal(outcome.sessionId, undefined);
+});
+
+test("fx trusts a non-zero exit over a successful document", () => {
+  const events = parseAll(fxAdapter, [fxAsk({ final_output: "Done." })]);
+  const outcome = fxAdapter.extractOutcome(events, 1);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error ?? "", /exit code 1/);
+  assert.equal(outcome.sessionId, "ses_1");
+});
+
+test("fx builds its headless command and resumes by session", () => {
+  const input = { prompt: "Implement the card", model: "moonshotai/kimi-k3", cwd: "/workspace" };
+  const cmd = fxAdapter.buildCommand(input);
+  assert.deepEqual(cmd, ["fx", "ask", "--json", "--full-access", "--no-color", "--", "Implement the card"]);
+  assert.deepEqual(fxAdapter.env?.(input), {
+    FX_MODEL: "moonshotai/kimi-k3",
+    FX_PERMISSION_MODE: "full-access",
+    FX_AUTO_UPGRADE: "0",
+    FX_NO_OPEN_BROWSER: "1",
+  });
+  assert.equal(
+    fxAdapter.env?.({ ...input, model: "vercel/moonshotai/kimi-k3" })?.FX_MODEL,
+    "moonshotai/kimi-k3",
+  );
+  const resumed = fxAdapter.buildCommand({ ...input, resumeSessionId: "ses_1" });
+  assert.deepEqual(resumed, [
+    "fx",
+    "ask",
+    "--json",
+    "--full-access",
+    "--no-color",
+    "--resume",
+    "ses_1",
+    "--",
+    "Implement the card",
+  ]);
+});
+
+test("fx writes its MCP servers where the CLI reads them", () => {
+  const files = fxAdapter.mcp!.renderConfig([
+    { slug: "docs", url: "https://bento.test/mcp", transport: "http", headers: { Authorization: "Bearer t" } },
+  ]);
+  assert.deepEqual(files.map((f) => f.path), ["/root/.fx/mcp.json"]);
+  assert.deepEqual(JSON.parse(files[0]!.content), {
+    mcp: {
+      docs: {
+        type: "http",
+        url: "https://bento.test/mcp",
+        bearer_token_env: "BENTO_MCP_GRANT",
+        enabled: true,
+        required: false,
+      },
+    },
+  });
+  assert.doesNotMatch(files[0]!.content, /Authorization/);
+  assert.deepEqual(fxAdapter.mcp!.env?.([
+    { slug: "docs", url: "https://bento.test/mcp", transport: "http", headers: { Authorization: "Bearer t" } },
+  ]), { BENTO_MCP_GRANT: "t" });
+  assert.deepEqual(JSON.parse(fxAdapter.mcp!.renderConfig([])[0]!.content), { mcp: {} });
+  assert.deepEqual(fxAdapter.mcp!.env?.([]), {});
 });

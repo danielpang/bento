@@ -175,6 +175,25 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
     ],
   },
   {
+    id: "vercel",
+    name: "Vercel AI Gateway",
+    env: ["AI_GATEWAY_API_KEY"],
+    // Official mark: the Vercel triangle. Same treatment as Cursor's
+    // own mark, which is also drawn by hand because models.dev has no
+    // Vercel provider for us to inherit from.
+    logo: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBmaWxsPSJjdXJyZW50Q29sb3IiIGQ9Ik0xMiAzLjIgMjIuNCAyMS4ySDEuNkwxMiAzLjJ6Ii8+PC9zdmc+",
+    /**
+     * The language-model list lives in model-catalog.gateway.ts, snapshotted
+     * from the Gateway API. These two stay as pins so a refresh that
+     * drops them still offers fx's default and the other slug its docs
+     * name. Unlisted slugs stay typeable. See checkAgentPairing.
+     */
+    models: [
+      { id: "moonshotai/kimi-k3", name: "Kimi K3" },
+      { id: "openai/gpt-5.4", name: "GPT-5.4" },
+    ],
+  },
+  {
     id: "ollama",
     name: "Ollama",
     env: ["OLLAMA_API_KEY"],

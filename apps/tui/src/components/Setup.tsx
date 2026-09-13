@@ -124,6 +124,7 @@ export const PROVIDER_KEYS = [
   { label: "Poolside", name: "POOLSIDE_API_KEY" },
   { label: "DeepSeek", name: "DEEPSEEK_API_KEY" },
   { label: "Meta", name: "META_API_KEY" },
+  { label: "Vercel AI Gateway", name: "AI_GATEWAY_API_KEY" },
 ] as const;
 
 type SetupPointer = {

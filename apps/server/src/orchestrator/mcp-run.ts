@@ -62,8 +62,8 @@ export interface PrepareRunMcpInput {
 export async function prepareRunMcp(
   ctx: AppContext,
   input: PrepareRunMcpInput,
-): Promise<{ extraArgs: string[]; cardTools: boolean }> {
-  const none = { extraArgs: [] as string[], cardTools: false };
+): Promise<{ extraArgs: string[]; cardTools: boolean; env: Record<string, string> }> {
+  const none = { extraArgs: [] as string[], cardTools: false, env: {} };
   const capability = input.adapter.mcp;
   const own = input.ownServers ?? [];
   // Whether this run has any server to attach at all: Bento's own, team
@@ -240,7 +240,11 @@ export async function prepareRunMcp(
     );
     return none;
   }
-  return { extraArgs: capability.extraArgs?.() ?? [], cardTools: attachedIds.includes(BENTO_SERVER_ID) };
+  return {
+    extraArgs: capability.extraArgs?.() ?? [],
+    cardTools: attachedIds.includes(BENTO_SERVER_ID),
+    env: capability.env?.(attached) ?? {},
+  };
 }
 
 /** Whether this run has any enabled server: the team's, plus the acting member's own. */

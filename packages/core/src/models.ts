@@ -1,5 +1,6 @@
 import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
+import { GATEWAY_CATALOG } from "./model-catalog.gateway.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
 import { isOllamaModel } from "./ollama.js";
 
@@ -21,8 +22,10 @@ export interface CatalogProvider {
 /**
  * Every provider Bento knows, refreshed ones first.
  *
- * The generated half comes from models.dev. The manual half is what that
- * snapshot cannot describe (Cursor's own Composer ids, Poolside's own
+ * The generated half comes from models.dev. Vercel AI Gateway is a
+ * second snapshot, from the Gateway's own model list, because those
+ * slugs are not a models.dev provider. The manual half is what neither
+ * snapshot can describe (Cursor's own Composer ids, Poolside's own
  * inference) or does not describe yet (a model released after the
  * snapshot was taken). Where both halves name the same provider,
  * generated models come first and manual ids that the snapshot missed
@@ -30,7 +33,10 @@ export interface CatalogProvider {
  * Cursor provider of its own, and a hand-added id drops out of the
  * manual list's way once a refresh carries it.
  */
-export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(GENERATED_CATALOG, MANUAL_CATALOG);
+export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(
+  mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG),
+  MANUAL_CATALOG,
+);
 
 /** Generated providers first; manual ids fill gaps on the same provider. */
 export function mergeCatalogs(
@@ -77,15 +83,26 @@ export function mergeCatalogs(
  * both what the API takes and what makes the single chip in the picker
  * worth drawing. Laguna weights through OpenRouter stay reachable the
  * way they always were, with pi or opencode.
+ *
+ * Vercel AI Gateway is the other gateway: one key, slugs that look
+ * like OpenRouter's (`moonshotai/kimi-k3`). fx is a harness that
+ * speaks Gateway and nothing else. pi, opencode, and Codex can pick
+ * Gateway the way they pick OpenRouter: the prefix is `vercel/`, the
+ * existing Anthropic and OpenAI keys are not used, and the bill is
+ * the Gateway's. A slash on fx is still a Gateway slug, because fx
+ * has no other provider.
  */
 const BY_CLI: Record<string, readonly string[]> = {
   // Ollama is last wherever it appears, and only ever named by its
   // prefix (ollama/glm-5.1). See ollama.ts.
   "claude-code": ["anthropic", "openrouter", "ollama"],
-  codex: ["openai", "openrouter"],
+  // vercel after openrouter so a bare slash on Codex stays OpenRouter
+  // (the historical default) and only an explicit vercel/ prefix
+  // selects Gateway. See providerForProfile.
+  codex: ["openai", "openrouter", "vercel"],
   cursor: ["anthropic", "openai", "google", "xai", "cursor"],
-  opencode: ["anthropic", "openai", "google", "deepseek", "openrouter", "ollama"],
-  pi: ["anthropic", "openai", "google", "deepseek", "openrouter"],
+  opencode: ["anthropic", "openai", "google", "deepseek", "openrouter", "vercel", "ollama"],
+  pi: ["anthropic", "openai", "google", "deepseek", "openrouter", "vercel"],
   pool: ["poolside"],
   dsh: ["deepseek", "ollama"],
   // Antigravity reaches Gemini and nothing else here, but under its own
@@ -95,6 +112,7 @@ const BY_CLI: Record<string, readonly string[]> = {
   // Muse Code reaches Muse Spark and nothing else here, under Meta's
   // own bare ids rather than the OpenRouter `meta/muse-spark-*` strings.
   muse: ["meta"],
+  fx: ["vercel"],
   fake: [],
 };
 
@@ -173,6 +191,11 @@ export function modelStringFor(cli: string, providerId: string, modelId: string)
   // this agent's runs to Ollama instead of the tool's own provider.
   if (providerId === "ollama") return `ollama/${modelId}`;
   if (providerId === "openrouter") return modelId;
+  // Gateway slugs already look like OpenRouter's. Codex cannot treat a
+  // bare slash as Gateway (that is OpenRouter), so the picker writes
+  // the vercel/ prefix and the adapter strips it. fx has no other
+  // provider, so it stores the slug alone.
+  if (providerId === "vercel") return cli === "fx" ? modelId : `vercel/${modelId}`;
   return modelId;
 }
 
@@ -186,7 +209,8 @@ export function modelStringFor(cli: string, providerId: string, modelId: string)
  *    on the tools that put the provider in the model string (pi,
  *    opencode, and pool). Codex and Claude Code take bare ids natively,
  *    so openai/gpt-5-mini is OpenRouter's slug rather than OpenAI's.
- *    The explicit openrouter/ prefix is the exception both kinds share.
+ *    The explicit openrouter/ and vercel/ prefixes are the exceptions
+ *    both kinds share.
  *    Codex goes further: every slash is OpenRouter, because that is how
  *    the picker writes the selected provider, and because a typed slug
  *    the snapshot has not listed yet is still that same selection. The
@@ -223,12 +247,19 @@ export function providerForProfile(cli: string, model: string): CatalogProvider 
     const named = allowed.find((p) => p.id === prefix);
     // ollama/ is Bento's own prefix on every tool that reaches Ollama,
     // bare id tools included, because the adapter strips it.
-    if (named && (namesItsProvider(cli) || prefix === "openrouter" || prefix === "ollama")) return named;
+    if (named && (namesItsProvider(cli) || prefix === "openrouter" || prefix === "ollama" || prefix === "vercel")) {
+      return named;
+    }
     // Codex native ids are bare. A slash is OpenRouter selected as the
     // provider: the picker writes catalog slugs that way, and a typed
     // id uses the same shape. The adapter then selects Codex's own
     // `model_provider=openrouter` from this same answer.
     if (cli === "codex") return allowed.find((p) => p.id === "openrouter");
+    // fx native ids are Gateway slugs. The prefix names the vendor
+    // behind the gateway, not a Bento provider, so a slash is Vercel
+    // the way a slash on Codex is OpenRouter. Unlisted slugs stay
+    // typeable and still wear the Gateway mark.
+    if (cli === "fx") return allowed.find((p) => p.id === "vercel");
   }
 
   // Never Ollama: its cloud ids are bare (glm-5.1), and matching one here
@@ -346,6 +377,10 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
         ? `This model is not in the catalog for this tool, so its provider could not be checked. To run it on Ollama, use ollama/${model}.`
         : "This model is not in the catalog, so its provider could not be checked.",
     };
+  }
+
+  if (provider.id === "vercel" && cli === "codex") {
+    return { status: "ok", provider, detail: "Runs on Vercel AI Gateway." };
   }
 
   if (provider.id === "openrouter" && !namesItsProvider(cli)) {

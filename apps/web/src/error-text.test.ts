@@ -25,6 +25,7 @@ test("every provider status URL is recognized", () => {
     "https://aistudio.google.com/status",
     "https://status.poolside.ai",
     "https://dev.meta.ai/status",
+    "https://www.vercel-status.com",
   ]) {
     assert.deepEqual(splitErrorLinks(`see ${url}`).at(-1), { text: url, href: url });
   }

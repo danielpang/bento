@@ -11,6 +11,8 @@ interface CodexLine {
 
 /** OpenRouter's OpenAI-compatible Responses endpoint. */
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+/** Codex's own AI Gateway compatibility endpoint. */
+const VERCEL_CODEX_BASE_URL = "https://ai-gateway.vercel.sh/codex/v1";
 
 /**
  * Codex config that names OpenRouter as a custom model_provider.
@@ -30,6 +32,14 @@ const OPENROUTER_PROVIDER_TOML = [
   'wire_api = "responses"',
 ].join("\n");
 
+const VERCEL_PROVIDER_TOML = [
+  "[model_providers.vercel]",
+  'name = "Vercel AI Gateway"',
+  `base_url = ${tomlString(VERCEL_CODEX_BASE_URL)}`,
+  'env_key = "AI_GATEWAY_API_KEY"',
+  'wire_api = "responses"',
+].join("\n");
+
 /**
  * OpenAI Codex CLI in non-interactive mode. Codex has its own sandbox,
  * which is redundant inside ours, so it runs with full access and our
@@ -44,6 +54,7 @@ export const codexAdapter: AgentAdapter = {
    * the OpenAI one. Bare OpenAI ids still need OPENAI_API_KEY.
    */
   requiredEnvFor(model) {
+    if (vercelSelected(model)) return ["AI_GATEWAY_API_KEY"];
     return openRouterSelected(model) ? ["OPENROUTER_API_KEY"] : ["OPENAI_API_KEY"];
   },
   configPaths: [".codex"],
@@ -58,7 +69,7 @@ export const codexAdapter: AgentAdapter = {
     // OpenRouter authenticates through OPENROUTER_API_KEY on the
     // custom provider. Remapping a leftover OpenAI key would put
     // CODEX_API_KEY in a sandbox that should not see it.
-    if (openRouterSelected(input.model)) return {};
+    if (openRouterSelected(input.model) || vercelSelected(input.model)) return {};
     const key = input.credentials?.OPENAI_API_KEY;
     return key ? { CODEX_API_KEY: key } : {};
   },
@@ -70,10 +81,10 @@ export const codexAdapter: AgentAdapter = {
    * orchestrator skips this adapter when local mode has ~/.codex mounted
    * read-only over it.
    *
-   * The OpenRouter provider is always defined here so `-c model_provider`
-   * has a table to select, including on runs with no MCP servers. An
-   * empty server list still writes the provider, so a removed server is
-   * cleared without dropping the OpenRouter route.
+   * The OpenRouter and Vercel AI Gateway providers are always defined
+   * here so `-c model_provider` has a table to select, including on
+   * runs with no MCP servers. An empty server list still writes both,
+   * so a removed server is cleared without dropping either route.
    */
   mcp: {
     renderConfig(servers) {
@@ -95,9 +106,11 @@ export const codexAdapter: AgentAdapter = {
       "--cd",
       input.cwd,
       "-m",
-      input.model,
+      vercelSelected(input.model) ? input.model.slice("vercel/".length) : input.model,
     );
-    if (openRouterSelected(input.model)) {
+    if (vercelSelected(input.model)) {
+      cmd.push(...vercelConfigOverrides());
+    } else if (openRouterSelected(input.model)) {
       // OpenRouter is the selected provider: tell Codex to use that
       // model_provider. -c still applies when ~/.codex is mounted
       // read-only and the config file above was not written. Nested
@@ -188,6 +201,13 @@ function openRouterSelected(model: string): boolean {
   return providerForProfile("codex", model)?.id === "openrouter";
 }
 
+function vercelSelected(model: string): boolean {
+  // The prefix is the selection. Do not ask providerForProfile: a
+  // slash on Codex is otherwise OpenRouter, and that answer is what
+  // this prefix exists to override.
+  return model.startsWith("vercel/");
+}
+
 function openRouterConfigOverrides(): string[] {
   return [
     "-c",
@@ -200,6 +220,21 @@ function openRouterConfigOverrides(): string[] {
     'model_providers.openrouter.env_key="OPENROUTER_API_KEY"',
     "-c",
     'model_providers.openrouter.wire_api="responses"',
+  ];
+}
+
+function vercelConfigOverrides(): string[] {
+  return [
+    "-c",
+    'model_provider="vercel"',
+    "-c",
+    'model_providers.vercel.name="Vercel AI Gateway"',
+    "-c",
+    `model_providers.vercel.base_url=${tomlString(VERCEL_CODEX_BASE_URL)}`,
+    "-c",
+    'model_providers.vercel.env_key="AI_GATEWAY_API_KEY"',
+    "-c",
+    'model_providers.vercel.wire_api="responses"',
   ];
 }
 
@@ -218,7 +253,7 @@ function renderCodexConfig(servers: McpRemoteServer[]): string {
         .join("\n");
     })
     .join("\n\n");
-  return [OPENROUTER_PROVIDER_TOML, mcp].filter(Boolean).join("\n\n") + "\n";
+  return [OPENROUTER_PROVIDER_TOML, VERCEL_PROVIDER_TOML, mcp].filter(Boolean).join("\n\n") + "\n";
 }
 
 /** A TOML basic string, escaping the characters TOML requires. */

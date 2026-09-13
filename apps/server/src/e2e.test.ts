@@ -59,7 +59,7 @@ import { CARD_BUSY_DELETE, startRunIfIdle } from "./orchestrator/start-run.js";
 import { enqueueRun } from "./orchestrator/queue.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { gitIdentityEnv } from "./orchestrator/agent-auth.js";
-import { antigravityAdapter, claudeCodeAdapter, codexAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
+import { antigravityAdapter, claudeCodeAdapter, codexAdapter, fxAdapter, museAdapter, opencodeAdapter, getAdapter } from "@bento/agents";
 import { recoverMissedMessages } from "./orchestrator/recover-session.js";
 import { MAX_CHILDREN_PER_CARD } from "./feature-tree.js";
 import { runsInContainer } from "./routes/settings.js";
@@ -2121,6 +2121,38 @@ test("a Muse Code run with no Meta key is missing it by name", async () => {
 });
 
 /**
+ * The path a person actually takes to run fx: pick the tool, pick a
+ * Gateway slug, paste an AI Gateway key. fx can also sign in with
+ * Vercel, or with a Codex or Grok subscription, which no sandbox can
+ * do, so the key is the whole of its authentication here.
+ */
+test("a pasted AI Gateway key is what reaches an fx run", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "AI_GATEWAY_API_KEY", value: "vck_pasted-by-the-user" }),
+    }),
+  );
+  try {
+    await withEnv({ AI_GATEWAY_API_KEY: null }, async () => {
+      const { env, missing } = await resolveAgentEnv(ctx, null, fxAdapter, "moonshotai/kimi-k3");
+      assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
+      assert.equal(env.AI_GATEWAY_API_KEY, "vck_pasted-by-the-user");
+    });
+  } finally {
+    await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+  }
+});
+
+test("an fx run with no AI Gateway key is missing it by name", async () => {
+  await withEnv({ AI_GATEWAY_API_KEY: null }, async () => {
+    const { missing } = await resolveAgentEnv(ctx, null, fxAdapter, "moonshotai/kimi-k3");
+    assert.deepEqual(missing, ["AI_GATEWAY_API_KEY"]);
+  });
+});
+
+/**
  * The path a person actually takes to run Codex through OpenRouter:
  * pick Codex, pick an OpenRouter model, paste the OpenRouter key.
  * Codex no longer reads OPENAI_BASE_URL, so the key under OpenRouter
@@ -3113,6 +3145,17 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   const prefixedMuse = await post({ name: "prefixed muse", cli: "muse", model: "meta/muse-spark-1.3" });
   assert.equal(prefixedMuse.status, 400, "Muse Code cannot accept provider-prefixed model ids");
   assert.match(((await prefixedMuse.json()) as { error: string }).error, /bare model id/);
+
+  const fx = await post({ name: "fx", cli: "fx", model: "moonshotai/kimi-k3" });
+  assert.equal(fx.status, 201, "fx accepts a Gateway slug");
+  const fxClaude = await post({ name: "fx claude", cli: "fx", model: "anthropic/claude-sonnet-5" });
+  assert.equal(fxClaude.status, 201, "a slash on fx is a Gateway slug, not a vendor prefix");
+  const fxPrefixed = await post({ name: "fx prefixed", cli: "fx", model: "vercel/moonshotai/kimi-k3" });
+  assert.equal(fxPrefixed.status, 201, "a vercel/ prefix on fx is still Gateway");
+  const piGateway = await post({ name: "pi gateway", cli: "pi", model: "vercel/moonshotai/kimi-k3" });
+  assert.equal(piGateway.status, 201, "pi reaches Gateway with a vercel/ prefix");
+  const codexGateway = await post({ name: "codex gateway", cli: "codex", model: "vercel/openai/gpt-5.4" });
+  assert.equal(codexGateway.status, 201, "Codex reaches Gateway with a vercel/ prefix");
 
   // A model the catalog has not caught up with is allowed: the snapshot
   // trails the tools, and refusing a brand new model would be worse.

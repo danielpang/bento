@@ -10,6 +10,7 @@ export const agentCli = z.enum([
   "dsh",
   "antigravity",
   "muse",
+  "fx",
   "fake",
 ]);
 export type AgentCli = z.infer<typeof agentCli>;

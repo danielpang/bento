@@ -17,14 +17,29 @@
  * Grok ids are generated here. Composer and Auto stay in
  * model-catalog.manual.ts and are merged on top.
  *
+ * Vercel AI Gateway is a second snapshot. models.dev has no vercel
+ * provider whose ids match what the Gateway takes (`moonshotai/kimi-k3`).
+ * Those slugs come from https://ai-gateway.vercel.sh/v1/models, language
+ * models only. Image, video, and embedding ids are not agent models.
+ *
  * Usage: pnpm models:update
+ *        pnpm models:update -- --gateway-only
  */
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const API = "https://models.dev/api.json";
+const GATEWAY_API = "https://ai-gateway.vercel.sh/v1/models";
 const LOGO = (id) => `https://models.dev/logos/${id}.svg`;
+const gatewayOnly = process.argv.includes("--gateway-only");
+
+/**
+ * Official Vercel triangle. models.dev has no vercel logo for us to
+ * inherit, so the mark is drawn here and copied into the snapshot.
+ */
+const VERCEL_LOGO =
+  "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBmaWxsPSJjdXJyZW50Q29sb3IiIGQ9Ik0xMiAzLjIgMjIuNCAyMS4ySDEuNkwxMiAzLjJ6Ii8+PC9zdmc+";
 
 /**
  * Providers we snapshot. `cursor` is listed so a later models.dev
@@ -54,59 +69,64 @@ const PINNED = {
   xai: ["grok-4.6", "grok-4.5"],
 };
 
+/** fx's default first, then the other slug its docs name. */
+const GATEWAY_PINNED = ["moonshotai/kimi-k3", "openai/gpt-5.4"];
+
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const out = path.join(root, "packages/core/src/model-catalog.generated.ts");
+const gatewayOut = path.join(root, "packages/core/src/model-catalog.gateway.ts");
 
-const res = await fetch(API);
-if (!res.ok) throw new Error(`models.dev returned ${res.status}`);
-const api = await res.json();
+if (!gatewayOnly) {
+  const res = await fetch(API);
+  if (!res.ok) throw new Error(`models.dev returned ${res.status}`);
+  const api = await res.json();
 
-const providers = [];
-for (const id of INCLUDE) {
-  const provider = api[id];
-  if (!provider) {
-    console.warn(`skipping ${id}: not in the models.dev catalog`);
-    continue;
+  const providers = [];
+  for (const id of INCLUDE) {
+    const provider = api[id];
+    if (!provider) {
+      console.warn(`skipping ${id}: not in the models.dev catalog`);
+      continue;
+    }
+    const options = OPTIONS[id] ?? {};
+    const pinned = PINNED[id] ?? [];
+    const rank = (modelId) => {
+      const at = pinned.indexOf(modelId);
+      return at === -1 ? pinned.length : at;
+    };
+    const models = Object.values(provider.models ?? {})
+      .filter((m) => !options.textOutputOnly || outputsText(m))
+      .map((m) => ({ id: m.id, name: m.name ?? m.id }))
+      .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
+    for (const want of pinned) {
+      if (!models.some((m) => m.id === want)) console.warn(`  pinned model ${want} is not in ${id}`);
+    }
+    if (models.length === 0) {
+      console.warn(`skipping ${id}: no models listed`);
+      continue;
+    }
+
+    const logoRes = await fetch(LOGO(id));
+    let logo = "";
+    if (logoRes.ok) {
+      const svg = Buffer.from(await logoRes.arrayBuffer());
+      logo = `data:image/svg+xml;base64,${svg.toString("base64")}`;
+    } else {
+      console.warn(`no logo for ${id} (${logoRes.status})`);
+    }
+
+    providers.push({
+      id,
+      name: provider.name ?? id,
+      env: options.env ?? provider.env ?? [],
+      logo,
+      models,
+    });
+    console.log(`${id}: ${models.length} models${logo ? "" : ", no logo"}`);
   }
-  const options = OPTIONS[id] ?? {};
-  const pinned = PINNED[id] ?? [];
-  const rank = (modelId) => {
-    const at = pinned.indexOf(modelId);
-    return at === -1 ? pinned.length : at;
-  };
-  const models = Object.values(provider.models ?? {})
-    .filter((m) => !options.textOutputOnly || outputsText(m))
-    .map((m) => ({ id: m.id, name: m.name ?? m.id }))
-    .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
-  for (const want of pinned) {
-    if (!models.some((m) => m.id === want)) console.warn(`  pinned model ${want} is not in ${id}`);
-  }
-  if (models.length === 0) {
-    console.warn(`skipping ${id}: no models listed`);
-    continue;
-  }
 
-  const logoRes = await fetch(LOGO(id));
-  let logo = "";
-  if (logoRes.ok) {
-    const svg = Buffer.from(await logoRes.arrayBuffer());
-    logo = `data:image/svg+xml;base64,${svg.toString("base64")}`;
-  } else {
-    console.warn(`no logo for ${id} (${logoRes.status})`);
-  }
-
-  providers.push({
-    id,
-    name: provider.name ?? id,
-    env: options.env ?? provider.env ?? [],
-    logo,
-    models,
-  });
-  console.log(`${id}: ${models.length} models${logo ? "" : ", no logo"}`);
-}
-
-const today = new Date().toISOString().slice(0, 10);
-const body = `// Generated by scripts/update-models.mjs from ${API}
+  const today = new Date().toISOString().slice(0, 10);
+  const body = `// Generated by scripts/update-models.mjs from ${API}
 // Snapshot taken ${today}. Do not edit by hand: run \`pnpm models:update\`.
 // Composer and other ids models.dev does not carry live in model-catalog.manual.ts.
 import type { CatalogProvider } from "./models.js";
@@ -114,12 +134,60 @@ import type { CatalogProvider } from "./models.js";
 export const MODEL_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(providers, null, 2)};
 `;
 
-await writeFile(out, body);
-console.log(`\nwrote ${path.relative(root, out)} (${(body.length / 1024).toFixed(0)} KB)`);
+  await writeFile(out, body);
+  console.log(`\nwrote ${path.relative(root, out)} (${(body.length / 1024).toFixed(0)} KB)`);
+}
+
+await writeGatewayCatalog();
 
 /** Keep models an agent can actually write with. Image/video-only drops. */
 function outputsText(model) {
   const output = model.modalities?.output;
   if (!Array.isArray(output) || output.length === 0) return true;
   return output.includes("text");
+}
+
+/**
+ * Language models the Gateway serves, under the slugs fx, pi, opencode,
+ * and Codex actually send. Separate from the models.dev snapshot so a
+ * Gateway-only refresh does not rewrite every other provider.
+ */
+async function writeGatewayCatalog() {
+  const res = await fetch(GATEWAY_API);
+  if (!res.ok) throw new Error(`AI Gateway returned ${res.status}`);
+  const payload = await res.json();
+  const listed = Array.isArray(payload?.data) ? payload.data : [];
+  const rank = (modelId) => {
+    const at = GATEWAY_PINNED.indexOf(modelId);
+    return at === -1 ? GATEWAY_PINNED.length : at;
+  };
+  const models = listed
+    .filter((m) => m?.type === "language" && typeof m.id === "string" && m.id !== "")
+    .map((m) => ({ id: m.id, name: typeof m.name === "string" && m.name !== "" ? m.name : m.id }))
+    .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
+  for (const want of GATEWAY_PINNED) {
+    if (!models.some((m) => m.id === want)) console.warn(`  pinned model ${want} is not in vercel`);
+  }
+  if (models.length === 0) throw new Error("AI Gateway listed no language models");
+
+  const today = new Date().toISOString().slice(0, 10);
+  const catalog = [
+    {
+      id: "vercel",
+      name: "Vercel AI Gateway",
+      env: ["AI_GATEWAY_API_KEY"],
+      logo: VERCEL_LOGO,
+      models,
+    },
+  ];
+  const body = `// Generated by scripts/update-models.mjs from ${GATEWAY_API}
+// Snapshot taken ${today}. Do not edit by hand: run \`pnpm models:update\`.
+// Language models only. Image, video, and embedding ids stay out.
+import type { CatalogProvider } from "./models.js";
+
+export const GATEWAY_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(catalog, null, 2)};
+`;
+  await writeFile(gatewayOut, body);
+  console.log(`vercel: ${models.length} language models`);
+  console.log(`wrote ${path.relative(root, gatewayOut)} (${(body.length / 1024).toFixed(0)} KB)`);
 }

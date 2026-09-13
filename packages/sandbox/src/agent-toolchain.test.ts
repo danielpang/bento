@@ -104,7 +104,7 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
       "BENTO_NODE_VERSION=22.22.2",
       "@deepseek-ai/dsh@0.1.1-rc.2",
       "exec /opt/bento/dsh/bin/dsh",
-      "for tool in agy claude codex cursor-agent dsh muse opencode pi pool",
+      "for tool in agy claude codex cursor-agent dsh fx muse opencode pi pool",
       "model: !!js process.env.DSH_MODEL",
       "provider: deepseek-official",
       "DSH_PERMISSION_MODE=danger-full-access",
@@ -142,8 +142,27 @@ test("adding muse does not bump TOOLCHAIN_VERSION", async () => {
   assert.ok(image.includes("https://dev.meta.ai/install.sh"), "the Docker image never installs muse");
   assert.ok(image.includes("MUSE_NO_MODIFY_PATH=1"), "the Docker image rewrites shell rc files");
   assert.ok(
-    image.includes("for tool in agy claude codex cursor-agent dsh muse opencode pi pool"),
+    image.includes("for tool in agy claude codex cursor-agent dsh fx muse opencode pi pool"),
     "the Docker image PATH check never mentions muse",
+  );
+});
+
+/**
+ * fx is a standalone binary, same as muse. Adding it must not bump
+ * TOOLCHAIN_VERSION: a warm sprite holding the v3 marker finds fx
+ * absent from the PATH, installs that one CLI, and leaves the rest
+ * alone.
+ */
+test("adding fx does not bump TOOLCHAIN_VERSION", async () => {
+  assert.equal(TOOLCHAIN_VERSION, 3, "adding fx must not stampede warm machines with a version bump");
+  assert.match(AGENT_TOOLCHAIN_SCRIPT, /https:\/\/fx\.sh\/setup\.sh/);
+  assert.match(AGENT_TOOLCHAIN_SCRIPT, /FX_INSTALL_DIR=/);
+  const image = await readFile(dockerfile, "utf8");
+  assert.ok(image.includes("https://fx.sh/setup.sh"), "the Docker image never installs fx");
+  assert.ok(image.includes("FX_INSTALL_DIR="), "the Docker image lets the installer pick its own bin dir");
+  assert.ok(
+    image.includes("for tool in agy claude codex cursor-agent dsh fx muse opencode pi pool"),
+    "the Docker image PATH check never mentions fx",
   );
 });
 
@@ -258,7 +277,7 @@ test("an installer that fails once is retried on the next provision, and the res
     assert.equal(first.status, 0, first.stderr);
     assert.deepEqual(toolchainMissing(first.stdout), ["opencode"]);
     assert.match(first.stderr, /opencode install failed/);
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "pi", "pool"]);
     // Not once and given up on: a blip passes within seconds. Both
     // routes get their three, the release first and the installer only
     // once that has failed.
@@ -276,7 +295,7 @@ test("an installer that fails once is retried on the next provision, and the res
     // missing, by the route that does not need the API.
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"]);
 
     // Third provision, with everything in place: no network at all.
     const third = sandbox.run();
@@ -308,7 +327,7 @@ test("a warm machine upgrades an old private Node while installing only missing 
       "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz",
     ]);
     assert.equal(spawnSync(node, ["--version"], { encoding: "utf8" }).stdout.trim(), "v22.22.2");
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -433,7 +452,7 @@ test("opencode comes from its release, never asking which version that is", () =
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"]);
     assert.ok(
       sandbox.fetched().some((url) => url.includes("releases/latest/download/opencode-linux-")),
       `the release was never fetched: ${sandbox.fetched().join(" ")}`,
@@ -464,7 +483,7 @@ test("opencode falls back to its installer when the release download is gone", (
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(toolchainMissing(result.stdout), []);
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"]);
     assert.ok(sandbox.fetched().includes("https://opencode.ai/install"));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -509,7 +528,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.deepEqual(toolchainMissing(bumped.stdout), ["opencode"]);
     // The four that did install are still usable. A bump that fails
     // halfway must not take the working CLIs down with it.
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "pi", "pool"]);
 
     // The provision after the bump. This is the assertion that would
     // have caught the original bug: the new marker is on disk, and it
@@ -521,7 +540,7 @@ test("a bump reinstalls the set, and still retries a CLI the bump could not inst
     assert.equal(after.status, 0);
     assert.equal(sandbox.fetched().length, 1);
     assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -550,7 +569,7 @@ test("a bump that cannot reach a CLI keeps the copy the machine already had", ()
     const bumped = sandbox.runAfterVersionBump();
     assert.equal(bumped.status, 0, bumped.stderr);
     assert.deepEqual(toolchainMissing(bumped.stdout), [], "the previously installed copy is still there");
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -583,7 +602,7 @@ test("opencode is reported missing when the release and the installer are both u
     assert.deepEqual(toolchainMissing(result.stdout), ["opencode"]);
     assert.match(result.stderr, /opencode release download failed/);
     // And the other four are unharmed.
-    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "pi", "pool"]);
+    assert.deepEqual(sandbox.published(), ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "pi", "pool"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -700,6 +719,7 @@ case "$url" in
   *antigravity*) tool=agy ;;
   *poolside*) tool=pool ;;
   *dev.meta.ai*|*muse-launcher*) tool=muse ;;
+  *fx.sh*) tool=fx ;;
   *) exit 22 ;;
 esac
 for broken in ${broken.join(" ")}; do

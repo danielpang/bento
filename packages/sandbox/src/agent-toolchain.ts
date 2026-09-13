@@ -9,7 +9,7 @@
  * on whatever version happened to be baked in, and every Go project
  * start by fighting it.
  *
- * Seven of the nine CLIs ship standalone binaries, so they carry no
+ * Eight of the ten CLIs ship standalone binaries, so they carry no
  * runtime of their own. pi and dsh are published only on npm, so they get a
  * private Node under /opt/bento that runs them and nothing else: it is
  * never placed on the PATH an agent's shell sees, so `node` in a
@@ -17,7 +17,7 @@
  */
 
 /** Binaries this script is responsible for putting on the PATH. */
-export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", "muse", "opencode", "pi", "pool"] as const;
+export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"] as const;
 
 /**
  * Bumped whenever the script changes what it installs, or when the
@@ -59,6 +59,7 @@ export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", 
  * have pi or opencode too old for native DeepSeek, or a dsh pin that
  * has moved, are caught by the version check below rather than a bump.
  * Adding muse is the same for a machine that never had it.
+ * Adding fx is the same for a machine that never had it.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -368,6 +369,16 @@ fi
 # them is a surprise on a machine that already has a PATH.
 if wanted muse; then
   MUSE_NO_MODIFY_PATH=1 install_from muse https://dev.meta.ai/install.sh bash || true
+fi
+
+# fx's installer writes PATH lines into shell rc files when ~/.local/bin
+# is not already on PATH. The sandbox has no login shell that would
+# read them, and publish() already looks there. Putting the install
+# dir on PATH first is what keeps the rc files alone.
+if wanted fx; then
+  mkdir -p "$HOME/.local/bin"
+  PATH="$HOME/.local/bin:$PATH" FX_INSTALL_DIR="$HOME/.local/bin" \\
+    install_from fx https://fx.sh/setup.sh bash || true
 fi
 
 # pi and dsh are npm only, so they share a private Node. A compatibility

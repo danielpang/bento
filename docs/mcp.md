@@ -1,4 +1,4 @@
-# MCP servers
+<h1 align="center">MCP servers</h1>
 
 An organization defines remote MCP servers once. Every supported harness receives them on each run. Agents never hold upstream credentials. Each run uses a gateway token scoped to that run.
 
@@ -57,7 +57,7 @@ Changing URL origin, auth type, or credential scope clears stored credentials fo
 
 ## Harness support
 
-Claude Code, Cursor, opencode, Codex, Antigravity, and Muse Code consume remote MCP servers. Unsupported harnesses or unreachable gateways log a notice in the transcript and run without MCP.
+Claude Code, Cursor, opencode, Codex, Antigravity, Muse Code, and fx consume remote MCP servers. Unsupported harnesses or unreachable gateways log a notice in the transcript and run without MCP.
 
 MCP is not attached when:
 

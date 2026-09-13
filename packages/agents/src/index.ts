@@ -6,6 +6,7 @@ import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
 import { fakeAdapter } from "./fake.js";
+import { fxAdapter } from "./fx.js";
 import { museAdapter } from "./muse.js";
 import { piAdapter } from "./pi.js";
 import { poolAdapter } from "./pool.js";
@@ -22,6 +23,7 @@ export { piAdapter } from "./pi.js";
 export { poolAdapter } from "./pool.js";
 export { opencodeAdapter } from "./opencode.js";
 export { fakeAdapter } from "./fake.js";
+export { fxAdapter } from "./fx.js";
 
 const adapters: Record<AgentCli, AgentAdapter> = {
   "claude-code": claudeCodeAdapter,
@@ -33,6 +35,7 @@ const adapters: Record<AgentCli, AgentAdapter> = {
   dsh: dshAdapter,
   antigravity: antigravityAdapter,
   muse: museAdapter,
+  fx: fxAdapter,
   fake: fakeAdapter,
 };
 
@@ -57,6 +60,9 @@ export const DEFAULT_MODELS: Record<AgentCli, string> = {
   // which is what its --model takes.
   antigravity: "gemini-3.1-pro-high",
   muse: "muse-spark-1.3",
+  // Gateway slug: vendor prefix included, billed through the
+  // AI Gateway key rather than that vendor's own key.
+  fx: "moonshotai/kimi-k3",
   fake: "fake-1",
 };
 export { runAgent, type RunAgentInput, type RunAgentResult, type ExecChunk } from "./execute.js";

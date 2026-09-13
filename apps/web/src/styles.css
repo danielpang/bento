@@ -2847,6 +2847,17 @@ a.pr-row:hover .pr-external {
   width: min(460px, 100%);
   max-width: 100%;
   min-width: 0;
+  /*
+   * This panel is a flex item of the backdrop. The default
+   * min-height: auto is the content height, and when that is taller
+   * than max-height the max is ignored: the dialog grows off screen,
+   * overflow never starts, and Save sits below the fold. Zero lets
+   * the max apply. 100% is the backdrop's padded box, so the panel
+   * stays inside the viewport and the actions at the end stay in
+   * the scroll.
+   */
+  min-height: 0;
+  max-height: 100%;
   background: var(--panel);
   border: 1px solid var(--line-bright);
   border-radius: var(--radius-lg);
@@ -2859,6 +2870,7 @@ a.pr-row:hover .pr-external {
      of stretching it past the viewport. Large editors get more width;
      this is the backstop when they still overflow. */
   overflow-x: hidden;
+  overflow-y: auto;
   animation: modal-rise 140ms ease-out;
 }
 
@@ -5342,7 +5354,7 @@ button.lane-agent[data-saving] {
 }
 
 .modal.modal-large {
-  max-height: min(92vh, 980px);
+  max-height: min(92vh, 980px, 100%);
 }
 
 .modal-large .skill-input {

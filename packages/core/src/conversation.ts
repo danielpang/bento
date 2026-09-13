@@ -44,7 +44,7 @@ export function forgetsBetweenRuns(cli: string): boolean {
  * for these looks stalled for the length of the run.
  */
 export function hasNoLiveTranscript(cli: string): boolean {
-  return cli === "dsh";
+  return cli === "dsh" || cli === "fx";
 }
 
 /**

@@ -76,6 +76,75 @@ test("muse only offers Muse Spark and requires its bare model ids", () => {
   assert.equal(checkAgentPairing("muse", "muse-spark-1.4").status, "unknown");
 });
 
+/**
+ * fx reaches Vercel AI Gateway and nothing else here. Slugs carry a
+ * vendor prefix (`moonshotai/kimi-k3`), which is what the Gateway
+ * takes, not a Bento provider name. A slash is therefore Gateway the
+ * way a slash on Codex is OpenRouter, so an unlisted slug stays
+ * typeable and still resolves to Vercel rather than to Anthropic or
+ * OpenAI.
+ */
+test("fx only offers Vercel AI Gateway, and a slash is a Gateway slug", () => {
+  assert.deepEqual(providersForCli("fx").map((provider) => provider.id), ["vercel"]);
+  assert.equal(modelStringFor("fx", "vercel", "moonshotai/kimi-k3"), "moonshotai/kimi-k3");
+  assert.equal(providerForProfile("fx", "moonshotai/kimi-k3")?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "moonshotai/kimi-k3").status, "ok");
+  assert.equal(checkAgentPairing("fx", "openai/gpt-5.4").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "anthropic/claude-sonnet-5").status, "ok");
+  assert.equal(checkAgentPairing("fx", "anthropic/claude-sonnet-5").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "acme/unreleased").provider?.id, "vercel");
+  assert.equal(checkAgentPairing("fx", "kimi-k3").status, "unknown");
+  // A vercel/ prefix is Bento's catalog selection. Pairing allows it;
+  // the fx adapter strips it before FX_MODEL reaches Gateway.
+  assert.equal(checkAgentPairing("fx", "vercel/moonshotai/kimi-k3").status, "ok");
+  assert.equal(checkAgentPairing("fx", "vercel/moonshotai/kimi-k3").provider?.id, "vercel");
+});
+
+/**
+ * pi, opencode, and Codex pick Gateway the way they pick OpenRouter:
+ * an explicit vercel/ prefix. A slash without that prefix is still
+ * whatever it was (OpenRouter on Codex, the named vendor on pi).
+ */
+test("pi, opencode, and Codex reach Vercel AI Gateway through a vercel/ prefix", () => {
+  for (const cli of ["pi", "opencode"]) {
+    assert.ok(providersForCli(cli).some((provider) => provider.id === "vercel"));
+    assert.equal(modelStringFor(cli, "vercel", "moonshotai/kimi-k3"), "vercel/moonshotai/kimi-k3");
+    assert.equal(providerForProfile(cli, "vercel/moonshotai/kimi-k3")?.id, "vercel");
+    assert.equal(checkAgentPairing(cli, "vercel/moonshotai/kimi-k3").status, "ok");
+    assert.equal(providerForProfile(cli, "anthropic/claude-sonnet-5")?.id, "anthropic");
+    // OpenRouter lists the same slug. Without vercel/ it stays OpenRouter,
+    // which is why the prefix is the selection and not the id alone.
+    assert.equal(providerForProfile(cli, "moonshotai/kimi-k3")?.id, "openrouter");
+  }
+  assert.equal(modelStringFor("codex", "vercel", "moonshotai/kimi-k3"), "vercel/moonshotai/kimi-k3");
+  assert.equal(providerForProfile("codex", "vercel/moonshotai/kimi-k3")?.id, "vercel");
+  assert.equal(checkAgentPairing("codex", "vercel/openai/gpt-5.4").status, "ok");
+  assert.equal(providerForProfile("codex", "openai/gpt-5-mini")?.id, "openrouter");
+  assert.equal(providerForProfile("codex", "acme/unreleased")?.id, "openrouter");
+});
+
+/**
+ * The picker has to offer what the Gateway actually serves, not only
+ * the two slugs fx's docs name. Image and embedding ids are not agent
+ * models. Kimi K3 stays first: it is fx's default.
+ */
+test("Vercel AI Gateway lists language models from the Gateway snapshot", () => {
+  const vercel = providersForCli("fx")[0];
+  assert.ok(vercel, "fx has no Gateway provider");
+  assert.equal(vercel.env[0], "AI_GATEWAY_API_KEY");
+  assert.ok(vercel.logo.startsWith("data:image/svg+xml"), "Gateway needs a provider mark");
+  const ids = vercel.models.map((model) => model.id);
+  assert.ok(ids.length > 50, `Gateway picker is too thin: ${ids.length} models`);
+  assert.equal(ids[0], "moonshotai/kimi-k3");
+  assert.equal(ids[1], "openai/gpt-5.4");
+  assert.ok(ids.includes("anthropic/claude-sonnet-5"));
+  assert.ok(ids.includes("spacexai/grok-4.6"));
+  assert.ok(
+    ids.every((id) => !id.includes("embedding") && !id.includes("imagine")),
+    "Gateway picker listed a non-language model",
+  );
+});
+
 test("a bare model id is resolved against the tool's own providers", () => {
   assert.equal(providerForProfile("claude-code", "claude-sonnet-5")?.id, "anthropic");
 });
@@ -103,7 +172,7 @@ test("a tool's default model resolves even when the snapshot lacks it", () => {
  * whose logo was shown when it was created.
  */
 test("every string modelStringFor composes resolves back to its provider", () => {
-  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity", "muse"]) {
+  for (const cli of ["claude-code", "codex", "cursor", "opencode", "pi", "dsh", "antigravity", "muse", "fx"]) {
     for (const provider of providersForCli(cli)) {
       const model = provider.models[0];
       if (!model) continue;
@@ -471,7 +540,7 @@ test("agents that saved before Ollama was listed still save", () => {
 
 test("only the tools Bento points at Ollama send ollama/ runs there", () => {
   for (const cli of ["claude-code", "opencode", "dsh"]) assert.equal(routesToOllama(cli, "ollama/glm-5.1"), true);
-  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse", "fake"]) {
+  for (const cli of ["codex", "cursor", "pi", "pool", "antigravity", "muse", "fx", "fake"]) {
     assert.equal(routesToOllama(cli, "ollama/glm-5.1"), false, cli);
   }
   assert.equal(routesToOllama("claude-code", "glm-5.1"), false);

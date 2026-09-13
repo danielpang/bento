@@ -6,6 +6,7 @@ import {
   captureRunFinished,
   dshFailureAdvice,
   mergeAgentExecEnv,
+  missingRequiredEnvMessage,
   museFailureAdvice,
   poolFailureAdvice,
   runDurationSeconds,
@@ -13,6 +14,36 @@ import {
 } from "./run-executor.js";
 import type { Analytics } from "../analytics.js";
 import type { AppContext } from "../context.js";
+
+test("a hosted run without a key points at Agents, Model provider keys", () => {
+  assert.equal(
+    missingRequiredEnvMessage({
+      missing: ["AI_GATEWAY_API_KEY"],
+      toolName: "fx",
+      cli: "fx",
+      mode: "multi",
+      onOllama: false,
+      sharing: false,
+      canShareLogin: false,
+    }),
+    "No AI_GATEWAY_API_KEY is configured, so fx cannot start. Add it under Agents, Model provider keys. Then re-run the agent.",
+  );
+});
+
+test("a local run without a key still points at bento setup", () => {
+  assert.match(
+    missingRequiredEnvMessage({
+      missing: ["ANTHROPIC_API_KEY"],
+      toolName: "Claude Code",
+      cli: "claude-code",
+      mode: "local",
+      onOllama: false,
+      sharing: false,
+      canShareLogin: false,
+    }),
+    /bento setup/,
+  );
+});
 
 test("tools without session ids retain stage context whether sent idle or queued", () => {
   for (const cli of ["pool", "dsh"]) {
