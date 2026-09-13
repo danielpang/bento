@@ -2876,9 +2876,14 @@ a.pr-row:hover .pr-external {
   gap: 12px;
   /* Long model ids and shell commands wrap inside the dialog instead
      of stretching it past the viewport. Large editors get more width;
-     this is the backstop when they still overflow. The body scrolls;
-     clipping here keeps the title and the buttons on screen. */
-  overflow: hidden;
+     this is the backstop when they still overflow. The panel itself
+     scrolls, including Save: a nested body left the buttons pinned
+     to a box taller than the visible phone screen. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   animation: modal-rise 140ms ease-out;
 }
 
@@ -2928,13 +2933,10 @@ a.pr-row:hover .pr-external {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overscroll-behavior: contain;
 }
 
 .modal-actions {
@@ -2943,6 +2945,11 @@ a.pr-row:hover .pr-external {
   gap: 8px;
   margin-top: 2px;
   flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--panel);
+  padding-top: 8px;
 }
 
 @keyframes modal-fade {
@@ -5389,19 +5396,27 @@ button.lane-agent[data-saving] {
   .modal-backdrop {
     padding: 10px;
     padding-bottom: max(10px, env(safe-area-inset-bottom));
-    align-items: flex-end;
-    align-items: safe flex-end;
+    align-items: flex-start;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
 
   .modal,
   .modal.modal-large {
     width: 100%;
-    max-height: calc(var(--visual-viewport-height, 100svh) - 20px);
+    /* svh is the chrome-visible phone height. visualViewport after
+       the keyboard drops can be the large viewport, which puts Save
+       under the URL bar with no way to scroll it into reach. */
+    max-height: min(calc(var(--visual-viewport-height, 100svh) - 20px), calc(100svh - 20px));
+    overflow-y: scroll;
   }
 
-  .modal-large .skill-input {
+  .modal-large .skill-input,
+  .skill-input {
     min-height: 110px;
-    max-height: min(480px, 40svh);
+    max-height: 160px;
+    overflow-y: auto;
   }
 }
 
