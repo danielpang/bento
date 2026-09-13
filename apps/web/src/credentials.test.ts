@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PROVIDER_TABS } from "./components/Credentials.js";
+import { PROVIDER_TABS } from "./provider-tabs.js";
 
 test("Model provider keys includes Vercel AI Gateway after OpenRouter", () => {
   const ids = PROVIDER_TABS.map((tab) => tab.id);

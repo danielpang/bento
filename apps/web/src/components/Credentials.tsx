@@ -7,6 +7,9 @@ import { SettingsCardSkeleton, Skeleton } from "./Skeleton.js";
 import type { BentoClient } from "@bento/api-client";
 import { TabScroll } from "./TabScroll.js";
 import { useToast } from "./Toasts.js";
+import { PROVIDER_TABS } from "../provider-tabs.js";
+
+export { PROVIDER_TABS };
 
 /**
  * The credential cards, shared by every panel that offers them.
@@ -29,23 +32,6 @@ interface Secret {
   name: string;
   hint?: string | null;
 }
-
-/**
- * One tab per model provider. The first key is the one whose presence
- * lights the tab; base URLs ride along on the provider they redirect.
- */
-export const PROVIDER_TABS = [
-  { id: "anthropic", label: "Anthropic", keys: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
-  { id: "openai", label: "OpenAI", keys: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
-  { id: "openrouter", label: "OpenRouter", keys: ["OPENROUTER_API_KEY"] },
-  { id: "vercel", label: "Vercel AI Gateway", keys: ["AI_GATEWAY_API_KEY"] },
-  { id: "cursor", label: "Cursor", keys: ["CURSOR_API_KEY"] },
-  { id: "gemini", label: "Gemini", keys: ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"] },
-  { id: "poolside", label: "Poolside", keys: ["POOLSIDE_API_KEY"] },
-  { id: "deepseek", label: "DeepSeek", keys: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"] },
-  { id: "meta", label: "Meta", keys: ["META_API_KEY"] },
-  { id: "ollama", label: "Ollama", keys: ["OLLAMA_API_KEY", "OLLAMA_BASE_URL"] },
-] as const;
 
 /**
  * Saved credentials, with load failure kept distinct from emptiness.
