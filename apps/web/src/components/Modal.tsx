@@ -2,6 +2,53 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useRef, type ReactNode } from "react";
 
 /**
+ * How many dialogs are currently pinning the overlay to the visible
+ * viewport. Nested confirms (remove, while an editor is open) must not
+ * clear the variables the parent still needs.
+ */
+let visualViewportLocks = 0;
+let stopVisualViewport: (() => void) | null = null;
+
+/**
+ * Size and place the overlay in the pixels the user can actually see.
+ *
+ * On a phone the layout viewport stays tall when the keyboard opens;
+ * only visualViewport shrinks. A panel sized to 100dvh then keeps Save
+ * behind the keyboard, and scrolling the fields cannot reveal a footer
+ * that is pinned to that taller box. These variables are what the
+ * backdrop and the max-height read.
+ */
+function lockVisualViewport(): () => void {
+  if (visualViewportLocks === 0) {
+    const root = document.documentElement.style;
+    const apply = () => {
+      const vv = window.visualViewport;
+      root.setProperty("--visual-viewport-height", `${vv?.height ?? window.innerHeight}px`);
+      root.setProperty("--visual-viewport-offset-top", `${vv?.offsetTop ?? 0}px`);
+    };
+    apply();
+    window.visualViewport?.addEventListener("resize", apply);
+    window.visualViewport?.addEventListener("scroll", apply);
+    window.addEventListener("resize", apply);
+    stopVisualViewport = () => {
+      window.visualViewport?.removeEventListener("resize", apply);
+      window.visualViewport?.removeEventListener("scroll", apply);
+      window.removeEventListener("resize", apply);
+      root.removeProperty("--visual-viewport-height");
+      root.removeProperty("--visual-viewport-offset-top");
+    };
+  }
+  visualViewportLocks += 1;
+  return () => {
+    visualViewportLocks -= 1;
+    if (visualViewportLocks === 0) {
+      stopVisualViewport?.();
+      stopVisualViewport = null;
+    }
+  };
+}
+
+/**
  * A dialog in Bento's own chrome, replacing the browser's prompt,
  * confirm, and alert.
  *
@@ -83,6 +130,7 @@ export function Modal({
       if (target?.isConnected) requestAnimationFrame(() => target.focus());
     };
   }, []);
+  useEffect(() => lockVisualViewport(), []);
 
   return (
     <Dialog.Root

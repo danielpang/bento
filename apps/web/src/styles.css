@@ -2833,7 +2833,13 @@ a.pr-row:hover .pr-external {
    hold one field at most, so nothing here uses them. */
 .modal-backdrop {
   position: fixed;
-  inset: 0;
+  /* The visible viewport, not the layout one: on a phone the keyboard
+     leaves 100dvh tall and only visualViewport shrinks. inset: 0 would
+     keep Save behind the keys. */
+  top: var(--visual-viewport-offset-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--visual-viewport-height, 100dvh);
   background: var(--backdrop);
   display: flex;
   align-items: center;
@@ -2859,7 +2865,7 @@ a.pr-row:hover .pr-external {
    * max apply; the body below is what scrolls.
    */
   min-height: 0;
-  max-height: min(85vh, 720px, calc(100dvh - 48px));
+  max-height: min(85vh, 720px, calc(var(--visual-viewport-height, 100dvh) - 48px));
   background: var(--panel);
   border: 1px solid var(--line-bright);
   border-radius: var(--radius-lg);
@@ -2924,6 +2930,7 @@ a.pr-row:hover .pr-external {
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -5370,12 +5377,32 @@ button.lane-agent[data-saving] {
 }
 
 .modal.modal-large {
-  max-height: min(92vh, 980px, calc(100dvh - 48px));
+  max-height: min(92vh, 980px, calc(var(--visual-viewport-height, 100dvh) - 48px));
 }
 
 .modal-large .skill-input {
   min-height: 200px;
   max-height: 480px;
+}
+
+@media (max-width: 720px) {
+  .modal-backdrop {
+    padding: 10px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    align-items: flex-end;
+    align-items: safe flex-end;
+  }
+
+  .modal,
+  .modal.modal-large {
+    width: 100%;
+    max-height: calc(var(--visual-viewport-height, 100svh) - 20px);
+  }
+
+  .modal-large .skill-input {
+    min-height: 110px;
+    max-height: min(480px, 40svh);
+  }
 }
 
 .modal-backdrop:has(.modal-expanded) {
