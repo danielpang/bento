@@ -412,34 +412,31 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // A shared login is a credential, whether it arrives as a mount or an
   // env var. Only when none of the three exists does the run stop here.
   if (missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
-    // The pointer has to name a door that exists where the reader is:
-    // Team is a panel only multi mode has. Local mode stores keys
-    // through bento setup, or shares this machine's agent logins. And
-    // when sharing is already on but this machine has no login for the
-    // tool, saying "turn on sharing" would point at a switch already
-    // flipped.
+    // The pointer has to name a door that exists where the reader is.
+    // Multi mode stores keys under Agents, Model provider keys. Local
+    // mode stores them through bento setup, or shares this machine's
+    // agent logins. And when sharing is already on but this machine has
+    // no login for the tool, saying "turn on sharing" would point at a
+    // switch already flipped.
     // An Ollama run shares no login, so the fixes worth naming are
     // Ollama's own: the key, or a server of the organization's own.
     const canShareLogin = !onOllama && Boolean(adapter.configPaths?.length);
     const sharing = canShareLogin && ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
-    const where = onOllama
-      ? ctx.env.BENTO_MODE === "multi"
-        ? "Add it under Team, or save an Ollama base URL naming an Ollama server you run. Then run again."
-        : "Save it under Agents, then Ollama, or save an Ollama base URL naming an Ollama server you run. Then run again."
-      : ctx.env.BENTO_MODE === "multi"
-        ? "Add it under Team, then run again."
-        : sharing
-          ? `Login sharing is on, but this machine has no ${profile.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
-          : canShareLogin
-            ? "Save it with bento setup in a terminal, or open Settings, then Local agent sign-ins, and turn on sharing. Then run again."
-            : "Save it with bento setup in a terminal, then run again.";
     const toolName = modelGuidanceFor(profile.cli)?.label ?? profile.cli;
     await finishRun(
       ctx,
       runId,
       {
         ok: false,
-        error: `No ${missing.join(", ")} is configured, so ${toolName} cannot start. ${where}`,
+        error: missingRequiredEnvMessage({
+          missing,
+          toolName,
+          cli: profile.cli,
+          mode: ctx.env.BENTO_MODE === "multi" ? "multi" : "local",
+          onOllama,
+          sharing,
+          canShareLogin,
+        }),
       },
       null,
     );
@@ -727,6 +724,34 @@ interface RunSettlement {
  * "the key you configured is refused" have different fixes, and a
  * single auth sentence hides the case where everything looks set up.
  */
+/**
+ * Points at the screen that actually holds the missing key. Team used
+ * to, then keys moved under Agents, and the old sentence sent people
+ * to a page that only links onward.
+ */
+export function missingRequiredEnvMessage(opts: {
+  missing: string[];
+  toolName: string;
+  cli: string;
+  mode: "local" | "multi";
+  onOllama: boolean;
+  sharing: boolean;
+  canShareLogin: boolean;
+}): string {
+  const where = opts.onOllama
+    ? opts.mode === "multi"
+      ? "Add it under Agents, Model provider keys, or save an Ollama base URL naming an Ollama server you run. Then re-run the agent."
+      : "Save it under Agents, then Ollama, or save an Ollama base URL naming an Ollama server you run. Then run again."
+    : opts.mode === "multi"
+      ? "Add it under Agents, Model provider keys. Then re-run the agent."
+      : opts.sharing
+        ? `Login sharing is on, but this machine has no ${opts.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
+        : opts.canShareLogin
+          ? "Save it with bento setup in a terminal, or open Settings, then Local agent sign-ins, and turn on sharing. Then run again."
+          : "Save it with bento setup in a terminal, then run again.";
+  return `No ${opts.missing.join(", ")} is configured, so ${opts.toolName} cannot start. ${where}`;
+}
+
 export function poolFailureAdvice(error: string): string | null {
   if (/no auth token provided|api-key you provided|incorrect api key|invalid_api_key/i.test(error)) {
     return "Poolside rejected the saved key. Replace POOLSIDE_API_KEY under Model provider keys, then run again. Keys revoked in the Poolside console fail this way.";
