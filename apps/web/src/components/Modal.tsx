@@ -130,7 +130,15 @@ export function Modal({
                 {description && <Dialog.Description className="muted">{description}</Dialog.Description>}
               </>
             )}
-            {children}
+            {/*
+              Fields scroll; the title and the buttons stay put. A long
+              agent skill or a stage's growing requirements used to
+              stretch the panel past the viewport, and because this
+              panel is a flex item of the backdrop its content-sized
+              min-height beat max-height, so overflow never engaged and
+              Save sat below the fold with no way to reach it.
+            */}
+            {children ? <div className="modal-body">{children}</div> : null}
             <div className="modal-actions">{actions}</div>
           </Dialog.Content>
         </Dialog.Overlay>

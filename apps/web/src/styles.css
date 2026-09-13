@@ -2837,6 +2837,10 @@ a.pr-row:hover .pr-external {
   background: var(--backdrop);
   display: flex;
   align-items: center;
+  /* safe: if a panel still outgrows the viewport, pin it to the top
+     rather than clipping title and buttons equally. A second
+     declaration so browsers that do not know `safe` keep center. */
+  align-items: safe center;
   justify-content: center;
   padding: 24px;
   z-index: 40;
@@ -2847,6 +2851,15 @@ a.pr-row:hover .pr-external {
   width: min(460px, 100%);
   max-width: 100%;
   min-width: 0;
+  /*
+   * This panel is a flex item of the backdrop. The default
+   * min-height: auto is the content height, and when that is taller
+   * than max-height the max is ignored: the dialog grows off screen,
+   * overflow never starts, and Save is unreachable. Zero lets the
+   * max apply; the body below is what scrolls.
+   */
+  min-height: 0;
+  max-height: min(85vh, 720px, calc(100dvh - 48px));
   background: var(--panel);
   border: 1px solid var(--line-bright);
   border-radius: var(--radius-lg);
@@ -2857,8 +2870,9 @@ a.pr-row:hover .pr-external {
   gap: 12px;
   /* Long model ids and shell commands wrap inside the dialog instead
      of stretching it past the viewport. Large editors get more width;
-     this is the backstop when they still overflow. */
-  overflow-x: hidden;
+     this is the backstop when they still overflow. The body scrolls;
+     clipping here keeps the title and the buttons on screen. */
+  overflow: hidden;
   animation: modal-rise 140ms ease-out;
 }
 
@@ -2874,6 +2888,8 @@ a.pr-row:hover .pr-external {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 .modal-head-copy {
@@ -2902,11 +2918,24 @@ a.pr-row:hover .pr-external {
   gap: 12px;
 }
 
+.modal-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overscroll-behavior: contain;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 2px;
+  flex-shrink: 0;
 }
 
 @keyframes modal-fade {
@@ -3676,11 +3705,10 @@ a.pr-row:hover .pr-external {
   max-height: 480px;
 }
 
-/* The agent form is the tallest modal; it scrolls inside itself
-   rather than growing past the viewport. */
-.modal {
-  max-height: min(85vh, 720px);
-  overflow-y: auto;
+/* Title and description stay above the scrolling body. */
+.modal > .modal-title,
+.modal > .muted {
+  flex-shrink: 0;
 }
 
 /* The composer: input first, stop beside it while the agent works. */
@@ -5342,7 +5370,7 @@ button.lane-agent[data-saving] {
 }
 
 .modal.modal-large {
-  max-height: min(92vh, 980px);
+  max-height: min(92vh, 980px, calc(100dvh - 48px));
 }
 
 .modal-large .skill-input {
@@ -5362,6 +5390,11 @@ button.lane-agent[data-saving] {
   max-height: none;
   min-height: 0;
   overflow: hidden;
+}
+
+.modal-expanded .modal-body {
+  overflow: hidden;
+  flex: 1 1 auto;
 }
 
 .artifact-head-btn {
