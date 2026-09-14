@@ -510,7 +510,6 @@ export function Board({
         {running > 0 && <span className="board-total-running"><span className="dot" data-state="running" /><strong>{running}</strong> running</span>}
         {attention > 0 && <span><span className="dot" data-state="gated" /><strong>{attention}</strong> {attention === 1 ? "needs" : "need"} attention</span>}
       </div>
-      <span className="board-hint">Drag cards to move through the pipeline<span aria-hidden="true"> →</span></span>
     </div>
     <div
       className="board"

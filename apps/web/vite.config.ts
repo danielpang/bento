@@ -112,6 +112,9 @@ function stampBuild(): Plugin {
   };
 }
 
+// UI-only development can use an existing API without rebuilding its image.
+const apiTarget = process.env.BENTO_API_TARGET || "http://127.0.0.1:4400";
+
 export default defineConfig({
   plugins: [react(), stampIcons(), stampBuild()],
   build: {
@@ -122,13 +125,13 @@ export default defineConfig({
   server: {
     port: 4401,
     proxy: {
-      "/api": { target: "http://127.0.0.1:4400", changeOrigin: true },
+      "/api": { target: apiTarget, changeOrigin: true },
       // /mcp-oauth before /mcp: Vite matches prefixes, and /mcp would
       // otherwise swallow /mcp-oauth. Both keep the inbound Host so
       // local OAuth issuer URLs stay on 4401, not the API's 4400.
-      "/mcp-oauth": { target: "http://127.0.0.1:4400", changeOrigin: false },
-      "/mcp": { target: "http://127.0.0.1:4400", changeOrigin: false },
-      "/.well-known": { target: "http://127.0.0.1:4400", changeOrigin: false },
+      "/mcp-oauth": { target: apiTarget, changeOrigin: false },
+      "/mcp": { target: apiTarget, changeOrigin: false },
+      "/.well-known": { target: apiTarget, changeOrigin: false },
     },
   },
 });
