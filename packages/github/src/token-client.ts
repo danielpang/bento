@@ -2,8 +2,10 @@ import { Octokit } from "@octokit/rest";
 import { checksVia, ensurePullRequestVia, mergeStateVia, reviewThreadsVia } from "./app-client.js";
 import type {
   CheckSummary,
+  CommitFilesInput,
   GitHubClient,
   GitHubPublisher,
+  GitHubRepositoryFiles,
   MergeStateSummary,
   OpenPullRequest,
   PullRequestDetails,
@@ -18,6 +20,7 @@ import {
   pullRequestHasRunCommentVia,
   updatePullRequestVia,
 } from "./pr-sync.js";
+import { commitFilesVia, readFileVia } from "./repo-files.js";
 
 /**
  * A personal access token instead of a GitHub App.
@@ -30,7 +33,7 @@ import {
  * pushes happen on the trusted host, and nothing here is ever mounted
  * into a sandbox.
  */
-export class GitHubTokenClient implements GitHubClient, GitHubPublisher {
+export class GitHubTokenClient implements GitHubClient, GitHubPublisher, GitHubRepositoryFiles {
   private octokit: Octokit;
 
   constructor(private token: string) {
@@ -67,6 +70,14 @@ export class GitHubTokenClient implements GitHubClient, GitHubPublisher {
 
   createPullRequestComment(ref: PullRequestRef, body: string): Promise<void> {
     return createPullRequestCommentVia(this.octokit, ref, body);
+  }
+
+  readFile(input: { owner: string; repo: string; path: string; ref: string }): Promise<string | null> {
+    return readFileVia(this.octokit, input);
+  }
+
+  commitFiles(input: CommitFilesInput): Promise<{ sha: string }> {
+    return commitFilesVia(this.octokit, input);
   }
 
   /** The token itself: a PAT cannot be narrowed per push the way an installation token can. */

@@ -94,6 +94,36 @@ bento pipeline import team-pipeline.yaml --project "New service"
 
 **Settings, Config** also exposes the agents file and pipeline file (select project for pipeline).
 
+## Keeping the files in the repository
+
+Both files can live in the repository they describe, at a fixed place:
+
+```
+.bento/pipeline.yaml
+.bento/agents.yaml
+```
+
+Bento reads them back from there, so the same board follows the code to another computer, another project, or from a local Bento to a hosted one. Either file may be present on its own.
+
+This is behind the `beta-testers` flag on hosted installs: the **In the repository** section under **Pipeline**, the sync and publish routes, and the push-driven sync all answer only for people on the flag. Local mode is always on.
+
+**When they are read.** On project creation, when the checkout (or the GitHub repository) carries them: the project arrives as that pipeline rather than the default six stages. On a push to the default branch that adds, changes, or removes either file, on hosted installs whose GitHub App receives `push` events. And on request: **Sync from repository** under **Pipeline**, or `bento pipeline sync`. A sync whose files match the ones last applied changes nothing, so edits made in the console survive until the files themselves change.
+
+**Where they are read from.** Local mode reads the checkout the project points at, as it is on disk. Hosted mode reads the default branch on GitHub, never a feature branch: feature branches are what agents push to, and a stage's requirements and a repository's setup command are things the server runs. In a project spanning several repositories, the first one in workspace order that carries either file is used.
+
+**Which file wins.** A stage may name an agent defined in either file. When both define the same agent, the agents file is the definition that lands, so a skill edited there is not overwritten by the copy the pipeline file carries. Everything read from the repository is applied as the project's owner, whoever pressed the button, so the same file never creates one agent per person.
+
+**Validation.** Both files are checked before anything is written. A file that does not parse, an agent with an unsupported tool and model pair, a stage naming an agent neither file defines, or a removed stage with cards in it refuses the whole pair, and the board is left exactly as it was. The reason is shown under **Pipeline** (and in `bento pipeline sync`) with the file named.
+
+**Putting them there.** **Open a pull request** under **Pipeline**, or `bento pipeline publish`, commits both files to a new `bento/config-...` branch of the repository and opens a pull request for them, using the same GitHub connection that publishes feature branches. Bento never pushes to the default branch: the files reach `main` only when someone merges that pull request, and a request to write `main`, `master`, or the base branch itself is refused before any call to GitHub. Nothing is opened when the default branch already carries these exact files, and nothing is committed when the files could not be read back (two agents sharing one name, for instance); the refusal says what to fix.
+
+CLI:
+
+```bash
+bento pipeline sync
+bento pipeline publish
+```
+
 ## The agents file
 
 Agent list without stages. Export/import from **Agents** or **Settings, Config**:

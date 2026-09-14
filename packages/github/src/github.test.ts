@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { parseRepoUrl, summarizeChecks, summarizeMergeState } from "./app-client.js";
-import { verifyWebhookSignature, webhookTarget } from "./webhook.js";
+import { commitFilesVia, isWritableConfigBranch } from "./repo-files.js";
+import { pushTarget, verifyWebhookSignature, webhookTarget } from "./webhook.js";
 
 test("summarizeChecks counts pending and failed", () => {
   const summary = summarizeChecks([
@@ -67,4 +68,58 @@ test("webhookTarget extracts PR from relevant events", () => {
   });
   assert.equal(webhookTarget("push", { repository }), null);
   assert.equal(webhookTarget("check_suite", { repository, check_suite: { pull_requests: [] } }), null);
+});
+
+test("pushTarget names the branch and every path the push touched", () => {
+  const target = pushTarget("push", {
+    ref: "refs/heads/main",
+    repository: { name: "widgets", owner: { login: "acme" } },
+    commits: [
+      { added: [".bento/pipeline.yaml"], modified: [], removed: [] },
+      { added: [], modified: ["README.md"], removed: ["old.txt"] },
+    ],
+    head_commit: { added: [], modified: ["README.md"], removed: [] },
+  });
+  assert.ok(target);
+  assert.equal(target.owner, "acme");
+  assert.equal(target.repo, "widgets");
+  assert.equal(target.branch, "main");
+  assert.deepEqual([...target.paths].sort(), [".bento/pipeline.yaml", "README.md", "old.txt"]);
+});
+
+test("pushTarget ignores tags, deleted branches, and other events", () => {
+  const repository = { name: "widgets", owner: { login: "acme" } };
+  assert.equal(pushTarget("push", { ref: "refs/tags/v1", repository, commits: [] }), null);
+  assert.equal(pushTarget("push", { ref: "refs/heads/gone", deleted: true, repository, commits: [] }), null);
+  assert.equal(pushTarget("pull_request", { ref: "refs/heads/main", repository }), null);
+});
+
+/**
+ * Bento's files reach the trunk through a pull request and a person.
+ * Nothing here may write to main, master, or the base it starts from.
+ */
+test("config files are only ever committed to a new branch, never the default branch", async () => {
+  assert.equal(isWritableConfigBranch("bento/config-20260910-024600", "main"), true);
+  assert.equal(isWritableConfigBranch("main", "main"), false);
+  assert.equal(isWritableConfigBranch("Master", "main"), false);
+  assert.equal(isWritableConfigBranch("trunk", "main"), false);
+  assert.equal(isWritableConfigBranch("release", "release"), false, "the base itself is never written");
+  assert.equal(isWritableConfigBranch("", "main"), false);
+
+  // Refused before a single API call: a fake Octokit that fails loudly
+  // if anything reaches it.
+  const untouched = new Proxy({}, { get: () => { throw new Error("GitHub must not be called"); } });
+  for (const branch of ["main", "master"]) {
+    await assert.rejects(
+      commitFilesVia(untouched as never, {
+        owner: "acme",
+        repo: "widgets",
+        baseBranch: "main",
+        branch,
+        message: "x",
+        files: [{ path: ".bento/pipeline.yaml", content: "version: 1\n" }],
+      }),
+      /never to the default branch/,
+    );
+  }
 });

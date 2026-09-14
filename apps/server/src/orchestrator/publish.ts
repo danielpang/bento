@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { featurePullRequests, features } from "@bento/db";
 import { STAGE_ARTIFACT_DIR } from "@bento/core";
-import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
+import { PROTECTED_BRANCHES, parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { RepositoryBundle } from "@bento/sandbox";
 import type { Db } from "@bento/db";
 
@@ -54,15 +54,9 @@ async function resolveDefaultBranchRef(repoPath: string, defaultBranch: string):
  */
 const CREDENTIAL_HELPER = '!f() { echo username=x-access-token; echo "password=$BENTO_PUSH_TOKEN"; }; f';
 
-/**
- * Branches this will never push to, whatever it is asked.
- *
- * Work reaches these through a pull request and a person, never through
- * an agent run. A feature branch named "main" would otherwise mean a
- * stage's output was force-pushed straight onto the trunk, which is
- * exactly the merge nobody asked an agent to perform.
- */
-const PROTECTED_BRANCHES = new Set(["main", "master", "trunk", "develop"]);
+// Branches this will never push to, whatever it is asked: work reaches
+// them through a pull request and a person, never through an agent run.
+// The list is @bento/github's, shared with the config file publisher.
 
 export interface PublishableRepository {
   /** Null once the repository has been removed from the project. */
