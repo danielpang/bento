@@ -399,26 +399,27 @@ button {
   gap: 4px;
 }
 
-/* Navigation describes the application; the second row owns the project.
+/* Project context comes first; its navigation and tools sit below it.
    Both rows keep the same DOM and keyboard order on smaller screens. */
 .workspace-nav .brand {
-  margin-right: 24px;
+  margin-right: 12px;
 }
 
-.workspace-nav .topbar-nav {
-  height: 100%;
+.workspace-toolbar .topbar-nav {
+  align-self: stretch;
+  margin-block: -10px;
 }
 
-.workspace-nav .topbar-nav .btn {
+.workspace-toolbar .topbar-nav .btn {
   display: inline-flex;
   align-items: center;
-  height: 100%;
+  min-height: 52px;
   padding: 0 14px;
   border-radius: 0;
   position: relative;
 }
 
-.workspace-nav a[aria-current="page"]::after {
+.workspace-toolbar a[aria-current="page"]::after {
   content: "";
   position: absolute;
   inset: auto 14px 0;
@@ -432,6 +433,7 @@ button {
   flex: none;
   gap: 20px;
   min-width: 0;
+  min-height: 56px;
   padding: 10px 28px;
 }
 
@@ -448,32 +450,37 @@ button {
   padding-inline: 16px;
 }
 
-.workspace-toolbar .picker-trigger {
+.workspace-project {
+  min-width: 0;
+  max-width: min(420px, 40vw);
+}
+
+.workspace-nav .picker-trigger {
   background: transparent;
   border-color: transparent;
   padding: 0 8px 0 0;
   gap: 16px;
-  max-width: min(420px, 40vw);
+  max-width: 100%;
 }
 
-.workspace-toolbar .picker-trigger:hover {
+.workspace-nav .picker-trigger:hover {
   background: var(--panel-raised);
 }
 
-.workspace-toolbar .picker-labels {
+.workspace-nav .picker-labels {
   flex-direction: row;
   align-items: center;
   gap: 10px;
 }
 
-.workspace-toolbar .picker-kicker {
+.workspace-nav .picker-kicker {
   font-family: var(--sans);
   font-size: 11px;
   letter-spacing: 0;
   text-transform: none;
 }
 
-.workspace-toolbar .picker-current {
+.workspace-nav .picker-current {
   font-size: 20px;
   font-weight: 650;
   letter-spacing: -0.045em;
@@ -486,7 +493,7 @@ button {
   background: var(--panel);
 }
 
-.workspace-toolbar .skeleton-picker {
+.workspace-nav .skeleton-picker {
   height: 36px;
 }
 
@@ -536,16 +543,6 @@ button {
   font-family: var(--mono);
   font-weight: 500;
   color: var(--text-dim);
-}
-
-.board-hint {
-  margin-left: auto;
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
-.board-hint span {
-  margin-left: 10px;
 }
 
 /* Hidden from sight, kept for a screen reader. Position rather than
@@ -1121,8 +1118,53 @@ select.input,
   color: var(--text-faint);
 }
 
-/* Lining figures of one width, so a spend climbing through 0.19 to
-   0.20 does not shuffle the digits beside it while it counts. */
+/* Spend is a destination, with the measured amount visible at a glance. */
+.spend-button {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  text-decoration: none;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.spend-button:hover {
+  background: var(--panel-raised);
+  border-color: var(--text-faint);
+}
+.spend-button[aria-current="page"] {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 6%, var(--panel));
+}
+.spend-button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
+.spend-button-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.spend-button-amount {
+  display: inline-flex;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.spend-button-estimate { color: var(--text-faint); }
+.spend-button-arrow { color: var(--text-faint); font-size: 18px; line-height: 1; }
+@media (max-width: 720px) {
+  .spend-button { gap: 6px; padding-inline: 8px; }
+  .spend-button-arrow { display: none; }
+}
+
+/* Lining figures keep the amount steady as it counts. */
 .spend-figure {
   font-variant-numeric: tabular-nums;
 }
@@ -3418,26 +3460,40 @@ a.pr-row:hover .pr-external {
     margin-right: 0;
   }
 
+  .workspace-nav > .topbar-spacer,
+  .workspace-toolbar > .topbar-spacer {
+    display: none;
+  }
+
+  .workspace-nav .picker-trigger {
+    gap: 8px;
+  }
+
   .workspace-toolbar {
     padding: 10px 16px;
     gap: 10px;
     flex-wrap: wrap;
   }
 
-  .workspace-toolbar .picker-trigger {
-    max-width: calc(100vw - 40px);
+  .workspace-project {
+    flex: 1;
+    max-width: none;
   }
 
-  .workspace-toolbar .picker-current {
-    font-size: 20px;
+  .workspace-nav .picker-current {
+    font-size: 16px;
   }
 
-  .workspace-toolbar .skeleton-picker {
+  .workspace-nav .picker-kicker {
+    display: none;
+  }
+
+  .workspace-nav .skeleton-picker {
     height: 26px;
   }
 
   .workspace-tools {
-    flex: 1 1 100%;
+    flex: 1;
     gap: 8px;
   }
 
@@ -3456,10 +3512,6 @@ a.pr-row:hover .pr-external {
   .board-overview {
     margin-inline: 16px;
     gap: 8px 16px;
-  }
-
-  .board-hint {
-    display: none;
   }
 
   .topbar .select {
