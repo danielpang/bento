@@ -74,17 +74,26 @@ const SKELETON_LANES = [
 
 export function BoardSkeleton() {
   return (
+    <>
+    <div className="board-overview" aria-hidden="true">
+      <Skeleton height={17} width="8.5rem" />
+      <Skeleton height={12} width="7rem" />
+    </div>
     <div className="board" aria-busy="true" aria-label="Loading board">
       <LoadingStatus label="Loading board" />
       {SKELETON_LANES.map((lane, i) => (
         <section key={i} className="lane" style={{ "--skeleton-i": i } as CSSProperties}>
           <header className="lane-head">
             <div className="lane-title">
-              <Skeleton height={12} width={lane.title} />
+              <span className="lane-title-text">
+                <Skeleton className="lane-ord" height={28} width={28} />
+                <Skeleton height={12} width={lane.title} />
+              </span>
               <Skeleton height={11} width="1.1rem" />
             </div>
             <Skeleton height={10} width="5.2rem" />
           </header>
+          <div className="lane-transition"><Skeleton height={10} width="6rem" /></div>
           <div className="lane-cards">
             {lane.cards.length === 0 ? (
               <div className="lane-empty skeleton-slot" />
@@ -95,6 +104,7 @@ export function BoardSkeleton() {
         </section>
       ))}
     </div>
+    </>
   );
 }
 
@@ -112,20 +122,20 @@ export function SessionsListSkeleton({
       <LoadingStatus label="Loading sessions" />
       {Array.from({ length: rows }, (_, i) => (
         <div key={i} className="session-card" aria-hidden="true">
-          <Skeleton className="skeleton-avatar" radius="50%" width={38} height={38} />
+          <Skeleton className="skeleton-avatar" radius="7px" width={28} height={28} />
           <span className="session-card-main">
             <span className="session-card-top">
-              <Skeleton height={14} width={`${58 + ((i * 13) % 22)}%`} />
+              <Skeleton height={13} width={`${58 + ((i * 13) % 22)}%`} />
               <Skeleton height={11} width="2.4rem" />
             </span>
-            <Skeleton height={12} width={`${40 + ((i * 9) % 18)}%`} />
+            <Skeleton height={11} width={`${40 + ((i * 9) % 18)}%`} />
           </span>
         </div>
       ))}
     </div>
   );
   if (!framed) return list;
-  return <div className="sessions-screen">{list}</div>;
+  return <div className="sessions-screen"><div className="surface-heading" aria-hidden="true"><div className="skeleton-lines"><Skeleton height={24} width="7rem" /><Skeleton height={13} width="14rem" /></div></div>{list}</div>;
 }
 
 /** Table rows for the spend page, without the intro (the intro is data-free). */
@@ -253,6 +263,8 @@ export function SettingsPageSkeleton() {
       </header>
       <div className="settings-page">
         <Skeleton height={22} width="7rem" />
+        <div className="settings-layout">
+        <div className="settings-navigation">
         <TabScroll>
           <div className="tab-row" aria-hidden="true">
             {["5.2rem", "4.4rem", "3.6rem", "3.8rem", "3.6rem", "3.2rem"].map((w) => (
@@ -260,7 +272,12 @@ export function SettingsPageSkeleton() {
             ))}
           </div>
         </TabScroll>
-        <SettingsBodySkeleton />
+        </div>
+        <div className="settings-content">
+          <div className="settings-section-heading skeleton-lines"><Skeleton height={22} width="8rem" /><Skeleton height={13} width="70%" /></div>
+          <SettingsBodySkeleton />
+        </div>
+        </div>
       </div>
     </div>
   );

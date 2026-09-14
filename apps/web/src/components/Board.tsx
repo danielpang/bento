@@ -497,8 +497,20 @@ export function Board({
   /* An empty lane means two different things, and saying the wrong one
      sends someone looking for a card that is simply filtered out. */
   const nothingFound = <p className="lane-empty">No matches</p>;
+  const states = features.map((feature) => cardState(feature, runStatusByFeature[feature.id]));
+  const running = states.filter((state) => state === "running").length;
+  const attention = states.filter((state) => state === "gated" || state === "failed").length;
 
   return (
+    <>
+    <div className="board-overview">
+      <h1>Feature pipeline</h1>
+      <div className="board-totals" aria-label="Pipeline summary">
+        <span><strong>{features.filter((feature) => !isFinished(feature)).length}</strong> open</span>
+        {running > 0 && <span className="board-total-running"><span className="dot" data-state="running" /><strong>{running}</strong> running</span>}
+        {attention > 0 && <span><span className="dot" data-state="gated" /><strong>{attention}</strong> {attention === 1 ? "needs" : "need"} attention</span>}
+      </div>
+    </div>
     <div
       className="board"
       ref={boardRef}
@@ -509,6 +521,8 @@ export function Board({
         name="Backlog"
         ordinal="00"
         count={backlog.length}
+        note="Ready to enter the pipeline"
+        kind="backlog"
         empty={
           searching ? (
             nothingFound
@@ -546,6 +560,8 @@ export function Board({
                 onNewAgent={onNewAgent}
               />
             }
+            gateType={stage.gateType}
+            kind="stage"
             expecting={expecting.has(stage.id)}
             {...(searching ? { empty: nothingFound } : {})}
             {...laneDropProps(stage.id, (featureId) => onMove(featureId, stage.id))}
@@ -571,7 +587,8 @@ export function Board({
         name="Completed"
         ordinal={String(stages.length + 1).padStart(2, "0")}
         count={finished.length}
-        note="finished work"
+        note="Finished work"
+        kind="completed"
         expecting={expecting.has(DONE_LANE)}
         empty={searching ? nothingFound : <p className="lane-empty">Nothing finished yet</p>}
         {...laneDropProps(DONE_LANE, onFinish)}
@@ -579,6 +596,7 @@ export function Board({
         {finished.map(card)}
       </Lane>
     </div>
+    </>
   );
 }
 
@@ -588,6 +606,8 @@ function Lane({
   count,
   agentMenu,
   note,
+  kind,
+  gateType,
   empty,
   over,
   expecting,
@@ -604,6 +624,8 @@ function Lane({
   agentMenu?: React.ReactNode;
   /** Said in the agent's place, for a lane no agent works. */
   note?: string;
+  kind?: "backlog" | "stage" | "completed";
+  gateType?: string;
   /** Shown in place of the default empty slot when the lane has no cards. */
   empty?: React.ReactNode;
   /** True while a card is being dragged over this lane. */
@@ -618,6 +640,8 @@ function Lane({
   return (
     <section
       className="lane"
+      data-kind={kind}
+      data-occupied={count > 0 || undefined}
       data-drop={over || undefined}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -637,8 +661,12 @@ function Lane({
           <span className="lane-agent lane-agent-empty">{note ?? "no agent assigned"}</span>
         )}
       </header>
+      <div className="lane-transition">
+        <span>{kind === "backlog" ? "Start here" : kind === "completed" ? "End of pipeline" : gateType === "manual" ? "Manual approval" : "Automatic advancement"}</span>
+        <span aria-hidden="true">{kind === "completed" ? "✓" : "→"}</span>
+      </div>
       <div className="lane-cards">
-        {count === 0 && (empty ?? <p className="lane-empty">No cards</p>)}
+        {count === 0 && (empty ?? <p className="lane-empty">Ready for the next card</p>)}
         {children}
       </div>
     </section>
@@ -882,7 +910,7 @@ function stateLabel(state: CardState): string {
     case "failed":
       return "agent failed";
     case "gated":
-      return "waiting at gate";
+      return "pending approval";
     case "done":
       return "completed";
     case "cancelled":

@@ -273,7 +273,7 @@ export function AgentsPanel({
   }
 
   return (
-    <aside className="drawer drawer-wide" role="dialog" aria-label="Agents" ref={panel}>
+    <aside className="drawer drawer-wide management-drawer agents-drawer" role="dialog" aria-label="Agents" ref={panel}>
       <header className="drawer-head">
         <div className="drawer-title-row">
           <h2 className="drawer-title">Agents</h2>
@@ -292,18 +292,22 @@ export function AgentsPanel({
 
       <div className="drawer-body">
 
-        <section className="section settings-card">
-          <h3 className="settings-title">Your agents</h3>
-          {profiles.length === 0 && <p className="muted">None yet.</p>}
+        <section className="section settings-card agent-roster">
+          <div className="settings-title-row">
+            <h3 className="settings-title">Your agents</h3>
+            <span className="surface-count">{profiles.length} configured</span>
+          </div>
+          {profiles.length === 0 && <p className="muted">No agents yet. Add one to give your pipeline its first collaborator.</p>}
           {profiles.map((profile) => (
-            <div key={profile.id} className="gate-check">
-              <ProviderMark cli={profile.cli} model={profile.model} />
-              <span className="gate-check-text">
-                <span className="gate-check-name">{profile.name}</span>{" "}
-                {PREVIEW_TOOLS[profile.cli] && <span className="chip chip-soft">preview</span>}
-                <br />
-                {profile.cli} · {profile.model}
+            <div key={profile.id} className="agent-roster-row">
+              <span className="agent-roster-mark"><ProviderMark cli={profile.cli} model={profile.model} /></span>
+              <span className="agent-roster-main">
+                <span className="agent-roster-name">{profile.name}{" "}
+                  {PREVIEW_TOOLS[profile.cli] && <span className="chip chip-soft">preview</span>}
+                </span>
+                <span className="agent-roster-model">{profile.cli} · {profile.model}</span>
               </span>
+              <div className="agent-roster-actions">
               <button
                 className="btn btn-ghost"
                 disabled={busy}
@@ -328,6 +332,7 @@ export function AgentsPanel({
               >
                 Remove
               </button>
+              </div>
             </div>
           ))}
         </section>
@@ -445,10 +450,11 @@ export function AgentsPanel({
             title={editingId ? `Edit ${profiles.find((p) => p.id === editingId)?.name ?? "agent"}` : "New agent"}
             description={
               editingId
-                ? undefined
+                ? "Configure the model and instructions this agent brings to every run."
                 : "Pair a coding agent with a model. Assign it to a stage afterwards under Pipeline."
             }
             large
+            editor
             onClose={closeForm}
             actions={
               <>
@@ -484,6 +490,15 @@ export function AgentsPanel({
               </>
             }
           >
+            <section className="editor-section">
+              <div className="editor-section-heading"><h3>Identity</h3><p>The role this agent plays in your pipeline.</p></div>
+              <label className="field">
+                <span className="label">Name</span>
+                <input className="input" placeholder="Implementer" value={name} onChange={(e) => setName(e.target.value)} />
+              </label>
+            </section>
+            <section className="editor-section">
+              <div className="editor-section-heading"><h3>Runtime</h3><p>Choose the coding tool and the model behind it.</p></div>
             <label className="field">
               <span className="label">Coding agent</span>
               <select className="select" value={cli} onChange={(e) => pickCli(e.target.value as AgentCli)}>
@@ -517,8 +532,8 @@ export function AgentsPanel({
               )}
             </label>
             {providers.length > 0 && (
-              <label className="field">
-                <span className="label">Provider</span>
+              <div className="field" role="group" aria-label="Provider">
+                <span className="label" aria-hidden="true">Provider</span>
                 <div className="provider-row">
                   {providers.map((option) => (
                     <button
@@ -541,7 +556,7 @@ export function AgentsPanel({
                     <span>Type it myself</span>
                   </button>
                 </div>
-              </label>
+              </div>
             )}
 
             <label className="field">
@@ -594,7 +609,7 @@ export function AgentsPanel({
                 </p>
               )}
             </label>
-            <div className="field">
+            <div className="editor-request">
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -603,15 +618,9 @@ export function AgentsPanel({
                 Request a new coding agent or model
               </button>
             </div>
-            <label className="field">
-              <span className="label">Name</span>
-              <input
-                className="input"
-                placeholder="Implementer"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </label>
+            </section>
+            <section className="editor-section">
+              <div className="editor-section-heading"><h3>Instructions</h3><p>Define how this agent works and what it hands to the next stage.</p></div>
             {/*
               The skill is where an agent stops being a generic model and
               becomes a role: it rides into every stage prompt this agent
@@ -633,6 +642,7 @@ export function AgentsPanel({
               />
               <span className="muted">Sent to the agent at the start of every run.</span>
             </label>
+            </section>
           </Modal>
         )}
 

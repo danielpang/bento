@@ -186,9 +186,20 @@ export function SessionsPage({
       ref={screenRef}
     >
       <div className="sessions-pane">
+        <header className="surface-heading">
+          <div>
+            <h1>Sessions</h1>
+            <p>Conversations behind the work.</p>
+          </div>
+          {sessions && <span className="surface-count">{sessions.length} conversations</span>}
+        </header>
         {sessions === null && <SessionsListSkeleton />}
         {sessions?.length === 0 && (
-          <p className="muted">No sessions yet. Start an agent from the board to begin a conversation.</p>
+          <div className="surface-empty">
+            <h2>Your first conversation starts with a card.</h2>
+            <p className="muted">Start an agent from the board. Its progress and conversation will appear here.</p>
+            <a className="btn" href="/">Go to board</a>
+          </div>
         )}
         {sessions && sessions.length > 0 && (
           <div className="sessions-list">

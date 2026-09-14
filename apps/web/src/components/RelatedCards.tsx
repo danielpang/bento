@@ -105,7 +105,7 @@ function toneWords(tone: string): string {
     case "failed":
       return "agent failed";
     case "gated":
-      return "waiting at gate";
+      return "pending approval";
     case "done":
       return "completed";
     case "cancelled":

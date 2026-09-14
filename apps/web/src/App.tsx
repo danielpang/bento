@@ -110,10 +110,20 @@ function RouteFallback() {
   if (path === "/changelog") return <PageSkeleton />;
   return (
     <div className="app" aria-busy="true">
-      <header className="topbar">
+      <header className="topbar workspace-nav">
         <BrandLockup />
+        <div className="workspace-project" aria-hidden="true"><Skeleton className="skeleton-picker" /></div>
         <span className="topbar-spacer" />
       </header>
+      <div className="workspace-toolbar" aria-hidden="true">
+        <div className="topbar-nav"><Skeleton width="18rem" height={20} /></div>
+        <Skeleton className="nav-menu-trigger" width={32} height={32} />
+        <span className="topbar-spacer" />
+        <div className="workspace-tools">
+          <Skeleton className="skeleton-search" />
+          <Skeleton className="skeleton-btn" />
+        </div>
+      </div>
       <BoardSkeleton />
     </div>
   );
@@ -847,8 +857,11 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
 
   const spend = projectId ? (
     <a
-      className="chip chip-link"
+      className="spend-button"
       href="/spend"
+      aria-label={usage && usage.totalRuns > 0
+        ? `View project spend: ${usage.runsWithoutCost > 0 ? "at least " : ""}$${usage.totalUsd.toFixed(2)}`
+        : "View project spend"}
       aria-current={screen === "spend" ? "page" : undefined}
       // The tool list comes from the catalog, so it cannot drift
       // from which adapters actually report a figure.
@@ -860,14 +873,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           : spendCoverageNote()
       }
     >
-      {usage && usage.totalRuns > 0 ? (
-        <>
-          spend $<span className="spend-figure">{spendShown.toFixed(2)}</span>
-          {usage.runsWithoutCost > 0 ? "+" : ""}
-        </>
-      ) : (
-        "spend"
+      <span className="spend-button-label">Spend</span>
+      {usage && usage.totalRuns > 0 && (
+        <span className="spend-button-amount">
+          $<span className="spend-figure">{spendShown.toFixed(2)}</span>
+          {usage.runsWithoutCost > 0 && <span className="spend-button-estimate">+</span>}
+        </span>
       )}
+      <span className="spend-button-arrow" aria-hidden="true">›</span>
     </a>
   ) : null;
 
@@ -961,8 +974,12 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             </button>
           }
         />
-        <div className="empty-state">
-          <p className="muted">No projects yet. Point Bento at a git repository to start a board.</p>
+        <div className="empty-state empty-project">
+          <div className="empty-pipeline" aria-hidden="true">
+            <span>Brief</span><span>Build</span><span>Review</span><span>Ship</span>
+          </div>
+          <h1>Your next feature starts here.</h1>
+          <p className="muted">Connect a repository, describe the work, and let your agents take it through the pipeline. You decide when it moves forward.</p>
           <button className="btn btn-primary" onClick={() => setDialog("project")}>
             New project
           </button>
@@ -1227,19 +1244,18 @@ function TopBar({
   ];
 
   return (
-    <header className="topbar">
+    <>
+    <header className="topbar workspace-nav">
       <BrandLockup />
-      {/* One block, so it can drop to a row of its own on a phone
-          without the picker and the field being separated by whatever
-          happened to wrap between them. */}
-      {(picker || search) && (
-        <div className="topbar-lead">
-          {picker}
-          {search}
-        </div>
-      )}
+      {picker && <div className="workspace-project">{picker}</div>}
       <span className="topbar-spacer" />
       {meta}
+      <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
+        <GearMark />
+      </a>
+      {showSignOut && <SignOutButton onClick={() => signOut()} />}
+    </header>
+    <div className="workspace-toolbar">
       <nav className="topbar-nav" aria-label="Board">
         {actions.map((action) =>
           action.href === undefined ? (
@@ -1259,14 +1275,16 @@ function TopBar({
             </a>
           ),
         )}
-        <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
-          <GearMark />
-        </a>
-        {showSignOut && <SignOutButton onClick={() => signOut()} />}
       </nav>
-      {primary}
       <NavMenu actions={entries} />
-    </header>
+      <span className="topbar-spacer" />
+      {(search || primary) && (
+        <div className="workspace-tools">
+          {search}
+          {primary}
+        </div>
+      )}
+    </div>
+    </>
   );
 }
-
