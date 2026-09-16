@@ -497,20 +497,8 @@ export function Board({
   /* An empty lane means two different things, and saying the wrong one
      sends someone looking for a card that is simply filtered out. */
   const nothingFound = <p className="lane-empty">No matches</p>;
-  const states = features.map((feature) => cardState(feature, runStatusByFeature[feature.id]));
-  const running = states.filter((state) => state === "running").length;
-  const attention = states.filter((state) => state === "gated" || state === "failed").length;
 
   return (
-    <>
-    <div className="board-overview">
-      <h1>Feature pipeline</h1>
-      <div className="board-totals" aria-label="Pipeline summary">
-        <span><strong>{features.filter((feature) => !isFinished(feature)).length}</strong> open</span>
-        {running > 0 && <span className="board-total-running"><span className="dot" data-state="running" /><strong>{running}</strong> running</span>}
-        {attention > 0 && <span><span className="dot" data-state="gated" /><strong>{attention}</strong> {attention === 1 ? "needs" : "need"} attention</span>}
-      </div>
-    </div>
     <div
       className="board"
       ref={boardRef}
@@ -596,7 +584,6 @@ export function Board({
         {finished.map(card)}
       </Lane>
     </div>
-    </>
   );
 }
 

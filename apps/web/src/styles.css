@@ -407,22 +407,21 @@ button {
 
 .workspace-toolbar .topbar-nav {
   align-self: stretch;
-  margin-block: -10px;
 }
 
 .workspace-toolbar .topbar-nav .btn {
   display: inline-flex;
   align-items: center;
-  min-height: 52px;
+  min-height: 36px;
   padding: 0 14px;
-  border-radius: 0;
+  border-radius: var(--radius);
   position: relative;
 }
 
 .workspace-toolbar a[aria-current="page"]::after {
   content: "";
   position: absolute;
-  inset: auto 14px 0;
+  inset: auto 14px -8px;
   height: 2px;
   background: var(--brand);
 }
@@ -504,45 +503,6 @@ button {
 
 .workspace-tools .skeleton-search {
   width: clamp(220px, 24vw, 320px);
-}
-
-.board-overview {
-  display: flex;
-  align-items: center;
-  flex: none;
-  flex-wrap: wrap;
-  gap: 12px 20px;
-  min-height: 36px;
-  margin: 0 28px;
-  padding: 7px 0;
-  border-top: 1px solid var(--line);
-}
-
-.board-overview h1 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.board-totals,
-.board-totals > span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.board-totals {
-  flex-wrap: wrap;
-  gap: 16px;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-.board-totals strong {
-  font-family: var(--mono);
-  font-weight: 500;
-  color: var(--text-dim);
 }
 
 /* Hidden from sight, kept for a screen reader. Position rather than
@@ -3507,11 +3467,6 @@ a.pr-row:hover .pr-external {
   .workspace-tools .btn {
     flex: none;
     min-height: 40px;
-  }
-
-  .board-overview {
-    margin-inline: 16px;
-    gap: 8px 16px;
   }
 
   .topbar .select {

@@ -15,13 +15,29 @@ Console source: `apps/web`. Development: Vite on port 4401. Production: built as
 | TUI            | none | `pnpm dev`                      |
 
 
-`pnpm dev` starts all packages with a `dev` script via turbo. Do not start `@bento/web` separately.
+`pnpm dev` starts all packages with a `dev` script via turbo. Do not also start a second copy of `@bento/web`.
 
 Server and console only:
 
 ```bash
 pnpm --filter @bento/server --filter @bento/web dev
 ```
+
+For UI-only work with the Docker API already running, start only Vite:
+
+```bash
+pnpm --filter @bento/web dev --host 127.0.0.1 --strictPort
+```
+
+Open [http://localhost:4401](http://localhost:4401). UI edits reload automatically without rebuilding Docker. The API and database must still be running.
+
+If OrbStack's published port 4400 is unavailable but its container hostname responds, use the direct API address:
+
+```bash
+BENTO_API_TARGET=http://server.bento.orb.local:4400 pnpm --filter @bento/web dev --host 127.0.0.1 --strictPort
+```
+
+`BENTO_API_TARGET` overrides Vite's development proxy only. It defaults to `http://127.0.0.1:4400` and is not included in browser code.
 
 ## Setup
 

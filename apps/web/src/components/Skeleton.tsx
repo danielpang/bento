@@ -74,11 +74,6 @@ const SKELETON_LANES = [
 
 export function BoardSkeleton() {
   return (
-    <>
-    <div className="board-overview" aria-hidden="true">
-      <Skeleton height={17} width="8.5rem" />
-      <Skeleton height={12} width="7rem" />
-    </div>
     <div className="board" aria-busy="true" aria-label="Loading board">
       <LoadingStatus label="Loading board" />
       {SKELETON_LANES.map((lane, i) => (
@@ -104,7 +99,6 @@ export function BoardSkeleton() {
         </section>
       ))}
     </div>
-    </>
   );
 }
 
