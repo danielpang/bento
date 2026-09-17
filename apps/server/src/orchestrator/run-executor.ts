@@ -747,7 +747,7 @@ export function missingRequiredEnvMessage(opts: {
       : opts.sharing
         ? `Login sharing is on, but this machine has no ${opts.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
         : opts.canShareLogin
-          ? "Save it with bento setup in a terminal, or open Settings, then Local agent sign-ins, and turn on sharing. Then run again."
+          ? "Save it with bento setup in a terminal, or open Settings, then Share agent logins, and turn on sharing. Then run again."
           : "Save it with bento setup in a terminal, then run again.";
   return `No ${opts.missing.join(", ")} is configured, so ${opts.toolName} cannot start. ${where}`;
 }

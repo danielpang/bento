@@ -26,7 +26,7 @@ export interface CliOptions {
   db?: string;
   dataDir: string;
   port: number;
-  /** Initial sharing choice. Absent leaves the saved machine setting in control. */
+  /** Local mode saves this choice; runner mode uses it for this process. */
   shareAgentAuth?: boolean;
   /** Identifies this machine when claiming work in runner mode. */
   runnerId: string;

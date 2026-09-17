@@ -25,6 +25,7 @@ import {
 } from "@bento/core";
 import type { GateCriteria, GateCriterion } from "@bento/core";
 import { getAdapter } from "@bento/agents";
+import { localAgentAuthEnv } from "@bento/server";
 import { terminalText } from "../terminal.js";
 import type { AgentProfile, AgentTool, BentoClient, Project, Repository, Stage } from "@bento/api-client";
 import { useMouseTarget, useSuspendMouse } from "../mouse.js";
@@ -142,6 +143,8 @@ export function Setup({
   client,
   repositoryPathOwner,
   agentsRunLocally,
+  runnerMode = false,
+  runnerSharesAgentAuth = false,
   selectedProjectId,
   serverMode = "local",
   onSection,
@@ -152,6 +155,10 @@ export function Setup({
   repositoryPathOwner: RepositoryPathOwner;
   /** Whether agents execute on this machine, which is what makes its logins usable. */
   agentsRunLocally: boolean;
+  /** A remote board whose runs execute on this machine. */
+  runnerMode?: boolean;
+  /** The remote runner can enable sharing only at launch. */
+  runnerSharesAgentAuth?: boolean;
   selectedProjectId?: string | undefined;
   serverMode?: "local" | "multi";
   onSection?: (section: SettingsSection) => void;
@@ -175,6 +182,9 @@ export function Setup({
   const [stages, setStages] = useState<Stage[]>([]);
   /** Needed to append a stage; a project has exactly one pipeline. */
   const [pipelineId, setPipelineId] = useState<string | null>(null);
+  const [pipelineLoaded, setPipelineLoaded] = useState(false);
+  const [pipelineError, setPipelineError] = useState("");
+  const [pipelineRefresh, setPipelineRefresh] = useState(0);
   const [secrets, setSecrets] = useState<{ id: string; name: string; hint: string }[]>([]);
   const [canManageCredentials, setCanManageCredentials] = useState(false);
   const [machine, setMachine] = useState<MachineSettings | null>(null);
@@ -215,12 +225,34 @@ export function Setup({
     setCanManageCredentials(secretRows.canManage);
     setMachine(machineRow);
     setTools(toolRows);
+    const first =
+      projectRows.find((p) => p.id === selectedProjectId || p.name === selectedProjectId) ?? projectRows[0];
+    if (first) {
+      try {
+        const pipeline = await client.getPipeline(first.id);
+        setStages(pipeline.stages);
+        setPipelineId(pipeline.id);
+        setPipelineLoaded(true);
+        setPipelineError("");
+      } catch (err) {
+        setPipelineLoaded(false);
+        setPipelineError(`Could not load pipeline: ${message(err)}`);
+        throw err;
+      }
+      setRepos(await client.listRepositories(first.id));
+    } else {
+      setStages([]);
+      setPipelineId(null);
+      setPipelineLoaded(false);
+      setPipelineError("");
+      setRepos([]);
+    }
     // In local mode the server is this process, so its report and this
     // machine's are the same answer. With a remote server they are not:
     // the agents run here, so the logins that matter are here, and the
     // server's own are none of this machine's business.
     setLogins(
-      machineRow && machineRow.mode === "local" && machineRow.logins.length > 0
+      !runnerMode && machineRow && machineRow.mode === "local" && machineRow.logins.length > 0
         ? machineRow.logins.map((row) => ({
             cli: row.cli,
             label: toolLabel(row.cli),
@@ -228,24 +260,9 @@ export function Setup({
             ...(row.detail ? { detail: row.detail } : {}),
           }))
         : agentsRunLocally
-          ? localLogins()
+          ? await localLogins().catch(() => [])
           : [],
     );
-    const first =
-      projectRows.find((p) => p.id === selectedProjectId || p.name === selectedProjectId) ?? projectRows[0];
-    if (first) {
-      const [pipeline, repoRows] = await Promise.all([
-        client.getPipeline(first.id),
-        client.listRepositories(first.id),
-      ]);
-      setStages(pipeline.stages);
-      setPipelineId(pipeline.id);
-      setRepos(repoRows);
-    } else {
-      setStages([]);
-      setPipelineId(null);
-      setRepos([]);
-    }
   }
 
   useEffect(() => {
@@ -253,6 +270,49 @@ export function Setup({
       .catch((err: unknown) => setError(message(err)))
       .finally(() => setLoading(false));
   }, []);
+
+  // Re-read the project's repositories each time this page opens. They
+  // may have been added in the web console while Settings stayed open.
+  useEffect(() => {
+    if (screen.name !== "repos" || !project) return;
+    let active = true;
+    setLoading(true);
+    setRepos([]);
+    void client.listRepositories(project.id)
+      .then((rows) => {
+        if (active) setRepos(rows);
+      })
+      .catch((err: unknown) => {
+        if (active) setError(`Could not load repositories: ${message(err)}`);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [screen.name, project?.id, client]);
+
+  // The board can change while Settings is open. Read the pipeline again
+  // when its editor opens, and never present an unfetched pipeline as empty.
+  useEffect(() => {
+    if (screen.name !== "stages" || !project) return;
+    let active = true;
+    setLoading(true);
+    void client.getPipeline(project.id)
+      .then((pipeline) => {
+        if (!active) return;
+        setStages(pipeline.stages);
+        setPipelineId(pipeline.id);
+        setPipelineLoaded(true);
+        setPipelineError("");
+      })
+      .catch((err: unknown) => {
+        if (active) setPipelineError(`Could not load pipeline: ${message(err)}`);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [screen.name, project?.id, client, pipelineRefresh]);
 
   /**
    * Hands the terminal to `claude auth login`, which prompts and then
@@ -268,6 +328,7 @@ export function Setup({
     setBusy(true);
     setError("");
     const restoreMouse = suspendMouse();
+    let loginFinished = false;
     try {
       if (isRawModeSupported) setRawMode(false);
       await new Promise<void>((resolve, reject) => {
@@ -279,14 +340,29 @@ export function Setup({
           code === 0 ? resolve() : reject(new Error(`claude auth login exited ${code}`)),
         );
       });
-      setNotice("Signed in to Claude Code.");
+      loginFinished = true;
     } catch (err) {
       setError(message(err));
     } finally {
       if (isRawModeSupported) setRawMode(true);
       restoreMouse();
+      const verified = loginFinished ? await waitForClaudeLogin() : false;
+      await load().catch((err: unknown) => setError(message(err)));
+      if (loginFinished) {
+        if (verified) {
+          const sharing = runnerMode ? runnerSharesAgentAuth : machine?.shareAgentAuth === true;
+          setNotice(
+            sharing
+              ? "Claude is ready to share with new runs."
+              : runnerMode
+                ? "Claude is signed in. Restart Bento with --share-agent-auth to share it."
+                : "Claude is signed in. Press s to share it with Bento.",
+          );
+        } else {
+          setError("Claude's login finished, but Bento cannot read a usable login. Check `claude auth status` and sign in again.");
+        }
+      }
       setBusy(false);
-      await load().catch(() => {});
     }
   }
 
@@ -315,6 +391,8 @@ export function Setup({
   }
 
   function go(next: Screen) {
+    if ((next.name === "repos" || next.name === "stages") && project) setLoading(true);
+    else if (screen.name === "repos" || screen.name === "stages") setLoading(false);
     setScreen(next);
     indexRef.current = 0;
     setIndex(0);
@@ -403,7 +481,13 @@ export function Setup({
     },
     {
       label: "Pipeline",
-      status: !project ? "connect a repository first" : `${assigned} of ${stages.length} have an agent`,
+      status: !project
+        ? "connect a repository first"
+        : pipelineError
+          ? "could not load stages"
+          : pipelineLoaded
+            ? `${assigned} of ${stages.length} have an agent`
+            : "loading stages",
       open: () => (project ? go({ name: "stages" }) : setNotice("Connect a repository first.")),
     },
     // Logins on this machine are worth offering exactly when this
@@ -411,8 +495,8 @@ export function Setup({
     ...(agentsRunLocally
       ? [
           {
-            label: "Local agent sign-ins",
-            status: subscriptionStatus(machine, logins),
+            label: "Share agent logins",
+            status: agentLoginStatus(machine, logins, runnerMode, runnerSharesAgentAuth),
             open: () => go({ name: "subscription" }),
           },
         ]
@@ -479,10 +563,19 @@ export function Setup({
 
     if (busy || loading) return;
 
+    if (screen.name === "stages" && pipelineError) {
+      if (input === "r") setPipelineRefresh((count) => count + 1);
+      return;
+    }
+
     if (screen.name === "subscription") {
       if (input === "s") {
+        if (runnerMode) {
+          setNotice("Restart Bento with --share-agent-auth to share logins for local runs.");
+          return;
+        }
         if (machine?.mode !== "local") {
-          setNotice("The board is on a server, so this is chosen at launch: pass --share-agent-auth.");
+          setNotice("Sharing is unavailable for this server.");
           return;
         }
         if (machine.pinnedByEnv) {
@@ -799,8 +892,10 @@ export function Setup({
       : []),
     ...(screen.name === "subscription"
       ? [
-          { label: "Toggle sharing", key: "s" },
           { label: "Sign in to Claude", key: "l" },
+          ...(!runnerMode && machine?.mode === "local" && !machine.pinnedByEnv
+            ? [{ label: machine.shareAgentAuth ? "Stop sharing" : "Share logins", key: "s" }]
+            : []),
         ]
       : []),
   ];
@@ -854,8 +949,8 @@ export function Setup({
     if (loading)
       return (
         <Box flexDirection="column">
-          <Text color="gray">Loading project settings…</Text>
-          <MouseButton label="Back" onClick={onDone} />
+          <Text color="gray">{screen.name === "repos" ? "Loading repositories…" : screen.name === "stages" ? "Loading pipeline…" : "Loading project settings…"}</Text>
+          <MouseButton label="Back" onClick={screen.name === "repos" || screen.name === "stages" ? () => go({ name: "hub" }) : onDone} />
         </Box>
       );
 
@@ -878,9 +973,13 @@ export function Setup({
             if (!dir) throw new Error("Enter a repository path.");
             const problem = repositoryPathOwner === "client" ? pathProblem(dir) : null;
             if (problem) throw new Error(problem);
-            if (project) await client.addRepository(project.id, { localPath: dir });
-            else await client.createProject({ name: name.trim() || repositoryNameHint(dir), localPath: dir });
-            await load();
+            if (project) {
+              const added = await client.addRepository(project.id, { localPath: dir });
+              setRepos((current) => [...current, added]);
+            } else {
+              await client.createProject({ name: name.trim() || repositoryNameHint(dir), localPath: dir });
+              await load();
+            }
             go({ name: "repos" });
           }}
         />
@@ -1224,76 +1323,45 @@ export function Setup({
     }
 
     if (screen.name === "subscription") {
-      const claude = machine?.claude ?? null;
-      const labelWidth = Math.max(14, ...logins.map((tool) => tool.label.length + 2));
-      const sharing = machine?.shareAgentAuth === true;
+      const visibleLogins = logins.filter(
+        (tool) => tool.signedIn || tool.detail?.startsWith("Configuration found"),
+      );
+      const sharing = runnerMode ? runnerSharesAgentAuth : machine?.shareAgentAuth === true;
       const pinned = machine?.pinnedByEnv === true;
-      /** The sharing setting lives on the machine the server runs on. */
-      const settable = machine?.mode === "local";
+      const settable = !runnerMode && machine?.mode === "local" && !pinned;
 
       return (
         <Frame
-          title="Local agent sign-ins"
-          hint="l sign in to Claude · s share on/off · Escape back"
+          title="Share agent logins"
+          hint={`${settable ? "s share on/off · " : ""}l sign in to Claude · Escape back`}
           notice={notice}
           error={error}
         >
-          <Text color="gray">
-            Agents can use the logins already on this machine instead of an API key, so a subscription you
-            already pay for drives the run.
-          </Text>
+          <Text color="gray">Use this machine's coding tool logins for local agent runs.</Text>
 
           <Box marginTop={1} flexDirection="column">
-            {logins.map((tool) => (
+            <Text bold>1. Sign in to a coding tool</Text>
+            {visibleLogins.map((tool) => (
               <Box key={tool.cli}>
                 <Text color={tool.signedIn ? "green" : "gray"}>{tool.signedIn ? "●" : "○"}</Text>
-                <Text> {tool.label.padEnd(labelWidth)}</Text>
-                <Text color="gray">{tool.detail ?? (tool.signedIn ? "signed in" : "not signed in")}</Text>
+                <Text> {tool.label}: </Text>
+                <Text color="gray">{tool.detail ?? (tool.signedIn ? "signed in" : "sign-in unverified")}</Text>
               </Box>
             ))}
-            {logins.length === 0 && <Text color="gray">No coding tool on this machine has a login.</Text>}
-          </Box>
-
-          {claude && (
-            <Box marginTop={1}>
-              <Text color={claude.loggedIn ? "green" : "yellow"}>
-                {claude.loggedIn
-                  ? `Claude Code is signed in${claude.email ? ` as ${claude.email}` : ""}${
-                      claude.subscriptionType ? ` on a ${claude.subscriptionType} plan` : ""
-                    }.`
-                  : "Claude Code is installed but not signed in yet."}
-              </Text>
-            </Box>
-          )}
-
-          <Box marginTop={1}>
-            {settable ? (
-              <Text>
-                Sharing is <Text color={sharing ? "green" : "gray"}>{sharing ? "on" : "off"}</Text>
-                {pinned ? " and pinned by BENTO_SHARE_AGENT_AUTH, so it cannot be changed here." : "."}
-              </Text>
-            ) : (
-              <Text color="gray">
-                The board is on a server, so sharing is decided when this machine starts: pass
-                --share-agent-auth to use these logins for runs here.
-              </Text>
-            )}
+            {visibleLogins.length === 0 && <Text color="gray">No login found. Press l for Claude Code.</Text>}
           </Box>
 
           <Box marginTop={1} flexDirection="column">
-            <Text color="gray">
-              l sign in to Claude Code ({"claude auth login"}), which opens your browser
+            <Text bold>
+              2. Share with Bento: <Text color={sharing ? "green" : "yellow"}>{sharing ? "On" : "Off"}</Text>
             </Text>
-            {settable && (
-              <Text color="gray">s turn sharing {sharing ? "off" : "on"} for runs on this machine</Text>
-            )}
+            {runnerMode && !sharing && <Text color="gray">Restart Bento with --share-agent-auth.</Text>}
+            {settable && !sharing && <Text color="gray">Press s to enable sharing.</Text>}
+            {pinned && !runnerMode && <Text color="gray">Set by BENTO_SHARE_AGENT_AUTH at startup.</Text>}
           </Box>
 
           <Box marginTop={1}>
-            <Text color="yellow">
-              These are long lived credentials for a paid account, and an agent can read anything its sandbox
-              can. Use it on repositories you trust.
-            </Text>
+            <Text color="yellow">Only share with trusted repositories. Agents can read shared credentials.</Text>
           </Box>
         </Frame>
       );
@@ -1302,15 +1370,12 @@ export function Setup({
     if (screen.name === "repos") {
       return (
         <Frame
-          title="Repositories"
+          title={project ? `Repositories · ${project.name}` : "Repositories"}
           hint="j/k move · Enter commands · d remove · Escape back"
           notice={notice}
           error={error}
         >
-          <Text color="gray">
-            The agent can inspect the repository and install its dependencies. Optional commands let you
-            specify dependency setup before work and build or test checks after edits.
-          </Text>
+          <Text color="gray">Repositories connected to this project.</Text>
           <Box flexDirection="column" marginTop={1}>
             {repos.map((repo, i) => (
               <Row
@@ -1320,9 +1385,12 @@ export function Setup({
                 status={`${repo.localPath}${repo.setupCommand ? ` · setup: ${repo.setupCommand}` : ""}${repo.testCommand ? ` · test: ${repo.testCommand}` : ""}`}
               />
             ))}
+            {repos.length === 0 && !error && project && (
+              <Text color="gray">No repositories connected to {project.name}.</Text>
+            )}
             <Row
               selected={index === repos.length}
-              label={project ? "Add another repository" : "Connect a repository"}
+              label={repos.length > 0 ? "Add another repository" : "Add repository"}
             />
             <Row selected={index === repos.length + 1} label="Back" />
           </Box>
@@ -1629,6 +1697,13 @@ export function Setup({
     }
 
     if (screen.name === "stages") {
+      if (pipelineError) {
+        return (
+          <Frame title="Pipeline" hint="r retry · Escape back" error={pipelineError}>
+            <MouseButton label="Retry" onClick={() => setPipelineRefresh((count) => count + 1)} />
+          </Frame>
+        );
+      }
       return (
         <Frame
           title="Pipeline"
@@ -1839,15 +1914,18 @@ export function SettingsRows({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** The hub line for the subscription row. */
-function subscriptionStatus(
+/** The hub line for sharing this machine's agent logins. */
+function agentLoginStatus(
   m: MachineSettings | null,
   logins: { label: string; signedIn: boolean }[],
+  runnerMode: boolean,
+  runnerSharesAgentAuth: boolean,
 ): string {
   const signedIn = logins.filter((row) => row.signedIn).map((row) => row.label);
-  const who = signedIn.length ? `${signedIn.join(", ")} ready to share` : "no verified login; open to check";
+  const who = signedIn.length ? signedIn.join(", ") : "no verified login";
+  if (runnerMode) return `${runnerSharesAgentAuth ? "sharing on" : "sharing off"}, ${who}`;
   if (!m || m.mode !== "local") return who;
-  return m.shareAgentAuth ? `sharing on, ${who}` : `sharing off, using API keys`;
+  return `${m.shareAgentAuth ? "sharing on" : "sharing off"}, ${who}`;
 }
 
 /**
@@ -1872,21 +1950,47 @@ function toolLabel(cli: string): string {
  *
  * Asked here rather than of the server, because with a remote server
  * the server's answer describes the wrong computer: the runs happen
- * here. Directory presence is only a configuration hint, never proof
- * that credentials exist or have not expired.
+ * here. Claude and Cursor use the same token reader as execution.
+ * For other tools, directory presence is only a configuration hint.
  */
-function localLogins(): { cli: string; label: string; signedIn: boolean; detail: string }[] {
-  return MODEL_GUIDANCE.map((tool) => {
-    const paths = getAdapter(tool.cli as AgentCli).configPaths ?? [];
-    return {
-      cli: tool.cli,
-      label: tool.label,
-      signedIn: false,
-      detail: paths.some((relative) => fs.existsSync(path.join(os.homedir(), relative)))
-        ? "Configuration found; sign-in unverified"
-        : "Not configured",
-    };
-  });
+async function localLogins(): Promise<{ cli: string; label: string; signedIn: boolean; detail: string }[]> {
+  const rows = await Promise.all(
+    MODEL_GUIDANCE.map(async (tool) => {
+      // A TUI and agent package from different builds can disagree on a
+      // newly added CLI. Login status is optional; it must not stop setup.
+      let adapter: ReturnType<typeof getAdapter>;
+      try {
+        adapter = getAdapter(tool.cli as AgentCli);
+      } catch {
+        return null;
+      }
+      const paths = adapter.configPaths ?? [];
+      const signedIn =
+        (tool.cli === "claude-code" || tool.cli === "cursor") &&
+        Object.keys(await localAgentAuthEnv(adapter)).length > 0;
+      return {
+        cli: tool.cli,
+        label: tool.label,
+        signedIn,
+        detail: signedIn
+          ? "Ready to share"
+          : paths.some((relative) => fs.existsSync(path.join(os.homedir(), relative)))
+            ? "Configuration found; sign-in unverified"
+            : "Not configured",
+      };
+    }),
+  );
+  return rows.filter((row): row is NonNullable<typeof row> => row !== null);
+}
+
+/** Browser sign-in may return just before Claude writes its credential. */
+async function waitForClaudeLogin(): Promise<boolean> {
+  const adapter = getAdapter("claude-code");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (Object.keys(await localAgentAuthEnv(adapter)).length > 0) return true;
+    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return false;
 }
 
 /** A skill is long; the row has space to say it exists and hint at it. */

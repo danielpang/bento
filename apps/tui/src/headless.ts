@@ -82,6 +82,7 @@ export async function runRunner(options: CliOptions): Promise<void> {
     runnerId: options.runnerId,
     sandbox: options.sandbox,
     dataDir: options.dataDir,
+    ...(options.shareAgentAuth !== undefined ? { shareAgentAuth: options.shareAgentAuth } : {}),
     onStatus: (message) => emit("status", message),
   });
 
