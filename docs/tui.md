@@ -170,11 +170,16 @@ Open **Settings** with `,` or `bento setup`.
 
 ### Use an existing CLI login
 
-Open **Settings → Local agent sign-ins** and enable sharing. Bento remembers the choice. Alternatively:
+Open **Settings → Share agent logins** and enable sharing. Bento remembers the choice. Alternatively:
 
 ```sh
 bento --share-agent-auth
 ```
+
+If the board is on a server but agents run on your machine, restart the TUI with
+`--share-agent-auth`. For a separate runner, start it with
+`bento runner --server <url> --share-agent-auth`. This choice applies to that
+runner process.
 
 Claude Code and Cursor show **Ready to share** when a usable credential is found. **Sign-in unverified** means configuration was found but authentication was not verified. Sign in through the underlying CLI if needed. Share credentials only with trusted repositories; agents can read them.
 
@@ -295,7 +300,7 @@ Use `bento repos`, `bento agents`, `bento sessions`, `bento spend`, and `bento m
 | Installer URL returns 404           | Use [source installation](#install-from-source) instead.                                  |
 | `bento: command not found`          | Add `~/.local/bin` to PATH and reopen your shell.                                         |
 | Docker connection or missing image  | Start Docker and build the sandbox image.                                                 |
-| Missing API key despite local login | Enable **Local agent sign-ins** sharing and check its status.                             |
+| Missing API key despite local login | Enable **Share agent logins** and check its status.                             |
 | Build fails before useful work      | Move builds to **Build and test (after edits)**; install the runtime in dependency setup. |
 | No PR after a successful run        | Connect GitHub and enable automatic PRs for that stage.                                   |
 | Text will not highlight             | Use your terminal's selection modifier; Warp uses Shift-drag.                             |

@@ -414,6 +414,7 @@ export function Console({
       runnerId: options.runnerId,
       sandbox: options.sandbox,
       dataDir: options.dataDir,
+      ...(options.shareAgentAuth !== undefined ? { shareAgentAuth: options.shareAgentAuth } : {}),
       onStatus: setRunnerStatus,
     });
     void runner.start();
@@ -785,9 +786,12 @@ export function Console({
   if (screen === "setup" && !workbench) {
     return (
       <Setup
+        key={projectId ?? options.project ?? "none"}
         client={client}
         repositoryPathOwner={repositoryPathOwnerForMode(options.mode)}
         agentsRunLocally={options.mode !== "client"}
+        runnerMode={options.mode === "runner"}
+        runnerSharesAgentAuth={options.shareAgentAuth === true}
         selectedProjectId={projectId ?? options.project}
         serverMode={serverMode}
         onSection={setWorkbench}

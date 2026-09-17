@@ -53,6 +53,7 @@ import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
@@ -229,6 +230,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, feature.organizationId);
   try {
+    const duplicateRepos = duplicateRepositoryLocation(repoRows);
+    if (duplicateRepos) {
+      throw new Error(
+        `Repositories ${duplicateRepos[0].name} and ${duplicateRepos[1].name} use the same checkout. ` +
+          "Remove one under Settings, Repositories, then run again.",
+      );
+    }
     prepared = ctx.driver.provider === "sprite"
       ? repoRows.map((r) => ({ name: r.name, localPath: r.localPath, worktreePath: "" }))
       : await ctx.worktrees.ensureAll(
@@ -747,7 +755,7 @@ export function missingRequiredEnvMessage(opts: {
       : opts.sharing
         ? `Login sharing is on, but this machine has no ${opts.cli} login to share. Sign in with the tool in a terminal, or save an API key with bento setup. Then run again.`
         : opts.canShareLogin
-          ? "Save it with bento setup in a terminal, or open Settings, then Local agent sign-ins, and turn on sharing. Then run again."
+          ? "Save it with bento setup in a terminal, or open Settings, then Share agent logins, and turn on sharing. Then run again."
           : "Save it with bento setup in a terminal, then run again.";
   return `No ${opts.missing.join(", ")} is configured, so ${opts.toolName} cannot start. ${where}`;
 }
