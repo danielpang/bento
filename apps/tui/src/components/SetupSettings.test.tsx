@@ -248,6 +248,46 @@ test("connecting a repository succeeds even if an unrelated settings refresh wou
   }
 });
 
+test("connecting an existing checkout explains the duplicate before sending it", async () => {
+  const f = fixture();
+  f.setRepositories([{
+    id: "repo-one",
+    projectId: "project",
+    name: "bento",
+    localPath: "/work/bento",
+    repoUrl: null,
+    githubRepoId: null,
+    defaultBranch: "main",
+    setupCommand: null,
+    testCommand: null,
+  }]);
+  let addCalls = 0;
+  f.client.addRepository = async () => {
+    addCalls += 1;
+    throw new Error("the server should not be called");
+  };
+  const ui = render(
+    <Setup client={f.client} repositoryPathOwner="server" agentsRunLocally={false} onDone={() => {}} />,
+  );
+  try {
+    await ready(ui, "Settings");
+    ui.stdin.write("\r");
+    await ready(ui, "Add another repository");
+    ui.stdin.write("j");
+    await pause();
+    ui.stdin.write("\r");
+    await ready(ui, "Connect a repository");
+    ui.stdin.write("/work/bento/");
+    await pause();
+    ui.stdin.write("\r");
+    await ready(ui, "This checkout is already connected as bento.");
+    assert.equal(addCalls, 0);
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
+});
+
 test("stage editor owns prompts, gate mode and ordering, preserving concurrent additions", async () => {
   const f = fixture();
   const ui = render(

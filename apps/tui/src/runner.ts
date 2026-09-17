@@ -1,5 +1,4 @@
 import { execFile as execFileCallback } from "node:child_process";
-import path from "node:path";
 import { promisify } from "node:util";
 import { credentialNamesFor, getAdapter, runAgent, runsOnOllama, writeFileCommand } from "@bento/agents";
 import {
@@ -20,7 +19,7 @@ import {
   type SandboxHandle,
 } from "@bento/sandbox";
 import type { TokenStore } from "@bento/api-client";
-import { localAgentAuthEnv, localAgentAuthMounts } from "@bento/server";
+import { duplicateRepositoryLocation, localAgentAuthEnv, localAgentAuthMounts } from "@bento/server";
 
 const execFile = promisify(execFileCallback);
 
@@ -164,17 +163,14 @@ export class LocalRunner {
     let workdir: string;
     try {
       if (repositories.length === 0) throw new Error("the project has no repositories");
-      const seenPaths = new Map<string, string>();
-      for (const repository of repositories) {
-        const normalized = path.posix.normalize(repository.localPath).replace(/\/+$/, "") || "/";
-        const previous = seenPaths.get(normalized);
-        if (previous) {
-          throw new Error(
-            `Repositories ${previous} and ${repository.name} use the same checkout. ` +
-              "Remove one under Settings, Repositories, then run again.",
-          );
-        }
-        seenPaths.set(normalized, repository.name);
+      const duplicate = duplicateRepositoryLocation(
+        repositories.map((repository) => ({ ...repository, githubRepoId: null })),
+      );
+      if (duplicate) {
+        throw new Error(
+          `Repositories ${duplicate[0].name} and ${duplicate[1].name} use the same checkout. ` +
+            "Remove one under Settings, Repositories, then run again.",
+        );
       }
       const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
       /**

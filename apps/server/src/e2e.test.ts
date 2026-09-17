@@ -5302,6 +5302,43 @@ test("a repository path is stored expanded, not with the tilde as typed", { time
   }
 });
 
+test("concurrent adds cannot connect the same checkout twice", { timeout: 60_000 }, async () => {
+  const { project } = await setupProject("Concurrent repository add");
+  const checkout = await fixtureRepo("concurrent-add");
+  const add = (name: string, localPath: string) =>
+    app.request(`/api/projects/${project.id}/repositories`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, localPath }),
+    });
+  const responses = await Promise.all([
+    add("extra-one", checkout),
+    add("extra-two", `${checkout}/`),
+  ]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [201, 409]);
+  const saved = await json<{ localPath: string }[]>(
+    await app.request(`/api/projects/${project.id}/repositories`),
+  );
+  assert.equal(
+    saved.filter((row) => row.localPath.replace(/\/+$/, "") === checkout).length,
+    1,
+    "only one row is stored for the checkout",
+  );
+});
+
+test("project creation refuses the same checkout twice", { timeout: 60_000 }, async () => {
+  const response = await app.request("/api/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Duplicate checkout at creation",
+      repositories: [{ localPath: repoDir }, { localPath: `${repoDir}/` }],
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json() as { error: string }).error, /same repository/);
+});
+
 /**
  * Expanding a tilde is only right when the server shares a home with
  * the person typing. Inside a container `~` is /root, so expanding

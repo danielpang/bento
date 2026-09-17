@@ -25,7 +25,7 @@ import {
 } from "@bento/core";
 import type { GateCriteria, GateCriterion } from "@bento/core";
 import { getAdapter } from "@bento/agents";
-import { localAgentAuthEnv } from "@bento/server";
+import { localAgentAuthEnv, sameRepositoryLocation } from "@bento/server";
 import { terminalText } from "../terminal.js";
 import type { AgentProfile, AgentTool, BentoClient, Project, Repository, Stage } from "@bento/api-client";
 import { useMouseTarget, useSuspendMouse } from "../mouse.js";
@@ -974,6 +974,10 @@ export function Setup({
             const problem = repositoryPathOwner === "client" ? pathProblem(dir) : null;
             if (problem) throw new Error(problem);
             if (project) {
+              const connected = repos.find((repo) =>
+                sameRepositoryLocation(repo, { localPath: dir, githubRepoId: null }),
+              );
+              if (connected) throw new Error(`This checkout is already connected as ${connected.name}.`);
               const added = await client.addRepository(project.id, { localPath: dir });
               setRepos((current) => [...current, added]);
             } else {
