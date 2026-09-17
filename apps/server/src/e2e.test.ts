@@ -5283,16 +5283,20 @@ test("a repository path is stored expanded, not with the tilde as typed", { time
     );
     assert.equal(repo?.localPath, checkout, "the repository stores a path the filesystem can find");
 
-    // The second door in, which takes the same input and once skipped
-    // the same step.
-    const added = await json<{ localPath: string }>(
-      await app.request(`/api/projects/${project.id}/repositories`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "again", localPath: `~/${path.basename(checkout)}` }),
-      }),
+    // The second door in resolves the same path before checking whether
+    // it is already connected. A duplicate would create two .git mounts
+    // for one Docker sandbox and make the first run fail.
+    const duplicate = await app.request(`/api/projects/${project.id}/repositories`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "again", localPath: `~/${path.basename(checkout)}` }),
+    });
+    assert.equal(duplicate.status, 409);
+    assert.match((await duplicate.json() as { error: string }).error, /already connected/);
+    const saved = await json<{ localPath: string }[]>(
+      await app.request(`/api/projects/${project.id}/repositories`),
     );
-    assert.equal(added.localPath, checkout, "adding a repository expands it too");
+    assert.equal(saved.length, 1, "a repeated add does not create a second checkout");
   } finally {
     mock.restoreAll();
   }

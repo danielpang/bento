@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
 import { credentialNamesFor, getAdapter, runAgent, runsOnOllama, writeFileCommand } from "@bento/agents";
 import {
@@ -163,6 +164,18 @@ export class LocalRunner {
     let workdir: string;
     try {
       if (repositories.length === 0) throw new Error("the project has no repositories");
+      const seenPaths = new Map<string, string>();
+      for (const repository of repositories) {
+        const normalized = path.posix.normalize(repository.localPath).replace(/\/+$/, "") || "/";
+        const previous = seenPaths.get(normalized);
+        if (previous) {
+          throw new Error(
+            `Repositories ${previous} and ${repository.name} use the same checkout. ` +
+              "Remove one under Settings, Repositories, then run again.",
+          );
+        }
+        seenPaths.set(normalized, repository.name);
+      }
       const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
       /**
        * The new branch starts at origin/<base>, and this machine's

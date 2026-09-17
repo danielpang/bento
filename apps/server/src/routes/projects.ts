@@ -32,6 +32,7 @@ import {
 import { githubForOrganization } from "../github.js";
 import { githubRemoteOf } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { duplicateRepositoryLocation, sameRepositoryLocation } from "../repository-identity.js";
 
 /**
  * The two shells a repository can carry. Shared by the add and edit
@@ -323,6 +324,9 @@ export function projectRoutes(ctx: AppContext) {
         if (!resolved.ok) return c.json({ error: resolved.error }, 400);
         repoInputs.push(resolved.repo);
       }
+      if (duplicateRepositoryLocation(repoInputs)) {
+        return c.json({ error: "the same repository was selected more than once" }, 400);
+      }
 
       const names = uniqueNames(repoInputs.map((r) => r.name ?? repoNameFromPath(r.localPath)));
       /** Absent when the project starts without a checkout. */
@@ -417,6 +421,10 @@ export function projectRoutes(ctx: AppContext) {
       const body = resolved.repo;
 
       const existing = await db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId));
+      const alreadyConnected = existing.find((row) => sameRepositoryLocation(row, body));
+      if (alreadyConnected) {
+        return c.json({ error: `This checkout is already connected as ${alreadyConnected.name}.` }, 409);
+      }
       const wanted = body.name ?? repoNameFromPath(body.localPath);
       // The reserved artifacts directory counts as taken; see uniqueNames.
       const taken = new Set([WORKSPACE_ARTIFACT_DIR, ...existing.map((r) => r.name)]);
