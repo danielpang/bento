@@ -3,6 +3,7 @@ import { repositories, sandboxes } from "@bento/db";
 import type { PreparedRepository, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
+import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { createRepositorySeed } from "./publish.js";
 
 /**
@@ -73,6 +74,19 @@ export async function provisionWorkspace(
 ): Promise<ProvisionedWorkspace> {
   const { repoRows, branch, workspaceKey } = input;
   const publisher = await githubConnectionFor(ctx, input.organizationId);
+
+  /**
+   * Two repositories pointing at one checkout would have their
+   * worktrees fight over the same .git, so the run stops here with a
+   * sentence naming both rather than failing somewhere further in.
+   */
+  const duplicateRepos = duplicateRepositoryLocation(repoRows);
+  if (duplicateRepos) {
+    throw new Error(
+      `Repositories ${duplicateRepos[0].name} and ${duplicateRepos[1].name} use the same checkout. ` +
+        "Remove one under Settings, Repositories, then run again.",
+    );
+  }
 
   const restarted = new Set(input.restartedRepoUrls ?? []);
   const prepared: PreparedRepository[] =

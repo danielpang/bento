@@ -32,6 +32,7 @@ import {
 import { githubForOrganization } from "../github.js";
 import { githubRemoteOf } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { duplicateRepositoryLocation, sameRepositoryLocation } from "../repository-identity.js";
 
 /**
  * The two shells a repository can carry. Shared by the add and edit
@@ -323,6 +324,9 @@ export function projectRoutes(ctx: AppContext) {
         if (!resolved.ok) return c.json({ error: resolved.error }, 400);
         repoInputs.push(resolved.repo);
       }
+      if (duplicateRepositoryLocation(repoInputs)) {
+        return c.json({ error: "the same repository was selected more than once" }, 400);
+      }
 
       const names = uniqueNames(repoInputs.map((r) => r.name ?? repoNameFromPath(r.localPath)));
       /** Absent when the project starts without a checkout. */
@@ -416,29 +420,50 @@ export function projectRoutes(ctx: AppContext) {
       if (!resolved.ok) return c.json({ error: resolved.error }, 400);
       const body = resolved.repo;
 
-      const existing = await db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId));
-      const wanted = body.name ?? repoNameFromPath(body.localPath);
-      // The reserved artifacts directory counts as taken; see uniqueNames.
-      const taken = new Set([WORKSPACE_ARTIFACT_DIR, ...existing.map((r) => r.name)]);
-      let name = wanted;
-      for (let i = 2; taken.has(name); i++) name = `${wanted}-${i}`;
+      const result = await db(c, ctx).transaction(async (tx) => {
+        // Serialize adds to this project across TUI sessions and server
+        // processes. Without the lock, two requests can both pass the
+        // duplicate check before either has inserted its row.
+        const [lockedProject] = await tx
+          .select({ id: projects.id })
+          .from(projects)
+          .where(eq(projects.id, projectId))
+          .for("update");
+        if (!lockedProject) return { kind: "missing" as const };
 
-      const [row] = await db(c, ctx)
-        .insert(repositories)
-        .values({
-          projectId,
-          name,
-          localPath: body.localPath,
-          repoUrl: body.repoUrl ?? null,
-          githubRepoId: body.githubRepoId,
-          defaultBranch: body.defaultBranch,
-          setupCommand: body.setupCommand ?? null,
-          testCommand: body.testCommand ?? null,
-          // One past the highest, not the row count: a count repeats a
-          // position whenever the rows below it are not contiguous.
-          position: existing.reduce((highest, r) => Math.max(highest, r.position + 1), 0),
-        })
-        .returning();
+        const existing = await tx.select().from(repositories).where(eq(repositories.projectId, projectId));
+        const alreadyConnected = existing.find((row) => sameRepositoryLocation(row, body));
+        if (alreadyConnected) return { kind: "duplicate" as const, name: alreadyConnected.name };
+
+        const wanted = body.name ?? repoNameFromPath(body.localPath);
+        // The reserved artifacts directory counts as taken; see uniqueNames.
+        const taken = new Set([WORKSPACE_ARTIFACT_DIR, ...existing.map((r) => r.name)]);
+        let name = wanted;
+        for (let i = 2; taken.has(name); i++) name = `${wanted}-${i}`;
+
+        const [row] = await tx
+          .insert(repositories)
+          .values({
+            projectId,
+            name,
+            localPath: body.localPath,
+            repoUrl: body.repoUrl ?? null,
+            githubRepoId: body.githubRepoId,
+            defaultBranch: body.defaultBranch,
+            setupCommand: body.setupCommand ?? null,
+            testCommand: body.testCommand ?? null,
+            // One past the highest, not the row count: a count repeats a
+            // position whenever the rows below it are not contiguous.
+            position: existing.reduce((highest, r) => Math.max(highest, r.position + 1), 0),
+          })
+          .returning();
+        return { kind: "added" as const, row };
+      });
+      if (result.kind === "missing") return c.json({ error: "not found" }, 404);
+      if (result.kind === "duplicate") {
+        return c.json({ error: `This checkout is already connected as ${result.name}.` }, 409);
+      }
+      const row = result.row;
       return c.json(row, 201);
     })
     /**

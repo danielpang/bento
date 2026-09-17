@@ -19,6 +19,7 @@ import {
   type SandboxHandle,
 } from "@bento/sandbox";
 import type { TokenStore } from "@bento/api-client";
+import { duplicateRepositoryLocation, localAgentAuthEnv, localAgentAuthMounts } from "@bento/server";
 
 const execFile = promisify(execFileCallback);
 
@@ -144,11 +145,33 @@ export class LocalRunner {
   private async execute(claimed: ClaimedRun): Promise<void> {
     const { run, feature, agent, repositories } = claimed;
     const adapter = getAdapter(agent.cli as Parameters<typeof getAdapter>[0]);
+    const names = credentialNamesFor(adapter, agent.model);
+    let credentials: Record<string, string> = {};
+    for (const name of [...names.required, ...names.optional, ...names.alternatives]) {
+      const value = process.env[name];
+      if (value) credentials[name] = value;
+    }
+    // A shared CLI login must never reach an Ollama endpoint.
+    const onOllama = runsOnOllama(names, credentials);
+    const authEnv = this.options.shareAgentAuth && !onOllama ? await localAgentAuthEnv(adapter) : {};
+    const authMounts =
+      this.options.shareAgentAuth && !onOllama && Object.keys(authEnv).length === 0 && this.driver.provider === "docker"
+        ? await localAgentAuthMounts(adapter)
+        : [];
 
     let handle: SandboxHandle;
     let workdir: string;
     try {
       if (repositories.length === 0) throw new Error("the project has no repositories");
+      const duplicate = duplicateRepositoryLocation(
+        repositories.map((repository) => ({ ...repository, githubRepoId: null })),
+      );
+      if (duplicate) {
+        throw new Error(
+          `Repositories ${duplicate[0].name} and ${duplicate[1].name} use the same checkout. ` +
+            "Remove one under Settings, Repositories, then run again.",
+        );
+      }
       const branch = feature.branchName ?? `feature/${feature.id.slice(0, 8)}`;
       /**
        * The new branch starts at origin/<base>, and this machine's
@@ -187,11 +210,14 @@ export class LocalRunner {
          */
         mounts:
           this.driver.provider === "docker"
-            ? repositories.map((r) => ({
-                hostPath: `${r.localPath.replace(/\/$/, "")}/.git`,
-                containerPath: `${r.localPath.replace(/\/$/, "")}/.git`,
-                readOnly: false,
-              }))
+            ? [
+                ...repositories.map((r) => ({
+                  hostPath: `${r.localPath.replace(/\/$/, "")}/.git`,
+                  containerPath: `${r.localPath.replace(/\/$/, "")}/.git`,
+                  readOnly: false,
+                })),
+                ...authMounts,
+              ]
             : [],
         ...(this.options.sandboxImage ? { image: this.options.sandboxImage } : {}),
       });
@@ -214,21 +240,13 @@ export class LocalRunner {
       ...(run.role ? { role: run.role } : {}),
     });
 
-    // Credentials come from this machine's environment and never reach
-    // the server, which is the point of running agents locally.
-    // An ollama/ model is given Ollama's credentials only.
-    let credentials: Record<string, string> = {};
+    // Credentials come from this machine and never reach the server.
     // Same names the server forwards: requiredEnvFor replaces requiredEnv,
     // so a Codex OpenRouter run does not also pick up OPENAI_API_KEY here.
-    const names = credentialNamesFor(adapter, agent.model);
-    for (const name of [...names.required, ...names.optional, ...names.alternatives]) {
-      const value = process.env[name];
-      if (value) credentials[name] = value;
-    }
     // A run on Ollama is given Ollama's credentials only, as on the server,
     // with the same loopback rewrite for a Docker sandbox and the same
     // refusal to start Ollama Cloud without a key.
-    if (runsOnOllama(names, credentials)) {
+    if (onOllama) {
       credentials = ollamaCredentialsOnly(credentials);
       if (credentials.OLLAMA_BASE_URL) {
         credentials.OLLAMA_BASE_URL = ollamaUrlFromSandbox(credentials.OLLAMA_BASE_URL, this.driver.provider);
@@ -243,6 +261,7 @@ export class LocalRunner {
         return;
       }
     }
+    credentials = { ...credentials, ...authEnv };
 
     const commandInput = {
       prompt,

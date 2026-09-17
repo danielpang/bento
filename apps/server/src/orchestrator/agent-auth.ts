@@ -32,6 +32,13 @@ export async function agentAuthMounts(
   adapter: AgentAdapter,
 ): Promise<{ hostPath: string; containerPath: string; readOnly: boolean }[]> {
   if (!(await shouldShareAgentAuth(ctx))) return [];
+  return localAgentAuthMounts(adapter);
+}
+
+/** Read login files from the machine running an agent. Callers choose whether sharing is enabled. */
+export async function localAgentAuthMounts(
+  adapter: AgentAdapter,
+): Promise<{ hostPath: string; containerPath: string; readOnly: boolean }[]> {
   // Cursor writes project state, settings and MCP caches under ~/.cursor.
   // Share its login through the environment, never a read-only home mount.
   if (adapter.cli === "cursor") return [];
