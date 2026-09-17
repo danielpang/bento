@@ -4887,13 +4887,15 @@ test("a build-only setup command is deferred to agent checks", { timeout: 120_00
     assert.equal(await waitForRun(started.id, 90_000), "succeeded");
     const transcript = await (await app.request(`/api/runs/${started.id}/transcript`)).text();
     assert.doesNotMatch(transcript, /Setting up .*: turbo/);
-    assert.match(transcript, /after edits/);
+    assert.doesNotMatch(transcript, /The build or test command for/);
     assert.ok(prompts.some((prompt) => prompt.includes("turbo run build && pnpm test") && prompt.includes("Build and test after making your changes")));
     const followUp = await json<{ id: string }>(await app.request("/api/runs", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "Check again" }),
     }));
     assert.equal(await waitForRun(followUp.id, 90_000), "succeeded");
+    const followUpTranscript = await (await app.request(`/api/runs/${followUp.id}/transcript`)).text();
+    assert.doesNotMatch(followUpTranscript, /The build or test command for/);
     assert.match(prompts.at(-1)!, /turbo run build && pnpm test/);
     assert.match(prompts.at(-1)!, /Build and test after making your changes/);
   } finally { spy.mock.restore(); }

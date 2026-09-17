@@ -59,12 +59,6 @@ export async function runRepositorySetup(
     const commands = resolveRepositoryCommands(repo);
     return { ...repo, setupCommand: commands.setupCommand };
   });
-  for (const repo of args.repositories) {
-    if (resolveRepositoryCommands(repo).deferredSetup)
-      await args.say(
-        `The build or test command for ${repo.name} will run as an agent check after edits, not before the agent starts: ${repo.setupCommand}`,
-      );
-  }
   const fingerprint = setupFingerprint(repositories);
   if (!fingerprint) return null;
 
