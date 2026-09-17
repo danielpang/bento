@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -373,5 +373,25 @@ export class WorktreeManager {
     } catch {
       // Already gone or never created.
     }
+  }
+
+  /**
+   * Drops every worktree in a feature's workspace, then the workspace
+   * directory itself.
+   *
+   * `remove` first: deleting a live worktree with plain `rm` leaves a
+   * stale registration in the origin repository that later `worktree add`
+   * calls trip over. The directory goes after, so leftover files the
+   * agents wrote beside the worktrees (node_modules, build output) go
+   * with it. Idempotent: a workspace that is already gone is a no-op.
+   */
+  async removeWorkspace(
+    repos: { name: string; localPath: string }[],
+    featureId: string,
+  ): Promise<void> {
+    for (const repo of repos) {
+      await this.remove(repo.localPath, featureId, repo.name);
+    }
+    await rm(this.workspacePath(featureId), { recursive: true, force: true });
   }
 }

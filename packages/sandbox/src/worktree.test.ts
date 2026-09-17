@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -323,4 +323,63 @@ test("a missing local base fails instead of silently inheriting HEAD", async () 
     ),
     /Base branch missing was not found/,
   );
+});
+
+/**
+ * Marking a card done has to give the disk back: the worktrees
+ * deregistered so a later add is not blocked by a stale record, and
+ * the workspace directory gone so leftover node_modules do not sit
+ * around forever. The branch itself stays in the origin repository.
+ */
+test("removeWorkspace deregisters the worktrees and deletes the workspace", async () => {
+  const repo = await fixtureRepo();
+  const dataDir = await scratchDir("bento-remove-ws-");
+  const manager = new WorktreeManager(dataDir);
+  const featureId = "feat-remove";
+  const [prepared] = await manager.ensureAll(
+    [{ name: "app", localPath: repo }],
+    featureId,
+    "feature/cleanup",
+  );
+  await writeFile(path.join(prepared!.worktreePath, "WIP.md"), "uncommitted\n");
+  await mkdir(path.join(manager.workspacePath(featureId), "node_modules"), { recursive: true });
+
+  await manager.removeWorkspace([{ name: "app", localPath: repo }], featureId);
+
+  await assert.rejects(() => stat(manager.workspacePath(featureId)), { code: "ENOENT" });
+  const { stdout } = await run("git", ["-C", repo, "worktree", "list", "--porcelain"]);
+  assert.equal(stdout.includes(prepared!.worktreePath), false, "the origin no longer lists the worktree");
+  const { stdout: branch } = await run("git", ["-C", repo, "branch", "--list", "feature/cleanup"]);
+  assert.match(branch, /feature\/cleanup/, "the committed branch survives in the origin");
+
+  await manager.removeWorkspace([{ name: "app", localPath: repo }], featureId);
+});
+
+test("a worktree reaped and then ensured again comes back with its commits", async () => {
+  const repo = await fixtureRepo();
+  const dataDir = await scratchDir("bento-reopen-ws-");
+  const manager = new WorktreeManager(dataDir);
+  const featureId = "feat-reopen";
+  const branch = "feature/keep-me";
+  const [worked] = await manager.ensureAll([{ name: "app", localPath: repo }], featureId, branch);
+  await writeFile(path.join(worked!.worktreePath, "kept.md"), "committed work\n");
+  await run("git", ["-C", worked!.worktreePath, "add", "-A"]);
+  await run("git", [
+    "-C",
+    worked!.worktreePath,
+    "-c",
+    "user.email=t@t.test",
+    "-c",
+    "user.name=t",
+    "commit",
+    "-qm",
+    "keep this",
+  ]);
+  const { stdout: sha } = await run("git", ["-C", worked!.worktreePath, "rev-parse", "HEAD"]);
+
+  await manager.removeWorkspace([{ name: "app", localPath: repo }], featureId);
+  const [again] = await manager.ensureAll([{ name: "app", localPath: repo }], featureId, branch);
+
+  const { stdout: head } = await run("git", ["-C", again!.worktreePath, "rev-parse", "HEAD"]);
+  assert.equal(head.trim(), sha.trim(), "the branch's commits are still there after the workspace was removed");
 });
