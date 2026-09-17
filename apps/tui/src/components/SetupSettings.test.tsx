@@ -91,6 +91,8 @@ test("pipeline remains visible when an unrelated Settings request fails", async 
   );
   try {
     await ready(ui, "0 of 2 have an agent");
+    assert.match(ui.lastFrame()!, /Project, could not load repositories/);
+    assert.doesNotMatch(ui.lastFrame()!, /0 checked out/);
     ui.stdin.write("j");
     ui.stdin.write("j");
     await pause();
@@ -135,13 +137,36 @@ test("opening pipeline settings reloads all six stages from the board project", 
 
 test("pipeline load failure is shown instead of zero stages", async () => {
   const f = fixture();
+  f.setRepositories([{
+    id: "repo-one",
+    projectId: "project",
+    name: "bento",
+    localPath: "/work/bento",
+    repoUrl: null,
+    githubRepoId: null,
+    defaultBranch: "main",
+    setupCommand: null,
+    testCommand: null,
+  }]);
+  f.client.getMachineSettings = async () =>
+    ({
+      mode: "local",
+      shareAgentAuth: true,
+      logins: [{ cli: "claude-code", signedIn: true, detail: "Ready to share" }],
+    }) as Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
   f.client.getPipeline = async () => { throw new Error("pipeline lookup failed"); };
   const ui = render(
-    <Setup client={f.client} repositoryPathOwner="server" agentsRunLocally={false} selectedProjectId="project" onDone={() => {}} />,
+    <Setup client={f.client} repositoryPathOwner="server" agentsRunLocally selectedProjectId="project" onDone={() => {}} />,
   );
   try {
     await ready(ui, "could not load stages");
     assert.doesNotMatch(ui.lastFrame()!, /0 of 0 have an agent/);
+    assert.match(ui.lastFrame()!, /Project, 1 checked out/);
+    assert.match(ui.lastFrame()!, /sharing on, Claude Code/);
+    ui.stdin.write("\r");
+    await ready(ui, "bento · /work/bento");
+    ui.stdin.write("\x1b");
+    await ready(ui, "could not load stages");
     ui.stdin.write("j");
     ui.stdin.write("j");
     await pause();

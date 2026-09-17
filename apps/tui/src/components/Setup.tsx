@@ -178,6 +178,7 @@ export function Setup({
   const indexRef = useRef(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [repos, setRepos] = useState<Repository[]>([]);
+  const [reposError, setReposError] = useState("");
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
   const [stages, setStages] = useState<Stage[]>([]);
   /** Needed to append a stage; a project has exactly one pipeline. */
@@ -225,32 +226,9 @@ export function Setup({
     setCanManageCredentials(secretRows.canManage);
     setMachine(machineRow);
     setTools(toolRows);
-    const first =
-      projectRows.find((p) => p.id === selectedProjectId || p.name === selectedProjectId) ?? projectRows[0];
-    if (first) {
-      try {
-        const pipeline = await client.getPipeline(first.id);
-        setStages(pipeline.stages);
-        setPipelineId(pipeline.id);
-        setPipelineLoaded(true);
-        setPipelineError("");
-      } catch (err) {
-        setPipelineLoaded(false);
-        setPipelineError(`Could not load pipeline: ${message(err)}`);
-        throw err;
-      }
-      setRepos(await client.listRepositories(first.id));
-    } else {
-      setStages([]);
-      setPipelineId(null);
-      setPipelineLoaded(false);
-      setPipelineError("");
-      setRepos([]);
-    }
-    // In local mode the server is this process, so its report and this
-    // machine's are the same answer. With a remote server they are not:
-    // the agents run here, so the logins that matter are here, and the
-    // server's own are none of this machine's business.
+    // In local mode the server's login report describes this machine.
+    // With a remote server, probe where the agents actually run instead.
+    // A failed project request must not hide a usable login.
     setLogins(
       !runnerMode && machineRow && machineRow.mode === "local" && machineRow.logins.length > 0
         ? machineRow.logins.map((row) => ({
@@ -263,6 +241,40 @@ export function Setup({
           ? await localLogins().catch(() => [])
           : [],
     );
+    const first =
+      projectRows.find((p) => p.id === selectedProjectId || p.name === selectedProjectId) ?? projectRows[0];
+    if (first) {
+      const [pipelineResult, reposResult] = await Promise.allSettled([
+        client.getPipeline(first.id),
+        client.listRepositories(first.id),
+      ]);
+      if (pipelineResult.status === "fulfilled") {
+        const pipeline = pipelineResult.value;
+        setStages(pipeline.stages);
+        setPipelineId(pipeline.id);
+        setPipelineLoaded(true);
+        setPipelineError("");
+      } else {
+        setStages([]);
+        setPipelineId(null);
+        setPipelineLoaded(false);
+        setPipelineError(`Could not load pipeline: ${message(pipelineResult.reason)}`);
+      }
+      if (reposResult.status === "fulfilled") {
+        setRepos(reposResult.value);
+        setReposError("");
+      } else {
+        setRepos([]);
+        setReposError(`Could not load repositories: ${message(reposResult.reason)}`);
+      }
+    } else {
+      setStages([]);
+      setPipelineId(null);
+      setPipelineLoaded(false);
+      setPipelineError("");
+      setRepos([]);
+      setReposError("");
+    }
   }
 
   useEffect(() => {
@@ -278,12 +290,16 @@ export function Setup({
     let active = true;
     setLoading(true);
     setRepos([]);
+    setReposError("");
     void client.listRepositories(project.id)
       .then((rows) => {
-        if (active) setRepos(rows);
+        if (active) {
+          setRepos(rows);
+          setReposError("");
+        }
       })
       .catch((err: unknown) => {
-        if (active) setError(`Could not load repositories: ${message(err)}`);
+        if (active) setReposError(`Could not load repositories: ${message(err)}`);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -471,7 +487,11 @@ export function Setup({
   const hubRows = [
     {
       label: "Repositories",
-      status: project ? `${project.name}, ${repos.length} checked out` : "none connected yet",
+      status: !project
+        ? "none connected yet"
+        : reposError
+          ? `${project.name}, could not load repositories`
+          : `${project.name}, ${repos.length} checked out`,
       open: () => go({ name: "repos" }),
     },
     {
@@ -1377,7 +1397,7 @@ export function Setup({
           title={project ? `Repositories · ${project.name}` : "Repositories"}
           hint="j/k move · Enter commands · d remove · Escape back"
           notice={notice}
-          error={error}
+          error={reposError || error}
         >
           <Text color="gray">Repositories connected to this project.</Text>
           <Box flexDirection="column" marginTop={1}>
@@ -1389,7 +1409,7 @@ export function Setup({
                 status={`${repo.localPath}${repo.setupCommand ? ` · setup: ${repo.setupCommand}` : ""}${repo.testCommand ? ` · test: ${repo.testCommand}` : ""}`}
               />
             ))}
-            {repos.length === 0 && !error && project && (
+            {repos.length === 0 && !reposError && !error && project && (
               <Text color="gray">No repositories connected to {project.name}.</Text>
             )}
             <Row
