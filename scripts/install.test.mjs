@@ -38,7 +38,7 @@ before(async () => {
 if (process.argv[2] === 'update') {
   try { await (await import('./update.js')).runUpdate(); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
-} else console.log(process.argv[2] === '--version' ? JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version : 'Bento usage');\n`);
+} else console.log(process.argv[2] === '--version' ? 'v' + JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version : 'Bento usage');\n`);
     const updater = ts.transpileModule(await readFile(path.join(root, "apps/tui/src/update.ts"), "utf8"), {
       compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
     }).outputText;
@@ -118,7 +118,7 @@ test("latest installation downloads the native archive, verifies it, and runs th
   await execFile("sh", ["-c", "curl -fsSL https://usebento.ai/install.sh | sh"], {
     env, cwd: temporary, timeout: 120_000,
   });
-  assert.equal(await installedVersion(), releaseVersion(tag));
+  assert.equal(await installedVersion(), tag);
   assert.ok(requests.includes("/latest"));
   assert.ok(requests.includes("/domain-install"));
   assert.ok(requests.includes("/install.sh"));
@@ -138,7 +138,7 @@ test("the installer also runs under dash without Bash extensions", async (t) => 
     throw error;
   }
   await execFile("dash", [installer, tag], { env, cwd: temporary, timeout: 120_000 });
-  assert.equal(await installedVersion(), releaseVersion(tag));
+  assert.equal(await installedVersion(), tag);
 });
 
 test("release installers pin their version and upgrades replace the installation", async () => {
@@ -147,20 +147,20 @@ test("release installers pin their version and upgrades replace the installation
   await writeFile(path.join(env.BENTO_INSTALL_DIR, "obsolete"), "old installation");
   requests = [];
   await install([], {}, pinned);
-  assert.equal(await installedVersion(), releaseVersion(tag));
+  assert.equal(await installedVersion(), tag);
   await assert.rejects(stat(path.join(env.BENTO_INSTALL_DIR, "obsolete")), { code: "ENOENT" });
   assert.ok(!requests.includes("/latest"));
   // A release script still permits an explicit version override.
   await assert.rejects(install(["v99.99.99"], {}, pinned));
   assert.ok(requests.some((url) => url.startsWith("/v99.99.99/")));
-  assert.equal(await installedVersion(), releaseVersion(tag));
+  assert.equal(await installedVersion(), tag);
 });
 
 test("checksum failures preserve the working installation", async () => {
   corruptChecksum = true;
   try {
     await assert.rejects(install([tag]), (error) => /checksum verification failed/.test(error.stderr));
-    assert.equal(await installedVersion(), releaseVersion(tag));
+    assert.equal(await installedVersion(), tag);
   } finally { corruptChecksum = false; }
 });
 
@@ -172,7 +172,7 @@ test("unsafe destinations and invalid versions fail without replacing the instal
   await writeFile(path.join(unrelated, "keep.txt"), "preserve this");
   await assert.rejects(install([tag], { BENTO_INSTALL_DIR: unrelated }), (error) => /another application/.test(error.stderr));
   assert.equal(await readFile(path.join(unrelated, "keep.txt"), "utf8"), "preserve this");
-  assert.equal(await installedVersion(), releaseVersion(tag));
+  assert.equal(await installedVersion(), tag);
 });
 
 test("old Node versions and unsupported platforms fail before download", async () => {
@@ -207,7 +207,7 @@ test("bento update skips downloads when current and ignores leftover installer o
   });
   assert.match(stdout, /already up to date/);
   assert.deepEqual(requests, ["/latest"]);
-  assert.equal(await installedVersion(), releaseVersion(tag));
+  assert.equal(await installedVersion(), tag);
 });
 
 test("bento update replaces its own installation and keeps custom paths and user data", async () => {
@@ -218,7 +218,7 @@ test("bento update replaces its own installation and keeps custom paths and user
   await mkdir(userData);
   await writeFile(path.join(userData, "settings.json"), '{"keep":true}');
   const { stdout } = await update({ BENTO_DATA_DIR: userData });
-  assert.equal(await installedVersion(), releaseVersion(tag));
+  assert.equal(await installedVersion(), tag);
   assert.match(stdout, /Restart Bento/);
   assert.match(stdout, /docker build/);
   assert.equal(await readFile(path.join(userData, "settings.json"), "utf8"), '{"keep":true}');
@@ -232,7 +232,7 @@ test("bento update preserves the installed CLI when checksum verification fails"
   corruptChecksum = true;
   try {
     await assert.rejects(update(), (error) => /checksum verification failed/.test(error.stderr));
-    assert.equal(await installedVersion(), "0.0.0");
+    assert.equal(await installedVersion(), "v0.0.0");
   } finally {
     corruptChecksum = false;
     await setInstalledVersion(releaseVersion(tag));
@@ -243,7 +243,7 @@ test("bento update handles unpublished or unavailable releases without replacing
   missingRelease = true;
   try {
     await assert.rejects(update(), (error) => /Could not resolve the latest release/.test(error.stderr));
-    assert.equal(await installedVersion(), releaseVersion(tag));
+    assert.equal(await installedVersion(), tag);
   } finally { missingRelease = false; }
 });
 
@@ -255,7 +255,7 @@ test("bento update refuses source and unmanaged installations before any downloa
   try {
     await assert.rejects(update(), (error) => /source checkout.*Git/.test(error.stderr));
     assert.deepEqual(requests, []);
-    assert.equal(await installedVersion(), releaseVersion(tag));
+    assert.equal(await installedVersion(), tag);
   } finally { await writeFile(marker, metadata); }
 });
 
