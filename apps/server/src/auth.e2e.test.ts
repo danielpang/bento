@@ -1142,6 +1142,7 @@ test("custom providers keep definitions and keys inside their organization", asy
         baseUrl: "https://other.example.test/v1", models: [{ id: "reasoning-a", name: "Other model" }] }),
     });
     assert.equal(reused.status, 409);
+    assert.match((await reused.json() as { error: string }).error, /cannot be reused/);
     assert.equal((await customProviderRunEnv(ctx, secondOrg.id, "codex", "responses-models/reasoning-a")), null);
 
     const project = await jsonPost("/api/projects", { name: "Retired provider run", localPath: "/tmp" }, firstToken);

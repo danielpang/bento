@@ -65,9 +65,11 @@ export function customProviderRoutes(ctx: AppContext) {
       if (!permission.canManage) return c.json({ error: "only owners and admins can manage providers" }, 403);
       const body = c.req.valid("json");
       if (reservedSlug(body.slug)) return c.json({ error: "provider ID is reserved" }, 409);
-      const [duplicate] = await db(c, ctx).select({ id: customModelProviders.id }).from(customModelProviders)
+      const [duplicate] = await db(c, ctx).select({ id: customModelProviders.id, deletedAt: customModelProviders.deletedAt }).from(customModelProviders)
         .where(and(permission.where, eq(customModelProviders.slug, body.slug)));
-      if (duplicate) return c.json({ error: "provider ID is already in use" }, 409);
+      if (duplicate) return c.json({ error: duplicate.deletedAt
+        ? "provider ID was removed and cannot be reused"
+        : "provider ID is already in use" }, 409);
       const [created] = await db(c, ctx).insert(customModelProviders).values({
         ...body, ownerId: actor(c), organizationId: permission.orgId,
       }).onConflictDoNothing().returning();

@@ -154,7 +154,7 @@ export function CustomProvidersSettings({ client }: { client: BentoClient }) {
       <CustomProviderKeyField client={client} provider={provider} canManage={canManage} onChanged={() => void reload()} />
     </section>)}
     {removing && <ConfirmDialog title={`Remove ${removing.name}?`}
-      description="Agents using this provider will stop running until another provider is selected."
+      description="Agents using this provider will stop running until another provider is selected. This provider ID cannot be reused."
       confirmLabel="Remove" destructive onClose={() => setRemoving(null)} onConfirm={() => void deleteProvider()} />}
   </>;
 }
