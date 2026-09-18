@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq, isNull } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { MODEL_CATALOG } from "@bento/core";
+import { CUSTOM_PROVIDER_PROTOCOLS, MODEL_CATALOG } from "@bento/core";
 import { customModelProviders } from "@bento/db";
 import { getAccessibleCustomProvider, getActiveOrganizationMembership } from "../access.js";
 import type { AppContext } from "../context.js";
@@ -16,7 +16,7 @@ const model = z.object({ id: z.string().min(1).max(160).regex(/^\S+$/, "Model ID
 const providerInput = z.object({
   slug,
   name: z.string().min(1).max(100),
-  protocol: z.enum(["openai", "openai-responses", "anthropic"]),
+  protocol: z.enum(CUSTOM_PROVIDER_PROTOCOLS),
   baseUrl: z.string().url().max(2048).refine((value) => {
     const url = new URL(value);
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
@@ -28,7 +28,7 @@ const reservedSlug = (value: string) => MODEL_CATALOG.some((provider) =>
   provider.id === value || provider.models.some((entry) => entry.id.startsWith(`${value}/`)));
 
 function publicProvider(row: typeof customModelProviders.$inferSelect) {
-  const { encryptedApiKey: _key, ...safe } = row;
+  const { encryptedApiKey: _key, deletedAt: _deletedAt, ...safe } = row;
   return { ...safe, hasApiKey: Boolean(row.encryptedApiKey) };
 }
 
@@ -56,7 +56,7 @@ export function customProviderRoutes(ctx: AppContext) {
     .get("/", async (c) => {
       const permission = await scope(c);
       if (!permission) return c.json({ error: "not found" }, 404);
-      const rows = await db(c, ctx).select().from(customModelProviders).where(permission.where);
+      const rows = await db(c, ctx).select().from(customModelProviders).where(and(permission.where, isNull(customModelProviders.deletedAt)));
       return c.json({ providers: rows.map(publicProvider), canManage: permission.canManage });
     })
     .post("/", zValidator("json", providerInput), async (c) => {
@@ -115,7 +115,9 @@ export function customProviderRoutes(ctx: AppContext) {
       const found = await accessible(c);
       if (!found) return c.json({ error: "not found" }, 404);
       if (!found.permission.canManage) return c.json({ error: "only owners and admins can manage providers" }, 403);
-      await db(c, ctx).delete(customModelProviders).where(and(eq(customModelProviders.id, found.provider.id), found.permission.where));
+      await db(c, ctx).update(customModelProviders)
+        .set({ deletedAt: new Date(), encryptedApiKey: null, keyHint: null, updatedAt: new Date() })
+        .where(and(eq(customModelProviders.id, found.provider.id), found.permission.where));
       return c.json({ ok: true });
     });
 }

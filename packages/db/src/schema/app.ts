@@ -14,6 +14,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import { CUSTOM_PROVIDER_PROTOCOLS } from "@bento/core";
 import { organization, user } from "./identity.js";
 
 const timestamps = {
@@ -728,11 +729,12 @@ export const customModelProviders = pgTable(
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
-    protocol: text("protocol", { enum: ["openai", "openai-responses", "anthropic"] }).notNull(),
+    protocol: text("protocol", { enum: CUSTOM_PROVIDER_PROTOCOLS }).notNull(),
     baseUrl: text("base_url").notNull(),
     models: jsonb("models").$type<{ id: string; name: string }[]>().notNull(),
     encryptedApiKey: text("encrypted_api_key"),
     keyHint: text("key_hint"),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     ...timestamps,
   },
   (t) => [

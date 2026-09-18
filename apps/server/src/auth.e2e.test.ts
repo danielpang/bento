@@ -20,7 +20,7 @@ import {
   user,
   verification,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
 import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -39,6 +39,7 @@ import { loadEnv } from "./env.js";
 import { createFeatureFlags, FeatureFlags } from "./feature-flags.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { customProviderRunEnv } from "./orchestrator/custom-provider.js";
+import { executeRun } from "./orchestrator/run-executor.js";
 import { agentAuthEnv } from "./orchestrator/agent-auth.js";
 import { shouldShareAgentAuth } from "./settings.js";
 
@@ -1086,6 +1087,7 @@ test("custom providers keep definitions and keys inside their organization", asy
       method: "POST", body: JSON.stringify({ name: "Custom Codex", cli: "codex", model: "responses-models/reasoning-a" }),
     });
     assert.equal(codexProfile.status, 201);
+    const codexProfileId = (await codexProfile.json() as { id: string }).id;
     const memberList = await asUser(memberToken, "/api/custom-providers");
     assert.equal((await memberList.json() as { providers: unknown[] }).providers.length, 3);
     const memberWrite = await asUser(memberToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "stolen" }) });
@@ -1106,6 +1108,73 @@ test("custom providers keep definitions and keys inside their organization", asy
     const after = await asUser(firstToken, `/api/custom-providers/${provider.id}`);
     assert.equal(after.status, 200);
     assert.doesNotMatch(await after.text(), /sk-private-123456789/);
+
+    const replacedKey = await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, {
+      method: "PUT", body: JSON.stringify({ apiKey: "sk-replacement-123456789" }),
+    });
+    assert.equal(replacedKey.status, 200);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-replacement-123456789");
+    assert.equal((await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, { method: "DELETE" })).status, 200);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.missingKey, true);
+    const edited = await asUser(firstToken, `/api/custom-providers/${provider.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...input, models: [{ id: "replacement-model", name: "Replacement model" }] }),
+    });
+    assert.equal(edited.status, 200);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.missingModel, true);
+
+    // Keep the slug reserved after removal. Existing agents must fail closed
+    // instead of treating a custom slug as a built-in Codex or fx route.
+    const removed = await asUser(firstToken, `/api/custom-providers/${responsesId}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    const retired = await customProviderRunEnv(ctx, firstOrg.id, "codex", "responses-models/reasoning-a");
+    assert.equal(retired?.disabled, true);
+    assert.deepEqual(retired?.env, {});
+    assert.equal((await asUser(firstToken, `/api/custom-providers/${responsesId}`)).status, 404);
+    assert.equal((await asUser(firstToken, `/api/custom-providers/${responsesId}/key`, {
+      method: "PUT", body: JSON.stringify({ apiKey: "sk-reenabled" }),
+    })).status, 404);
+    const visible = await asUser(firstToken, "/api/custom-providers");
+    assert.equal((await visible.json() as { providers: unknown[] }).providers.length, 2);
+    const reused = await asUser(firstToken, "/api/custom-providers", {
+      method: "POST",
+      body: JSON.stringify({ slug: "responses-models", name: "Other endpoint", protocol: "openai-responses",
+        baseUrl: "https://other.example.test/v1", models: [{ id: "reasoning-a", name: "Other model" }] }),
+    });
+    assert.equal(reused.status, 409);
+    assert.equal((await customProviderRunEnv(ctx, secondOrg.id, "codex", "responses-models/reasoning-a")), null);
+
+    const project = await jsonPost("/api/projects", { name: "Retired provider run", localPath: "/tmp" }, firstToken);
+    assert.equal(project.status, 201);
+    const projectId = (await project.json() as { id: string }).id;
+    const pipeline = await asUser(firstToken, `/api/projects/${projectId}/pipeline`);
+    const pipelineStages = (await pipeline.json() as { stages: { id: string }[] }).stages;
+    for (const stage of pipelineStages) {
+      assert.equal((await asUser(firstToken, `/api/stages/${stage.id}`, {
+        method: "PATCH", body: JSON.stringify({ defaultAgentProfileId: null }),
+      })).status, 200);
+    }
+    const feature = await jsonPost("/api/features", { projectId, title: "Do not launch Codex" }, firstToken);
+    assert.equal(feature.status, 201);
+    const featureId = (await feature.json() as { id: string }).id;
+    assert.equal((await asUser(firstToken, `/api/features/${featureId}/advance`, { method: "POST" })).status, 200);
+    const started = await asUser(firstToken, "/api/runs", {
+      method: "POST", body: JSON.stringify({ featureId, agentProfileId: codexProfileId }),
+    });
+    assert.equal(started.status, 201, await started.clone().text());
+    const runId = (await started.json() as { id: string }).id;
+    const previousDriver = ctx.driver;
+    let provisioned = false;
+    ctx.driver = {
+      provider: "local-process",
+      provision: async () => { provisioned = true; throw new Error("a removed provider must fail before provisioning"); },
+    } as unknown as SandboxDriver;
+    try { await executeRun(ctx, runId); } finally { ctx.driver = previousDriver; }
+    const [finished] = await ctx.db.select({ status: agentRuns.status, error: agentRuns.error })
+      .from(agentRuns).where(eq(agentRuns.id, runId));
+    assert.equal(provisioned, false);
+    assert.equal(finished?.status, "failed");
+    assert.match(finished?.error ?? "", /custom provider is not available/);
   } finally { ctx.featureFlags = previous; }
 });
 

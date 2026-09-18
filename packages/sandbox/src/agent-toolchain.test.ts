@@ -156,14 +156,35 @@ test("adding muse does not bump TOOLCHAIN_VERSION", async () => {
 test("adding fx does not bump TOOLCHAIN_VERSION", async () => {
   assert.equal(TOOLCHAIN_VERSION, 3, "adding fx must not stampede warm machines with a version bump");
   assert.match(AGENT_TOOLCHAIN_SCRIPT, /https:\/\/fx\.sh\/setup\.sh/);
+  assert.match(AGENT_TOOLCHAIN_SCRIPT, /fx" upgrade --channel dev --json/);
+  assert.match(AGENT_TOOLCHAIN_SCRIPT, /FX_CUSTOM_MARKER=\/opt\/bento\/fx-custom-connections/);
   assert.match(AGENT_TOOLCHAIN_SCRIPT, /FX_INSTALL_DIR=/);
   const image = await readFile(dockerfile, "utf8");
   assert.ok(image.includes("https://fx.sh/setup.sh"), "the Docker image never installs fx");
+  assert.ok(image.includes("upgrade --channel dev --json"), "the Docker image needs fx custom connections");
   assert.ok(image.includes("FX_INSTALL_DIR="), "the Docker image lets the installer pick its own bin dir");
   assert.ok(
     image.includes("for tool in agy claude codex cursor-agent dsh fx muse opencode pi pool"),
     "the Docker image PATH check never mentions fx",
   );
+});
+
+test("a warm machine upgrades only fx when custom connections are missing", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-fx-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.equal(sandbox.run().status, 0);
+    const marker = path.join(root, "opt/bento/fx-custom-connections");
+    assert.equal(existsSync(marker), true);
+    rmSync(marker);
+    const upgraded = sandbox.run();
+    assert.equal(upgraded.status, 0, upgraded.stderr);
+    assert.deepEqual(sandbox.fetched(), ["https://fx.sh/setup.sh"]);
+    assert.equal(existsSync(marker), true);
+    assert.deepEqual(toolchainMissing(upgraded.stdout), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 /**

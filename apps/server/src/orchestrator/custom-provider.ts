@@ -10,6 +10,7 @@ export interface CustomProviderRunConfig {
   missingKey: boolean;
   missingModel?: boolean;
   unsupported?: boolean;
+  disabled?: boolean;
 }
 
 /** Resolve the selected organization provider and the config its harness needs. */
@@ -29,6 +30,7 @@ export async function customProviderRunEnv(
     eq(customModelProviders.slug, slug),
   ));
   if (!row) return null;
+  if (row.deletedAt) return { env: {}, missingKey: false, disabled: true };
   const modelId = model.slice(slug.length + 1);
   if (!row.models.some((entry) => entry.id === modelId)) return { env: {}, missingKey: false, missingModel: true };
   if (!supportsCustomProvider(cli, row.protocol)) return { env: {}, missingKey: false, unsupported: true };

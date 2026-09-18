@@ -5,6 +5,7 @@ import {
   agentRunPrompt,
   forgetsBetweenRuns,
   missingOllamaCredentials,
+  customProviderRunError,
   modelGuidanceFor,
   ollamaCredentialsOnly,
   ollamaUrlFromSandbox,
@@ -146,20 +147,9 @@ export class LocalRunner {
 
   private async execute(claimed: ClaimedRun): Promise<void> {
     const { run, feature, agent, repositories } = claimed;
-    if (claimed.customProvider?.disabled) {
-      await this.complete(run.id, { ok: false, error: "This custom provider is not available for this run." });
-      return;
-    }
-    if (claimed.customProvider?.missingKey) {
-      await this.complete(run.id, { ok: false, error: "This custom provider has no API key. Add one under Agents or Settings, Providers." });
-      return;
-    }
-    if (claimed.customProvider?.missingModel) {
-      await this.complete(run.id, { ok: false, error: "This model is no longer listed for its custom provider. Update the agent or the provider under Settings, Providers." });
-      return;
-    }
-    if (claimed.customProvider?.unsupported) {
-      await this.complete(run.id, { ok: false, error: `${agent.cli} cannot use this custom provider's protocol. Choose a supported agent tool.` });
+    const providerError = claimed.customProvider && customProviderRunError(claimed.customProvider, agent.cli);
+    if (providerError) {
+      await this.complete(run.id, { ok: false, error: providerError });
       return;
     }
     const adapter = getAdapter(agent.cli as Parameters<typeof getAdapter>[0]);

@@ -49,7 +49,8 @@ export async function getActiveOrganizationMembership(ctx: AppContext, c: Contex
 /** Re-check live membership before acting on a custom provider id. */
 export async function getAccessibleCustomProvider(ctx: AppContext, c: Context, id: string) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
-  const [provider] = await db(c, ctx).select().from(customModelProviders).where(eq(customModelProviders.id, id));
+  const [provider] = await db(c, ctx).select().from(customModelProviders)
+    .where(and(eq(customModelProviders.id, id), isNull(customModelProviders.deletedAt)));
   if (!provider) return null;
   if (ctx.env.BENTO_MODE !== "multi") return provider.ownerId === actor(c) ? provider : null;
   const membership = await getActiveOrganizationMembership(ctx, c);

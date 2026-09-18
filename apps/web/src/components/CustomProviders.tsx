@@ -121,7 +121,7 @@ export function CustomProvidersSettings({ client }: { client: BentoClient }) {
   return <>
     <section className="section settings-card">
       <h3 className="settings-title">Custom model providers</h3>
-      <p className="muted">Add an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint. OpenCode, pi, and dsh can use all three. Claude Code uses Anthropic, Codex uses Responses, and fx uses Chat Completions with a preview build. Keys are stored encrypted for this workspace.</p>
+      <p className="muted">Add an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint. OpenCode, pi, and dsh can use all three. Claude Code uses Anthropic, Codex uses Responses, and fx uses Chat Completions. Keys are stored encrypted for this workspace.</p>
       {providers.length === 0 && <p className="muted">No custom providers yet.</p>}
       {providers.map((provider) => <div className="criterion" key={provider.id}>
         <div><strong>{provider.name}</strong> <span className="muted">({provider.slug}, {provider.protocol})</span>

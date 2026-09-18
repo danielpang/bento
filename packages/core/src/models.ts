@@ -205,13 +205,27 @@ export function customModelStringFor(providerId: string, modelId: string): strin
   return `${providerId}/${modelId}`;
 }
 
+export const CUSTOM_PROVIDER_PROTOCOLS = ["openai", "openai-responses", "anthropic"] as const;
+export type CustomProviderProtocol = (typeof CUSTOM_PROVIDER_PROTOCOLS)[number];
+
+/** Shared failure copy for hosted and remote runners. A removed provider wins over its stale model and key. */
+export function customProviderRunError(
+  state: { disabled?: boolean; missingKey?: boolean; missingModel?: boolean; unsupported?: boolean },
+  cli: string,
+): string | null {
+  if (state.disabled) return "This custom provider is not available for this run.";
+  if (state.missingKey) return "This custom provider has no API key. Add one under Agents or Settings, Providers.";
+  if (state.missingModel) return "This model is no longer listed for its custom provider. Update the agent or the provider under Settings, Providers.";
+  if (state.unsupported) return `${cli} cannot use this custom provider's protocol. Choose a supported agent tool.`;
+  return null;
+}
+
 /** Only offer a custom route where the CLI can speak the selected wire protocol. */
-export function supportsCustomProvider(cli: string, protocol: "openai" | "openai-responses" | "anthropic"): boolean {
+export function supportsCustomProvider(cli: string, protocol: CustomProviderProtocol): boolean {
   if (cli === "opencode" || cli === "pi" || cli === "dsh") return true;
   if (cli === "claude-code") return protocol === "anthropic";
   if (cli === "codex") return protocol === "openai-responses";
-  // fx custom connections require its preview build. The released CLI
-  // currently rejects the config; the run reports that prerequisite.
+  // Bento installs the dev-channel build with custom connections.
   if (cli === "fx") return protocol === "openai";
   return false;
 }

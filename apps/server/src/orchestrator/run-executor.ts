@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import {
   WORKSPACE_ARTIFACT_DIR,
   agentRunPrompt,
+  customProviderRunError,
   forgetsBetweenRuns,
   modelGuidanceFor,
   resolveRepositoryCommands,
@@ -198,6 +199,19 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     await saySystem(
       "Resolving merge conflicts: the agent rebases the branch onto the latest base branch, and the server force pushes it with lease protection when the run finishes.",
     );
+  }
+
+  const customProviderError = customProvider && customProviderRunError(customProvider, profile.cli);
+  if (customProvider && (
+    customProviderError || !(await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId }))
+  )) {
+    await finishRun(ctx, runId, {
+      ok: false,
+      error: customProviderError ?? "This custom provider is not available for this run.",
+    }, null);
+    emitBoard("failed");
+    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    return;
   }
 
   let handle: SandboxHandle;
@@ -418,24 +432,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }),
     say: saySystem,
   });
-
-  if (customProvider && (
-    customProvider.missingKey || customProvider.missingModel || customProvider.unsupported || !(await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId }))
-  )) {
-    await finishRun(ctx, runId, {
-      ok: false,
-      error: customProvider.missingKey
-        ? "This custom provider has no API key. Add one under Agents or Settings, Providers."
-        : customProvider.missingModel
-          ? "This model is no longer listed for its custom provider. Update the agent or the provider under Settings, Providers."
-          : customProvider.unsupported
-            ? `${profile.cli} cannot use this custom provider's protocol. Choose a supported agent tool.`
-            : "This custom provider is not available for this run.",
-    }, null);
-    emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
-    return;
-  }
 
   // Commits land as the user rather than a placeholder. The adapter's
   // own variables go first, so anything the organization saved under

@@ -1241,6 +1241,21 @@ test("writeFileCommand writes content a shell would otherwise mangle", async () 
   assert.equal((await stat(file.path)).mode & 0o777, 0o600);
 });
 
+test("writeFileCommand preserves an existing parent directory's permissions", async () => {
+  const { execFile } = await import("node:child_process");
+  const { chmod, mkdtemp, rm, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(`${tmpdir()}/bento-write-parent-`);
+  try {
+    await chmod(dir, 0o1777);
+    const [command, ...args] = writeFileCommand({ path: `${dir}/config.json`, content: "{}" });
+    await new Promise<void>((resolve, reject) => execFile(command!, args, (err) => (err ? reject(err) : resolve())));
+    assert.equal((await stat(dir)).mode & 0o1777, 0o1777);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 /**
  * pi reaches no Ollama of Bento's, so an ollama/ model there is pi's own
  * provider (from its models.json) and keeps pi's credentials and login.

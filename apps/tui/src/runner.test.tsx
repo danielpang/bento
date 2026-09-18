@@ -107,3 +107,36 @@ test("a remote runner reports duplicate checkouts before provisioning Docker", a
   assert.match(reported, /Repositories bento and bento-2 use the same checkout/);
   assert.match(reported, /Settings, Repositories/);
 });
+
+test("a remote runner rejects a removed custom provider before provisioning", async () => {
+  let provisioned = false;
+  let reported = "";
+  const runner = new LocalRunner({
+    baseUrl: "http://example.test",
+    runnerId: "test",
+    sandbox: "docker",
+    dataDir: tmpdir(),
+    onStatus: () => {},
+  });
+  const instance = runner as unknown as {
+    driver: SandboxDriver;
+    complete: (_id: string, outcome: { error?: string }) => Promise<void>;
+    execute: (claimed: unknown) => Promise<void>;
+  };
+  instance.driver = {
+    provider: "docker",
+    provision: async () => { provisioned = true; throw new Error("Docker should not be called"); },
+  } as unknown as SandboxDriver;
+  instance.complete = async (_id, outcome) => { reported = outcome.error ?? ""; };
+
+  await instance.execute({
+    run: { id: "run", featureId: "feature", stageId: "stage", prompt: "", resumeSessionId: null },
+    feature: { id: "feature", title: "Test", branchName: "test" },
+    agent: { cli: "codex", model: "retired-models/reasoning-a", extraArgs: [] },
+    customProvider: { env: {}, missingKey: false, disabled: true },
+    repositories: [{ name: "repo", localPath: "/tmp/repo", defaultBranch: "main" }],
+    stagePrompt: "Test",
+  });
+  assert.equal(provisioned, false);
+  assert.match(reported, /custom provider is not available/);
+});

@@ -6,7 +6,7 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
@@ -55,7 +55,7 @@ export interface ClientOptions {
 export interface CustomModelProviderInput {
   slug: string;
   name: string;
-  protocol: "openai" | "openai-responses" | "anthropic";
+  protocol: CustomProviderProtocol;
   baseUrl: string;
   models: { id: string; name: string }[];
 }

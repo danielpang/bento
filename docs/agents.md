@@ -23,7 +23,7 @@ Beta testers can add a provider in **Settings, Providers**. Enter its API base U
 
 | Protocol | Harnesses |
 | --- | --- |
-| OpenAI Chat Completions | OpenCode, pi, dsh, fx with a custom connections preview build |
+| OpenAI Chat Completions | OpenCode, pi, dsh, fx |
 | OpenAI Responses | OpenCode, pi, dsh, Codex |
 | Anthropic Messages | OpenCode, pi, dsh, Claude Code |
 
@@ -33,7 +33,7 @@ OpenRouter: pick an OpenRouter model on Codex, pi, or opencode and save `OPENROU
 
 **Vercel AI Gateway:** one key, many models, billed through that key: the same shape as OpenRouter, a different catalog and bill. Save `AI_GATEWAY_API_KEY` under Agents, Vercel AI Gateway. The picker lists the Gateway's language models. Image, video, and embedding ids stay out. Unlisted slugs stay typeable.
 
-- **fx** uses Gateway by default. Model ids are Gateway slugs (`moonshotai/kimi-k3`, `openai/gpt-5.4`). Custom OpenAI Chat Completions connections require an fx build with the custom connections preview.
+- **fx** uses Gateway by default. Model ids are Gateway slugs (`moonshotai/kimi-k3`, `openai/gpt-5.4`). Bento installs the dev-channel build for custom OpenAI Chat Completions connections.
 - **pi, opencode, Codex** pick Gateway with a `vercel/` prefix (`vercel/moonshotai/kimi-k3`). The same slug without that prefix still uses the vendor key or OpenRouter.
 
 To use a vendor key, pick pi or opencode without the prefix. To bill through OpenRouter, pick pi, opencode, or Codex and save `OPENROUTER_API_KEY`.
@@ -156,7 +156,7 @@ MCP servers attach through `~/.config/muse/settings.json`, which Bento rewrites 
 
 Vercel's `fx`, run headlessly (`fx ask --json --full-access`). Gateway slugs, vendor prefix included: `moonshotai/kimi-k3`, `openai/gpt-5.4`. Unlisted slugs may be typed manually. `fx ask` has no `--model` flag; Bento sets `FX_MODEL`.
 
-Gateway authentication is `AI_GATEWAY_API_KEY`. A custom Chat Completions connection instead reads its own encrypted organization key through `BENTO_CUSTOM_PROVIDER_API_KEY`, with its endpoint and model selected in Settings. The released fx 0.0.10 rejects custom connections; use a build containing the [custom connections preview](https://fx.sh/docs/configure-fx/custom-model-connections) for those profiles. fx can also sign in with Vercel, or with a Codex or Grok subscription, which no sandbox can do. Local mode can share this machine's `~/.fx` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
+Gateway authentication is `AI_GATEWAY_API_KEY`. A custom Chat Completions connection instead reads its own encrypted organization key through `BENTO_CUSTOM_PROVIDER_API_KEY`, with its endpoint and model selected in Settings. Bento installs an fx [custom connections preview](https://fx.sh/docs/configure-fx/custom-model-connections) build in sandboxes. fx can also sign in with Vercel, or with a Codex or Grok subscription, which no sandbox can do. Local mode can share this machine's `~/.fx` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
 
 `--full-access` disables fx's own permission checks: Bento's sandbox is the boundary. `fx ask --json` prints one object when the process exits (no streamed tool or thinking events). Runs resume by session id (`--resume`). Headless mode accepts no mid-run input. Does not report cost: the JSON carries token counts, not a dollar figure.
 

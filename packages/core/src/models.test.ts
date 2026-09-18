@@ -4,6 +4,7 @@ import { MODEL_GUIDANCE } from "./credentials.js";
 import {
   checkAgentPairing,
   customModelStringFor,
+  customProviderRunError,
   mergeCatalogs,
   modelStringFor,
   supportsCustomProvider,
@@ -37,6 +38,15 @@ test("custom provider model IDs stay unambiguous across harnesses", () => {
   for (const cli of ["codex", "cursor", "pool", "antigravity", "muse"]) {
     assert.equal(supportsCustomProvider(cli, "openai"), false);
   }
+});
+
+test("custom provider run failures identify the blocked route", () => {
+  assert.equal(customProviderRunError({ disabled: true, missingKey: true }, "codex"),
+    "This custom provider is not available for this run.");
+  assert.match(customProviderRunError({ missingKey: true }, "pi") ?? "", /no API key/);
+  assert.match(customProviderRunError({ missingModel: true }, "dsh") ?? "", /no longer listed/);
+  assert.match(customProviderRunError({ unsupported: true }, "fx") ?? "", /fx cannot use/);
+  assert.equal(customProviderRunError({}, "opencode"), null);
 });
 
 test("pi and opencode offer current native DeepSeek models", () => {

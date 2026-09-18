@@ -60,6 +60,7 @@ RUN set -eu; \
     mkdir -p "$HOME/.local/bin"; \
     PATH="$HOME/.local/bin:$PATH" FX_INSTALL_DIR="$HOME/.local/bin" \
       fetch_run fx https://fx.sh/setup.sh bash; \
+    FX_INSTALL_DIR="$HOME/.local/bin" "$HOME/.local/bin/fx" upgrade --channel dev --json >/dev/null; \
     case "$(dpkg --print-architecture)" in arm64) target=linux-arm64 ;; *) target=linux-x64 ;; esac; \
     if [ "$target" = linux-x64 ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then target=linux-x64-baseline; fi; \
     mkdir -p /tmp/oc "$HOME/.opencode/bin"; \
