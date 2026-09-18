@@ -4,6 +4,7 @@ import { App } from "./app.js";
 import { MouseProvider } from "./mouse.js";
 import { HELP, parseCliOptions } from "./cli-options.js";
 import { redirectTerminalLogs } from "./terminal-log.js";
+import { cliVersion } from "./version.js";
 import {
   runAgents,
   runLogin,
@@ -33,9 +34,7 @@ if (options.help) {
 }
 
 if (options.version) {
-  const { createRequire } = await import("node:module");
-  const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
-  console.log(pkg.version);
+  console.log(cliVersion());
   process.exit(0);
 }
 
