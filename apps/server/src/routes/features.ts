@@ -539,9 +539,11 @@ export function featureRoutes(ctx: AppContext) {
           // repository. Removing one leaves the branch it had checked
           // out exactly where it is, which is the promise this feature
           // makes; anything uncommitted in it goes, same as the
-          // sandbox being thrown away.
+          // sandbox being thrown away. The workspace directory itself
+          // goes too: leftover node_modules are not a worktree and
+          // would otherwise sit around after the card is gone.
           const repos = await tx.select().from(repositories).where(eq(repositories.projectId, feature.projectId));
-          for (const repo of repos) await ctx.worktrees.remove(repo.localPath, feature.id, repo.name);
+          await ctx.worktrees.removeWorkspace(repos, feature.id);
 
           // Runs (and their transcripts), gate checks, history and
           // pull request links all cascade from this row.
