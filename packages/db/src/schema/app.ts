@@ -65,6 +65,20 @@ export const projects = pgTable("projects", {
    */
   linearCreateIssues: boolean("linear_create_issues").notNull().default(true),
   /**
+   * The .bento/pipeline.yaml and .bento/agents.yaml last applied from
+   * the project's repository, as a digest of their text. A sync whose
+   * files hash the same is a no-op, which is what lets edits made in
+   * the console survive until the files themselves change.
+   */
+  repoConfigHash: text("repo_config_hash"),
+  repoConfigSyncedAt: timestamp("repo_config_synced_at", { withTimezone: true }),
+  /**
+   * Why the last sync applied nothing, in words, or null when it did.
+   * An invalid file in the repository must leave the pipeline exactly
+   * as it was, and this is how the console says so.
+   */
+  repoConfigError: text("repo_config_error"),
+  /**
    * Where those issues go when no Linear team is mapped to this project.
    * The team is required for a create, so an unset team means nothing is
    * filed; the key and name are kept so settings can name the team

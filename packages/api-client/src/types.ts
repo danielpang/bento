@@ -20,7 +20,45 @@ export interface Project {
   linearTeamName: string | null;
   linearProjectId: string | null;
   linearProjectName: string | null;
+  /** When the repository's .bento files were last applied, if ever. */
+  repoConfigSyncedAt: string | null;
+  /** Why the last sync from the repository applied nothing, or null. */
+  repoConfigError: string | null;
 }
+
+/**
+ * The repository's own copy of the configuration: the two files under
+ * .bento/, whether they are there, and whether they differ from what
+ * was last applied.
+ */
+export interface RepoConfigStatus {
+  paths: { pipeline: string; agents: string };
+  repository: { id: string; name: string } | null;
+  found: { pipeline: boolean; agents: boolean };
+  changed: boolean;
+  syncedAt: string | null;
+  error: string | null;
+  /** Set when the files could not be read at all, with the reason. */
+  unavailable: string | null;
+}
+
+export type RepoConfigSyncResult =
+  | { status: "missing"; error: string }
+  | { status: "unavailable"; error: string }
+  | { status: "unchanged"; repository: { id: string; name: string } }
+  | { status: "invalid"; error: string; repository: { id: string; name: string } }
+  | {
+      status: "applied";
+      repository: { id: string; name: string };
+      files: string[];
+      pipeline: { stages: number; agents: number; removedStages: string[]; skippedRepositories: string[] } | null;
+      /** Distinct agents the pair defined, whichever file each came from. */
+      agents: number;
+    };
+
+export type RepoConfigPublishResult =
+  | { ok: true; unchanged: true; repository: { id: string; name: string } }
+  | { ok: true; unchanged: false; repository: { id: string; name: string }; branch: string; prNumber: number; url: string };
 
 export interface Repository {
   id: string;

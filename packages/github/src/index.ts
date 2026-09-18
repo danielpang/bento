@@ -11,9 +11,10 @@ export {
   type PullRequestMergeLike,
 } from "./app-client.js";
 export { GitHubTokenClient } from "./token-client.js";
+export { PROTECTED_BRANCHES, commitFilesVia, isWritableConfigBranch } from "./repo-files.js";
 export {
   isBentoDefaultPullRequestBody,
   parseStageWriteUpForPullRequest,
   pullRequestRunMarker,
 } from "./pr-sync.js";
-export { verifyWebhookSignature, webhookTarget, type WebhookTarget } from "./webhook.js";
+export { pushTarget, verifyWebhookSignature, webhookTarget, type PushTarget, type WebhookTarget } from "./webhook.js";

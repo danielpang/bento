@@ -122,3 +122,38 @@ export interface GitHubPublisher {
    */
   pushToken(repositoryId?: number): Promise<string>;
 }
+
+/** One file to commit: a repository path and its whole text. */
+export interface RepositoryFile {
+  path: string;
+  content: string;
+}
+
+export interface CommitFilesInput {
+  owner: string;
+  repo: string;
+  /** The branch the new one starts from, usually the default branch. */
+  baseBranch: string;
+  /** The branch to create. Refused when it already exists. */
+  branch: string;
+  message: string;
+  files: RepositoryFile[];
+}
+
+/**
+ * Files on a branch: reading one, and committing a few onto a new
+ * branch. This is how Bento's own configuration travels with the code
+ * it describes, in both directions.
+ *
+ * Reads are pinned to a branch the caller names, never to whatever a
+ * feature branch carries. Agents write feature branches, so a file read
+ * from one would be a file an agent chose. Writes go through the Git
+ * data API on the trusted host, with the same credential the publisher
+ * pushes with, and never through a sandbox.
+ */
+export interface GitHubRepositoryFiles {
+  /** The file's text at that ref, or null when there is no such file. */
+  readFile(input: { owner: string; repo: string; path: string; ref: string }): Promise<string | null>;
+  /** One commit carrying every file, on a new branch. Returns the commit. */
+  commitFiles(input: CommitFilesInput): Promise<{ sha: string }>;
+}

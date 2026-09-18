@@ -1,12 +1,13 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { parseRepoUrl, verifyWebhookSignature, webhookTarget } from "@bento/github";
+import { parseRepoUrl, pushTarget, verifyWebhookSignature, webhookTarget } from "@bento/github";
 import { parseIssueWebhook, verifyLinearWebhookSignature } from "@bento/linear";
 import { verifySlackSignature } from "@bento/slack";
 import { features, githubInstallations, projects, slackConnections, slackPendingMentions } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { linearConnectionRow } from "../linear.js";
+import { queueRepoConfigSyncs } from "../repo-config.js";
 import { slackClientFor, slackConnectionByTeam } from "../slack.js";
 import { interactiveChannelId, interactiveTeamId, isUuid, parseReviewTarget, projectPickFromInteractive, rejectModal } from "../orchestrator/slack-notify.js";
 import type { SlackInboundJob } from "../orchestrator/slack-sync.js";
@@ -86,6 +87,15 @@ export function webhookRoutes(ctx: AppContext) {
           .where(eq(githubInstallations.installationId, String(installationEvent.installation.id)));
       }
       return c.json({ ok: true, matched: 0 });
+    }
+
+    // A push to a default branch that touched .bento/ means the
+    // repository's own pipeline or agents changed. Queued rather than
+    // applied here, so GitHub gets its answer at once.
+    const push = pushTarget(event, payload);
+    if (push) {
+      const queued = await queueRepoConfigSyncs(ctx, db(c, ctx), push);
+      return c.json({ ok: true, matched: queued });
     }
 
     const target = webhookTarget(event, payload);

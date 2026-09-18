@@ -183,6 +183,13 @@
       "when": 1788669917315,
       "tag": "0025_mcp_inbound",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789006959965,
+      "tag": "0026_repo_config",
+      "breakpoints": true
     }
   ]
 }
