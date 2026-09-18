@@ -319,7 +319,7 @@ function sharedFlags(input: BuildCommandInput): string[] {
     "--include-partial-messages",
     "--dangerously-skip-permissions",
     "--model",
-    ollamaModelId(input.model),
+    input.customProvider?.modelId ?? ollamaModelId(input.model),
   ];
   if (input.resumeSessionId) flags.push("--resume", input.resumeSessionId);
   if (input.extraArgs?.length) flags.push(...input.extraArgs);

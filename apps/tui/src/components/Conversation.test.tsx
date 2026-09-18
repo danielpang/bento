@@ -141,6 +141,14 @@ function fixture() {
   };
 }
 
+async function streamReady(f: ReturnType<typeof fixture>) {
+  const end = Date.now() + 5000;
+  while (f.count() === 0) {
+    if (Date.now() > end) throw new Error("Run stream did not subscribe");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 test("active conversation has a Stop button and x stops the agent", async () => {
   const f = fixture();
   const ui = render(
@@ -259,6 +267,7 @@ test("live conversation keeps one stream through refresh, replaces drafts and ex
   );
   try {
     await ready(ui, "Waiting for agent output");
+    await streamReady(f);
     f.stream().onEvent?.({ type: "message", role: "user", text: "Make the button clearer" });
     f.stream().onDelta?.({ channel: "text", offset: 0, text: "Writing a response" });
     await ready(ui, "Writing a response");
@@ -302,6 +311,7 @@ test("history scrolling pauses follow and removed search keys leave the conversa
   );
   try {
     await ready(ui, "Waiting for agent output");
+    await streamReady(f);
     f.stream().onEvent?.({
       type: "message",
       role: "assistant",
@@ -392,6 +402,7 @@ test("inline composer preserves history and multiline drafts, and retries failed
   );
   try {
     await ready(ui, "Reply to agent");
+    await streamReady(f);
     f.stream().onEvent?.({ type: "message", role: "assistant", text: "Previous agent reply stays visible" });
     await ready(ui, "Previous agent reply stays visible");
     ui.stdin.write("\x1b[200~First line\nSecond line: café 🙂\x1b[201~");
@@ -542,6 +553,7 @@ test("tool inspector follows a live result and returns to the same unsent conver
   );
   try {
     await ready(ui, "Waiting for agent output");
+    await streamReady(f);
     f.stream().onEvent?.({
       type: "tool",
       name: "shellToolCall",

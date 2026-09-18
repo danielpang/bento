@@ -16,6 +16,7 @@ const OLLAMA_PATCH: McpFile = {
   path: "/tmp/bento/dsh-ollama.patch.yml",
   content: "- id: llm-deepseek\n  config:\n    maxTokens: 32768\n",
 };
+const CUSTOM_PATCH_PATH = "/tmp/bento/dsh-custom.patch.yml";
 
 export const dshAdapter: AgentAdapter = {
   cli: "dsh",
@@ -35,7 +36,7 @@ export const dshAdapter: AgentAdapter = {
    */
   env(input: BuildCommandInput): Record<string, string> {
     return {
-      DSH_MODEL: ollamaModelId(input.model),
+      DSH_MODEL: input.customProvider?.modelId ?? ollamaModelId(input.model),
       DSH_TOOLS_MODE: "native",
       DSH_PERMISSION_MODE: "danger-full-access",
       DSH_TELEMETRY_DISABLED: "1",
@@ -49,11 +50,41 @@ export const dshAdapter: AgentAdapter = {
   },
 
   files(input: BuildCommandInput): McpFile[] {
+    if (input.customProvider) {
+      const provider = input.customProvider;
+      const quote = (value: string) => JSON.stringify(value);
+      return [{
+        path: CUSTOM_PATCH_PATH,
+        content: [
+          "- id: agent-default-model",
+          "  config:",
+          `    provider: ${quote(provider.slug)}`,
+          `    model: ${quote(provider.modelId)}`,
+          "- id: llm-pi-ai",
+          "  config:",
+          "    providers:",
+          `      ${provider.slug}:`,
+          `        displayName: ${quote(provider.name)}`,
+          "        apiKeyEnv: BENTO_CUSTOM_PROVIDER_API_KEY",
+          `        api: ${provider.protocol === "anthropic" ? "anthropic-messages"
+            : provider.protocol === "openai-responses" ? "openai-responses" : "openai-completions"}`,
+          `        baseURL: ${quote(provider.baseUrl)}`,
+          "        models:",
+          ...provider.models.flatMap((model) => [
+            `          - id: ${quote(model.id)}`,
+            `            name: ${quote(model.name)}`,
+          ]),
+          "",
+        ].join("\n"),
+      }];
+    }
     return isOllamaModel(input.model) ? [OLLAMA_PATCH] : [];
   },
 
   buildCommand(input: BuildCommandInput): string[] {
-    const patch = isOllamaModel(input.model) ? ["--patch", OLLAMA_PATCH.path] : [];
+    const patch = input.customProvider
+      ? ["--patch", CUSTOM_PATCH_PATH]
+      : isOllamaModel(input.model) ? ["--patch", OLLAMA_PATCH.path] : [];
     return ["dsh", "--profile", "headless", ...patch, ...(input.extraArgs ?? []), input.prompt];
   },
 

@@ -1174,15 +1174,86 @@ test("DeepSeek Harness on an Ollama model points its provider at Ollama with a l
   assert.deepEqual(dshAdapter.files?.({ ...input, model: "deepseek-v4-pro" }), []);
 });
 
+test("custom providers produce harness-specific config without putting keys in files or argv", () => {
+  const customProvider = {
+    slug: "team-models", name: "Team models", protocol: "openai" as const,
+    baseUrl: "https://models.example.test/v1", modelId: "vendor/model-a",
+    models: [{ id: "vendor/model-a", name: "Model A" }],
+  };
+  const input = { prompt: "do it", model: "team-models/vendor/model-a", cwd: "/workspace", customProvider };
+  const piFile = piAdapter.files?.(input)[0];
+  assert.equal(piFile?.path, "/root/.pi/agent/models.json");
+  assert.deepEqual(JSON.parse(piFile?.content ?? "{}").providers[customProvider.slug], {
+    baseUrl: customProvider.baseUrl,
+    api: "openai-completions",
+    apiKey: "$BENTO_CUSTOM_PROVIDER_API_KEY",
+    models: customProvider.models,
+  });
+  assert.deepEqual(piAdapter.buildCommand(input).slice(0, 6), ["pi", "--mode", "json", "--print", "--model", input.model]);
+
+  const dshFile = dshAdapter.files?.(input)[0];
+  assert.match(dshFile?.content ?? "", /provider: "team-models"/);
+  assert.match(dshFile?.content ?? "", /api: openai-completions/);
+  assert.match(dshFile?.content ?? "", /apiKeyEnv: BENTO_CUSTOM_PROVIDER_API_KEY/);
+  assert.match(dshFile?.content ?? "", /model: "vendor\/model-a"/);
+  assert.deepEqual(dshAdapter.buildCommand(input), ["dsh", "--profile", "headless", "--patch", dshFile!.path, "do it"]);
+  assert.equal(dshAdapter.env?.(input).DSH_MODEL, "vendor/model-a");
+
+  const fxFile = fxAdapter.files?.(input)[0];
+  assert.equal(fxFile?.path, "/root/.fx/settings.json");
+  assert.deepEqual(JSON.parse(fxFile?.content ?? "{}").providers[customProvider.slug], {
+    protocol: "openai-chat-completions",
+    base_url: customProvider.baseUrl,
+    auth: { type: "bearer", env: "BENTO_CUSTOM_PROVIDER_API_KEY" },
+  });
+  assert.equal(fxAdapter.env?.(input).FX_PROVIDER, customProvider.slug);
+  assert.equal(fxAdapter.env?.(input).FX_MODEL, customProvider.modelId);
+
+  const anthropicInput = { ...input, customProvider: { ...customProvider, protocol: "anthropic" as const } };
+  assert.equal(JSON.parse(piAdapter.files?.(anthropicInput)[0]?.content ?? "{}").providers[customProvider.slug].api, "anthropic-messages");
+  assert.match(dshAdapter.files?.(anthropicInput)[0]?.content ?? "", /api: anthropic-messages/);
+  const claude = claudeCodeAdapter.buildCommand(anthropicInput);
+  assert.equal(claude[claude.indexOf("--model") + 1], customProvider.modelId);
+
+  const responsesInput = { ...input, customProvider: { ...customProvider, protocol: "openai-responses" as const } };
+  assert.equal(JSON.parse(piAdapter.files?.(responsesInput)[0]?.content ?? "{}").providers[customProvider.slug].api, "openai-responses");
+  assert.match(dshAdapter.files?.(responsesInput)[0]?.content ?? "", /api: openai-responses/);
+  const codex = codexAdapter.buildCommand(responsesInput);
+  assert.equal(codex[codex.indexOf("-m") + 1], customProvider.modelId);
+  assert.ok(codex.includes('model_provider="team-models"'));
+  assert.ok(codex.includes('model_providers.team-models.base_url="https://models.example.test/v1"'));
+  assert.ok(codex.includes('model_providers.team-models.env_key="BENTO_CUSTOM_PROVIDER_API_KEY"'));
+  assert.ok(codex.includes('model_providers.team-models.wire_api="responses"'));
+  assert.ok(!codex.includes('model_provider="openrouter"'));
+  assert.deepEqual(codexAdapter.env?.(responsesInput), {});
+});
+
 test("writeFileCommand writes content a shell would otherwise mangle", async () => {
   const { execFile } = await import("node:child_process");
-  const { mkdtemp, readFile } = await import("node:fs/promises");
+  const { mkdtemp, readFile, stat } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const dir = await mkdtemp(`${tmpdir()}/bento-write-`);
   const file = { path: `${dir}/nested/it's here.yml`, content: "- id: x\n  quote: 'single' \"double\" $HOME `tick`\n" };
   const [command, ...args] = writeFileCommand(file);
   await new Promise<void>((resolve, reject) => execFile(command!, args, (err) => (err ? reject(err) : resolve())));
   assert.equal(await readFile(file.path, "utf8"), file.content);
+  assert.equal((await stat(`${dir}/nested`)).mode & 0o777, 0o700);
+  assert.equal((await stat(file.path)).mode & 0o777, 0o600);
+});
+
+test("writeFileCommand preserves an existing parent directory's permissions", async () => {
+  const { execFile } = await import("node:child_process");
+  const { chmod, mkdtemp, rm, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(`${tmpdir()}/bento-write-parent-`);
+  try {
+    await chmod(dir, 0o1777);
+    const [command, ...args] = writeFileCommand({ path: `${dir}/config.json`, content: "{}" });
+    await new Promise<void>((resolve, reject) => execFile(command!, args, (err) => (err ? reject(err) : resolve())));
+    assert.equal((await stat(dir)).mode & 0o1777, 0o1777);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 /**

@@ -6,6 +6,7 @@ import {
   agentProfiles,
   agentRuns,
   createDb,
+  customModelProviders,
   createPool,
   invitation,
   linearConnections,
@@ -19,7 +20,7 @@ import {
   user,
   verification,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import { mkdtemp } from "node:fs/promises";
 import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -37,6 +38,8 @@ import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { createFeatureFlags, FeatureFlags } from "./feature-flags.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
+import { customProviderRunEnv } from "./orchestrator/custom-provider.js";
+import { executeRun } from "./orchestrator/run-executor.js";
 import { agentAuthEnv } from "./orchestrator/agent-auth.js";
 import { shouldShareAgentAuth } from "./settings.js";
 
@@ -776,6 +779,16 @@ test("every entity route refuses a foreign tenant", async () => {
     })
     .returning({ id: mcpConnections.id });
   assert.ok(mcpConnection!.id, "the owner's MCP connection must exist for the connection routes to be probed");
+  const [customProvider] = await ctx.db.insert(customModelProviders).values({
+    ownerId: ownerRow!.id,
+    organizationId: null,
+    slug: "matrix-provider",
+    name: "Matrix provider",
+    protocol: "openai",
+    baseUrl: "https://models.example.test/v1",
+    models: [{ id: "matrix-model", name: "Matrix model" }],
+  }).returning({ id: customModelProviders.id });
+  assert.ok(customProvider?.id);
 
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
@@ -876,6 +889,11 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", "/api/linear/import", { body: JSON.stringify({ issueIds: ["issue-x"], projectId: project.id }) }],
     ["PATCH", "/api/slack/settings", { body: JSON.stringify({ defaultProjectId: project.id }) }],
     ["GET", "/api/mcp-connections"],
+    ["GET", `/api/custom-providers/${customProvider!.id}`],
+    ["PUT", `/api/custom-providers/${customProvider!.id}`, { body: JSON.stringify({ slug: "stolen-provider", name: "Stolen", protocol: "openai", baseUrl: "https://evil.example/v1", models: [{ id: "m", name: "M" }] }) }],
+    ["PUT", `/api/custom-providers/${customProvider!.id}/key`, { body: JSON.stringify({ apiKey: "stolen" }) }],
+    ["DELETE", `/api/custom-providers/${customProvider!.id}/key`],
+    ["DELETE", `/api/custom-providers/${customProvider!.id}`],
     ["POST", "/api/mcp-connections", { body: JSON.stringify({ name: "Injected", scope: "organization" }) }],
     ["DELETE", `/api/mcp-connections/${mcpConnection!.id}`],
     ["GET", "/api/mcp-oauth/consent?request=00000000-0000-0000-0000-000000000000"],
@@ -986,6 +1004,179 @@ test("every entity route refuses a foreign tenant", async () => {
     !stage.gateCriteria.some((criterion) => criterion.type === "command"),
     "the intruder's gateCriteria write must not land",
   );
+});
+
+test("custom providers keep definitions and keys inside their organization", async () => {
+  const previous = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(null, true);
+  try {
+    const first = await jsonPost("/api/auth/sign-up/email", { email: "provider-a@bento.test", password: "correct-horse-battery", name: "Provider A" });
+    const second = await jsonPost("/api/auth/sign-up/email", { email: "provider-b@bento.test", password: "correct-horse-battery", name: "Provider B" });
+    const memberSignUp = await jsonPost("/api/auth/sign-up/email", { email: "provider-member@bento.test", password: "correct-horse-battery", name: "Provider member" });
+    const firstToken = first.headers.get("set-auth-token")!;
+    const secondToken = second.headers.get("set-auth-token")!;
+    const memberToken = memberSignUp.headers.get("set-auth-token")!;
+    const firstOrg = (await (await jsonPost("/api/auth/organization/create", { name: "Provider A", slug: "provider-a" }, firstToken)).json()) as { id: string };
+    const secondOrg = (await (await jsonPost("/api/auth/organization/create", { name: "Provider B", slug: "provider-b" }, secondToken)).json()) as { id: string };
+    await jsonPost("/api/auth/organization/set-active", { organizationId: firstOrg.id }, firstToken);
+    await jsonPost("/api/auth/organization/set-active", { organizationId: secondOrg.id }, secondToken);
+    const [memberUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "provider-member@bento.test"));
+    await ctx.db.insert(member).values({ id: crypto.randomUUID(), organizationId: firstOrg.id, userId: memberUser!.id, role: "member" });
+    await jsonPost("/api/auth/organization/set-active", { organizationId: firstOrg.id }, memberToken);
+    const asUser = (token: string, path: string, init: RequestInit = {}) => app.request(path, {
+      ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(init.headers ?? {}) },
+    });
+    const input = { slug: "private-models", name: "Private models", protocol: "anthropic", baseUrl: "https://models.example.test/v1", models: [{ id: "vendor/model-1", name: "Model 1" }] };
+    const created = await asUser(firstToken, "/api/custom-providers", { method: "POST", body: JSON.stringify(input) });
+    assert.equal(created.status, 201);
+    const provider = (await created.json()) as { id: string; hasApiKey: boolean; encryptedApiKey?: string };
+    assert.ok(provider.id);
+    assert.equal(provider.hasApiKey, false);
+    assert.equal(provider.encryptedApiKey, undefined);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.missingKey, true);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/retired"))?.missingModel, true);
+    const saved = await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "sk-private-123456789" }) });
+    assert.equal(saved.status, 200);
+    assert.doesNotMatch(await saved.text(), /sk-private-123456789/);
+    const config = await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1");
+    assert.equal(config?.missingKey, false);
+    assert.equal(config?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-private-123456789");
+    const parsed = JSON.parse(config?.env.OPENCODE_CONFIG_CONTENT ?? "{}") as { provider?: Record<string, { npm?: string; options?: { baseURL?: string; apiKey?: string } }> };
+    assert.equal(parsed.provider?.["private-models"]?.npm, "@ai-sdk/anthropic");
+    assert.equal(parsed.provider?.["private-models"]?.options?.baseURL, input.baseUrl);
+    assert.equal(parsed.provider?.["private-models"]?.options?.apiKey, "{env:BENTO_CUSTOM_PROVIDER_API_KEY}");
+    for (const cli of ["pi", "dsh", "claude-code"]) {
+      const route = await customProviderRunEnv(ctx, firstOrg.id, cli, "private-models/vendor/model-1");
+      assert.equal(route?.selection?.modelId, "vendor/model-1", cli);
+      assert.equal(route?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-private-123456789", cli);
+    }
+    const claudeRoute = await customProviderRunEnv(ctx, firstOrg.id, "claude-code", "private-models/vendor/model-1");
+    assert.equal(claudeRoute?.env.ANTHROPIC_BASE_URL, input.baseUrl);
+    assert.equal(claudeRoute?.env.ANTHROPIC_AUTH_TOKEN, "sk-private-123456789");
+    assert.equal(claudeRoute?.env.ANTHROPIC_API_KEY, "");
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "fx", "private-models/vendor/model-1"))?.unsupported, true);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "codex", "private-models/vendor/model-1"))?.unsupported, true);
+    for (const cli of ["dsh", "claude-code", "pi"]) {
+      const profile = await asUser(firstToken, "/api/profiles", {
+        method: "POST",
+        body: JSON.stringify({ name: `Custom ${cli}`, cli, model: "private-models/vendor/model-1" }),
+      });
+      assert.equal(profile.status, 201, `${cli} should accept the custom provider model`);
+    }
+    const fxProvider = await asUser(firstToken, "/api/custom-providers", {
+      method: "POST",
+      body: JSON.stringify({ slug: "fx-models", name: "fx models", protocol: "openai", baseUrl: "https://fx.example.test/v1", models: [{ id: "chat-a", name: "Chat A" }] }),
+    });
+    assert.equal(fxProvider.status, 201);
+    const fxId = (await fxProvider.json() as { id: string }).id;
+    await asUser(firstToken, `/api/custom-providers/${fxId}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "sk-fx-private" }) });
+    const fxRoute = await customProviderRunEnv(ctx, firstOrg.id, "fx", "fx-models/chat-a");
+    assert.equal(fxRoute?.selection?.modelId, "chat-a");
+    assert.equal(fxRoute?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-fx-private");
+    const responsesProvider = await asUser(firstToken, "/api/custom-providers", {
+      method: "POST",
+      body: JSON.stringify({ slug: "responses-models", name: "Responses models", protocol: "openai-responses", baseUrl: "https://responses.example.test/v1", models: [{ id: "reasoning-a", name: "Reasoning A" }] }),
+    });
+    assert.equal(responsesProvider.status, 201);
+    const responsesId = (await responsesProvider.json() as { id: string }).id;
+    await asUser(firstToken, `/api/custom-providers/${responsesId}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "sk-responses-private" }) });
+    const codexRoute = await customProviderRunEnv(ctx, firstOrg.id, "codex", "responses-models/reasoning-a");
+    assert.equal(codexRoute?.selection?.modelId, "reasoning-a");
+    assert.equal(codexRoute?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-responses-private");
+    const codexProfile = await asUser(firstToken, "/api/profiles", {
+      method: "POST", body: JSON.stringify({ name: "Custom Codex", cli: "codex", model: "responses-models/reasoning-a" }),
+    });
+    assert.equal(codexProfile.status, 201);
+    const codexProfileId = (await codexProfile.json() as { id: string }).id;
+    const memberList = await asUser(memberToken, "/api/custom-providers");
+    assert.equal((await memberList.json() as { providers: unknown[] }).providers.length, 3);
+    const memberWrite = await asUser(memberToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "stolen" }) });
+    assert.equal(memberWrite.status, 403);
+    const otherList = await asUser(secondToken, "/api/custom-providers");
+    assert.deepEqual((await otherList.json() as { providers: unknown[] }).providers, []);
+    for (const [method, path, body] of [
+      ["GET", `/api/custom-providers/${provider.id}`, undefined],
+      ["PUT", `/api/custom-providers/${provider.id}`, input],
+      ["PUT", `/api/custom-providers/${provider.id}/key`, { apiKey: "stolen" }],
+      ["DELETE", `/api/custom-providers/${provider.id}/key`, undefined],
+      ["DELETE", `/api/custom-providers/${provider.id}`, undefined],
+    ] as const) {
+      const response = await asUser(secondToken, path, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+      assert.equal(response.status, 404, `${method} ${path} exposed another organization's provider`);
+    }
+    assert.equal((await customProviderRunEnv(ctx, secondOrg.id, "opencode", "private-models/vendor/model-1")), null);
+    const after = await asUser(firstToken, `/api/custom-providers/${provider.id}`);
+    assert.equal(after.status, 200);
+    assert.doesNotMatch(await after.text(), /sk-private-123456789/);
+
+    const replacedKey = await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, {
+      method: "PUT", body: JSON.stringify({ apiKey: "sk-replacement-123456789" }),
+    });
+    assert.equal(replacedKey.status, 200);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-replacement-123456789");
+    assert.equal((await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, { method: "DELETE" })).status, 200);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.missingKey, true);
+    const edited = await asUser(firstToken, `/api/custom-providers/${provider.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...input, models: [{ id: "replacement-model", name: "Replacement model" }] }),
+    });
+    assert.equal(edited.status, 200);
+    assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.missingModel, true);
+
+    // Keep the slug reserved after removal. Existing agents must fail closed
+    // instead of treating a custom slug as a built-in Codex or fx route.
+    const removed = await asUser(firstToken, `/api/custom-providers/${responsesId}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    const retired = await customProviderRunEnv(ctx, firstOrg.id, "codex", "responses-models/reasoning-a");
+    assert.equal(retired?.disabled, true);
+    assert.deepEqual(retired?.env, {});
+    assert.equal((await asUser(firstToken, `/api/custom-providers/${responsesId}`)).status, 404);
+    assert.equal((await asUser(firstToken, `/api/custom-providers/${responsesId}/key`, {
+      method: "PUT", body: JSON.stringify({ apiKey: "sk-reenabled" }),
+    })).status, 404);
+    const visible = await asUser(firstToken, "/api/custom-providers");
+    assert.equal((await visible.json() as { providers: unknown[] }).providers.length, 2);
+    const reused = await asUser(firstToken, "/api/custom-providers", {
+      method: "POST",
+      body: JSON.stringify({ slug: "responses-models", name: "Other endpoint", protocol: "openai-responses",
+        baseUrl: "https://other.example.test/v1", models: [{ id: "reasoning-a", name: "Other model" }] }),
+    });
+    assert.equal(reused.status, 409);
+    assert.match((await reused.json() as { error: string }).error, /cannot be reused/);
+    assert.equal((await customProviderRunEnv(ctx, secondOrg.id, "codex", "responses-models/reasoning-a")), null);
+
+    const project = await jsonPost("/api/projects", { name: "Retired provider run", localPath: "/tmp" }, firstToken);
+    assert.equal(project.status, 201);
+    const projectId = (await project.json() as { id: string }).id;
+    const pipeline = await asUser(firstToken, `/api/projects/${projectId}/pipeline`);
+    const pipelineStages = (await pipeline.json() as { stages: { id: string }[] }).stages;
+    for (const stage of pipelineStages) {
+      assert.equal((await asUser(firstToken, `/api/stages/${stage.id}`, {
+        method: "PATCH", body: JSON.stringify({ defaultAgentProfileId: null }),
+      })).status, 200);
+    }
+    const feature = await jsonPost("/api/features", { projectId, title: "Do not launch Codex" }, firstToken);
+    assert.equal(feature.status, 201);
+    const featureId = (await feature.json() as { id: string }).id;
+    assert.equal((await asUser(firstToken, `/api/features/${featureId}/advance`, { method: "POST" })).status, 200);
+    const started = await asUser(firstToken, "/api/runs", {
+      method: "POST", body: JSON.stringify({ featureId, agentProfileId: codexProfileId }),
+    });
+    assert.equal(started.status, 201, await started.clone().text());
+    const runId = (await started.json() as { id: string }).id;
+    const previousDriver = ctx.driver;
+    let provisioned = false;
+    ctx.driver = {
+      provider: "local-process",
+      provision: async () => { provisioned = true; throw new Error("a removed provider must fail before provisioning"); },
+    } as unknown as SandboxDriver;
+    try { await executeRun(ctx, runId); } finally { ctx.driver = previousDriver; }
+    const [finished] = await ctx.db.select({ status: agentRuns.status, error: agentRuns.error })
+      .from(agentRuns).where(eq(agentRuns.id, runId));
+    assert.equal(provisioned, false);
+    assert.equal(finished?.status, "failed");
+    assert.match(finished?.error ?? "", /custom provider is not available/);
+  } finally { ctx.featureFlags = previous; }
 });
 
 /**

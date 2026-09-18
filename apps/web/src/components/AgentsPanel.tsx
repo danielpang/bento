@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PREVIEW_TOOLS, toolCapabilities, useDismissable, type ToolCapability } from "./ui.js";
 import { useToast } from "./Toasts.js";
-import type { AgentProfile, AgentTool, BentoClient } from "@bento/api-client";
+import type { AgentProfile, AgentTool, BentoClient, CustomModelProvider } from "@bento/api-client";
 
 /** What the server reports about the machine it runs on. */
 type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
@@ -9,16 +9,20 @@ import { Modal } from "./Modal.js";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { ContactDialog } from "./ContactDialog.js";
 import { ProviderKeysCard } from "./Credentials.js";
+import { CustomProviderKeys } from "./CustomProviders.js";
+import { BetaOnly, useBetaTesters } from "../beta.js";
 import { ProviderMark } from "./ProviderMark.js";
 import { SecretField } from "./SecretField.js";
 import { YamlFileActions, downloadYaml } from "./YamlFileActions.js";
 import {
   MODEL_GUIDANCE,
   checkAgentPairing,
+  customModelStringFor,
   isOllamaModel,
   modelGuidanceFor,
   modelStringFor,
   providersForCli,
+  supportsCustomProvider,
   type AgentCli,
 } from "@bento/core";
 
@@ -75,6 +79,12 @@ export function AgentsPanel({
   const [model, setModel] = useState(CLIS[0]!.model);
   /** Empty means the model is typed by hand rather than picked. */
   const [providerId, setProviderId] = useState(() => providersForCli("claude-code")[0]?.id ?? "");
+  const isBetaTester = useBetaTesters();
+  const [customProviders, setCustomProviders] = useState<CustomModelProvider[]>([]);
+  useEffect(() => {
+    if (!isBetaTester) return;
+    void client.listCustomProviders().then((result) => setCustomProviders(result.providers)).catch(() => setCustomProviders([]));
+  }, [client, isBetaTester]);
   /**
    * The agent being changed, or null when adding a new one. One form
    * serves both: the fields, the cascade from tool to provider to
@@ -152,19 +162,36 @@ export function AgentsPanel({
    * agrees with the picker. It earns its place on the free text path,
    * where a model can be typed that the tool cannot reach.
    */
-  const pairing = checkAgentPairing(cli, model.trim());
-  const providers = providersForCli(cli);
+  const customOptionsFor = (tool: AgentCli) => isBetaTester
+    ? customProviders.filter((entry) => supportsCustomProvider(tool, entry.protocol)).map((entry) => ({
+      id: entry.slug, name: entry.name, env: [] as string[], logo: "", models: entry.models,
+    }))
+    : [];
+  const modelFor = (tool: AgentCli, providerId: string, modelId: string) =>
+    customProviders.some((entry) => entry.slug === providerId)
+      ? customModelStringFor(providerId, modelId)
+      : modelStringFor(tool, providerId, modelId);
+  const selectedCustom = isBetaTester && customProviders.find((entry) =>
+    supportsCustomProvider(cli, entry.protocol)
+    && entry.models.some((item) => customModelStringFor(entry.slug, item.id) === model.trim()));
+  const pairing = selectedCustom
+    ? { status: "ok" as const, detail: `Runs on ${selectedCustom.name}.` }
+    : checkAgentPairing(cli, model.trim());
+  const providers = [
+    ...providersForCli(cli),
+    ...customOptionsFor(cli),
+  ];
   const provider = providers.find((p) => p.id === providerId);
 
   /** Selecting a tool changes which providers and models apply. */
   function pickCli(next: AgentCli) {
     setCli(next);
-    const options = providersForCli(next);
+    const options = [...providersForCli(next), ...customOptionsFor(next)];
     const first = options[0];
     setProviderId(first?.id ?? "");
     setModel(
       first?.models[0]
-        ? modelStringFor(next, first.id, first.models[0].id)
+        ? modelFor(next, first.id, first.models[0].id)
         : (CLIS.find((c) => c.value === next)?.model ?? ""),
     );
   }
@@ -172,7 +199,7 @@ export function AgentsPanel({
   function pickProvider(nextId: string) {
     setProviderId(nextId);
     const next = providers.find((p) => p.id === nextId);
-    if (next?.models[0]) setModel(modelStringFor(cli, next.id, next.models[0].id));
+    if (next?.models[0]) setModel(modelFor(cli, next.id, next.models[0].id));
   }
 
   /**
@@ -192,8 +219,8 @@ export function AgentsPanel({
     setCli(editedCli);
     setModel(profile.model);
     setSkill(profile.skill ?? "");
-    const owning = providersForCli(editedCli).find((p) =>
-      p.models.some((m) => modelStringFor(editedCli, p.id, m.id) === profile.model),
+    const owning = [...providersForCli(editedCli), ...customOptionsFor(editedCli)].find((p) =>
+      p.models.some((m) => modelFor(editedCli, p.id, m.id) === profile.model),
     );
     setProviderId(owning?.id ?? "");
   }
@@ -439,6 +466,7 @@ export function AgentsPanel({
             The Team panel used to keep a second, different copy, so
             which one you got depended on how the server was run. */}
         <ProviderKeysCard client={client} />
+        <BetaOnly><CustomProviderKeys client={client} /></BetaOnly>
 
         {formOpen && (
           <Modal
@@ -554,7 +582,7 @@ export function AgentsPanel({
               {provider ? (
                 <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
                   {provider.models.map((option) => {
-                    const value = modelStringFor(cli, provider.id, option.id);
+                    const value = modelFor(cli, provider.id, option.id);
                     return (
                       <option key={option.id} value={value}>
                         {option.name} ({option.id})
@@ -577,6 +605,7 @@ export function AgentsPanel({
                 ))}
               </datalist>
               {guidance && <p className="muted">{guidance.format}</p>}
+              {cli === "fx" && selectedCustom && <p className="muted">fx custom connections require a preview build of fx.</p>}
               {/* Only when there is something to act on. "Runs on
                   Anthropic." restated the model id that is already in
                   the field above it; a routing requirement or a pairing

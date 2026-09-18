@@ -7,6 +7,8 @@ import { AppearanceSettings } from "./AppearanceSettings.js";
 import { BillingCard } from "./BillingCard.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { ConfigSettings } from "./ConfigSettings.js";
+import { CustomProvidersSettings } from "./CustomProviders.js";
+import { BetaOnly, useBetaTesters } from "../beta.js";
 import { GitHubTokenCard, GitIdentityCard } from "./Credentials.js";
 import { GitHubAccountCard, useGitHubOutcome } from "./GitHubIdentity.js";
 import { LinearPanel } from "./LinearPanel.js";
@@ -38,6 +40,7 @@ import {
 type Tab = SettingsTab;
 
 export function SettingsPage({ client }: { client: BentoClient }) {
+  const isBetaTester = useBetaTesters();
   const { data: session, isPending } = useSession();
   const [mode, setMode] = useState<"local" | "multi" | "unknown">("unknown");
   const [social, setSocial] = useState<{ github: boolean; google: boolean } | undefined>(undefined);
@@ -76,7 +79,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   if (mode === "unknown" || (mode === "multi" && isPending)) return <SettingsPageSkeleton />;
   if (mode === "multi" && !session) return <SignIn social={social} />;
 
-  const tabs = settingsSections(mode, { hasBilling, requested: tab });
+  const tabs = settingsSections(mode, { hasBilling, requested: tab }).filter((entry) => entry.id !== "providers" || isBetaTester);
   const active = resolveSettingsTab(tabs, tab);
 
   return (
@@ -138,6 +141,9 @@ export function SettingsPage({ client }: { client: BentoClient }) {
           </Tabs.Content>
           <Tabs.Content value="config" className="settings-body">
             <ConfigSettings client={client} />
+          </Tabs.Content>
+          <Tabs.Content value="providers" className="settings-body">
+            <BetaOnly><CustomProvidersSettings client={client} /></BetaOnly>
           </Tabs.Content>
           <Tabs.Content value="team" className="settings-body">
             <TeamSettings client={client} />

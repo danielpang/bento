@@ -6,7 +6,7 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
@@ -50,6 +50,21 @@ export interface ClientOptions {
    * offer a reload after a deploy; other clients leave it unset.
    */
   onBuild?: (build: string) => void;
+}
+
+export interface CustomModelProviderInput {
+  slug: string;
+  name: string;
+  protocol: CustomProviderProtocol;
+  baseUrl: string;
+  models: { id: string; name: string }[];
+}
+
+export interface CustomModelProvider extends CustomModelProviderInput {
+  id: string;
+  organizationId: string | null;
+  keyHint: string | null;
+  hasApiKey: boolean;
 }
 
 export interface RunStreamHandlers {
@@ -1260,6 +1275,30 @@ export class BentoClient {
       secrets: { id: string; name: string; hint: string }[];
       canManage: boolean;
     }>("/api/secrets");
+  }
+
+  listCustomProviders() {
+    return this.request<{ providers: CustomModelProvider[]; canManage: boolean }>("/api/custom-providers");
+  }
+
+  createCustomProvider(input: CustomModelProviderInput) {
+    return this.request<CustomModelProvider>("/api/custom-providers", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateCustomProvider(id: string, input: CustomModelProviderInput) {
+    return this.request<CustomModelProvider>(`/api/custom-providers/${id}`, { method: "PUT", body: JSON.stringify(input) });
+  }
+
+  deleteCustomProvider(id: string) {
+    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}`, { method: "DELETE" });
+  }
+
+  saveCustomProviderKey(id: string, apiKey: string) {
+    return this.request<CustomModelProvider>(`/api/custom-providers/${id}/key`, { method: "PUT", body: JSON.stringify({ apiKey }) });
+  }
+
+  deleteCustomProviderKey(id: string) {
+    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}/key`, { method: "DELETE" });
   }
 
   /** Values are write only: nothing reads a secret back. */

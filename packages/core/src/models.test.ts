@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import { MODEL_GUIDANCE } from "./credentials.js";
 import {
   checkAgentPairing,
+  customModelStringFor,
+  customProviderRunError,
   mergeCatalogs,
   modelStringFor,
+  supportsCustomProvider,
   providerForProfile,
   providersForCli,
   routesToOllama,
@@ -15,6 +18,35 @@ import {
 test("a prefixed model string names its own provider", () => {
   assert.equal(providerForProfile("opencode", "anthropic/claude-sonnet-5")?.id, "anthropic");
   assert.equal(providerForProfile("pi", "google/gemini-3-pro")?.id, "google");
+});
+
+test("custom provider model IDs stay unambiguous across harnesses", () => {
+  assert.equal(customModelStringFor("team-models", "vendor/model-a"), "team-models/vendor/model-a");
+  assert.equal(checkAgentPairing("dsh", "team-models/vendor/model-a").status, "unknown");
+  assert.equal(checkAgentPairing("claude-code", "team-models/vendor/model-a").status, "unknown");
+  for (const cli of ["opencode", "pi", "dsh"]) {
+    assert.equal(supportsCustomProvider(cli, "openai"), true);
+    assert.equal(supportsCustomProvider(cli, "openai-responses"), true);
+    assert.equal(supportsCustomProvider(cli, "anthropic"), true);
+  }
+  assert.equal(supportsCustomProvider("claude-code", "anthropic"), true);
+  assert.equal(supportsCustomProvider("claude-code", "openai"), false);
+  assert.equal(supportsCustomProvider("fx", "openai"), true);
+  assert.equal(supportsCustomProvider("fx", "anthropic"), false);
+  assert.equal(supportsCustomProvider("fx", "openai-responses"), false);
+  assert.equal(supportsCustomProvider("codex", "openai-responses"), true);
+  for (const cli of ["codex", "cursor", "pool", "antigravity", "muse"]) {
+    assert.equal(supportsCustomProvider(cli, "openai"), false);
+  }
+});
+
+test("custom provider run failures identify the blocked route", () => {
+  assert.equal(customProviderRunError({ disabled: true, missingKey: true }, "codex"),
+    "This custom provider is not available for this run.");
+  assert.match(customProviderRunError({ missingKey: true }, "pi") ?? "", /no API key/);
+  assert.match(customProviderRunError({ missingModel: true }, "dsh") ?? "", /no longer listed/);
+  assert.match(customProviderRunError({ unsupported: true }, "fx") ?? "", /fx cannot use/);
+  assert.equal(customProviderRunError({}, "opencode"), null);
 });
 
 test("pi and opencode offer current native DeepSeek models", () => {
@@ -84,7 +116,7 @@ test("muse only offers Muse Spark and requires its bare model ids", () => {
  * typeable and still resolves to Vercel rather than to Anthropic or
  * OpenAI.
  */
-test("fx only offers Vercel AI Gateway, and a slash is a Gateway slug", () => {
+test("fx built-in catalog offers Vercel AI Gateway, and a slash is a Gateway slug", () => {
   assert.deepEqual(providersForCli("fx").map((provider) => provider.id), ["vercel"]);
   assert.equal(modelStringFor("fx", "vercel", "moonshotai/kimi-k3"), "moonshotai/kimi-k3");
   assert.equal(providerForProfile("fx", "moonshotai/kimi-k3")?.id, "vercel");

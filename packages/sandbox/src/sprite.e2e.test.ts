@@ -274,6 +274,19 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.match(text, /--resume/);
   });
 
+  await t.test("installed fx resolves a custom Chat Completions connection", { skip: needsSprite() }, async () => {
+    const configured = await shell(
+      "tmp=$(mktemp -d); mkdir -p \"$tmp/.fx\"; " +
+      "printf '%s' '{\"providers\":{\"bento-test\":{\"protocol\":\"openai-chat-completions\",\"base_url\":\"https://models.example.test/v1\",\"auth\":{\"type\":\"bearer\",\"env\":\"BENTO_CUSTOM_PROVIDER_API_KEY\"}}},\"models\":{\"bento-test\":\"chat-a\"}}' > \"$tmp/.fx/settings.json\"; " +
+      "HOME=\"$tmp\" FX_PROVIDER=bento-test FX_MODEL=chat-a BENTO_CUSTOM_PROVIDER_API_KEY=sk-test fx doctor --json; status=$?; rm -rf \"$tmp\"; exit $status",
+    );
+    assert.equal(configured.exitCode, 0, configured.stderr);
+    const result = JSON.parse(configured.out) as { model_source?: string; auth?: string; fail_count?: number };
+    assert.equal(result.model_source, "bento-test");
+    assert.equal(result.auth, "configured provider");
+    assert.equal(result.fail_count, 0);
+  });
+
   /**
    * Muse Code's echo provider needs no key and still emits the JSONL
    * envelope Bento's adapter reads: a session stream, output deltas,
