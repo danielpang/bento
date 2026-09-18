@@ -30,6 +30,7 @@ import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
 import { reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { swarmWorkspaceKey } from "./swarm/sandbox.js";
 
 const run = promisify(execFile);
 
@@ -175,6 +176,7 @@ async function seedSucceededRun(featureId: string, stageId: string) {
   const [row] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId,
       stageId,
       agentProfileId: profile!.id,
@@ -201,6 +203,7 @@ test("reaping a finished card destroys its machine and workspace, and leaves art
   const [textArt] = await ctx.db
     .insert(runArtifacts)
     .values({
+      type: "pipeline",
       runId: runRow.id,
       featureId,
       stageSlug: "implementation",
@@ -212,9 +215,10 @@ test("reaping a finished card destroys its machine and workspace, and leaves art
       content: "# write-up\n",
     })
     .returning();
-  const storageKey = artifactStorageKey(null, featureId, runRow.id, "shot");
+  const storageKey = artifactStorageKey(null, { featureId }, runRow.id, "shot");
   await ctx.artifacts!.put(storageKey, Buffer.from("png-bytes"), "image/png");
   await ctx.db.insert(runArtifacts).values({
+    type: "pipeline",
     runId: runRow.id,
     featureId,
     stageSlug: "implementation",
@@ -263,6 +267,7 @@ test("an active run refuses the reap and leaves the workspace", async () => {
     })
     .returning();
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId,
     stageId,
     agentProfileId: profile!.id,
@@ -317,6 +322,22 @@ test("the boot sweep reclaims leftover workspaces of finished and deleted cards"
   await mkdir(junk, { recursive: true });
   await writeFile(path.join(junk, "keep.txt"), "leave me\n");
 
+  /**
+   * A swarm's workspace shares this folder and is not a card.
+   *
+   * The sweep deletes a directory whose row it cannot find, and a
+   * swarm has no row in features, so a pattern that accepted
+   * `swarm-<id>` would delete the workspace of a swarm that is still
+   * working. The prefix is what keeps it out, and this is what says so.
+   */
+  const swarmWorkspace = path.join(
+    ctx.env.BENTO_DATA_DIR,
+    "worktrees",
+    swarmWorkspaceKey("2f1c9d1e-3b7a-4c55-9f0e-6d2a8b4c1e77"),
+  );
+  await mkdir(swarmWorkspace, { recursive: true });
+  await writeFile(path.join(swarmWorkspace, "leaf.txt"), "still working\n");
+
   await reapFinishedSandboxes(ctx);
 
   await assert.rejects(() => stat(ctx.worktrees.workspacePath(done.featureId)), { code: "ENOENT" });
@@ -324,4 +345,5 @@ test("the boot sweep reclaims leftover workspaces of finished and deleted cards"
   await assert.rejects(() => stat(ctx.worktrees.workspacePath(deleted.featureId)), { code: "ENOENT" });
   await stat(ctx.worktrees.workspacePath(active.featureId));
   await stat(path.join(junk, "keep.txt"));
+  await stat(path.join(swarmWorkspace, "leaf.txt"));
 });

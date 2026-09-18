@@ -389,11 +389,11 @@ export class WorktreeManager {
    */
   async removeWorkspace(
     repos: { name: string; localPath: string }[],
-    featureId: string,
+    workspaceKey: string,
   ): Promise<void> {
     for (const repo of repos) {
-      await this.remove(repo.localPath, featureId, repo.name);
+      await this.remove(repo.localPath, workspaceKey, repo.name);
     }
-    await rm(this.workspacePath(featureId), { recursive: true, force: true });
+    await rm(this.workspacePath(workspaceKey), { recursive: true, force: true });
   }
 }

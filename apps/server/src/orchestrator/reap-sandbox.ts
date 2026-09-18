@@ -8,7 +8,16 @@ import { ACTIVE_RUN_STATUSES } from "./start-run.js";
 /** The queue a finished card's sandbox goes through on its way out. */
 export const REAP_SANDBOX_QUEUE = "sandbox.reap";
 
-/** Directory names under worktrees/ are feature ids by construction. */
+/**
+ * A card's workspace directory, which is its feature id.
+ *
+ * Not every directory under worktrees/ is one any more: a swarm's is
+ * its workspace key, `swarm-<id>`, which this deliberately does not
+ * match. The sweep below deletes a directory whose row it cannot find,
+ * so a pattern that accepted a swarm's name would look it up in
+ * features, find nothing, and delete the workspace of a swarm that is
+ * still working. Anything that widens this has to answer that first.
+ */
 const FEATURE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
