@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** A release reports its stamped tag; a source checkout reports its Git revision. */
-export function cliVersion(moduleUrl: string): string {
+export function cliVersion(moduleUrl = import.meta.url): string {
   const packageDirectory = path.resolve(fileURLToPath(new URL("../", moduleUrl)));
   const checkout = path.resolve(packageDirectory, "../..");
   if (packageDirectory === path.join(checkout, "apps", "tui") && existsSync(path.join(checkout, ".git"))) {

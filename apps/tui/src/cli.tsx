@@ -34,7 +34,7 @@ if (options.help) {
 }
 
 if (options.version) {
-  console.log(cliVersion(import.meta.url));
+  console.log(cliVersion());
   process.exit(0);
 }
 
