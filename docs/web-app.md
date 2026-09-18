@@ -266,6 +266,14 @@ Updates via SSE: `/api/board/:id/events`.
 
 **Search:** filtered in `Board.tsx` via `matchesQuery` (`apps/web/src/search.test.ts`). Punctuation-normalized matching.
 
+**Board and Sessions (beta):** Board shows the pipeline; Sessions is the grouped card list and conversation workspace. There is no separate Board/List toggle. Both share search and the remembered All cards, Needs you, and Running filters. Sessions retains the latest agent, run count, activity date, and reported cost, with recent conversations first within each group. Cards awaiting their first run appear under Up next. These controls use `beta-testers`, enabled in local mode.
+
+**Board focus (beta):** Needs you includes held cards and failed or stopped runs, excluding completed cards and cards with an active agent.
+
+**Focused review (beta):** Opening a card in Sessions, or from Board's Needs you or Running filters, shows the queue on the left, chat in the center, and the original-width detail drawer on the right. The drawer omits its Chat tab while the center conversation is visible. Below 1280px, chat returns to the drawer, and Sessions opens its Chat tab by default. The conversation and draft are preserved when resizing. Closing the card returns to the current route's board or list. A single board stream updates the list and open card.
+
+**Keyboard (beta):** The web shortcuts follow the TUI: `n` opens a new card, `/` focuses board search, and `:`, `?`, or `Ctrl+P` finds cards and actions. `j` and `k` open the next or previous visible card. Typing in a field does not trigger these shortcuts. Configure groups the agent, pipeline, and repository panels. Card handoffs show recorded changes, automated requirement results, and output from the latest run in the current stage.
+
 **Icons:** hashed URLs in `index.html` and `site.webmanifest` (Vite plugin) to invalidate browser favicon cache.
 
 **Stale tabs:** the build stamps a build id into `index.html` (`<meta name="bento-build">`, from `SOURCE_COMMIT` or a hash of the emitted files; `apps/web/src/build-id.ts`, names in `@bento/core`). The server reads it from the shell it serves and sends it as `x-bento-build` on every API response and as `build` in `/api/health`. The console compares that with its own page (`apps/web/src/build-watch.ts`) and shows a reload toast, bottom left with the other toasts but with no lifetime, on the first mismatch, which after a deploy is the board refetch that follows the stream reconnect. The shell is served with `no-cache` (the build id is its ETag) and a missing file is a 404 rather than the shell, so a reload actually gets the new build. A lazy chunk that fails to load reloads the page once per build (`main.tsx`). The Vite dev server stamps nothing, so none of this runs locally.

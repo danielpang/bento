@@ -15,10 +15,12 @@ export function BoardSearch({
   onChange,
   /** How many cards the query leaves, announced rather than only drawn. */
   matches,
+  onCommands,
 }: {
   value: string;
   onChange: (next: string) => void;
   matches: number;
+  onCommands?: () => void;
 }) {
   const searching = value.trim().length > 0;
   return (
@@ -44,6 +46,7 @@ export function BoardSearch({
           }
         }}
       />
+      {!searching && onCommands && <button className="search-command" title="Commands (:, ?, or Ctrl+P). Use j and k to move between cards, n for a new card." aria-label="Find a card or action" onClick={onCommands}><kbd>?</kbd></button>}
       {searching && (
         <>
           {/* Screen readers get the count the lane headers show

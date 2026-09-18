@@ -43,6 +43,7 @@ const SECTION_DESCRIPTIONS: Record<Tab, string> = {
   appearance: "Make this workspace feel like yours.",
   projects: "Manage the projects your agents work on.",
   config: "Keep your agents and pipelines portable with YAML files.",
+  providers: "Manage custom model providers and their API keys.",
   github: "Connect the identity and credentials agents use with GitHub.",
   linear: "Bring issues into your pipeline and keep progress in sync.",
   slack: "Connect your team and follow the work from Slack.",

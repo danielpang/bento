@@ -51,10 +51,15 @@ import { deleteConsequences } from "./delete-consequences.js";
 import { descriptionText, hasDescription, needsClamp } from "../card-description.js";
 import { useBetaTesters } from "../beta.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
+import { ReviewHandoff } from "./ReviewHandoff.js";
+import { ConversationPlacement } from "./ConversationPlacement.js";
 
 interface DrawerProps {
   client: BentoClient;
   feature: Feature;
+  /** A focused review places the single conversation in the center. */
+  chatHost?: HTMLElement | null;
+  initialTab?: "overview" | "activity";
   stages: Stage[];
   profiles: AgentProfile[];
   /** Bumped by the board stream when a run on this card changes state. */
@@ -116,6 +121,8 @@ const ARTIFACT_PREVIEW = 6;
 export function FeatureDrawer({
   client,
   feature,
+  chatHost,
+  initialTab = "overview",
   stages,
   profiles,
   runsVersion,
@@ -192,14 +199,19 @@ export function FeatureDrawer({
    * brief already unrolled before anybody asked for it.
    */
   const [descriptionOpen, setDescriptionOpen] = useState(false);
-  const [drawerTab, setDrawerTab] = useState("overview");
+  const [drawerTab, setDrawerTab] = useState<string>(initialTab);
   /**
    * Whether anything can actually open a pull request. Offering an
    * enabled button that can only fail is how a missing setting gets
    * mistaken for a broken feature.
    */
   const [canPublish, setCanPublish] = useState<boolean | null>(null);
-  const panel = useDismissable<HTMLElement>(onClose);
+  const panel = useDismissable<HTMLElement>(onClose, "[data-feature], .board-controls, .review-chat");
+  const activeDrawerTab = chatHost && drawerTab === "activity" ? "overview" : drawerTab;
+  const showConversation = () => {
+    if (chatHost) chatHost.focus({ preventScroll: true });
+    else setDrawerTab("activity");
+  };
 
   const stage = stages.find((s) => s.id === feature.currentStageId);
   // The server sends runs newest first.
@@ -234,7 +246,7 @@ export function FeatureDrawer({
     setLoadFailed(false);
     setPublishNotes([]);
     setDescriptionOpen(false);
-    setDrawerTab("overview");
+    setDrawerTab(initialTab);
     setGroup(null);
     setShowRelated(false);
   }, [feature.id]);
@@ -517,6 +529,9 @@ export function FeatureDrawer({
   // Approving mid-run would advance the card out from under the working
   // agent; the button says why it is waiting instead of failing later.
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
+  const stageRun = latestRun?.stageId === feature.currentStageId ? latestRun : undefined;
+  const needsRecovery = beta && !!stageRun && (stageRun.status === "failed" || stageRun.status === "cancelled");
+  const nextStageName = stages[stages.findIndex((s) => s.id === feature.currentStageId) + 1]?.name ?? "Completed";
   const displayedAgent = runActive ? latestAgent : stageAgent;
   /**
    * The pull requests GitHub says cannot merge, keyed by URL so each
@@ -714,7 +729,7 @@ export function FeatureDrawer({
   const descriptionClamps = needsClamp(description);
 
   return (
-    <Tabs.Root value={drawerTab} onValueChange={setDrawerTab} asChild>
+    <Tabs.Root value={activeDrawerTab} onValueChange={setDrawerTab} asChild>
     <aside className="drawer feature-drawer" role="dialog" aria-label={feature.title} ref={panel}>
       <header className="drawer-head">
         <div className="feature-topline">
@@ -764,7 +779,7 @@ export function FeatureDrawer({
       <Tabs.List className="feature-tabs" aria-label="Feature details">
         <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
         <Tabs.Trigger value="changes">Changes</Tabs.Trigger>
-        <Tabs.Trigger value="activity">Chat{runActive && <span className="dot" data-state="running" />}</Tabs.Trigger>
+        {!chatHost && <Tabs.Trigger value="activity">Chat{runActive && <span className="dot" data-state="running" />}</Tabs.Trigger>}
         <Tabs.Trigger value="history">History</Tabs.Trigger>
       </Tabs.List>
       <div className="drawer-body feature-drawer-body">
@@ -778,14 +793,26 @@ export function FeatureDrawer({
             {SEND_BACK_NOTICE}
           </p>
         )}
-        <Tabs.Content value="overview" forceMount hidden={drawerTab !== "overview"} className="feature-pane">
+        <Tabs.Content value="overview" forceMount hidden={activeDrawerTab !== "overview"} className="feature-pane">
         <section className="section feature-next-step">
           <div className="feature-section-heading">
-            <h3>Next step</h3>
+            <h3>{beta && !finished ? runActive ? "Work in progress" : needsRecovery ? "Let's get this moving" : "Your next step" : "Next step"}</h3>
             <span>{finished ? "Reopen to continue" : runActive ? "Agent at work" : stage ? `Next: ${stages[stages.indexOf(stage) + 1]?.name ?? "Completed"}` : "Begin implementation"}</span>
           </div>
+          {beta && feature.currentStageId && !finished && <ReviewHandoff
+            run={stageRun}
+            agentName={latestAgent?.name}
+            changes={changes}
+            gate={gate}
+            artifacts={visibleArtifacts}
+            pending={detailsPending}
+            failed={loadFailed}
+            onChanges={() => setDrawerTab("changes")}
+            onChat={showConversation}
+            onArtifact={setOpenArtifact}
+          />}
           {runActive && (
-            <button className="feature-activity-link" onClick={() => setDrawerTab("activity")}>
+            <button className="feature-activity-link" onClick={showConversation}>
               Follow the agent's progress <span aria-hidden="true">→</span>
             </button>
           )}
@@ -810,12 +837,18 @@ export function FeatureDrawer({
             ) : feature.currentStageId ? (
               <>
                 <button
-                  className="btn btn-primary"
-                  disabled={busy || runActive}
+                  className={beta && (needsRecovery || runActive) ? "btn" : "btn btn-primary"}
+                  disabled={busy || runActive || detailsPending || loadFailed}
                   title={runActive ? "An agent is working this card. Stop it or wait for it to finish." : undefined}
-                  onClick={() => act(() => client.approveFeature(feature.id))}
+                  onClick={() => act(async () => {
+                    const result = await client.approveFeature(feature.id);
+                    if (beta) {
+                      const destination = stages.find((s) => s.id === result.feature.currentStageId)?.name;
+                      toast.note(result.feature.status === "done" ? "Card completed. Nice work." : result.feature.currentStageId !== feature.currentStageId && destination ? `Moved to ${destination}.` : "Approval recorded.");
+                    }
+                  })}
                 >
-                  Approve and advance
+                  {beta ? `Approve → ${nextStageName}` : "Approve and advance"}
                 </button>
                 <button className="btn" disabled={busy} onClick={() => setDialog("reject")}>
                   Reject
@@ -827,6 +860,8 @@ export function FeatureDrawer({
               </button>
             )}
           </div>
+          {needsRecovery && stageAgent && !finished && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
+          {needsRecovery && !stageAgent && !finished && <button className="btn btn-primary recovery-action" onClick={showConversation}>Review the last run</button>}
           {/* Why the last run failed, where the eye lands. The same
               sentence closes the transcript, but a person looking at a
               red card reads the actions first. Boxed so it reads as the
@@ -1077,7 +1112,7 @@ export function FeatureDrawer({
         )}
 
         </Tabs.Content>
-        <Tabs.Content value="changes" forceMount hidden={drawerTab !== "changes"} className="feature-pane">
+        <Tabs.Content value="changes" forceMount hidden={activeDrawerTab !== "changes"} className="feature-pane">
         {(showPullRequests || listedPullRequests.length > 0) && (
           <section className="section">
             <span className="label">Pull requests</span>
@@ -1250,7 +1285,8 @@ export function FeatureDrawer({
         </section>
 
         </Tabs.Content>
-        <Tabs.Content value="activity" forceMount hidden={drawerTab !== "activity"} className="feature-pane feature-pane-conversation">
+        <Tabs.Content value="activity" forceMount hidden={activeDrawerTab !== "activity"} className="feature-pane feature-pane-conversation">
+        <ConversationPlacement target={chatHost}>
         {detailsPending ? (
           <ChatSkeleton tall />
         ) : (
@@ -1264,11 +1300,12 @@ export function FeatureDrawer({
             onChanged={onChanged}
             onEvent={onEvent}
             expandHref={`/session/${feature.id}`}
-            visible={drawerTab === "activity"}
+            visible={!!chatHost || activeDrawerTab === "activity"}
           />
         )}
+        </ConversationPlacement>
         </Tabs.Content>
-        <Tabs.Content value="history" forceMount hidden={drawerTab !== "history"} className="feature-pane">
+        <Tabs.Content value="history" forceMount hidden={activeDrawerTab !== "history"} className="feature-pane">
         {/*
           Who moved this card, when, and what moved it. The events were
           already fetched and formatted; without them on screen there

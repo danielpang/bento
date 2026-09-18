@@ -77,7 +77,7 @@ export function BoardSkeleton() {
     <div className="board" aria-busy="true" aria-label="Loading board">
       <LoadingStatus label="Loading board" />
       {SKELETON_LANES.map((lane, i) => (
-        <section key={i} className="lane" style={{ "--skeleton-i": i } as CSSProperties}>
+        <section key={i} className="lane" data-kind="stage" style={{ "--skeleton-i": i } as CSSProperties}>
           <header className="lane-head">
             <div className="lane-title">
               <span className="lane-title-text">
@@ -88,7 +88,7 @@ export function BoardSkeleton() {
             </div>
             <Skeleton height={10} width="5.2rem" />
           </header>
-          <div className="lane-transition"><Skeleton height={10} width="6rem" /></div>
+          <div className="lane-policy"><Skeleton height={10} width="6rem" /></div>
           <div className="lane-cards">
             {lane.cards.length === 0 ? (
               <div className="lane-empty skeleton-slot" />

@@ -72,6 +72,8 @@ export function AgentsPanel({
   /** Open the editor or the create form on mount, from the board pill. */
   initialAction?: { editId?: string; new?: boolean };
 }) {
+  const beta = useBetaTesters();
+  const [section, setSection] = useState<"agents" | "connections" | "files">("agents");
   const toast = useToast();
   const panel = useDismissable<HTMLElement>(onClose);
   const [name, setName] = useState("");
@@ -79,12 +81,11 @@ export function AgentsPanel({
   const [model, setModel] = useState(CLIS[0]!.model);
   /** Empty means the model is typed by hand rather than picked. */
   const [providerId, setProviderId] = useState(() => providersForCli("claude-code")[0]?.id ?? "");
-  const isBetaTester = useBetaTesters();
   const [customProviders, setCustomProviders] = useState<CustomModelProvider[]>([]);
   useEffect(() => {
-    if (!isBetaTester) return;
+    if (!beta) return;
     void client.listCustomProviders().then((result) => setCustomProviders(result.providers)).catch(() => setCustomProviders([]));
-  }, [client, isBetaTester]);
+  }, [client, beta]);
   /**
    * The agent being changed, or null when adding a new one. One form
    * serves both: the fields, the cascade from tool to provider to
@@ -162,7 +163,7 @@ export function AgentsPanel({
    * agrees with the picker. It earns its place on the free text path,
    * where a model can be typed that the tool cannot reach.
    */
-  const customOptionsFor = (tool: AgentCli) => isBetaTester
+  const customOptionsFor = (tool: AgentCli) => beta
     ? customProviders.filter((entry) => supportsCustomProvider(tool, entry.protocol)).map((entry) => ({
       id: entry.slug, name: entry.name, env: [] as string[], logo: "", models: entry.models,
     }))
@@ -171,7 +172,7 @@ export function AgentsPanel({
     customProviders.some((entry) => entry.slug === providerId)
       ? customModelStringFor(providerId, modelId)
       : modelStringFor(tool, providerId, modelId);
-  const selectedCustom = isBetaTester && customProviders.find((entry) =>
+  const selectedCustom = beta && customProviders.find((entry) =>
     supportsCustomProvider(cli, entry.protocol)
     && entry.models.some((item) => customModelStringFor(entry.slug, item.id) === model.trim()));
   const pairing = selectedCustom
@@ -315,11 +316,14 @@ export function AgentsPanel({
           </button>
         </div>
         <p className="muted">Pair a coding agent with a model, then assign it to a stage.</p>
+        {beta && <div className="board-filters agent-sections" role="group" aria-label="Agent settings">
+          {([["agents", "Agents"], ["connections", "Connections"], ["files", "Import / export"]] as const).map(([value, label]) => <button className="board-filter" key={value} aria-pressed={section === value} onClick={() => setSection(value)}>{label}</button>)}
+        </div>}
       </header>
 
       <div className="drawer-body">
 
-        <section className="section settings-card agent-roster">
+        <section className="section settings-card agent-roster" hidden={beta && section !== "agents"}>
           <div className="settings-title-row">
             <h3 className="settings-title">Your agents</h3>
             <span className="surface-count">{profiles.length} configured</span>
@@ -364,7 +368,7 @@ export function AgentsPanel({
           ))}
         </section>
 
-        <section className="section settings-card">
+        <section className="section settings-card" hidden={beta && section !== "files"}>
           <h3 className="settings-title">Agents file</h3>
           {/* Word for word with Settings, Config. Two descriptions of
               one file taught two different things about how importing
@@ -381,6 +385,7 @@ export function AgentsPanel({
           />
         </section>
 
+        <div hidden={beta && section !== "connections"}>
         {machine && (
           <section className="section settings-card">
             <h3 className="settings-title">Claude subscription</h3>
@@ -472,6 +477,7 @@ export function AgentsPanel({
             which one you got depended on how the server was run. */}
         <ProviderKeysCard client={client} />
         <BetaOnly><CustomProviderKeys client={client} /></BetaOnly>
+        </div>
 
         {formOpen && (
           <Modal

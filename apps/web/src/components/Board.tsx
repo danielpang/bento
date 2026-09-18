@@ -1,9 +1,10 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AgentProfile, Feature, FeatureSpend, Stage } from "@bento/api-client";
+import type { AgentProfile, Feature, FeatureSpend, ProjectSession, Stage } from "@bento/api-client";
 import { childBadgeLabel, childStatsFrom, childTone, relatedRootId, type ChildStats } from "@bento/core";
 import { useBetaTesters } from "../beta.js";
 import { LaneAgentMenu } from "./LaneAgentMenu.js";
 import { formatCardSpend } from "./spend-format.js";
+import { attentionLabel, readBoardFocus, workGroup, type BoardFocus, type WorkGroup } from "../board-focus.js";
 
 /** Read once: a page is not re-rendered when the setting changes. */
 const REDUCED_MOTION =
@@ -86,6 +87,9 @@ function layoutOffset(el: HTMLElement): { x: number; y: number } {
 /** How much of the board's right edge the open drawer covers. */
 function drawerReserve(board: HTMLElement): number {
   if (!board.hasAttribute("data-drawer-open")) return 0;
+  const panel = document.querySelector<HTMLElement>(".feature-drawer");
+  // In a focused review the panel occupies its own grid column.
+  if (panel && getComputedStyle(panel).position === "static") return 0;
   // The CSS declares it; older WebKit has returned the unresolved
   // calc() for a computed scroll-padding, and right after the
   // attribute lands the recalc has not happened yet, so the docked
@@ -168,7 +172,7 @@ function revealCard(card: HTMLElement) {
 
     // Up and down: each lane scrolls its own cards; the page itself
     // does not scroll.
-    const laneCards = card.closest<HTMLElement>(".lane-cards");
+    const laneCards = card.closest<HTMLElement>(".lane-cards") ?? (board?.classList.contains("work-list") ? board : null);
     if (laneCards) {
       const cardY = layoutOffset(card).y - layoutOffset(laneCards).y;
       let target = laneCards.scrollTop;
@@ -229,6 +233,12 @@ interface BoardProps {
    * against, and refetches on.
    */
   query?: string;
+  /** A card opened from the command menu must be visible in context. */
+  onClearQuery?: () => void;
+  onFocusedReviewChange?: (focused: boolean) => void;
+  /** Board and Sessions are the two routes into this shared workspace. */
+  view?: "board" | "list";
+  sessions?: ProjectSession[];
 }
 
 /** A card whose work is over: finished or abandoned, either way not moving. */
@@ -369,6 +379,10 @@ export function Board({
   drawerOpen,
   spendByFeature = {},
   query = "",
+  onClearQuery,
+  onFocusedReviewChange,
+  view = "board",
+  sessions = [],
 }: BoardProps) {
   /**
    * Groups are unfinished product, so the badge and the ring are only
@@ -377,11 +391,35 @@ export function Board({
    * there is nothing for a caller to supply.
    */
   const showGroups = useBetaTesters();
+  const [focus, setFocus] = useState<BoardFocus>(() => {
+    try { return readBoardFocus(localStorage.getItem("bento.board.focus")); } catch { return "all"; }
+  });
+  const sessionByFeature = useMemo(() => new Map(sessions.map((session) => [session.featureId, session])), [sessions]);
+  const activeFocus = showGroups ? focus : "all";
+  const focusedReview = showGroups && (activeFocus !== "all" || view === "list") && drawerOpen;
+  useEffect(() => { onFocusedReviewChange?.(focusedReview); }, [focusedReview, onFocusedReviewChange]);
+  const listView = showGroups && (view === "list" || focusedReview);
+  const chooseFocus = (next: BoardFocus) => {
+    setFocus(next);
+    try { localStorage.setItem("bento.board.focus", next); } catch { /* Storage is optional. */ }
+  };
   const searching = query.trim().length > 0;
+  const matching = useMemo(() => features.filter((f) => !searching || matchesQuery(f, query)), [features, query, searching]);
   const shown = useMemo(
-    () => (searching ? features.filter((f) => matchesQuery(f, query)) : features),
-    [features, query, searching],
+    () => matching.filter((f) => activeFocus === "all" || workGroup(f, runStatusByFeature[f.id]) === activeFocus),
+    [matching, activeFocus, runStatusByFeature],
   );
+  const previousSelection = useRef<string | null>(null);
+  useEffect(() => {
+    if (previousSelection.current === selectedId) return;
+    previousSelection.current = selectedId;
+    if (!showGroups || !selectedId || !features.some((f) => f.id === selectedId) || shown.some((f) => f.id === selectedId)) return;
+    // Explicit navigation wins over a filter, but a live update or a
+    // filter click must not silently change the person's chosen view.
+    setFocus("all");
+    try { localStorage.setItem("bento.board.focus", "all"); } catch { /* Storage is optional. */ }
+    onClearQuery?.();
+  }, [selectedId, showGroups, features, shown, onClearQuery]);
   /**
    * Which cards were split, and how their parts are doing.
    *
@@ -449,6 +487,26 @@ export function Board({
   );
   const expecting = useExpectedArrivals(stages, features, runStatusByFeature);
 
+  useEffect(() => {
+    if (!showGroups) return;
+    const navigate = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
+      if (!(event.target instanceof HTMLElement) || event.target.closest("input, textarea, select, [contenteditable=true], [role=menu], [role=tablist], [data-portal-layer]")) return;
+      if (document.querySelector("[role=dialog]:not(.feature-drawer)")) return;
+      if (event.key !== "j" && event.key !== "k") return;
+      const cards = Array.from(boardRef.current?.querySelectorAll<HTMLButtonElement>("[data-feature]") ?? []);
+      if (!cards.length) return;
+      const index = cards.findIndex((el) => el.dataset.feature === selectedId);
+      const next = cards[index < 0 ? 0 : Math.max(0, Math.min(cards.length - 1, index + (event.key === "j" ? 1 : -1)))];
+      if (!next) return;
+      event.preventDefault();
+      onSelect(next.dataset.feature!);
+      next.focus({ preventScroll: true });
+    };
+    document.addEventListener("keydown", navigate);
+    return () => document.removeEventListener("keydown", navigate);
+  }, [showGroups, selectedId, onSelect]);
+
   /**
    * A lane's drop behaviour. The lane's key and what a drop does are
    * separate arguments because the Done lane is not a stage: it takes
@@ -491,6 +549,9 @@ export function Board({
       onSelect={onSelect}
       childStats={childStats.get(feature.id)}
       inGroup={relatedIds?.has(feature.id) ?? false}
+      session={view === "list" ? sessionByFeature.get(feature.id) : undefined}
+      agentName={profiles.find((p) => p.id === sessionByFeature.get(feature.id)?.latestRun.agentProfileId)?.name}
+      attentionLabel={showGroups ? attentionLabel(feature, runStatusByFeature[feature.id], stages.find((s) => s.id === feature.currentStageId)?.gateType === "manual") : undefined}
     />
   );
 
@@ -499,9 +560,46 @@ export function Board({
   const nothingFound = <p className="lane-empty">No matches</p>;
 
   return (
+    <>
+    {showGroups && (
+      <div className="board-controls">
+        <div className="board-filters" role="group" aria-label="Filter cards">
+          {([["all", "All cards"], ["needs-you", "Needs you"], ["running", "Running"]] as const).map(([value, label]) => (
+            <button key={value} className="board-filter" aria-pressed={activeFocus === value} onClick={() => chooseFocus(value)}>
+              {label}<span>{value === "all" ? matching.length : matching.filter((f) => workGroup(f, runStatusByFeature[f.id]) === value).length}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    )}
+    {showGroups && shown.length === 0 && (activeFocus !== "all" || searching) ? (
+      <div className="board-caught-up" role="status" data-review-queue={focusedReview || undefined}>
+        <span className="bento-moment" aria-hidden="true"><i /><i /><i /></span>
+        <h2>{searching ? "No matching cards" : activeFocus === "needs-you" ? "All caught up" : "No agents running"}</h2>
+        <p>{searching ? "Try another search or show all cards." : activeFocus === "needs-you" ? "Nothing needs your attention right now." : "Work in progress will appear here when an agent starts."}</p>
+        {activeFocus !== "all" && <button className="btn" onClick={() => chooseFocus("all")}>Show all cards</button>}
+      </div>
+    ) : listView ? (
+      <div className="board work-list" ref={boardRef} data-drawer-open={drawerOpen || undefined} data-review-queue={focusedReview || undefined}>
+        {([["needs-you", "Needs you"], ["running", "Working"], ["ready", "Up next"], ["completed", "Completed"]] as [WorkGroup, string][]).map(([group, label]) => {
+          const items = shown.filter((f) => workGroup(f, runStatusByFeature[f.id]) === group).sort((a, b) =>
+            (sessionByFeature.get(b.id)?.latestRun.queuedAt ?? "").localeCompare(sessionByFeature.get(a.id)?.latestRun.queuedAt ?? ""));
+          if (!items.length) return null;
+          return <section className="work-group" key={group} aria-label={label}>
+            <h2>{label}<span>{items.length}</span></h2>
+            {items.map((feature) => <div className="work-row" key={feature.id}>
+              {card(feature)}
+              <span className="work-stage">{isFinished(feature) ? "Completed" : stages.find((s) => s.id === feature.currentStageId)?.name ?? "Backlog"}</span>
+            </div>)}
+          </section>;
+        })}
+        {features.length === 0 && <div className="board-caught-up"><h2>Your next idea starts here</h2><p>Describe the work. Your agents can take it from there.</p><button className="btn btn-primary" onClick={onNewCard}>Add your first card</button></div>}
+      </div>
+    ) : (
     <div
       className="board"
       ref={boardRef}
+      data-focused={activeFocus !== "all" || undefined}
       data-drawer-open={drawerOpen || undefined}
       data-grouped={relatedIds ? "" : undefined}
     >
@@ -584,6 +682,8 @@ export function Board({
         {finished.map(card)}
       </Lane>
     </div>
+    )}
+    </>
   );
 }
 
@@ -637,7 +737,7 @@ function Lane({
       <header className="lane-head" data-expecting={expecting || undefined}>
         <div className="lane-title">
           <span className="lane-title-text" title={name}>
-            <span className="lane-ord">{ordinal}</span>
+            <span className="lane-ord" aria-hidden="true">{ordinal}</span>
             <span className="lane-name">{name}</span>
           </span>
           <span className="lane-count">{count}</span>
@@ -648,12 +748,9 @@ function Lane({
           <span className="lane-agent lane-agent-empty">{note ?? "no agent assigned"}</span>
         )}
       </header>
-      <div className="lane-transition">
-        <span>{kind === "backlog" ? "Start here" : kind === "completed" ? "End of pipeline" : gateType === "manual" ? "Manual approval" : "Automatic advancement"}</span>
-        <span aria-hidden="true">{kind === "completed" ? "✓" : "→"}</span>
-      </div>
+      {kind === "stage" && <span className="lane-policy" title={gateType === "manual" ? "You review the work before it advances" : "Advances when its requirements pass"}>{gateType === "manual" ? "Review before advancing" : "Advances automatically"}</span>}
       <div className="lane-cards">
-        {count === 0 && (empty ?? <p className="lane-empty">Ready for the next card</p>)}
+        {count === 0 && empty}
         {children}
       </div>
     </section>
@@ -678,6 +775,9 @@ const Card = memo(function Card({
   onSelect,
   childStats,
   inGroup,
+  attentionLabel,
+  session,
+  agentName,
 }: {
   feature: Feature;
   state: CardState;
@@ -692,9 +792,12 @@ const Card = memo(function Card({
   childStats: ChildStats | undefined;
   /** This card is in the selected card's group, so it keeps its ring. */
   inGroup: boolean;
+  attentionLabel?: string;
+  session?: ProjectSession;
+  agentName?: string;
 }) {
   const finished = feature.status === "done" || feature.status === "cancelled";
-  const spendLabel = finished ? formatCardSpend(spend) : null;
+  const spendLabel = finished && !session ? formatCardSpend(spend) : null;
   const runActive = RUN_ACTIVE.has(runStatus ?? "");
   const self = useRef<HTMLButtonElement>(null);
   // A card in a right lane opens under the drawer; bring it out.
@@ -764,7 +867,7 @@ const Card = memo(function Card({
       <span className="card-meta">
         <span className="status">
           <span className="dot" data-state={state} />
-          {stateLabel(state)}
+          {attentionLabel ?? stateLabel(state)}
         </span>
         {/* Spend sits with the PR chip in the existing meta row, not
             in a section of its own. Only a finished card prints it,
@@ -824,6 +927,13 @@ const Card = memo(function Card({
           </span>
         )}
       </span>
+      {session && <span className="card-session-meta">
+        <span>{agentName ?? "Agent"} · {session.runCount} {session.runCount === 1 ? "run" : "runs"}</span>
+        <span>
+          <time dateTime={session.latestRun.queuedAt} title={new Date(session.latestRun.queuedAt).toLocaleString()}>{new Date(session.latestRun.queuedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</time>
+          {session.totalCostUsd !== null && <span title="Reported cost across agent runs. Some agents do not report cost, so this is a minimum."> · ${session.totalCostUsd.toFixed(2)}+</span>}
+        </span>
+      </span>}
       {/*
         The agent's own words while it works, and its last words when it
         fails, which is why the run ended where it did. Keyed on the run

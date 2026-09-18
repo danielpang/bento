@@ -6,6 +6,7 @@ import {
   type Feature,
   type FeatureSpend,
   type ProjectUsage,
+  type ProjectSession,
   type Stage,
 } from "@bento/api-client";
 import { spendCoverageNote, type AgentEvent } from "@bento/core";
@@ -31,8 +32,9 @@ import {
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { CHANGELOG_URL } from "./changelog.js";
-import { BetaTestersProvider } from "./beta.js";
-import { NavMenu, type NavAction } from "./components/NavMenu.js";
+import { BetaTestersProvider, useBetaTesters } from "./beta.js";
+import { NavMenu, ConfigureMenu, type NavAction } from "./components/NavMenu.js";
+import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
@@ -393,6 +395,18 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
 }
 
 function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
+  const beta = useBetaTesters();
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const [focusedReview, setFocusedReview] = useState(false);
+  const [chatHost, setChatHost] = useState<HTMLDivElement | null>(null);
+  const [wideReview, setWideReview] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 1280px)");
+    const update = () => setWideReview(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   // Sessions and spend are sibling tabs of the board inside the same
   // chrome, so those addresses land here and only the slab between the
   // topbar and the bottom bar differs. Navigation is full page loads,
@@ -403,6 +417,8 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
   const screen: "board" | "sessions" | "spend" =
     path === "/sessions" ? "sessions" : path === "/spend" ? "spend" : "board";
+  const workScreen = screen === "board" || (beta && screen === "sessions");
+  const [sessions, setSessions] = useState<ProjectSession[]>([]);
   /**
    * Null until the list has answered. An empty array is a real answer
    * ("no projects yet"); starting there showed that copy for a beat on
@@ -460,6 +476,27 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * against.
    */
   const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (!beta) return;
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.repeat) return;
+      if (document.querySelector('[role="dialog"]:not(.feature-drawer), [role="menu"]')) return;
+      if (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (!event.metaKey && ((event.ctrlKey && event.key === "p") || (!event.ctrlKey && (event.key === ":" || event.key === "?")))) {
+        event.preventDefault();
+        setCommandsOpen(true);
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.shiftKey || !workScreen) return;
+      if (event.key === "n" && projectId && loadedFor === projectId) {
+        event.preventDefault(); setDialog("feature");
+      } else if (event.key === "/") {
+        event.preventDefault(); document.querySelector<HTMLInputElement>(".search-input")?.focus();
+      }
+    };
+    document.addEventListener("keydown", shortcut);
+    return () => document.removeEventListener("keydown", shortcut);
+  }, [beta, workScreen, projectId, loadedFor]);
   /** Opened from the bottom bar and from the menu; one dialog either way. */
   const [contactOpen, setContactOpen] = useState(false);
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
@@ -524,7 +561,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         setLoadedFor(null);
         return;
       }
-      const [pipeline, featureRows, snapshot] = await Promise.all([
+      const [pipeline, featureRows, snapshot, conversations] = await Promise.all([
         client.getPipeline(forProject),
         client.listFeatures(forProject),
         // The run status behind every card's face. Seeding it here
@@ -533,11 +570,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         // emits into a fresh session, so the card used to read
         // "not started" while its agent worked.
         client.getBoardSnapshot(forProject),
+        beta && screen === "sessions" ? client.listSessions(forProject) : Promise.resolve(null),
       ]);
       if (seq !== refreshSeq.current) return;
       setStages(pipeline.stages);
       setPipelineId(pipeline.id);
       setFeatures(featureRows);
+      setSessions(conversations?.sessions ?? []);
       setRunStatus(snapshot.statuses);
       setLastOutput(snapshot.outputs);
       setLoadedFor(forProject);
@@ -551,7 +590,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       setLoadedFor(forProject);
       setLoadError(err instanceof Error ? err.message : String(err));
     }
-  }, [projectId]);
+  }, [projectId, beta, screen]);
 
   const loadProjectList = useCallback(() => {
     const wantedFeature = new URLSearchParams(window.location.search).get("feature");
@@ -650,14 +689,11 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
 
   // Board events tell us a card moved or a run changed state. Status
   // lands optimistically; the refetch is coalesced so a burst of events
-  // costs one round trip instead of one per event. Board screen only:
-  // the sessions tab runs its own stream for its own list, and holding
-  // a second one here meant two connections per viewer, both refetching
-  // board data nothing on that screen renders. The one initial
-  // refresh() still happens on either screen, because the panels
-  // (Pipeline, Repositories) read stages and features wherever opened.
+  // costs one round trip instead of one per event. The shared Board
+  // and Sessions workspace uses one subscription. Legacy Sessions
+  // still owns its stream, so it must not subscribe here as well.
   useEffect(() => {
-    if (!projectId || screen !== "board") return;
+    if (!projectId || !workScreen) return;
     let timer: number | null = null;
     const stop = client.streamBoard(
       projectId,
@@ -704,7 +740,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       stop();
       if (timer !== null) clearTimeout(timer);
     };
-  }, [projectId, refresh, toast]);
+  }, [projectId, workScreen, refresh, toast]);
 
   /**
    * A deleted card takes its drawer and its Delete button with it, so
@@ -803,6 +839,20 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
 
   const dialogs = (
     <>
+      {beta && commandsOpen && <CommandMenu onClose={() => setCommandsOpen(false)} commands={[
+        ...(projectId && loadedFor === projectId ? [{ id: "new", label: "Create a card", hint: "n", run: () => setDialog("feature") }] : []),
+        { id: "board", label: "Go to board", run: () => { window.location.href = "/"; } },
+        { id: "sessions", label: "Go to sessions", run: () => { window.location.href = "/sessions"; } },
+        { id: "agents", label: "Configure agents", run: () => setPanel("agents") },
+        ...(projectId ? [
+          { id: "pipeline", label: "Configure pipeline", run: () => setPanel("pipeline") },
+          { id: "repos", label: "Configure repositories", run: () => setPanel("repos") },
+        ] : []),
+        ...features.map((feature) => ({ id: feature.id, label: feature.title, hint: "Card", run: () => {
+          if (workScreen) { setQuery(""); setSelectedId(feature.id); }
+          else window.location.href = `/?feature=${encodeURIComponent(feature.id)}`;
+        } })),
+      ]} />}
       {dialog === "feature" && (
         <NewFeatureDialog onClose={() => setDialog("none")} onSubmit={addFeature} />
       )}
@@ -929,8 +979,8 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           meta={spend}
           onContact={() => setContactOpen(true)}
           picker={<Skeleton className="skeleton-picker" />}
-          search={screen === "board" ? <Skeleton className="skeleton-search" /> : undefined}
-          primary={screen === "board" ? <Skeleton className="skeleton-btn" /> : undefined}
+          search={workScreen ? <Skeleton className="skeleton-search" /> : undefined}
+          primary={workScreen ? <Skeleton className="skeleton-btn" /> : undefined}
         />
         {loadError && (
           <div className="setup-prompt" role="alert">
@@ -1007,17 +1057,18 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           />
         }
         search={
-          screen === "board" ? (
-            <BoardSearch
+          workScreen ? (
+          <BoardSearch
               value={query}
               onChange={setQuery}
               matches={features.filter((f) => matchesQuery(f, query)).length}
+              onCommands={beta ? () => setCommandsOpen(true) : undefined}
             />
           ) : undefined
         }
         primary={
-          screen === "board" ? (
-            <button className="btn btn-primary" onClick={() => setDialog("feature")}>
+          workScreen ? (
+            <button className="btn btn-primary" title={beta ? "New card (n)" : undefined} onClick={() => setDialog("feature")}>
               New card
             </button>
           ) : undefined
@@ -1054,7 +1105,8 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         </div>
       )}
 
-      {screen === "sessions" ? (
+      <div className="board-workspace">
+      {screen === "sessions" && !beta ? (
         // Its own boundary, like the panels and the drawer: without one
         // the chunk load suspends to the app root and blanks the chrome.
         <Suspense fallback={<SessionsListSkeleton framed />}>
@@ -1068,6 +1120,11 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         <BoardSkeleton />
       ) : (
       <Board
+        key={projectId}
+        view={screen === "sessions" ? "list" : "board"}
+        sessions={sessions}
+        onClearQuery={() => setQuery("")}
+        onFocusedReviewChange={setFocusedReview}
         drawerOpen={selected !== null}
         query={query}
         stages={stages}
@@ -1142,11 +1199,22 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
 
       {/* Same reason as the panels: the board stays put while the
           drawer's code arrives. */}
+      {workScreen && selected && focusedReview && wideReview && (
+        <section className="review-chat" aria-label="Card conversation">
+          <header className="review-chat-heading">
+            <h2>Chat</h2>
+            <span>{selected.title}</span>
+          </header>
+          <div className="review-chat-body" ref={setChatHost} tabIndex={-1} />
+        </section>
+      )}
       <Suspense fallback={null}>
-        {screen === "board" && selected && (
+        {workScreen && selected && (
           <FeatureDrawer
             client={client}
             feature={selected}
+            chatHost={chatHost}
+            initialTab={screen === "sessions" ? "activity" : "overview"}
             stages={stages}
             profiles={profiles}
             runsVersion={runTicks[selected.id] ?? 0}
@@ -1159,7 +1227,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           />
         )}
       </Suspense>
-
+      </div>
       {panels}
       {dialogs}
       {bottom}
@@ -1223,6 +1291,7 @@ function TopBar({
   onContact: () => void;
   showSignOut: boolean;
 }) {
+  const beta = useBetaTesters();
   /*
    * What the row spells out in controls the menu has to spell out in
    * words. The gear is a gear because the row has no space for a word
@@ -1257,7 +1326,7 @@ function TopBar({
     </header>
     <div className="workspace-toolbar">
       <nav className="topbar-nav" aria-label="Board">
-        {actions.map((action) =>
+        {actions.filter((action) => !beta || action.href !== undefined).map((action) =>
           action.href === undefined ? (
             <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
               {action.label}
@@ -1275,6 +1344,7 @@ function TopBar({
             </a>
           ),
         )}
+        {beta && actions.some((action) => action.href === undefined) && <ConfigureMenu actions={actions.filter((action) => action.href === undefined)} />}
       </nav>
       <NavMenu actions={entries} />
       <span className="topbar-spacer" />
