@@ -29,6 +29,23 @@ export const piAdapter: AgentAdapter = {
   ],
   configPaths: [".pi"],
 
+  files(input: BuildCommandInput) {
+    const provider = input.customProvider;
+    if (!provider) return [];
+    return [{
+      path: "/root/.pi/agent/models.json",
+      content: JSON.stringify({ providers: {
+        [provider.slug]: {
+          baseUrl: provider.baseUrl,
+          api: provider.protocol === "anthropic" ? "anthropic-messages"
+            : provider.protocol === "openai-responses" ? "openai-responses" : "openai-completions",
+          apiKey: "$BENTO_CUSTOM_PROVIDER_API_KEY",
+          models: provider.models,
+        },
+      } }),
+    }];
+  },
+
   buildCommand(input: BuildCommandInput): string[] {
     const argv = ["pi", "--mode", "json", "--print", ...piModelArgs(input.model)];
     // A partial id is accepted, so the stored session id works as is.

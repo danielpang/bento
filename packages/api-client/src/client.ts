@@ -52,6 +52,21 @@ export interface ClientOptions {
   onBuild?: (build: string) => void;
 }
 
+export interface CustomModelProviderInput {
+  slug: string;
+  name: string;
+  protocol: "openai" | "openai-responses" | "anthropic";
+  baseUrl: string;
+  models: { id: string; name: string }[];
+}
+
+export interface CustomModelProvider extends CustomModelProviderInput {
+  id: string;
+  organizationId: string | null;
+  keyHint: string | null;
+  hasApiKey: boolean;
+}
+
 export interface RunStreamHandlers {
   onEvent?: (event: AgentEvent, seq: number) => void;
   onDelta?: (delta: AgentDelta) => void;
@@ -1260,6 +1275,30 @@ export class BentoClient {
       secrets: { id: string; name: string; hint: string }[];
       canManage: boolean;
     }>("/api/secrets");
+  }
+
+  listCustomProviders() {
+    return this.request<{ providers: CustomModelProvider[]; canManage: boolean }>("/api/custom-providers");
+  }
+
+  createCustomProvider(input: CustomModelProviderInput) {
+    return this.request<CustomModelProvider>("/api/custom-providers", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateCustomProvider(id: string, input: CustomModelProviderInput) {
+    return this.request<CustomModelProvider>(`/api/custom-providers/${id}`, { method: "PUT", body: JSON.stringify(input) });
+  }
+
+  deleteCustomProvider(id: string) {
+    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}`, { method: "DELETE" });
+  }
+
+  saveCustomProviderKey(id: string, apiKey: string) {
+    return this.request<CustomModelProvider>(`/api/custom-providers/${id}/key`, { method: "PUT", body: JSON.stringify({ apiKey }) });
+  }
+
+  deleteCustomProviderKey(id: string) {
+    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}/key`, { method: "DELETE" });
   }
 
   /** Values are write only: nothing reads a secret back. */

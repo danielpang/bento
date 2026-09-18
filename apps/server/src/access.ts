@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
-import { agentRuns, features, member, pipelines, projects, runArtifacts, stages } from "@bento/db";
+import { agentRuns, customModelProviders, features, member, pipelines, projects, runArtifacts, stages } from "@bento/db";
 import type { Context } from "hono";
 import type { AppContext } from "./context.js";
 import { actor, activeOrg } from "./middleware/actor.js";
@@ -44,6 +44,16 @@ export async function getActiveOrganizationMembership(ctx: AppContext, c: Contex
     .from(member)
     .where(and(eq(member.userId, actor(c)), eq(member.organizationId, organizationId)));
   return membership ?? null;
+}
+
+/** Re-check live membership before acting on a custom provider id. */
+export async function getAccessibleCustomProvider(ctx: AppContext, c: Context, id: string) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
+  const [provider] = await db(c, ctx).select().from(customModelProviders).where(eq(customModelProviders.id, id));
+  if (!provider) return null;
+  if (ctx.env.BENTO_MODE !== "multi") return provider.ownerId === actor(c) ? provider : null;
+  const membership = await getActiveOrganizationMembership(ctx, c);
+  return membership?.organizationId === provider.organizationId ? provider : null;
 }
 
 /** Throws-free check that the caller may act on one project. */

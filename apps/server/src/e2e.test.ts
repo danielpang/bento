@@ -5595,6 +5595,44 @@ test("a runner executes work the server holds for it", { timeout: 90_000 }, asyn
   assert.equal(approved.feature.currentStageId, stages[1]!.id);
 });
 
+test("a claimed OpenCode run receives its custom provider configuration and key", async () => {
+  const { project } = await setupProject("Custom provider runner");
+  await ctx.db.execute(sql`update projects set executor = 'runner' where id = ${project.id}`);
+  const createProvider = await app.request("/api/custom-providers", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ slug: "runner-models", name: "Runner models", protocol: "openai", baseUrl: "https://models.example.test/v1", models: [{ id: "model-a", name: "Model A" }] }),
+  });
+  assert.equal(createProvider.status, 201);
+  const provider = (await createProvider.json()) as { id: string };
+  await app.request(`/api/custom-providers/${provider.id}/key`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ apiKey: "sk-runner-test-key" }),
+  });
+  const profile = await json<{ id: string }>(await app.request("/api/profiles", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Runner custom OpenCode", cli: "opencode", model: "runner-models/model-a" }),
+  }));
+  const feature = await createFeature(project.id, "Custom provider work");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  const created = await json<{ id: string }>(await app.request("/api/runs", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+  }));
+  const claim = await json<{ run: { id: string }; customProvider: { env: Record<string, string>; missingKey: boolean; selection: { slug: string; modelId: string } } }>(
+    await app.request("/api/runner/claim", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runnerId: "custom-runner" }) }),
+  );
+  assert.equal(claim.run.id, created.id);
+  assert.equal(claim.customProvider.missingKey, false);
+  assert.deepEqual({ slug: claim.customProvider.selection.slug, modelId: claim.customProvider.selection.modelId }, { slug: "runner-models", modelId: "model-a" });
+  assert.equal(claim.customProvider.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-runner-test-key");
+  assert.match(claim.customProvider.env.OPENCODE_CONFIG_CONTENT ?? "", /runner-models/);
+  assert.doesNotMatch(claim.customProvider.env.OPENCODE_CONFIG_CONTENT ?? "", /sk-runner-test-key/);
+  const config = JSON.parse(claim.customProvider.env.OPENCODE_CONFIG_CONTENT ?? "{}") as { provider?: Record<string, { npm?: string }> };
+  assert.equal(config.provider?.["runner-models"]?.npm, "@ai-sdk/openai-compatible");
+  await app.request(`/api/runner/runs/${created.id}/complete`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runnerId: "custom-runner", ok: false, error: "test complete" }),
+  });
+});
+
 /**
  * One card, one agent. A second Start while a run is queued or working
  * would put two agents on the same branch, so every door refuses it,

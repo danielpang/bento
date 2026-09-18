@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { credentialNamesFor, getAdapter, runAgent, runsOnOllama, writeFileCommand } from "@bento/agents";
+import { credentialNamesFor, getAdapter, runAgent, runsOnOllama, writeFileCommand, type CustomProviderSelection } from "@bento/agents";
 import {
   agentRunPrompt,
   forgetsBetweenRuns,
@@ -40,6 +40,7 @@ interface ClaimedRun {
     startFromBase?: boolean;
   };
   agent: { cli: string; model: string; extraArgs: string[] };
+  customProvider?: { env: Record<string, string>; selection?: CustomProviderSelection; missingKey: boolean; missingModel?: boolean; unsupported?: boolean; disabled?: boolean };
   repositories: { name: string; localPath: string; defaultBranch: string }[];
   stagePrompt: string;
   compactedConversation?: string;
@@ -62,7 +63,8 @@ export interface RunnerOptions {
  *
  * This is the middle deployment option: the board, history, and team live
  * on the server, while agents run here in local containers against local
- * checkouts. Repository paths and agent credentials stay on this machine.
+ * checkouts. Built-in provider credentials stay on this machine. A custom
+ * provider key saved in Bento is delivered only with its claimed run.
  */
 class AuthError extends Error {
   constructor(readonly status: number) {
@@ -144,18 +146,34 @@ export class LocalRunner {
 
   private async execute(claimed: ClaimedRun): Promise<void> {
     const { run, feature, agent, repositories } = claimed;
+    if (claimed.customProvider?.disabled) {
+      await this.complete(run.id, { ok: false, error: "This custom provider is not available for this run." });
+      return;
+    }
+    if (claimed.customProvider?.missingKey) {
+      await this.complete(run.id, { ok: false, error: "This custom provider has no API key. Add one under Agents or Settings, Providers." });
+      return;
+    }
+    if (claimed.customProvider?.missingModel) {
+      await this.complete(run.id, { ok: false, error: "This model is no longer listed for its custom provider. Update the agent or the provider under Settings, Providers." });
+      return;
+    }
+    if (claimed.customProvider?.unsupported) {
+      await this.complete(run.id, { ok: false, error: `${agent.cli} cannot use this custom provider's protocol. Choose a supported agent tool.` });
+      return;
+    }
     const adapter = getAdapter(agent.cli as Parameters<typeof getAdapter>[0]);
     const names = credentialNamesFor(adapter, agent.model);
     let credentials: Record<string, string> = {};
-    for (const name of [...names.required, ...names.optional, ...names.alternatives]) {
+    for (const name of claimed.customProvider ? [] : [...names.required, ...names.optional, ...names.alternatives]) {
       const value = process.env[name];
       if (value) credentials[name] = value;
     }
     // A shared CLI login must never reach an Ollama endpoint.
     const onOllama = runsOnOllama(names, credentials);
-    const authEnv = this.options.shareAgentAuth && !onOllama ? await localAgentAuthEnv(adapter) : {};
+    const authEnv = this.options.shareAgentAuth && !onOllama && !claimed.customProvider ? await localAgentAuthEnv(adapter) : {};
     const authMounts =
-      this.options.shareAgentAuth && !onOllama && Object.keys(authEnv).length === 0 && this.driver.provider === "docker"
+      this.options.shareAgentAuth && !onOllama && !claimed.customProvider && Object.keys(authEnv).length === 0 && this.driver.provider === "docker"
         ? await localAgentAuthMounts(adapter)
         : [];
 
@@ -240,7 +258,8 @@ export class LocalRunner {
       ...(run.kind ? { kind: run.kind } : {}),
     });
 
-    // Credentials come from this machine and never reach the server.
+    // Built-in provider credentials come from this machine. Custom
+    // provider credentials arrive with the claimed run from Bento.
     // Same names the server forwards: requiredEnvFor replaces requiredEnv,
     // so a Codex OpenRouter run does not also pick up OPENAI_API_KEY here.
     // A run on Ollama is given Ollama's credentials only, as on the server,
@@ -270,6 +289,7 @@ export class LocalRunner {
       ...(run.resumeSessionId ? { resumeSessionId: run.resumeSessionId } : {}),
       ...(agent.extraArgs.length ? { extraArgs: agent.extraArgs } : {}),
       credentials,
+      ...(claimed.customProvider?.selection ? { customProvider: claimed.customProvider.selection } : {}),
     };
     const argv = adapter.buildCommand(commandInput);
 
@@ -286,7 +306,7 @@ export class LocalRunner {
     // The adapter's own variables go under the credentials: pool's model
     // travels this way, since `pool exec` has no flag for it, and an
     // exported base URL still wins over the default.
-    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}), ...credentials };
+    const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}), ...credentials, ...(claimed.customProvider?.env ?? {}) };
 
     let pending: AgentEvent[] = [];
 

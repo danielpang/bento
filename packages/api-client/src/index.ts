@@ -4,6 +4,8 @@ export {
   ApiError,
   unwrapError,
   type ClientOptions,
+  type CustomModelProvider,
+  type CustomModelProviderInput,
   type GitHubConnection,
   type GitHubInstallationOption,
   type GitHubRepository,

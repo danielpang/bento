@@ -17,6 +17,17 @@ export interface BuildCommandInput {
    * the env hook.
    */
   credentials?: Readonly<Record<string, string>>;
+  /** A Bento-owned provider selected for this run. The API key stays in env. */
+  customProvider?: CustomProviderSelection;
+}
+
+export interface CustomProviderSelection {
+  slug: string;
+  name: string;
+  protocol: "openai" | "openai-responses" | "anthropic";
+  baseUrl: string;
+  modelId: string;
+  models: { id: string; name: string }[];
 }
 
 /**
@@ -329,5 +340,5 @@ export function runsOnOllama(names: { ollama: OllamaRoute }, found: Readonly<Rec
 export function writeFileCommand(file: McpFile): string[] {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const dir = file.path.replace(/\/[^/]+$/, "") || "/";
-  return ["sh", "-c", `mkdir -p ${quote(dir)} && printf %s ${quote(file.content)} > ${quote(file.path)}`];
+  return ["sh", "-c", `mkdir -p ${quote(dir)} && chmod 700 ${quote(dir)} && printf %s ${quote(file.content)} > ${quote(file.path)} && chmod 600 ${quote(file.path)}`];
 }
