@@ -58,6 +58,7 @@ import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import { recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
@@ -350,6 +351,16 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       // Local mode can share the user's own agent logins and git identity.
       mounts: [...repoGitMounts, ...authMounts],
       image: ctx.env.BENTO_SANDBOX_IMAGE,
+      /**
+       * Drivers that install their CLIs on the way in install these and
+       * no others, which is minutes off the first stage of a new card.
+       * Resolved here rather than in the driver because it is a question
+       * about the pipeline, and the driver has no database.
+       */
+      agentBinaries: await pipelineAgentBinaries(ctx.db, {
+        pipelineId: feature.pipelineId,
+        runCli: profile.cli,
+      }),
       onProgress: saySystem,
     });
 

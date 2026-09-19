@@ -16,8 +16,49 @@
  * workspace still means "the one this repository installed".
  */
 
+import type { AgentCli } from "@bento/core";
+
 /** Binaries this script is responsible for putting on the PATH. */
 export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", "fx", "muse", "opencode", "pi", "pool"] as const;
+
+export type AgentBinary = (typeof AGENT_BINARIES)[number];
+
+/**
+ * Which binary a profile's CLI spawns. This is what lets a sandbox
+ * install the two agents a card's pipeline actually uses instead of all
+ * ten, so the first stage of a new card waits for two installers rather
+ * than for ten plus a Node runtime.
+ *
+ * `fake` maps to nothing: it is the in-process test agent, and a
+ * sandbox never spawns a binary for it.
+ */
+export const AGENT_CLI_BINARIES: Record<AgentCli, AgentBinary | null> = {
+  "claude-code": "claude",
+  codex: "codex",
+  cursor: "cursor-agent",
+  opencode: "opencode",
+  pi: "pi",
+  pool: "pool",
+  dsh: "dsh",
+  antigravity: "agy",
+  muse: "muse",
+  fx: "fx",
+  fake: null,
+};
+
+/**
+ * The binaries a set of CLIs needs, deduplicated and in AGENT_BINARIES
+ * order so the same pipeline always renders the same script. A CLI with
+ * no binary contributes nothing.
+ */
+export function toolchainBinaries(clis: Iterable<AgentCli>): AgentBinary[] {
+  const wanted = new Set<AgentBinary>();
+  for (const cli of clis) {
+    const binary = AGENT_CLI_BINARIES[cli];
+    if (binary) wanted.add(binary);
+  }
+  return AGENT_BINARIES.filter((binary) => wanted.has(binary));
+}
 
 /**
  * Bumped whenever the script changes what it installs, or when the
@@ -62,15 +103,50 @@ export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", 
  * Adding fx is the same for a machine that never had it.
  * fx's custom connections require the dev-channel binary. A separate
  * marker upgrades only fx on warm machines that already have the v3 set.
+ *
+ * Installing only a card's own agents did not need one either, and the
+ * reasoning is the same one more time. A warm sprite's whole-set marker
+ * is converted into per-CLI stamps in place, so it reinstalls nothing,
+ * and any CLI it is later asked for that it does not have is absent
+ * from the PATH and installed then. Bumping for it would have done the
+ * one thing this change exists to avoid: send every warm sprite in the
+ * fleet to ten installers at once.
+ *
+ * It does change what a bump costs, and for the better. A bump used to
+ * mean every warm sprite reinstalling all ten CLIs on its next
+ * provision, which is the fan-out most likely to get a vendor to
+ * throttle us. Now each card reinstalls the two or three agents it
+ * actually runs, spread over whenever those cards next run. Wait for
+ * .github/workflows/sandbox-e2e.yml before merging a bump all the same:
+ * a real sprite is still the only thing that can say the installers
+ * themselves work.
  */
 export const TOOLCHAIN_VERSION = 3;
 
 /**
- * The marker file the script leaves behind. Exported so provisioning
- * can ask "is the install still ahead?" cheaply and say so before the
- * minutes-long wait rather than after.
+ * Where the script records what it has installed: one empty file per
+ * CLI, in a directory named for the toolchain version. Exported so
+ * provisioning can ask "are this card's agents still ahead of us?"
+ * cheaply and say so before the minutes-long wait rather than after.
+ *
+ * Per CLI rather than one marker for the whole set, because a provision
+ * now installs only the agents a card's pipeline uses. One marker
+ * cannot answer "was claude installed at this version?" on a machine
+ * where only codex has ever run, and answering that wrong is how a
+ * version bump would silently skip the very CLI it was bumped for.
  */
-export const TOOLCHAIN_MARKER = `/opt/bento/toolchain-v${TOOLCHAIN_VERSION}`;
+export const TOOLCHAIN_STAMPS = `/opt/bento/toolchain/v${TOOLCHAIN_VERSION}`;
+
+/**
+ * What TOOLCHAIN_STAMPS replaced: a single file meaning "every CLI was
+ * attempted at this version". Warm sprites across the fleet still carry
+ * one, and it is good evidence, so the script converts it into stamps
+ * for the CLIs actually on the PATH rather than reinstalling ten
+ * working binaries to learn what the machine already knows. Versioned
+ * exactly like the stamps, so a bump cannot inherit the previous
+ * version's word for it.
+ */
+export const TOOLCHAIN_LEGACY_MARKER = `/opt/bento/toolchain-v${TOOLCHAIN_VERSION}`;
 const FX_CUSTOM_MARKER = "/opt/bento/fx-custom-connections";
 
 /**
@@ -93,9 +169,13 @@ const PI_MIN_VERSION = "0.70.1";
 const DSH_VERSION = "0.1.1-rc.2";
 
 /**
- * Idempotent, and safe to run on every provision: a sandbox that already
- * has every CLI exits immediately, which is the common case once a card
- * is past its first stage.
+ * The provisioning script, rendered for the CLIs this sandbox is asked
+ * to be able to spawn. Defaults to all of them, which is what the
+ * Docker image installs and what a caller naming nothing gets.
+ *
+ * Idempotent, and safe to run on every provision: a sandbox that
+ * already has the asked-for CLIs exits immediately, which is the common
+ * case once a card is past its first stage.
  *
  * Written as POSIX sh because it runs wherever the sandbox came from,
  * and installer failures are tolerated one CLI at a time: a run using
@@ -104,20 +184,31 @@ const DSH_VERSION = "0.1.1-rc.2";
  * install ran", so a sandbox that lost one installer to a rate limit
  * skipped straight past it on every later provision and every run of
  * that agent died at spawn with the runtime's own words, "executable
- * file `opencode` not found in $PATH". Now the marker only ends the
- * script when every binary actually resolves, and a later provision
- * retries the ones that do not, so the sandbox heals itself the moment
- * the installer is reachable again.
+ * file `opencode` not found in $PATH". Now a stamp goes on one CLI at a
+ * time and only for a CLI that resolves, and a later provision retries
+ * the ones that do not, so the sandbox heals itself the moment the
+ * installer is reachable again.
+ *
+ * What changed after that is the scope. A card whose pipeline runs
+ * Claude Code and Codex used to wait on ten installers plus a private
+ * Node it would never call, every one of them on the critical path of
+ * its first stage. Asking for two installs two. An agent added to the
+ * pipeline after the card was created is not a special case: it is
+ * absent from the PATH and unstamped, so the provision that first needs
+ * it installs it and the run proceeds.
  */
-export const AGENT_TOOLCHAIN_SCRIPT = `set -eu
-MARKER=${TOOLCHAIN_MARKER}
+export function agentToolchainScript(binaries: readonly string[] = AGENT_BINARIES): string {
+  return `set -eu
+STAMPS=${TOOLCHAIN_STAMPS}
+LEGACY_MARKER=${TOOLCHAIN_LEGACY_MARKER}
 FX_CUSTOM_MARKER=${FX_CUSTOM_MARKER}
-ALL='${AGENT_BINARIES.join(" ")}'
+ALL='${binaries.join(" ")}'
+EVERY='${AGENT_BINARIES.join(" ")}'
 # Installers write under it, and \${HOME} unset would end the script here
 # rather than at the missing tool, under set -u.
 HOME=\${HOME:-/root}
 export HOME
-mkdir -p /opt/bento /usr/local/bin
+mkdir -p /opt/bento /usr/local/bin "$STAMPS"
 
 # Installers drop binaries wherever they like; this puts them somewhere
 # every PATH already includes, because an agent is spawned directly
@@ -203,25 +294,34 @@ cli_stale() {
   esac
 }
 
-# What a run can actually spawn decides the work, not the marker alone.
-# With the marker there this is nine builtin lookups and no network,
-# which is what makes the common case free; without it the whole set is
-# installed, because a version bump means the commands Bento builds now
-# want newer CLIs than the ones already here. A present CLI can still be
-# needed when it is below a floor this script now requires.
-needed=""
-if [ -f "$MARKER" ]; then
-  for tool in $ALL; do
-    if publish "$tool"; then
-      if cli_stale "$tool"; then needed="$needed $tool"; fi
-    else
-      needed="$needed $tool"
-    fi
+# A machine provisioned before stamps existed carries one marker saying
+# the whole set was attempted at this version. That is worth believing
+# rather than spending ten installers to rediscover, so it is converted
+# into stamps for the CLIs that are actually on the PATH, once, and then
+# removed. A CLI the old run never landed stays unstamped and is
+# installed below if this card wants it.
+if [ -f "$LEGACY_MARKER" ]; then
+  for tool in $EVERY; do
+    if publish "$tool"; then touch "$STAMPS/$tool"; fi
   done
-  if [ -z "$needed" ]; then exit 0; fi
-else
-  needed="$ALL"
+  rm -f "$LEGACY_MARKER"
 fi
+
+# What this card can actually spawn decides the work. For a card whose
+# agents are all here this is a couple of builtin lookups each and no
+# network, which is what makes every stage after the first free. A CLI
+# needs installing when this version has never stamped it (a fresh
+# machine, or a version bump, which means the commands Bento builds now
+# want newer CLIs than the ones already here), when its binary has gone
+# missing, or when it is below a floor this script now requires.
+needed=""
+for tool in $ALL; do
+  if [ -f "$STAMPS/$tool" ] && publish "$tool"; then
+    if cli_stale "$tool"; then needed="$needed $tool"; fi
+  else
+    needed="$needed $tool"
+  fi
+done
 
 wanted() {
   case " $needed " in *" $1 "*) return 0 ;; esac
@@ -245,6 +345,18 @@ if [ -n "$packages" ] && command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \\
     ca-certificates $packages >/dev/null
 fi
+
+# Before the early exit, because these belong to the sandbox rather than
+# to any one agent: the repository clone that provisioning does next
+# needs git whether or not a single CLI was missing, and a card whose
+# agents are all installed still commits as somebody.
+git config --system user.email "no-reply@usebento.ai" || true
+git config --system user.name "Bento Agent" || true
+git config --system --add safe.directory '*' || true
+
+# Every asked-for CLI is stamped and on the PATH, which is every stage
+# of a card after its first.
+if [ -z "$needed" ]; then exit 0; fi
 
 # Downloaded first and then run, rather than piped into a shell: a
 # pipeline reports the shell's exit status, so a fetch that answers 403
@@ -489,27 +601,55 @@ fi
 # codes. On stdout as well as stderr, because provisioning reads this
 # line and puts the missing CLI in the run's transcript, rather than
 # leaving the run to fail later with a shell's "not found".
+#
+# The stamp goes on here, one CLI at a time and only for a CLI that
+# resolves, so an installer that had a bad minute leaves no stamp and is
+# the only thing retried next time. The whole-set marker this replaced
+# had to be written even on failure, precisely to avoid reinstalling
+# nine working CLIs for one unreachable vendor; stamping per CLI is what
+# makes that trade unnecessary.
 missing=""
 for tool in $ALL; do
-  publish "$tool" || missing="$missing$tool "
+  if publish "$tool"; then
+    touch "$STAMPS/$tool"
+  else
+    missing="$missing$tool "
+  fi
 done
 if [ -n "$missing" ]; then
   echo "${TOOLCHAIN_MISSING_PREFIX} $missing"
   for tool in $missing; do echo "bento: $tool is not installed" >&2; done
 fi
-
-git config --system user.email "no-reply@usebento.ai" || true
-git config --system user.name "Bento Agent" || true
-git config --system --add safe.directory '*' || true
-
-# Written even when a CLI is missing, and deliberately. The marker says
-# "this version of the toolchain has run here"; the retry decision is
-# made above from the binaries themselves, so the next provision installs
-# whatever is still absent and nothing else. Holding the marker back
-# instead would reinstall the whole set, minutes of it, on every stage of
-# a card whose one unreachable CLI it never uses.
-touch "$MARKER"
 `;
+}
+
+/**
+ * The script with every CLI asked for. What the Docker image mirrors,
+ * and what a driver that names no agents installs.
+ */
+export const AGENT_TOOLCHAIN_SCRIPT = agentToolchainScript();
+
+/**
+ * Asks a sandbox whether the CLIs this card needs are already stamped,
+ * so provisioning can name a minutes-long install before it happens
+ * rather than after it. Cheap on purpose: one stat per CLI, no network,
+ * and no installer.
+ *
+ * Only as good as the stamps, which say a CLI resolved when it was
+ * installed rather than that it resolves now. The script itself checks
+ * the PATH and reinstalls what has gone missing, so the cost of being
+ * wrong here is a progress line that was too optimistic, never a run
+ * that starts without its agent.
+ */
+export function toolchainPresenceProbe(binaries: readonly string[] = AGENT_BINARIES): string {
+  if (binaries.length === 0) return "echo tools-present";
+  return [
+    `for tool in ${binaries.join(" ")}; do`,
+    `  if [ ! -f ${TOOLCHAIN_STAMPS}/"$tool" ]; then echo tools-absent; exit 0; fi`,
+    "done",
+    "echo tools-present",
+  ].join("\n");
+}
 
 /**
  * The CLIs the script could not put on the PATH, read back from its

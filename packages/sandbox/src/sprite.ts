@@ -2,9 +2,9 @@ import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { APIError, FilesystemError, SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
 import {
   AGENT_BINARIES,
-  AGENT_TOOLCHAIN_SCRIPT,
-  TOOLCHAIN_MARKER,
+  agentToolchainScript,
   toolchainMissing,
+  toolchainPresenceProbe,
 } from "./agent-toolchain.js";
 import {
   collectExec,
@@ -128,35 +128,47 @@ export class SpriteDriver implements SandboxDriver {
     }
     await say(reused ? `Reusing this card's cloud sandbox (${name}).` : `Created cloud sandbox ${name}.`);
 
-    // One round trip prepares the workspace and answers whether the
-    // agent CLIs are already there, so the wait that follows can be
-    // named before it happens rather than discovered after.
+    /**
+     * The CLIs this card can spawn, which the caller narrows to its
+     * pipeline's agents plus the one this run uses. A caller that names
+     * none asks for all of them.
+     */
+    const binaries = spec.agentBinaries ?? AGENT_BINARIES;
+
+    // One round trip prepares the workspace and answers whether those
+    // CLIs are already there, so the wait that follows can be named
+    // before it happens rather than discovered after.
     const probe = await runScript(
       sprite,
-      [
-        "set -eu",
-        `mkdir -p ${shellQuote(this.workdir)}`,
-        `if [ -f ${shellQuote(TOOLCHAIN_MARKER)} ]; then echo tools-present; else echo tools-absent; fi`,
-      ].join("\n"),
+      ["set -eu", `mkdir -p ${shellQuote(this.workdir)}`, toolchainPresenceProbe(binaries)].join("\n"),
     );
     const toolsPresent = probe.stdout.includes("tools-present");
 
     /**
      * A sprite is a bare machine, not an image: there is nowhere to bake
      * the agent CLIs the way the Docker driver does, so they are
-     * installed on first provision. The script exits at once when the
-     * marker is there and every CLI resolves, which is every stage
-     * after a card's first; a CLI that is missing because its installer
-     * had a bad minute is retried here, and only that one.
+     * installed on the way in. Only the ones this card asked for, which
+     * is what keeps the first stage of a new card down to the installers
+     * it will actually use rather than all ten plus a private Node.
+     *
+     * The script exits at once when every asked-for CLI is stamped and
+     * resolves, which is every stage after a card's first. A CLI that is
+     * missing, whether because its installer had a bad minute or because
+     * it joined the pipeline after this sandbox was built, is installed
+     * here, and only that one.
      */
+    // Named when there are any. A pipeline built entirely from the
+    // in-process test agent asks for none, and "installed ()" reads as
+    // a bug in the transcript the person is watching.
+    const named = binaries.length > 0 ? ` (${binaries.join(", ")})` : "";
     let toolchain: { stdout: string };
     if (toolsPresent) {
-      await say("Agent tools are already installed.");
-      toolchain = await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
+      await say(`Agent tools are already installed${named}.`);
+      toolchain = await runScript(sprite, agentToolchainScript(binaries));
     } else {
-      await say("Installing the agent tools. This takes a few minutes on a new sandbox.");
+      await say(`Installing the agent tools this card uses${named}. This takes a few minutes on a new sandbox.`);
       const started = Date.now();
-      toolchain = await runScript(sprite, AGENT_TOOLCHAIN_SCRIPT);
+      toolchain = await runScript(sprite, agentToolchainScript(binaries));
       await say(`Agent tools installed in ${Math.round((Date.now() - started) / 1000)}s.`);
     }
 
@@ -298,9 +310,11 @@ export class SpriteDriver implements SandboxDriver {
   }
 
   /**
-   * Every sprite installs the whole set on its first provision, so the
-   * answer is known without asking: there is no machine to inspect
-   * until a card has one, and by then the tools are there.
+   * Every CLI is available on a sprite, so the answer is known without
+   * asking: there is no machine to inspect until a card has one, and
+   * provisioning installs whatever that card's agents turn out to be.
+   * Picking any agent in the form is therefore never the mistake this
+   * probe exists to catch, including one no sandbox has installed yet.
    */
   async checkTools(binaries: readonly string[]): Promise<Record<string, boolean> | null> {
     const installed = new Set<string>(AGENT_BINARIES);
