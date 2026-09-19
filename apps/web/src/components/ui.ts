@@ -47,7 +47,7 @@ function inPortalLayer(node: EventTarget | null): boolean {
   return node instanceof Element && node.closest("[data-portal-layer]") !== null;
 }
 
-export function useDismissable<T extends HTMLElement>(onClose: () => void): RefObject<T | null> {
+export function useDismissable<T extends HTMLElement>(onClose: () => void, keepOpenOn?: string): RefObject<T | null> {
   const panel = useRef<T | null>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -66,6 +66,9 @@ export function useDismissable<T extends HTMLElement>(onClose: () => void): RefO
     const onDown = (e: MouseEvent) => {
       const el = panel.current;
       if (!el || el.contains(e.target as Node) || inPortalLayer(e.target)) return;
+      // Switching cards in a review queue replaces the detail in place.
+      // Closing on mousedown would remove the card before its click.
+      if (keepOpenOn && e.target instanceof Element && e.target.closest(keepOpenOn)) return;
       closeRef.current();
     };
     document.addEventListener("keydown", onKey, true);
@@ -74,7 +77,7 @@ export function useDismissable<T extends HTMLElement>(onClose: () => void): RefO
       document.removeEventListener("keydown", onKey, true);
       document.removeEventListener("mousedown", onDown);
     };
-  }, []);
+  }, [keepOpenOn]);
 
   return panel;
 }

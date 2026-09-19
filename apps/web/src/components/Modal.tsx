@@ -44,6 +44,7 @@ export function Modal({
   large,
   expanded,
   headerActions,
+  editor,
 }: {
   title: string;
   description?: string;
@@ -61,6 +62,8 @@ export function Modal({
   expanded?: boolean;
   /** Icon controls on the title row, top right. */
   headerActions?: ReactNode;
+  /** Long editors keep their header and save actions visible while fields scroll. */
+  editor?: boolean;
 }) {
   /**
    * Put the cursor back where it came from.
@@ -74,13 +77,17 @@ export function Modal({
    * The frame delay lets Radix's own focus handling finish first,
    * otherwise it runs after this and lands back on nothing.
    */
-  const returnFocus = useRef<Element | null>(null);
+  // Capture the opener before the form's autoFocus runs during commit.
+  const returnFocus = useRef<Element | null>(typeof document === "undefined" ? null : document.activeElement);
+  const restoreFrame = useRef<number | null>(null);
   const panel = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    returnFocus.current = document.activeElement;
+    // StrictMode replays setup and cleanup on mount. Cancel the replay's
+    // pending restoration so it cannot steal focus from the open dialog.
+    if (restoreFrame.current !== null) cancelAnimationFrame(restoreFrame.current);
     return () => {
       const target = returnFocus.current as HTMLElement | null;
-      if (target?.isConnected) requestAnimationFrame(() => target.focus());
+      if (target?.isConnected) restoreFrame.current = requestAnimationFrame(() => target.focus());
     };
   }, []);
 
@@ -98,7 +105,7 @@ export function Modal({
             without also dismissing the drawer that opened it. */}
         <Dialog.Overlay className="modal-backdrop" data-portal-layer="">
           <Dialog.Content
-            className={["modal", wide && "modal-wide", large && "modal-large", expanded && "modal-expanded"].filter(Boolean).join(" ")}
+            className={["modal", wide && "modal-wide", large && "modal-large", expanded && "modal-expanded", editor && "modal-editor"].filter(Boolean).join(" ")}
             ref={panel}
             // The panel itself, so the focus trap still has focus
             // inside it: preventing this without moving focus leaves it
@@ -114,7 +121,7 @@ export function Modal({
             // through a screen reader twice.
             {...(description ? {} : { "aria-describedby": undefined })}
           >
-            {headerActions ? (
+            {headerActions || editor ? (
               <div className="modal-head">
                 <div className="modal-head-copy">
                   <Dialog.Title className="modal-title" title={title}>
@@ -122,7 +129,7 @@ export function Modal({
                   </Dialog.Title>
                   {description && <Dialog.Description className="muted">{description}</Dialog.Description>}
                 </div>
-                <div className="modal-head-actions">{headerActions}</div>
+                {headerActions && <div className="modal-head-actions">{headerActions}</div>}
               </div>
             ) : (
               <>
@@ -130,7 +137,7 @@ export function Modal({
                 {description && <Dialog.Description className="muted">{description}</Dialog.Description>}
               </>
             )}
-            {children}
+            {editor ? <div className="editor-body">{children}</div> : children}
             <div className="modal-actions">{actions}</div>
           </Dialog.Content>
         </Dialog.Overlay>
