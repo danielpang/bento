@@ -1,3 +1,5 @@
+import type { AgentBinary } from "./agent-toolchain.js";
+
 export interface SandboxHandle {
   /** Driver-specific identifier: container id, sprite name, or process tag. */
   externalId: string;
@@ -56,7 +58,7 @@ export interface ProvisionSpec {
    * an agent added to the pipeline after the card was created arrives
    * with the stage that first needs it.
    */
-  agentBinaries?: readonly string[];
+  agentBinaries?: readonly AgentBinary[];
   env?: Record<string, string>;
   /**
    * Called with a human readable line as provisioning advances: sandbox

@@ -14,9 +14,15 @@ import { toolchainBinaries, type AgentBinary } from "@bento/sandbox";
  * The set is the whole pipeline's, not this stage's, on purpose. A card
  * keeps one machine for its whole life, so installing the later stages'
  * agents while the first stage is already paying for a cold provision
- * costs nothing extra there and saves each later stage its own wait. It
+ * costs nothing extra there and saves those stages their own wait. It
  * also covers the judge a gate runs, which is an agent nothing else in
  * the stage would name.
+ *
+ * Only the stages that assign an agent, though. A stage left unassigned
+ * names nobody here and is run by whoever a person or a follow-up picks
+ * at the time, so that run pays for its own CLI if the sandbox does not
+ * already have it. `runCli` below is what makes that safe rather than
+ * merely late.
  *
  * Narrowing this can never strand a run, and the reason is worth being
  * precise about, because the failure it would cause is the one

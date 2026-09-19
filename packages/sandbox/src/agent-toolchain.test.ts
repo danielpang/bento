@@ -811,15 +811,28 @@ EOF
     );
   }
 
-  run(script = this.script): { status: number | null; stdout: string; stderr: string } {
+  run(
+    script = this.script,
+    env: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
     rmSync(path.join(this.root, "fetched"), { force: true });
     const home = path.join(this.root, "home");
     mkdirSync(home, { recursive: true });
     const result = spawnSync("sh", ["-c", script], {
-      env: { PATH: `${this.stubs}:${this.root}/usr/local/bin:/usr/bin:/bin`, HOME: home },
+      env: { PATH: `${this.stubs}:${this.root}/usr/local/bin:/usr/bin:/bin`, HOME: home, ...env },
       encoding: "utf8",
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }
+
+  /**
+   * Drops a stub so the machine's own tool is used instead. For the
+   * handful of assertions that are about a real tool's behaviour rather
+   * than about the script calling it; anything that would reach the
+   * network stays stubbed.
+   */
+  unstub(name: string): void {
+    rmSync(path.join(this.stubs, name), { force: true });
   }
 
   /**
@@ -838,8 +851,11 @@ EOF
   }
 
   /** The script rendered for one card's agents rather than all ten. */
-  runFor(binaries: readonly string[]): { status: number | null; stdout: string; stderr: string } {
-    return this.run(this.relocate(agentToolchainScript(binaries)));
+  runFor(
+    binaries: readonly string[],
+    env: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
+    return this.run(this.relocate(agentToolchainScript(binaries)), env);
   }
 
   /** The binaries a run could actually spawn afterwards. */
@@ -1068,13 +1084,59 @@ test("a machine holding the marker stamps replaced does not reinstall", () => {
     assert.equal(after.status, 0, after.stderr);
     assert.deepEqual(toolchainMissing(after.stdout), []);
     assert.deepEqual(sandbox.fetched(), [], "a warm machine reinstalled what it already had");
-    // Converted once, then gone, so the next provision reads stamps.
-    assert.ok(!existsSync(legacy));
-    assert.ok(existsSync(path.join(stamps, "claude")));
-    // Every CLI it really had, not only the two this card asked for:
-    // the marker's word covered the whole set, and throwing the rest
-    // away would reinstall them one card at a time for no reason.
-    assert.ok(existsSync(path.join(stamps, "opencode")));
+
+    /**
+     * And the marker is still there afterwards.
+     *
+     * Consuming it would be tidier, and it would also mean that a
+     * rollback to the version before stamps, or one older machine still
+     * serving during a rolling deploy, saw a sprite with no marker and
+     * no stamps it can read, and reinstalled all ten CLIs. Across the
+     * fleet at once, which is the fan-out this change exists to avoid.
+     */
+    // Stated as the predicate the pre-stamp script runs, `[ -f
+     // /opt/bento/toolchain-v<N> ]`, because that is the whole of what a
+     // rolled-back deploy asks before deciding to reinstall the set.
+    assert.equal(
+      spawnSync("sh", ["-c", `[ -f ${legacy} ]`]).status,
+      0,
+      "the marker a rolled-back deploy reads was consumed",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+/**
+ * The git identity moved above the early exit, so it runs on every
+ * provision rather than only the cold one. `--add` appends another
+ * identical line each time, which on a card with many stages grows
+ * /etc/gitconfig without bound.
+ */
+test("the git identity is written the same way however often it runs", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-gitconfig-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    const gitconfig = path.join(root, "etc/gitconfig");
+    mkdirSync(path.dirname(gitconfig), { recursive: true });
+    /**
+     * The real git, pointed at a system config this test owns. Stubbed
+     * git would only ever prove what the stub does, and the thing under
+     * test is which of git's own flags was used.
+     */
+    sandbox.unstub("git");
+
+    for (let provision = 0; provision < 3; provision += 1) {
+      assert.equal(sandbox.runFor(["claude"], { GIT_CONFIG_SYSTEM: gitconfig }).status, 0);
+    }
+    const written = readFileSync(gitconfig, "utf8");
+    assert.equal(
+      written.split("\n").filter((line) => line.includes("directory")).length,
+      1,
+      `safe.directory was appended once per provision:\n${written}`,
+    );
+    assert.match(written, /no-reply@usebento\.ai/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1169,4 +1231,36 @@ test("the presence probe asks about this card's agents and touches no installer"
   assert.ok(probe.includes(TOOLCHAIN_STAMPS));
   assert.doesNotMatch(probe, /curl|apt-get|install/);
   assert.equal(spawnSync("sh", ["-n", "-c", probe]).status, 0);
+});
+
+/**
+ * The probe decides one thing: whether the run's transcript promises a
+ * minutes-long wait. Reading only stamps would tell every warm sprite in
+ * the fleet it was about to install, right before installing nothing.
+ */
+test("the presence probe reads the pre-stamp marker too", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-probe-"));
+  try {
+    const stamps = path.join(root, TOOLCHAIN_STAMPS.replace(/^\//, ""));
+    const legacy = path.join(root, TOOLCHAIN_LEGACY_MARKER.replace(/^\//, ""));
+    const probe = toolchainPresenceProbe(["claude", "codex"])
+      .replaceAll(TOOLCHAIN_STAMPS, stamps)
+      .replaceAll(TOOLCHAIN_LEGACY_MARKER, legacy);
+    const ask = () => spawnSync("sh", ["-c", probe], { encoding: "utf8" }).stdout.trim();
+
+    assert.equal(ask(), "tools-absent", "a machine with nothing on it");
+
+    mkdirSync(path.dirname(legacy), { recursive: true });
+    writeFileSync(legacy, "");
+    assert.equal(ask(), "tools-present", "a warm sprite from before stamps");
+
+    rmSync(legacy);
+    mkdirSync(stamps, { recursive: true });
+    writeFileSync(path.join(stamps, "claude"), "");
+    assert.equal(ask(), "tools-absent", "one of the two is stamped, the other is not");
+    writeFileSync(path.join(stamps, "codex"), "");
+    assert.equal(ask(), "tools-present");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -106,9 +106,9 @@ export function toolchainBinaries(clis: Iterable<AgentCli>): AgentBinary[] {
  *
  * Installing only a card's own agents did not need one either, and the
  * reasoning is the same one more time. A warm sprite's whole-set marker
- * is converted into per-CLI stamps in place, so it reinstalls nothing,
- * and any CLI it is later asked for that it does not have is absent
- * from the PATH and installed then. Bumping for it would have done the
+ * is still read, and counts for every CLI it covers, so such a machine
+ * reinstalls nothing; any CLI it is later asked for that it does not
+ * have is absent from the PATH and installed then. Bumping for it would have done the
  * one thing this change exists to avoid: send every warm sprite in the
  * fleet to ten installers at once.
  *
@@ -140,11 +140,14 @@ export const TOOLCHAIN_STAMPS = `/opt/bento/toolchain/v${TOOLCHAIN_VERSION}`;
 /**
  * What TOOLCHAIN_STAMPS replaced: a single file meaning "every CLI was
  * attempted at this version". Warm sprites across the fleet still carry
- * one, and it is good evidence, so the script converts it into stamps
- * for the CLIs actually on the PATH rather than reinstalling ten
- * working binaries to learn what the machine already knows. Versioned
- * exactly like the stamps, so a bump cannot inherit the previous
- * version's word for it.
+ * one, and it is good evidence, so the script reads it as a stamp for
+ * any CLI rather than reinstalling ten working binaries to learn what
+ * the machine already knows. Versioned exactly like the stamps, so a
+ * bump cannot inherit the previous version's word for it.
+ *
+ * Read, never written and never removed. A machine that has it keeps
+ * it, so a deploy of this change can be rolled back without sending the
+ * whole fleet through ten installers at once.
  */
 export const TOOLCHAIN_LEGACY_MARKER = `/opt/bento/toolchain-v${TOOLCHAIN_VERSION}`;
 const FX_CUSTOM_MARKER = "/opt/bento/fx-custom-connections";
@@ -221,7 +224,6 @@ STAMPS=${TOOLCHAIN_STAMPS}
 LEGACY_MARKER=${TOOLCHAIN_LEGACY_MARKER}
 FX_CUSTOM_MARKER=${FX_CUSTOM_MARKER}
 ALL='${binaries.join(" ")}'
-EVERY='${AGENT_BINARIES.join(" ")}'
 # Installers write under it, and \${HOME} unset would end the script here
 # rather than at the missing tool, under set -u.
 HOME=\${HOME:-/root}
@@ -318,29 +320,28 @@ cli_stale() {
   esac
 }
 
-# A machine provisioned before stamps existed carries one marker saying
-# the whole set was attempted at this version. That is worth believing
-# rather than spending ten installers to rediscover, so it is converted
-# into stamps for the CLIs that are actually on the PATH, once, and then
-# removed. A CLI the old run never landed stays unstamped and is
-# installed below if this card wants it.
-if [ -f "$LEGACY_MARKER" ]; then
-  for tool in $EVERY; do
-    if publish "$tool"; then touch "$STAMPS/$tool"; fi
-  done
-  rm -f "$LEGACY_MARKER"
-fi
-
 # What this card can actually spawn decides the work. For a card whose
 # agents are all here this is a couple of builtin lookups each and no
 # network, which is what makes every stage after the first free. A CLI
-# needs installing when this version has never stamped it (a fresh
+# needs installing when nothing says this version installed it (a fresh
 # machine, or a version bump, which means the commands Bento builds now
 # want newer CLIs than the ones already here), when its binary has gone
 # missing, or when it is below a floor this script now requires.
+#
+# Two things can say it. Its own stamp, or the single marker that warm
+# machines from before stamps carry, which means the whole set was
+# attempted at this version and is exactly as good a word for one CLI.
+#
+# That marker is read rather than converted and deleted, and it is left
+# where it is. Deleting it would be tidier, and it would also mean that
+# rolling back to the version before stamps, or one older machine in a
+# rolling deploy, found no marker and reinstalled all ten CLIs on every
+# warm sprite at once: the fleet-wide installer fan-out this whole change
+# exists to avoid. It costs one stat per CLI and stops being read the
+# moment TOOLCHAIN_VERSION moves, since both paths are versioned.
 needed=""
 for tool in $ALL; do
-  if [ -f "$STAMPS/$tool" ] && publish "$tool"; then
+  if publish "$tool" && { [ -f "$STAMPS/$tool" ] || [ -f "$LEGACY_MARKER" ]; }; then
     if cli_stale "$tool"; then needed="$needed $tool"; fi
   else
     needed="$needed $tool"
@@ -376,7 +377,9 @@ fi
 # agents are all installed still commits as somebody.
 git config --system user.email "no-reply@usebento.ai" || true
 git config --system user.name "Bento Agent" || true
-git config --system --add safe.directory '*' || true
+# --replace-all rather than --add: this runs on every provision now, and
+# --add would append another identical line to /etc/gitconfig each time.
+git config --system --replace-all safe.directory '*' || true
 
 # Every asked-for CLI is stamped and on the PATH, which is every stage
 # of a card after its first.
@@ -699,8 +702,12 @@ export const AGENT_TOOLCHAIN_SCRIPT = agentToolchainScript();
  * rather than after it. Cheap on purpose: one stat per CLI, no network,
  * and no installer.
  *
- * Only as good as the stamps, which say a CLI resolved when it was
- * installed rather than that it resolves now. The script itself checks
+ * Reads the same two things the script does, a stamp or the pre-stamp
+ * marker, so a warm machine is not told it is about to wait minutes for
+ * an install that will take a second.
+ *
+ * Only as good as those, which say a CLI resolved when it was installed
+ * rather than that it resolves now. The script itself checks
  * the PATH and reinstalls what has gone missing, so the cost of being
  * wrong here is a progress line that was too optimistic, never a run
  * that starts without its agent.
@@ -709,7 +716,10 @@ export function toolchainPresenceProbe(binaries: readonly string[] = AGENT_BINAR
   if (binaries.length === 0) return "echo tools-present";
   return [
     `for tool in ${binaries.join(" ")}; do`,
-    `  if [ ! -f ${TOOLCHAIN_STAMPS}/"$tool" ]; then echo tools-absent; exit 0; fi`,
+    `  if [ ! -f ${TOOLCHAIN_STAMPS}/"$tool" ] && [ ! -f ${TOOLCHAIN_LEGACY_MARKER} ]; then`,
+    "    echo tools-absent",
+    "    exit 0",
+    "  fi",
     "done",
     "echo tools-present",
   ].join("\n");
