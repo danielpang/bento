@@ -9,4 +9,12 @@ export {
   type PreparedRepository,
 } from "./worktree.js";
 export { createDockerClient, resolveDockerSocket } from "./docker-client.js";
-export { AGENT_BINARIES, AGENT_TOOLCHAIN_SCRIPT, TOOLCHAIN_VERSION } from "./agent-toolchain.js";
+export {
+  AGENT_BINARIES,
+  AGENT_CLI_BINARIES,
+  AGENT_TOOLCHAIN_SCRIPT,
+  TOOLCHAIN_VERSION,
+  agentToolchainScript,
+  toolchainBinaries,
+  type AgentBinary,
+} from "./agent-toolchain.js";
