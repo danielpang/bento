@@ -1,4 +1,4 @@
-import { DEFAULT_AGENTS, DEFAULT_STAGES, MODEL_GUIDANCE } from "@bento/core";
+import { DEFAULT_AGENTS, DEFAULT_STAGES, MODEL_GUIDANCE, SWARM_AGENTS } from "@bento/core";
 import { eq } from "drizzle-orm";
 import type { Db } from "./client.js";
 import { agentProfiles, pipelines, stages } from "./schema/index.js";
@@ -87,4 +87,48 @@ async function ensureDefaultAgents(
     if (id) bySlug.set(agent.stageSlug, id);
   }
   return bySlug;
+}
+
+/**
+ * The planner and worker agents a swarm runs as.
+ *
+ * Seeded rather than built in, for the same reason the stage agents
+ * are: the skill is the part a team rewrites, and a role whose
+ * instructions live in the server is a role nobody can change. Matched
+ * on name, so somebody who already has a "Swarm Planner" keeps theirs.
+ *
+ * Returned by role rather than by name, because that is what a swarm
+ * template asks for.
+ */
+export async function ensureSwarmAgents(
+  db: Db,
+  owner: { ownerId: string; organizationId: string | null },
+): Promise<{ planner: string | null; worker: string | null }> {
+  const existing = await db.select().from(agentProfiles).where(eq(agentProfiles.ownerId, owner.ownerId));
+  const byName = new Map(existing.map((profile) => [profile.name, profile.id]));
+
+  const missing = SWARM_AGENTS.filter((agent) => !byName.has(agent.name));
+  if (missing.length > 0) {
+    const created = await db
+      .insert(agentProfiles)
+      .values(
+        missing.map((agent) => ({
+          ownerId: owner.ownerId,
+          organizationId: owner.organizationId,
+          name: agent.name,
+          cli: SEED_CLI,
+          model: SEED_MODEL,
+          skill: agent.skill,
+        })),
+      )
+      .returning({ id: agentProfiles.id, name: agentProfiles.name });
+    for (const profile of created) byName.set(profile.name, profile.id);
+  }
+
+  const byRole = new Map<string, string>();
+  for (const agent of SWARM_AGENTS) {
+    const id = byName.get(agent.name);
+    if (id) byRole.set(agent.role, id);
+  }
+  return { planner: byRole.get("planner") ?? null, worker: byRole.get("worker") ?? null };
 }

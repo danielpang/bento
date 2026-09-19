@@ -58,6 +58,16 @@ export interface Entitlements {
    */
   canStartRun?(organizationId: string, featureId?: string): Promise<EntitlementRefusal | null>;
   /**
+   * Asked before a swarm is created or started, and before the console
+   * offers the mode at all.
+   *
+   * Optional like the rest of the newer checks: a deployment that has
+   * not heard of swarms answers nothing and the feature is simply
+   * available, which is what an open source install and local mode
+   * are. Absent here is "no plan to enforce", never "refuse".
+   */
+  canUseSwarms?(organizationId: string): Promise<EntitlementRefusal | null>;
+  /**
    * Told once a run reached a terminal state, so a deployment that
    * meters compute can record what it cost.
    *

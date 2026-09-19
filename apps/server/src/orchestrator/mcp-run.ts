@@ -45,11 +45,17 @@ export interface PrepareRunMcpInput {
   /** Absolute container paths mounted read-only, from agentAuthMounts. */
   mountedConfigPaths: string[];
   /**
-   * Whether this run may have Bento's own tools. Unfinished product,
-   * so it is the beta flag, decided by the caller (which knows the
-   * project) rather than read here.
+   * Bento's own servers, served in process by the gateway.
+   *
+   * They travel the same path as the team's: the same grant, the same
+   * token, the same config file, the same rate limit. What is different
+   * is that there is no row to enable and no credential to attach, so
+   * they are not filtered by either, and a run that gets one gets it
+   * whatever the organization's registry holds.
    */
-  cardTools: boolean;
+  ownServers?: { id: string; slug: string }[];
+  /** Copied onto the grant, so the swarm tools can check it per call. */
+  swarmId?: string | null;
   say: (text: string) => Promise<void>;
 }
 
@@ -59,9 +65,12 @@ export async function prepareRunMcp(
 ): Promise<{ extraArgs: string[]; cardTools: boolean; env: Record<string, string> }> {
   const none = { extraArgs: [] as string[], cardTools: false, env: {} };
   const capability = input.adapter.mcp;
-  // Whether this run has any server to attach at all: team servers, plus
-  // the acting member's own. Decides only whether a skip is worth a note.
-  const hasServers = () => hasEnabledServers(ctx, input.organizationId, input.actingUserId);
+  const own = input.ownServers ?? [];
+  // Whether this run has any server to attach at all: Bento's own, team
+  // servers, plus the acting member's. Decides only whether a skip is
+  // worth a note.
+  const hasServers = async () =>
+    own.length > 0 || (await hasEnabledServers(ctx, input.organizationId, input.actingUserId));
   if (!capability) {
     // No note for tools nobody expected to support MCP, only when there
     // actually are servers this tool will silently lack.
@@ -127,33 +136,15 @@ export async function prepareRunMcp(
           : isNull(mcpServers.userId),
       ),
     );
+  if (servers.length === 0 && own.length === 0) {
+    // Overwrite any config a previous run left in this (per-feature,
+    // reused) sandbox, so a removed server does not linger.
+    await writeConfigs(ctx, input.handle, capability.renderConfig([]));
+    return none;
+  }
 
   const attached: McpRemoteServer[] = [];
   const attachedIds: string[] = [];
-
-  /**
-   * Bento's own tools, on every run that can have any MCP at all and
-   * whose team is on the beta flag.
-   *
-   * Not a row in mcp_servers: it is not an upstream, it has no
-   * credential, and no admin configured it. The gateway answers this
-   * id itself. It goes first so it reads first in the harness's tool
-   * list, and it is what lets the agent working a card file the parts
-   * of a task too large for one branch.
-   *
-   * Flagged with the console it belongs to, not separately: an agent
-   * that can split a card for a team whose board cannot show the group
-   * has made work nobody can see the shape of.
-   */
-  if (input.cardTools) {
-    attached.push({
-      slug: BENTO_SERVER_ID,
-      url: `${gatewayBase}/api/mcp-gateway/${BENTO_SERVER_ID}`,
-      transport: "http",
-      headers: {},
-    });
-    attachedIds.push(BENTO_SERVER_ID);
-  }
 
   // A personal slug may equal a team slug, and one slug is one tool
   // name to the harness. The team's server wins: the registry is what
@@ -161,17 +152,6 @@ export async function prepareRunMcp(
   // beats their config silently shadowing it.
   const teamSlugs = new Set(servers.filter((s) => !s.userId).map((s) => s.slug));
   for (const server of servers) {
-    // A server named "bento" would take the tool names the board's own
-    // tools answer on, which is the one shadowing that could reach the
-    // cards. Only a conflict when ours is actually attached: the slug
-    // is a tool name in the harness, not a gateway path, so a run
-    // without the card tools has nothing to collide with.
-    if (input.cardTools && server.slug === BENTO_SERVER_ID) {
-      await input.say(
-        `The server ${server.name} uses the name bento, which belongs to Bento's own tools, so it is not attached to this run.`,
-      );
-      continue;
-    }
     if (server.userId && teamSlugs.has(server.slug)) {
       await input.say(
         `Your personal server ${server.name} shares its tool name with a team server, so the team's is used.`,
@@ -200,13 +180,38 @@ export async function prepareRunMcp(
   }
 
   /**
-   * Nothing to attach: no card tools, and no server the run can use
-   * (all per-user with no credential, say). Clear any config a previous
-   * run left in this per-feature sandbox and mint no grant. The resume
-   * path keys the MCP flags off a live grant, so minting one here would
-   * make a resumed run add --mcp-config that the first run never had,
-   * and the session would diverge.
+   * Bento's own servers, which win their slug outright.
+   *
+   * A team server sharing the name of a Bento tool would mean a call
+   * meant for the board (the planner's create_task, a card's split)
+   * reached somebody's own endpoint, which is worse than the
+   * personal-shadows-team case the rule above covers: the agent would
+   * still believe it had changed the board. The team's server is
+   * dropped with a line, rather than silently shadowed.
    */
+  for (const server of own) {
+    const clash = attached.findIndex((s) => s.slug === server.slug);
+    if (clash >= 0) {
+      attached.splice(clash, 1);
+      attachedIds.splice(clash, 1);
+      await input.say(
+        `One of this organization's MCP servers uses the tool name ${server.slug}, which is Bento's own. Bento's is attached to this run and yours is not.`,
+      );
+    }
+    attached.push({
+      slug: server.slug,
+      url: `${gatewayBase}/api/mcp-gateway/${server.id}`,
+      transport: "http",
+      headers: {},
+    });
+    attachedIds.push(server.id);
+  }
+
+  // No server attached (all per-user with no credential, say): clear any
+  // stale config and mint no grant. The resume path keys the MCP flags
+  // off a live grant, so minting one here would make a resumed run add
+  // --mcp-config that the first run never had, and the session would
+  // diverge.
   if (attached.length === 0) {
     await writeConfigs(ctx, input.handle, capability.renderConfig([]));
     return none;
@@ -217,6 +222,7 @@ export async function prepareRunMcp(
     organizationId: input.organizationId,
     actingUserId: input.actingUserId,
     serverIds: attachedIds,
+    swarmId: input.swarmId ?? null,
     ttlMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 + GRANT_SLACK_MS,
   });
   for (const server of attached) {
