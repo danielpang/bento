@@ -147,7 +147,7 @@ export function StageConfig({
   }
 
   return (
-    <aside className="drawer drawer-wide" role="dialog" aria-label="Stage configuration" ref={panel}>
+    <aside className="drawer drawer-wide management-drawer pipeline-drawer" role="dialog" aria-label="Stage configuration" ref={panel}>
       <header className="drawer-head">
         <div className="drawer-title-row">
           <h2 className="drawer-title">Pipeline</h2>
@@ -166,13 +166,17 @@ export function StageConfig({
           </button>
         </div>
         <p className="muted">
-          Cards move left to right through these stages, each with its own agent and exit rule.
-          Drag to re-order.
+          Define who does the work and when a card moves forward.
         </p>
       </header>
 
       <div className="drawer-body">
-
+        <section className="section pipeline-stages" aria-label="Pipeline stages">
+          <div className="settings-title-row">
+            <h3 className="settings-title">Stage sequence</h3>
+            <span className="surface-count">{order.length} stages · Drag to reorder</span>
+          </div>
+          {order.length === 0 && <p className="muted">Add the first stage to start shaping your workflow.</p>}
         {order.map((stage, index) => {
           const assigned = profiles.find((p) => p.id === stage.defaultAgentProfileId);
           const criteria = Array.isArray(stage.gateCriteria) ? stage.gateCriteria : [];
@@ -254,16 +258,16 @@ export function StageConfig({
                 </div>
                 <div className="stage-card-meta">
                   {assigned ? (
-                    <span className="chip">
+                    <span className="stage-agent">
                       <ProviderMark cli={assigned.cli} model={assigned.model} decorative />
                       {assigned.name}
                     </span>
                   ) : (
-                    <span className="chip chip-empty">no agent</span>
+                    <span className="stage-agent muted">No agent assigned</span>
                   )}
                   {assigned && PREVIEW_TOOLS[assigned.cli] && <span className="chip chip-soft">preview</span>}
-                  <span className="chip chip-soft">
-                    {stage.gateType === "manual" ? "Manual" : "Automatic"}
+                  <span className="stage-exit">
+                    {stage.gateType === "manual" ? "Manual approval" : "Automatic advancement"}
                   </span>
                   {stage.gateType === "auto" && criteria.length > 0 && (
                     <span className="muted">
@@ -289,12 +293,13 @@ export function StageConfig({
             </div>
           );
         })}
+        </section>
 
         {/* A pipeline is weeks of tuning, and until now it lived in one
             database. As a file it can go beside the code it describes,
             into another project, or into review with everything else. */}
-        <section className="section">
-          <span className="label">Pipeline file</span>
+        <section className="section settings-card">
+          <h3 className="settings-title">Pipeline file</h3>
           <p className="muted">
             Your stages, agents, and commands as one YAML file. Import it into another project
             instead of rebuilding it.
@@ -427,6 +432,7 @@ function StageEditor({
           : "The stage joins the end of the pipeline, waiting for your approval until you say otherwise."
       }
       large
+      editor
       onClose={onClose}
       actions={
         <>
@@ -443,6 +449,8 @@ function StageEditor({
         </>
       }
     >
+      <section className="editor-section">
+        <div className="editor-section-heading"><h3>Stage details</h3><p>Name the step and assign the agent responsible for it.</p></div>
       <label className="field">
         <span className="label">Name</span>
         <input
@@ -473,44 +481,39 @@ function StageEditor({
         </span>
       </label>
 
-      <label className="field">
-        <span className="label">Advance</span>
-        <select
-          className="select"
-          value={draft.gateType}
-          onChange={(e) => setDraft((d) => ({ ...d, gateType: e.target.value as "manual" | "auto" }))}
-        >
-          <option value="manual">Only when I approve or reject</option>
-          <option value="auto">Automatically, once its requirements pass</option>
-        </select>
-      </label>
-
-      <div className="field">
-        <span className="label">Pull request</span>
-        <label className="gate-check">
+      </section>
+      <section className="editor-section">
+        <div className="editor-section-heading"><h3>Advancement</h3><p>Decide when the work is ready for the next stage.</p></div>
+        <fieldset className="editor-choices">
+          <legend className="visually-hidden">Advance</legend>
+          <label className="editor-choice" data-selected={draft.gateType === "manual" || undefined}>
+            <input type="radio" name="stage-advance" value="manual" checked={draft.gateType === "manual"} onChange={() => setDraft((d) => ({ ...d, gateType: "manual" }))} />
+            <span><strong>Manual approval</strong><span>You review the result and decide what happens next.</span></span>
+          </label>
+          <label className="editor-choice" data-selected={draft.gateType === "auto" || undefined}>
+            <input type="radio" name="stage-advance" value="auto" checked={draft.gateType === "auto"} onChange={() => setDraft((d) => ({ ...d, gateType: "auto" }))} />
+            <span><strong>Automatic advancement</strong><span>The card moves forward once every requirement passes.</span></span>
+          </label>
+        </fieldset>
+        {draft.gateType === "auto" && (
+          <CriteriaEditor criteria={draft.criteria} profiles={profiles} busy={busy} onChange={(criteria) => setDraft((d) => ({ ...d, criteria }))} />
+        )}
+      </section>
+      <section className="editor-section">
+        <div className="editor-section-heading"><h3>Pull request</h3><p>Publish the work when the agent finishes.</p></div>
+        <label className="editor-choice" data-selected={draft.createPr || undefined}>
           <input
             type="checkbox"
             checked={draft.createPr}
             onChange={(e) => setDraft((d) => ({ ...d, createPr: e.target.checked }))}
           />
-          <span className="gate-check-text">
-            Push the card's branch and open a pull request when the agent finishes, or update the
-            one already open.
-            {canPublish === false && " Connect GitHub under Settings first."}
+          <span>
+            <strong>Create or update a pull request</strong>
+            <span>Push the card's branch and open a pull request, or update the one already open.</span>
           </span>
         </label>
-      </div>
-
-      {draft.gateType === "auto" ? (
-        <CriteriaEditor
-          criteria={draft.criteria}
-          profiles={profiles}
-          busy={busy}
-          onChange={(criteria) => setDraft((d) => ({ ...d, criteria }))}
-        />
-      ) : (
-        <p className="muted">Manual approval.</p>
-      )}
+        {canPublish === false && <p className="muted">Connect GitHub under Settings before publishing a pull request.</p>}
+      </section>
     </Modal>
   );
 }

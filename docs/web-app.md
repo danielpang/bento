@@ -15,13 +15,29 @@ Console source: `apps/web`. Development: Vite on port 4401. Production: built as
 | TUI            | none | `pnpm dev`                      |
 
 
-`pnpm dev` starts all packages with a `dev` script via turbo. Do not start `@bento/web` separately.
+`pnpm dev` starts all packages with a `dev` script via turbo. Do not also start a second copy of `@bento/web`.
 
 Server and console only:
 
 ```bash
 pnpm --filter @bento/server --filter @bento/web dev
 ```
+
+For UI-only work with the Docker API already running, start only Vite:
+
+```bash
+pnpm --filter @bento/web dev --host 127.0.0.1 --strictPort
+```
+
+Open [http://localhost:4401](http://localhost:4401). UI edits reload automatically without rebuilding Docker. The API and database must still be running.
+
+If OrbStack's published port 4400 is unavailable but its container hostname responds, use the direct API address:
+
+```bash
+BENTO_API_TARGET=http://server.bento.orb.local:4400 pnpm --filter @bento/web dev --host 127.0.0.1 --strictPort
+```
+
+`BENTO_API_TARGET` overrides Vite's development proxy only. It defaults to `http://127.0.0.1:4400` and is not included in browser code.
 
 ## Setup
 
@@ -249,6 +265,14 @@ Updates via SSE: `/api/board/:id/events`.
 **Done lane:** status-driven, not a stored stage. **Mark done** and drag-to-Done skip remaining stages. **Reopen** restores prior stage.
 
 **Search:** filtered in `Board.tsx` via `matchesQuery` (`apps/web/src/search.test.ts`). Punctuation-normalized matching.
+
+**Board and Sessions (beta):** Board shows the pipeline; Sessions is the grouped card list and conversation workspace. There is no separate Board/List toggle. Both share search and the remembered All cards, Needs you, and Running filters. Sessions retains the latest agent, run count, activity date, and reported cost, with recent conversations first within each group. Cards awaiting their first run appear under Up next. These controls use `beta-testers`, enabled in local mode.
+
+**Board focus (beta):** Needs you includes held cards and failed or stopped runs, excluding completed cards and cards with an active agent.
+
+**Focused review (beta):** Opening a card in Sessions, or from Board's Needs you or Running filters, shows the queue on the left, chat in the center, and the original-width detail drawer on the right. The drawer omits its Chat tab while the center conversation is visible. Below 1280px, chat returns to the drawer, and Sessions opens its Chat tab by default. The conversation and draft are preserved when resizing. Closing the card returns to the current route's board or list. A single board stream updates the list and open card.
+
+**Keyboard (beta):** The web shortcuts follow the TUI: `n` opens a new card, `/` focuses board search, and `:`, `?`, or `Ctrl+P` finds cards and actions. `j` and `k` open the next or previous visible card. Typing in a field does not trigger these shortcuts. Configure groups the agent, pipeline, and repository panels. Card handoffs show recorded changes, automated requirement results, and output from the latest run in the current stage.
 
 **Icons:** hashed URLs in `index.html` and `site.webmanifest` (Vite plugin) to invalidate browser favicon cache.
 

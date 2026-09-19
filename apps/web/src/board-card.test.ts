@@ -224,10 +224,10 @@ test("a stage with no agent renders a control to assign one", () => {
   assert.match(html, /aria-label="Assign an agent to the Build stage"/);
 });
 
-test("Backlog and Completed name their agent as a label, not a control", () => {
+test("Backlog and Completed describe their role as a label, not a control", () => {
   const html = render([feature("active")]);
-  assert.match(html, /<span class="lane-agent lane-agent-empty">no agent assigned<\/span>/);
-  assert.match(html, /<span class="lane-agent lane-agent-empty">finished work<\/span>/);
+  assert.match(html, /<span class="lane-agent lane-agent-empty">Ready to enter the pipeline<\/span>/);
+  assert.match(html, /<span class="lane-agent lane-agent-empty">Finished work<\/span>/);
   assert.doesNotMatch(html, /aria-label="Assign an agent to the Backlog stage"/);
   assert.doesNotMatch(html, /aria-label="Assign an agent to the Completed stage"/);
 });

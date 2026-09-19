@@ -16,6 +16,22 @@ export type NavAction =
   | { id: string; label: string; onSelect: () => void; href?: never; current?: never; external?: never }
   | { id: string; label: string; href: string; onSelect?: never; current?: boolean; external?: boolean };
 
+export function ConfigureMenu({ actions }: { actions: NavAction[] }) {
+  return <Menu.Root>
+    <Menu.Trigger className="btn btn-ghost configure-trigger">
+      Configure
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+        <path d="m3 4.5 3 3 3-3" />
+      </svg>
+    </Menu.Trigger>
+    <Menu.Portal>
+      <Menu.Content className="picker-menu" align="start" sideOffset={6} data-portal-layer="">
+        {actions.map((action) => <Menu.Item key={action.id} className="picker-item" onSelect={action.onSelect}>{action.label}</Menu.Item>)}
+      </Menu.Content>
+    </Menu.Portal>
+  </Menu.Root>;
+}
+
 /**
  * The navigation, collapsed.
  *

@@ -1,4 +1,6 @@
 import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
+import * as Tabs from "@radix-ui/react-tabs";
+import { ProviderMark } from "./ProviderMark.js";
 import { AgentSession } from "./AgentSession.js";
 import { criterionName, useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
@@ -41,7 +43,6 @@ import {
   needsSendBackPrompt,
   parentDeleteRefusal,
   SEND_BACK_NOTICE,
-  spendCoverageNote,
   withProviderOutageAdvice,
   type AgentEvent,
 } from "@bento/core";
@@ -50,10 +51,15 @@ import { deleteConsequences } from "./delete-consequences.js";
 import { descriptionText, hasDescription, needsClamp } from "../card-description.js";
 import { useBetaTesters } from "../beta.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
+import { ReviewHandoff } from "./ReviewHandoff.js";
+import { ConversationPlacement } from "./ConversationPlacement.js";
 
 interface DrawerProps {
   client: BentoClient;
   feature: Feature;
+  /** A focused review places the single conversation in the center. */
+  chatHost?: HTMLElement | null;
+  initialTab?: "overview" | "activity";
   stages: Stage[];
   profiles: AgentProfile[];
   /** Bumped by the board stream when a run on this card changes state. */
@@ -83,8 +89,8 @@ interface DrawerProps {
  *
  * Bento prices nothing itself: it records the figure the CLI prints,
  * and Codex, Cursor, and opencode print none. A bare total would read
- * as a cheap card rather than an unmeasured one, so the runs that
- * reported nothing are counted out loud.
+ * as a cheap card rather than an unmeasured one, so incomplete cost
+ * reporting gets a short note.
  */
 function CardSpend({ runs }: { runs: AgentRun[] }) {
   const finished = runs.filter(isSpendRun);
@@ -94,9 +100,9 @@ function CardSpend({ runs }: { runs: AgentRun[] }) {
   const silent = finished.length - measured.length;
 
   return (
-    <p className="muted" title={spendCoverageNote()}>
-      {measured.length > 0 ? `$${total.toFixed(2)} across ${measured.length} of ${finished.length} runs.` : "Cost not reported."}
-      {silent > 0 && ` ${silent} run${silent === 1 ? "" : "s"} reported no cost, so this is a floor, not a total.`}
+    <p className="muted">
+      {measured.length > 0 ? `$${total.toFixed(2)}` : "Cost not reported."}
+      {measured.length > 0 && silent > 0 && ". May be higher because some agents don't report cost."}
     </p>
   );
 }
@@ -115,6 +121,8 @@ const ARTIFACT_PREVIEW = 6;
 export function FeatureDrawer({
   client,
   feature,
+  chatHost,
+  initialTab = "overview",
   stages,
   profiles,
   runsVersion,
@@ -181,26 +189,29 @@ export function FeatureDrawer({
    */
   const [loadedId, setLoadedId] = useState<string | null>(null);
   /**
-   * Artifacts are capped until asked for, the way history is. A card
-   * that has run a pipeline several times has a write-up, a mockup and
-   * a screenshot per stage, and the untrimmed list pushed the changes
-   * and the conversation below anything a scroll would reach.
+   * Artifacts are capped until asked for. A card that has run a pipeline
+   * several times can have enough output to push the changes below reach.
    */
   const [showAllArtifacts, setShowAllArtifacts] = useState(false);
-  const [showAllHistory, setShowAllHistory] = useState(false);
   /**
    * A long description opens clamped. Per card, like the sections
    * below: expanding one Linear body should not leave the next card's
    * brief already unrolled before anybody asked for it.
    */
   const [descriptionOpen, setDescriptionOpen] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<string>(initialTab);
   /**
    * Whether anything can actually open a pull request. Offering an
    * enabled button that can only fail is how a missing setting gets
    * mistaken for a broken feature.
    */
   const [canPublish, setCanPublish] = useState<boolean | null>(null);
-  const panel = useDismissable<HTMLElement>(onClose);
+  const panel = useDismissable<HTMLElement>(onClose, "[data-feature], .board-controls, .review-chat");
+  const activeDrawerTab = chatHost && drawerTab === "activity" ? "overview" : drawerTab;
+  const showConversation = () => {
+    if (chatHost) chatHost.focus({ preventScroll: true });
+    else setDrawerTab("activity");
+  };
 
   const stage = stages.find((s) => s.id === feature.currentStageId);
   // The server sends runs newest first.
@@ -235,6 +246,7 @@ export function FeatureDrawer({
     setLoadFailed(false);
     setPublishNotes([]);
     setDescriptionOpen(false);
+    setDrawerTab(initialTab);
     setGroup(null);
     setShowRelated(false);
   }, [feature.id]);
@@ -517,6 +529,10 @@ export function FeatureDrawer({
   // Approving mid-run would advance the card out from under the working
   // agent; the button says why it is waiting instead of failing later.
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
+  const stageRun = latestRun?.stageId === feature.currentStageId ? latestRun : undefined;
+  const needsRecovery = beta && !!stageRun && (stageRun.status === "failed" || stageRun.status === "cancelled");
+  const nextStageName = stages[stages.findIndex((s) => s.id === feature.currentStageId) + 1]?.name ?? "Completed";
+  const displayedAgent = runActive ? latestAgent : stageAgent;
   /**
    * The pull requests GitHub says cannot merge, keyed by URL so each
    * row below can wear its own warning. "unknown" and "clean" both stay
@@ -713,36 +729,60 @@ export function FeatureDrawer({
   const descriptionClamps = needsClamp(description);
 
   return (
-    <aside className="drawer" role="dialog" aria-label={feature.title} ref={panel}>
+    <Tabs.Root value={activeDrawerTab} onValueChange={setDrawerTab} asChild>
+    <aside className="drawer feature-drawer" role="dialog" aria-label={feature.title} ref={panel}>
       <header className="drawer-head">
-        <div className="drawer-title-row">
-          <h2 className="drawer-title">{feature.title}</h2>
-          <button className="btn btn-ghost" onClick={onClose} aria-label="Close">
-            Close
+        <div className="feature-topline">
+          <span className="feature-kicker">Feature</span>
+          <span className="chip" data-status={runActive ? "active" : feature.status}>
+            {runActive ? "Agent working" : statusWords(feature.status)}
+          </span>
+          <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            <span aria-hidden="true">×</span>
           </button>
         </div>
-        {/* Labeled, because three bare boxes read as mystery tokens:
-            which one is the stage and which one is the status is only
-            obvious to whoever wrote them. */}
-        <div className="drawer-meta">
-          <div className="meta-item">
-            <span className="meta-label">Stage</span>
-            <span className="chip">{stage ? stage.name : "Backlog"}</span>
+        <h2 className="drawer-title">{feature.title}</h2>
+        {feature.branchName && (
+          <div className="feature-branch">
+            <span className="meta-label">Branch</span>
+            <code title={feature.branchName}>{feature.branchName}</code>
           </div>
-          <div className="meta-item">
-            <span className="meta-label">Status</span>
-            <span className="chip" data-status={feature.status}>{statusWords(feature.status)}</span>
+        )}
+        <div className="feature-stage">
+          <div className="feature-stage-heading">
+            <span>{finished ? "Finished" : stage?.name ?? "Backlog"}</span>
+            <span className="feature-stage-position">
+              {stage && !finished ? `Stage ${stages.indexOf(stage) + 1} of ${stages.length}` : finished ? "End of pipeline" : "Before the first stage"}
+            </span>
           </div>
-          {feature.branchName && (
-            <div className="meta-item meta-item-wide">
-              <span className="meta-label">Branch</span>
-              <span className="chip chip-clip" title={feature.branchName}>{feature.branchName}</span>
-            </div>
-          )}
+          <ol className="feature-progress" aria-label="Pipeline position">
+            {[{ id: "backlog", name: "Backlog" }, ...stages, { id: "completed", name: "Completed" }].map((step) => {
+              const current = finished ? step.id === "completed" : step.id === (feature.currentStageId ?? "backlog");
+              return (
+                <li key={step.id} title={step.name} aria-current={current ? "step" : undefined}>
+                  <span className="visually-hidden">{step.name}</span>
+                </li>
+              );
+            })}
+          </ol>
+          <div className="feature-agent">
+            {detailsPending ? <Skeleton height={14} width="11rem" /> : displayedAgent ? (
+              <>
+                <ProviderMark cli={displayedAgent.cli} model={displayedAgent.model} decorative />
+                <span>{displayedAgent.name}</span>
+              </>
+            ) : <span>{finished ? "Work finished" : stage ? "No agent assigned" : "Assign agents in Pipeline"}</span>}
+            {stage && !finished && <span className="feature-gate-mode">{stage.gateType === "manual" ? "Manual approval" : "Automatic advancement"}</span>}
+          </div>
         </div>
       </header>
-
-      <div className="drawer-body drawer-body-sectioned">
+      <Tabs.List className="feature-tabs" aria-label="Feature details">
+        <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
+        <Tabs.Trigger value="changes">Changes</Tabs.Trigger>
+        {!chatHost && <Tabs.Trigger value="activity">Chat{runActive && <span className="dot" data-state="running" />}</Tabs.Trigger>}
+        <Tabs.Trigger value="history">History</Tabs.Trigger>
+      </Tabs.List>
+      <div className="drawer-body feature-drawer-body">
         {loadFailed && (
           <p className="error" role="alert">
             Could not load this card's details. Check the connection and reopen the card.
@@ -753,41 +793,29 @@ export function FeatureDrawer({
             {SEND_BACK_NOTICE}
           </p>
         )}
-        {/*
-          What was actually asked for. Every agent on this card is given
-          this text as its brief, search matches it, and Linear imports
-          and Slack cards keep their issue body and permalink in it, so
-          until now the one reader who could not see it was the person
-          who filed the card. Above the actions, because approving or
-          rejecting is a judgement about this.
-
-          Plain text, always: agents and integrations write here, and
-          React's escaping is the whole of the sanitization story.
-        */}
-        {hasDescription(description) && (
-          <section className="section">
-            <span className="label">Description</span>
-            <p
-              id={descriptionId}
-              className={descriptionClamps && !descriptionOpen ? "card-description clamped" : "card-description"}
-            >
-              {description}
-            </p>
-            {descriptionClamps && (
-              <button
-                className="btn btn-ghost"
-                aria-expanded={descriptionOpen}
-                aria-controls={descriptionId}
-                onClick={() => setDescriptionOpen((on) => !on)}
-              >
-                {descriptionOpen ? "Show less" : "Show more"}
-              </button>
-            )}
-          </section>
-        )}
-
-        <section className="section">
-          <span className="label">Actions</span>
+        <Tabs.Content value="overview" forceMount hidden={activeDrawerTab !== "overview"} className="feature-pane">
+        <section className="section feature-next-step">
+          <div className="feature-section-heading">
+            <h3>{beta && !finished ? runActive ? "Work in progress" : needsRecovery ? "Let's get this moving" : "Your next step" : "Next step"}</h3>
+            <span>{finished ? "Reopen to continue" : runActive ? "Agent at work" : stage ? `Next: ${stages[stages.indexOf(stage) + 1]?.name ?? "Completed"}` : "Begin implementation"}</span>
+          </div>
+          {beta && feature.currentStageId && !finished && <ReviewHandoff
+            run={stageRun}
+            agentName={latestAgent?.name}
+            changes={changes}
+            gate={gate}
+            artifacts={visibleArtifacts}
+            pending={detailsPending}
+            failed={loadFailed}
+            onChanges={() => setDrawerTab("changes")}
+            onChat={showConversation}
+            onArtifact={setOpenArtifact}
+          />}
+          {runActive && (
+            <button className="feature-activity-link" onClick={showConversation}>
+              Follow the agent's progress <span aria-hidden="true">→</span>
+            </button>
+          )}
           {/*
             A card in the backlog is in no stage, so there is no gate to
             approve, reject or re-check: the server refuses all three
@@ -801,8 +829,6 @@ export function FeatureDrawer({
               This card is finished. Reopen it to change something; it comes back to where it left off.
             </p>
           )}
-          {/* One grid, so buttons line up in even columns instead of
-              wrapping wherever a row happens to run out. */}
           <div className="action-grid">
             {finished ? (
               <button className="btn" disabled={busy} onClick={() => act(() => client.moveFeatureBack(feature.id))}>
@@ -811,75 +837,31 @@ export function FeatureDrawer({
             ) : feature.currentStageId ? (
               <>
                 <button
-                  className="btn btn-primary"
-                  disabled={busy || runActive}
+                  className={beta && (needsRecovery || runActive) ? "btn" : "btn btn-primary"}
+                  disabled={busy || runActive || detailsPending || loadFailed}
                   title={runActive ? "An agent is working this card. Stop it or wait for it to finish." : undefined}
-                  onClick={() => act(() => client.approveFeature(feature.id))}
+                  onClick={() => act(async () => {
+                    const result = await client.approveFeature(feature.id);
+                    if (beta) {
+                      const destination = stages.find((s) => s.id === result.feature.currentStageId)?.name;
+                      toast.note(result.feature.status === "done" ? "Card completed. Nice work." : result.feature.currentStageId !== feature.currentStageId && destination ? `Moved to ${destination}.` : "Approval recorded.");
+                    }
+                  })}
                 >
-                  Approve and advance
+                  {beta ? `Approve → ${nextStageName}` : "Approve and advance"}
                 </button>
-                {/* The other half of a manual gate: not right yet, so back
-                    it goes to where the fixing happens. */}
                 <button className="btn" disabled={busy} onClick={() => setDialog("reject")}>
                   Reject
                 </button>
-                {/* A manual stage has no requirements to re-read, so
-                    offering the button there was offering a no-op. */}
-                {stage?.gateType !== "manual" && (
-                  <button className="btn" disabled={busy} onClick={() => act(() => client.recheckGate(feature.id))}>
-                    Re-check requirements
-                  </button>
-                )}
-                <button className="btn" disabled={busy} onClick={() => act(() => client.moveFeatureBack(feature.id))}>
-                  Send back a stage
-                </button>
               </>
             ) : (
-              <button
-                className="btn btn-primary"
-                disabled={busy}
-                onClick={() => act(() => client.advanceFeature(feature.id))}
-              >
+              <button className="btn btn-primary" disabled={busy} onClick={() => act(() => client.advanceFeature(feature.id))}>
                 Start pipeline
               </button>
             )}
-            {/*
-              Done from wherever the card is, without walking it through
-              the stages that are left. The board's Done lane takes a
-              drop for the same reason, and this is the way there for
-              anyone not using a mouse. Not the primary button anywhere:
-              finishing early is the exception, and reopening is one
-              click away when it was the wrong call.
-            */}
-            {!finished && (
-              <button className="btn" disabled={busy} onClick={() => act(() => client.finishFeature(feature.id))}>
-                Mark completed
-              </button>
-            )}
-            {stageAgent && feature.currentStageId && !finished && (
-              <button
-                className="btn"
-                disabled={busy}
-                title={`${stageAgent.cli} ${stageAgent.model}`}
-                onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}
-              >
-                Run {stageAgent.name}
-              </button>
-            )}
-            {/* Both act on the card's work, which a finished card no
-                longer accepts: continue is refused outright, and an
-                undo would silently rewrite a card everyone stopped
-                watching. Reopen first, then these come back. */}
-            {latestRun?.checkpointId && !finished && (
-              <button
-                className="btn"
-                disabled={busy}
-                onClick={() => setDialog("rollback")}
-              >
-                Undo this run
-              </button>
-            )}
           </div>
+          {needsRecovery && stageAgent && !finished && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
+          {needsRecovery && !stageAgent && !finished && <button className="btn btn-primary recovery-action" onClick={showConversation}>Review the last run</button>}
           {/* Why the last run failed, where the eye lands. The same
               sentence closes the transcript, but a person looking at a
               red card reads the actions first. Boxed so it reads as the
@@ -896,26 +878,55 @@ export function FeatureDrawer({
           )}
           <CardSpend runs={runs} />
 
-          {/* The one action that ends the card, so it is in the same
-              room as the others and not in the same row: below a rule,
-              and quiet until it is reached for. */}
-          <div className="danger-row">
-            <button
-              className="btn btn-ghost btn-danger-quiet"
-              disabled={busy || loadedId !== feature.id || deleteBlocked !== null}
-              {...(deleteBlocked ? { title: deleteBlocked, "aria-describedby": deleteReasonId } : {})}
-              onClick={() => setDialog("delete")}
-            >
-              Delete card
-            </button>
-            {/* A title on a disabled button reaches neither a keyboard
-                nor a screen reader, so the reason is also said here. */}
-            {deleteBlocked && (
-              <span id={deleteReasonId} className="visually-hidden">
-                {deleteBlocked}
-              </span>
-            )}
-          </div>
+          <details className="feature-more-actions">
+            <summary>More actions</summary>
+            <div className="action-grid">
+              {!finished && feature.currentStageId && (
+                <>
+                  {stage?.gateType !== "manual" && (
+                    <button className="btn" disabled={busy} onClick={() => act(() => client.recheckGate(feature.id))}>
+                      Re-check requirements
+                    </button>
+                  )}
+                  <button className="btn" disabled={busy} onClick={() => act(() => client.moveFeatureBack(feature.id))}>
+                    Send back a stage
+                  </button>
+                </>
+              )}
+              {!finished && (
+                <button className="btn" disabled={busy} onClick={() => act(() => client.finishFeature(feature.id))}>
+                  Mark completed
+                </button>
+              )}
+              {stageAgent && feature.currentStageId && !finished && (
+                <button
+                  className="btn"
+                  disabled={busy || runActive}
+                  title={`${stageAgent.cli} ${stageAgent.model}`}
+                  onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}
+                >
+                  Run {stageAgent.name}
+                </button>
+              )}
+              {latestRun?.checkpointId && !finished && (
+                <button className="btn" disabled={busy} onClick={() => setDialog("rollback")}>
+                  Undo this run
+                </button>
+              )}
+            </div>
+            <div className="danger-row">
+              <button
+                className="btn btn-ghost btn-danger-quiet"
+                disabled={busy || loadedId !== feature.id || deleteBlocked !== null}
+                {...(deleteBlocked ? { title: deleteBlocked, "aria-describedby": deleteReasonId } : {})}
+                onClick={() => setDialog("delete")}
+              >
+                Delete card
+              </button>
+              {deleteBlocked && <span id={deleteReasonId} className="visually-hidden">{deleteBlocked}</span>}
+            </div>
+          </details>
+
 
           {dialog === "reject" && (
             <PromptDialog
@@ -950,6 +961,38 @@ export function FeatureDrawer({
             />
           )}
         </section>
+
+        {/*
+          The original brief remains readable on the overview, including
+          Linear bodies and Slack permalinks. It uses the card row already
+          on the board, so it does not wait for the detail fetch.
+
+          Plain text, always: agents and integrations write here, and
+          React's escaping is the whole of the sanitization story.
+        */}
+        {hasDescription(description) && (
+          <section className="section">
+            <span className="label">Description</span>
+            <p
+              id={descriptionId}
+              className={descriptionClamps && !descriptionOpen ? "card-description clamped" : "card-description"}
+            >
+              {description}
+            </p>
+            {descriptionClamps && (
+              <button
+                className="btn btn-ghost"
+                aria-expanded={descriptionOpen}
+                aria-controls={descriptionId}
+                onClick={() => setDescriptionOpen((on) => !on)}
+              >
+                {descriptionOpen ? "Show less" : "Show more"}
+              </button>
+            )}
+          </section>
+        )}
+
+
 
         {/*
           A card that was split, or a part of one. Nothing at all for
@@ -1068,6 +1111,8 @@ export function FeatureDrawer({
           </section>
         )}
 
+        </Tabs.Content>
+        <Tabs.Content value="changes" forceMount hidden={activeDrawerTab !== "changes"} className="feature-pane">
         {(showPullRequests || listedPullRequests.length > 0) && (
           <section className="section">
             <span className="label">Pull requests</span>
@@ -1124,31 +1169,6 @@ export function FeatureDrawer({
                 {note.text}
               </p>
             ))}
-          </section>
-        )}
-
-        {/*
-          Who moved this card, when, and what moved it. The events were
-          already fetched and formatted; without them on screen there
-          was no way to see that a card had been rejected twice, or that
-          a gate rather than a person sent it back.
-        */}
-        {history.length > 0 && (
-          <section className="section">
-            <span className="label">History</span>
-            {(showAllHistory ? history : history.slice(-6)).map((event) => (
-              <div key={event.id} className="history-row">
-                <span className="history-when">{formatWhen(event.at)}</span>
-                <span className="history-what">
-                  {describeEvent(event, stages)} <span className="muted">{triggerLabel(event)}</span>
-                </span>
-              </div>
-            ))}
-            {history.length > 6 && (
-              <button className="btn btn-ghost" onClick={() => setShowAllHistory((on) => !on)}>
-                {showAllHistory ? "Show less" : `Show all ${history.length}`}
-              </button>
-            )}
           </section>
         )}
 
@@ -1264,8 +1284,11 @@ export function FeatureDrawer({
           )}
         </section>
 
+        </Tabs.Content>
+        <Tabs.Content value="activity" forceMount hidden={activeDrawerTab !== "activity"} className="feature-pane feature-pane-conversation">
+        <ConversationPlacement target={chatHost}>
         {detailsPending ? (
-          <ChatSkeleton />
+          <ChatSkeleton tall />
         ) : (
           <AgentSession
             client={client}
@@ -1277,10 +1300,45 @@ export function FeatureDrawer({
             onChanged={onChanged}
             onEvent={onEvent}
             expandHref={`/session/${feature.id}`}
+            visible={!!chatHost || activeDrawerTab === "activity"}
           />
         )}
+        </ConversationPlacement>
+        </Tabs.Content>
+        <Tabs.Content value="history" forceMount hidden={activeDrawerTab !== "history"} className="feature-pane">
+        {/*
+          Who moved this card, when, and what moved it. The events were
+          already fetched and formatted; without them on screen there
+          was no way to see that a card had been rejected twice, or that
+          a gate rather than a person sent it back.
+        */}
+          <section className="section">
+            <span className="label">History</span>
+            {detailsPending ? (
+              <div className="skeleton-stack" aria-busy="true" aria-label="Loading history">
+                {[0, 1, 2, 3].map((i) => (
+                  <div key={i} className="history-row" aria-hidden="true">
+                    <Skeleton height={12} width="5rem" />
+                    <Skeleton height={12} width={`${55 - i * 5}%`} />
+                  </div>
+                ))}
+              </div>
+            ) : history.length === 0 ? (
+              <p className="muted">{loadFailed ? "History could not be loaded." : "No history yet. Stage changes and approvals will appear here."}</p>
+            ) : history.map((event) => (
+              <div key={event.id} className="history-row">
+                <span className="history-when">{formatWhen(event.at)}</span>
+                <span className="history-what">
+                  {describeEvent(event, stages)} <span className="muted">{triggerLabel(event)}</span>
+                </span>
+              </div>
+            ))}
+          </section>
+
+        </Tabs.Content>
       </div>
     </aside>
+    </Tabs.Root>
   );
 }
 
@@ -1390,9 +1448,7 @@ function triggerLabel(event: FeatureEvent): string {
 }
 
 /**
- * A card's own status as a phrase. The board has always said "waiting
- * at gate" while the drawer beside it said "gated", which reads as two
- * different facts about the same card.
+ * A card's own status as a phrase, matching the board and related cards.
  */
 function statusWords(status: string): string {
   switch (status) {
@@ -1401,7 +1457,7 @@ function statusWords(status: string): string {
     case "active":
       return "in progress";
     case "gated":
-      return "waiting at gate";
+      return "pending approval";
     case "done":
       return "completed";
     case "cancelled":
@@ -1432,4 +1488,3 @@ const ARTIFACT_KIND_WORDS: Record<string, string> = {
 function artifactKindWords(kind: string): string {
   return ARTIFACT_KIND_WORDS[kind] ?? "File";
 }
-
