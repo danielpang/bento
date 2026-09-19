@@ -14,6 +14,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import { CUSTOM_PROVIDER_PROTOCOLS } from "@bento/core";
 import { organization, user } from "./identity.js";
 
 const timestamps = {
@@ -836,6 +837,29 @@ export const secrets = pgTable(
   (t) => [
     uniqueIndex("secrets_org_name_idx").on(t.organizationId, t.name),
     uniqueIndex("secrets_local_name_idx").on(t.name).where(sql`${t.organizationId} is null`),
+  ],
+);
+
+/** Organization-owned model endpoints. Keys are encrypted and never returned by the API. */
+export const customModelProviders = pgTable(
+  "custom_model_providers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: text("owner_id").notNull().references(() => user.id),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    protocol: text("protocol", { enum: CUSTOM_PROVIDER_PROTOCOLS }).notNull(),
+    baseUrl: text("base_url").notNull(),
+    models: jsonb("models").$type<{ id: string; name: string }[]>().notNull(),
+    encryptedApiKey: text("encrypted_api_key"),
+    keyHint: text("key_hint"),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("custom_model_providers_org_slug_idx").on(t.organizationId, t.slug),
+    uniqueIndex("custom_model_providers_local_slug_idx").on(t.slug).where(sql`${t.organizationId} is null`),
   ],
 );
 

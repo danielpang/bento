@@ -9,6 +9,8 @@ import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { buildStagePrompt } from "../orchestrator/prompt.js";
 import { compactedConversation } from "../orchestrator/conversation-history.js";
+import { customProviderRunEnv } from "../orchestrator/custom-provider.js";
+import { isBetaRun } from "../feature-flags.js";
 import { appendRunEvent, isUniqueViolation } from "../orchestrator/transcript.js";
 import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
@@ -46,7 +48,9 @@ const completeInput = z.object({
  * This is the middle option between a thin client and running everything
  * locally: your organization, projects, and history live on the server,
  * but agents run in containers on your own machine with your own
- * checkouts and credentials, which never reach the server.
+ * checkouts and built-in provider credentials, which never reach the
+ * server. Organization-owned custom provider keys are delivered with
+ * the claimed run to the runner that executes it.
  */
 /**
  * Authorizes a report about a run.
@@ -145,6 +149,14 @@ export function runnerRoutes(ctx: AppContext) {
         .orderBy(asc(repositories.position));
 
       if (!profile || !stage) return c.json({ error: "run has dangling references" }, 500);
+      const customProvider = await customProviderRunEnv(ctx, candidate.feature.organizationId, profile.cli, profile.model);
+      const [providerProject] = customProvider
+        ? await db(c, ctx).select({ ownerId: projects.ownerId }).from(projects).where(eq(projects.id, candidate.feature.projectId))
+        : [];
+      const customProviderAllowed = !customProvider || (providerProject && await isBetaRun(ctx, {
+        actingUserId: candidate.run.startedBy,
+        projectOwnerId: providerProject.ownerId,
+      }));
 
       ctx.bus.emitBoardEvent({
         type: "run_updated",
@@ -236,6 +248,7 @@ export function runnerRoutes(ctx: AppContext) {
           startFromBase: replaced.length > 0,
         },
         agent: { cli: profile.cli, model: profile.model, extraArgs: profile.extraArgs },
+        customProvider: customProviderAllowed ? (customProvider ?? undefined) : { env: {}, missingKey: false, disabled: true },
         repositories: repoRows.map((r) => ({
           name: r.name,
           localPath: r.localPath,

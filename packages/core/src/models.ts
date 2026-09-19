@@ -85,8 +85,9 @@ export function mergeCatalogs(
  * way they always were, with pi or opencode.
  *
  * Vercel AI Gateway is the other gateway: one key, slugs that look
- * like OpenRouter's (`moonshotai/kimi-k3`). fx is a harness that
- * speaks Gateway and nothing else. pi, opencode, and Codex can pick
+ * like OpenRouter's (`moonshotai/kimi-k3`). The built-in fx catalog
+ * selects Gateway; its custom connections preview also speaks Chat
+ * Completions. pi, opencode, and Codex can pick
  * Gateway the way they pick OpenRouter: the prefix is `vercel/`, the
  * existing Anthropic and OpenAI keys are not used, and the bill is
  * the Gateway's. A slash on fx is still a Gateway slug, because fx
@@ -197,6 +198,36 @@ export function modelStringFor(cli: string, providerId: string, modelId: string)
   // provider, so it stores the slug alone.
   if (providerId === "vercel") return cli === "fx" ? modelId : `vercel/${modelId}`;
   return modelId;
+}
+
+/** Bento custom providers keep their prefix on every tool, even tools whose built-in model IDs are bare. */
+export function customModelStringFor(providerId: string, modelId: string): string {
+  return `${providerId}/${modelId}`;
+}
+
+export const CUSTOM_PROVIDER_PROTOCOLS = ["openai", "openai-responses", "anthropic"] as const;
+export type CustomProviderProtocol = (typeof CUSTOM_PROVIDER_PROTOCOLS)[number];
+
+/** Shared failure copy for hosted and remote runners. A removed provider wins over its stale model and key. */
+export function customProviderRunError(
+  state: { disabled?: boolean; missingKey?: boolean; missingModel?: boolean; unsupported?: boolean },
+  cli: string,
+): string | null {
+  if (state.disabled) return "This custom provider is not available for this run.";
+  if (state.missingKey) return "This custom provider has no API key. Add one under Agents or Settings, Providers.";
+  if (state.missingModel) return "This model is no longer listed for its custom provider. Update the agent or the provider under Settings, Providers.";
+  if (state.unsupported) return `${cli} cannot use this custom provider's protocol. Choose a supported agent tool.`;
+  return null;
+}
+
+/** Only offer a custom route where the CLI can speak the selected wire protocol. */
+export function supportsCustomProvider(cli: string, protocol: CustomProviderProtocol): boolean {
+  if (cli === "opencode" || cli === "pi" || cli === "dsh") return true;
+  if (cli === "claude-code") return protocol === "anthropic";
+  if (cli === "codex") return protocol === "openai-responses";
+  // Bento installs the dev-channel build with custom connections.
+  if (cli === "fx") return protocol === "openai";
+  return false;
 }
 
 /**
@@ -334,7 +365,12 @@ function providerOfModel(model: string): CatalogProvider | undefined {
  */
 export function checkAgentPairing(cli: string, model: string): AgentPairing {
   const guidance = modelGuidanceFor(cli);
-  if (guidance?.bareModelId && model.includes("/") && !routesToOllama(cli, model)) {
+  // A slug absent from the built-in catalog may be a Bento custom
+  // provider. Its definition is checked against the organization when
+  // the run starts, so keep it typeable on bare-id tools too.
+  const prefix = model.split("/", 1)[0];
+  if (guidance?.bareModelId && model.includes("/") && !routesToOllama(cli, model)
+    && MODEL_CATALOG.some((provider) => provider.id === prefix)) {
     const example = guidance.examples[0] ?? guidance.defaultModel;
     return {
       status: "impossible",

@@ -66,6 +66,7 @@ export const codexAdapter: AgentAdapter = {
    * reads, so the stored key is handed over under that name.
    */
   env(input: BuildCommandInput): Record<string, string> {
+    if (input.customProvider) return {};
     // OpenRouter authenticates through OPENROUTER_API_KEY on the
     // custom provider. Remapping a leftover OpenAI key would put
     // CODEX_API_KEY in a sandbox that should not see it.
@@ -106,9 +107,11 @@ export const codexAdapter: AgentAdapter = {
       "--cd",
       input.cwd,
       "-m",
-      vercelSelected(input.model) ? input.model.slice("vercel/".length) : input.model,
+      input.customProvider?.modelId ?? (vercelSelected(input.model) ? input.model.slice("vercel/".length) : input.model),
     );
-    if (vercelSelected(input.model)) {
+    if (input.customProvider) {
+      cmd.push(...customProviderConfigOverrides(input.customProvider));
+    } else if (vercelSelected(input.model)) {
       cmd.push(...vercelConfigOverrides());
     } else if (openRouterSelected(input.model)) {
       // OpenRouter is the selected provider: tell Codex to use that
@@ -235,6 +238,17 @@ function vercelConfigOverrides(): string[] {
     'model_providers.vercel.env_key="AI_GATEWAY_API_KEY"',
     "-c",
     'model_providers.vercel.wire_api="responses"',
+  ];
+}
+
+function customProviderConfigOverrides(provider: NonNullable<BuildCommandInput["customProvider"]>): string[] {
+  const id = provider.slug;
+  return [
+    "-c", `model_provider=${tomlString(id)}`,
+    "-c", `model_providers.${id}.name=${tomlString(provider.name)}`,
+    "-c", `model_providers.${id}.base_url=${tomlString(provider.baseUrl)}`,
+    "-c", `model_providers.${id}.env_key="BENTO_CUSTOM_PROVIDER_API_KEY"`,
+    "-c", `model_providers.${id}.wire_api="responses"`,
   ];
 }
 

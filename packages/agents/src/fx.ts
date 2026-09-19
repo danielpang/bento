@@ -22,12 +22,13 @@ interface FxAskJson {
 /**
  * Vercel's fx CLI (`fx`) in headless `ask` mode.
  *
- * fx is a coding agent harness, not a model provider. The default
+ * fx is a coding agent harness, not a model provider. Its default
  * inference path is Vercel AI Gateway: one `AI_GATEWAY_API_KEY`, and
  * every model is a Gateway slug (`moonshotai/kimi-k3`,
  * `openai/gpt-5.4`). That is the same shape as an OpenRouter id, but
- * a different key, catalog, and bill. Anthropic, OpenAI, and the
- * other vendor keys Bento already stores are not read. Codex and Grok
+ * a different key, catalog, and bill. Built-in fx runs do not read
+ * other vendor keys. Its custom connections preview reads the selected
+ * OpenAI-compatible provider key. Codex and Grok
  * subscriptions exist as interactive `fx login` providers; a sandbox
  * has no browser, so they are out of reach here.
  *
@@ -47,13 +48,32 @@ export const fxAdapter: AgentAdapter = {
   requiredEnv: ["AI_GATEWAY_API_KEY"],
   configPaths: [".fx"],
 
+  files(input: BuildCommandInput) {
+    const provider = input.customProvider;
+    if (!provider) return [];
+    return [{
+      path: "/root/.fx/settings.json",
+      content: JSON.stringify({
+        providers: {
+          [provider.slug]: {
+            protocol: "openai-chat-completions",
+            base_url: provider.baseUrl,
+            auth: { type: "bearer", env: "BENTO_CUSTOM_PROVIDER_API_KEY" },
+          },
+        },
+        models: { [provider.slug]: provider.modelId },
+      }),
+    }];
+  },
+
   env(input: BuildCommandInput): Record<string, string> {
     return {
       // The picker stores a bare Gateway slug. A vercel/ prefix is
       // Bento's shared catalog selection, the same one pi and Codex
-      // strip before they call Gateway. fx has no other provider, so
-      // the prefix is never part of FX_MODEL.
-      FX_MODEL: gatewaySlug(input.model),
+      // strip before they call Gateway. A custom connection takes its
+      // own raw model id and provider name from the selected route.
+      FX_MODEL: input.customProvider?.modelId ?? gatewaySlug(input.model),
+      ...(input.customProvider ? { FX_PROVIDER: input.customProvider.slug } : {}),
       FX_PERMISSION_MODE: "full-access",
       FX_AUTO_UPGRADE: "0",
       FX_NO_OPEN_BROWSER: "1",

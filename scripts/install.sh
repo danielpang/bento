@@ -125,7 +125,7 @@ tar -xzf "$TMP/$ASSET" -C "$STAGING" --strip-components=1
 [ -f "$STAGING/dist/cli.js" ] && [ -x "$STAGING/bento" ] || err "The release archive is missing the CLI."
 echo "Checking installation..."
 INSTALLED_VERSION="$("$STAGING/bento" --version)" || err "The downloaded CLI could not start."
-[ "$INSTALLED_VERSION" = "${VERSION#v}" ] || err "The downloaded CLI reports the wrong version: $INSTALLED_VERSION"
+[ "$INSTALLED_VERSION" = "$VERSION" ] || err "The downloaded CLI reports the wrong version: $INSTALLED_VERSION"
 node - "$STAGING/.bento-install.json" "$BIN_DIR" <<'NODE'
 const fs = require('node:fs');
 fs.writeFileSync(process.argv[2], JSON.stringify({ version: 1, binDir: process.argv[3] }) + '\n');

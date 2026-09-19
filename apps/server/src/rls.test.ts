@@ -33,6 +33,7 @@ const TENANT_TABLES = [
   "gate_checks",
   "agent_profiles",
   "secrets",
+  "custom_model_providers",
   "github_installations",
   "linear_team_mappings",
   "linear_issue_links",
@@ -172,6 +173,19 @@ test("a row cannot be written into another organization", async () => {
     /row-level security/,
     "the WITH CHECK clause must reject a write aimed at another organization",
   );
+});
+
+test("custom providers inherit the active organization and remain isolated", async () => {
+  await asOrg("org-a", async (client) => {
+    await client.query(
+      `insert into custom_model_providers (owner_id,slug,name,protocol,base_url,models)
+       values ('u1','private-models','Private models','openai','https://models.example.test/v1','[{"id":"m","name":"M"}]'::jsonb)`,
+    );
+    const own = await client.query("select organization_id from custom_model_providers where slug='private-models'");
+    assert.deepEqual(own.rows.map((row) => row.organization_id), ["org-a"]);
+    const foreign = await asOrg("org-b", (other) => other.query("select id from custom_model_providers where slug='private-models'"));
+    assert.equal(foreign.rows.length, 0);
+  });
 });
 
 test("child inserts inherit their organization from the parent", async () => {

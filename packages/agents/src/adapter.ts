@@ -1,4 +1,4 @@
-import type { AgentCli, AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
+import type { AgentCli, AgentDelta, AgentEvent, CustomProviderProtocol, RunOutcome } from "@bento/core";
 import { hasOllamaCredentials, OLLAMA_CREDENTIAL_NAMES, ollamaNeedsSavedCredentials, routesToOllama } from "@bento/core";
 
 export interface BuildCommandInput {
@@ -17,6 +17,17 @@ export interface BuildCommandInput {
    * the env hook.
    */
   credentials?: Readonly<Record<string, string>>;
+  /** A Bento-owned provider selected for this run. The API key stays in env. */
+  customProvider?: CustomProviderSelection;
+}
+
+export interface CustomProviderSelection {
+  slug: string;
+  name: string;
+  protocol: CustomProviderProtocol;
+  baseUrl: string;
+  modelId: string;
+  models: { id: string; name: string }[];
 }
 
 /**
@@ -329,5 +340,5 @@ export function runsOnOllama(names: { ollama: OllamaRoute }, found: Readonly<Rec
 export function writeFileCommand(file: McpFile): string[] {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const dir = file.path.replace(/\/[^/]+$/, "") || "/";
-  return ["sh", "-c", `mkdir -p ${quote(dir)} && printf %s ${quote(file.content)} > ${quote(file.path)}`];
+  return ["sh", "-c", `if [ ! -d ${quote(dir)} ]; then mkdir -p ${quote(dir)} && chmod 700 ${quote(dir)}; fi && printf %s ${quote(file.content)} > ${quote(file.path)} && chmod 600 ${quote(file.path)}`];
 }

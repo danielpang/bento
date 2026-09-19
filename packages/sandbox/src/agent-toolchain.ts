@@ -60,6 +60,8 @@ export const AGENT_BINARIES = ["agy", "claude", "codex", "cursor-agent", "dsh", 
  * has moved, are caught by the version check below rather than a bump.
  * Adding muse is the same for a machine that never had it.
  * Adding fx is the same for a machine that never had it.
+ * fx's custom connections require the dev-channel binary. A separate
+ * marker upgrades only fx on warm machines that already have the v3 set.
  */
 export const TOOLCHAIN_VERSION = 3;
 
@@ -69,6 +71,7 @@ export const TOOLCHAIN_VERSION = 3;
  * minutes-long wait rather than after.
  */
 export const TOOLCHAIN_MARKER = `/opt/bento/toolchain-v${TOOLCHAIN_VERSION}`;
+const FX_CUSTOM_MARKER = "/opt/bento/fx-custom-connections";
 
 /**
  * How the script names the CLIs that are still not on the PATH when it
@@ -108,6 +111,7 @@ const DSH_VERSION = "0.1.1-rc.2";
  */
 export const AGENT_TOOLCHAIN_SCRIPT = `set -eu
 MARKER=${TOOLCHAIN_MARKER}
+FX_CUSTOM_MARKER=${FX_CUSTOM_MARKER}
 ALL='${AGENT_BINARIES.join(" ")}'
 # Installers write under it, and \${HOME} unset would end the script here
 # rather than at the missing tool, under set -u.
@@ -191,6 +195,9 @@ cli_stale() {
         *${DSH_VERSION}*) return 1 ;;
         *) return 0 ;;
       esac
+      ;;
+    fx)
+      [ ! -f "$FX_CUSTOM_MARKER" ]
       ;;
     *) return 1 ;;
   esac
@@ -377,8 +384,14 @@ fi
 # dir on PATH first is what keeps the rc files alone.
 if wanted fx; then
   mkdir -p "$HOME/.local/bin"
-  PATH="$HOME/.local/bin:$PATH" FX_INSTALL_DIR="$HOME/.local/bin" \\
-    install_from fx https://fx.sh/setup.sh bash || true
+  (PATH="$HOME/.local/bin:$PATH" FX_INSTALL_DIR="$HOME/.local/bin" \\
+    install_from fx https://fx.sh/setup.sh bash) || true
+  if [ -x "$HOME/.local/bin/fx" ] &&
+     FX_INSTALL_DIR="$HOME/.local/bin" "$HOME/.local/bin/fx" upgrade --channel dev --json >/dev/null; then
+    touch "$FX_CUSTOM_MARKER"
+  else
+    echo "bento: fx custom connections build is unavailable" >&2
+  fi
 fi
 
 # pi and dsh are npm only, so they share a private Node. A compatibility

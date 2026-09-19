@@ -1,6 +1,6 @@
 {
-  "id": "8eb81202-dee6-41b3-aa92-936bbfa09ca0",
-  "prevId": "fff003e7-e329-4847-ab8c-c4e156680063",
+  "id": "4a011431-91d2-4083-a9f2-98746c2b421e",
+  "prevId": "19130bff-bd5d-4946-a925-60fc821da40c",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -991,13 +991,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'task'"
         },
         "type": {
           "name": "type",
@@ -4318,6 +4311,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "feature_id": {
           "name": "feature_id",
           "type": "uuid",
@@ -4533,9 +4532,13 @@
           "name": "run_artifacts_content_or_key",
           "value": "(\"run_artifacts\".\"content\" is null) <> (\"run_artifacts\".\"storage_key\" is null)"
         },
-        "run_artifacts_feature_or_swarm": {
-          "name": "run_artifacts_feature_or_swarm",
-          "value": "(\"run_artifacts\".\"feature_id\" is null) <> (\"run_artifacts\".\"swarm_id\" is null)"
+        "run_artifacts_pipeline_shape": {
+          "name": "run_artifacts_pipeline_shape",
+          "value": "\"run_artifacts\".\"type\" <> 'pipeline' or (\"run_artifacts\".\"feature_id\" is not null and \"run_artifacts\".\"swarm_id\" is null and \"run_artifacts\".\"swarm_task_id\" is null)"
+        },
+        "run_artifacts_swarm_shape": {
+          "name": "run_artifacts_swarm_shape",
+          "value": "\"run_artifacts\".\"type\" <> 'swarm' or (\"run_artifacts\".\"swarm_id\" is not null and \"run_artifacts\".\"feature_id\" is null)"
         }
       },
       "isRLSEnabled": false
@@ -6495,12 +6498,12 @@
           "notNull": true,
           "default": 0
         },
-        "kind": {
-          "name": "kind",
+        "node_type": {
+          "name": "node_type",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'task'"
+          "default": "'leaf'"
         },
         "title": {
           "name": "title",
@@ -6520,7 +6523,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'pending'"
+          "default": "'open'"
         },
         "attention": {
           "name": "attention",
@@ -7105,6 +7108,167 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.custom_model_providers": {
+      "name": "custom_model_providers",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "owner_id": {
+          "name": "owner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "protocol": {
+          "name": "protocol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "base_url": {
+          "name": "base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "models": {
+          "name": "models",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "encrypted_api_key": {
+          "name": "encrypted_api_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "key_hint": {
+          "name": "key_hint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "custom_model_providers_org_slug_idx": {
+          "name": "custom_model_providers_org_slug_idx",
+          "columns": [
+            {
+              "expression": "organization_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "slug",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "custom_model_providers_local_slug_idx": {
+          "name": "custom_model_providers_local_slug_idx",
+          "columns": [
+            {
+              "expression": "slug",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"custom_model_providers\".\"organization_id\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "custom_model_providers_owner_id_user_id_fk": {
+          "name": "custom_model_providers_owner_id_user_id_fk",
+          "tableFrom": "custom_model_providers",
+          "tableTo": "user",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "owner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "custom_model_providers_organization_id_organization_id_fk": {
+          "name": "custom_model_providers_organization_id_organization_id_fk",
+          "tableFrom": "custom_model_providers",
+          "tableTo": "organization",
+          "schemaTo": "identity",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },

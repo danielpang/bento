@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import {
   WORKSPACE_ARTIFACT_DIR,
   agentRunPrompt,
+  customProviderRunError,
   forgetsBetweenRuns,
   modelGuidanceFor,
   resolveRepositoryCommands,
@@ -17,6 +18,7 @@ import {
   type AgentAdapter,
   type LiveSession,
   type McpFile,
+  type CustomProviderSelection,
 } from "@bento/agents";
 import {
   agentProfiles,
@@ -49,6 +51,7 @@ import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildStagePrompt, repositoryInstructions } from "./prompt.js";
 import { buildPlannerPrompt } from "./swarm/planner-prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
+import { customProviderRunEnv } from "./custom-provider.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
@@ -137,13 +140,18 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Credentials come from the owning organization, never from the
   // server's own environment: see resolveAgentEnv. Resolved here, ahead
   // of the logins, because it decides whether the run goes to Ollama.
-  const { env: agentEnv, missing, ollama: onOllama } = await resolveAgentEnv(
+  const { env: resolvedEnv, missing, ollama: onOllama } = await resolveAgentEnv(
     ctx,
     project.organizationId,
     adapter,
     profile.model,
   );
-  const sharesLogin = !onOllama;
+  const customProvider = await customProviderRunEnv(ctx, project.organizationId, profile.cli, profile.model);
+  // A custom provider key is sufficient. Forwarding every other
+  // provider key would give this sandbox credentials it does
+  // not need, and a shared local login can mount read-only state.
+  const agentEnv = customProvider ? {} : resolvedEnv;
+  const sharesLogin = !onOllama && !customProvider;
   const authEnv = sharesLogin ? await agentAuthEnv(ctx, adapter) : {};
   /**
    * When the login arrives as an env token, the config mounts are not
@@ -174,6 +182,22 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     await saySystem(
       "Resolving merge conflicts: the agent rebases the branch onto the latest base branch, and the server force pushes it with lease protection when the run finishes.",
     );
+  }
+
+  const customProviderError = customProvider && customProviderRunError(customProvider, profile.cli);
+  if (customProvider && (
+    customProviderError || !(await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId }))
+  )) {
+    await finishRun(ctx, runId, {
+      ok: false,
+      error: customProviderError ?? "This custom provider is not available for this run.",
+    }, null);
+    emitBoard("failed");
+    // Through the subject, like every other failure here: a card's
+    // settlement is its gate, a swarm's is the reconciler, and a swarm
+    // run has no feature to name.
+    await subject.settle(ctx);
+    return;
   }
 
   let handle: SandboxHandle;
@@ -287,14 +311,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     say: saySystem,
   });
 
-
   // Commits land as the user rather than a placeholder. The adapter's
   // own variables go first, so anything the organization saved under
   // the same name wins: pool's base URL defaults to Poolside Platform
   // here and to an enterprise endpoint when one is stored.
   // A shared login is a credential, whether it arrives as a mount or an
   // env var. Only when none of the three exists does the run stop here.
-  if (missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
+  if (!customProvider && missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
     // The pointer has to name a door that exists where the reader is.
     // Multi mode stores keys under Agents, Model provider keys. Local
     // mode stores them through bento setup, or shares this machine's
@@ -378,10 +401,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     cardTools,
     setupWarning: setupFailure,
     credentials: agentEnv,
+    ...(customProvider?.selection ? { customProvider: customProvider.selection } : {}),
   });
 
   const execEnv = {
     ...mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx)),
+    ...(customProvider?.env ?? {}),
     ...mcpEnv,
   };
 
@@ -1060,6 +1085,7 @@ async function buildRunCommand(
      * process already carries its environment and only argv[0] is read.
      */
     credentials?: Record<string, string>;
+    customProvider?: CustomProviderSelection;
     /**
      * Whether Bento's own tools reached the sandbox. The prompt only
      * mentions splitting a card when the tool that does it is there.
@@ -1130,6 +1156,7 @@ async function buildRunCommand(
     ...(run.cliSessionId ? { resumeSessionId: run.cliSessionId } : {}),
     ...(combinedArgs.length ? { extraArgs: combinedArgs } : {}),
     ...(input.credentials ? { credentials: input.credentials } : {}),
+    ...(input.customProvider ? { customProvider: input.customProvider } : {}),
   };
   /**
    * Live mode: the tool holds a conversation over stdin, so a message

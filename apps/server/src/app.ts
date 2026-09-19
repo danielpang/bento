@@ -11,6 +11,7 @@ import { profileRoutes } from "./routes/profiles.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runnerRoutes } from "./routes/runner.js";
 import { secretRoutes } from "./routes/secrets.js";
+import { customProviderRoutes } from "./routes/custom-providers.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { teamRoutes } from "./routes/team.js";
 import { stageRoutes } from "./routes/stages.js";
@@ -345,6 +346,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/runs", runRoutes(ctx))
     .route("/runner", runnerRoutes(ctx))
     .route("/secrets", secretRoutes(ctx))
+    .route("/custom-providers", customProviderRoutes(ctx))
     .route("/github", githubRoutes(ctx))
     .route("/linear", linearRoutes(ctx))
     .route("/slack", slackRoutes(ctx))
