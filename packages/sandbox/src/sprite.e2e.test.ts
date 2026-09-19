@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SpritesClient } from "@fly/sprites";
-import { AGENT_BINARIES, TOOLCHAIN_MARKER } from "./agent-toolchain.js";
+import { AGENT_BINARIES, TOOLCHAIN_LEGACY_MARKER, TOOLCHAIN_STAMPS } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
 import { taskRequest } from "./keep-awake.js";
 import { SpriteDriver, spriteExistsWithRetry, spriteName } from "./sprite.js";
@@ -127,11 +127,12 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   const said: string[] = [];
-  const provision = () =>
+  const provision = (agentBinaries?: readonly string[]) =>
     driver.provision({
       projectId: "sprite-e2e",
       featureId,
       hostWorkspacePath: "/unused",
+      ...(agentBinaries ? { agentBinaries } : {}),
       onProgress: (message) => {
         said.push(message);
         console.log(`  ${message}`);
@@ -443,6 +444,48 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   /**
+   * The narrowing itself, against the real installers.
+   *
+   * Both halves matter, and they fail differently. Installing more than
+   * was asked for only wastes the minutes this change exists to save.
+   * Installing less is a run that dies at spawn with "executable file
+   * not found in $PATH", which is the failure the whole file is here to
+   * catch, so the CLIs are removed first and the sprite is asked
+   * afterwards rather than the script's own report being believed.
+   */
+  await t.test("a provision installs the agents it was asked for, and no others", { skip: needsSprite() }, async () => {
+    await uninstall(["codex", "opencode"]);
+    await shell(`rm -f ${TOOLCHAIN_STAMPS}/codex ${TOOLCHAIN_STAMPS}/opencode`);
+    const removed = await present();
+    assert.deepEqual(
+      removed.filter((binary) => binary === "codex" || binary === "opencode"),
+      [],
+      "the CLIs were not actually removed",
+    );
+
+    // A card whose pipeline runs Claude Code and Codex.
+    said.length = 0;
+    await provision(["claude", "codex"]);
+    assert.deepEqual(
+      said.filter((message) => message.includes("Could not install")),
+      [],
+    );
+    const narrowed = await present();
+    assert.ok(narrowed.includes("codex"), "an agent this card runs was not installed");
+    assert.ok(!narrowed.includes("opencode"), "an agent this card never names was installed anyway");
+
+    // Somebody adds an opencode stage to that pipeline. The provision
+    // before the stage that needs it is where it arrives.
+    said.length = 0;
+    await provision(["claude", "codex", "opencode"]);
+    assert.deepEqual(
+      said.filter((message) => message.includes("Could not install")),
+      [],
+    );
+    assert.deepEqual(await present(), expected, "an agent added to the pipeline later never arrived");
+  });
+
+  /**
    * What a TOOLCHAIN_VERSION bump looks like from inside the sandbox:
    * the marker it knows is gone, so the whole set installs again. This
    * is the run that matters most after a bump, because it is the one
@@ -450,7 +493,8 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * installers are most likely to be throttled.
    */
   await t.test("a version bump reinstalls the set and leaves nothing missing", { skip: needsSprite() }, async () => {
-    assert.equal((await shell(`rm -f ${TOOLCHAIN_MARKER}; test ! -f ${TOOLCHAIN_MARKER}`)).exitCode, 0);
+    const forget = `rm -rf ${TOOLCHAIN_STAMPS} ${TOOLCHAIN_LEGACY_MARKER}`;
+    assert.equal((await shell(`${forget}; test ! -d ${TOOLCHAIN_STAMPS}`)).exitCode, 0);
 
     said.length = 0;
     await provision();
@@ -461,7 +505,8 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     const failed = said.filter((message) => message.includes("Could not install"));
     assert.deepEqual(failed, [], `a bump left a CLI uninstalled: ${failed.join(" ")}`);
     assert.deepEqual(await present(), expected);
-    assert.equal((await shell(`test -f ${TOOLCHAIN_MARKER}`)).exitCode, 0, "the marker was not rewritten");
+    const stamped = await shell(`ls ${TOOLCHAIN_STAMPS} 2>/dev/null | sort | tr '\\n' ' '`);
+    assert.equal(stamped.out, expected.join(" "), "the bump did not stamp every CLI it reinstalled");
   });
 
   /**
@@ -500,7 +545,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
       // it comes from npm rather than from GitHub and re-downloading it
       // tests nothing here.
       await uninstall(AGENT_BINARIES);
-      await shell(`rm -f ${TOOLCHAIN_MARKER}`);
+      await shell(`rm -rf ${TOOLCHAIN_STAMPS} ${TOOLCHAIN_LEGACY_MARKER}`);
       assert.deepEqual(await present(), [], "the CLIs were not actually removed");
 
       said.length = 0;

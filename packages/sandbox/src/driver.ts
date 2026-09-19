@@ -39,6 +39,24 @@ export interface ProvisionSpec {
    */
   mounts?: { hostPath: string; containerPath: string; readOnly?: boolean }[];
   image?: string;
+  /**
+   * The agent binaries this sandbox must be able to spawn, which is the
+   * set the card's pipeline uses plus the one this run spawns. Absent
+   * means all of them, which is what a caller that does not know asks
+   * for.
+   *
+   * Only the Sprite driver acts on it: a sprite is a bare machine that
+   * installs its CLIs on the way in, so installing two instead of ten
+   * is minutes off the first stage of every new card. The Docker image
+   * ships all of them already, and the local driver runs whatever is on
+   * the developer's own PATH.
+   *
+   * Narrowing it cannot strand a run. Provisioning happens before every
+   * run, and a CLI that is absent from the PATH is installed then, so
+   * an agent added to the pipeline after the card was created arrives
+   * with the stage that first needs it.
+   */
+  agentBinaries?: readonly string[];
   env?: Record<string, string>;
   /**
    * Called with a human readable line as provisioning advances: sandbox
