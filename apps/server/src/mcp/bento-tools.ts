@@ -1,9 +1,10 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { agentRuns, features, pullRequestUpdates, repositories } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { featurePullRequestTargets } from "../feature-prs.js";
 import { childCardsFor, childCount, MAX_CHILDREN_PER_CARD, parentRefusal } from "../feature-tree.js";
 import { githubConnectionFor } from "../github.js";
+import { cardBranch } from "../orchestrator/branch-rotation.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import { applyPendingPullRequestUpdates } from "../orchestrator/pull-request-updates.js";
 import type { ResolvedGrant } from "./grants.js";
@@ -68,7 +69,7 @@ const SET_PULL_REQUEST_DESCRIPTION = [
   "Set the title and description of the pull request for the card you are working.",
   "",
   "Bento opens and updates the pull request with its own GitHub connection; you have none. If the card already has a pull request, this is applied to it at once. Otherwise it is kept and applied when the branch is next published, which happens when this run finishes if the stage is set to create a pull request.",
-  "Calling it again before it is applied replaces what you set. Write the description for the reviewer: what changed, why, and how to verify it.",
+  "Calling it again before it is applied replaces the parts you give again and keeps the rest. Write the description for the reviewer: what changed, why, and how to verify it.",
 ].join("\n");
 
 const ADD_PULL_REQUEST_COMMENT_DESCRIPTION = [
@@ -324,63 +325,76 @@ async function listChildCards(ctx: AppContext, grant: ResolvedGrant) {
 }
 
 /**
- * The repository argument, checked against the project: a name that is
- * not there is refused with the names that are, so the agent can fix
- * its call rather than have a row wait forever for a repository that
- * will never publish. Undefined means every repository.
+ * The repositories a call is for, by name: the one named, checked
+ * against the project, or every repository the project has. A name
+ * that is not there is refused with the names that are, so the agent
+ * can fix its call rather than have a row wait forever for a
+ * repository that will never publish. A project with no repositories
+ * has nothing to open a pull request in, and says so.
  */
-async function resolveRepository(
+async function resolveRepositories(
   ctx: AppContext,
   projectId: string,
   raw: unknown,
-): Promise<{ ok: true; repository: string | null } | { ok: false; reason: string }> {
+): Promise<{ ok: true; repositories: string[] } | { ok: false; reason: string }> {
   const name = typeof raw === "string" ? raw.trim() : "";
-  if (!name) return { ok: true, repository: null };
   const rows = await ctx.db
     .select({ name: repositories.name })
     .from(repositories)
-    .where(eq(repositories.projectId, projectId));
-  if (rows.some((r) => r.name === name)) return { ok: true, repository: name };
+    .where(eq(repositories.projectId, projectId))
+    .orderBy(repositories.position);
   const known = rows.map((r) => r.name);
-  return {
-    ok: false,
-    reason:
-      known.length === 0
-        ? "this project has no repositories"
-        : `this project's repositories are ${known.join(", ")}, and there is no ${name}`,
-  };
+  if (known.length === 0) return { ok: false, reason: "this project has no repositories, so there is no pull request" };
+  if (!name) return { ok: true, repositories: known };
+  if (known.includes(name)) return { ok: true, repositories: [name] };
+  return { ok: false, reason: `this project's repositories are ${known.join(", ")}, and there is no ${name}` };
 }
 
 /**
- * Writes pending updates to the card's pull requests right now, when it
- * has any and the organization has a GitHub connection. The answer is
- * what the agent reads, so it says which of the three things happened:
- * applied, kept for the next publish, or refused by GitHub.
+ * Writes the rows just recorded to the card's pull requests right now,
+ * when it has any and the organization has a GitHub connection, and
+ * says what happened to each: applied to which pull request, kept
+ * for a repository with no pull request yet, or refused by GitHub.
+ * The answer is what the agent reads, so it names only the pull
+ * requests these rows actually reached.
  */
 async function applyNow(
   ctx: AppContext,
   feature: typeof features.$inferSelect,
   what: string,
+  rowIds: string[],
 ): Promise<string> {
   const publisher = await githubConnectionFor(ctx, feature.organizationId);
   const targets = publisher ? await featurePullRequestTargets(ctx.db, feature) : [];
-  if (!publisher || targets.length === 0) {
-    return `Saved ${what}. This card has no pull request yet, so Bento applies it when the branch is next published.`;
-  }
-  const applied = await applyPendingPullRequestUpdates(ctx.db, publisher, {
-    featureId: feature.id,
-    targets: targets.map((t) => ({ name: t.name, repoUrl: t.repoUrl, prNumber: t.number, url: t.url })),
-  });
+  const applied =
+    publisher && targets.length > 0
+      ? await applyPendingPullRequestUpdates(ctx.db, publisher, {
+          featureId: feature.id,
+          branch: cardBranch(feature),
+          targets: targets.map((t) => ({ name: t.name, repoUrl: t.repoUrl, prNumber: t.number, url: t.url })),
+        })
+      : null;
+
+  const rows = await ctx.db.select().from(pullRequestUpdates).where(inArray(pullRequestUpdates.id, rowIds));
+  const landed = rows.filter((row) => row.appliedAt !== null);
+  const kept = rows.filter((row) => row.appliedAt === null);
   const lines: string[] = [];
-  if (applied.updated > 0 || applied.commented > 0) {
+  if (landed.length > 0) {
+    const urls = landed
+      .map((row) => targets.find((t) => t.name === row.repository)?.url)
+      .filter((url): url is string => !!url);
+    lines.push(`Applied ${what} to ${urls.join(", ")}.`);
+  }
+  for (const failure of applied?.failures ?? []) {
+    lines.push(`GitHub refused the update for ${failure}. It is kept and tried again at the next publish.`);
+  }
+  const waiting = kept.filter((row) => !applied?.failures.some((f) => f.startsWith(`${row.repository}:`)));
+  if (waiting.length > 0) {
+    const names = waiting.map((row) => row.repository).join(", ");
     lines.push(
-      `Applied ${what} to ${targets
-        .map((t) => `${t.url}`)
-        .join(", ")}.`,
+      `Saved ${what} for ${names}: no pull request there yet, so Bento applies it when the branch is next published.`,
     );
   }
-  for (const failure of applied.failures) lines.push(`GitHub refused the update for ${failure}. It is kept and tried again at the next publish.`);
-  if (lines.length === 0) lines.push(`Saved ${what}. Bento applies it when the branch is next published.`);
   return lines.join("\n");
 }
 
@@ -397,36 +411,59 @@ async function setPullRequest(ctx: AppContext, grant: ResolvedGrant, args: Recor
 
   const feature = await runFeature(ctx, grant);
   if (!feature) return say("The card this run belongs to no longer exists, so nothing was set.", true);
-  const repo = await resolveRepository(ctx, feature.projectId, args.repository);
-  if (!repo.ok) return say(`Nothing was set: ${repo.reason}.`, true);
+  const repos = await resolveRepositories(ctx, feature.projectId, args.repository);
+  if (!repos.ok) return say(`Nothing was set: ${repos.reason}.`, true);
+  const branch = cardBranch(feature);
 
-  // A second call replaces the first: one pending description per run
-  // and repository, the newest, so what lands is what the agent last
-  // decided rather than both in order.
-  await ctx.db
-    .delete(pullRequestUpdates)
-    .where(
-      and(
-        eq(pullRequestUpdates.runId, grant.runId),
-        eq(pullRequestUpdates.kind, "description"),
-        isNull(pullRequestUpdates.appliedAt),
-        repo.repository === null
-          ? isNull(pullRequestUpdates.repository)
-          : eq(pullRequestUpdates.repository, repo.repository),
-      ),
-    );
-  await ctx.db.insert(pullRequestUpdates).values({
-    runId: grant.runId,
-    featureId: feature.id,
-    organizationId: feature.organizationId,
-    repository: repo.repository,
-    kind: "description",
-    title: title || null,
-    body,
-  });
+  // A second call before the first is applied amends it: the parts
+  // given again replace, the parts left out stay. So a title-only
+  // follow-up keeps the description from the first call, the same as
+  // it would on a pull request that already exists.
+  const rowIds: string[] = [];
+  for (const repository of repos.repositories) {
+    const [pending] = await ctx.db
+      .select()
+      .from(pullRequestUpdates)
+      .where(
+        and(
+          eq(pullRequestUpdates.runId, grant.runId),
+          eq(pullRequestUpdates.repository, repository),
+          eq(pullRequestUpdates.branch, branch),
+          eq(pullRequestUpdates.kind, "description"),
+          isNull(pullRequestUpdates.appliedAt),
+        ),
+      )
+      .limit(1);
+    if (pending) {
+      await ctx.db
+        .update(pullRequestUpdates)
+        .set({
+          ...(title ? { title } : {}),
+          ...(body ? { body } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(pullRequestUpdates.id, pending.id));
+      rowIds.push(pending.id);
+      continue;
+    }
+    const [row] = await ctx.db
+      .insert(pullRequestUpdates)
+      .values({
+        runId: grant.runId,
+        featureId: feature.id,
+        organizationId: feature.organizationId,
+        repository,
+        branch,
+        kind: "description",
+        title: title || null,
+        body,
+      })
+      .returning({ id: pullRequestUpdates.id });
+    if (row) rowIds.push(row.id);
+  }
 
   const what = title && body ? "the pull request title and description" : title ? "the pull request title" : "the pull request description";
-  return say(await applyNow(ctx, feature, what));
+  return say(await applyNow(ctx, feature, what, rowIds));
 }
 
 async function addPullRequestComment(ctx: AppContext, grant: ResolvedGrant, args: Record<string, unknown>) {
@@ -438,17 +475,24 @@ async function addPullRequestComment(ctx: AppContext, grant: ResolvedGrant, args
 
   const feature = await runFeature(ctx, grant);
   if (!feature) return say("The card this run belongs to no longer exists, so nothing was posted.", true);
-  const repo = await resolveRepository(ctx, feature.projectId, args.repository);
-  if (!repo.ok) return say(`Nothing was posted: ${repo.reason}.`, true);
+  const repos = await resolveRepositories(ctx, feature.projectId, args.repository);
+  if (!repos.ok) return say(`Nothing was posted: ${repos.reason}.`, true);
+  const branch = cardBranch(feature);
 
-  await ctx.db.insert(pullRequestUpdates).values({
-    runId: grant.runId,
-    featureId: feature.id,
-    organizationId: feature.organizationId,
-    repository: repo.repository,
-    kind: "comment",
-    body,
-  });
+  const rows = await ctx.db
+    .insert(pullRequestUpdates)
+    .values(
+      repos.repositories.map((repository) => ({
+        runId: grant.runId,
+        featureId: feature.id,
+        organizationId: feature.organizationId,
+        repository,
+        branch,
+        kind: "comment" as const,
+        body,
+      })),
+    )
+    .returning({ id: pullRequestUpdates.id });
 
-  return say(await applyNow(ctx, feature, "the comment"));
+  return say(await applyNow(ctx, feature, "the comment", rows.map((r) => r.id)));
 }

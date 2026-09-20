@@ -3,7 +3,8 @@ CREATE TABLE "pull_request_updates" (
 	"run_id" uuid NOT NULL,
 	"feature_id" uuid NOT NULL,
 	"organization_id" text,
-	"repository" text,
+	"repository" text NOT NULL,
+	"branch" text NOT NULL,
 	"kind" text NOT NULL,
 	"title" text,
 	"body" text DEFAULT '' NOT NULL,
@@ -15,7 +16,7 @@ CREATE TABLE "pull_request_updates" (
 ALTER TABLE "pull_request_updates" ADD CONSTRAINT "pull_request_updates_run_id_agent_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."agent_runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "pull_request_updates" ADD CONSTRAINT "pull_request_updates_feature_id_features_id_fk" FOREIGN KEY ("feature_id") REFERENCES "public"."features"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "pull_request_updates" ADD CONSTRAINT "pull_request_updates_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "identity"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "pull_request_updates_feature_idx" ON "pull_request_updates" USING btree ("feature_id","applied_at");--> statement-breakpoint
+CREATE INDEX "pull_request_updates_feature_idx" ON "pull_request_updates" USING btree ("feature_id","branch","applied_at");--> statement-breakpoint
 CREATE INDEX "pull_request_updates_run_idx" ON "pull_request_updates" USING btree ("run_id");--> statement-breakpoint
 
 -- Tenant isolation, none of which a new table inherits: the policy, the

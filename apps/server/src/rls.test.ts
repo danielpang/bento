@@ -366,8 +366,8 @@ test("what an agent asks a pull request to say belongs to its run's organization
 
   const inherited = await asOrg("org-a", (client) =>
     client.query(
-      `insert into pull_request_updates (run_id,feature_id,kind,title,body)
-       values ($1,$2,'description','Add widgets','What changed and why.')
+      `insert into pull_request_updates (run_id,feature_id,repository,branch,kind,title,body)
+       values ($1,$2,'app','feature/abc','description','Add widgets','What changed and why.')
        returning organization_id`,
       [run, feature],
     ),
@@ -375,8 +375,8 @@ test("what an agent asks a pull request to say belongs to its run's organization
   assert.equal(inherited.rows[0].organization_id, "org-a");
 
   await pool.query(
-    `insert into pull_request_updates (run_id,feature_id,organization_id,kind,body)
-     values ($1,$2,'org-a','comment','Looks good.')`,
+    `insert into pull_request_updates (run_id,feature_id,organization_id,repository,branch,kind,body)
+     values ($1,$2,'org-a','app','feature/abc','comment','Looks good.')`,
     [run, feature],
   );
   const foreign = await asOrg("org-b", (client) =>

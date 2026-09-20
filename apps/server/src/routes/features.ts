@@ -1214,7 +1214,11 @@ export function featureRoutes(ctx: AppContext) {
       // The same as a run's publish: whatever an agent asked the pull
       // request to say, and no publish has applied yet, lands now.
       if (allPublished.length > 0) {
-        await applyPendingPullRequestUpdates(ctx.db, publisher, { featureId: feature.id, targets: allPublished });
+        await applyPendingPullRequestUpdates(ctx.db, publisher, {
+          featureId: feature.id,
+          branch: feature.branchName,
+          targets: allPublished,
+        });
       }
       const remainingFailures = [
         ...failures.filter((f) => !ancestryNames.has(f.name)),

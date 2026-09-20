@@ -1107,6 +1107,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     if (allPublished.length > 0) {
       await applyPendingPullRequestUpdates(ctx.db, publisher, {
         featureId: feature.id,
+        branch,
         targets: allPublished,
         say: saySystem,
       });
