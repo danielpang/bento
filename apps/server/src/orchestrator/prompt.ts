@@ -52,12 +52,14 @@ export function buildStagePrompt(
   /** Workspace directory whose files are captured onto the card as artifacts. */
   artifactsDir?: string,
   /**
-   * Whether this run actually got Bento's own MCP tools. Only then is
-   * the paragraph about splitting worth saying: telling an agent to
-   * create cards when it has no tool to do it with produces a run that
-   * writes the parts into prose and calls it done.
+   * Whether this run actually got Bento's own MCP tools. Only then are
+   * the paragraphs about splitting and about the pull request worth
+   * saying: telling an agent to create cards when it has no tool to do
+   * it with produces a run that writes the parts into prose and calls
+   * it done, and telling it to set a pull request title it cannot set
+   * produces a write-up with a title nobody copies anywhere.
    */
-  canSplitCard = false,
+  cardTools = false,
 ): string {
   const artifact = stageArtifactPath(stage.slug);
   const priorStages = allStages.filter((s) => s.position < stage.position);
@@ -113,6 +115,19 @@ export function buildStagePrompt(
       repositories.length > 1 ? " in every repository you changed" : ""
     }.`,
   );
+  /**
+   * The pull request's own text, when the tools to set it are there.
+   * The write-up above is for the card; the pull request is for the
+   * reviewer, and the two read differently, so the agent is asked for
+   * both rather than having one copied into the other.
+   */
+  if (cardTools) {
+    lines.push(
+      stage.createPr
+        ? "Before you finish, call the set_pull_request tool with the pull request's title and a description written for the reviewer: what changed, why, and how to verify it. Bento applies it when this run publishes, or at once if the card already has a pull request. To leave a note for the reviewer on the pull request, call add_pull_request_comment. This does not replace the write-up above."
+        : "The set_pull_request and add_pull_request_comment tools set the pull request's title and description and post comments on it. If this card already has a pull request, Bento applies them at once; otherwise it keeps them until the branch is published.",
+    );
+  }
   if (repositories.length > 1) {
     // Said explicitly because the obvious reading of "commit your work"
     // in a workspace of several checkouts is to commit in one of them.
@@ -145,7 +160,7 @@ export function buildStagePrompt(
    * the server enforces is only the shape: children of this card, in
    * this project, up to a cap, none of them started by the tool.
    */
-  if (canSplitCard) {
+  if (cardTools) {
     lines.push(
       "If this task is too large to finish as one change on one branch, you can split it: the create_card tool files a part of it as its own card, belonging to this one. Only split when both are true: the task really is too large for one branch, and dividing it is more efficient than working it yourself, because the parts can run in separate sandboxes, or hold less context, or finish independently. Do not split parts that would edit the same files, and do not split work you could simply do. Most cards are one change and should end with no parts at all. When you do split, say so in your summary and keep working whatever scope you kept for yourself; the parts you filed start in the backlog and are picked up as ordinary cards.",
     );

@@ -673,6 +673,69 @@ export const runArtifacts = pgTable(
   ],
 );
 
+/**
+ * What an agent asked to say on the card's pull requests.
+ *
+ * An agent has no GitHub credential, so it cannot write a pull request
+ * title, description, or comment itself. Instead the card tools on the
+ * MCP gateway record the request here, and the server applies it with
+ * its own connection: at once when the card already has a pull request
+ * in that repository, otherwise when the branch is next published.
+ * Rows are the record either way, and `appliedAt` is what tells a
+ * pending row from a finished one, so a publish that fails halfway
+ * leaves the unapplied rows for the next attempt.
+ *
+ * One row is one repository on one branch. A request for "every
+ * repository" is written as a row per repository, so a repository
+ * whose publish failed keeps its row pending while the others close,
+ * and a row never outlives its branch: after a merge rotates the card
+ * onto a new branch, what was written for the old pull request does
+ * not land on the new one.
+ *
+ * A description row carries a title, a body, or both, and replaces
+ * that much of what the pull request had. Later rows win. A comment
+ * row is posted once, keyed by its own id in a hidden marker so a
+ * retry after a crash between posting and marking cannot post it
+ * twice.
+ */
+export const pullRequestUpdates = pgTable(
+  "pull_request_updates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "cascade" }),
+    featureId: uuid("feature_id")
+      .notNull()
+      .references(() => features.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /**
+     * The repository's name in the project. Held by name rather than
+     * by row, the way publishing names repositories, so a row still
+     * says where it was meant to go after the repository leaves.
+     */
+    repository: text("repository").notNull(),
+    /** The card's branch when the row was written; see feature_pull_requests.branch. */
+    branch: text("branch").notNull(),
+    kind: text("kind", { enum: ["description", "comment"] }).notNull(),
+    /** A new pull request title. Description rows only; null keeps the current one. */
+    title: text("title"),
+    /** The description or the comment. Empty means keep the current description. */
+    body: text("body").notNull().default(""),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index("pull_request_updates_feature_idx").on(t.featureId, t.branch, t.appliedAt),
+    index("pull_request_updates_run_idx").on(t.runId),
+  ],
+);
+
 export const gateChecks = pgTable("gate_checks", {
   id: uuid("id").primaryKey().defaultRandom(),
   featureId: uuid("feature_id")

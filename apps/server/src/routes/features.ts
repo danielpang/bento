@@ -60,6 +60,7 @@ import {
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
 import { buildCiFixPrompt, buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
+import { applyPendingPullRequestUpdates } from "../orchestrator/pull-request-updates.js";
 import { startFeatureFollowUpRun, startFeatureRebaseRun, recoverAncestryPublishFailures, type RebaseTarget } from "../orchestrator/rebase-run.js";
 import { linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { parseRepoUrl, type GitHubClient, type GitHubPublisher } from "@bento/github";
@@ -1210,6 +1211,15 @@ export function featureRoutes(ctx: AppContext) {
         failures.filter((f) => recovery.draftPublished.some((p) => p.name === f.name)).map((f) => f.name),
       );
       const allPublished = [...published, ...recovery.draftPublished];
+      // The same as a run's publish: whatever an agent asked the pull
+      // request to say, and no publish has applied yet, lands now.
+      if (allPublished.length > 0) {
+        await applyPendingPullRequestUpdates(ctx.db, publisher, {
+          featureId: feature.id,
+          branch: feature.branchName,
+          targets: allPublished,
+        });
+      }
       const remainingFailures = [
         ...failures.filter((f) => !ancestryNames.has(f.name)),
         ...recovery.draftFailures,

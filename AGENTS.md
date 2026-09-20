@@ -174,9 +174,12 @@ always on.
   schedules start one as nobody. `isBetaRun` asks about the acting
   member when there is one and the project's owner when there is not,
   so a team's auto-started stages behave like the runs it starts by
-  hand. A capability given to an agent (the card tools on the MCP
-  gateway) belongs behind the same flag as the console that shows what
-  the agent did with it.
+  hand. A capability given to an agent belongs behind the same flag as
+  the console that shows what the agent did with it, until both are
+  ready. The card tools on the MCP gateway (`create_card`,
+  `set_pull_request`, `add_pull_request_comment`) are rolled out to
+  every run; only the board's group view of split cards is still on
+  the flag.
 
 Do not mint a second flag for "show this to testers". This is that flag.
 

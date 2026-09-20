@@ -112,8 +112,8 @@ export interface GitHubPublisher {
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest>;
   getPullRequest(ref: PullRequestRef): Promise<PullRequestDetails>;
   updatePullRequest(input: PullRequestUpdateInput): Promise<void>;
-  /** True when a comment from this run was already posted on the pull request. */
-  pullRequestHasRunComment(ref: PullRequestRef, runId: string): Promise<boolean>;
+  /** True when a comment containing the marker is already on the pull request. */
+  pullRequestHasComment(ref: PullRequestRef, marker: string): Promise<boolean>;
   createPullRequestComment(ref: PullRequestRef, body: string): Promise<void>;
   /**
    * A short lived credential for pushing. Stays on the server and, when

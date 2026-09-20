@@ -16,7 +16,7 @@ import type {
 import {
   createPullRequestCommentVia,
   getPullRequestVia,
-  pullRequestHasRunCommentVia,
+  pullRequestHasCommentVia,
   updatePullRequestVia,
 } from "./pr-sync.js";
 
@@ -219,8 +219,8 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
     return updatePullRequestVia(this.octokit, input);
   }
 
-  pullRequestHasRunComment(ref: PullRequestRef, runId: string): Promise<boolean> {
-    return pullRequestHasRunCommentVia(this.octokit, ref, runId);
+  pullRequestHasComment(ref: PullRequestRef, marker: string): Promise<boolean> {
+    return pullRequestHasCommentVia(this.octokit, ref, marker);
   }
 
   createPullRequestComment(ref: PullRequestRef, body: string): Promise<void> {
