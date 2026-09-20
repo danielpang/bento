@@ -37,6 +37,7 @@ import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
+import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
 import { linkGitHubRemotes, refreshBaseBranches } from "./repo-remote.js";
 import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
@@ -422,13 +423,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     handle,
     restrictNetwork,
     mountedConfigPaths: authMounts.map((m) => m.containerPath),
-    // Splitting a card is unfinished product, and the console that
-    // shows a group is behind the same flag. An auto-started run has
-    // nobody acting, so the project's owner answers for it.
-    cardTools: await isBetaRun(ctx, {
-      actingUserId: run.startedBy,
-      projectOwnerId: project.ownerId,
-    }),
+    // Every run that can have MCP at all gets Bento's own tools: they
+    // are how the agent files the parts of a card and says what its
+    // pull request should read, and neither needs a person to opt in.
+    cardTools: true,
     say: saySystem,
   });
 
@@ -1102,6 +1100,17 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       },
       runRow?.startedBy ?? "system",
     );
+    // What the agent asked the pull request to say, now that there is
+    // one to say it on. After the push and the open, so a description
+    // set during the run lands on the pull request this run created.
+    const allPublished = [...published, ...recovery.draftPublished];
+    if (allPublished.length > 0) {
+      await applyPendingPullRequestUpdates(ctx.db, publisher, {
+        featureId: feature.id,
+        targets: allPublished,
+        say: saySystem,
+      });
+    }
     publishNotes.push(
       ...published.map((pr) => `Opened pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}`),
       ...recovery.draftPublished.map(

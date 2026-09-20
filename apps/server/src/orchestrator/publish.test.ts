@@ -162,7 +162,7 @@ test("draft publish opens a draft pull request", async () => {
       return { title: "Draft me", body: null, state: "open", merged: false };
     },
     async updatePullRequest() {},
-    async pullRequestHasRunComment() {
+    async pullRequestHasComment() {
       return false;
     },
     async createPullRequestComment() {},

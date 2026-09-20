@@ -15,6 +15,7 @@ import {
   mcpServers,
   pipelines,
   projects,
+  pullRequestUpdates,
   runMigrations,
   stages,
   user,
@@ -30,6 +31,7 @@ import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { mintRunGrant, revokeRunGrant, runHasActiveMcp } from "./grants.js";
 import { BENTO_SERVER_ID } from "./bento-tools.js";
+import { applyPendingPullRequestUpdates } from "../orchestrator/pull-request-updates.js";
 import { MAX_CHILDREN_PER_CARD } from "../feature-tree.js";
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
@@ -586,15 +588,15 @@ function toolText(body: unknown): string {
   return result?.content?.map((c) => c.text ?? "").join("\n") ?? "";
 }
 
-test("the bento server lists its two tools and nothing else", async () => {
+test("the bento server lists its four tools and nothing else", async () => {
   const token = await bentoGrant();
   const res = await bentoCall(token, "tools/list");
   assert.equal(res.status, 200);
   const body = (await res.json()) as { result: { tools: { name: string; description: string }[] } };
   assert.deepEqual(
     body.result.tools.map((t) => t.name).sort(),
-    ["create_card", "list_child_cards"],
-    "no update and no delete tool exists to be talked into using",
+    ["add_pull_request_comment", "create_card", "list_child_cards", "set_pull_request"],
+    "no tool edits or deletes a card, so there is none to be talked into using",
   );
   // The efficiency gate lives in the description, because code cannot
   // judge whether a task deserves splitting.
@@ -648,6 +650,167 @@ test("a card with no title is refused rather than filed blank", async () => {
   const body = (await res.json()) as { result: { isError?: boolean } };
   assert.equal(body.result.isError, true);
   assert.match(toolText(body), /needs a title/);
+});
+
+/**
+ * The pull request tools. With no GitHub connection and no pull
+ * request on the card, everything is recorded for the next publish;
+ * the apply step is then driven with a stub publisher against the rows
+ * the tools wrote, so the round trip is exercised without GitHub.
+ */
+
+async function pendingUpdates() {
+  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+  return ctx.db
+    .select()
+    .from(pullRequestUpdates)
+    .where(eq(pullRequestUpdates.featureId, run!.featureId))
+    .orderBy(pullRequestUpdates.createdAt);
+}
+
+test("set_pull_request records a description for the run's own card, and a second call replaces it", async () => {
+  const token = await bentoGrant();
+  const first = await bentoCall(token, "tools/call", {
+    name: "set_pull_request",
+    arguments: { title: "First title", description: "First body" },
+  });
+  assert.equal(first.status, 200);
+  assert.match(toolText(await first.json()), /no pull request yet/);
+
+  const second = await bentoCall(token, "tools/call", {
+    name: "set_pull_request",
+    arguments: { title: "Add widgets", description: "What changed and why." },
+  });
+  assert.equal(second.status, 200);
+
+  const rows = (await pendingUpdates()).filter((r) => r.kind === "description");
+  assert.equal(rows.length, 1, "the second call replaced the first rather than queueing both");
+  assert.equal(rows[0]!.runId, runId, "keyed to the run behind the grant, not anything named");
+  assert.equal(rows[0]!.title, "Add widgets");
+  assert.equal(rows[0]!.body, "What changed and why.");
+  assert.equal(rows[0]!.repository, null, "no repository named means every repository");
+  assert.equal(rows[0]!.appliedAt, null, "nothing to apply it to yet");
+});
+
+test("set_pull_request needs a title or a description, and only a repository the project has", async () => {
+  const token = await bentoGrant();
+  const empty = await bentoCall(token, "tools/call", { name: "set_pull_request", arguments: {} });
+  const emptyBody = (await empty.json()) as { result: { isError?: boolean } };
+  assert.equal(emptyBody.result.isError, true);
+  assert.match(toolText(emptyBody), /Nothing was set/);
+
+  const unknown = await bentoCall(token, "tools/call", {
+    name: "set_pull_request",
+    arguments: { title: "x", repository: "not-a-repo" },
+  });
+  const unknownBody = (await unknown.json()) as { result: { isError?: boolean } };
+  assert.equal(unknownBody.result.isError, true, "a repository the project does not have is refused, not filed to wait forever");
+  assert.match(toolText(unknownBody), /no repositories|there is no not-a-repo/);
+});
+
+test("add_pull_request_comment records each comment, and refuses an empty one", async () => {
+  const token = await bentoGrant();
+  const empty = await bentoCall(token, "tools/call", { name: "add_pull_request_comment", arguments: { body: "  " } });
+  const emptyBody = (await empty.json()) as { result: { isError?: boolean } };
+  assert.equal(emptyBody.result.isError, true);
+
+  for (const body of ["Please look at the migration first.", "Second note."]) {
+    const res = await bentoCall(token, "tools/call", { name: "add_pull_request_comment", arguments: { body } });
+    assert.equal(res.status, 200);
+    assert.match(toolText(await res.json()), /no pull request yet/);
+  }
+  const comments = (await pendingUpdates()).filter((r) => r.kind === "comment");
+  assert.deepEqual(
+    comments.map((r) => r.body),
+    ["Please look at the migration first.", "Second note."],
+    "two calls are two comments, in order, neither replacing the other",
+  );
+});
+
+test("a publish applies what the agent recorded, once, and marks it applied", async () => {
+  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+  const featureId = run!.featureId;
+  const updates: { title?: string; body?: string; prNumber: number }[] = [];
+  const comments: { prNumber: number; body: string }[] = [];
+  const publisher = {
+    async ensurePullRequest() {
+      throw new Error("not opened here");
+    },
+    async getPullRequest() {
+      return { title: "t", body: null, state: "open", merged: false };
+    },
+    async updatePullRequest(input: { prNumber: number; title?: string; body?: string }) {
+      updates.push({ prNumber: input.prNumber, ...(input.title ? { title: input.title } : {}), ...(input.body ? { body: input.body } : {}) });
+    },
+    async pullRequestHasComment(_ref: unknown, marker: string) {
+      return comments.some((c) => c.body.includes(marker));
+    },
+    async createPullRequestComment(ref: { prNumber: number }, body: string) {
+      comments.push({ prNumber: ref.prNumber, body });
+    },
+    async pushToken() {
+      return "unused";
+    },
+  };
+  const targets = [{ name: "app", repoUrl: "https://github.com/acme/app", prNumber: 7, url: "https://github.com/acme/app/pull/7" }];
+
+  const first = await applyPendingPullRequestUpdates(ctx.db, publisher, { featureId, targets });
+  assert.equal(first.updated, 1, "one update call carries the latest title and description");
+  assert.deepEqual(updates, [{ prNumber: 7, title: "Add widgets", body: "What changed and why." }]);
+  assert.equal(first.commented, 2);
+  assert.match(comments[0]!.body, /^Please look at the migration first\.\n\n<!-- bento-pr-update:/);
+  assert.deepEqual(first.failures, []);
+
+  const rows = await pendingUpdates();
+  assert.ok(rows.length >= 3);
+  assert.ok(rows.every((r) => r.appliedAt !== null), "every row that reached its pull request is marked applied");
+
+  // A second publish finds nothing pending and writes nothing.
+  const second = await applyPendingPullRequestUpdates(ctx.db, publisher, { featureId, targets });
+  assert.deepEqual([second.updated, second.commented, updates.length, comments.length], [0, 0, 1, 2]);
+});
+
+test("a row for one repository waits for that repository's pull request", async () => {
+  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+  const featureId = run!.featureId;
+  const [row] = await ctx.db
+    .insert(pullRequestUpdates)
+    .values({ runId, featureId, organizationId: null, repository: "api", kind: "comment", body: "API only." })
+    .returning();
+  const posted: number[] = [];
+  const publisher = {
+    async ensurePullRequest() {
+      throw new Error("not opened here");
+    },
+    async getPullRequest() {
+      return { title: "t", body: null, state: "open", merged: false };
+    },
+    async updatePullRequest() {},
+    async pullRequestHasComment() {
+      return false;
+    },
+    async createPullRequestComment(ref: { prNumber: number }) {
+      posted.push(ref.prNumber);
+    },
+    async pushToken() {
+      return "unused";
+    },
+  };
+  const other = await applyPendingPullRequestUpdates(ctx.db, publisher, {
+    featureId,
+    targets: [{ name: "app", repoUrl: "https://github.com/acme/app", prNumber: 7, url: "u" }],
+  });
+  assert.equal(other.commented, 0, "the app pull request is not where an api comment goes");
+  let [after] = await ctx.db.select().from(pullRequestUpdates).where(eq(pullRequestUpdates.id, row!.id));
+  assert.equal(after!.appliedAt, null, "still pending for the repository it names");
+
+  const mine = await applyPendingPullRequestUpdates(ctx.db, publisher, {
+    featureId,
+    targets: [{ name: "api", repoUrl: "https://github.com/acme/api", prNumber: 9, url: "u" }],
+  });
+  assert.deepEqual([mine.commented, posted], [1, [9]]);
+  [after] = await ctx.db.select().from(pullRequestUpdates).where(eq(pullRequestUpdates.id, row!.id));
+  assert.notEqual(after!.appliedAt, null);
 });
 
 test("an unknown tool is refused, not guessed at", async () => {

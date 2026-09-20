@@ -48,7 +48,7 @@ function publisherSaying(merged: Record<number, boolean>): GitHubPublisher {
       throw new Error("not used");
     },
     async updatePullRequest() {},
-    async pullRequestHasRunComment() {
+    async pullRequestHasComment() {
       return false;
     },
     async createPullRequestComment() {},

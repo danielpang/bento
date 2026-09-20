@@ -1,8 +1,11 @@
-import { eq } from "drizzle-orm";
-import { agentRuns, features } from "@bento/db";
+import { and, eq, isNull } from "drizzle-orm";
+import { agentRuns, features, pullRequestUpdates, repositories } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { featurePullRequestTargets } from "../feature-prs.js";
 import { childCardsFor, childCount, MAX_CHILDREN_PER_CARD, parentRefusal } from "../feature-tree.js";
+import { githubConnectionFor } from "../github.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
+import { applyPendingPullRequestUpdates } from "../orchestrator/pull-request-updates.js";
 import type { ResolvedGrant } from "./grants.js";
 
 /**
@@ -14,18 +17,22 @@ import type { ResolvedGrant } from "./grants.js";
  * itself instead of proxying. No upstream, no credential, no new token
  * format, and it dies with the run like every other grant.
  *
- * What it exposes is deliberately tiny. The run's own feature is the
- * only card it can touch, and the only thing it can do is add children
- * to it. Everything about who and where comes from the grant, never
- * from the agent:
+ * What it exposes is deliberately small. The run's own feature is the
+ * only card it can touch: it can add children to it, and it can say
+ * what the card's pull requests should read. Everything about who and
+ * where comes from the grant, never from the agent:
  *
- * - The agent cannot name a parent, a project, or another card. There
- *   is nothing to pass, so there is nothing to forge.
- * - There is no update and no delete. A tool that could rewrite a card
- *   would make every repository an agent reads a way to rewrite the
- *   board.
+ * - The agent cannot name a parent, a project, another card, or a
+ *   pull request. There is nothing to pass, so there is nothing to
+ *   forge; a repository name is checked against the project's own.
+ * - There is no update and no delete of cards. A tool that could
+ *   rewrite a card would make every repository an agent reads a way
+ *   to rewrite the board.
  * - Children are filed, never started. They land in the backlog and go
  *   through the ordinary activation path, entitlement checks and all.
+ * - Pull request text is recorded, and the server writes it to GitHub
+ *   with its own connection. No credential reaches the sandbox, and
+ *   the only pull requests it can reach are the card's own.
  *
  * The judgement about *whether* to split cannot live here. Code cannot
  * tell a large task from a small one, so that gate is written into the
@@ -46,6 +53,29 @@ const SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const MAX_TITLE = 200;
 const MAX_DESCRIPTION = 20_000;
+/** GitHub's own limit on a pull request title. */
+const MAX_PR_TITLE = 256;
+/** Under GitHub's limit on a pull request body or comment, with room for the marker. */
+const MAX_PR_BODY = 65_000;
+
+const REPOSITORY_ARGUMENT = {
+  type: "string",
+  description:
+    "The repository this is for, by its name in the project. Leave it out to mean every repository the card opens a pull request in, which is right for a project with one.",
+};
+
+const SET_PULL_REQUEST_DESCRIPTION = [
+  "Set the title and description of the pull request for the card you are working.",
+  "",
+  "Bento opens and updates the pull request with its own GitHub connection; you have none. If the card already has a pull request, this is applied to it at once. Otherwise it is kept and applied when the branch is next published, which happens when this run finishes if the stage is set to create a pull request.",
+  "Calling it again before it is applied replaces what you set. Write the description for the reviewer: what changed, why, and how to verify it.",
+].join("\n");
+
+const ADD_PULL_REQUEST_COMMENT_DESCRIPTION = [
+  "Post a comment on the pull request for the card you are working: a review, a question for the reviewer, or a note about what to look at.",
+  "",
+  "Applied at once if the card already has a pull request, otherwise kept and posted when the branch is next published. Each call is one comment; do not repeat yourself.",
+].join("\n");
 
 /**
  * The efficiency gate, in the agent's own tool list.
@@ -87,6 +117,34 @@ const TOOLS = [
     description:
       "The cards already split off from the one you are working, with their status. Check this before creating parts if you may have been interrupted: a re-queued run that does not look would file everything twice.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "set_pull_request",
+    title: "Set the pull request title and description",
+    description: SET_PULL_REQUEST_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: `The pull request title, at most ${MAX_PR_TITLE} characters.` },
+        description: { type: "string", description: "The pull request description, in Markdown." },
+        repository: REPOSITORY_ARGUMENT,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "add_pull_request_comment",
+    title: "Comment on the pull request",
+    description: ADD_PULL_REQUEST_COMMENT_DESCRIPTION,
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "The comment, in Markdown." },
+        repository: REPOSITORY_ARGUMENT,
+      },
+      required: ["body"],
+      additionalProperties: false,
+    },
   },
 ];
 
@@ -142,7 +200,7 @@ export async function handleBentoRpc(ctx: AppContext, grant: ResolvedGrant, raw:
         capabilities: { tools: {} },
         serverInfo: { name: "bento", title: "Bento board", version: "1" },
         instructions:
-          "The card you are working, from the inside. Use create_card only when the task is too large for one branch and dividing it is more efficient than doing it yourself.",
+          "The card you are working, from the inside. Use create_card only when the task is too large for one branch and dividing it is more efficient than doing it yourself. Use set_pull_request and add_pull_request_comment to say what the card's pull request should read; Bento writes it to GitHub for you.",
       });
     }
     case "ping":
@@ -154,6 +212,8 @@ export async function handleBentoRpc(ctx: AppContext, grant: ResolvedGrant, raw:
       const args = (call.arguments ?? {}) as Record<string, unknown>;
       if (call.name === "create_card") return reply(await createCard(ctx, grant, args));
       if (call.name === "list_child_cards") return reply(await listChildCards(ctx, grant));
+      if (call.name === "set_pull_request") return reply(await setPullRequest(ctx, grant, args));
+      if (call.name === "add_pull_request_comment") return reply(await addPullRequestComment(ctx, grant, args));
       return fail(-32602, `unknown tool: ${String(call.name)}`);
     }
     default:
@@ -261,4 +321,134 @@ async function listChildCards(ctx: AppContext, grant: ResolvedGrant) {
       )
       .join("\n"),
   );
+}
+
+/**
+ * The repository argument, checked against the project: a name that is
+ * not there is refused with the names that are, so the agent can fix
+ * its call rather than have a row wait forever for a repository that
+ * will never publish. Undefined means every repository.
+ */
+async function resolveRepository(
+  ctx: AppContext,
+  projectId: string,
+  raw: unknown,
+): Promise<{ ok: true; repository: string | null } | { ok: false; reason: string }> {
+  const name = typeof raw === "string" ? raw.trim() : "";
+  if (!name) return { ok: true, repository: null };
+  const rows = await ctx.db
+    .select({ name: repositories.name })
+    .from(repositories)
+    .where(eq(repositories.projectId, projectId));
+  if (rows.some((r) => r.name === name)) return { ok: true, repository: name };
+  const known = rows.map((r) => r.name);
+  return {
+    ok: false,
+    reason:
+      known.length === 0
+        ? "this project has no repositories"
+        : `this project's repositories are ${known.join(", ")}, and there is no ${name}`,
+  };
+}
+
+/**
+ * Writes pending updates to the card's pull requests right now, when it
+ * has any and the organization has a GitHub connection. The answer is
+ * what the agent reads, so it says which of the three things happened:
+ * applied, kept for the next publish, or refused by GitHub.
+ */
+async function applyNow(
+  ctx: AppContext,
+  feature: typeof features.$inferSelect,
+  what: string,
+): Promise<string> {
+  const publisher = await githubConnectionFor(ctx, feature.organizationId);
+  const targets = publisher ? await featurePullRequestTargets(ctx.db, feature) : [];
+  if (!publisher || targets.length === 0) {
+    return `Saved ${what}. This card has no pull request yet, so Bento applies it when the branch is next published.`;
+  }
+  const applied = await applyPendingPullRequestUpdates(ctx.db, publisher, {
+    featureId: feature.id,
+    targets: targets.map((t) => ({ name: t.name, repoUrl: t.repoUrl, prNumber: t.number, url: t.url })),
+  });
+  const lines: string[] = [];
+  if (applied.updated > 0 || applied.commented > 0) {
+    lines.push(
+      `Applied ${what} to ${targets
+        .map((t) => `${t.url}`)
+        .join(", ")}.`,
+    );
+  }
+  for (const failure of applied.failures) lines.push(`GitHub refused the update for ${failure}. It is kept and tried again at the next publish.`);
+  if (lines.length === 0) lines.push(`Saved ${what}. Bento applies it when the branch is next published.`);
+  return lines.join("\n");
+}
+
+async function setPullRequest(ctx: AppContext, grant: ResolvedGrant, args: Record<string, unknown>) {
+  const title = typeof args.title === "string" ? args.title.trim() : "";
+  const body = typeof args.description === "string" ? args.description.trim() : "";
+  if (!title && !body) return say("Give a title, a description, or both. Nothing was set.", true);
+  if (title.length > MAX_PR_TITLE) {
+    return say(`A pull request title is at most ${MAX_PR_TITLE} characters. Nothing was set.`, true);
+  }
+  if (body.length > MAX_PR_BODY) {
+    return say(`A pull request description is at most ${MAX_PR_BODY} characters. Nothing was set.`, true);
+  }
+
+  const feature = await runFeature(ctx, grant);
+  if (!feature) return say("The card this run belongs to no longer exists, so nothing was set.", true);
+  const repo = await resolveRepository(ctx, feature.projectId, args.repository);
+  if (!repo.ok) return say(`Nothing was set: ${repo.reason}.`, true);
+
+  // A second call replaces the first: one pending description per run
+  // and repository, the newest, so what lands is what the agent last
+  // decided rather than both in order.
+  await ctx.db
+    .delete(pullRequestUpdates)
+    .where(
+      and(
+        eq(pullRequestUpdates.runId, grant.runId),
+        eq(pullRequestUpdates.kind, "description"),
+        isNull(pullRequestUpdates.appliedAt),
+        repo.repository === null
+          ? isNull(pullRequestUpdates.repository)
+          : eq(pullRequestUpdates.repository, repo.repository),
+      ),
+    );
+  await ctx.db.insert(pullRequestUpdates).values({
+    runId: grant.runId,
+    featureId: feature.id,
+    organizationId: feature.organizationId,
+    repository: repo.repository,
+    kind: "description",
+    title: title || null,
+    body,
+  });
+
+  const what = title && body ? "the pull request title and description" : title ? "the pull request title" : "the pull request description";
+  return say(await applyNow(ctx, feature, what));
+}
+
+async function addPullRequestComment(ctx: AppContext, grant: ResolvedGrant, args: Record<string, unknown>) {
+  const body = typeof args.body === "string" ? args.body.trim() : "";
+  if (!body) return say("A comment needs a body. Nothing was posted.", true);
+  if (body.length > MAX_PR_BODY) {
+    return say(`A comment is at most ${MAX_PR_BODY} characters. Nothing was posted.`, true);
+  }
+
+  const feature = await runFeature(ctx, grant);
+  if (!feature) return say("The card this run belongs to no longer exists, so nothing was posted.", true);
+  const repo = await resolveRepository(ctx, feature.projectId, args.repository);
+  if (!repo.ok) return say(`Nothing was posted: ${repo.reason}.`, true);
+
+  await ctx.db.insert(pullRequestUpdates).values({
+    runId: grant.runId,
+    featureId: feature.id,
+    organizationId: feature.organizationId,
+    repository: repo.repository,
+    kind: "comment",
+    body,
+  });
+
+  return say(await applyNow(ctx, feature, "the comment"));
 }

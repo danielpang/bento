@@ -26,8 +26,7 @@ import { mintRunGrant, revokeRunGrant } from "../mcp/grants.js";
  * branch. It rides the same grant as everything else, so a harness
  * with no MCP support, an organization that restricts sandbox network
  * access, and the local-process driver each run without it, which is
- * the same limitation their MCP servers already have. It is also
- * behind the beta flag, decided by the caller.
+ * the same limitation their MCP servers already have.
  */
 
 const EXEC_TIMEOUT_MS = 30_000;
@@ -45,9 +44,9 @@ export interface PrepareRunMcpInput {
   /** Absolute container paths mounted read-only, from agentAuthMounts. */
   mountedConfigPaths: string[];
   /**
-   * Whether this run may have Bento's own tools. Unfinished product,
-   * so it is the beta flag, decided by the caller (which knows the
-   * project) rather than read here.
+   * Whether this run may have Bento's own tools. Decided by the caller:
+   * a fresh run always may, and a resumed run gets exactly what its
+   * grant says its first life had.
    */
   cardTools: boolean;
   say: (text: string) => Promise<void>;
@@ -132,8 +131,7 @@ export async function prepareRunMcp(
   const attachedIds: string[] = [];
 
   /**
-   * Bento's own tools, on every run that can have any MCP at all and
-   * whose team is on the beta flag.
+   * Bento's own tools, on every run that can have any MCP at all.
    *
    * Not a row in mcp_servers: it is not an upstream, it has no
    * credential, and no admin configured it. The gateway answers this
@@ -141,9 +139,9 @@ export async function prepareRunMcp(
    * list, and it is what lets the agent working a card file the parts
    * of a task too large for one branch.
    *
-   * Flagged with the console it belongs to, not separately: an agent
-   * that can split a card for a team whose board cannot show the group
-   * has made work nobody can see the shape of.
+   * The board's group view of split cards is still on the beta flag;
+   * the parts an agent files are ordinary cards in the backlog either
+   * way, so a team without it sees the cards, only not the grouping.
    */
   if (input.cardTools) {
     attached.push({

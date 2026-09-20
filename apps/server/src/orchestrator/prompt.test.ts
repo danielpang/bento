@@ -98,6 +98,28 @@ test("an agent without the tool is never told about splitting", () => {
   assert.doesNotMatch(prompt, /split/i);
 });
 
+test("an agent with the card tools is asked to set the pull request text", () => {
+  const publishing = buildStagePrompt(feature, { ...stage, createPr: true }, [stage], [], undefined, undefined, true);
+  assert.match(publishing, /set_pull_request/);
+  assert.match(publishing, /add_pull_request_comment/);
+  assert.match(publishing, /Bento applies it when this run publishes/);
+  // The write-up is still asked for: the tools add to it, not replace it.
+  assert.match(publishing, /write a concise summary of your work/);
+
+  const notPublishing = buildStagePrompt(feature, { ...stage, createPr: false }, [stage], [], undefined, undefined, true);
+  assert.match(notPublishing, /set_pull_request/);
+  assert.match(notPublishing, /keeps them until the branch is published/);
+});
+
+test("an agent without the tools is never asked to set the pull request text", () => {
+  // Naming a tool that is not there produces a write-up with a title
+  // nobody copies anywhere, which is the mistake the removed slug
+  // convention made in the other direction.
+  const prompt = buildStagePrompt(feature, { ...stage, createPr: true }, [stage]);
+  assert.doesNotMatch(prompt, /set_pull_request/);
+  assert.doesNotMatch(prompt, /add_pull_request_comment/);
+});
+
 test("the merge prohibition still comes last, after the split paragraph", () => {
   const prompt = buildStagePrompt(feature, stage, [stage], [], undefined, undefined, true);
   assert.ok(prompt.indexOf("create_card") < prompt.indexOf("Stay on your branch"));

@@ -11,9 +11,5 @@ export {
   type PullRequestMergeLike,
 } from "./app-client.js";
 export { GitHubTokenClient } from "./token-client.js";
-export {
-  isBentoDefaultPullRequestBody,
-  parseStageWriteUpForPullRequest,
-  pullRequestRunMarker,
-} from "./pr-sync.js";
+export { pullRequestMarker } from "./pr-sync.js";
 export { verifyWebhookSignature, webhookTarget, type WebhookTarget } from "./webhook.js";

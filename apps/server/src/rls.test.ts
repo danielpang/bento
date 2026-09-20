@@ -30,6 +30,7 @@ const TENANT_TABLES = [
   "agent_runs",
   "run_events",
   "run_artifacts",
+  "pull_request_updates",
   "gate_checks",
   "agent_profiles",
   "secrets",
@@ -326,6 +327,62 @@ test("run artifacts inherit their organization from the run", async () => {
     ),
     /run_artifacts_content_or_key/,
   );
+});
+
+test("what an agent asks a pull request to say belongs to its run's organization", async () => {
+  // The rows carry text an agent wrote for GitHub, and the tool that
+  // writes them names no organization: the trigger derives it from
+  // the run, and another organization must not read them.
+  const projectA = "00000001-0000-0000-0000-000000000000";
+  const pipeline = "1000000e-0000-0000-0000-000000000000";
+  const stage = "2000000e-0000-0000-0000-000000000000";
+  const profile = "3000000e-0000-0000-0000-000000000000";
+  const feature = "4000000e-0000-0000-0000-000000000000";
+  const run = "5000000e-0000-0000-0000-000000000000";
+  await pool.query(
+    `insert into pipelines (id,project_id,organization_id,name) values ($1,$2,'org-a','PR updates')`,
+    [pipeline, projectA],
+  );
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,organization_id,name,cli,model)
+     values ($1,'u1','org-a','PR updates','fake','fake-1')`,
+    [profile],
+  );
+  await pool.query(
+    `insert into stages (id,pipeline_id,organization_id,position,name,slug)
+     values ($1,$2,'org-a',0,'Build','build')`,
+    [stage, pipeline],
+  );
+  await pool.query(
+    `insert into features (id,project_id,organization_id,pipeline_id,title)
+     values ($1,$2,'org-a',$3,'PR update feature')`,
+    [feature, projectA, pipeline],
+  );
+  await pool.query(
+    `insert into agent_runs (id,feature_id,organization_id,stage_id,agent_profile_id,prompt)
+     values ($1,$2,'org-a',$3,$4,'work')`,
+    [run, feature, stage, profile],
+  );
+
+  const inherited = await asOrg("org-a", (client) =>
+    client.query(
+      `insert into pull_request_updates (run_id,feature_id,kind,title,body)
+       values ($1,$2,'description','Add widgets','What changed and why.')
+       returning organization_id`,
+      [run, feature],
+    ),
+  );
+  assert.equal(inherited.rows[0].organization_id, "org-a");
+
+  await pool.query(
+    `insert into pull_request_updates (run_id,feature_id,organization_id,kind,body)
+     values ($1,$2,'org-a','comment','Looks good.')`,
+    [run, feature],
+  );
+  const foreign = await asOrg("org-b", (client) =>
+    client.query("select count(*)::int as n from pull_request_updates"),
+  );
+  assert.equal(foreign.rows[0].n, 0, "another organization must not read what an agent wrote for a pull request");
 });
 
 test("secret names are unique locally and within each organization", async () => {
