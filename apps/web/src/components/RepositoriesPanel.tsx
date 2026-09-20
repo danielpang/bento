@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { useDismissable } from "./ui.js";
+import { RepositoryBrowse } from "./RepositoryBrowse.js";
 import { useToast } from "./Toasts.js";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { ConnectGitHubAccount } from "./GitHubIdentity.js";
 import { RepoCardSkeleton, Skeleton } from "./Skeleton.js";
+import { startIntegration, useDesktopIntegrationRevision } from "../desktop.js";
+import { DesktopIntegrationNote } from "./DesktopIntegrationNote.js";
 import type {
   BentoClient,
   GitHubConnection,
@@ -30,6 +33,7 @@ export function RepositoriesPanel({
   onClose: () => void;
 }) {
   const toast = useToast();
+  const revision = useDesktopIntegrationRevision();
   const panel = useDismissable<HTMLElement>(onClose);
   const [busy, setBusy] = useState(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
@@ -86,7 +90,7 @@ export function RepositoriesPanel({
       setGitHub(null);
       setGitHubUnknown(true);
     }).finally(() => setGitHubChecked(true));
-  }, [client, busy]);
+  }, [client, busy, revision]);
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -245,12 +249,12 @@ export function RepositoriesPanel({
                         className={adoptable.length > 0 ? "btn" : "btn btn-primary"}
                         disabled={busy}
                         onClick={() => act(async () => {
-                          const { url } = await client.startGitHubInstall();
-                          window.location.assign(url);
+                          await startIntegration("github", () => client.startGitHubInstall());
                         })}
                       >
                         Install GitHub App
                       </button>
+                      <DesktopIntegrationNote />
                       <p className="muted">
                         If your GitHub organization requires approval, the install becomes a
                         request to its owners and appears here once approved. Everything else
@@ -271,6 +275,7 @@ export function RepositoriesPanel({
                   aria-label="Repository path"
                   title="A full path, or one starting with ~ for the home of the machine the server runs on"
                 />
+                <RepositoryBrowse disabled={busy} onChoose={setNewRepo} />
                 <button
                   className="btn btn-primary"
                   disabled={busy || !newRepo.trim()}

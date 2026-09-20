@@ -39,6 +39,12 @@ Connect a repository, configure agents and credentials, then return to the board
 
 See the **[Bento CLI guide](./docs/tui.md)** for settings, shortcuts, and cloud setup (no local Docker required).
 
+## Mac application
+
+The Electron app includes the complete web console and supports local Bento or a
+remote server. From source, run `pnpm install` and `pnpm dev:desktop`.
+See the [Mac application guide](./apps/desktop/README.md) for packaging and setup.
+
 ## Web UI
 
 You will need Docker installed to run Bento.
@@ -99,7 +105,7 @@ Turn on "Create a pull request" for a stage and a successful run there pushes th
 | [Coding agents](./docs/agents.md)          | What each tool can do, how each authenticates, talking to a working agent      |
 | [Pull requests](./docs/pull-requests.md)   | Publishing, what stays out of the diff, connecting GitHub                      |
 | [Web app setup](./docs/web-app.md)         | Running it for a team, multi mode, troubleshooting, contributing               |
-| [macOS app](./apps/mac/README.md)          | Desktop app setup                                                            |
+| [macOS app](./apps/desktop/README.md)      | Electron desktop setup, packaging, and verification                          |
 
 ## Security model
 

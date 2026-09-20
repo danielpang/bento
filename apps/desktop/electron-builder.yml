@@ -1,0 +1,26 @@
+appId: ai.usebento.desktop
+productName: Bento
+copyright: Copyright Bento contributors
+asar: true
+npmRebuild: false
+files:
+  - dist/**
+  - package.json
+  - '!**/*.map'
+  - '!**/*.test.*'
+mac:
+  category: public.app-category.developer-tools
+  icon: assets/icon.png
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.plist
+  notarize: true
+dmg:
+  title: Bento
+artifactName: Bento-${version}-${arch}.${ext}
+directories:
+  output: ../../release-dist/desktop

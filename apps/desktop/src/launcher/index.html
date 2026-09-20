@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bento</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="titlebar"></div>
+    <main>
+      <header><img src="/icon.png" width="52" height="52" alt="" /><div><h1>Bento</h1><p class="muted">A home for your coding agents.</p></div></header>
+      <h2>Where do you want to work?</h2>
+      <form id="connection-form">
+        <fieldset class="modes" aria-label="Connection mode">
+          <label class="mode"><input type="radio" name="mode" value="local" checked /><span><strong>On this Mac</strong><small>Projects and agents run locally.</small></span></label>
+          <label class="mode"><input type="radio" name="mode" value="remote" /><span><strong>Connect to a server</strong><small>Use your team's Bento workspace.</small></span></label>
+        </fieldset>
+        <section id="remote-options" hidden>
+          <label class="field">Server address<input id="server-url" type="url" placeholder="https://app.usebento.ai" spellcheck="false" /></label>
+          <p class="muted hint">Sign in through your browser. Your agents run on the server.</p>
+        </section>
+        <section id="local-options">
+          <p class="hint">Start Docker Desktop or OrbStack before connecting. Bento manages its database and agent sandboxes for you.</p>
+          <p class="muted hint">Configure provider keys and CLI login sharing inside Bento.</p>
+          <details>
+            <summary>Advanced settings</summary>
+            <label class="field">Data and worktrees<div class="input-row"><input id="data-dir" spellcheck="false" /><button id="choose-directory" type="button" class="secondary">Choose...</button></div></label>
+            <label class="field">PostgreSQL URL <span class="muted">(optional)</span><input id="database-url" type="password" placeholder="Leave empty to manage with Docker" autocomplete="off" /></label>
+            <label class="field">Sandbox image<input id="sandbox-image" value="bento-sandbox:dev" spellcheck="false" /></label>
+            <label class="field">Agent isolation<select id="sandbox"><option value="docker">Docker sandboxes</option><option value="local-process">Local processes (development only)</option></select></label>
+            <p id="isolation-note" class="hint warning" hidden>Local processes have access to this Mac without sandbox isolation. Use only for trusted development work. A PostgreSQL URL is still required if Docker is unavailable.</p>
+          </details>
+        </section>
+        <section class="status" role="status" aria-live="polite"><span id="status-message">Choose where Bento runs.</span><div id="login" hidden><strong id="user-code"></strong><button id="open-verification" type="button" class="secondary">Open sign-in page</button></div></section>
+        <div class="actions"><button id="connect" type="submit">Open Bento</button><button id="cancel" type="button" class="secondary" hidden>Cancel</button><button id="show-console" type="button" class="secondary" hidden>Return to workspace</button></div>
+      </form>
+      <footer>Your projects and history stay with the connection you choose.</footer>
+    </main>
+    <script type="module" src="/launcher.js"></script>
+  </body>
+</html>

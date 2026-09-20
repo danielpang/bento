@@ -1,4 +1,5 @@
-import { serve } from "@hono/node-server";
+import { getRequestListener, serve } from "@hono/node-server";
+import type { Server } from "node:http";
 import { createDb, createPool, pgBossDatabase, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
@@ -34,6 +35,8 @@ export interface StartOptions {
   quiet?: boolean;
   /** Save an initial local login-sharing choice. Settings can change it after startup. */
   initialShareAgentAuth?: boolean;
+  /** An embedded caller can reserve its HTTP port before booting the stack. */
+  listener?: Server;
 }
 
 /**
@@ -60,6 +63,10 @@ export interface RunningServer {
  * the embedded case wants.
  */
 export async function startServer(options: StartOptions = {}): Promise<RunningServer> {
+  const reservedAddress = options.listener?.address();
+  if (options.listener && (!reservedAddress || typeof reservedAddress === "string")) {
+    throw new Error("The embedded HTTP listener must already be listening on a TCP port.");
+  }
   // Kept for the cloud module, whose own variables (Stripe, the sales
   // inbox) are deliberately unknown to this schema.
   const rawEnv = { ...process.env, ...options.env } as NodeJS.ProcessEnv;
@@ -316,12 +323,15 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
      */
     const hostname = env.BENTO_HOST ?? (env.BENTO_MODE === "local" ? "127.0.0.1" : "0.0.0.0");
 
-    const server = await new Promise<{ port: number; handle: ReturnType<typeof serve> }>((resolve) => {
-      const handle = serve(
-        { fetch: app.fetch, port: env.PORT, hostname },
-        (info) => resolve({ port: info.port, handle }),
-      );
-    });
+    const server = options.listener && reservedAddress && typeof reservedAddress !== "string"
+      ? { port: reservedAddress.port, handle: options.listener.on("request", getRequestListener(app.fetch, { hostname })) }
+      : await new Promise<{ port: number; handle: ReturnType<typeof serve> }>((resolve, reject) => {
+        const handle = serve(
+          { fetch: app.fetch, port: env.PORT, hostname },
+          (info) => resolve({ port: info.port, handle }),
+        );
+        handle.once("error", reject);
+      });
 
     if (!options.quiet) {
       console.log(

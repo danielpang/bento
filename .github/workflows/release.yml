@@ -98,9 +98,17 @@ jobs:
             release-dist/bento-cli-*.sha256
             release-dist/install.sh
 
+  mac:
+    name: Package the Mac app
+    needs: verify
+    uses: ./.github/workflows/desktop.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+
   release:
-    name: Publish CLI release
-    needs: cli
+    name: Publish Bento release
+    needs: [cli, mac]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -111,6 +119,10 @@ jobs:
           pattern: cli-*
           path: artifacts
           merge-multiple: true
+      - uses: actions/download-artifact@v7
+        with:
+          name: desktop-macos
+          path: artifacts
       - name: Publish verified assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -131,12 +143,15 @@ jobs:
             echo 'No pnpm or source checkout is required. Run the installer again to update.'
             echo
             echo "See [the CLI guide](https://github.com/$REPO/blob/$TAG/docs/tui.md) for local Docker setup and hosted connections."
-            echo 'The optional Mac app is attached separately when its build finishes.'
+            echo
+            echo 'The macOS app uses the same release version. Download the arm64 DMG for Apple Silicon or the x64 DMG for Intel, then drag Bento to Applications.'
+            echo 'The app bundles its runtime, so it does not need a separate Node.js installation.'
+            echo "See [the Mac application guide](https://github.com/$REPO/blob/$TAG/apps/desktop/README.md) for setup and signing details."
           } > notes.md
           flags=()
           if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
           # Draft first: an incomplete upload never becomes the latest installer.
-          # A rerun may repair a draft, but never replace published CLI assets.
+          # A rerun may repair a draft, but never replace published release assets.
           if gh release view "$TAG" --json isDraft --jq .isDraft > is-draft.txt 2>/dev/null; then
             if [ "$(cat is-draft.txt)" != true ]; then
               echo "::error::$TAG is already published. Push a new version tag."
@@ -145,85 +160,5 @@ jobs:
           else
             gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
           fi
-          gh release upload "$TAG" artifacts/*.tar.gz artifacts/install.sh artifacts/SHA256SUMS --clobber
+          gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.dmg artifacts/*.zip artifacts/install.sh artifacts/SHA256SUMS --clobber
           gh release edit "$TAG" --draft=false --notes-file notes.md "${flags[@]}"
-
-  mac:
-    name: Package the Mac app
-    needs: release
-    permissions:
-      contents: write
-    runs-on: macos-latest
-    # The secrets context is not available in step-level `if`, so the
-    # presence of each optional secret is hoisted into env here.
-    env:
-      HAS_SIGNING: ${{ secrets.MACOS_SIGNING_IDENTITY != '' }}
-      HAS_NOTARY: ${{ secrets.MACOS_NOTARY_PASSWORD != '' }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v5
-        with:
-          # The Native SDK toolchain requires 22.15 or newer.
-          node-version: 22
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-
-      # --yes lets the toolchain fetch its pinned Zig on a clean runner.
-      - name: Build the app
-        working-directory: apps/mac
-        run: |
-          ../../node_modules/.bin/native check
-          ../../node_modules/.bin/native build --yes
-
-      # Signing is optional: without secrets the app is ad-hoc signed,
-      # which runs locally but shows Gatekeeper warnings when shared.
-      - name: Package unsigned
-        if: env.HAS_SIGNING != 'true'
-        working-directory: apps/mac
-        run: ../../node_modules/.bin/native package --target macos
-
-      - name: Package signed
-        if: env.HAS_SIGNING == 'true'
-        working-directory: apps/mac
-        env:
-          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
-        run: |
-          echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
-          security create-keychain -p actions build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p actions build.keychain
-          security import /tmp/cert.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
-          rm -f /tmp/cert.p12
-          ../../node_modules/.bin/native package --target macos \
-            --signing identity --identity "$IDENTITY" --team-id "$TEAM_ID"
-
-      - name: Notarize and staple
-        if: env.HAS_NOTARY == 'true'
-        working-directory: apps/mac
-        env:
-          APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
-          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
-          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
-        run: |
-          ditto -c -k --keepParent zig-out/package/mac.app /tmp/notarize.zip
-          xcrun notarytool submit /tmp/notarize.zip \
-            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$NOTARY_PASSWORD" --wait
-          xcrun stapler staple zig-out/package/mac.app
-
-      - name: Zip the app
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          ditto -c -k --keepParent apps/mac/zig-out/package/mac.app "bento-mac-$TAG.zip"
-
-      - name: Attach the Mac app to the CLI release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" "bento-mac-$TAG.zip" --clobber

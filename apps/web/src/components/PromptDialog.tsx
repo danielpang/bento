@@ -2,6 +2,9 @@ import { useEffect, useState, type FormEvent } from "react";
 import type { BentoClient, GitHubConnection, GitHubRepository } from "@bento/api-client";
 import { ConnectGitHubAccount } from "./GitHubIdentity.js";
 import { Modal } from "./Modal.js";
+import { RepositoryBrowse } from "./RepositoryBrowse.js";
+import { startIntegration, useDesktopIntegrationRevision } from "../desktop.js";
+import { DesktopIntegrationNote } from "./DesktopIntegrationNote.js";
 import { ListRowsSkeleton } from "./Skeleton.js";
 
 /**
@@ -239,6 +242,7 @@ export function NewProjectDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [github, setGitHub] = useState<GitHubConnection | null>(null);
+  const revision = useDesktopIntegrationRevision();
   const [githubChecked, setGitHubChecked] = useState(false);
   const [githubRepos, setGitHubRepos] = useState<GitHubRepository[]>([]);
   const [selectedRepoIds, setSelectedRepoIds] = useState<string[]>([]);
@@ -253,7 +257,7 @@ export function NewProjectDialog({
       setGitHub(status);
       if (status.connected) setGitHubRepos(await client.listGitHubRepositories());
     }).catch(() => setGitHub(null)).finally(() => setGitHubChecked(true));
-  }, [client]);
+  }, [client, revision]);
 
   function setPath(index: number, value: string) {
     setPaths((current) => current.map((p, i) => (i === index ? value : p)));
@@ -337,13 +341,16 @@ export function NewProjectDialog({
                       yet, so that step comes first here rather than as
                       a refusal on the way back from GitHub. */}
                   {github.identityLinked ? (
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => void client.startGitHubInstall().then(({ url }) => window.location.assign(url))}
-                    >
-                      Install GitHub App
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => void startIntegration("github", () => client.startGitHubInstall()).catch(err => setError(err instanceof Error ? err.message : String(err)))}
+                      >
+                        Install GitHub App
+                      </button>
+                      <DesktopIntegrationNote />
+                    </>
                   ) : (
                     <ConnectGitHubAccount status={github} returnTo="/" primary={false} />
                   )}
@@ -394,6 +401,7 @@ export function NewProjectDialog({
                 spellCheck={false}
                 aria-label={`Repository path ${index + 1}`}
               />
+              <RepositoryBrowse disabled={busy} onChoose={(path) => setPath(index, path)} />
               {paths.length > 1 && (
                 <button
                   type="button"

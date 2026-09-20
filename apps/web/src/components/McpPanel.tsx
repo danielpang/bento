@@ -6,6 +6,8 @@ import { McpConnectionsSection } from "./McpConnections.js";
 import { SecretField } from "./SecretField.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
+import { startIntegration, useDesktopIntegrationRevision } from "../desktop.js";
+import { DesktopIntegrationNote } from "./DesktopIntegrationNote.js";
 
 /**
  * The MCP tab: the organization defines its MCP servers once, and every
@@ -26,6 +28,7 @@ import { useToast } from "./Toasts.js";
  * means anything.
  */
 export function McpPanel({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
+  const revision = useDesktopIntegrationRevision();
   const toast = useToast();
   const [status, setStatus] = useState<McpStatus | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -47,7 +50,7 @@ export function McpPanel({ client, mode }: { client: BentoClient; mode: "local" 
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, revision]);
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -88,6 +91,7 @@ export function McpPanel({ client, mode }: { client: BentoClient; mode: "local" 
     <>
       <section className="section settings-card">
         <h3 className="settings-title">Existing connections</h3>
+        <DesktopIntegrationNote />
         <p className="muted">
           {mode === "local"
             ? "Servers your runs get, with the credentials you connect here. Every run you start uses them."
@@ -198,8 +202,7 @@ async function connectTo(
   serverId: string,
 ) {
   await act(async () => {
-    const { url } = await client.startMcpConnect(serverId);
-    window.location.assign(url);
+    await startIntegration("mcp", () => client.startMcpConnect(serverId));
   });
 }
 
