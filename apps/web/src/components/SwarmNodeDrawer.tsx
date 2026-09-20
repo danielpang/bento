@@ -37,10 +37,10 @@ export function SwarmNodeDrawer({
   /**
    * Marks a leaf done by hand.
    *
-   * Optional, and absent is the answer today: no route finishes a task
-   * on somebody's say so, so the button is drawn disabled with the
-   * reason under it rather than wired to something that would look
-   * like it worked and do nothing.
+   * Still optional, because a caller that has no swarm selected has
+   * nothing to send it to. A drawer given no handler draws the button
+   * disabled with the reason under it, rather than wired to something
+   * that would look like it worked and do nothing.
    */
   onMarkDone?: (taskId: string) => void;
   /**
@@ -208,9 +208,12 @@ export function SwarmNodeDrawer({
             <p className="muted">A plan node is finished by its own tasks finishing.</p>
           )}
           {onMarkDone === undefined && task.nodeType === "leaf" && (
+            <p className="muted">Finishing a task by hand is not available here.</p>
+          )}
+          {onMarkDone !== undefined && task.nodeType === "leaf" && task.status !== "done" && (
             <p className="muted">
-              Finishing a task by hand is not available yet. A leaf is done when its worker reports
-              and the planner accepts it.
+              A leaf is normally done when its worker reports and the planner accepts it. Finishing
+              it here says so on their behalf, and stops any agent still working it.
             </p>
           )}
         </section>

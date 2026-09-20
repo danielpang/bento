@@ -50,16 +50,41 @@ export interface SwarmApi {
   setWorkers(swarmId: string, workers: number): Promise<void>;
   /** An answer to the planner is a message to the planner. */
   answerQuestion(swarmId: string, questionId: string, text: string): Promise<void>;
+  /**
+   * Finishes a leaf because a person says it is finished.
+   *
+   * The tree is an agent's to fill in and a person's to correct, so
+   * this is not a fixture convenience: a leaf nobody is going to work,
+   * or one somebody already did by hand, is done, and the rollup above
+   * it should say so.
+   */
+  markTaskDone(swarmId: string, taskId: string): Promise<void>;
+  /**
+   * The swarm's own event stream, for as long as one is open.
+   *
+   * A swarm is watched rather than read: the planner writes the tree
+   * over minutes and the reconciler rolls finishes up afterwards, so a
+   * page that only fetched on click shows a board that was true when
+   * you clicked. Scoped to one swarm server side, so a busy card board
+   * on the same project does not wake this page.
+   *
+   * onReconnect fires when the stream comes back after a drop. Board
+   * events are not persisted, so whatever fired meanwhile is gone and
+   * the caller's answer is to refetch rather than to wait.
+   *
+   * Returns the unsubscribe.
+   */
+  streamSwarm(swarmId: string, onEvent: () => void, onReconnect?: () => void): () => void;
 }
 
 /**
  * The fixtures answer more than the routes do, and only the tests use
- * the extra: a fixture that can mark a leaf done is how the rollup is
- * exercised without a swarm actually running one.
+ * the extra: opening a pull request is the merge queue's, and until
+ * the merge queue exists a fixture is the only thing that can put a
+ * row on the header.
  */
 export interface FixtureSwarmApi extends SwarmApi {
   createPullRequest(swarmId: string): Promise<SwarmPullRequest>;
-  markTaskDone(swarmId: string, taskId: string): Promise<void>;
 }
 
 /**
@@ -184,6 +209,12 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
             : task,
         );
       });
+    },
+    // Fixtures change only when something here changes them, so there
+    // is nothing to hear: the subscription is real and the stream is
+    // empty, which is what a fixture should be.
+    streamSwarm() {
+      return () => {};
     },
   };
 }
@@ -427,9 +458,19 @@ export function toTemplate(row: WireTemplate): SwarmTemplate {
  * stand up a server to check which path a button hits is a test
  * nobody writes.
  */
+export interface EventSourceLike {
+  addEventListener(type: string, listener: () => void): void;
+  close(): void;
+}
+
 export function httpSwarmApi(
   baseUrl = "",
   doFetch: typeof fetch = (input, init) => fetch(input, init),
+  // Taken as an argument for the reason fetch is, and because Node has
+  // no EventSource at all: a test that wants to know what this page
+  // subscribes to should not have to stand up a server to find out.
+  openStream: ((url: string) => EventSourceLike) | null =
+    typeof EventSource === "undefined" ? null : (url) => new EventSource(url, { withCredentials: true }),
 ): SwarmApi {
   async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await doFetch(`${baseUrl}${path}`, {
@@ -492,6 +533,25 @@ export function httpSwarmApi(
     },
     async setWorkers(swarmId, workers) {
       await patch(`/api/swarms/${swarmId}`, { maxWorkers: workers });
+    },
+    async markTaskDone(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/done`);
+    },
+    streamSwarm(swarmId, onEvent, onReconnect) {
+      // No EventSource is not an error: the console still works, it
+      // just reads the board when it is asked to rather than as it
+      // changes. Server rendering and the tests take this path.
+      if (!openStream) return () => {};
+      const source = openStream(`${baseUrl}/api/swarms/${swarmId}/events`);
+      let opened = false;
+      source.addEventListener("open", () => {
+        // The first open is the subscription; a later one is the
+        // stream coming back, and whatever it missed is not replayed.
+        if (opened) onReconnect?.();
+        opened = true;
+      });
+      source.addEventListener("swarm_event", () => onEvent());
+      return () => source.close();
     },
     async answerQuestion(swarmId, questionId, text) {
       // The planner hears everything as a message, and the coordinator
