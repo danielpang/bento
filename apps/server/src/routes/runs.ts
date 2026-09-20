@@ -50,6 +50,7 @@ export function runRoutes(ctx: AppContext) {
       const executor = project?.executor ?? "server";
 
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId,
         agentProfileId: body.agentProfileId,
@@ -91,6 +92,7 @@ export function runRoutes(ctx: AppContext) {
       }
 
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: previous.featureId,
         stageId: previous.stageId,
         agentProfileId: previous.agentProfileId,

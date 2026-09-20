@@ -33,6 +33,16 @@ import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { CHANGELOG_URL } from "./changelog.js";
 import { BetaTestersProvider, useBetaTesters } from "./beta.js";
+import { BoardModeToggle } from "./components/BoardModeToggle.js";
+import { useSwarmPlan } from "./swarm/plan.js";
+import { isSwarmEvent } from "./swarm/events.js";
+import {
+  boardHref,
+  browserStorage,
+  readBoardMode,
+  rememberBoardMode,
+  type BoardMode,
+} from "./swarm/view-state.js";
 import { NavMenu, ConfigureMenu, type NavAction } from "./components/NavMenu.js";
 import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
@@ -71,6 +81,10 @@ const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) 
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
 const SpendPage = lazy(() => import("./components/SpendPage.js").then((m) => ({ default: m.SpendPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
+/* The swarm board is a second board, and most people open the first
+ * one: its tree, its outline and its dialog stay out of the bundle
+ * until somebody picks Swarms. */
+const SwarmBoard = lazy(() => import("./components/SwarmBoard.js").then((m) => ({ default: m.SwarmBoard })));
 
 /**
  * What a route shows while its code arrives.
@@ -242,7 +256,7 @@ function Console() {
   if (mode === "multi" && session) {
     return <FirstTeamGate userName={session.user.name ?? ""} />;
   }
-  return <BoardScreen showSignOut={false} />;
+  return <BoardScreen showSignOut={false} mode="local" />;
 }
 
 /**
@@ -278,7 +292,7 @@ function FirstTeamGate({ userName }: { userName: string }) {
   if (!created && Array.isArray(organizations) && organizations.length === 0) {
     return <FirstTeam userName={userName} onCreated={() => setCreated(true)} />;
   }
-  return <BoardScreen showSignOut />;
+  return <BoardScreen showSignOut mode="multi" />;
 }
 
 /** What /api/team/invitations answers with: only offers accept would honour. */
@@ -398,7 +412,7 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
   );
 }
 
-function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
+function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local" | "multi" }) {
   const beta = useBetaTesters();
   const [commandsOpen, setCommandsOpen] = useState(false);
   const [focusedReview, setFocusedReview] = useState(false);
@@ -441,6 +455,27 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       return null;
     }
   });
+  /**
+   * Pipeline or Swarms: which board of this project you are looking
+   * at. Beside the picker rather than in the address bar's path,
+   * because the project is chosen once and the mode decides which
+   * board of it you see.
+   *
+   * Remembered per browser and written into the address, so a reload
+   * lands where you were and a link opens the board it was copied
+   * from. Pipeline is the default, and stays it for anybody who never
+   * touches the toggle.
+   */
+  const swarmStorage = useMemo(() => browserStorage(), []);
+  const [boardMode, setBoardMode] = useState<BoardMode>(() =>
+    readBoardMode(window.location.search, swarmStorage),
+  );
+  const { access: swarmAccess, surfaces: swarmSurfaces } = useSwarmPlan(mode);
+  const betaTester = useBetaTesters();
+  /** Swarms only render for a tester on a plan that includes them. */
+  const swarmsOpen = betaTester && swarmAccess.included;
+  const swarming = boardMode === "swarms" && swarmsOpen && screen === "board";
+
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [features, setFeatures] = useState<Feature[]>([]);
@@ -703,6 +738,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       projectId,
       (event) => {
         const e = event as { featureId?: string; status?: string; type?: string; text?: string };
+        /*
+         * The other board's, on the same channel. Ignored here rather
+         * than handled: nothing on this screen renders a swarm, and
+         * falling through to the refresh below re-fetched stages,
+         * features and usage several times a second for every viewer
+         * of the Pipeline while a swarm ran.
+         */
+        if (isSwarmEvent(event)) return;
         if (e.type === "run_updated" && e.featureId && e.status) {
           setRunStatus((prev) => ({ ...prev, [e.featureId!]: e.status }));
           // The drawer refetches its runs list on this tick, so a run
@@ -938,6 +981,29 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     </a>
   ) : null;
 
+  /*
+   * Rendered on the board screen only. Sessions and spend are not
+   * boards, and a toggle that changes something two screens away is
+   * a control that lies about what it does.
+   */
+  const boardToggle =
+    screen === "board" ? (
+      <BoardModeToggle
+        mode={boardMode}
+        access={swarmAccess}
+        hrefFor={(next) => boardHref(window.location.pathname, window.location.search, { mode: next })}
+        onSelect={(next) => {
+          setBoardMode(next);
+          rememberBoardMode(swarmStorage, next);
+          window.history.replaceState(
+            null,
+            "",
+            boardHref(window.location.pathname, window.location.search, { mode: next }),
+          );
+        }}
+      />
+    ) : undefined;
+
   const hasProjects = (projects?.length ?? 0) > 0;
   /**
    * The list has not answered, or this project's stages have not. Either
@@ -1060,9 +1126,10 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             onNewProject={() => setDialog("project")}
           />
         }
+        boardToggle={boardToggle}
         search={
-          workScreen ? (
-          <BoardSearch
+          workScreen && !swarming ? (
+            <BoardSearch
               value={query}
               onChange={setQuery}
               matches={features.filter((f) => matchesQuery(f, query)).length}
@@ -1071,7 +1138,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           ) : undefined
         }
         primary={
-          workScreen ? (
+          workScreen && !swarming ? (
             <button className="btn btn-primary" title={beta ? "New card (n)" : undefined} onClick={() => setDialog("feature")}>
               New card
             </button>
@@ -1083,7 +1150,9 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           act on any advice below it either. The banner links to
           Settings, Billing, so a phone does not land on Appearance
           with that tab off the right edge of the strip. */}
-      <OutOfCompute />
+      {/* The swarm page carries its own, above its own header, so a
+          swarm does not stack two identical banners. */}
+      {!swarming && <OutOfCompute />}
 
       {!boardPending && setupNeeded && (
         <div className="setup-prompt">
@@ -1119,6 +1188,12 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       ) : screen === "spend" ? (
         <Suspense fallback={<SpendPageSkeleton />}>
           <SpendPage client={client} projectId={projectId} />
+        </Suspense>
+      ) : swarming && projectId ? (
+        /* A second board of the same project. Its own boundary, like
+           the panels: the chunk arrives without blanking the chrome. */
+        <Suspense fallback={<BoardSkeleton />}>
+          <SwarmBoard projectId={projectId} surfaces={swarmSurfaces} />
         </Suspense>
       ) : boardPending ? (
         <BoardSkeleton />
@@ -1213,7 +1288,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         </section>
       )}
       <Suspense fallback={null}>
-        {workScreen && selected && (
+        {workScreen && !swarming && selected && (
           <FeatureDrawer
             client={client}
             feature={selected}
@@ -1279,6 +1354,7 @@ function TopBar({
   actions = [],
   primary,
   picker,
+  boardToggle,
   search,
   meta,
   onContact,
@@ -1289,6 +1365,8 @@ function TopBar({
   /** The one button that stays out of the menu at every width. */
   primary?: React.ReactNode;
   picker?: React.ReactNode;
+  /** Pipeline or Swarms. Beside the picker, never in the menu. */
+  boardToggle?: React.ReactNode;
   search?: React.ReactNode;
   /** The spend chip. It stays out of the menu at every width. */
   meta?: React.ReactNode;
@@ -1321,6 +1399,9 @@ function TopBar({
     <header className="topbar workspace-nav">
       <BrandLockup />
       {picker && <div className="workspace-project">{picker}</div>}
+      {/* Beside the picker it qualifies: which project, then which of
+          its boards. The row's own gap separates them. */}
+      {boardToggle}
       <span className="topbar-spacer" />
       {meta}
       <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">

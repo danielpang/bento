@@ -542,7 +542,7 @@ export function projectRoutes(ctx: AppContext) {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
 
-      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.role, "judge"));
       const [totals, latest] = await Promise.all([
         db(c, ctx)
           .select({
@@ -596,7 +596,7 @@ export function projectRoutes(ctx: AppContext) {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
 
-      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.role, "judge"));
       const [totals, latest] = await Promise.all([
         db(c, ctx)
           .select({
@@ -854,7 +854,7 @@ export function projectRoutes(ctx: AppContext) {
     .get("/:id/usage", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
-      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const spendRun = and(ne(agentRuns.role, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
       const rows = await db(c, ctx)
         .select({
           stageId: agentRuns.stageId,
@@ -930,7 +930,7 @@ export function projectRoutes(ctx: AppContext) {
     .get("/:id/usage/plain", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
-      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const spendRun = and(ne(agentRuns.role, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
       const rows = await db(c, ctx)
         .select({
           stageId: agentRuns.stageId,
