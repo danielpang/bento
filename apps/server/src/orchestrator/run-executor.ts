@@ -37,7 +37,6 @@ import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
-import { syncPullRequestsFromRun } from "./sync-pr-from-run.js";
 import { linkGitHubRemotes, refreshBaseBranches } from "./repo-remote.js";
 import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
@@ -1103,16 +1102,6 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       },
       runRow?.startedBy ?? "system",
     );
-    const allPublished = [...published, ...recovery.draftPublished];
-    if (allPublished.length > 0 && runKind !== "rebase") {
-      await syncPullRequestsFromRun(ctx.db, publisher, {
-        runId,
-        stageSlug: stage.slug,
-        stageName: stage.name,
-        published: allPublished,
-        say: saySystem,
-      });
-    }
     publishNotes.push(
       ...published.map((pr) => `Opened pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}`),
       ...recovery.draftPublished.map(

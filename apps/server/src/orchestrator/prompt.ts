@@ -113,17 +113,6 @@ export function buildStagePrompt(
       repositories.length > 1 ? " in every repository you changed" : ""
     }.`,
   );
-  if (stage.createPr) {
-    if (stage.slug === "implementation") {
-      lines.push(
-        "Bento copies this write-up to the pull request description when the run publishes. Start with a markdown H1 (# Title) when you want a custom pull request title; the rest becomes the description.",
-      );
-    } else if (stage.slug === "code-review") {
-      lines.push(
-        "Bento posts this write-up as a comment on the pull request when the run publishes. Put your full review here rather than only in the transcript.",
-      );
-    }
-  }
   if (repositories.length > 1) {
     // Said explicitly because the obvious reading of "commit your work"
     // in a workspace of several checkouts is to commit in one of them.
