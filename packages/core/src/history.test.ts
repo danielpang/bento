@@ -34,8 +34,8 @@ test("automated moves keep their own words", () => {
 });
 
 const moved = (trigger: string, at: string, kind = "stage_moved") => ({ kind, trigger, at });
-const run = (stageId: string, queuedAt: string, kind: string | null = "task") => ({
-  kind,
+const run = (stageId: string, queuedAt: string, role: string | null = "stage") => ({
+  role,
   stageId,
   queuedAt,
 });

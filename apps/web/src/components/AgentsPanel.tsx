@@ -13,6 +13,7 @@ import { CustomProviderKeys } from "./CustomProviders.js";
 import { BetaOnly, useBetaTesters } from "../beta.js";
 import { ProviderMark } from "./ProviderMark.js";
 import { SecretField } from "./SecretField.js";
+import { SwarmTemplatesPanel } from "./SwarmTemplatesPanel.js";
 import { YamlFileActions, downloadYaml } from "./YamlFileActions.js";
 import {
   MODEL_GUIDANCE,
@@ -367,6 +368,17 @@ export function AgentsPanel({
             </div>
           ))}
         </section>
+
+        {/* Templates pair two models rather than one, which is the
+            only thing that makes them a second list rather than a
+            second panel. Beta gated inside the component.
+
+            Filed under Agents now that the panel is sectioned: a
+            template is an agent pairing, and the other two sections
+            are about files and connections. */}
+        <div hidden={beta && section !== "agents"}>
+          <SwarmTemplatesPanel />
+        </div>
 
         <section className="section settings-card" hidden={beta && section !== "files"}>
           <h3 className="settings-title">Agents file</h3>
