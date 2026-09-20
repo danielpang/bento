@@ -195,6 +195,7 @@ test("every control the console offers reaches the route that does it", async ()
   await api.restoreSwarm("sw-1");
   await api.setWorkers("sw-1", 6);
   await api.answerQuestion("sw-1", "q-1", "Use the new client.");
+  await api.markTaskDone("sw-1", "task-9");
 
   assert.deepEqual(
     calls.map((call) => `${call.method} ${call.url}`),
@@ -207,6 +208,9 @@ test("every control the console offers reaches the route that does it", async ()
       "PATCH /api/swarms/sw-1",
       "PATCH /api/swarms/sw-1",
       "POST /api/swarms/sw-1/messages",
+      // A task is addressed through the swarm that owns it, which is
+      // also how the route reaches it: not yours reads as not there.
+      "POST /api/swarms/sw-1/tasks/task-9/done",
     ],
   );
   assert.deepEqual(calls[3]!.body, { archived: true });
@@ -219,6 +223,47 @@ test("every control the console offers reaches the route that does it", async ()
     calls.every((call) => !(call.body && typeof call.body === "object" && "status" in call.body)),
     "no call tries to set a status directly",
   );
+});
+
+test("a swarm is watched through its own stream, and a reconnect is a refetch", () => {
+  const listeners = new Map<string, () => void>();
+  let closed = false;
+  let opened = "";
+  const api = httpSwarmApi("", fetchStub(wireSwarm()).doFetch, (url) => {
+    opened = url;
+    return {
+      addEventListener: (type: string, listener: () => void) => listeners.set(type, listener),
+      close: () => {
+        closed = true;
+      },
+    };
+  });
+
+  let events = 0;
+  let reconnects = 0;
+  const stop = api.streamSwarm("sw-1", () => (events += 1), () => (reconnects += 1));
+  assert.equal(opened, "/api/swarms/sw-1/events", "one swarm's stream, not the whole project's board");
+
+  listeners.get("open")!();
+  assert.equal(reconnects, 0, "the first open is the subscription, not a reconnection");
+  listeners.get("swarm_event")!();
+  listeners.get("swarm_event")!();
+  assert.equal(events, 2, "every event is a wake, and the caller decides what to refetch");
+
+  // A second open is the stream coming back. Board events are not
+  // persisted, so what it missed is gone and only a refetch fills it.
+  listeners.get("open")!();
+  assert.equal(reconnects, 1);
+
+  stop();
+  assert.equal(closed, true, "and leaving the swarm takes the stream with it");
+});
+
+test("a console with no EventSource still works, without a stream", () => {
+  const api = httpSwarmApi("", fetchStub(wireSwarm()).doFetch, null);
+  // Server rendering and the tests take this path: no subscription,
+  // no throw, and a stop that is safe to call.
+  assert.doesNotThrow(() => api.streamSwarm("sw-1", () => {})());
 });
 
 test("a refusal reaches the person in the server's own words", async () => {

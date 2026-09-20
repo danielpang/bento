@@ -488,6 +488,96 @@ export function swarmRoutes(ctx: AppContext) {
       },
     )
     /**
+     * Marks a leaf done, because a person says so.
+     *
+     * The tree is an agent's to fill in and a person's to correct. A
+     * leaf a worker cannot finish, or one somebody finished by hand in
+     * their own checkout, is still done, and a board that cannot be
+     * told so is a board that drifts from the repository it describes.
+     *
+     * Only a leaf. A plan node is finished by its own children
+     * finishing, and letting a person close one directly would leave
+     * its subtree open underneath a node that says it is complete,
+     * which is the one shape the rollup cannot render honestly.
+     *
+     * The runs go with it, the way cancelling a swarm takes its runs:
+     * an agent still working a task the board calls done is spending
+     * money on work nobody is waiting for, and its report would land
+     * on a finished node. Marking done is the decision; the agent
+     * stopping is that decision reaching the sandbox.
+     */
+    .post("/:id/tasks/:taskId/done", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+
+      // Scoped to this swarm rather than looked up by id alone, so a
+      // task id from another team's swarm reads as not there rather
+      // than as a task this caller may not touch.
+      const [task] = await db(c, ctx)
+        .select()
+        .from(swarmTasks)
+        .where(and(eq(swarmTasks.id, c.req.param("taskId")), eq(swarmTasks.swarmId, swarm.id)))
+        .limit(1);
+      if (!task) return c.json({ error: "not found" }, 404);
+
+      if (task.nodeType !== "leaf") {
+        return c.json(
+          { error: "A plan node is finished by its own tasks finishing.", code: "NOT_A_LEAF" },
+          409,
+        );
+      }
+      if (swarm.status === "cancelled") {
+        return c.json(
+          { error: "This swarm is stopped, so its tasks are not moving.", code: "SWARM_STOPPED" },
+          409,
+        );
+      }
+      // Already done is the answer the caller wanted, so it is not an
+      // error: a second click, or two people in the same drawer, both
+      // get the finished row rather than a refusal for something that
+      // did happen.
+      if (task.status === "done") return c.json(task);
+
+      const now = new Date();
+      const [done] = await db(c, ctx)
+        .update(swarmTasks)
+        .set({
+          status: "done",
+          // Nothing is waiting on a finished node, and an attention
+          // flag left behind would keep it lit on a board whose whole
+          // job is saying where to look.
+          attention: null,
+          assignedRunId: null,
+          endedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(swarmTasks.id, task.id))
+        .returning();
+
+      /*
+       * Then the agents, through the card board's cancellation, for
+       * the reasons /cancel states: markCancelled is a compare-and-set
+       * against the active statuses, it revokes the run's gateway
+       * token, and a run this process is not carrying is marked rather
+       * than interrupted.
+       */
+      const active = await db(c, ctx)
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+      for (const run of active) {
+        ctx.running.get(run.id)?.abort();
+        await markCancelled(ctx, run.id);
+      }
+
+      // The rollup is the reconciler's, not this route's: one place
+      // decides what a finished leaf means for the nodes above it.
+      deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      return c.json(done);
+    })
+    /**
      * Deletes a swarm and everything under it, machines included.
      *
      * Refused while an agent is working, the way a card is: the run

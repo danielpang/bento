@@ -25,10 +25,10 @@ import {
  * This is the only component that talks to the swarm endpoints, and
  * it does so through `swarmApi`. Everything below it takes plain data.
  *
- * Two controls the fixtures once offered are not wired to anything:
- * opening a pull request for a swarm, and marking a leaf done by hand.
- * Neither has a route, so neither gets a handler, and the surfaces
- * render them as unavailable rather than as buttons that do nothing.
+ * One control the fixtures offer is still not wired to anything:
+ * opening a pull request for a swarm, which is the merge queue's and
+ * has no route. It renders as unavailable rather than as a button
+ * that does nothing.
  *
  * The model is built here, once per change, and handed to the strip's
  * ring, the header's ring, the tree and the outline alike. Four
@@ -120,6 +120,47 @@ export function SwarmBoard({
     rememberSwarmId(storage, projectId, selectedId);
     loadDetail(selectedId);
   }, [selectedId, projectId, storage, loadDetail]);
+
+  /*
+   * A swarm is watched, not read once.
+   *
+   * Its planner writes the tree over minutes and the reconciler rolls
+   * finishes up after the fact, so without this the page showed
+   * whatever was true when it was opened: a leaf marked done here left
+   * the node above it reading open until somebody reloaded, and a
+   * planner at work looked like a swarm doing nothing.
+   *
+   * Refetches are coalesced, for the reason the card board coalesces
+   * them: a swarm emits an event per task it touches, and a burst must
+   * cost one round trip rather than one each. What arrives is only the
+   * wake; the detail is the snapshot, so a dropped event costs nothing
+   * once the next one lands, and a reconnect refetches outright
+   * because nothing missed is replayed.
+   */
+  useEffect(() => {
+    if (!selectedId) return;
+    let timer: number | null = null;
+    const refresh = () => {
+      loadDetail(selectedId);
+      // The strip's rings and counts come from the list, not the
+      // detail, so they go stale in the same way.
+      loadSwarms();
+    };
+    const stop = swarmApi.streamSwarm(
+      selectedId,
+      () => {
+        timer ??= window.setTimeout(() => {
+          timer = null;
+          refresh();
+        }, 250);
+      },
+      refresh,
+    );
+    return () => {
+      stop();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [selectedId, loadDetail, loadSwarms]);
 
   /*
    * The address carries the choice, so a link to this swarm in this
@@ -221,7 +262,15 @@ export function SwarmBoard({
       )}
 
       {task && node && (
-        <SwarmNodeDrawer task={task} node={node} busy={busy} onClose={() => setTaskId(null)} />
+        <SwarmNodeDrawer
+          task={task}
+          node={node}
+          busy={busy}
+          onClose={() => setTaskId(null)}
+          // act reloads the detail, so the rings above the node move
+          // as soon as the reconciler has rolled the finish up.
+          onMarkDone={(id) => selectedId && act(() => swarmApi.markTaskDone(selectedId, id))}
+        />
       )}
 
       {creating && (

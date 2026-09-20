@@ -28,6 +28,7 @@ import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { createFeatureFlags } from "../feature-flags.js";
 import { mintRunGrant } from "../mcp/grants.js";
+import { tickSwarm } from "../orchestrator/swarm/coordinator.js";
 import { BENTO_SWARM_SERVER_ID } from "../mcp/swarm-server.js";
 import { RUNNER_PROJECT_REFUSAL } from "./swarms.js";
 
@@ -617,6 +618,146 @@ test("the stream queries at setup and then never again", async () => {
   );
   controller.abort();
   await reader.cancel().catch(() => {});
+});
+
+/* ---------------------------------------------------------------- *
+ * Finishing a leaf by hand.                                        *
+ * ---------------------------------------------------------------- */
+
+/**
+ * A plan node over two leaves, which is the smallest tree where a
+ * rollup is visible: finishing both children has to move the parent,
+ * and finishing one must not.
+ */
+async function treeOf(swarmId: string) {
+  const [plan] = await db
+    .insert(swarmTasks)
+    .values({ swarmId, title: "Build it", nodeType: "plan" })
+    .returning();
+  const [first] = await db
+    .insert(swarmTasks)
+    .values({ swarmId, parentId: plan!.id, title: "First", nodeType: "leaf", position: 0 })
+    .returning();
+  const [second] = await db
+    .insert(swarmTasks)
+    .values({ swarmId, parentId: plan!.id, title: "Second", nodeType: "leaf", position: 1 })
+    .returning();
+  return { plan: plan!, first: first!, second: second! };
+}
+
+const readTask = async (id: string) => {
+  const [row] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, id));
+  return row!;
+};
+
+test("a leaf a person marks done is done, and the node above it follows when its last child is", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal((await res.json()).status, "done");
+
+  // The route writes the leaf and queues the rollup rather than doing
+  // it inline: one place decides what a finished leaf means above it.
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "and the reconciler was woken to roll it up",
+  );
+
+  await tickSwarm(ctx, swarm.id);
+  assert.notEqual((await readTask(tree.plan.id)).status, "done", "one of two children is not the group");
+
+  await post(`/api/swarms/${swarm.id}/tasks/${tree.second.id}/done`);
+  await tickSwarm(ctx, swarm.id);
+  assert.equal(
+    (await readTask(tree.plan.id)).status,
+    "done",
+    "a group whose children are all finished is finished, which is the ring moving",
+  );
+});
+
+test("marking a leaf done stops the agent still working it", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const [planner] = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+
+  const [worker] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: tree.first.id,
+      role: "worker",
+      agentProfileId: planner!.agentProfileId,
+      prompt: "work the leaf",
+      status: "running",
+      startedBy: ctx.userId,
+    })
+    .returning();
+  const controller = new AbortController();
+  ctx.running.set(worker!.id, controller);
+  await db.update(swarmTasks).set({ assignedRunId: worker!.id, status: "working" }).where(eq(swarmTasks.id, tree.first.id));
+
+  await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+
+  const [after] = await db.select().from(agentRuns).where(eq(agentRuns.id, worker!.id));
+  assert.equal(after!.status, "cancelled", "an agent working a task the board calls done is spending for nobody");
+  assert.equal(controller.signal.aborted, true, "and it was interrupted, not only marked");
+  // The task keeps no pointer at a run that is over: the drawer reads
+  // this to decide whether anything is on the node.
+  assert.equal((await readTask(tree.first.id)).assignedRunId, null);
+});
+
+test("a plan node is not a person's to finish directly", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.plan.id}/done`);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).code, "NOT_A_LEAF");
+  assert.notEqual((await readTask(tree.plan.id)).status, "done", "its subtree would have been left open under it");
+});
+
+test("a leaf of another swarm is not this swarm's to finish", async () => {
+  const mine = await createSwarm();
+  const theirs = await createSwarm({ title: "Theirs" });
+  const tree = await treeOf(theirs.id);
+
+  const res = await post(`/api/swarms/${mine.id}/tasks/${tree.first.id}/done`);
+  assert.equal(res.status, 404, "a task is reached through the swarm that owns it, or not at all");
+  assert.notEqual((await readTask(tree.first.id)).status, "done");
+});
+
+test("finishing a leaf twice is not an error the second time", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+  const again = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+  assert.equal(again.status, 200, "a second click, or a second person in the drawer, got what they wanted");
+  assert.equal((await again.json()).status, "done");
+});
+
+test("a stopped swarm's leaves are not moved by hand", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await post(`/api/swarms/${swarm.id}/cancel`);
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).code, "SWARM_STOPPED");
+});
+
+test("a leaf wanting attention stops wanting it once it is finished", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarmTasks).set({ attention: "failed" }).where(eq(swarmTasks.id, tree.first.id));
+
+  await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+  assert.equal(
+    (await readTask(tree.first.id)).attention,
+    null,
+    "a finished node left lit is a board that sends people to work that is over",
+  );
 });
 
 async function readSwarm(id: string) {

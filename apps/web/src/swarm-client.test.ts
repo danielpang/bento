@@ -9,12 +9,14 @@ import type { NewSwarmInput } from "./swarm/types.js";
 /**
  * The boundary the console actually talks to.
  *
- * The routes are not built, so this asserts the shape they will
- * answer in and the behaviour the console leans on: the strip's ring
- * is the same rollup the page draws, marking a leaf done moves every
- * ring above it, and a new swarm lands at the end of the strip. When
- * the endpoints land, the fixtures go and these assertions become the
- * contract the routes have to keep.
+ * Not every route is built, so this asserts the shape they answer in
+ * and the behaviour the console leans on: the strip's ring is the
+ * same rollup the page draws, marking a leaf done moves every ring
+ * above it, and a new swarm lands at the end of the strip. Finishing
+ * a leaf has a route now, and swarm-http-client.test.ts holds it to
+ * this contract; what is left here is the arithmetic, which is the
+ * console's own and cheaper to exercise against fixtures than against
+ * a database.
  */
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");

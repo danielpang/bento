@@ -1013,6 +1013,11 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/swarms/${swarm.id}/cancel`],
     ["GET", `/api/swarms/${swarm.id}/messages`],
     ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
+    // A real node of the owner's swarm, not an invented id: a route
+    // that had lost its access check would find this one and finish
+    // it, where a made up id would answer 404 either way and prove
+    // nothing.
+    ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/done`],
     // The stream, for the reason the run stream is here: it must refuse
     // before it streams anything.
     ["GET", `/api/swarms/${swarm.id}/events`],
@@ -1050,6 +1055,14 @@ test("every entity route refuses a foreign tenant", async () => {
   assert.equal(swarmBody.swarm.title, "Mine", "nor renamed it");
   assert.equal(swarmBody.swarm.maxWorkers, 4, "nor raised how many agents it may run at once");
   assert.equal(swarmBody.swarm.status, "planning", "nor started its work");
+  // And its node is still open. Marking somebody else's leaf done is
+  // the quiet version of the same theft: no row disappears, the board
+  // just stops describing the work that is left.
+  const taskAfter = await ctx.db
+    .select({ status: swarmTasks.status })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.id, swarmTask!.id));
+  assert.equal(taskAfter[0]?.status, "open", "nor finished one of its tasks");
   const templateAfter = await asOwner(`/api/swarm-templates/${template.id}`);
   assert.equal(templateAfter.status, 200, "the intruder must not have deleted the owner's swarm template");
   assert.equal(((await templateAfter.json()) as { name: string }).name, "Mine");

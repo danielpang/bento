@@ -278,6 +278,33 @@ test("the drawer offers marking a leaf done, and never a plan node", () => {
   );
   assert.match(planHtml, /<button class="btn" disabled="">Mark done<\/button>/);
   assert.match(planHtml, /A plan node is finished by its own tasks finishing\./);
+
+  // Given no handler the button stays drawn and disabled, rather than
+  // disappearing: a control that vanishes reads as a feature that does
+  // not exist, and this one does.
+  const unwired = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, {
+      task: tasks()[3]!,
+      node: model.byId.get("slow")!,
+      onClose: () => {},
+    }),
+  );
+  assert.match(unwired, /disabled=""[^>]*>Mark done/);
+  assert.match(unwired, /not available here/);
+});
+
+test("the drawer says what finishing a leaf by hand does to the agent on it", () => {
+  const html = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, {
+      task: tasks()[3]!,
+      node: model.byId.get("slow")!,
+      onClose: () => {},
+      onMarkDone: () => {},
+    }),
+  );
+  // The route stops the run, so the drawer says so before the click
+  // rather than leaving a person to notice their agent went quiet.
+  assert.match(html, /stops any agent still working it/);
 });
 
 test("the mode toggle is two segments, and only for a tester", () => {
