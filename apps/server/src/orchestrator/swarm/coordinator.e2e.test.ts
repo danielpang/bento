@@ -535,6 +535,51 @@ test("the landing queue keeps one in flight and drops what was withdrawn", async
   assert.equal(result?.landingId, byTask.get(done.id)!.id);
 });
 
+test("a conflict whose resolver has finished is tried again, rather than holding forever", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it" });
+  const [resolver] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: stuck.id,
+      role: "resolver",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "running",
+    })
+    .returning();
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: stuck.id, position: 0, status: "conflicted", resolverRunId: resolver!.id })
+    .returning();
+
+  const landed: string[] = [];
+  const deps = { ...starter(), startLanding: async (_tx: unknown, id: string) => void landed.push(id) };
+
+  // While the resolver works, nothing moves: the queue is held on
+  // purpose, because the branch it is holding has not been reconciled.
+  await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.deepEqual(landed, []);
+  const held = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(held[0]!.status, "conflicted");
+
+  /**
+   * And once it ends, the row goes back to the queue. Without this the
+   * swarm's first conflict is the last thing it ever does: the row
+   * holds everything behind it and nothing anywhere moves it.
+   */
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, resolver!.id));
+  const result = await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.deepEqual(landed, [landing!.id], "the reconciled branch is tried again");
+  assert.equal(result?.landingId, landing!.id);
+  assert.equal(result?.landingPromoted, true);
+  const retried = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(retried[0]!.status, "landing");
+  assert.equal(retried[0]!.resolverRunId, resolver!.id, "and it still names the resolver, so it is not tried twice");
+});
+
 test("a conflict holds the queue rather than letting the next branch overtake it", async () => {
   const swarm = await makeSwarm({ status: "running" });
   const stuck = await makeTask(swarm.id, { title: "stuck", status: "done" });
