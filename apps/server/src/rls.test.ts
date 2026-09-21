@@ -36,6 +36,7 @@ const TENANT_TABLES = [
   "secrets",
   "custom_model_providers",
   "github_installations",
+  "linear_connections",
   "linear_team_mappings",
   "linear_issue_links",
   "slack_connections",
