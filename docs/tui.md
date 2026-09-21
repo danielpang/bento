@@ -20,6 +20,7 @@ Follow the installer's PATH instruction, adding it to `~/.zshrc` or `~/.bashrc`,
 
 The [Electron Mac app](../apps/desktop/README.md#shared-release-version) uses the
 same Bento release version. One Git tag builds and publishes both applications.
+See [releasing Bento](releases.md) to manually start or retry the shared release workflow.
 
 To update to the latest stable release, quit the TUI and run:
 

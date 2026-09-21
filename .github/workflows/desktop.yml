@@ -13,6 +13,10 @@ on:
         description: The same release tag used to package the CLI
         required: true
         type: string
+      commit:
+        description: Exact tag commit already resolved by the release workflow
+        required: false
+        type: string
     outputs:
       signed:
         description: Whether the Mac installers are Developer ID signed and notarized
@@ -30,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.commit || format('refs/tags/{0}', inputs.tag) }}
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v5
         with:
