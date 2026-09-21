@@ -4,17 +4,46 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build or retry (for example v0.1.3)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    name: Resolve the existing release tag
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.tag.outputs.commit }}
+    steps:
+      # Dispatch uses the selected branch's workflow and validation helper.
+      # Every build below uses the requested tag's resolved commit instead.
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Validate and resolve the tag
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          EXPECTED_COMMIT: ${{ github.event_name == 'push' && github.sha || '' }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-target.mjs "$TAG"
+
   verify:
     name: Verify the version and CLI dependencies
+    needs: resolve
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     services:
@@ -36,6 +65,8 @@ jobs:
       BENTO_SANDBOX_DRIVER: local-process
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v5
         with:
@@ -43,7 +74,7 @@ jobs:
           cache: pnpm
       - name: Validate the release tag
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: node scripts/release-version.mjs "$TAG"
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec turbo run build typecheck --filter=@bento/tui...
@@ -53,7 +84,7 @@ jobs:
 
   cli:
     name: Package CLI (${{ matrix.platform }})
-    needs: verify
+    needs: [resolve, verify]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     strategy:
@@ -70,6 +101,8 @@ jobs:
             platform: darwin-arm64
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v5
         with:
@@ -79,14 +112,14 @@ jobs:
       - run: pnpm exec turbo run build --filter=@bento/tui...
       - name: Package native dependencies and stamp the version
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.resolve.outputs.tag }}
           EXPECTED_PLATFORM: ${{ matrix.platform }}
         run: |
           test "$(node -p 'process.platform + "-" + process.arch')" = "$EXPECTED_PLATFORM"
           node scripts/package-cli.mjs "$TAG"
       - name: Install and test the release outside the checkout
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.resolve.outputs.tag }}
           PLATFORM: ${{ matrix.platform }}
         run: BENTO_TEST_ARCHIVE="$PWD/release-dist/bento-cli-$TAG-$PLATFORM.tar.gz" node --test scripts/install.test.mjs
       - uses: actions/upload-artifact@v6
@@ -100,20 +133,25 @@ jobs:
 
   mac:
     name: Package the Mac app
-    needs: verify
+    needs: [resolve, verify]
     uses: ./.github/workflows/desktop.yml
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ needs.resolve.outputs.tag }}
+      commit: ${{ needs.resolve.outputs.commit }}
     secrets: inherit
 
   release:
     name: Publish Bento release
-    needs: [cli, mac]
+    needs: [resolve, cli, mac]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
+      # Use this workflow's publication helper even when an older tag lacks it.
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
       - uses: actions/download-artifact@v7
         with:
           pattern: cli-*
@@ -126,7 +164,8 @@ jobs:
       - name: Publish verified assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.resolve.outputs.commit }}
           REPO: ${{ github.repository }}
           MAC_SIGNED: ${{ needs.mac.outputs.signed }}
         run: |
@@ -163,13 +202,10 @@ jobs:
           if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
           # Draft first: an incomplete upload never becomes the latest installer.
           # A rerun may repair a draft, but never replace published release assets.
-          if gh release view "$TAG" --json isDraft --jq .isDraft > is-draft.txt 2>/dev/null; then
-            if [ "$(cat is-draft.txt)" != true ]; then
-              echo "::error::$TAG is already published. Push a new version tag."
-              exit 1
-            fi
-          else
-            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
+          STATE="$(node scripts/release-target.mjs "$TAG")"
+          if [ "$STATE" = missing ]; then
+            gh release create "$TAG" --repo "$REPO" --draft --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
           fi
-          gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.dmg artifacts/*.zip artifacts/*.blockmap artifacts/latest-mac.yml artifacts/install.sh artifacts/SHA256SUMS --clobber
-          gh release edit "$TAG" --draft=false --notes-file notes.md "${flags[@]}"
+          gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.dmg artifacts/*.zip artifacts/*.blockmap artifacts/latest-mac.yml artifacts/install.sh artifacts/SHA256SUMS --repo "$REPO" --clobber
+          node scripts/release-target.mjs "$TAG"
+          gh release edit "$TAG" --repo "$REPO" --draft=false --notes-file notes.md "${flags[@]}"

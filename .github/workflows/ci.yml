@@ -39,3 +39,5 @@ jobs:
       - run: pnpm test
       - name: Verify release installer behavior
         run: node --test scripts/install.test.mjs
+      - name: Verify release tag resolution and retry guards
+        run: node --test scripts/release-target.test.mjs
