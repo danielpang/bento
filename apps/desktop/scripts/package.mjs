@@ -86,7 +86,15 @@ try {
   if (!supplied.some(arg => arg === "--arm64" || arg === "--x64" || arg === "--universal")) args.push(`--${process.arch}`);
   // Release publication is atomic and owned by release.yml, never builder.
   args.push("--publish", "never");
-  execFileSync("pnpm", args, { cwd: root, stdio: "inherit", env: { ...process.env, ...(unsigned ? { CSC_IDENTITY_AUTO_DISCOVERY: "false" } : {}) } });
+  const env = { ...process.env };
+  if (unsigned) {
+    // Missing Actions secrets arrive as empty strings. electron-builder treats
+    // CSC_LINK="" as a certificate path and tries to import the staging directory.
+    // Certificate-free builds must ignore even populated signing credentials.
+    for (const name of ["CSC_LINK", "CSC_KEY_PASSWORD", "CSC_INSTALLER_LINK", "CSC_INSTALLER_KEY_PASSWORD", "CSC_NAME", "CSC_KEYCHAIN"]) delete env[name];
+    env.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+  }
+  execFileSync("pnpm", args, { cwd: root, stdio: "inherit", env });
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }
