@@ -43,6 +43,9 @@ See the **[Bento CLI guide](./docs/tui.md)** for settings, shortcuts, and cloud 
 
 The Electron app includes the complete web console and supports local Bento or a
 remote server. From source, run `pnpm install` and `pnpm dev:desktop`.
+
+[Download Bento for Mac](https://github.com/danielpang/bento/releases/latest) (Apple Silicon and Intel).
+
 See the [Mac application guide](./apps/desktop/README.md) for packaging and setup.
 
 ## Web UI

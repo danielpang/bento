@@ -13,7 +13,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "bento-update-smoke-"));
 const version = "1.2.3";
 const payloads = Object.fromEntries(["arm64", "x64"].map(arch => [arch, Buffer.from(`isolated update payload ${arch}`)]));
-const metadata = { version, files: Object.entries(payloads).map(([arch, bytes]) => ({ url: `Bento-${version}-${arch}.zip`, size: bytes.length, sha512: createHash("sha512").update(bytes).digest("base64") })) };
+const metadata = { version, files: Object.entries(payloads).flatMap(([arch, bytes]) => ["zip", "dmg"].map(ext => ({ url: `Bento-${version}-${arch}.${ext}`, size: bytes.length, sha512: createHash("sha512").update(bytes).digest("base64") }))) };
 let mode = "valid";
 const requests = [];
 const server = createServer((request, response) => {
@@ -36,32 +36,76 @@ const host = `127.0.0.1:${server.address().port}`;
 const env = { ...process.env, BENTO_DESKTOP_PROFILE: path.join(temporary, "profile") };
 delete env.ELECTRON_RUN_AS_NODE;
 let desktop;
+async function closeDesktop(application) {
+  // Keep the inspector connected through Bento's asynchronous before-quit
+  // handler. Playwright's close() otherwise detaches immediately after app.quit.
+  await application.evaluate(({ app }) => new Promise(resolve => {
+    app.once("will-quit", () => resolve());
+    app.quit();
+  })).catch(() => {});
+  await application.close();
+}
 try {
-  // First exercise the shipped menu and disabled-development policy.
+  // Exercise the shipped native menu, including the packaged unsigned policy.
   desktop = await _electron.launch({ ...(process.env.BENTO_DESKTOP_EXECUTABLE ? { executablePath: process.env.BENTO_DESKTOP_EXECUTABLE, args: [] } : { args: [root] }), env });
   desktop.process().stderr.on("data", bytes => process.stderr.write(bytes));
   await desktop.firstWindow();
   console.log("Opened Bento for native update menu verification");
-  const disabled = await desktop.evaluate(async ({ Menu, dialog }) => {
-    let result;
-    dialog.showMessageBox = async options => { result = options; return { response: 0, checkboxChecked: false }; };
+  const menuResult = await desktop.evaluate(async ({ app, Menu, dialog, shell }, { host, packaged }) => {
+    const messages = [];
+    const urls = [];
+    let consent = false;
+    dialog.showMessageBox = async options => {
+      messages.push(options);
+      return { response: consent && options.buttons?.includes("Download Update") ? 1 : 0, checkboxChecked: false };
+    };
+    shell.openExternal = async url => { urls.push(url); };
+    if (packaged) {
+      // Access the shipped updater through the main-process test inspector.
+      // Production has no feed override or testing IPC.
+      const require = process.getBuiltinModule("module").createRequire(`${app.getAppPath()}/package.json`);
+      require("electron-updater").autoUpdater.setFeedURL({ provider: "github", owner: "danielpang", repo: "bento", host, protocol: "http" });
+    }
     const item = Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === "Check for Updates...");
     if (!item) throw new Error("Missing native Check for Updates menu");
+    const waitFor = async predicate => {
+      const deadline = Date.now() + 15_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error("Timed out waiting for the update menu");
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
     item.click();
-    await new Promise(resolve => setImmediate(resolve));
-    return result;
-  });
-  assert.match(disabled.detail, process.env.BENTO_DESKTOP_EXECUTABLE ? /local or unsigned build/ : /Development builds/);
-  console.log("PASS: development or unsigned builds explain why updates are disabled");
-  await desktop.close();
+    await waitFor(() => messages.length);
+    if (packaged) {
+      await waitFor(() => Menu.getApplicationMenu().items[0].submenu.items.some(item => item.label === "Check for Updates..."));
+      if (urls.length) throw new Error("Later opened a download");
+      consent = true;
+      Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === "Check for Updates...").click();
+      await waitFor(() => urls.length);
+    }
+    return { messages, urls, arch: process.arch === "arm64" || app.runningUnderARM64Translation ? "arm64" : "x64" };
+  }, { host, packaged: Boolean(process.env.BENTO_DESKTOP_EXECUTABLE) });
+  if (process.env.BENTO_DESKTOP_EXECUTABLE) {
+    assert.equal(menuResult.messages[0].message, `Bento ${version} is available`);
+    assert.match(menuResult.messages[0].detail, /quit Bento with Cmd\+Q/);
+    assert.deepEqual(menuResult.urls, [`https://github.com/danielpang/bento/releases/download/v${version}/Bento-${version}-${menuResult.arch}.dmg`]);
+    assert.ok(!requests.some(url => /\.(zip|dmg)$/.test(url)), "Manual checks must not use the automatic installer");
+  } else assert.match(menuResult.messages[0].detail, /Development builds/);
+  console.log("PASS: native menu follows the development or manual update policy");
+  await closeDesktop(desktop);
+  desktop = undefined;
 
-  await writeFile(path.join(temporary, "main.cjs"), `const {app, BrowserWindow} = require('electron'); global.fixtureRequire = require('node:module').createRequire(${JSON.stringify(path.join(root, "package.json"))}); global.loadRuntimeController = () => import(${JSON.stringify(path.join(root, "dist/runtime-controller.js"))}); app.setPath('userData', ${JSON.stringify(path.join(temporary, "fixture-profile"))}); app.whenReady().then(() => new BrowserWindow({show:false}));`);
+  await writeFile(path.join(temporary, "main.cjs"), `const {app, BrowserWindow} = require('electron'); global.fixtureRequire = require('node:module').createRequire(${JSON.stringify(path.join(root, "package.json"))}); global.loadRuntimeController = () => import(${JSON.stringify(path.join(root, "dist/runtime-controller.js"))}); global.loadUpdates = () => import(${JSON.stringify(path.join(root, "dist/updates.js"))}); app.setPath('userData', ${JSON.stringify(path.join(temporary, "fixture-profile"))}); app.whenReady().then(() => new BrowserWindow({show:false}));`);
   desktop = await _electron.launch({ args: [path.join(temporary, "main.cjs")], env });
   console.log("Opened isolated updater fixture");
   for (const scenario of [
     { name: "apple-silicon", arch: "arm64", rosetta: false, selected: "arm64", mode: "valid" },
     { name: "intel", arch: "x64", rosetta: false, selected: "x64", mode: "valid" },
     { name: "rosetta", arch: "x64", rosetta: true, selected: "arm64", mode: "valid" },
+    { name: "manual-arm64", arch: "arm64", manual: true, selected: "arm64", mode: "valid" },
+    { name: "manual-x64", arch: "x64", manual: true, selected: "x64", mode: "valid" },
+    { name: "manual-rosetta", arch: "x64", rosetta: true, manual: true, selected: "arm64", mode: "valid" },
     { name: "checksum", arch: "arm64", rosetta: false, selected: "arm64", mode: "corrupt" },
     { name: "missing", arch: "arm64", rosetta: false, selected: "arm64", mode: "missing" },
   ]) {
@@ -91,6 +135,18 @@ try {
       let downloaded;
       updater.on("update-downloaded", info => { downloaded = info.downloadedFile; });
       try {
+        if (scenario.manual) {
+          const { DesktopUpdates } = await globalThis.loadUpdates();
+          const urls = [];
+          const errors = [];
+          const unexpected = () => { throw new Error("Manual mode attempted automatic installation"); };
+          const updates = new DesktopUpdates(updater, { changed() {}, notify: unexpected, message: async (...args) => { errors.push(args); },
+            confirmRestart: unexpected, prepareInstall: unexpected, shutdown: unexpected, shutdownFailed: unexpected }, undefined,
+          { arch: scenario.arch === "arm64" || scenario.rosetta ? "arm64" : "x64", confirmDownload: async () => true, openDownload: async url => { urls.push(url); } });
+          await updates.check(true);
+          updates.dispose();
+          return { urls, errors, nativeStaged: updater.squirrelDownloadedUpdate };
+        }
         const result = await updater.checkForUpdates();
         await result.downloadPromise;
         const { readFile } = require("node:fs/promises");
@@ -102,7 +158,12 @@ try {
         Object.defineProperty(process, "arch", originalArch);
       }
     }, { root, folder, host, scenario });
-    if (scenario.mode === "valid") {
+    if (scenario.manual) {
+      assert.deepEqual(result.errors, []);
+      assert.deepEqual(result.urls, [`https://github.com/danielpang/bento/releases/download/v${version}/Bento-${version}-${scenario.selected}.dmg`]);
+      assert.equal(result.nativeStaged, false);
+      assert.ok(!requests.some(url => /\.(zip|dmg)$/.test(url)));
+    } else if (scenario.mode === "valid") {
       assert.equal(result.version, version);
       assert.equal(result.contents, payloads[scenario.selected].toString());
       assert.equal(result.nativeStaged, false);
@@ -134,7 +195,7 @@ try {
   console.log("PASS: graceful and forced utility process shutdown wait for exit before replacement");
   console.log(`PASS: native menu and update service. Isolated fixtures: ${temporary}`);
 } finally {
-  await desktop?.close();
+  if (desktop) await closeDesktop(desktop);
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
 }

@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeUpdater, dialog, Notification } from "electron";
+import { app, autoUpdater as nativeUpdater, dialog, Notification, shell } from "electron";
 import electronUpdater from "electron-updater";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -6,15 +6,18 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { DesktopUpdates } from "./updates.js";
 
-async function disabledReason(): Promise<string | undefined> {
-  if (!app.isPackaged || process.platform !== "darwin") return "Automatic updates are available in the signed macOS release. Development builds must be rebuilt from source.";
+async function updatePolicy(): Promise<{ manual?: boolean; disabledReason?: string }> {
+  if (!app.isPackaged || process.platform !== "darwin") return { disabledReason: "Update checks are available in the packaged macOS app. Development builds must be rebuilt from source." };
   const manifest = JSON.parse(await readFile(path.join(app.getAppPath(), "package.json"), "utf8"));
-  if (manifest.bentoUpdatesEnabled !== true) return "This is a local or unsigned build. Install a signed Bento release to enable automatic updates.";
+  if (manifest.bentoUpdateMode === "manual") return { manual: true };
+  if (manifest.bentoUpdateMode !== "automatic" && manifest.bentoUpdatesEnabled !== true) {
+    return { disabledReason: "This development package does not check for updates. Install a Bento release or rebuild from source." };
+  }
   try {
     // Fail closed even if someone manually repackages a release manifest.
     await promisify(execFile)("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", path.resolve(process.execPath, "../../..")], { timeout: 30_000 });
-  } catch { return "This app does not have a valid Developer ID signature. Install a signed Bento release to enable automatic updates."; }
-  return undefined;
+  } catch { return { manual: true }; }
+  return {};
 }
 
 let staged = false;
@@ -35,6 +38,7 @@ function prepareInstall(): Promise<void> {
 export async function createUpdates(callbacks: { changed(): void; shutdown(): Promise<void>; shutdownFailed(): void }) {
   // Default import is required for electron-updater's CommonJS ESM interop.
   const { autoUpdater } = electronUpdater;
+  const policy = await updatePolicy();
   return new DesktopUpdates(autoUpdater, {
     ...callbacks,
     prepareInstall,
@@ -44,5 +48,10 @@ export async function createUpdates(callbacks: { changed(): void; shutdown(): Pr
     message: async (message, detail) => { await dialog.showMessageBox({ type: "info", message, detail }); },
     confirmRestart: async (version) => (await dialog.showMessageBox({ type: "question", buttons: ["Later", "Restart and Update"], defaultId: 0, cancelId: 0,
       message: `Install Bento ${version}?`, detail: "Bento will restart and stop its local server. Finish active local work first. Projects and history are kept. Agents on a remote server will continue running." })).response === 1,
-  }, await disabledReason());
+  }, policy.disabledReason, policy.manual ? {
+    arch: process.arch === "arm64" || app.runningUnderARM64Translation ? "arm64" : "x64",
+    confirmDownload: async (version) => (await dialog.showMessageBox({ type: "info", buttons: ["Later", "Download Update"], defaultId: 1, cancelId: 0,
+      message: `Bento ${version} is available`, detail: "Download the installer in your browser. When you are ready, quit Bento with Cmd+Q, open the DMG, and drag Bento into Applications to replace the old app. Your settings and projects are kept. Bento will keep running until you quit." })).response === 1,
+    openDownload: (url) => shell.openExternal(url),
+  } : undefined);
 }

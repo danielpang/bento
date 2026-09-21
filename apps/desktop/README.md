@@ -53,6 +53,10 @@ shared console. Existing beta flags apply exactly as they do on the web.
   Dark, or Dark blue theme. Fullscreen releases the space reserved for controls.
 - Closing a window keeps the local server running. **Quit Bento** stops the
   local server gracefully. Remote agents continue independently of the app.
+- Unsigned packaged builds use manual updates. **Bento > Check for Updates**
+  finds a newer stable release and offers to open the matching DMG download in
+  your browser. Finish local work, quit Bento, then drag the new Bento.app into
+  Applications to replace it. Checking or downloading never stops the server.
 - Signed release builds check for stable updates after launch and every six
   hours, and download them in the background. **Bento > Check for Updates**
   checks immediately. Once downloaded, choose **Bento > Restart to Update**.
@@ -71,8 +75,10 @@ pnpm --filter @bento/desktop package:mac --unsigned --dir --arm64
 pnpm --filter @bento/desktop package:mac --unsigned --arm64 --x64
 ```
 
-Outputs are in `release-dist/desktop`. An unsigned local build is for testing;
-release distribution needs an Apple Developer ID certificate and notarization.
+Outputs are in `release-dist/desktop`. Unsigned builds support manual
+installation and updates without an Apple Developer ID certificate.
+macOS may block their first launch. See
+[Apple's Gatekeeper guidance](https://support.apple.com/en-us/102445).
 The installed app bundles its Node runtime, production dependencies, migrations,
 web assets, and sandbox Dockerfile. It does not need the source checkout or a
 separate Node installation. Docker is still required for local sandboxes.
@@ -81,13 +87,14 @@ For a signed release, provide electron-builder's `CSC_LINK` and
 `CSC_KEY_PASSWORD`, plus `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and
 `APPLE_TEAM_ID`, then omit `--unsigned`. Automatic updates are enabled only when
 `BENTO_RELEASE_TAG` is supplied and the packaged app has a valid Developer ID
-Application signature. Source, local, and explicitly unsigned builds show an
-explanation in **Check for Updates** and never contact the update service.
+Application signature. Unsigned packages offer manual updates. Source builds
+and signed packages without an explicit release tag show an explanation in
+**Check for Updates** and never contact the update service.
 
-Existing unsigned builds and builds from before automatic updates were added
-need one manual replacement with the first signed release. Drag its Bento.app
-into Applications. Connection settings and project data are kept. Subsequent
-signed releases update through the app. Launch the installed app from
+To replace an unsigned build, quit Bento and drag the downloaded Bento.app into
+Applications. Connection settings and project data are kept. This also upgrades
+an unsigned installation to the first signed release when available. Subsequent
+signed releases support automatic updates. Launch the installed app from
 Applications, rather than from the mounted DMG.
 
 ### Shared release version
@@ -111,17 +118,23 @@ versions are development placeholders; release tags are the source of truth.
 
 The Desktop workflow is also available manually. Select an existing release tag
 to rebuild that revision and upload installers as workflow artifacts without
-publishing a release. Both workflows use the same packaging job. Signing and
-notarization require `DESKTOP_CSC_LINK`, with
+publishing a release. Both workflows use the same packaging job. Without a
+signing certificate, CI builds unsigned installers with manual updates and can
+publish the shared CLI/Mac release. To enable signing and notarization, set
+`DESKTOP_CSC_LINK`, with
 `DESKTOP_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and
 `APPLE_TEAM_ID`. The existing `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD`,
 `MACOS_APPLE_ID`, `MACOS_NOTARY_PASSWORD`, and `MACOS_TEAM_ID` secrets are also
-accepted. Missing signing or notarization secrets fail the job explicitly.
-Because the CLI and Mac app share one release, this also prevents publication
-of that CLI release until signing is configured. Only local commands with
-`--unsigned` can opt out of signing.
+accepted. When a certificate is configured, missing associated signing or
+notarization secrets fail the job explicitly. A failed signing or notarization
+attempt never falls back to an unsigned release. Release notes state whether
+the uploaded Mac app is unsigned with manual updates or signed and notarized
+with automatic updates.
 
-### Configure the first signing certificate
+### Optional: configure the first signing certificate
+
+Signing enables notarization and automatic installation. It is not required
+for unsigned releases or manual updates.
 
 1. In Keychain Access, use **Certificate Assistant > Request a Certificate From
    a Certificate Authority** to save a CSR. Follow Apple's
@@ -144,12 +157,18 @@ of that CLI release until signing is configured. Only local commands with
 
 ### Update release contract
 
-The pinned electron-updater 6.8.3 uses electron-builder 26's metadata format and
-the public `danielpang/bento` GitHub Releases feed. No token is shipped. The
-stable channel excludes prereleases and downgrades. Even a prerelease build
-checks only stable releases; a higher prerelease waits for a newer stable
-version. The explicit `latest` publish channel generates `latest-mac.yml` for
-all builds; GitHub's prerelease flag controls stable visibility.
+Both update modes use public `danielpang/bento` GitHub Releases without a
+shipped token, and exclude prereleases and downgrades. Manual checks resolve
+the matching DMG from a newer stable release and ask before opening the
+download in the system browser. The app does not install it or restart.
+
+Automatic updates use the pinned electron-updater 6.8.3 and electron-builder
+26's metadata format. Even a prerelease build checks only stable releases;
+a higher prerelease waits for a newer stable version. The explicit `latest`
+publish channel generates `latest-mac.yml` for all builds; GitHub's prerelease
+flag controls stable visibility. Packaging records `bentoUpdateMode` as
+`manual` for `--unsigned`, `automatic` for an explicitly tagged signed release,
+or `disabled` for an untagged signed build.
 
 Build both architectures in one invocation so builder merges both ZIPs and
 DMGs into `latest-mac.yml`. Keep these release assets together:
@@ -160,8 +179,8 @@ DMGs into `latest-mac.yml`. Keep these release assets together:
 - `latest-mac.yml` with SHA-512 hashes and sizes for both architectures.
 - `SHA256SUMS` covering the installers, ZIPs, blockmaps, and update metadata.
 
-The updater selects arm64 on Apple Silicon, including a currently running x64
-build under Rosetta, and x64 on Intel. It verifies download checksums, then
+The automatic updater selects arm64 on Apple Silicon, including a currently
+running x64 build under Rosetta, and x64 on Intel. It verifies download checksums, then
 asks native Squirrel.Mac to validate the update signature after restart
 consent. Only successful native staging allows the local server to stop.
 The utility process must exit before the app restarts. A failed download or
@@ -200,7 +219,7 @@ loopback release fixture. It checks the native menu, stable selection, both
 architecture paths (including simulated Rosetta), checksum rejection, missing
 metadata, and real graceful and forced utility-process exits. It never installs
 an update. Set `BENTO_DESKTOP_EXECUTABLE` to verify the unsigned packaged app's
-disabled-update menu as well. After packaging both architectures, run:
+manual-update menu as well. After packaging both architectures, run:
 
 ```sh
 node apps/desktop/scripts/verify-update-artifacts.mjs release-dist/desktop v0.1.3

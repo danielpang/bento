@@ -63,8 +63,10 @@ try {
   const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
   delete manifest.devDependencies;
   manifest.version = version;
-  // Only explicitly versioned, signed release packages may contact the feed.
-  manifest.bentoUpdatesEnabled = Boolean(process.env.BENTO_RELEASE_TAG && !unsigned);
+  // Unsigned apps offer browser downloads. Native installation is reserved for
+  // explicitly versioned, signed releases; untagged signed builds stay local.
+  manifest.bentoUpdateMode = unsigned ? "manual" : process.env.BENTO_RELEASE_TAG ? "automatic" : "disabled";
+  manifest.bentoUpdatesEnabled = manifest.bentoUpdateMode === "automatic";
   await writeFile(manifestFile, JSON.stringify(manifest, null, 2));
   const args = ["exec", "electron-builder", "--projectDir", stage, "--config", path.join(stage, "electron-builder.yml"),
     `--config.electronVersion=${sourceManifest.devDependencies.electron}`,

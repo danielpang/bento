@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { DesktopUpdates, type UpdateDriver, type UpdateUi } from "./updates.js";
+import { DesktopUpdates, manualDownloadUrl, type ManualUpdateOptions, type UpdateDriver, type UpdateUi } from "./updates.js";
+import type { UpdateInfo } from "electron-updater";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -10,7 +11,7 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
-function fixture(disabledReason?: string) {
+function fixture(disabledReason?: string, manual?: ManualUpdateOptions) {
   const emitter = new EventEmitter();
   const calls: string[] = [];
   const messages: string[] = [];
@@ -29,7 +30,7 @@ function fixture(disabledReason?: string) {
     shutdown: async () => { calls.push("shutdown"); },
     shutdownFailed: () => { calls.push("recover"); },
   };
-  const updates = new DesktopUpdates(driver, ui, disabledReason);
+  const updates = new DesktopUpdates(driver, ui, disabledReason, manual);
   const downloaded = () => emitter.emit("update-downloaded", { version: "1.2.3" });
   return { updates, emitter, driver, ui, calls, messages, result, downloaded, checks: () => checks };
 }
@@ -48,6 +49,76 @@ test("background downloads never restart or stage an update without consent", as
   await f.updates.check(true); // Later is the default answer.
   assert.deepEqual(f.calls, ["notify"]);
   assert.equal(f.updates.menu.label, "Restart to Update...");
+});
+
+function manualRelease(arch = "arm64") {
+  const info = { version: "1.2.3", tag: "v1.2.3", path: "unused.zip", sha512: "checksum", releaseDate: "2026-09-20T00:00:00Z",
+    files: [{ url: `Bento-1.2.3-${arch}.dmg`, sha512: "checksum" }] };
+  return { isUpdateAvailable: true, updateInfo: info, versionInfo: info, downloadPromise: null };
+}
+
+test("manual updates wait for a click and consent, without downloading or restarting the app", async () => {
+  const urls: string[] = [];
+  let consent = false;
+  const f = fixture(undefined, { arch: "arm64", confirmDownload: async () => consent, openDownload: async url => { urls.push(url); } });
+  assert.equal(f.driver.autoDownload, false);
+  assert.equal(f.driver.autoInstallOnAppQuit, false);
+  f.updates.start();
+  await f.updates.check();
+  assert.equal(f.checks(), 0);
+  const cancelled = f.updates.check(true);
+  f.result.resolve(manualRelease());
+  await cancelled;
+  assert.deepEqual(urls, []);
+  consent = true;
+  await f.updates.check(true);
+  assert.deepEqual(urls, ["https://github.com/danielpang/bento/releases/download/v1.2.3/Bento-1.2.3-arm64.dmg"]);
+  assert.deepEqual(f.calls, []); // No signature staging, notification, shutdown, or installation.
+  assert.equal(f.updates.menu.label, "Check for Updates...");
+});
+
+test("repeated manual checks share one version lookup and confirmation", async () => {
+  const consent = deferred<boolean>();
+  let prompts = 0;
+  const f = fixture(undefined, { arch: "x64", confirmDownload: () => { prompts++; return consent.promise; }, openDownload: async () => {} });
+  const first = f.updates.check(true);
+  f.result.resolve(manualRelease("x64"));
+  await new Promise(resolve => setImmediate(resolve));
+  const repeated = f.updates.check(true);
+  consent.resolve(false);
+  await Promise.all([first, repeated]);
+  assert.equal(f.checks(), 1);
+  assert.equal(prompts, 1);
+});
+
+test("manual mode reports current versions and recovers from a browser failure", async () => {
+  let fail = true;
+  const urls: string[] = [];
+  const f = fixture(undefined, { arch: "arm64", confirmDownload: async () => true, openDownload: async url => {
+    if (fail) throw new Error("Browser could not open");
+    urls.push(url);
+  } });
+  f.result.resolve({ ...manualRelease(), isUpdateAvailable: false });
+  await f.updates.check(true);
+  assert.match(f.messages[0]!, /up to date/);
+  f.driver.checkForUpdates = async () => manualRelease();
+  await f.updates.check(true);
+  assert.match(f.messages[1]!, /Could not check for updates/);
+  fail = false;
+  await f.updates.check(true);
+  assert.equal(urls.length, 1);
+  assert.deepEqual(f.calls, []);
+});
+
+test("manual installer selection requires an exact stable release and matching architecture", () => {
+  const info = manualRelease("x64").updateInfo;
+  assert.equal(manualDownloadUrl(info, "x64"), "https://github.com/danielpang/bento/releases/download/v1.2.3/Bento-1.2.3-x64.dmg");
+  assert.equal(manualDownloadUrl({ ...info, tag: "1.2.3" } as UpdateInfo, "x64"), "https://github.com/danielpang/bento/releases/download/1.2.3/Bento-1.2.3-x64.dmg");
+  assert.throws(() => manualDownloadUrl(info, "arm64"));
+  for (const patch of [
+    { version: "1.2.3-beta.1" }, { tag: "v1.2.4" }, { tag: "../../other" },
+    { files: [{ url: "https://example.com/installer.dmg", sha512: "checksum" }] },
+  ]) assert.throws(() => manualDownloadUrl({ ...info, ...patch }, "x64"));
 });
 
 test("a manual check joins an automatic download and reports its result once", async () => {
