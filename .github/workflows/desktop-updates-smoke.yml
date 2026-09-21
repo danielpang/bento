@@ -1,0 +1,35 @@
+name: Desktop update smoke
+
+on:
+  pull_request:
+    paths:
+      - 'apps/desktop/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/desktop.yml'
+      - '.github/workflows/desktop-updates-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/desktop/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/desktop.yml'
+      - '.github/workflows/desktop-updates-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  updates:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @bento/desktop... build
+      - run: pnpm --filter @bento/desktop test:updates
+        timeout-minutes: 5

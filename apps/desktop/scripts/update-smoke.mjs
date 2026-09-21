@@ -5,6 +5,8 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { _electron } from "playwright";
+import { closeElectron } from "./close-electron.mjs";
+import { teardownSmoke } from "./teardown-smoke.mjs";
 
 // Real Electron networking, GitHub provider, architecture selection, disk cache,
 // and SHA-512 verification against an isolated loopback release service. It never
@@ -37,19 +39,15 @@ const env = { ...process.env, BENTO_DESKTOP_PROFILE: path.join(temporary, "profi
 delete env.ELECTRON_RUN_AS_NODE;
 let desktop;
 async function closeDesktop(application) {
-  // Keep the inspector connected through Bento's asynchronous before-quit
-  // handler. Playwright's close() otherwise detaches immediately after app.quit.
-  await application.evaluate(({ app }) => new Promise(resolve => {
-    app.once("will-quit", () => resolve());
-    app.quit();
-  })).catch(() => {});
-  await application.close();
+  const result = await closeElectron(application);
+  if (result.timedOutAt) console.warn(`Stopped isolated Electron fixture after ${result.timedOutAt} timed out.`);
 }
 try {
   // Exercise the shipped native menu, including the packaged unsigned policy.
   desktop = await _electron.launch({ ...(process.env.BENTO_DESKTOP_EXECUTABLE ? { executablePath: process.env.BENTO_DESKTOP_EXECUTABLE, args: [] } : { args: [root] }), env });
   desktop.process().stderr.on("data", bytes => process.stderr.write(bytes));
-  await desktop.firstWindow();
+  const launcher = await desktop.firstWindow();
+  await launcher.waitForLoadState("domcontentloaded");
   console.log("Opened Bento for native update menu verification");
   const menuResult = await desktop.evaluate(async ({ app, Menu, dialog, shell }, { host, packaged }) => {
     const messages = [];
@@ -199,3 +197,4 @@ try {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
 }
+await teardownSmoke();
