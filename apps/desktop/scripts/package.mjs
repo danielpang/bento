@@ -71,7 +71,17 @@ try {
   const args = ["exec", "electron-builder", "--projectDir", stage, "--config", path.join(stage, "electron-builder.yml"),
     `--config.electronVersion=${sourceManifest.devDependencies.electron}`,
     `--config.directories.output=${output}`];
-  if (unsigned) args.push("--config.mac.identity=null", "--config.mac.notarize=false", "--config.forceCodeSigning=false");
+  // Even without Developer ID, seal the finished bundle. Skipping signing leaves
+  // Electron's linker signature attached to a different app and Gatekeeper calls
+  // the download damaged. Ad-hoc builds have no Team ID for library validation.
+  if (unsigned) args.push(
+    "--config.mac.identity=-",
+    `--config.mac.sign=${path.join(root, "scripts/sign-adhoc.mjs")}`,
+    "--config.mac.hardenedRuntime=false",
+    "--config.mac.timestamp=none",
+    "--config.mac.notarize=false",
+    "--config.forceCodeSigning=false",
+  );
   args.push(...supplied.filter(arg => arg !== "--unsigned"));
   if (!supplied.some(arg => arg === "--arm64" || arg === "--x64" || arg === "--universal")) args.push(`--${process.arch}`);
   // Release publication is atomic and owned by release.yml, never builder.

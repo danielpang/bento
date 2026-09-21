@@ -29,6 +29,7 @@
   },
   "devDependencies": {
     "@bento/web": "workspace:*",
+    "@electron/osx-sign": "1.3.3",
     "@types/node": "^26.1.1",
     "electron": "44.4.3",
     "electron-builder": "26.15.3",

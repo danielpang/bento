@@ -36,6 +36,9 @@ importers:
       '@bento/web':
         specifier: workspace:*
         version: link:../web
+      '@electron/osx-sign':
+        specifier: 1.3.3
+        version: 1.3.3
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1

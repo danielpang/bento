@@ -96,6 +96,7 @@ jobs:
           for ARCH in mac-arm64 mac; do
             ACTUAL="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "release-dist/desktop/$ARCH/Bento.app/Contents/Info.plist")"
             test "$ACTUAL" = "$VERSION"
+            codesign --verify --deep --strict "release-dist/desktop/$ARCH/Bento.app"
             if [ "$SIGNED" = true ]; then
               codesign --verify --deep --strict -R 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "release-dist/desktop/$ARCH/Bento.app"
               xcrun stapler validate "release-dist/desktop/$ARCH/Bento.app"

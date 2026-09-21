@@ -41,9 +41,17 @@ pnpm --filter @bento/desktop package:mac --unsigned --arm64 --x64
 
 Output: `release-dist/desktop`. Bundled Node, deps, migrations, web assets, sandbox Dockerfile. Host Node not required; Docker still needed for local sandboxes.
 
-Unsigned: manual install/update; Gatekeeper may block first launch ([Apple guidance](https://support.apple.com/en-us/102445)). Signed: set `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` and omit `--unsigned`. Auto-updates only with `BENTO_RELEASE_TAG` and valid Developer ID signature.
+Unsigned: manual install/update. `--unsigned` applies an ad-hoc signature to seal the finished app, with hardened runtime disabled only for this mode. It does not establish a trusted developer identity or notarize the app, so Gatekeeper still blocks first launch ([Apple guidance](https://support.apple.com/en-us/102445)). Signed: set `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` and omit `--unsigned`. Auto-updates only with `BENTO_RELEASE_TAG` and valid Developer ID signature.
 
 Quit before replacing the app. Launch from `/Applications`, not the mounted DMG.
+
+For a release without Developer ID signing, try opening the installed app, then use **System Settings → Privacy & Security → Open Anyway** if macOS offers it. If it still blocks a download you trust, first compare the DMG's SHA-256 with the release's `SHA256SUMS`. You can then remove quarantine from just your installed Bento copy:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Bento.app
+```
+
+This is an explicit exception for Bento. It does not disable Gatekeeper for other apps. Managed Macs may require administrator approval. A matching download checksum does not repair an invalid app signature; use a release built with this packaging fix.
 
 ### Versioning and CI
 
