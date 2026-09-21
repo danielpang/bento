@@ -110,6 +110,9 @@ before(async () => {
     bus,
     userId: "u1",
     worktrees: new WorktreeManager(dataDir),
+    // Only the provider is read here, and only to refuse a driver that
+    // keeps its checkouts inside the machine rather than on this host.
+    driver: { provider: "docker" },
     boss: {
       send: async (queue: string, data: unknown) => {
         queued.push({ queue, data: data as Record<string, unknown> });
@@ -320,6 +323,26 @@ test("a worker that committed nothing lands as done with no commits", async () =
   assert.equal(result?.status, "landed");
   assert.deepEqual(result?.landed, [], "no repository moved");
   assert.equal((await taskRow(fx.task.id))!.status, "done");
+});
+
+test("a deployment whose driver holds the checkouts says so, rather than failing on a missing path", async () => {
+  const fx = await swarmWithLeaf("sprite");
+  await commitIn(fx.workerTree, fx.task.id, "e.txt", "from e\n", "add e");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const head = await git(fx.swarmTree, ["rev-parse", "HEAD"]);
+
+  const driver = (ctx as unknown as { driver: { provider: string } }).driver;
+  const was = driver.provider;
+  driver.provider = "sprite";
+  try {
+    const result = await performLanding(ctx, landing.id);
+    assert.equal(result?.status, "failed");
+    assert.match(result?.reason ?? "", /nothing has been lost/);
+    assert.doesNotMatch(result?.reason ?? "", /ENOENT|fatal:/, "not a git message about a path nobody can act on");
+  } finally {
+    driver.provider = was;
+  }
+  assert.equal(await git(fx.swarmTree, ["rev-parse", "HEAD"]), head);
 });
 
 test("a landing that is not at the front of the queue is not performed", async () => {

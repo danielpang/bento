@@ -146,6 +146,26 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   if (repoRows.length === 0) {
     return finish(ctx, landing.id, "failed", "this project spans no repositories, so there is nothing to land.");
   }
+  /**
+   * Landing reads and writes checkouts on this host.
+   *
+   * A driver with no host filesystem (the sprite driver clones inside
+   * the machine instead of mounting a worktree) has neither the swarm's
+   * checkout nor the worker's here, so every git call below would fail
+   * on a directory that is not there and the leaf would be failed with
+   * a message about a missing ref. Said plainly instead, because the
+   * answer is not "retry" and not "the worker did something wrong": it
+   * is that this deployment's driver cannot land yet.
+   */
+  if (ctx.driver.provider === "sprite") {
+    return finish(
+      ctx,
+      landing.id,
+      "failed",
+      "landing a branch needs the repository on the server, and this deployment runs agents on sandboxes that hold their own clones. The leaf's branch is in its sandbox and nothing has been lost.",
+      task,
+    );
+  }
 
   const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
   const workerBranch = landing.branchName ?? task.branchName ?? workerBranchName(swarmBranch, task.id);
