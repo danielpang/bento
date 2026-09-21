@@ -70,6 +70,7 @@ jobs:
       - run: pnpm --filter @bento/desktop typecheck
       - run: pnpm --filter @bento/desktop test
       - run: pnpm --filter @bento/desktop test:updates
+        timeout-minutes: 5
       - run: pnpm --filter @bento/web test
       - name: Build installers
         env:
