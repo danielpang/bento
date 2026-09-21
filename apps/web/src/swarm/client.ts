@@ -4,6 +4,7 @@ import type {
   NewSwarmInput,
   Swarm,
   SwarmDetail,
+  SwarmLanding,
   SwarmPullRequest,
   SwarmStatus,
   SwarmSummary,
@@ -273,10 +274,30 @@ export interface WireTask {
   endedAt: string | null;
 }
 
+/** One row of the merge queue, as the detail sends it. */
+export interface WireLanding {
+  id: string;
+  taskId: string;
+  branchName: string | null;
+  position: number;
+  status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
+  attempt: number;
+  error: string | null;
+  resolverRunId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
 export interface WireDetail {
   swarm: WireSwarm;
   tasks: WireTask[];
   activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
+  /**
+   * Optional, because a detail from a server that predates the merge
+   * queue has none and a panel that read undefined.length would take
+   * the whole page down over a field that is only ever informational.
+   */
+  landings?: WireLanding[];
 }
 
 export interface WireTemplate {
@@ -581,13 +602,34 @@ export function toDetail(detail: WireDetail): SwarmDetail {
   return {
     swarm: toSwarm(detail.swarm, working),
     tasks: detail.tasks.map(toTask),
-    // The merge queue, the ledger and this swarm's pull requests are
-    // not served yet. Empty, so nothing is drawn rather than drawn
-    // wrong; the surfaces that read them render only when they hold
-    // something.
-    landings: [],
+    landings: (detail.landings ?? []).map(toLanding),
+    // The ledger and this swarm's pull requests are not served yet.
+    // Empty, so nothing is drawn rather than drawn wrong; the surfaces
+    // that read them render only when they hold something.
     ledger: [],
     pullRequests: [],
+  };
+}
+
+/**
+ * One merge queue row.
+ *
+ * Copied field for field rather than spread, so a column added to the
+ * server's response reaches the page only once somebody has decided
+ * what it means here.
+ */
+function toLanding(landing: WireLanding): SwarmLanding {
+  return {
+    id: landing.id,
+    taskId: landing.taskId,
+    branchName: landing.branchName,
+    position: landing.position,
+    status: landing.status,
+    attempt: landing.attempt,
+    error: landing.error,
+    resolverRunId: landing.resolverRunId,
+    startedAt: landing.startedAt,
+    endedAt: landing.endedAt,
   };
 }
 

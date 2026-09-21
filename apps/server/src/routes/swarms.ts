@@ -59,6 +59,16 @@ import { enqueueRun } from "../orchestrator/queue.js";
 export const RUNNER_PROJECT_REFUSAL =
   "Swarms need Bento to hold the sandboxes, because the merge queue lands one branch onto another inside them. This project runs its agents on your own machines, so it cannot run a swarm. Use a card, or move the project to server-run agents.";
 
+/**
+ * How much of the merge queue the detail carries.
+ *
+ * Enough to answer what a person opens the panel to ask: what is
+ * landing now, what is behind it, and did the last few go in. A swarm
+ * has a landing per leaf, so the whole list grows without bound and
+ * without becoming more useful.
+ */
+const LANDINGS_SHOWN = 20;
+
 const createSwarm = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(200),
@@ -277,7 +287,39 @@ export function swarmRoutes(ctx: AppContext) {
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
         .orderBy(desc(agentRuns.queuedAt));
-      return c.json({ swarm, tasks, activeRuns: runs });
+      /**
+       * The merge queue, as the panel draws it: what is waiting, what
+       * is landing, and the last of what has landed.
+       *
+       * Capped rather than whole. A long swarm has a landing per leaf
+       * and the ones from an hour ago answer nothing a person is
+       * asking; the panel shows the last ten, and the cap is here
+       * rather than in the browser so a swarm of two hundred leaves
+       * does not send two hundred rows on every refetch.
+       *
+       * Ordered by position, which is the queue's own order, and then
+       * by when the row was made, so two rows that somehow share a
+       * position still draw in a fixed order rather than swapping
+       * between refetches.
+       */
+      const landings = await db(c, ctx)
+        .select({
+          id: swarmLandings.id,
+          taskId: swarmLandings.taskId,
+          branchName: swarmLandings.branchName,
+          position: swarmLandings.position,
+          status: swarmLandings.status,
+          attempt: swarmLandings.attempt,
+          error: swarmLandings.error,
+          resolverRunId: swarmLandings.resolverRunId,
+          startedAt: swarmLandings.startedAt,
+          endedAt: swarmLandings.endedAt,
+        })
+        .from(swarmLandings)
+        .where(eq(swarmLandings.swarmId, swarm.id))
+        .orderBy(asc(swarmLandings.position), asc(swarmLandings.createdAt))
+        .limit(LANDINGS_SHOWN);
+      return c.json({ swarm, tasks, activeRuns: runs, landings });
     })
     .patch("/:id", zValidator("json", updateSwarm), async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
@@ -797,6 +839,23 @@ async function defaultTemplate(
       description: "The planner and worker a swarm uses when nobody has chosen others.",
       plannerProfileId: agents.planner,
       workerProfileId: agents.worker,
+      /**
+       * Two at once on a local install, four on a hosted one.
+       *
+       * A hosted worker is its own machine, so four of them cost four
+       * machines and nothing of the person's laptop. A local worker is
+       * a worktree and a container on the machine somebody is also
+       * using: four agents each running the repository's test command
+       * is four builds competing for the same cores, and the install
+       * that is meant to be watched becomes the one nobody can type on.
+       *
+       * Written onto the template rather than read from the mode at
+       * spawn time, so an install that later joins a team keeps the
+       * shape its swarms already had, and so a person who wants four
+       * can simply set four. A number nobody can see and nobody can
+       * change is not a default, it is a rule.
+       */
+      maxWorkers: ctx.env.BENTO_MODE === "multi" ? 4 : 2,
     })
     .returning();
   return created ?? null;
