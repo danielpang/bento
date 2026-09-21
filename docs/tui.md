@@ -18,6 +18,9 @@ Alternatively, you can [install from source](#install-from-source).
 
 Follow the installer's PATH instruction, adding it to `~/.zshrc` or `~/.bashrc`, then run `bento --version`. It prints the release tag, such as `v0.1.2`, and shows the same version during startup. A source checkout also shows its commit and dirty state when it differs from the tag. For a specific version, use its installer link from [GitHub Releases](https://github.com/danielpang/bento/releases).
 
+The [Electron Mac app](../apps/desktop/README.md#shared-release-version) uses the
+same Bento release version. One Git tag builds and publishes both applications.
+
 To update to the latest stable release, quit the TUI and run:
 
 ```sh

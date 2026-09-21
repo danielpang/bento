@@ -3,6 +3,7 @@ import { ApiError, type BentoClient, type RunArtifact } from "@bento/api-client"
 import { Markdown, MermaidDiagram } from "./Markdown.js";
 import { Modal } from "./Modal.js";
 import { Skeleton } from "./Skeleton.js";
+import { desktop } from "../desktop.js";
 
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 4;
@@ -211,7 +212,7 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
     body = showSource ? (
       <pre className="artifact artifact-source">{text}</pre>
     ) : (
-      <iframe className="artifact-frame" sandbox="allow-scripts" srcDoc={text!} title={artifact.path} />
+      <HtmlPreview text={text!} title={artifact.path} />
     );
   } else if (needsText) {
     body = <pre className="artifact artifact-source">{text}</pre>;
@@ -220,6 +221,16 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
   }
 
   return { body, sourceToggle };
+}
+
+function HtmlPreview({ text, title }: { text: string; title: string }) {
+  const frame = useRef<HTMLIFrameElement>(null);
+  const send = () => frame.current?.contentWindow?.postMessage({ html: text }, "*");
+  useEffect(() => { if (desktop) send(); }, [text]);
+  // An unprivileged document hosts the exact same sandboxed srcdoc on desktop.
+  // This lets previews use CDN scripts without granting the console that right.
+  if (desktop) return <iframe ref={frame} className="artifact-frame" sandbox="allow-scripts" src="bento-preview://artifact/" onLoad={send} title={title} />;
+  return <iframe className="artifact-frame" sandbox="allow-scripts" srcDoc={text} title={title} />;
 }
 
 function ArtifactTextSkeleton() {

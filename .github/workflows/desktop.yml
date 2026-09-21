@@ -1,0 +1,111 @@
+name: Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Bento release tag to build (for example v0.1.3)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: The same release tag used to package the CLI
+        required: true
+        type: string
+    outputs:
+      signed:
+        description: Whether the Mac installers are Developer ID signed and notarized
+        value: ${{ jobs.mac.outputs.signed }}
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 35
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Validate the release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: node scripts/release-version.mjs "$TAG"
+      - name: Select signing mode
+        id: signing
+        env:
+          CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK || secrets.MACOS_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.DESKTOP_CSC_KEY_PASSWORD || secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID || secrets.MACOS_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
+        run: |
+          if [ -z "$CSC_LINK" ]; then
+            echo 'signed=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::No signing certificate configured. Building unsigned installers with manual updates.'
+            exit 0
+          fi
+          for NAME in CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!NAME}" ]; then
+              echo "::error::Missing $NAME. A configured signing certificate requires complete signing and notarization settings. See apps/desktop/README.md."
+              exit 1
+            fi
+          done
+          echo 'signed=true' >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @bento/desktop... build
+      - run: pnpm --filter @bento/desktop typecheck
+      - run: pnpm --filter @bento/desktop test
+      - run: pnpm --filter @bento/desktop test:updates
+      - run: pnpm --filter @bento/web test
+      - name: Build installers
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          BENTO_RELEASE_TAG: ${{ inputs.tag }}
+          CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK || secrets.MACOS_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.DESKTOP_CSC_KEY_PASSWORD || secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID || secrets.MACOS_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
+        run: |
+          case "$SIGNED" in
+            true) pnpm --filter @bento/desktop package:mac --arm64 --x64 ;;
+            false) pnpm --filter @bento/desktop package:mac --unsigned --arm64 --x64 ;;
+            *) echo '::error::Unknown signing mode.'; exit 1 ;;
+          esac
+      - name: Verify signing, versions, and update assets
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="$(node scripts/release-version.mjs "$TAG")"
+          for ARCH in mac-arm64 mac; do
+            ACTUAL="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "release-dist/desktop/$ARCH/Bento.app/Contents/Info.plist")"
+            test "$ACTUAL" = "$VERSION"
+            if [ "$SIGNED" = true ]; then
+              codesign --verify --deep --strict -R 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "release-dist/desktop/$ARCH/Bento.app"
+              xcrun stapler validate "release-dist/desktop/$ARCH/Bento.app"
+            fi
+          done
+          node apps/desktop/scripts/verify-update-artifacts.mjs release-dist/desktop "$TAG"
+          cd release-dist/desktop
+          shasum -a 256 ./*.dmg ./*.zip ./*.blockmap ./latest-mac.yml > desktop.sha256
+      - uses: actions/upload-artifact@v6
+        with:
+          name: desktop-macos
+          if-no-files-found: error
+          path: |
+            release-dist/desktop/*.dmg
+            release-dist/desktop/*.zip
+            release-dist/desktop/*.blockmap
+            release-dist/desktop/latest-mac.yml
+            release-dist/desktop/desktop.sha256

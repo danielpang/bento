@@ -3,6 +3,8 @@ import type { BentoClient, Project, SlackConnection } from "@bento/api-client";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
+import { startIntegration, useDesktopIntegrationRevision } from "../desktop.js";
+import { DesktopIntegrationNote } from "./DesktopIntegrationNote.js";
 
 /**
  * The Slack tab: install the app into a workspace, and pick the
@@ -10,6 +12,7 @@ import { useToast } from "./Toasts.js";
  * in Slack.
  */
 export function SlackPanel({ client }: { client: BentoClient }) {
+  const revision = useDesktopIntegrationRevision();
   const toast = useToast();
   const [status, setStatus] = useState<SlackConnection | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -35,7 +38,7 @@ export function SlackPanel({ client }: { client: BentoClient }) {
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, revision]);
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -83,6 +86,7 @@ export function SlackPanel({ client }: { client: BentoClient }) {
           Install Bento in a Slack workspace to create cards with @bento and get stage
           progress, write-ups, and review buttons in that thread.
         </p>
+        <DesktopIntegrationNote />
         {status.canManage ? (
           <button
             type="button"
@@ -90,8 +94,7 @@ export function SlackPanel({ client }: { client: BentoClient }) {
             disabled={busy}
             onClick={() =>
               void act(async () => {
-                const { url } = await client.startSlackInstall();
-                window.location.assign(url);
+                await startIntegration("slack", () => client.startSlackInstall());
               })
             }
           >

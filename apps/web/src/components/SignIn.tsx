@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { authClient, signIn, signUp } from "../auth-client.js";
 import { BrandLockup } from "./BrandLockup.js";
+import { desktop } from "../desktop.js";
 import { GitHubIcon, GoogleIcon } from "./ProviderIcons.js";
 
 /**
@@ -130,6 +131,14 @@ export function SignIn({
         ? "Could not send the email just now. Try again in a moment."
         : "If that address has an account, a reset link is on its way.",
     );
+  }
+
+  if (desktop) {
+    return <div className="center"><div className="card-panel">
+      <div className="auth-head"><BrandLockup size="lg" /><h1>Sign in to Bento</h1></div>
+      <p className="muted">Open Connection Settings and connect to sign in through your browser.</p>
+      <button className="btn btn-primary" onClick={() => void desktop?.settings()}>Connection Settings</button>
+    </div></div>;
   }
 
   if (pendingEmail) {

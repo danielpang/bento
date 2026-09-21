@@ -3,6 +3,8 @@ import type { BentoClient, GitHubConnection } from "@bento/api-client";
 import { authClient } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
+import { desktop, startIntegration, useDesktopIntegrationRevision } from "../desktop.js";
+import { DesktopIntegrationNote } from "./DesktopIntegrationNote.js";
 
 const CONNECT_NOTE =
   "Sends you to GitHub to confirm who you are, then back here. It is your own account, not the "
@@ -58,6 +60,10 @@ export function ConnectGitHubAccount({
         className={primary ? "btn btn-primary" : "btn"}
         disabled={busy}
         onClick={() => {
+          if (desktop) {
+            void desktop.openIntegration("github").catch(toast.fail);
+            return;
+          }
           setBusy(true);
           void authClient
             .linkSocial({
@@ -79,7 +85,7 @@ export function ConnectGitHubAccount({
       >
         {label}
       </button>
-      <p className="muted">{note}</p>
+      {desktop ? <DesktopIntegrationNote /> : <p className="muted">{note}</p>}
     </>
   );
 }
@@ -108,6 +114,7 @@ const RECONNECT_NOTE =
  */
 export function GitHubAccountCard({ client }: { client: BentoClient }) {
   const toast = useToast();
+  const revision = useDesktopIntegrationRevision();
   const [status, setStatus] = useState<GitHubConnection | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -120,7 +127,7 @@ export function GitHubAccountCard({ client }: { client: BentoClient }) {
         setFailed(false);
       })
       .catch(() => setFailed(true));
-  }, [client]);
+  }, [client, revision]);
 
   if (failed) {
     return (
@@ -156,17 +163,14 @@ export function GitHubAccountCard({ client }: { client: BentoClient }) {
                 disabled={busy}
                 onClick={() => {
                   setBusy(true);
-                  void client
-                    .startGitHubInstall()
-                    .then(({ url }) => window.location.assign(url))
-                    .catch((err: unknown) => {
-                      toast.fail(err);
-                      setBusy(false);
-                    });
+                  void startIntegration("github", () => client.startGitHubInstall())
+                    .catch(toast.fail)
+                    .finally(() => setBusy(false));
                 }}
               >
                 Install GitHub App
               </button>
+              <DesktopIntegrationNote />
             </div>
           )}
           {status.connected && status.installation && (

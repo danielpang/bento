@@ -6,6 +6,7 @@ import { ToastHost } from "./components/Toasts.js";
 import { startErrorTracking } from "./posthog.js";
 import { ownBuild } from "./build-watch.js";
 import "./styles.css";
+import "./desktop.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");

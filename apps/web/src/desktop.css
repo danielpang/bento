@@ -1,0 +1,52 @@
+/* The macOS traffic lights sit on the existing themed header. Only Electron's
+   isolated preload sets this attribute; browser layout stays the same. */
+:root[data-desktop="mac"] {
+  --desktop-controls-inset: 104px;
+  --desktop-titlebar-height: 52px;
+}
+
+:root[data-desktop="mac"] .topbar {
+  padding-left: var(--desktop-controls-inset);
+  border-bottom: 0;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+/* Blank header space drags the window. Menus, links, and form fields keep
+   normal pointer behavior, including the project picker's whole subtree. */
+:root[data-desktop="mac"] .topbar > :not(.topbar-spacer) {
+  -webkit-app-region: no-drag;
+}
+
+:root[data-desktop="mac"] :is(.modal-backdrop, .drawer, [data-portal-layer]) {
+  -webkit-app-region: no-drag;
+}
+
+.desktop-titlebar {
+  position: fixed;
+  inset: 0 0 auto;
+  height: var(--desktop-titlebar-height);
+  background: transparent;
+  -webkit-app-region: drag;
+  user-select: none;
+  z-index: 1;
+}
+
+/* Standalone sessions, artifacts, and entrance screens have no full-width
+   header. Reserve a matching strip so native controls never cover content. */
+:root[data-desktop="mac"] body:not(:has(#root > .app > .topbar)) {
+  padding-top: var(--desktop-titlebar-height);
+}
+
+:root[data-desktop="mac"] body:not(:has(#root > .app > .topbar)) #root > :is(.app, .session-page) {
+  height: calc(100dvh - var(--desktop-titlebar-height));
+}
+
+:root[data-desktop="mac"] body:has(#root > .app > .topbar) > .desktop-titlebar {
+  display: none;
+}
+
+:root[data-desktop="mac"][data-desktop-fullscreen] {
+  --desktop-controls-inset: 24px;
+  --desktop-titlebar-height: 0px;
+}

@@ -11,6 +11,8 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "dev:cli": "./scripts/dev-cli.sh",
+    "dev:desktop": "pnpm --filter @bento/desktop... build && pnpm --filter @bento/desktop start",
+    "desktop:package": "pnpm --filter @bento/desktop... build && pnpm --filter @bento/desktop package:mac",
     "docker:up": "docker compose up --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f server",

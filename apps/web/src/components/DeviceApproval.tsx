@@ -69,13 +69,13 @@ export function DeviceApproval() {
       <div className="card-panel">
         <div className="auth-head">
           <BrandLockup size="lg" />
-          <h1>Connect a terminal</h1>
+          <h1>Connect Bento</h1>
         </div>
 
         {phase === "entering" || phase === "claiming" || phase === "error" ? (
           <>
             {phase === "error" && <p className="error">{message}</p>}
-            <p className="muted">Enter the code shown in your terminal.</p>
+            <p className="muted">Enter the code shown in your Bento application or terminal.</p>
             <input
               className="input user-code"
               value={code}
@@ -91,7 +91,7 @@ export function DeviceApproval() {
 
         {phase === "ready" && (
           <>
-            <p className="muted">A terminal is asking to sign in as you.</p>
+            <p className="muted">A Bento application is asking to sign in as you.</p>
             <div className="user-code">{code}</div>
             <div className="actions actions-centered">
               <button className="btn btn-primary" disabled={deciding} onClick={() => decide(true)}>
@@ -104,8 +104,8 @@ export function DeviceApproval() {
           </>
         )}
 
-        {phase === "done" && <p className="muted">Approved. Return to your terminal, it will continue on its own.</p>}
-        {phase === "denied" && <p className="muted">Denied. The terminal will not be signed in.</p>}
+        {phase === "done" && <p className="muted">Approved. Return to Bento, it will continue on its own.</p>}
+        {phase === "denied" && <p className="muted">Denied. The application will not be signed in.</p>}
       </div>
     </div>
   );
