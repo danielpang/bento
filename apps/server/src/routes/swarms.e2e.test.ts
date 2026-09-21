@@ -299,6 +299,36 @@ test("the swarm reads back with its plan, and the strip reads back with its numb
   assert.equal((await app.request("/api/swarms?projectId=11111111-1111-1111-1111-111111111111")).status, 404);
 });
 
+test("the detail carries the merge queue, in the queue's own order and words", async () => {
+  const swarm = await createSwarm();
+  const [first] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "landed one", status: "done", position: 0 })
+    .returning();
+  const [second] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "stuck one", status: "working", position: 1 })
+    .returning();
+  await db.insert(swarmLandings).values([
+    { swarmId: swarm.id, taskId: second!.id, branchName: "swarm/s-2", position: 1, status: "conflicted", attempt: 2, error: "CONFLICT (content): both changed one file" },
+    { swarmId: swarm.id, taskId: first!.id, branchName: "swarm/s-1", position: 0, status: "landed", attempt: 1 },
+  ]);
+
+  const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
+    landings: { taskId: string; status: string; attempt: number; error: string | null; branchName: string | null }[];
+  };
+  assert.equal(detail.landings.length, 2);
+  assert.deepEqual(
+    detail.landings.map((row) => row.taskId),
+    [first!.id, second!.id],
+    "by position, which is the queue's own order rather than insertion order",
+  );
+  assert.equal(detail.landings[1]!.status, "conflicted", "the server's own word, not a translation of it");
+  assert.equal(detail.landings[1]!.attempt, 2);
+  assert.match(detail.landings[1]!.error ?? "", /both changed one file/);
+  assert.equal(detail.landings[0]!.branchName, "swarm/s-1");
+});
+
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {
   const swarm = await createSwarm();
   await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });

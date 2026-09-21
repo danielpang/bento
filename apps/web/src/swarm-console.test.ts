@@ -4,15 +4,17 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BetaTestersScope } from "./beta.js";
 import { BoardModeToggle } from "./components/BoardModeToggle.js";
+import { MergeQueue } from "./components/MergeQueue.js";
 import { SwarmEmpty, SwarmStrip } from "./components/SwarmStrip.js";
 import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmPage } from "./components/SwarmPage.js";
+import { isolationWords } from "./components/SwarmTemplatesPanel.js";
 import { modeSurfaces } from "./swarm/plan.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import type { SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
+import type { SwarmLanding, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
 import { readFileSync, readdirSync } from "node:fs";
 
 /**
@@ -372,6 +374,175 @@ const NOW = Date.parse("2026-09-04T12:00:00.000Z");
   setItem: () => {},
 };
 
+test("a pull request the console would not link to is drawn without a link", () => {
+  /**
+   * `swarm_pull_requests.url` is written on a path agents are on, and
+   * an href is not inert: a `javascript:` address in one runs on the
+   * console's origin with the session that is open. `client.ts` nulls
+   * anything that is not http or https, and this is the other half of
+   * that: the chip has to still draw, because a pull request nobody
+   * can see is worse than one nobody can click.
+   */
+  const detail = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-api")!;
+  const withRefused = {
+    ...detail,
+    pullRequests: [
+      { id: "pr-good", repoUrl: "github.com/acme/app", number: 12, url: "https://github.com/acme/app/pull/12", headSha: null },
+      { id: "pr-bad", repoUrl: "github.com/acme/api", number: 13, url: null, headSha: null },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    createElement(SwarmPage, {
+      detail: withRefused,
+      model: buildSwarmModel(withRefused.tasks, { now: NOW }),
+      view: "tree",
+      onView: () => {},
+      selectedId: null,
+      onSelect: () => {},
+      onToggleNode: () => {},
+      surfaces: modeSurfaces("multi"),
+      actions: {
+        onPause: () => {},
+        onResume: () => {},
+        onStop: () => {},
+        onWorkers: () => {},
+        onAnswer: () => {},
+      },
+    }),
+  );
+
+  assert.match(html, /href="https:\/\/github\.com\/acme\/app\/pull\/12"/, "the real one is a link");
+  assert.match(html, /github\.com\/acme\/api #13/, "the refused one is still shown");
+  assert.equal(
+    html.split("swarm-prs")[1]?.includes("javascript:"),
+    false,
+    "and nothing that is not an address reached an href",
+  );
+  // One anchor in the row, not two: the refused chip is a span.
+  const row = html.split('class="swarm-prs"')[1]?.split("</div>")[0] ?? "";
+  assert.equal((row.match(/<a /g) ?? []).length, 1);
+});
+
+test("a node draws the commits and the history the drawer was given, not the plan's", () => {
+  /**
+   * The commits come from git, through the node route, because landing
+   * rebases a worker's branch and every sha changes: a list carried on
+   * the plan row would name commits no branch has. The history is what
+   * makes a resolver visible at all, since a conflict puts a second
+   * agent on a leaf and nothing else on the node says so.
+   */
+  const model = buildSwarmModel(tasks(), { now: NOW });
+  const task = tasks().find((row) => row.id === "slow")!;
+  const html = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, {
+      task,
+      node: model.byId.get("slow")!,
+      detail: {
+        taskId: "slow",
+        commits: [
+          { sha: "9f2c1abdeadbeef", message: "Refund the last capture", at: "2026-01-01T00:00:00.000Z", repository: "api" },
+        ],
+        events: [
+          {
+            id: "ev-1",
+            kind: "assigned",
+            at: "2026-01-01T00:00:00.000Z",
+            fromStatus: "open",
+            toStatus: "assigned",
+            runId: null,
+            detail: null,
+          },
+          {
+            id: "ev-2",
+            kind: "attention_raised",
+            at: "2026-01-01T01:00:00.000Z",
+            fromStatus: null,
+            toStatus: null,
+            runId: "11112222-3333-4444-5555-666677778888",
+            detail: { conflict: "shared.txt: both modified\nsecond line", resolver: "started" },
+          },
+        ],
+      },
+      onClose: () => {},
+    }),
+  );
+
+  assert.match(html, /9f2c1ab/, "the sha, shortened");
+  assert.match(html, /Refund the last capture/);
+  assert.match(html, /Assigned/);
+  assert.match(html, /Resolver started/, "the resolver run reads as one, not as an enum");
+  assert.match(html, /run 11112222/, "and names the run it served, so the transcript can be found");
+  assert.match(html, /shared\.txt: both modified/);
+  assert.doesNotMatch(html, /second line/, "one line of git's output, not all of it");
+});
+
+test("a node with nothing committed says so rather than saying nothing was pushed", () => {
+  const model = buildSwarmModel(tasks(), { now: NOW });
+  const task = tasks().find((row) => row.id === "slow")!;
+  const html = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, {
+      task,
+      node: model.byId.get("slow")!,
+      detail: { taskId: "slow", commits: [], events: [] },
+      onClose: () => {},
+    }),
+  );
+  assert.match(html, /No commits carry this task&#x27;s trailer yet/);
+});
+
+test("the node composer says where a message goes, and a finished node gets none", () => {
+  /**
+   * The card composer's rule: the box says whether the words go now or
+   * wait. A swarm worker is headless and holds no live session, so the
+   * only honest promise is the next agent put on the task.
+   */
+  const model = buildSwarmModel(tasks(), { now: NOW });
+  const working = tasks().find((row) => row.id === "slow")!;
+  const live = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, {
+      task: working,
+      node: model.byId.get("slow")!,
+      onClose: () => {},
+      onMessage: () => {},
+    }),
+  );
+  assert.match(live, /aria-label="Queue a message for this task"/);
+  assert.match(live, /cannot hear mid turn/);
+  assert.match(live, /given to the next agent put on it/);
+
+  const done = tasks().find((row) => row.id === "s1")!;
+  const finished = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, {
+      task: done,
+      node: model.byId.get("s1")!,
+      onClose: () => {},
+      onMessage: () => {},
+    }),
+  );
+  assert.doesNotMatch(finished, /aria-label="Queue a message for this task"/);
+  assert.match(finished, /no agent is coming to read a message/);
+});
+
+test("a drawer with no handler for messages draws no composer at all", () => {
+  const model = buildSwarmModel(tasks(), { now: NOW });
+  const task = tasks().find((row) => row.id === "slow")!;
+  const html = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, { task, node: model.byId.get("slow")!, onClose: () => {} }),
+  );
+  assert.doesNotMatch(html, /Queue a message/);
+});
+
+test("a template says where its agents work, because a deployment can refuse it", () => {
+  /**
+   * The shape is recorded on the template rather than read off the
+   * driver, so it is a thing a person chose and a thing a deployment
+   * can decline. Somebody reading this panel is the person who would
+   * have to know why a swarm was refused.
+   */
+  assert.equal(isolationWords("worktree"), "each in a worktree of the repository on the server");
+  assert.equal(isolationWords("sandbox"), "each on a machine of its own");
+});
+
 function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
   const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
   const detail = status ? { ...seeded, swarm: { ...seeded.swarm, status } } : seeded;
@@ -468,12 +639,111 @@ test("the same page in local mode renders no out of compute banner", () => {
   assert.ok(!pageHtml("multi").includes("agent hours for the period"));
 });
 
+/* ------------------------------------------------------------------ *
+ * The merge queue.
+ * ------------------------------------------------------------------ */
+
+function landing(overrides: Partial<SwarmLanding> = {}): SwarmLanding {
+  return {
+    id: "ld",
+    taskId: "t-1",
+    branchName: "swarm/checkout-aaaa1111",
+    position: 0,
+    status: "queued",
+    attempt: 0,
+    error: null,
+    resolverRunId: null,
+    startedAt: null,
+    endedAt: null,
+    ...overrides,
+  };
+}
+
+function queueHtml(landings: SwarmLanding[]): string {
+  return renderToStaticMarkup(createElement(MergeQueue, { landings, tasks: tasks() }));
+}
+
+test("the merge queue says what is landing, what is waiting, and what went in", () => {
+  const html = queueHtml([
+    landing({ id: "a", taskId: "t-api", status: "landed", attempt: 1, endedAt: "2026-01-01T10:00:00.000Z" }),
+    landing({ id: "b", taskId: "t-web", status: "landing", attempt: 1, position: 1 }),
+    landing({ id: "c", taskId: "t-docs", status: "queued", position: 2 }),
+  ]);
+  assert.match(html, /Merge queue/);
+  assert.match(html, /Landing/);
+  assert.match(html, /Waiting/);
+  assert.match(html, /Landed/);
+  assert.match(html, /1 waiting, one branch at a time/);
+  assertNoDashes(html, "the merge queue");
+});
+
+test("every landing status draws a tone the stylesheet actually defines", () => {
+  /**
+   * A tone name with no rule behind it draws as the default grey,
+   * silently, so a conflict and a queued row would be the same dot. The
+   * six here are the board's own, and the stylesheet is read rather
+   * than assumed.
+   */
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const statuses: SwarmLanding["status"][] = ["queued", "landing", "landed", "conflicted", "failed", "cancelled"];
+  for (const status of statuses) {
+    const html = queueHtml([landing({ status })]);
+    const tone = /class="dot" data-state="([a-z]+)"/.exec(html)?.[1];
+    assert.ok(tone, `${status} draws a dot`);
+    const defined = tone === "idle" || css.includes(`.dot[data-state="${tone}"]`);
+    assert.ok(defined, `${status} draws as "${tone}", which the stylesheet does not define`);
+  }
+});
+
+test("what git said about a conflict is printed as text, and only while it stands", () => {
+  const conflict = queueHtml([
+    landing({ status: "conflicted", attempt: 2, error: "CONFLICT (content): Merge conflict in <script>x</script>" }),
+  ]);
+  // Agent adjacent output, escaped by React rather than trusted.
+  assert.ok(!conflict.includes("<script>x</script>"));
+  assert.match(conflict, /&lt;script&gt;/);
+  assert.match(conflict, /try 2/);
+  assert.match(conflict, /nothing else lands until this is settled/);
+
+  // A landed row's error is history, and printing it would read as a
+  // failure on work that is in.
+  const landed = queueHtml([landing({ status: "landed", error: "an earlier attempt said this" })]);
+  assert.ok(!landed.includes("an earlier attempt said this"));
+});
+
+test("a conflict nobody is on says the queue is still asking, not that it gave up", () => {
+  /**
+   * The words have to match what the server does. A conflict with no
+   * resolver named is not a conflict the queue has abandoned: an agent
+   * is asked for on every pass, and the ordinary reason there is none
+   * yet is a team with no agent hours left for the moment. The panel
+   * said "nothing is reconciling this branch", which read as a dead end
+   * and sent people to cancel the swarm.
+   */
+  const waiting = queueHtml([landing({ status: "conflicted", error: "CONFLICT (content) in one file" })]);
+  assert.match(waiting, /No agent is on this branch yet/);
+  assert.match(waiting, /asked for each time the swarm is reconciled/);
+  assert.ok(!waiting.includes("Nothing is reconciling"));
+
+  const working = queueHtml([
+    landing({ status: "conflicted", resolverRunId: "run-1", error: "CONFLICT (content) in one file" }),
+  ]);
+  assert.match(working, /An agent is reconciling this branch/);
+  assertNoDashes(`${waiting}${working}`, "the merge queue's conflict note");
+});
+
+test("a swarm with nothing accepted yet says so rather than drawing an empty list", () => {
+  const html = queueHtml([]);
+  assert.match(html, /Nothing has been accepted yet/);
+  assert.ok(!html.includes("swarm-queue-row"));
+});
+
 test("no dash reaches a reader, in any swarm source", () => {
   const roots = ["src/swarm", "src/components"];
   const offenders: string[] = [];
   for (const root of roots) {
     for (const name of readdirSync(new URL(`../${root}`, import.meta.url))) {
-      if (!/^(Swarm|BoardModeToggle|CompletionRing|NewSwarm)/.test(name) && root === "src/components") continue;
+      if (!/^(Swarm|BoardModeToggle|CompletionRing|NewSwarm|MergeQueue)/.test(name) && root === "src/components") continue;
       if (!name.endsWith(".ts") && !name.endsWith(".tsx")) continue;
       const text = readFileSync(new URL(`../${root}/${name}`, import.meta.url), "utf8");
       if (text.includes("\u2014") || text.includes("\u2013")) offenders.push(`${root}/${name}`);

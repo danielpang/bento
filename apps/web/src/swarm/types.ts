@@ -161,9 +161,19 @@ export interface SwarmLanding {
   taskId: string;
   branchName: string | null;
   position: number;
-  status: "queued" | "landing" | "landed" | "conflict" | "failed";
+  /**
+   * The server's own words, not a translation of them. The panel picks
+   * the label; a second vocabulary here was how "conflict" and
+   * "conflicted" came to mean the same thing in two files, and a row
+   * whose status matched neither drew as nothing at all.
+   */
+  status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
   attempt: number;
   error: string | null;
+  /** The agent reconciling this branch, when one was started. */
+  resolverRunId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
 }
 
 /**
