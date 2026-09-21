@@ -18,12 +18,14 @@
     "test": "node --test --import tsx src/*.test.ts",
     "test:e2e": "node scripts/smoke.mjs",
     "test:auth": "node scripts/remote-smoke.mjs",
+    "test:updates": "node scripts/update-smoke.mjs",
     "package:mac": "node scripts/package.mjs"
   },
   "dependencies": {
     "@bento/api-client": "workspace:*",
     "@bento/sandbox": "workspace:*",
-    "@bento/server": "workspace:*"
+    "@bento/server": "workspace:*",
+    "electron-updater": "6.8.3"
   },
   "devDependencies": {
     "@bento/web": "workspace:*",

@@ -26,7 +26,7 @@ export class RuntimeController {
         }
       });
       child.once("exit", (code) => {
-        this.child = undefined;
+        if (this.child === child) this.child = undefined;
         if (!ready) reject(new Error(`The local server stopped during startup (exit ${code}).`));
         else if (!this.stopping) this.failed("The local server stopped. Open Connection Settings to restart it.");
       });
@@ -38,13 +38,20 @@ export class RuntimeController {
     if (this.stopping) return this.stopping;
     const child = this.child;
     if (!child) return;
-    this.stopping = new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => { child.kill(); resolve(); }, 12_000);
-      child.once("exit", () => { clearTimeout(timeout); resolve(); });
-      child.postMessage({ type: "stop" });
+    this.stopping = new Promise<void>((resolve, reject) => {
+      let killTimeout: ReturnType<typeof setTimeout> | undefined;
+      const forceStop = () => {
+        // kill() only sends a signal. Keep ownership until exit is observed.
+        try { child.kill(); }
+        catch (error) { reject(error); return; }
+        killTimeout = setTimeout(() => reject(new Error("The local server did not stop. Please try quitting again.")), 5_000);
+      };
+      const timeout = setTimeout(forceStop, 12_000);
+      child.once("exit", () => { clearTimeout(timeout); clearTimeout(killTimeout); resolve(); });
+      try { child.postMessage({ type: "stop" }); }
+      catch { clearTimeout(timeout); forceStop(); }
     });
-    await this.stopping;
-    this.child = undefined;
-    this.stopping = undefined;
+    try { await this.stopping; }
+    finally { this.stopping = undefined; }
   }
 }

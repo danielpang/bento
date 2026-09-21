@@ -22,6 +22,8 @@ if (!tag) {
   }
 }
 const version = releaseVersion(tag);
+const supplied = process.argv.slice(2);
+const unsigned = supplied.includes("--unsigned");
 // Build beside a running app when verifying a new desktop release. Replacing
 // its resources would leave the old main process using new renderer assets.
 const output = path.resolve(repository, process.env.BENTO_DESKTOP_OUTPUT ?? "release-dist/desktop");
@@ -61,15 +63,18 @@ try {
   const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
   delete manifest.devDependencies;
   manifest.version = version;
+  // Only explicitly versioned, signed release packages may contact the feed.
+  manifest.bentoUpdatesEnabled = Boolean(process.env.BENTO_RELEASE_TAG && !unsigned);
   await writeFile(manifestFile, JSON.stringify(manifest, null, 2));
   const args = ["exec", "electron-builder", "--projectDir", stage, "--config", path.join(stage, "electron-builder.yml"),
     `--config.electronVersion=${sourceManifest.devDependencies.electron}`,
     `--config.directories.output=${output}`];
-  const supplied = process.argv.slice(2);
-  if (supplied.includes("--unsigned")) args.push("--config.mac.identity=null", "--config.mac.notarize=false");
+  if (unsigned) args.push("--config.mac.identity=null", "--config.mac.notarize=false", "--config.forceCodeSigning=false");
   args.push(...supplied.filter(arg => arg !== "--unsigned"));
   if (!supplied.some(arg => arg === "--arm64" || arg === "--x64" || arg === "--universal")) args.push(`--${process.arch}`);
-  execFileSync("pnpm", args, { cwd: root, stdio: "inherit", env: { ...process.env, ...(supplied.includes("--unsigned") ? { CSC_IDENTITY_AUTO_DISCOVERY: "false" } : {}) } });
+  // Release publication is atomic and owned by release.yml, never builder.
+  args.push("--publish", "never");
+  execFileSync("pnpm", args, { cwd: root, stdio: "inherit", env: { ...process.env, ...(unsigned ? { CSC_IDENTITY_AUTO_DISCOVERY: "false" } : {}) } });
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }

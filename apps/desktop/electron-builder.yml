@@ -3,6 +3,14 @@ productName: Bento
 copyright: Copyright Bento contributors
 asar: true
 npmRebuild: false
+forceCodeSigning: true
+publish:
+  provider: github
+  owner: danielpang
+  repo: bento
+  channel: latest
+  releaseType: release
+generateUpdatesFilesForAllChannels: false
 files:
   - dist/**
   - package.json

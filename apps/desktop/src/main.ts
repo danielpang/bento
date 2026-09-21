@@ -5,6 +5,8 @@ import { DeviceFlow } from "@bento/api-client";
 import { DesktopStore } from "./store.js";
 import { bundledFile, installConsoleProtocol } from "./protocol.js";
 import { RuntimeController } from "./runtime-controller.js";
+import { createUpdates } from "./update-service.js";
+import type { DesktopUpdates } from "./updates.js";
 import { isTrustedConsoleUrl, LAUNCHER_ORIGIN, normalizeServerUrl, safeExternalUrl, validateSettings } from "./security.js";
 import type { DesktopSettings, DesktopStatus } from "./contracts.js";
 
@@ -32,6 +34,9 @@ let status: DesktopStatus = { phase: "idle", message: "Choose where Bento runs."
 let connectionTask: Promise<void> | undefined;
 let cancelled: AbortController | undefined;
 let quitting = false;
+let quitPrepared = false;
+let shutdownTask: Promise<void> | undefined;
+let updates: DesktopUpdates | undefined;
 const backgrounds = { light: "#f2f1ed", dark: "#0e0d0b", navy: "#0a0e16" };
 let appearance: keyof typeof backgrounds = nativeTheme.shouldUseDarkColors ? "dark" : "light";
 
@@ -53,23 +58,50 @@ async function boot() {
     return bundledFile(path.join(directory, "launcher"), url.pathname === "/" ? "/index.html" : url.pathname, url.pathname === "/");
   });
   installIpc();
+  updates = await createUpdates({ changed: installMenu, shutdown: prepareShutdown, shutdownFailed: () => {
+    if (quitPrepared && current?.settings.mode === "local") {
+      current = undefined;
+      for (const window of windows) window.destroy();
+      publish({ phase: "idle", message: "The update could not finish. Reconnect to restart local Bento." });
+      void showLauncher();
+    }
+    quitting = false; quitPrepared = false; shutdownTask = undefined;
+  } });
   installMenu();
   app.on("second-instance", () => { if (current) openConsole(); else void showLauncher(); });
   app.on("activate", () => { if (windows.size === 0) { if (current) openConsole(); else void showLauncher(); } });
   app.on("window-all-closed", () => { /* macOS keeps local runs alive until Quit. */ });
   app.on("before-quit", (event) => {
-    if (quitting) return;
+    if (quitPrepared) return;
     event.preventDefault();
-    quitting = true;
-    cancelled?.abort();
-    void runtime.stop().finally(() => app.quit());
+    // With no child, shutdown resolves in this event's microtask checkpoint.
+    // Wait for Electron to leave the cancelled quit before asking it to quit.
+    void prepareShutdown().then(() => setImmediate(() => app.quit())).catch((error: unknown) => {
+      quitting = false;
+      dialog.showErrorBox("Bento could not stop", error instanceof Error ? error.message : String(error));
+    });
   });
+  app.on("will-quit", () => updates?.dispose());
+  updates.start();
   await showLauncher();
   // Opt-in command line launch is useful for development and integration tests.
   const server = process.argv.indexOf("--server");
   if (server >= 0 && process.argv[server + 1]) {
     await connect({ ...store.settings, mode: "remote", serverUrl: process.argv[server + 1]! });
   } else if (store.configured) await connect(store.settings);
+}
+
+async function prepareShutdown() {
+  if (shutdownTask) return shutdownTask;
+  quitting = true;
+  cancelled?.abort();
+  shutdownTask = (async () => {
+    await runtime.stop();
+    await connectionTask?.catch(() => {});
+    quitPrepared = true;
+  })();
+  try { await shutdownTask; }
+  catch (error) { quitting = false; shutdownTask = undefined; throw error; }
 }
 
 async function showLauncher() {
@@ -145,6 +177,7 @@ function installIpc() {
 }
 
 async function connect(settings: DesktopSettings): Promise<void> {
+  if (quitting) throw new Error("Bento is shutting down. Please wait.");
   if (connectionTask) throw new Error("A connection is already starting.");
   const controller = new AbortController();
   cancelled = controller;
@@ -266,6 +299,8 @@ function installMenu() {
   };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: "Bento", submenu: [ { role: "about" }, { type: "separator" },
+      { ...updates?.menu, label: updates?.menu.label ?? "Check for Updates...", click: () => void updates?.check(true) },
+      { type: "separator" },
       { label: "Connection Settings...", accelerator: "CmdOrCtrl+,", click: () => void showLauncher() },
       { type: "separator" }, { role: "services" }, { type: "separator" }, { role: "hide" }, { role: "hideOthers" }, { role: "unhide" }, { type: "separator" }, { role: "quit" } ] },
     { label: "File", submenu: [ { label: "New Window", accelerator: "CmdOrCtrl+Shift+N", click: () => openConsole() }, { role: "close" } ] },

@@ -34,10 +34,25 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
         run: node scripts/release-version.mjs "$TAG"
+      - name: Require release signing and notarization
+        env:
+          CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK || secrets.MACOS_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.DESKTOP_CSC_KEY_PASSWORD || secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID || secrets.MACOS_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
+        run: |
+          for NAME in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!NAME}" ]; then
+              echo "::error::Missing $NAME. Release builds require Developer ID signing and notarization. See apps/desktop/README.md."
+              exit 1
+            fi
+          done
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @bento/desktop... build
       - run: pnpm --filter @bento/desktop typecheck
       - run: pnpm --filter @bento/desktop test
+      - run: pnpm --filter @bento/desktop test:updates
       - run: pnpm --filter @bento/web test
       - name: Build installers
         env:
@@ -47,16 +62,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID || secrets.MACOS_APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
-        run: |
-          if [ -n "$CSC_LINK" ]; then
-            test -n "$APPLE_ID"
-            test -n "$APPLE_APP_SPECIFIC_PASSWORD"
-            test -n "$APPLE_TEAM_ID"
-            pnpm --filter @bento/desktop package:mac --arm64 --x64
-          else
-            pnpm --filter @bento/desktop package:mac --unsigned --arm64 --x64
-          fi
-      - name: Verify app versions and checksum the installers
+        run: pnpm --filter @bento/desktop package:mac --arm64 --x64
+      - name: Verify signing, versions, and update assets
         env:
           TAG: ${{ inputs.tag }}
         run: |
@@ -64,9 +71,12 @@ jobs:
           for ARCH in mac-arm64 mac; do
             ACTUAL="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "release-dist/desktop/$ARCH/Bento.app/Contents/Info.plist")"
             test "$ACTUAL" = "$VERSION"
+            codesign --verify --deep --strict -R 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "release-dist/desktop/$ARCH/Bento.app"
+            xcrun stapler validate "release-dist/desktop/$ARCH/Bento.app"
           done
+          node apps/desktop/scripts/verify-update-artifacts.mjs release-dist/desktop "$TAG"
           cd release-dist/desktop
-          shasum -a 256 ./*.dmg ./*.zip > desktop.sha256
+          shasum -a 256 ./*.dmg ./*.zip ./*.blockmap ./latest-mac.yml > desktop.sha256
       - uses: actions/upload-artifact@v6
         with:
           name: desktop-macos
@@ -74,4 +84,6 @@ jobs:
           path: |
             release-dist/desktop/*.dmg
             release-dist/desktop/*.zip
+            release-dist/desktop/*.blockmap
+            release-dist/desktop/latest-mac.yml
             release-dist/desktop/desktop.sha256

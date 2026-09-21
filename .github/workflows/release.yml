@@ -146,6 +146,7 @@ jobs:
             echo
             echo 'The macOS app uses the same release version. Download the arm64 DMG for Apple Silicon or the x64 DMG for Intel, then drag Bento to Applications.'
             echo 'The app bundles its runtime, so it does not need a separate Node.js installation.'
+            echo 'Signed macOS releases download stable updates automatically. Choose Bento > Restart to Update when you are ready. Existing unsigned builds need a one-time manual replacement with this signed app.'
             echo "See [the Mac application guide](https://github.com/$REPO/blob/$TAG/apps/desktop/README.md) for setup and signing details."
           } > notes.md
           flags=()
@@ -160,5 +161,5 @@ jobs:
           else
             gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
           fi
-          gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.dmg artifacts/*.zip artifacts/install.sh artifacts/SHA256SUMS --clobber
+          gh release upload "$TAG" artifacts/*.tar.gz artifacts/*.dmg artifacts/*.zip artifacts/*.blockmap artifacts/latest-mac.yml artifacts/install.sh artifacts/SHA256SUMS --clobber
           gh release edit "$TAG" --draft=false --notes-file notes.md "${flags[@]}"
