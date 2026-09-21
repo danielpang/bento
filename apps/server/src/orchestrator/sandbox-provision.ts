@@ -65,6 +65,20 @@ export interface ProvisionWorkspaceInput {
    * old one stood and that work travels with the card.
    */
   restartedRepoUrls?: string[];
+  /**
+   * The branch a new branch here starts from, instead of each
+   * repository's default branch.
+   *
+   * A swarm's worker sets it to the swarm's branch, and that is the
+   * whole of what makes a swarm one change rather than several. A leaf
+   * branched off the repository's default branch has none of what the
+   * leaves before it landed, so its agent writes against code that is
+   * already out of date and its branch conflicts with every one of
+   * them at the merge queue. Only the branch's starting point: an
+   * existing worktree is left where its agent was working, the way a
+   * card's is.
+   */
+  startFromBranch?: string;
   /** Progress lines, which go into the transcript of whatever asked. */
   say: (text: string) => Promise<void>;
 }
@@ -104,7 +118,11 @@ export async function provisionWorkspace(
             name: r.name,
             localPath: r.localPath,
             defaultBranch: r.defaultBranch,
-            ...(r.repoUrl && restarted.has(r.repoUrl) ? { startFromBranch: r.defaultBranch } : {}),
+            ...(r.repoUrl && restarted.has(r.repoUrl)
+              ? { startFromBranch: r.defaultBranch }
+              : input.startFromBranch
+                ? { startFromBranch: input.startFromBranch }
+                : {}),
           })),
           workspaceKey,
           branch,

@@ -16,6 +16,9 @@ import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
 import { queueSwarmSandboxReap } from "../reap-sandbox.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
+import { enqueueLanding } from "./landing.js";
+import { enqueueSwarmPublish } from "./complete.js";
+import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -165,12 +168,26 @@ export interface SwarmTickResult {
   plannerRunId: string | null;
   /** Worker runs started. */
   workerRunIds: string[];
+  /** Resolver runs started on conflicted landings. */
+  resolverRunIds: string[];
   /** Why the spawn loop stopped early, when a plan limit stopped it. */
   spawnRefusal: string | null;
-  /** The landing promoted to the front of the queue, if any. */
+  /** The landing at the front of the queue, if any is in flight. */
   landingId: string | null;
+  /** Whether this tick is what promoted it, rather than finding it already running. */
+  landingPromoted: boolean;
   /** The swarm's status after the tick. */
   status: (typeof swarms.$inferSelect)["status"];
+  /**
+   * Whether this tick is what finished the swarm, rather than finding
+   * it already finished.
+   *
+   * The publish that follows is keyed on the transition rather than on
+   * the status, for the reason the landing promotion is: a tick runs
+   * again for all sorts of reasons, and a job per tick on a swarm that
+   * has been done for a week is a push per tick.
+   */
+  becameDone: boolean;
 }
 
 /**
@@ -191,15 +208,81 @@ export interface SwarmTickResult {
 export async function tickSwarm(
   ctx: AppContext,
   swarmId: string,
-  deps: SwarmTickDeps = { startRun: (tx, values) => startRunIfIdle(tx as unknown as Db, values, ctx.entitlements, ctx.analytics) },
+  deps: SwarmTickDeps = {
+    startRun: (tx, values) => startRunIfIdle(tx as unknown as Db, values, ctx.entitlements, ctx.analytics),
+    /**
+     * Present, and empty. Its presence is what tells step four this
+     * deployment performs landings at all, and it does nothing here
+     * because the job must not be sent from inside the transaction:
+     * a worker that picked it up before the commit would read the row
+     * as still queued and drop it. The send happens below, on the id
+     * the tick returns.
+     */
+    startLanding: async () => {},
+  },
 ): Promise<SwarmTickResult | null> {
   const events: BoardEvent[] = [];
   const result = await ctx.db.transaction(async (tx) => runTick(tx, swarmId, deps, events));
   for (const event of events) ctx.bus.emitBoardEvent(event);
   if (result) {
-    for (const runId of [...(result.plannerRunId ? [result.plannerRunId] : []), ...result.workerRunIds]) {
+    for (const runId of [
+      ...(result.plannerRunId ? [result.plannerRunId] : []),
+      ...result.workerRunIds,
+      ...result.resolverRunIds,
+    ]) {
       await enqueueRun(ctx, runId);
     }
+    /**
+     * The landing this tick promoted, once the promotion is committed.
+     *
+     * Only when this tick moved the row: the id is also returned for a
+     * landing that was already in flight, and enqueuing that one on
+     * every tick would be a job per tick for as long as it ran.
+     */
+    if (result.landingId && result.landingPromoted) {
+      try {
+        await enqueueLanding(ctx, result.landingId);
+      } catch (err) {
+        /**
+         * The claim goes back if the job could not be sent.
+         *
+         * The promotion is committed by now, so a send that throws
+         * leaves a row that says "landing" with nothing anywhere that
+         * will ever perform it: this tick is retried and deliberately
+         * does not re-enqueue a row already in flight, nothing sweeps a
+         * claimed row with no job, and resumeClaimedLandings only runs
+         * at boot. The partial unique index then refuses every other
+         * landing in that swarm, so one failed send ends the whole
+         * queue until a restart. Releasing it puts the row back at the
+         * front of the queue for the retried tick to promote again.
+         */
+        await ctx.db
+          .update(swarmLandings)
+          .set({
+            status: "queued",
+            startedAt: null,
+            // The attempt never happened, so it is not counted: the
+            // count is what fails a branch git keeps refusing, and a
+            // queue that could not be reached is not that.
+            attempt: sql`greatest(${swarmLandings.attempt} - 1, 0)`,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(swarmLandings.id, result.landingId), eq(swarmLandings.status, "landing")))
+          .catch(() => {});
+        throw err;
+      }
+    }
+    /**
+     * A swarm that just finished has one thing left to do, and it is
+     * the only thing in a swarm that leaves Bento: push the branch and
+     * open the pull requests.
+     *
+     * On its own queue rather than inline, because it clones, pushes
+     * and talks to GitHub, and the tick worker runs one job at a time
+     * for every swarm on the deployment. After the commit, because the
+     * job reads the swarm's status and refuses anything but "done".
+     */
+    if (result.becameDone) await enqueueSwarmPublish(ctx, swarmId);
     /*
      * A swarm that is over holds a machine nobody is working in, and a
      * sprite costs money for as long as it exists rather than for as
@@ -208,6 +291,10 @@ export async function tickSwarm(
      * away and a finished swarm must not fail to finish because Fly
      * was slow. Safe to queue twice, because the reap reads the rows
      * and a machine already gone is no rows.
+     *
+     * The publish above is asked for on the transition and this on the
+     * status, which is deliberate: publishing twice would open a second
+     * pull request, and reaping twice is no rows.
      */
     if (swarmIsOver(result.status)) await queueSwarmSandboxReap(ctx, swarmId);
   }
@@ -236,20 +323,106 @@ async function runTick(
     .where(eq(swarmTasks.swarmId, swarmId))
     .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
 
+  await settleWorkedLeaves(tx, swarm, tasks, events, now);
   const changed = await rollUp(tx, swarm, tasks, events);
   const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
   const spawned = await spawnWorkers(tx, swarm, changed.tasks, deps, events, now);
-  const landingId = await advanceLandingQueue(tx, swarm, changed.tasks, deps, now);
+  const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now);
   const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events);
 
   return {
     changedTasks: changed.changedCount,
     plannerRunId,
     workerRunIds: spawned.runIds,
+    resolverRunIds: landing.resolverRunIds,
     spawnRefusal: spawned.refusal,
-    landingId,
+    landingId: landing.landing?.id ?? null,
+    landingPromoted: landing.landing?.promoted ?? false,
     status,
+    becameDone: status === "done" && swarm.status !== "done",
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Step 0: close leaves whose worker has stopped.
+ * ------------------------------------------------------------------ */
+
+/**
+ * What a leaf is once the agent on it is no longer running.
+ *
+ * A worker ends its task by calling report, which writes the summary
+ * onto the leaf and leaves the status alone: a reported leaf is still
+ * in flight, because the planner has not yet said whether it is done or
+ * is going back. That is the case this step does nothing about, and it
+ * is the common one.
+ *
+ * The case it exists for is the other one: a run that stopped without
+ * reporting. The agent crashed, ran out of context, hit its budget, or
+ * simply ended its turn without calling the tool. Nothing else in the
+ * swarm notices. The leaf stays "working" with no agent on it, the
+ * spawn step passes over it because it is not "assigned", the planner
+ * is never woken because the wake only carries leaves it has not heard
+ * about, and the swarm sits at "running" forever with nothing moving.
+ * Every swarm with one flaky worker ended that way.
+ *
+ * So a leaf whose run is gone and whose report never arrived is failed,
+ * with the reason on the row. Failing it is what puts it in front of
+ * the planner, which can reject it back to assigned, split it, or give
+ * up on it. Silence cannot be any of those.
+ *
+ * Runs first: a leaf with no run at all has not started yet, and is
+ * left to the spawn step rather than failed for never having begun.
+ */
+async function settleWorkedLeaves(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  events: BoardEvent[],
+  now: Date,
+): Promise<void> {
+  const working = tasks.filter(
+    (task) => task.nodeType === "leaf" && task.status === "working" && !task.report && task.assignedRunId,
+  );
+  if (working.length === 0) return;
+
+  const runs = await tx
+    .select({ id: agentRuns.id, status: agentRuns.status, error: agentRuns.error })
+    .from(agentRuns)
+    .where(inArray(agentRuns.id, working.map((task) => task.assignedRunId!)));
+  const byRun = new Map(runs.map((run) => [run.id, run]));
+
+  for (const task of working) {
+    const run = byRun.get(task.assignedRunId!);
+    // A run row that is gone takes its leaf with it: there is nothing
+    // left that could still report, so this is the same case.
+    if (run && (ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) continue;
+    const reason = run?.error?.trim()
+      ? `the agent working it stopped: ${run.error.trim()}`
+      : "the agent working it stopped without reporting.";
+    // Through the one door, so the latch that decides whether the
+    // planner ever hears about this leaf is cleared by construction.
+    await handLeafToPlanner(tx, {
+      task,
+      status: "failed",
+      attention: "failed",
+      flags: { workerStopped: reason },
+      set: { endedAt: task.endedAt ?? now },
+      runId: task.assignedRunId,
+      detail: { reason },
+      now,
+    });
+    // The in-memory row too, so the roll up below reads the tree this
+    // step just changed rather than the tree as it was before it.
+    task.status = "failed";
+    task.attention = "failed";
+    events.push({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "failed",
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -492,10 +665,20 @@ async function deliverPlannerWake(
     )
     .orderBy(asc(swarmMessages.createdAt));
 
-  /*
-   * What the tree did while the planner was away: reports and endings
-   * it has not been told about. Reported and failed leaves only; a
-   * status the planner itself set is not news to it.
+  /**
+   * What the tree did while the planner was away.
+   *
+   * Two things count as news. A leaf that has reported, which is a
+   * worker asking to be accepted or sent back, and a leaf that failed,
+   * which is work the plan has to do something else about. A leaf that
+   * reported is still "working" until the planner decides, so the
+   * status column alone cannot find it: the report is the marker, and
+   * asking for status alone was how every accepted-or-rejected decision
+   * waited on a planner nobody woke.
+   *
+   * Done is not in the list. A leaf is done because the planner
+   * accepted it, and telling an agent what it just did is a turn spent
+   * on nothing.
    *
    * Leaves, said in the query rather than only in this comment. A
    * group's status is this tick's own rollup of children the planner
@@ -510,13 +693,35 @@ async function deliverPlannerWake(
       and(
         eq(swarmTasks.swarmId, swarm.id),
         eq(swarmTasks.nodeType, "leaf"),
-        inArray(swarmTasks.status, ["done", "failed"]),
-        sql`coalesce((${swarmTasks.flags} ->> 'plannerToldAt'), '') = ''`,
+        sql`(${swarmTasks.report} is not null or ${swarmTasks.status} = 'failed')`,
+        sql`${swarmTasks.status} <> 'cancelled'`,
+        PLANNER_NOT_TOLD,
       ),
     )
     .orderBy(asc(swarmTasks.position));
 
-  if (pending.length === 0 && reported.length === 0) return null;
+  /**
+   * Not while the agent that reported is still running.
+   *
+   * report is a tool call, not the end of a turn, so a worker can call
+   * it and go on committing for another minute. A planner told about
+   * it then could accept the leaf, and the merge queue would land the
+   * branch as it stood halfway through the worker's last commit. The
+   * run's own settlement enqueues a tick, so waiting costs nothing.
+   */
+  const stillWorking = new Set(
+    (
+      await tx
+        .select({ taskId: agentRuns.swarmTaskId })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+    )
+      .map((row) => row.taskId)
+      .filter((id): id is string => id !== null),
+  );
+  const news = reported.filter((task) => !stillWorking.has(task.id));
+
+  if (pending.length === 0 && news.length === 0) return null;
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run the planner as. The messages stay queued, so this
@@ -524,7 +729,7 @@ async function deliverPlannerWake(
   if (!profileId) return null;
 
   const items: PlannerWakeItem[] = [
-    ...reported.map((task) => ({
+    ...news.map((task) => ({
       kind: "task" as const,
       taskId: task.id,
       title: task.title,
@@ -560,7 +765,7 @@ async function deliverPlannerWake(
       .set({ status: "sent", runId: started.id, sentAt: now })
       .where(eq(swarmMessages.id, message.id));
   }
-  for (const task of reported) {
+  for (const task of news) {
     await tx
       .update(swarmTasks)
       .set({ flags: { ...task.flags, plannerToldAt: now.toISOString() } })
@@ -718,45 +923,122 @@ async function spawnWorkers(
  * Step 4: advance the landing queue.
  * ------------------------------------------------------------------ */
 
+/** What step four did: the row in flight, and the agents it put on conflicts. */
+interface LandingStep {
+  landing: { id: string; promoted: boolean } | null;
+  /** Resolver runs this tick started. A run with no job never starts. */
+  resolverRunIds: string[];
+}
+
 /**
  * Keeps the merge queue honest, and hands its front row to whatever
  * lands branches.
  *
  * One landing at a time is a database fact (the partial unique index on
- * swarm_landings), not a property of this function, so all this does is
- * decide which row is next and drop the ones whose work went away.
+ * swarm_landings), not a property of this function, so most of this is
+ * deciding which row is next and dropping the ones whose work went
+ * away.
+ *
+ * The exception is a conflicted row, which is the one state in the
+ * queue that needs something started rather than something chosen. A
+ * conflict holds everything behind it until an agent reconciles the
+ * branch, so this is where that agent is put on it: every pass, for
+ * every conflicted row that has nobody, rather than once at the moment
+ * the conflict was found. The difference is the whole of a queue that
+ * stops for good and one that does not. A team at its plan limit is the
+ * routine way a resolver cannot start, and it is transient, so the
+ * answer is to ask again next pass; a conflict nothing could ever
+ * resolve fails the leaf instead, which frees the queue and puts the
+ * leaf in front of the planner.
  */
 async function advanceLandingQueue(
   tx: Tx,
   swarm: typeof swarms.$inferSelect,
   tasks: Task[],
   deps: SwarmTickDeps,
+  events: BoardEvent[],
   now: Date,
-): Promise<string | null> {
+): Promise<LandingStep> {
   const byId = new Map(tasks.map((task) => [task.id, task]));
+  const resolverRunIds: string[] = [];
   const queue = await tx
     .select()
     .from(swarmLandings)
     .where(eq(swarmLandings.swarmId, swarm.id))
     .orderBy(asc(swarmLandings.position), asc(swarmLandings.createdAt));
 
-  // A landing for work somebody withdrew has nothing left to land.
+  /**
+   * A landing for work somebody withdrew has nothing left to land.
+   *
+   * Conflicted as well as queued, because a conflicted row holds the
+   * queue: a leaf cancelled while its branch was in conflict would
+   * otherwise stop every landing behind it with nothing left that could
+   * ever settle it.
+   */
   for (const landing of queue) {
-    if (landing.status !== "queued") continue;
+    if (landing.status !== "queued" && landing.status !== "conflicted") continue;
     const task = byId.get(landing.taskId);
     if (task && task.status !== "cancelled") continue;
     await tx
       .update(swarmLandings)
       .set({ status: "cancelled", endedAt: now, updatedAt: now })
       .where(eq(swarmLandings.id, landing.id));
+    landing.status = "cancelled";
   }
 
   const inFlight = queue.find((landing) => landing.status === "landing");
-  if (inFlight) return inFlight.id;
-  // A conflict is a person's or a resolver's problem, and either way it
-  // holds the queue: landing the row behind it would put the conflicted
-  // branch permanently out of order.
-  if (queue.some((landing) => landing.status === "conflicted")) return null;
+  if (inFlight) return { landing: { id: inFlight.id, promoted: false }, resolverRunIds };
+
+  const conflicts = queue.filter((landing) => landing.status === "conflicted");
+  for (const landing of conflicts) {
+    /**
+     * A conflict with nobody on it. Either an agent can be started on
+     * it now, or this is a conflict nothing will ever resolve and the
+     * leaf fails; the one thing that must not happen is the row being
+     * left exactly as it is, because nothing else in the swarm moves it
+     * and everything behind it waits on it.
+     */
+    if (!landing.resolverRunId) {
+      const runId = await startResolver(tx, swarm, landing, byId.get(landing.taskId), deps, events, now);
+      if (runId) resolverRunIds.push(runId);
+      continue;
+    }
+    /**
+     * A conflict whose resolver has finished is ready to be tried
+     * again.
+     *
+     * Without this the queue stops for good. The landing sits at
+     * "conflicted", which holds everything behind it, the resolver run
+     * ends and settles into a tick, and the tick reads a conflicted row
+     * and returns: nothing anywhere moves the row back, so a swarm's
+     * first conflict was the last thing it ever did. The resolver is
+     * what changes the facts (it merges the swarm's branch into the
+     * leaf's and resolves), so its ending is exactly when the row is
+     * worth promoting again.
+     *
+     * The resolver run id stays on the row, which is what makes this
+     * happen once: performLanding fails a leaf whose landing already
+     * names a resolver, rather than asking for a second one.
+     */
+    const [resolver] = await tx
+      .select({ status: agentRuns.status })
+      .from(agentRuns)
+      .where(eq(agentRuns.id, landing.resolverRunId))
+      .limit(1);
+    if (resolver && (ACTIVE_RUN_STATUSES as readonly string[]).includes(resolver.status)) continue;
+    await tx
+      .update(swarmLandings)
+      .set({ status: "queued", startedAt: null, updatedAt: now })
+      .where(eq(swarmLandings.id, landing.id));
+    landing.status = "queued";
+  }
+  /**
+   * A conflict still being resolved holds the queue: landing the row
+   * behind it would put the conflicted branch permanently out of order
+   * with work that passed it. Either the resolver settles it or the
+   * leaf fails, and both go through the row.
+   */
+  if (queue.some((landing) => landing.status === "conflicted")) return { landing: null, resolverRunIds };
 
   const next = queue.find(
     (landing) => landing.status === "queued" && byId.get(landing.taskId)?.status !== "cancelled",
@@ -764,14 +1046,109 @@ async function advanceLandingQueue(
   // Nothing performs landings in this deployment yet. Promoting the row
   // would move it into a state nothing takes it out of, so the queue is
   // left as it is and the row keeps its place.
-  if (!next || !deps.startLanding) return null;
+  if (!next || !deps.startLanding) return { landing: null, resolverRunIds };
 
   await tx
     .update(swarmLandings)
     .set({ status: "landing", startedAt: now, attempt: next.attempt + 1, updatedAt: now })
     .where(eq(swarmLandings.id, next.id));
   await deps.startLanding(tx, next.id);
-  return next.id;
+  return { landing: { id: next.id, promoted: true }, resolverRunIds };
+}
+
+/**
+ * Puts an agent on one conflicted landing, or fails the leaf when
+ * nothing could be put on it.
+ *
+ * Returns the run it started, so the caller can hand it to the queue
+ * after the commit: a run row with no `run.execute` job is a resolver
+ * that never runs and a queue that never moves.
+ *
+ * Refusals are not all the same, and the difference is what this is
+ * for. No worker agent on the template is permanent, so the leaf fails
+ * with a sentence a person can act on. "Busy" and a plan limit are
+ * transient: the row is left conflicted with nobody on it, and the next
+ * tick asks again.
+ */
+async function startResolver(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  landing: typeof swarmLandings.$inferSelect,
+  task: Task | undefined,
+  deps: SwarmTickDeps,
+  events: BoardEvent[],
+  now: Date,
+): Promise<string | null> {
+  // A row whose leaf is gone is the cancel sweep's, not this one's.
+  if (!task || task.status === "cancelled") return null;
+
+  const profileId = await workerProfileFor(tx, swarm);
+  if (!profileId) {
+    const reason =
+      "this swarm's template has no worker agent, so nothing can be put on the conflict. Set one on the template, and the planner can hand this work out again.";
+    await tx
+      .update(swarmLandings)
+      .set({
+        status: "failed",
+        error: [landing.error, "", reason].filter((line) => line !== null).join("\n"),
+        endedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(swarmLandings.id, landing.id));
+    await handLeafToPlanner(tx, {
+      task,
+      status: "failed",
+      attention: "conflict",
+      flags: { landingError: reason },
+      detail: { landingError: reason },
+      now,
+    });
+    // The rows this tick's later steps read, and the row the queue
+    // above reads: both have to see the conflict gone, or the queue
+    // stays held for one more pass by a landing that has failed.
+    landing.status = "failed";
+    task.status = "failed";
+    task.attention = "conflict";
+    events.push({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "failed",
+    });
+    return null;
+  }
+
+  const started = await deps.startRun(tx, {
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: task.id,
+    role: "resolver",
+    agentProfileId: profileId,
+    prompt: "",
+    executor: "server",
+    startedBy: swarm.startedBy,
+  });
+  // SWARM_FULL is the swarm's ceiling and belongs here with the rest:
+  // a resolver asked for while every slot is taken is asked for again
+  // on the next tick, which is the whole point of starting it from the
+  // reconciler rather than from the landing that conflicted.
+  if (started === "busy" || started === "gone" || started === SWARM_FULL || "outOfCompute" in started) {
+    return null;
+  }
+
+  await tx
+    .update(swarmLandings)
+    .set({ resolverRunId: started.id, updatedAt: now })
+    .where(eq(swarmLandings.id, landing.id));
+  await tx.insert(swarmTaskEvents).values({
+    taskId: task.id,
+    kind: "attention_raised",
+    runId: started.id,
+    detail: { conflict: landing.error, resolver: "started" },
+  });
+  landing.resolverRunId = started.id;
+  return started.id;
 }
 
 /* ------------------------------------------------------------------ *

@@ -12,7 +12,8 @@ import {
 import type { AppContext } from "../context.js";
 import { BENTO_SWARM_SERVER_ID, BENTO_SWARM_SLUG } from "../mcp/swarm-server.js";
 import { linkGitHubRemotes } from "./repo-remote.js";
-import { swarmBranchName, swarmWorkspaceKey } from "./swarm/sandbox.js";
+import { swarmBranchName, swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./swarm/sandbox.js";
+import { workerBranchName } from "./swarm/branches.js";
 import { enqueueSwarmTick } from "./swarm/coordinator.js";
 import type { PipelineRun } from "./pipeline-run.js";
 
@@ -184,9 +185,15 @@ async function swarmSubject(
    * committing to one branch, which is the thing the merge queue
    * exists to avoid.
    */
-  const perTask = (run.role === "worker" || run.role === "subplanner") && task;
+  /**
+   * A resolver is on this list because it works the leaf's branch, in
+   * the leaf's workspace: what it does is merge the swarm's branch into
+   * that branch and fix the result, so a resolver given the swarm's own
+   * checkout would be merging a branch into itself.
+   */
+  const perTask = (run.role === "worker" || run.role === "subplanner" || run.role === "resolver") && task;
   const branch = perTask
-    ? (task.branchName ?? `${swarm.branchName ?? swarmBranchName(swarm.slug)}/${task.id.slice(0, 8)}`)
+    ? (task.branchName ?? workerBranchName(swarm.branchName ?? swarmBranchName(swarm.slug), task.id))
     : (swarm.branchName ?? swarmBranchName(swarm.slug));
 
   return {
@@ -199,7 +206,7 @@ async function swarmSubject(
     organizationId: swarm.organizationId,
     repoRows,
     branch,
-    workspaceKey: perTask ? `${swarmWorkspaceKey(swarm.id)}-${task.id.slice(0, 8)}` : swarmWorkspaceKey(swarm.id),
+    workspaceKey: perTask ? swarmTaskWorkspaceKey(swarm.id, task.id) : swarmWorkspaceKey(swarm.id),
     sandboxOwner: { swarmId: swarm.id, swarmTaskId: task?.id ?? null },
     snapshotLabel: `before ${run.role}`,
     // The plan is made through tools, so every swarm agent gets Bento's

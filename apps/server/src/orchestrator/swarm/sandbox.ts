@@ -36,6 +36,24 @@ export function swarmWorkspaceKey(swarmId: string): string {
 }
 
 /**
+ * The name one leaf's workspace and machine are known by.
+ *
+ * Built from the swarm's key and the task, so the swarm's machines are
+ * one prefix in a container list and a leaf's machine can be found
+ * again without reading a row. Eight characters of the task id, the
+ * way its branch takes eight: the swarm's own id is already in the
+ * name, so two leaves would have to share a prefix within one swarm.
+ *
+ * Derived here rather than written inline wherever it is needed,
+ * because the reaper has to name exactly the workspace the executor
+ * made, and two spellings of one rule is how a machine gets left
+ * behind billing.
+ */
+export function swarmTaskWorkspaceKey(swarmId: string, taskId: string): string {
+  return `${swarmWorkspaceKey(swarmId)}-${taskId.slice(0, 8)}`;
+}
+
+/**
  * The branch a swarm lands on, from its slug.
  *
  * The slug is unique per project and stable, so the branch name is
