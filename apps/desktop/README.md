@@ -29,6 +29,7 @@ Everything else (keys, agents, pipelines, repos, team, integrations) is the same
 - Traffic lights in the header (also the drag region). Theme follows console Light / Dark / Dark blue.
 - Close window: local server keeps running. **Quit Bento**: stops local server gracefully. Remote agents are unaffected.
 - **Updates:** unsigned builds → **Check for Updates** opens a newer stable DMG in the browser; replace `Bento.app` manually after quitting. Signed releases → background check every 6h; **Restart to Update** when ready (local server stops on restart; **Later** keeps it up).
+- A bottom-left toast offers **Download update** or **Restart and update**, with a dismiss button. Both packaged modes check after launch and every six hours; unsigned builds only download after consent. Dismissing hides that version across windows for the app session.
 - Device tokens: encrypted in the macOS Keychain. No plaintext fallback.
 
 ## Build
@@ -65,13 +66,23 @@ Without `BENTO_RELEASE_TAG`, version comes from `git describe` (or `-dev` withou
 
 Signing secrets: `DESKTOP_CSC_LINK` / `DESKTOP_CSC_KEY_PASSWORD` (or legacy `MACOS_*`). Missing notarization secrets fail the job; no unsigned fallback on failed sign.
 
-### Signing setup (optional)
+### Apple signing and automatic updates
 
-1. CSR in Keychain Access → [Apple CSR help](https://developer.apple.com/help/account/certificates/create-a-certificate-signing-request/).
-2. **Developer ID Application** cert → install `.cer` on the build Mac.
-3. Export cert + key as `.p12` → base64 in `DESKTOP_CSC_LINK`, password in `DESKTOP_CSC_KEY_PASSWORD`.
-4. `APPLE_ID`, `APPLE_TEAM_ID`, app-specific password for notarization.
-5. Run Desktop workflow on a tag to verify signature + staple before publishing.
+Automatic installation requires an Apple Developer Program membership and a **Developer ID Application** certificate with its private key. A `.cer` alone is insufficient. Create the CSR in Keychain Access, issue the certificate through your Apple developer account, then export the certificate and private key together as a password-protected `.p12`. See [Apple's CSR instructions](https://developer.apple.com/help/account/certificates/create-a-certificate-signing-request/) and [electron-builder's macOS signing guide](https://www.electron.build/v26/docs/mac/).
+
+Configure these repository Actions secrets before running the Desktop or Release workflow:
+
+| Actions secret | Value | Local build environment variable |
+| --- | --- | --- |
+| `DESKTOP_CSC_LINK` | Base64 contents of the exported `.p12` | `CSC_LINK` (base64 or a local `.p12` path) |
+| `DESKTOP_CSC_KEY_PASSWORD` | Password protecting the `.p12` | `CSC_KEY_PASSWORD` |
+| `APPLE_ID` | Apple account used for notarization | `APPLE_ID` |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password generated for that account | `APPLE_APP_SPECIFIC_PASSWORD` |
+| `APPLE_TEAM_ID` | Developer team that owns the certificate | `APPLE_TEAM_ID` |
+
+Without a certificate, CI deliberately produces unsigned installers with manual updates. With a certificate configured, incomplete credentials, signing errors, or notarization errors fail the build. The workflow verifies the Developer ID signature and notarization staple on both architectures, then checks every updater asset's size and SHA-512 checksum before upload.
+
+Run the **Desktop** workflow on a tag first to validate signing and notarization without publishing a release. Keep the application ID and signing team consistent across releases so macOS can verify the replacement. An existing unsigned app must be replaced manually with the first signed release; later signed releases can update automatically. [electron-builder requires macOS signing and the ZIP update target](https://www.electron.build/v26/docs/features/auto-update/).
 
 ### Update artifacts
 
@@ -91,7 +102,7 @@ DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5439/app pnpm --filter @bent
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5439/app pnpm --filter @bento/desktop test:auth
 ```
 
-E2E: launches the real app, temp DB/profile, server/migrations/cards/SSE/auth/preferences; no paid APIs. Update smoke (macOS): loopback fixture, menu, arch paths, checksum/metadata errors; set `BENTO_DESKTOP_EXECUTABLE` for packaged manual-update menu.
+E2E: launches the real app, temp DB/profile, server/migrations/cards/SSE/auth/preferences; no paid APIs. Update smoke (macOS): loopback fixture, real updater/controller, consent, arch paths, checksum/metadata errors; set `BENTO_DESKTOP_EXECUTABLE` for the packaged manual-update menu, toast themes, and dismissal across windows. CI runs this packaged smoke when producing unsigned installers.
 
 After packaging both arch:
 

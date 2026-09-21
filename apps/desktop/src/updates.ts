@@ -1,4 +1,5 @@
 import type { AppUpdater, UpdateInfo } from "electron-updater";
+import type { DesktopUpdateNotice } from "./contracts.js";
 
 type Phase = "idle" | "checking" | "downloading" | "ready" | "installing";
 export type UpdateDriver = Pick<AppUpdater, "autoDownload" | "autoInstallOnAppQuit" | "allowPrerelease" | "allowDowngrade" | "on" | "checkForUpdates" | "quitAndInstall">;
@@ -39,10 +40,12 @@ export function updateErrorDetail(error: unknown): string {
   return "Bento could not download or verify the update. Check your internet connection and try again later. Your current app and projects are kept.";
 }
 
-/** Owns one check/download at a time. Only a native menu action can restart. */
+/** Owns one check/download at a time. Installation always requires consent. */
 export class DesktopUpdates {
   private phase: Phase = "idle";
   private version = "";
+  private manualUrl: string | undefined;
+  private dismissedVersion = "";
   private task: Promise<void> | undefined;
   private interactive = false;
   private prompting = false;
@@ -74,8 +77,19 @@ export class DesktopUpdates {
     return { label: labels[this.phase], enabled: !this.disposed && this.phase !== "installing" };
   }
 
+  get notice(): DesktopUpdateNotice | null {
+    if (this.disposed || this.disabledReason || !this.version || this.dismissedVersion === this.version) return null;
+    if (this.manual ? !this.manualUrl : this.phase !== "ready" && this.phase !== "installing") return null;
+    return { version: this.version, action: this.manual ? "download" : "restart", busy: this.phase === "checking" || this.phase === "installing" || this.prompting };
+  }
+
+  dismissNotice() {
+    this.dismissedVersion = this.version;
+    this.ui.changed();
+  }
+
   start() {
-    if (this.disabledReason || this.manual || this.disposed || this.timers.length) return;
+    if (this.disabledReason || this.disposed || this.timers.length) return;
     this.timers.push(setTimeout(() => void this.check(), 30_000));
     this.timers.push(setInterval(() => void this.check(), 6 * 60 * 60 * 1000));
     for (const timer of this.timers) timer.unref();
@@ -89,7 +103,6 @@ export class DesktopUpdates {
 
   async check(interactive = false): Promise<void> {
     if (this.disposed || this.phase === "installing") return;
-    if (this.manual && !interactive) return;
     if (this.disabledReason) {
       if (interactive && !this.prompting) {
         this.prompting = true;
@@ -115,8 +128,11 @@ export class DesktopUpdates {
       if (this.manual && result?.isUpdateAvailable) {
         if (this.disposed) return;
         const url = manualDownloadUrl(result.updateInfo, this.manual.arch);
-        if (await this.manual.confirmDownload(result.updateInfo.version) && !this.disposed) {
+        this.version = result.updateInfo.version;
+        this.manualUrl = url;
+        if (this.interactive && await this.manual.confirmDownload(result.updateInfo.version) && !this.disposed) {
           await this.manual.openDownload(url);
+          this.dismissedVersion = this.version;
         }
         this.setPhase("idle");
         return;
@@ -126,6 +142,7 @@ export class DesktopUpdates {
       if (this.phase === "ready") {
         if (this.interactive) await this.offerRestart();
       } else {
+        this.manualUrl = undefined;
         this.setPhase("idle");
         if (this.interactive) await this.ui.message("Bento is up to date", "You have the latest stable version of Bento.");
       }
@@ -138,6 +155,7 @@ export class DesktopUpdates {
   private async offerRestart() {
     if (this.prompting || this.disposed) return;
     this.prompting = true;
+    this.ui.changed();
     try {
       if (!await this.ui.confirmRestart(this.version) || this.disposed) return;
       this.setPhase("installing");
@@ -151,7 +169,11 @@ export class DesktopUpdates {
       this.ui.shutdownFailed();
       this.setPhase("ready");
       if (!this.disposed) await this.ui.message("Could not install the update", updateErrorDetail(error));
-    } finally { this.prompting = false; this.interactive = false; }
+    } finally {
+      this.prompting = false;
+      this.interactive = false;
+      if (!this.disposed) this.ui.changed();
+    }
   }
 
   private setPhase(phase: Phase) {

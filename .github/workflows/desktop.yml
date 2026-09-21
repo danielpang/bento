@@ -105,6 +105,16 @@ jobs:
           node apps/desktop/scripts/verify-update-artifacts.mjs release-dist/desktop "$TAG"
           cd release-dist/desktop
           shasum -a 256 ./*.dmg ./*.zip ./*.blockmap ./latest-mac.yml > desktop.sha256
+      - name: Verify packaged manual updates
+        if: steps.signing.outputs.signed == 'false'
+        run: |
+          case "$(uname -m)" in
+            arm64) APP_DIRECTORY=mac-arm64 ;;
+            x86_64) APP_DIRECTORY=mac ;;
+            *) echo '::error::Unsupported runner architecture.'; exit 1 ;;
+          esac
+          BENTO_DESKTOP_EXECUTABLE="$GITHUB_WORKSPACE/release-dist/desktop/$APP_DIRECTORY/Bento.app/Contents/MacOS/Bento" \
+            pnpm --filter @bento/desktop test:updates
       - uses: actions/upload-artifact@v6
         with:
           name: desktop-macos

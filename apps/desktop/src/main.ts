@@ -58,7 +58,7 @@ async function boot() {
     return bundledFile(path.join(directory, "launcher"), url.pathname === "/" ? "/index.html" : url.pathname, url.pathname === "/");
   });
   installIpc();
-  updates = await createUpdates({ changed: installMenu, shutdown: prepareShutdown, shutdownFailed: () => {
+  updates = await createUpdates({ changed: refreshUpdates, shutdown: prepareShutdown, shutdownFailed: () => {
     if (quitPrepared && current?.settings.mode === "local") {
       current = undefined;
       for (const window of windows) window.destroy();
@@ -89,6 +89,13 @@ async function boot() {
   if (server >= 0 && process.argv[server + 1]) {
     await connect({ ...store.settings, mode: "remote", serverUrl: process.argv[server + 1]! });
   } else if (store.configured) await connect(store.settings);
+}
+
+function refreshUpdates() {
+  installMenu();
+  for (const window of [...windows, ...(launcher ? [launcher] : [])]) {
+    if (!window.isDestroyed()) window.webContents.send("desktop:update", updates?.notice ?? null);
+  }
 }
 
 async function prepareShutdown() {
@@ -140,6 +147,11 @@ function installIpc() {
     const result = await dialog.showOpenDialog(owner, { title: "Choose a folder", properties: ["openDirectory", "createDirectory"] });
     return result.canceled ? null : result.filePaths[0] ?? null;
   };
+  for (const kind of ["launcher", "console"] as const) {
+    handle(`${kind}:update-status`, kind, () => updates?.notice ?? null);
+    handle(`${kind}:update`, kind, () => updates?.check(true));
+    handle(`${kind}:dismiss-update`, kind, () => updates?.dismissNotice());
+  }
   handle("launcher:settings", "launcher", () => store.settings);
   handle("launcher:appearance", "launcher", () => ({ theme: appearance, fullscreen: launcher!.isFullScreen() }));
   handle("launcher:status", "launcher", () => status);

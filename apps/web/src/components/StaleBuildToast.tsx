@@ -1,4 +1,5 @@
 import { buildWatch, useBuildWatch } from "../build-watch.js";
+import { desktop } from "../desktop.js";
 
 /**
  * The console has been deployed since this page loaded. Lives in the
@@ -9,7 +10,9 @@ import { buildWatch, useBuildWatch } from "../build-watch.js";
  */
 export function StaleBuildToast() {
   const { prompt } = useBuildWatch();
-  if (!prompt) return null;
+  // Electron serves its bundled console. Reloading cannot pick up a web deploy;
+  // the desktop updater provides the matching application update notification.
+  if (desktop || !prompt) return null;
   return (
     <div className="toast stale-build" data-tone="update">
       <span className="toast-text">A new version of Bento is available. Reload to keep the console working.</span>

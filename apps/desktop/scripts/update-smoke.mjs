@@ -13,15 +13,23 @@ import { teardownSmoke } from "./teardown-smoke.mjs";
 // asks Squirrel to install or changes the user's profile or installed Bento.
 const root = path.resolve(import.meta.dirname, "..");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "bento-update-smoke-"));
-const version = "1.2.3";
+let version = "1.2.3";
 const payloads = Object.fromEntries(["arm64", "x64"].map(arch => [arch, Buffer.from(`isolated update payload ${arch}`)]));
 const metadata = { version, files: Object.entries(payloads).flatMap(([arch, bytes]) => ["zip", "dmg"].map(ext => ({ url: `Bento-${version}-${arch}.${ext}`, size: bytes.length, sha512: createHash("sha512").update(bytes).digest("base64") }))) };
+function setVersion(next) {
+  for (const file of metadata.files) file.url = file.url.replace(`Bento-${version}-`, `Bento-${next}-`);
+  version = next;
+  metadata.version = next;
+}
 let mode = "valid";
 const requests = [];
 const server = createServer((request, response) => {
   const url = new URL(request.url, "http://localhost").pathname;
   requests.push(url);
-  if (url.endsWith(".atom")) {
+  if (url === "/api/health") {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ mode: "local" }));
+  } else if (url.endsWith(".atom")) {
     response.end(`<feed><entry><title>Preview</title><link href="https://github.com/danielpang/bento/releases/tag/v99.0.0-beta.1"/><content>Preview</content></entry><entry><title>Stable</title><link href="https://github.com/danielpang/bento/releases/tag/v${version}"/><content>Stable</content></entry></feed>`);
   } else if (url.endsWith("/latest")) {
     response.setHeader("Content-Type", "application/json");
@@ -48,14 +56,19 @@ try {
   desktop.process().stderr.on("data", bytes => process.stderr.write(bytes));
   const launcher = await desktop.firstWindow();
   await launcher.waitForLoadState("domcontentloaded");
+  if (process.env.BENTO_DESKTOP_EXECUTABLE) {
+    const runningVersion = await desktop.evaluate(({ app }) => app.getVersion());
+    // Keep this smoke useful when a real release passes the original fixture's version.
+    setVersion(`${Number(runningVersion.split(".")[0]) + 1}.0.0`);
+  }
   console.log("Opened Bento for native update menu verification");
   const menuResult = await desktop.evaluate(async ({ app, Menu, dialog, shell }, { host, packaged }) => {
     const messages = [];
     const urls = [];
-    let consent = false;
+    globalThis.updateSmoke = { messages, urls, consent: false };
     dialog.showMessageBox = async options => {
       messages.push(options);
-      return { response: consent && options.buttons?.includes("Download Update") ? 1 : 0, checkboxChecked: false };
+      return { response: globalThis.updateSmoke.consent && options.buttons?.includes("Download Update") ? 1 : 0, checkboxChecked: false };
     };
     shell.openExternal = async url => { urls.push(url); };
     if (packaged) {
@@ -78,17 +91,51 @@ try {
     if (packaged) {
       await waitFor(() => Menu.getApplicationMenu().items[0].submenu.items.some(item => item.label === "Check for Updates..."));
       if (urls.length) throw new Error("Later opened a download");
-      consent = true;
-      Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === "Check for Updates...").click();
-      await waitFor(() => urls.length);
     }
     return { messages, urls, arch: process.arch === "arm64" || app.runningUnderARM64Translation ? "arm64" : "x64" };
   }, { host, packaged: Boolean(process.env.BENTO_DESKTOP_EXECUTABLE) });
   if (process.env.BENTO_DESKTOP_EXECUTABLE) {
     assert.equal(menuResult.messages[0].message, `Bento ${version} is available`);
     assert.match(menuResult.messages[0].detail, /quit Bento with Cmd\+Q/);
-    assert.deepEqual(menuResult.urls, [`https://github.com/danielpang/bento/releases/download/v${version}/Bento-${version}-${menuResult.arch}.dmg`]);
+    const toast = launcher.locator("#bento-update-toast");
+    await toast.waitFor({ state: "visible" });
+    assert.ok((await toast.innerText()).includes(`Bento ${version} is available`));
+    for (const theme of ["light", "dark", "navy"]) {
+      await launcher.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+      await toast.screenshot({ path: path.join(temporary, `update-toast-${theme}.png`) });
+    }
+    const box = await toast.boundingBox();
+    const viewportHeight = await launcher.evaluate(() => innerHeight);
+    assert.equal(Math.round(box.x), 16);
+    assert.equal(Math.round(viewportHeight - box.y - box.height), 16);
+
+    // A newly opened console receives the existing notice through trusted IPC.
+    await launcher.locator('input[name="mode"][value="remote"]').check();
+    await launcher.locator("#server-url").fill(`http://${host}`);
+    const consoleOpened = desktop.waitForEvent("window");
+    await launcher.locator("#connect").click();
+    const consolePage = await consoleOpened;
+    const consoleToast = consolePage.locator("#bento-update-toast");
+    await consoleToast.waitFor({ state: "visible" });
+    await consoleToast.screenshot({ path: path.join(temporary, "update-toast-console.png") });
+    await consoleToast.getByRole("button", { name: "Dismiss update notification" }).click();
+    await toast.waitFor({ state: "hidden" });
+    await consolePage.reload();
+    await consoleToast.waitFor({ state: "hidden" });
+
+    // A later release brings the notice back; its actual button launches the
+    // manual flow without exposing arbitrary download URLs to the renderer.
+    setVersion(`${Number(version.split(".")[0]) + 1}.0.0`);
+    await desktop.evaluate(({ Menu }) => Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === "Check for Updates...").click());
+    await consoleToast.waitFor({ state: "visible" });
+    await desktop.evaluate(() => { globalThis.updateSmoke.consent = true; });
+    await consoleToast.getByRole("button", { name: "Download update" }).click();
+    await consoleToast.waitFor({ state: "hidden" });
+    const urls = await desktop.evaluate(() => globalThis.updateSmoke.urls);
+    assert.deepEqual(urls, [`https://github.com/danielpang/bento/releases/download/v${version}/Bento-${version}-${menuResult.arch}.dmg`]);
     assert.ok(!requests.some(url => /\.(zip|dmg)$/.test(url)), "Manual checks must not use the automatic installer");
+    setVersion("1.2.3");
+    console.log(`PASS: themed update toast, shared dismissal, console reload, and download button. Screenshots: ${temporary}`);
   } else assert.match(menuResult.messages[0].detail, /Development builds/);
   console.log("PASS: native menu follows the development or manual update policy");
   await closeDesktop(desktop);
@@ -131,7 +178,9 @@ try {
       updater.allowDowngrade = false;
       updater.logger = { info() {}, warn() {}, error() {} };
       let downloaded;
+      let updateError;
       updater.on("update-downloaded", info => { downloaded = info.downloadedFile; });
+      updater.on("error", error => { updateError = error.code ?? error.message; });
       try {
         if (scenario.manual) {
           const { DesktopUpdates } = await globalThis.loadUpdates();
@@ -145,10 +194,22 @@ try {
           updates.dispose();
           return { urls, errors, nativeStaged: updater.squirrelDownloadedUpdate };
         }
-        const result = await updater.checkForUpdates();
-        await result.downloadPromise;
+        const { DesktopUpdates } = await globalThis.loadUpdates();
+        const notices = [];
+        let restartPrompts = 0;
+        const unexpected = () => { throw new Error("Automatic update proceeded without restart consent"); };
+        const updates = new DesktopUpdates(updater, {
+          changed: () => notices.push(updates.notice), notify() {}, message: unexpected,
+          confirmRestart: async () => { restartPrompts++; return false; },
+          prepareInstall: unexpected, shutdown: unexpected, shutdownFailed: unexpected,
+        });
+        await updates.check();
+        if (updates.notice) await updates.check(true); // Later must leave the runtime and native installer alone.
+        const notice = updates.notice;
+        updates.dispose();
         const { readFile } = require("node:fs/promises");
-        return { version: result.updateInfo.version, contents: await readFile(downloaded, "utf8"), nativeStaged: updater.squirrelDownloadedUpdate };
+        return { error: updateError, notice, notices, restartPrompts,
+          contents: downloaded ? await readFile(downloaded, "utf8") : undefined, nativeStaged: updater.squirrelDownloadedUpdate };
       } catch (error) { return { error: error.code ?? error.message }; }
       finally {
         updater.closeServerIfExists();
@@ -162,7 +223,9 @@ try {
       assert.equal(result.nativeStaged, false);
       assert.ok(!requests.some(url => /\.(zip|dmg)$/.test(url)));
     } else if (scenario.mode === "valid") {
-      assert.equal(result.version, version);
+      assert.deepEqual(result.notice, { version, action: "restart", busy: false });
+      assert.equal(result.restartPrompts, 1);
+      assert.deepEqual(result.notices.slice(-3).map(notice => notice?.busy), [false, true, false]);
       assert.equal(result.contents, payloads[scenario.selected].toString());
       assert.equal(result.nativeStaged, false);
       assert.equal(requests.filter(url => url.endsWith(".zip")).length, 1);
