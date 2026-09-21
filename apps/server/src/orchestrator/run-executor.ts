@@ -29,9 +29,11 @@ import {
   organizationPolicies,
   projects,
   repositories,
+  runArtifacts,
   runEvents,
   sandboxes,
   stages,
+  swarmLandings,
   swarmTasks,
   swarmTemplates,
   swarms,
@@ -49,13 +51,18 @@ import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
-import { buildStagePrompt, repositoryInstructions } from "./prompt.js";
-import { buildPlannerPrompt } from "./swarm/planner-prompt.js";
+import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
+import { buildPlannerPrompt, quoteUntrusted } from "./swarm/planner-prompt.js";
+import { buildWorkerPrompt } from "./swarm/worker-prompt.js";
+import { taskTrailer } from "./swarm/branches.js";
+import { takeNodeMessages } from "./swarm/node-messages.js";
+import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
+import { SWARM_DESIGN_PATH } from "./swarm/design-document.js";
 import { isBetaRun } from "../feature-flags.js";
 import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
@@ -71,11 +78,18 @@ import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
-import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox, reapSwarmSandbox } from "./reap-sandbox.js";
+import {
+  REAP_SANDBOX_QUEUE,
+  reapFinishedSandboxes,
+  reapSandbox,
+  reapSwarmSandbox,
+  reapSwarmTaskSandbox,
+} from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
 import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -269,6 +283,29 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
               runCli: profile.cli,
             }),
           }
+        : {}),
+      /**
+       * A leaf's branch starts from the swarm's branch, never from the
+       * repository's default branch: the swarm's branch is where every
+       * leaf before it landed, and a worker that did not start there
+       * writes against code the swarm has already moved past.
+       */
+      ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName
+        ? { startFromBranch: subject.swarm.branchName }
+        : {}),
+      // What the swarm's template says about where its agents work.
+      // A card has no such promise, so it passes none.
+      ...(subject.kind === "swarm" ? { workerIsolation: subject.workerIsolation } : {}),
+      /**
+       * And, on a driver whose sandboxes hold their own clones, the
+       * swarm's branch itself. It is not on any remote until the swarm
+       * finishes, so a worker there has no other way to reach it, and
+       * a worker that started from the repository's default branch
+       * would be writing against code every landed leaf has moved
+       * past. Read out of the swarm's own machine.
+       */
+      ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName && ctx.driver.provider === "sprite"
+        ? { startFromBundles: await swarmBranchBundles(ctx, subject.swarm, repoRows) }
         : {}),
       say: saySystem,
     });
@@ -1238,12 +1275,98 @@ async function buildSubjectPrompt(
         .where(eq(swarmTemplates.id, subject.swarm.templateId))
         .limit(1)
     : [];
+  const agent = { name: subject.profile.name, skill: subject.profile.skill };
+  /**
+   * Which prompt a swarm run gets is its role's, not its board's.
+   *
+   * Every swarm role used to build the planner's prompt, which handed
+   * a worker the goal, the plan-making instructions, and the sentence
+   * about tools it does not have. An agent told to decompose a goal
+   * decomposes it: the leaf it was actually given was never worked,
+   * and the planner heard nothing back.
+   */
+  if (subject.run.role === "resolver" && subject.task) {
+    const [landing] = await ctx.db
+      .select()
+      .from(swarmLandings)
+      .where(eq(swarmLandings.resolverRunId, subject.run.id))
+      .limit(1);
+    const [design] = await ctx.db
+      .select({ content: runArtifacts.content })
+      .from(runArtifacts)
+      .where(and(eq(runArtifacts.swarmId, subject.swarm.id), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
+      .limit(1);
+    return buildResolverPrompt({
+      branch: subject.branch,
+      swarmBranch: subject.swarm.branchName ?? "",
+      taskId: subject.task.id,
+      taskTitle: subject.task.title,
+      conflict:
+        landing?.error
+        ?? (typeof subject.task.flags?.conflict === "string" ? subject.task.flags.conflict : "(git did not say)"),
+      design: design?.content ?? null,
+      repositories: mounted,
+      trailer: taskTrailer(subject.task.id),
+      quote: quoteUntrusted,
+    });
+  }
+  if (subject.run.role === "worker" && subject.task) {
+    return buildWorkerPrompt({
+      swarm: subject.swarm,
+      task: subject.task,
+      agent,
+      repositories: mounted,
+      branch: subject.branch,
+      templateInstructions: template?.workerInstructions ?? null,
+      hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
+      messages: await takeNodeMessages(ctx.db, subject.task.id, subject.run.id),
+    });
+  }
   return buildPlannerPrompt({
     swarm: subject.swarm,
-    agent: { name: subject.profile.name, skill: subject.profile.skill },
+    agent,
     repositories: mounted,
     templateInstructions: template?.plannerInstructions ?? null,
   });
+}
+
+/**
+ * The swarm's branch, read out of the machine that holds it.
+ *
+ * Only reached on a driver whose sandboxes keep their own clones, and
+ * only for a worker: the planner and the resolver work the swarm's own
+ * machine, where the branch is already checked out.
+ *
+ * A swarm with no machine recorded has no branch anywhere either, so
+ * there is nothing to carry and the worker's seed from the remote is
+ * the right starting point. Everything else is an error rather than a
+ * fallback, because the fallback is the repository's default branch
+ * and nothing downstream could tell that apart from the swarm's head.
+ */
+async function swarmBranchBundles(
+  ctx: AppContext,
+  swarm: typeof swarms.$inferSelect,
+  repoRows: (typeof repositories.$inferSelect)[],
+): Promise<Map<string, { branch: string; data: Buffer }>> {
+  if (!swarm.sandboxId) return new Map();
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
+  if (!row || row.status === "destroyed") return new Map();
+  return exportSwarmBranch(
+    ctx.driver,
+    { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
+    repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
+    swarm.branchName ?? swarmBranchName(swarm.slug),
+  );
+}
+
+/** Whether the planner has written the design note a worker is told to read. */
+async function swarmHasDesign(ctx: AppContext, swarmId: string): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ id: runArtifacts.id })
+    .from(runArtifacts)
+    .where(and(eq(runArtifacts.swarmId, swarmId), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
+    .limit(1);
+  return Boolean(row);
 }
 
 /**
@@ -2152,8 +2275,30 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * event that arrives mid tick still gets read.
    */
   await ctx.boss.createQueue(SWARM_TICK_QUEUE, { name: SWARM_TICK_QUEUE, policy: "short" });
+  /**
+   * The merge queue's own queue. "short" with the landing's id as the
+   * key, so a landing that is already waiting is not queued twice; one
+   * at a time within a swarm is the partial unique index's job and not
+   * this one's.
+   */
+  await ctx.boss.createQueue(SWARM_LAND_QUEUE, { name: SWARM_LAND_QUEUE, policy: "short" });
 
   await recoverInterruptedRuns(ctx);
+  /**
+   * Landings the previous process was holding.
+   *
+   * A row that says "landing" with nothing behind it is the one state
+   * the merge queue cannot leave on its own: the index refuses a second
+   * row in flight for that swarm, so nothing else in it can land until
+   * this one is finished. Re-running a landing is safe by construction,
+   * because the branch is moved before the row is written and a branch
+   * that already has the work reads as landed with no commits.
+   *
+   * Before the ticks, so a swarm's first tick after a restart reads a
+   * queue that is being drained rather than one stuck at its front.
+   */
+  const claimed = await resumeClaimedLandings(ctx);
+  if (claimed > 0) console.log(`resumed ${claimed} landing(s) a restart left claimed`);
   /**
    * Every swarm that is still working gets one tick, after recovery
    * rather than before it: the tick reads the runs, and it should read
@@ -2174,11 +2319,15 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * Sequentially rather than in parallel: this is housekeeping, and it
    * should never compete with an agent for the provider's rate limit.
    */
-  await ctx.boss.work<{ featureId?: string; swarmId?: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
-    // One queue, both boards: a job names a card or a swarm, and which
-    // one it names is what says whose machine is being reclaimed.
+  await ctx.boss.work<{ featureId?: string; swarmId?: string; swarmTaskId?: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
+    // One queue, three kinds of machine. Which id the job carries is
+    // what says whose it is: a card's, a swarm's own, or the one a
+    // leaf's worker was given. The leaf is asked first because it is
+    // the narrowest, and a job naming none of them is one nothing can
+    // act on, so it is dropped rather than retried forever.
     for (const job of jobs) {
-      if (job.data.swarmId) await reapSwarmSandbox(ctx, job.data.swarmId);
+      if (job.data.swarmTaskId) await reapSwarmTaskSandbox(ctx, job.data.swarmTaskId);
+      else if (job.data.swarmId) await reapSwarmSandbox(ctx, job.data.swarmId);
       else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
     }
   }));

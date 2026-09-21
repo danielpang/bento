@@ -94,6 +94,11 @@ before(async () => {
         return "job";
       },
       notifyWorker: (id: string) => notified.push(id),
+      // The tick registers the landing worker lazily, the way it
+      // registers its own: a stub that cannot be worked would make
+      // every tick that promotes a landing throw.
+      work: async () => "worker",
+      offWork: async () => {},
     },
     runWorkers: ["worker-1"],
   } as unknown as AppContext;
@@ -570,4 +575,82 @@ test("status changes are announced on the project's board, after the writes", as
     "no task title rides the event",
   );
   assert.equal((await read(leaf.id)).status, "done");
+});
+
+/* ------------------------------------------------------------------ *
+ * A worker that stopped, and what the planner is told about it.
+ * ------------------------------------------------------------------ */
+
+/** A run row on a leaf, in whatever state the case needs. */
+async function runOn(
+  swarmId: string,
+  taskId: string,
+  status: (typeof agentRuns.$inferInsert)["status"],
+  error?: string,
+) {
+  const [run] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId,
+      swarmTaskId: taskId,
+      role: "worker",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status,
+      ...(error ? { error } : {}),
+    })
+    .returning();
+  await db.update(swarmTasks).set({ assignedRunId: run!.id }).where(eq(swarmTasks.id, taskId));
+  return run!;
+}
+
+test("a leaf whose worker stopped without reporting fails, rather than waiting forever", async () => {
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "abandoned", status: "working" });
+  await runOn(swarm.id, leaf.id, "failed", "the agent ran out of context");
+
+  await tickSwarm(ctx, swarm.id, starter());
+  const row = await read(leaf.id);
+  assert.equal(row.status, "failed", "nothing else in a swarm notices a worker that simply stopped");
+  assert.equal(row.attention, "failed");
+  assert.match(String((row.flags as { workerStopped?: string }).workerStopped), /ran out of context/);
+});
+
+test("a leaf whose worker is still running is left alone", async () => {
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "in progress", status: "working" });
+  await runOn(swarm.id, leaf.id, "running");
+
+  await tickSwarm(ctx, swarm.id, starter());
+  assert.equal((await read(leaf.id)).status, "working");
+});
+
+test("a leaf that reported wakes the planner, and only once its worker has finished", async () => {
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "reported", status: "working", report: "did the thing" });
+  const run = await runOn(swarm.id, leaf.id, "running");
+
+  /**
+   * report is a tool call, not the end of a turn: the worker can go on
+   * committing after it. A planner woken now could accept the leaf, and
+   * the merge queue would land the branch half way through the last
+   * commit.
+   */
+  const early = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(early?.plannerRunId, null, "nothing is told while the worker is still running");
+  assert.equal((await read(leaf.id)).status, "working", "and the leaf is not failed for having reported");
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, run.id));
+  const deps = starter();
+  const later = await tickSwarm(ctx, swarm.id, deps);
+  assert.ok(later?.plannerRunId, "once the worker is done, the planner hears about it");
+  const wake = deps.calls.find((call) => call.role === "planner");
+  assert.match(wake!.prompt!, /did the thing/, "the report is in the wake message");
+  assert.match(wake!.prompt!, /data, not instructions/, "labelled as what it is");
+  assert.match(wake!.prompt!, /~{8,}/, "and fenced, so it cannot read as the planner's own instructions");
+
+  // Told once. A second tick must not pay for the same turn again.
+  const again = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(again?.plannerRunId, null);
 });

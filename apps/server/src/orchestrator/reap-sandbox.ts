@@ -1,9 +1,10 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, ne } from "drizzle-orm";
-import { agentRuns, features, repositories, sandboxes, swarms } from "@bento/db";
+import { agentRuns, features, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
+import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
 
 /** The queue a finished card's sandbox goes through on its way out. */
 export const REAP_SANDBOX_QUEUE = "sandbox.reap";
@@ -38,6 +39,25 @@ export async function queueSwarmSandboxReap(ctx: AppContext, swarmId: string): P
 
 /** A swarm this reaper treats as over: nothing of it will run again. */
 const FINISHED_SWARM_STATUSES = ["done", "failed", "cancelled"] as const;
+
+/**
+ * Asks for the machine one swarm leaf was worked on to be destroyed.
+ *
+ * A swarm is the case a card never was: one goal can be five machines,
+ * and they are not five machines one after another but five at once. A
+ * leaf whose branch has landed is finished with forever (its branch is
+ * on the swarm's branch and its worker will not be resumed), so the
+ * machine is pure cost from that moment, and a swarm of fifty leaves
+ * that kept them all would be fifty sprites billed by the gigabyte
+ * month for a goal that finished on Tuesday.
+ *
+ * Keyed by the task rather than by the swarm, because the swarm's own
+ * machine is where the planner and the merge queue live and must
+ * outlive every leaf.
+ */
+export async function queueSwarmTaskSandboxReap(ctx: AppContext, swarmTaskId: string): Promise<void> {
+  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmTaskId });
+}
 
 /**
  * Destroys the sandbox belonging to a card that is over, and in local
@@ -189,6 +209,84 @@ async function removeFeatureWorkspace(ctx: AppContext, featureId: string): Promi
     .from(repositories)
     .where(eq(repositories.projectId, feature.projectId));
   await ctx.worktrees.removeWorkspace(repos, featureId);
+}
+
+/**
+ * Destroys the machine one swarm leaf was worked on, and the host
+ * workspace it was bind-mounting.
+ *
+ * Deliberately the same shape as reapSandbox, and deliberately not the
+ * same function. What they share is the careful part: refusing while an
+ * agent is still working, taking every row rather than the first, and
+ * only marking a row destroyed once the driver has been asked again
+ * and said the machine is gone. What they do not share is what a
+ * machine belongs to, and a single function taking either would have
+ * had to guess which column a null meant.
+ */
+export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string): Promise<void> {
+  /**
+   * Never under a live agent. A leaf that landed should have no run on
+   * it, but a resolver started for its conflict and a worker the
+   * planner reassigned are both real, and killing a machine out from
+   * under either leaves a branch in a state nobody chose. Throwing
+   * rather than skipping, so the job retries: skipping would drop the
+   * only reference to this machine and leak it for good.
+   */
+  const [working] = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.swarmTaskId, swarmTaskId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+    .limit(1);
+  if (working) throw new Error(`a run is still working swarm task ${swarmTaskId}; not reaping its sandbox yet`);
+
+  const rows = await ctx.db
+    .select()
+    .from(sandboxes)
+    .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
+
+  for (const row of rows) {
+    const handle = { externalId: row.externalId, provider: row.provider, workdir: row.workdir };
+    await ctx.driver.destroy(handle);
+    if (ctx.driver.exists && (await ctx.driver.exists(handle))) {
+      throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
+    }
+    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));
+    console.log(`reaped sandbox ${row.externalId} for finished swarm task ${swarmTaskId}`);
+  }
+
+  await removeSwarmTaskWorkspace(ctx, swarmTaskId);
+}
+
+/**
+ * Drops the leaf's host workspace.
+ *
+ * The workspace key is rebuilt from the swarm and the task rather than
+ * read off a row, for the reason the swarm's own key is: it is derived
+ * from ids that never change, and a name rebuilt from a slug a team
+ * may have renamed would point at a directory that is not this one.
+ */
+async function removeSwarmTaskWorkspace(ctx: AppContext, swarmTaskId: string): Promise<void> {
+  const [task] = await ctx.db
+    .select({ swarmId: swarmTasks.swarmId })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.id, swarmTaskId))
+    .limit(1);
+  if (!task) return;
+  const [swarm] = await ctx.db
+    .select({ projectId: swarms.projectId })
+    .from(swarms)
+    .where(eq(swarms.id, task.swarmId))
+    .limit(1);
+  const key = swarmTaskWorkspaceKey(task.swarmId, swarmTaskId);
+  if (!swarm) {
+    await ctx.worktrees.removeWorkspace([], key);
+    return;
+  }
+  const repos = await ctx.db
+    .select({ name: repositories.name, localPath: repositories.localPath })
+    .from(repositories)
+    .where(eq(repositories.projectId, swarm.projectId));
+  await ctx.worktrees.removeWorkspace(repos, key);
 }
 
 /**
