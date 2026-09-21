@@ -40,7 +40,7 @@ import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
-import { identifyUser, resetUser } from "./posthog.js";
+import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -141,12 +141,16 @@ const PROJECT_KEY = "bento:projectId";
 
 export function App() {
   const { data: session, isPending } = useSession();
+  const previousUserId = useRef<string | null>(null);
   useEffect(() => {
     if (isPending) return;
-    if (session?.user) {
-      identifyUser(session.user.id, { email: session.user.email, name: session.user.name });
-    } else {
+    const change = sessionIdentityChange(previousUserId.current, session?.user ?? null);
+    if (change.type === "identify") {
+      identifyUser(change.user.id, { email: change.user.email, name: change.user.name });
+      previousUserId.current = change.user.id;
+    } else if (change.type === "reset") {
       resetUser();
+      previousUserId.current = null;
     }
   }, [isPending, session]);
   return (
