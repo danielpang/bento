@@ -6,6 +6,7 @@ import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { ACTIVE_RUN_STATUSES } from "../start-run.js";
 import { enqueueSwarmTick } from "./coordinator.js";
 import { quoteUntrusted } from "./planner-prompt.js";
+import { captureSwarmSpend } from "./spend.js";
 
 /**
  * The clock nobody else is watching.
@@ -421,6 +422,8 @@ async function enforceTimeLimit(
     .returning({ id: swarms.id });
   if (!ended) return;
   result.timedOut.push(swarm.id);
+  // The clock ended it, so the clock is what records what it cost.
+  await captureSwarmSpend(ctx, swarm.id, "timed_out");
   ctx.bus.emitBoardEvent({
     type: "swarm_updated",
     projectId: swarm.projectId,

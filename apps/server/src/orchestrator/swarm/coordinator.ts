@@ -21,6 +21,7 @@ import { enqueueSwarmPublish } from "./complete.js";
 import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
 import { assumedCostFor, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
 import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog } from "./watchdog.js";
+import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -190,7 +191,19 @@ export interface SwarmTickResult {
    * has been done for a week is a push per tick.
    */
   becameDone: boolean;
+  /**
+   * The ending this tick gave the swarm, if it gave it one.
+   *
+   * Separate from becameDone because a swarm ends five ways and only
+   * one of them publishes, while all five are worth recording: what a
+   * swarm that ran out of money spent is exactly as interesting as
+   * what a finished one did, and more so.
+   */
+  becameFinal: SwarmSpendOutcome | null;
 }
+
+/** The states a swarm does not leave, and what each is called in the ledger. */
+const FINAL_SWARM_STATUSES = ["done", "failed", "cancelled", "budget_exhausted", "timed_out"] as const;
 
 /**
  * Reconciles one swarm.
@@ -286,6 +299,14 @@ export async function tickSwarm(
      */
     if (result.becameDone) await enqueueSwarmPublish(ctx, swarmId);
     /*
+     * And what it cost, once, on whichever ending it reached. On the
+     * transition rather than the status, for the reason the publish is:
+     * a tick runs again for all sorts of reasons, and an event per tick
+     * on a swarm that finished last week would be a spend report per
+     * tick.
+     */
+    if (result.becameFinal) await captureSwarmSpend(ctx, swarmId, result.becameFinal);
+    /*
      * A swarm that is over holds a machine nobody is working in, and a
      * sprite costs money for as long as it exists rather than for as
      * long as it is used. Queued rather than destroyed here, for the
@@ -343,6 +364,10 @@ async function runTick(
     landingPromoted: landing.landing?.promoted ?? false,
     status,
     becameDone: status === "done" && swarm.status !== "done",
+    becameFinal:
+      status !== swarm.status && (FINAL_SWARM_STATUSES as readonly string[]).includes(status)
+        ? (status as SwarmSpendOutcome)
+        : null,
   };
 }
 

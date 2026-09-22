@@ -38,6 +38,7 @@ import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import { cancelTaskTree, reassignLeaf, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
@@ -532,6 +533,13 @@ export function swarmRoutes(ctx: AppContext) {
        * would refuse to reap under.
        */
       deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
+      /*
+       * And what it cost, because a swarm somebody stopped is one of
+       * the more interesting things to know the spend of: it is the
+       * shape of a swarm that was not converging. After the commit, so
+       * the figures the event reads are the ones this request wrote.
+       */
+      deferAfterCommit(c, () => captureSwarmSpend(ctx, swarm.id, "cancelled"));
       return c.json(cancelled);
     })
     /**
