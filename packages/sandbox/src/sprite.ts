@@ -313,6 +313,12 @@ export class SpriteDriver implements SandboxDriver {
 
     // Repositories live inside the sprite, so clone what is missing and
     // fetch what is already there.
+    let mentionedFilesystemRetry = false;
+    const sayFilesystemRetry = async () => {
+      if (mentionedFilesystemRetry) return;
+      mentionedFilesystemRetry = true;
+      await say("The sandbox filesystem is temporarily unavailable. Retrying.");
+    };
     for (const repo of spec.repositories ?? []) {
       if (!repo.cloneUrl) continue;
       const dir = `${this.workdir}/${repo.name}`;
@@ -327,11 +333,12 @@ export class SpriteDriver implements SandboxDriver {
       ];
       if (repo.seedBundle) {
         const bundlePath = `/tmp/bento-seed-${repo.name}.bundle`;
-        // Filesystem calls carry no SDK timeout at all; see bounded.
-        await bounded(
-          sprite.filesystem("/").writeFile(bundlePath, repo.seedBundle),
-          FILESYSTEM_TIMEOUT_MS,
+        const seedBundle = repo.seedBundle;
+        // Filesystem calls carry no SDK timeout at all; see callFilesystem.
+        await callFilesystem(
+          () => sprite.filesystem("/").writeFile(bundlePath, seedBundle),
           `writing the ${repo.name} seed bundle`,
+          sayFilesystemRetry,
         );
         try {
           const script = [
@@ -347,9 +354,11 @@ export class SpriteDriver implements SandboxDriver {
           ].join("\n");
           await runScript(sprite, script);
         } finally {
-          await bounded(sprite.filesystem("/").rm(bundlePath), FILESYSTEM_TIMEOUT_MS, "removing the seed bundle").catch(
-            () => {},
-          );
+          await callFilesystem(
+            () => sprite.filesystem("/").rm(bundlePath),
+            "removing the seed bundle",
+            sayFilesystemRetry,
+          ).catch(() => {});
         }
       } else {
         const script = [
@@ -386,20 +395,22 @@ export class SpriteDriver implements SandboxDriver {
      * every run of one failed here, in provisioning, with a TypeError
      * from inside a vendor's SDK and no hint that the cause was a
      * project without a repository. Narrow on purpose: an API that is
-     * unreachable or refusing raises an APIError, which still travels,
-     * and the bound around it still applies to the call itself.
+     * unreachable or refusing still travels, and the bound around the
+     * call still applies. A transient "service temporarily unavailable"
+     * is retried first (see callFilesystem); it is not an empty workspace.
      */
-    const entries = await bounded(
-      filesystem.readdir(this.workdir, { withFileTypes: true }).catch((err: unknown) => {
-        // Only the SDK's own null dereference; undici reports a
-        // transport failure as TypeError("fetch failed") too, but that
-        // one carries the underlying error as its cause and an outage
-        // must not read as an empty workspace with nothing to sweep.
-        if (err instanceof TypeError && err.cause === undefined) return [];
-        throw err;
-      }),
-      FILESYSTEM_TIMEOUT_MS,
+    const entries = await callFilesystem(
+      () =>
+        filesystem.readdir(this.workdir, { withFileTypes: true }).catch((err: unknown) => {
+          // Only the SDK's own null dereference; undici reports a
+          // transport failure as TypeError("fetch failed") too, but that
+          // one carries the underlying error as its cause and an outage
+          // must not read as an empty workspace with nothing to sweep.
+          if (err instanceof TypeError && err.cause === undefined) return [];
+          throw err;
+        }),
       "listing the workspace",
+      sayFilesystemRetry,
     );
     for (const entry of entries) {
       if (!entry.isDirectory() || keep.has(entry.name)) continue;
@@ -412,21 +423,22 @@ export class SpriteDriver implements SandboxDriver {
        * grew failed every later provision of its card exactly there.
        * A path shown to be missing is not a checkout; see
        * pathWasMissing for why the error class alone is not trusted.
-       * The catch sits inside bounded so its timeout still travels.
+       * The catch sits inside the bounded call so its timeout still travels.
        */
-      const isCheckout = await bounded(
-        filesystem.exists(`${candidate}/.git`).catch((err: unknown) => {
-          if (pathWasMissing(err)) return false;
-          throw err;
-        }),
-        FILESYSTEM_TIMEOUT_MS,
+      const isCheckout = await callFilesystem(
+        () =>
+          filesystem.exists(`${candidate}/.git`).catch((err: unknown) => {
+            if (pathWasMissing(err)) return false;
+            throw err;
+          }),
         "checking a checkout",
+        sayFilesystemRetry,
       );
       if (!isCheckout) continue;
-      await bounded(
-        filesystem.rm(candidate, { recursive: true, force: true }),
-        FILESYSTEM_TIMEOUT_MS,
+      await callFilesystem(
+        () => filesystem.rm(candidate, { recursive: true, force: true }),
         `removing the old ${entry.name} checkout`,
+        sayFilesystemRetry,
       );
     }
 
@@ -1183,6 +1195,15 @@ const CHECKPOINT_TIMEOUT_MS = 5 * 60_000;
 const RESTORE_TIMEOUT_MS = 10 * 60_000;
 
 /**
+ * Waits between retries of a filesystem call the sprites API asked us
+ * to repeat. About fourteen seconds in total: long enough for a proxy
+ * or a waking sprite to start answering, short enough that a provision
+ * still fails while the person is watching when the outage holds.
+ * Exported so the provision tests can advance the same clock.
+ */
+export const FILESYSTEM_RETRY_DELAYS_MS = [500, 1_500, 4_000, 8_000];
+
+/**
  * Whether a filesystem call failed because the path is not there, as
  * opposed to the API failing to answer.
  *
@@ -1201,6 +1222,56 @@ function pathWasMissing(err: unknown): boolean {
   if (!(err instanceof FilesystemError)) return false;
   if (err.code === "ENOENT") return true;
   return err.code === "UNKNOWN" && /no such file or directory/i.test(err.message);
+}
+
+/**
+ * Whether a filesystem call failed because the sprites API could not
+ * answer just now.
+ *
+ * The live failure is a FilesystemError whose message is "service
+ * temporarily unavailable, please retry". The SDK copies that sentence
+ * off the JSON body and drops the HTTP status, and the code stays
+ * UNKNOWN, the same code an expired token and a missing path wear. The
+ * class is therefore not a signal. Only that sentence is, plus the
+ * SDK's non-JSON fallback ("readdir failed with status 503"), which
+ * still names a 408, 429, or 5xx. Anything else fails the provision on
+ * the first try: retrying an expired token or a missing path would only
+ * delay the sweep that removes dropped repositories.
+ */
+function filesystemCallIsRetriable(err: unknown): boolean {
+  if (!(err instanceof FilesystemError)) return false;
+  if (/temporarily unavailable|please retry/i.test(err.message)) return true;
+  const status = /failed with status (\d+)\b/.exec(err.message);
+  if (!status) return false;
+  const code = Number(status[1]);
+  return code === 408 || code === 429 || (code >= 500 && code <= 599);
+}
+
+/**
+ * One filesystem call, bounded, and repeated when the API says to retry.
+ *
+ * The bound stays inside the attempt: a hung call still ends at
+ * FILESYSTEM_TIMEOUT_MS, and that timeout is not itself retried. The
+ * work closure runs again from scratch, which is safe for the calls
+ * provisioning makes (list, stat, overwrite, delete). onRetry runs once,
+ * before the first wait, and a failure there must not replace the
+ * filesystem error that caused the retry.
+ */
+async function callFilesystem<T>(
+  work: () => Promise<T>,
+  what: string,
+  onRetry?: () => Promise<void>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await bounded(work(), FILESYSTEM_TIMEOUT_MS, what);
+    } catch (err) {
+      const delay = FILESYSTEM_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !filesystemCallIsRetriable(err)) throw err;
+      if (attempt === 0) await onRetry?.().catch(() => {});
+      await sleep(delay);
+    }
+  }
 }
 
 /**
