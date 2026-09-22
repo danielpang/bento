@@ -1275,3 +1275,86 @@ test("a leaf that starts drops the ceiling it was refused for", async () => {
     "a leaf that is working asserts no ceiling",
   );
 });
+
+/* ---------------------------------------------------------------- *
+ * Planners on part of a plan.
+ * ---------------------------------------------------------------- */
+
+test("a plan node that was handed over gets a planner of its own, before the leaves", async () => {
+  /**
+   * Before the leaves, because a sub planner produces leaves and a
+   * leaf takes a worker slot for as long as an agent is on it:
+   * starting the planner of a subtree first is what lets the leaves it
+   * writes be picked up on the next tick rather than a tick after
+   * every other leaf has finished.
+   */
+  const swarm = await makeSwarm();
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "Payments", status: "assigned", position: 0 });
+  const leaf = await makeTask(swarm.id, { title: "Elsewhere", status: "assigned", position: 1 });
+
+  const deps = starter();
+  await tickSwarm(ctx, swarm.id, deps);
+
+  assert.deepEqual(
+    deps.calls.map((call) => [call.role, call.swarmTaskId]),
+    [
+      ["subplanner", group.id],
+      ["worker", leaf.id],
+    ],
+  );
+  // It runs as the swarm's planner agent, not the worker's: what is
+  // being asked for is a plan.
+  assert.equal(deps.calls[0]!.agentProfileId, PROFILE);
+
+  const [after] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, group.id));
+  assert.equal(after!.status, "working");
+  assert.ok(after!.assignedRunId, "and the node names the run planning it");
+
+  // And the run is queued, because a run that is not queued never
+  // starts.
+  assert.equal(queued.filter((job) => job.queue === "run.execute").length, 2);
+});
+
+test("a plan node whose planner stopped without writing anything is failed, not left hanging", async () => {
+  /**
+   * A sub planner finishes by having written children, and then the
+   * rollup owns the node. One that stopped without writing any leaves
+   * the node working with no agent on it and no children to roll up,
+   * which nothing else in the swarm notices: the subtree simply never
+   * happens.
+   */
+  const swarm = await makeSwarm();
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "Payments", status: "assigned" });
+
+  const deps = starter();
+  await tickSwarm(ctx, swarm.id, deps);
+  const [working] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, group.id));
+  assert.equal(working!.status, "working");
+
+  await db
+    .update(agentRuns)
+    .set({ status: "failed", error: "the model ended the turn" })
+    .where(eq(agentRuns.id, working!.assignedRunId!));
+
+  await tickSwarm(ctx, swarm.id, starter());
+  const [settled] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, group.id));
+  assert.equal(settled!.status, "failed");
+  assert.equal(settled!.attention, "failed", "so a person and the planner both see it");
+});
+
+test("a plan node with children is the rollup's, not the settle step's", async () => {
+  const swarm = await makeSwarm();
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "Payments", status: "assigned" });
+
+  await tickSwarm(ctx, swarm.id, starter());
+  const [working] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, group.id));
+  // The planner wrote a leaf and then its run ended, which is what a
+  // sub planner finishing looks like.
+  await makeTask(swarm.id, { parentId: group.id, title: "Card tokens", status: "working" });
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, working!.assignedRunId!));
+
+  await tickSwarm(ctx, swarm.id, starter());
+  const [rolled] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, group.id));
+  assert.equal(rolled!.status, "working", "its status is its children's, and nothing failed it");
+  assert.equal(rolled!.attention, null);
+});

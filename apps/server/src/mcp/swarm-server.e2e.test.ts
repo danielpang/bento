@@ -15,6 +15,7 @@ import {
   swarmLandings,
   swarmMessages,
   swarmTasks,
+  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -246,6 +247,7 @@ test("the handshake and the catalogue answer a planner", async () => {
       "assign",
       "cancel_task",
       "create_task",
+      "delegate",
       "get_tree",
       "read_design",
       "read_report",
@@ -652,4 +654,103 @@ test("rejecting lets the leaf's next report reach the planner again", async () =
     "the mark that says this leaf's news has been heard goes with the report it described",
   );
   assert.equal((row!.flags as { rejection?: string }).rejection, "the empty cart case is missing");
+});
+
+/* ---------------------------------------------------------------- *
+ * Handing one part of a plan to a planner of its own.
+ * ---------------------------------------------------------------- */
+
+/** A swarm whose template allows plans this many levels deep. */
+async function swarmWithDepth(maxPlanDepth: number): Promise<string> {
+  const [template] = await db
+    .insert(swarmTemplates)
+    .values({
+      ownerId: "u1",
+      organizationId: null,
+      name: `T-${Math.random().toString(36).slice(2, 8)}`,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
+      maxPlanDepth,
+    })
+    .returning();
+  const [swarm] = await db
+    .insert(swarms)
+    .values({
+      projectId: PROJECT,
+      slug: `s-${Math.random().toString(36).slice(2, 8)}`,
+      title: "Swarm",
+      status: "running",
+      templateId: template!.id,
+    })
+    .returning();
+  return swarm!.id;
+}
+
+test("a plan node can be handed to a planner of its own, within the template's depth", async () => {
+  const swarmId = await swarmWithDepth(2);
+  const { token } = await agentOn("planner", { swarmId });
+  const group = await makeTask(swarmId, { nodeType: "plan", title: "Payments" });
+
+  const handed = await call(token, "delegate", { taskId: group.id });
+  assert.ok(!handed.isError, handed.text);
+  assert.match(handed.text, /planner of its own/);
+  assert.equal((await task(group.id))!.status, "assigned", "the coordinator is what starts it");
+
+  // Asked twice, it says so rather than marking the node again.
+  const again = await call(token, "delegate", { taskId: group.id });
+  assert.match(again.text, /already has a planner of its own/);
+});
+
+test("a leaf cannot be handed over, and neither can a node too deep for the template", async () => {
+  const swarmId = await swarmWithDepth(2);
+  const { token } = await agentOn("planner", { swarmId });
+
+  const leaf = await makeTask(swarmId, { title: "One change" });
+  const onLeaf = await call(token, "delegate", { taskId: leaf.id });
+  assert.ok(onLeaf.isError);
+  assert.match(onLeaf.text, /is a leaf/);
+
+  // Depth two allows a planner on a top level node and no deeper: a
+  // planner on a node one level down would be level three.
+  const top = await makeTask(swarmId, { nodeType: "plan", title: "Payments" });
+  const under = await makeTask(swarmId, { parentId: top.id, nodeType: "plan", title: "Refunds" });
+  const tooDeep = await call(token, "delegate", { taskId: under.id });
+  assert.ok(tooDeep.isError);
+  assert.match(tooDeep.text, /allows plans 2 levels deep/);
+  assert.equal((await task(under.id))!.status, "open");
+});
+
+test("a template that allows one level allows no sub planners at all", async () => {
+  /**
+   * One level is what every swarm did before this existed: the
+   * planner writes the whole tree. The refusal says so rather than
+   * reporting a number, because "the template does not allow it" is
+   * the thing the team can change.
+   */
+  const swarmId = await swarmWithDepth(1);
+  const { token } = await agentOn("planner", { swarmId });
+  const group = await makeTask(swarmId, { nodeType: "plan", title: "Payments" });
+
+  const refused = await call(token, "delegate", { taskId: group.id });
+  assert.ok(refused.isError);
+  assert.match(refused.text, /does not allow sub planners/);
+  assert.equal((await task(group.id))!.status, "open");
+});
+
+test("a sub planner cannot hand over a node outside the part it was given", async () => {
+  const swarmId = await swarmWithDepth(3);
+  const mine = await makeTask(swarmId, { nodeType: "plan", title: "mine" });
+  const under = await makeTask(swarmId, { parentId: mine.id, nodeType: "plan", title: "under mine" });
+  const elsewhere = await makeTask(swarmId, { nodeType: "plan", title: "elsewhere" });
+
+  const sub = await agentOn("subplanner", { swarmId, taskId: mine.id });
+  const outside = await call(sub.token, "delegate", { taskId: elsewhere.id });
+  assert.ok(outside.isError);
+  assert.match(outside.text, /outside the part of the plan you were given/);
+
+  // Inside its own subtree, and within the depth, it may.
+  const inside = await call(sub.token, "delegate", { taskId: under.id });
+  assert.ok(!inside.isError, inside.text);
+  assert.equal((await task(under.id))!.status, "assigned");
 });
