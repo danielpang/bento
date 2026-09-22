@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import pg from "pg";
 import { eq } from "drizzle-orm";
 import {
+  agentProfiles,
   agentRuns,
   createDb,
   createPool,
@@ -1088,4 +1089,189 @@ test("stopping a swarm hands its own machine to the reaper", async () => {
     [{ swarmId: swarm.id }],
     "the machine is queued rather than destroyed inline, the way a finished card's is",
   );
+});
+
+/* ---------------------------------------------------------------- *
+ * The node controls: retry, cancel, split, reassign, and editing the
+ * description that made the retry worth doing.
+ * ---------------------------------------------------------------- */
+
+/**
+ * The whole point of retrying: the leaf goes back in the queue with the
+ * attempt that failed cleared off it, and the reconciler is what puts a
+ * new agent on it.
+ */
+test("retrying a leaf puts it back in the queue and clears the attempt that failed", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db
+    .update(swarmTasks)
+    .set({ status: "failed", attention: "failed", report: "I could not do it", flags: { plannerToldAt: "yesterday" } })
+    .where(eq(swarmTasks.id, tree.first.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(res.status, 200, await res.clone().text());
+
+  const after = await readTask(tree.first.id);
+  assert.equal(after.status, "assigned", "assigned, not working: the reconciler decides when there is room");
+  assert.equal(after.attention, null);
+  assert.equal(after.report, null, "the old report was about the attempt being discarded");
+  assert.equal((after.flags as { retries?: number }).retries, 1, "and the board can say this is the second try");
+  assert.equal(
+    (after.flags as { plannerToldAt?: string }).plannerToldAt,
+    undefined,
+    "the latch is cleared, or the planner would never hear how this one goes",
+  );
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "and the reconciler was woken to spawn on it",
+  );
+});
+
+/** Retrying replaces the agent, so the one that is there stops first. */
+test("retrying a leaf that still has an agent on it stops that agent", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const [run] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: tree.first.id,
+      role: "worker",
+      agentProfileId: (await db.select().from(agentProfiles).limit(1))[0]!.id,
+      prompt: "",
+      status: "running",
+    })
+    .returning();
+  const controller = new AbortController();
+  ctx.running.set(run!.id, controller);
+  await db.update(swarmTasks).set({ status: "working", assignedRunId: run!.id }).where(eq(swarmTasks.id, tree.first.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal(controller.signal.aborted, true, "the agent that was on it is stopped");
+  const [stopped] = await db.select().from(agentRuns).where(eq(agentRuns.id, run!.id));
+  assert.equal(stopped!.status, "cancelled");
+  assert.equal((await readTask(tree.first.id)).status, "assigned");
+});
+
+/** A plan node is worked through its children, so there is nothing to retry. */
+test("a plan node is not a person's to retry", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.plan.id}/retry`);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).code, "NOT_A_LEAF");
+});
+
+/**
+ * Cancelling takes the subtree, the same rule the planner's own tool
+ * follows, because both call the same function.
+ */
+test("cancelling a plan node cancels everything under it and stops its agents", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.plan.id}/cancel`);
+  assert.equal(res.status, 200, await res.clone().text());
+  const { cancelled } = (await res.json()) as { cancelled: string[] };
+  assert.equal(cancelled.length, 3, "the node and both leaves under it");
+  for (const id of [tree.plan.id, tree.first.id, tree.second.id]) {
+    assert.equal((await readTask(id)).status, "cancelled");
+  }
+});
+
+test("splitting a leaf turns it into a plan node with the tasks it should have been", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarmTasks).set({ status: "assigned" }).where(eq(swarmTasks.id, tree.first.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/split`, {
+    children: [{ title: "The read path" }, { title: "The write path", description: "and its tests", weight: 2 }],
+  });
+  assert.equal(res.status, 201, await res.clone().text());
+  const { created } = (await res.json()) as { created: string[] };
+  assert.equal(created.length, 2);
+
+  const split = await readTask(tree.first.id);
+  assert.equal(split.nodeType, "plan", "it is no longer something an agent is given");
+  assert.equal(split.status, "open", "and its own assignment went to its children");
+  const children = (await tasksOf(swarm.id)).filter((task) => task.parentId === tree.first.id);
+  assert.deepEqual(children.map((task) => task.title).sort(), ["The read path", "The write path"]);
+  assert.equal(children.every((task) => task.status === "open"), true, "none of them is started");
+});
+
+/** Splitting a leaf an agent is on would orphan the work it is doing. */
+test("a leaf being worked is not split out from under its agent", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarmTasks).set({ status: "working" }).where(eq(swarmTasks.id, tree.first.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/split`, {
+    children: [{ title: "Too late" }],
+  });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).code, "CANNOT_SPLIT");
+});
+
+/**
+ * Reassigning writes the agent on the node, so the next spawn uses it
+ * and every other leaf keeps the template's own worker.
+ */
+test("reassigning a leaf puts a different agent on that leaf alone", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const [stronger] = await db
+    .insert(agentProfiles)
+    .values({ ownerId: ctx.userId!, name: "Stronger", cli: "fake", model: "fake-2" })
+    .returning();
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/reassign`, {
+    agentProfileId: stronger!.id,
+  });
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal((await readTask(tree.first.id)).agentProfileId, stronger!.id);
+  assert.equal((await readTask(tree.second.id)).agentProfileId, null, "and its sibling is untouched");
+
+  // Reassigning does not start anything: a leaf waiting its turn keeps
+  // its place, and the retry is what pushes it.
+  assert.equal((await readTask(tree.first.id)).status, tree.first.status);
+
+  const back = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/reassign`, { agentProfileId: null });
+  assert.equal(back.status, 200);
+  assert.equal((await readTask(tree.first.id)).agentProfileId, null, "and it can be put back on the template's own");
+});
+
+/** An agent id nobody can reach is not an agent this swarm can run. */
+test("a leaf cannot be reassigned to an agent that is not there", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/reassign`, {
+    agentProfileId: "00000000-0000-0000-0000-000000000000",
+  });
+  assert.equal(res.status, 404);
+});
+
+/**
+ * The half of "edit before retry" that is not the retry. A leaf that
+ * failed because its description was wrong fails again against the same
+ * description.
+ */
+test("a task's description can be corrected, and its status cannot", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+
+  const res = await patch(`/api/swarms/${swarm.id}/tasks/${tree.first.id}`, {
+    description: "Only the totals, not the tax rules.",
+    weight: 3,
+  });
+  assert.equal(res.status, 200, await res.clone().text());
+  const edited = await readTask(tree.first.id);
+  assert.equal(edited.description, "Only the totals, not the tax rules.");
+  assert.equal(edited.weight, 3);
+
+  const refused = await patch(`/api/swarms/${swarm.id}/tasks/${tree.first.id}`, { status: "done" });
+  assert.equal(refused.status, 400, "where a task is in its life is not something a patch decides");
+  assert.equal((await readTask(tree.first.id)).status, tree.first.status);
 });
