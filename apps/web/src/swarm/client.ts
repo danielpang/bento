@@ -100,6 +100,13 @@ export interface SwarmApi {
   retryTask(swarmId: string, taskId: string): Promise<void>;
   cancelTask(swarmId: string, taskId: string): Promise<void>;
   splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
+  /**
+   * Adds a task to the plan under one of its plan nodes.
+   *
+   * The other half of a tree a person and an agent share. It goes in
+   * ready to be worked, and the planner is told and may object.
+   */
+  addTask(swarmId: string, parentId: string, task: { title: string; description?: string }): Promise<void>;
   reassignTask(swarmId: string, taskId: string, agentProfileId: string | null): Promise<void>;
   editTask(
     swarmId: string,
@@ -401,6 +408,28 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
             report: null,
             commits: [],
           })),
+        ];
+      });
+    },
+    addTask(swarmId, parentId, task) {
+      return mutate(swarmId, (detail) => {
+        const parent = detail.tasks.find((row) => row.id === parentId);
+        if (!parent) return;
+        detail.tasks = [
+          ...detail.tasks,
+          {
+            ...parent,
+            id: `${parentId}-added-${detail.tasks.length}`,
+            parentId,
+            position: detail.tasks.filter((row) => row.parentId === parentId).length,
+            nodeType: "leaf" as const,
+            status: "assigned" as const,
+            attention: "none" as const,
+            title: task.title,
+            description: task.description ?? "",
+            report: null,
+            commits: [],
+          },
         ];
       });
     },
@@ -877,6 +906,9 @@ export function httpSwarmApi(
     },
     async splitTask(swarmId, taskId, children) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/split`, { children });
+    },
+    async addTask(swarmId, parentId, task) {
+      await post(`/api/swarms/${swarmId}/tasks`, { parentId, ...task });
     },
     async reassignTask(swarmId, taskId, agentProfileId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/reassign`, { agentProfileId });

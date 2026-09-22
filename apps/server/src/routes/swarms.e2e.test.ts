@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import {
   agentProfiles,
   agentRuns,
@@ -1646,4 +1646,79 @@ test("archiving a finished swarm reaps its machine, and archiving a live one doe
   const [restored] = await db.select().from(swarms).where(eq(swarms.id, live.id));
   assert.equal(restored!.archivedAt, null);
   assert.equal(queued.filter((job) => job.queue === "sandbox.reap").length, 0);
+});
+
+/* ---------------------------------------------------------------- *
+ * Adding a task by hand.
+ * ---------------------------------------------------------------- */
+
+test("a person can add a task, and the planner is told and can object", async () => {
+  /**
+   * The tree is an agent's to fill in and a person's to correct. A
+   * task added by hand goes in ready to be worked, because somebody
+   * who adds one has decided it needs doing and leaving it open would
+   * be the planner overruling them by inaction. What keeps that
+   * honest is the notice: the planner hears about it and can cancel
+   * it, which is a decision somebody can see.
+   */
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks`, {
+    parentId: tree.plan.id,
+    title: "Add the retry",
+    description: "The upload path has no retry, and the planner did not split one out.",
+  });
+  assert.equal(res.status, 201, await res.clone().text());
+  const created = (await res.json()) as { id: string; parentId: string; status: string; nodeType: string };
+  assert.equal(created.parentId, tree.plan.id);
+  assert.equal(created.nodeType, "leaf");
+  assert.equal(created.status, "assigned", "ready to be worked, not waiting on the planner");
+
+  const messages = await db
+    .select()
+    .from(swarmMessages)
+    .where(eq(swarmMessages.swarmId, swarm.id))
+    .orderBy(asc(swarmMessages.createdAt));
+  const notice = messages.at(-1)!;
+  assert.equal(notice.source, "system", "Bento's own sentence about a row it holds");
+  assert.match(notice.text, new RegExp(created.id));
+  assert.match(notice.text, /Add the retry/, "with what the person wrote, quoted inside it");
+  assert.match(notice.text, /use cancel_task or split_task/, "and how to object");
+});
+
+test("a task cannot hang off another task", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks`, { parentId: tree.first.id, title: "Under a leaf" });
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as { error: string; code: string };
+  assert.equal(body.code, "CANNOT_ADD");
+  assert.match(body.error, /cannot hang off another task/);
+});
+
+test("a task added at the top of the plan needs no parent, and a foreign node is not there", async () => {
+  const swarm = await createSwarm();
+  const top = await post(`/api/swarms/${swarm.id}/tasks`, { title: "At the top" });
+  assert.equal(top.status, 201);
+  assert.equal(((await top.json()) as { parentId: string | null }).parentId, null);
+
+  // A node from another swarm reads as not there rather than as one
+  // this caller may add work under.
+  const other = await createSwarm({ title: "Another" });
+  const otherTree = await treeOf(other.id);
+  const foreign = await post(`/api/swarms/${swarm.id}/tasks`, {
+    parentId: otherTree.plan.id,
+    title: "Injected",
+  });
+  assert.equal(foreign.status, 404);
+});
+
+test("nothing is added to a swarm somebody stopped", async () => {
+  const swarm = await createSwarm();
+  await post(`/api/swarms/${swarm.id}/cancel`);
+  const res = await post(`/api/swarms/${swarm.id}/tasks`, { title: "Too late" });
+  assert.equal(res.status, 409);
+  assert.equal(((await res.json()) as { code: string }).code, "SWARM_STOPPED");
 });

@@ -1057,6 +1057,9 @@ test("every entity route refuses a foreign tenant", async () => {
     // that had lost its access check would find this one and finish
     // it, where a made up id would answer 404 either way and prove
     // nothing.
+    // Adding work to somebody else's plan, which their agents would
+    // then go and do with their credentials.
+    ["POST", `/api/swarms/${swarm.id}/tasks`, { body: JSON.stringify({ title: "Injected" }) }],
     ["GET", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}`],
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/done`],
     // The node controls, which are the routes that retry, stop, split
