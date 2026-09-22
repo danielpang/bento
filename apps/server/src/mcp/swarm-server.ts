@@ -300,7 +300,7 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   read_design: {
     description:
       "The swarm's design note: how the whole change fits together, written by the planner. Every agent in the swarm reads the same one.",
-    roles: ["planner", "subplanner", "worker"],
+    roles: ["planner", "subplanner", "worker", "judge"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   read_report: {
@@ -322,13 +322,13 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   my_task: {
     description:
       "The task you were given, as the plan holds it now: its title, what finished means for it, and why it was sent back if it was. Read it before you start.",
-    roles: ["worker"],
+    roles: ["worker", "judge"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   report: {
     description:
       "How you finish. Say what you did, what you did not do, and anything you found that the plan should know. The planner reads it and either accepts your branch into the merge queue or sends it back with a reason.",
-    roles: ["worker"],
+    roles: ["worker", "judge"],
     inputSchema: {
       type: "object",
       properties: { summary: str("What you did, what you did not, and what the plan should know.") },
@@ -339,7 +339,7 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   flag: {
     description:
       "For when you cannot finish: a decision that is not yours, a blocker you cannot clear, or a task that turns out to belong to files somebody else is working. Brings the planner or a person to your task.",
-    roles: ["worker"],
+    roles: ["worker", "judge"],
     inputSchema: {
       type: "object",
       properties: {

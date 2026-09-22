@@ -63,6 +63,7 @@ import {
 } from "./swarm/planner-prompt.js";
 import { buildWorkerPrompt } from "./swarm/worker-prompt.js";
 import { isDocumentSwarm, SECTION_DIR } from "./swarm/deliverable.js";
+import { buildFinalCheckPrompt, finalCheckFor, tasksOf } from "./swarm/final-check.js";
 import { isSafeBranchName, taskTrailer } from "./swarm/branches.js";
 import { takeNodeMessages } from "./swarm/node-messages.js";
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
@@ -1389,6 +1390,24 @@ async function buildSubjectPrompt(
       templateInstructions: template?.plannerInstructions ?? null,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
     });
+  }
+  /*
+   * The final check gets the judge's prompt, which is not the worker's
+   * with a paragraph added: a worker is told to make a change and
+   * commit it, and an agent told that will make one. The single most
+   * useful property of a check is that it changes nothing.
+   */
+  if (subject.run.role === "judge" && subject.task) {
+    const check = finalCheckFor(template);
+    if (check) {
+      return buildFinalCheckPrompt({
+        swarm: subject.swarm,
+        check,
+        agent,
+        repositories: mounted,
+        tasks: await tasksOf(ctx.db, subject.swarm.id),
+      });
+    }
   }
   if (subject.run.role === "worker" && subject.task) {
     return buildWorkerPrompt({

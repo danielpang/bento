@@ -1358,3 +1358,109 @@ test("a plan node with children is the rollup's, not the settle step's", async (
   assert.equal(rolled!.status, "working", "its status is its children's, and nothing failed it");
   assert.equal(rolled!.attention, null);
 });
+
+/* ---------------------------------------------------------------- *
+ * The last look before a swarm is finished.
+ * ---------------------------------------------------------------- */
+
+/** A template that asks for a final check, and a swarm running under it. */
+async function swarmWithFinalCheck(
+  over: { judgeProfileId?: string | null; completionCommand?: string | null } = {},
+): Promise<typeof swarms.$inferSelect> {
+  const [template] = await db
+    .insert(swarmTemplates)
+    .values({
+      ownerId: "u1",
+      organizationId: null,
+      name: `T-${Math.random().toString(36).slice(2, 8)}`,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
+      judgeProfileId: over.judgeProfileId === undefined ? PROFILE : over.judgeProfileId,
+      completionCommand: over.completionCommand ?? null,
+    })
+    .returning();
+  return makeSwarm({ templateId: template!.id });
+}
+
+test("a finished tree gets a final check, and the swarm is not done until it is", async () => {
+  /**
+   * The check is a leaf of the tree it checks, which is the whole
+   * design: the root cannot be done while a leaf under it is not, so
+   * the gate holds by construction rather than by a rule somebody has
+   * to remember to apply before publishing.
+   */
+  const swarm = await swarmWithFinalCheck({ completionCommand: "pnpm test" });
+  const leaf = await makeTask(swarm.id, { title: "Line item totals", status: "done" });
+
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  assert.notEqual(first?.status, "done", "the tree is finished but the swarm is not");
+  assert.equal(first?.becameDone, false, "so nothing is published");
+
+  const rows = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id));
+  const check = rows.find((row) => row.id !== leaf.id);
+  assert.ok(check, "a check was added to the tree");
+  assert.equal(check!.title, "Final check");
+  assert.equal(check!.parentId, null, "at the top of the plan, where the whole change is");
+  assert.equal(check!.agentProfileId, PROFILE, "run by the judge the template names");
+  assert.match(check!.description, /pnpm test/, "and it says what it will do");
+
+  // It is worked by a judge rather than a worker: an agent told to
+  // make a change makes one, and a check must not.
+  const judgeRun = (await db.select().from(agentRuns).where(eq(agentRuns.swarmTaskId, check!.id)))[0];
+  assert.equal(judgeRun?.role, "judge");
+
+  // A second tick does not add a second check.
+  await tickSwarm(ctx, swarm.id, starter());
+  assert.equal((await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).length, 2);
+
+  // And once the check is accepted, the swarm finishes and publishes.
+  await db.update(swarmTasks).set({ status: "done", report: "VERDICT: COMPLETE" }).where(eq(swarmTasks.id, check!.id));
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, judgeRun!.id));
+  const last = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(last?.status, "done");
+  assert.equal(last?.becameDone, true);
+});
+
+test("a template that asks for nothing gets no check, which is every swarm before this", async () => {
+  const swarm = await swarmWithFinalCheck({ judgeProfileId: null, completionCommand: null });
+  await makeTask(swarm.id, { title: "Line item totals", status: "done" });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(result?.status, "done");
+  assert.equal(result?.becameDone, true);
+  assert.equal((await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).length, 1);
+});
+
+test("a check that failed is not replaced by another, it is the planner's to decide about", async () => {
+  /**
+   * It has reported, the planner has been woken about it, and what
+   * happens next is a decision. A swarm that quietly spawned a second
+   * judge over the same change would spend money arguing with itself.
+   */
+  const swarm = await swarmWithFinalCheck();
+  await makeTask(swarm.id, { title: "Line item totals", status: "done" });
+  await tickSwarm(ctx, swarm.id, starter());
+
+  const rows = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id));
+  const check = rows.find((row) => row.title === "Final check")!;
+  await db
+    .update(swarmTasks)
+    .set({ status: "failed", attention: "failed", report: "VERDICT: INCOMPLETE the retry is missing" })
+    .where(eq(swarmTasks.id, check.id));
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmTaskId, check.id));
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal((await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).length, 2);
+  assert.notEqual(result?.status, "done", "a swarm whose check failed is not finished");
+});
+
+test("a check is not added to a tree that is still being worked", async () => {
+  const swarm = await swarmWithFinalCheck();
+  await makeTask(swarm.id, { title: "Done", status: "done" });
+  await makeTask(swarm.id, { title: "Still going", status: "working" });
+
+  await tickSwarm(ctx, swarm.id, starter());
+  const titles = (await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).map((r) => r.title);
+  assert.ok(!titles.includes("Final check"));
+});

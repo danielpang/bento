@@ -18,6 +18,7 @@ import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle, type NewRun, type OutO
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
 import { enqueueSwarmPublish } from "./complete.js";
+import { ensureFinalCheck, isFinalCheck, templateOf } from "./final-check.js";
 import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
 import { assumedCostFor, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
 import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog } from "./watchdog.js";
@@ -361,6 +362,30 @@ async function runTick(
     .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
 
   await settleWorkedLeaves(tx, swarm, tasks, events, now);
+  /*
+   * The last thing a swarm does, put on the tree before the rollup
+   * reads it.
+   *
+   * Before, because the check is a leaf and the root cannot be done
+   * while a leaf under it is not: added after the rollup, the swarm
+   * would read as done for one tick, publish, and only then discover
+   * it had a check to run. A template that asks for neither a judge
+   * nor a command adds nothing here, which is every swarm that ran
+   * before this existed.
+   */
+  const template = await templateOf(tx, swarm);
+  const check = await ensureFinalCheck(tx, swarm, tasks, template, now);
+  if (check.created) {
+    tasks.push(check.created);
+    events.push({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: check.created.id,
+      status: check.created.status,
+    });
+  }
+
   const changed = await rollUp(tx, swarm, tasks, events);
   await warnLowBudget(tx, swarm, now);
   const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
@@ -1052,7 +1077,14 @@ async function spawnWorkers(
       type: "swarm",
       swarmId: swarm.id,
       swarmTaskId: task.id,
-      role: "worker",
+      /*
+       * The final check is a judge, and the role says so on the run.
+       * It is what the executor reads to give it the judge's prompt
+       * rather than a worker's, and it is what makes the run legible
+       * afterwards: an agent that changed nothing and ruled on the
+       * work is not a worker, whatever table it shares.
+       */
+      role: isFinalCheck(task) ? "judge" : "worker",
       agentProfileId: profileId,
       prompt: "",
       executor: "server",
