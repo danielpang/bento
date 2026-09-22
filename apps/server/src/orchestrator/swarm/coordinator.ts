@@ -20,6 +20,7 @@ import { enqueueLanding } from "./landing.js";
 import { enqueueSwarmPublish } from "./complete.js";
 import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
 import { assumedCostFor, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
+import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog } from "./watchdog.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -1400,6 +1401,20 @@ export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promis
     await registerTickWorker(ctx);
     await ctx.boss.send(SWARM_TICK_QUEUE, { swarmId }, { singletonKey: swarmId });
   });
+  /**
+   * And the clock, from the same door.
+   *
+   * Outside the lifecycle turn because it is a different worker with a
+   * different lifetime: the tick worker stops when nothing is running,
+   * and the watchdog has to outlive exactly that, for the swarm that is
+   * paused waiting on a ceiling somewhere else to lift. Its own failure
+   * is never this send's: a tick that could not also start a schedule
+   * is still a tick.
+   */
+  await ensureSwarmWatchdog(ctx).catch((err: unknown) => {
+    console.warn("could not start the swarm watchdog:", err);
+    ctx.analytics?.captureException(err, null, null, { queue: SWARM_TICK_QUEUE });
+  });
 }
 
 /**
@@ -1453,13 +1468,28 @@ async function registerTickWorker(ctx: AppContext): Promise<void> {
  * one that comes after finds no worker registered and registers again.
  */
 export async function stopSwarmTickWorkerIfIdle(ctx: AppContext): Promise<boolean> {
-  return await inTurn(ctx.boss, async () => {
+  const stopped = await inTurn(ctx.boss, async () => {
     if (!tickWorkers.has(ctx.boss)) return false;
     if (await hasActiveSwarms(ctx)) return false;
     tickWorkers.delete(ctx.boss);
     await ctx.boss.offWork(SWARM_TICK_QUEUE);
     return true;
   });
+  /**
+   * The clock goes when there is nothing left for it to watch, which
+   * is a later moment than this one.
+   *
+   * A swarm paused on a plan limit keeps the watchdog even though it
+   * keeps no tick worker: it has nothing in flight to reconcile, and
+   * it is the one state that cannot wake itself, so something has to
+   * keep asking whether the ceiling has lifted.
+   */
+  if (!(await hasWatchedSwarms(ctx))) {
+    await stopSwarmWatchdog(ctx).catch((err: unknown) => {
+      console.warn("could not stop the swarm watchdog:", err);
+    });
+  }
+  return stopped;
 }
 
 /** Stops the tick worker, so an idle deployment stops paying for the poll. */
