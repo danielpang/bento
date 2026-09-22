@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { gateCriteria, gateType } from "@bento/core";
 import { agentEntry } from "./agent-file.js";
+import { swarmEntryProblem, swarmTemplateEntry } from "./swarm-file.js";
 import { firstZodProblem, parseYamlDocument, writeYamlDocument } from "./yaml-file.js";
 
 /**
@@ -58,6 +59,20 @@ export const pipelineFile = z.object({
    * else, and the commands simply do not apply.
    */
   repositories: z.array(repositoryEntry).max(20).default([]),
+  /**
+   * The swarm templates this project's team uses.
+   *
+   * In the same file as the pipeline because most teams keep one file
+   * beside their code, and a second file for the swarm half would be a
+   * second thing to remember and a second thing to forget. Optional, so
+   * every pipeline file written before swarms existed still imports.
+   *
+   * The entry shape is swarm-file.ts's, imported rather than restated:
+   * the same templates are also carried on their own, and two
+   * definitions of one thing is how one file starts accepting what the
+   * other refuses.
+   */
+  swarms: z.array(swarmTemplateEntry).max(50).default([]),
 });
 
 export type PipelineFile = z.infer<typeof pipelineFile>;
@@ -83,6 +98,14 @@ export function parsePipelineFile(text: string): { data: PipelineFile } | { erro
       return { error: `stage "${stage.slug}" names the agent "${stage.agent}", which the file does not define` };
     }
   }
+  /*
+   * And the swarm templates, through the same checks the standalone
+   * swarm file makes: two templates of one name would make an import
+   * depend on order, and an agent named but not defined is a template
+   * that arrives with nobody to plan with.
+   */
+  const swarmProblem = swarmEntryProblem(parsed.data.swarms, parsed.data.agents.map((agent) => agent.name));
+  if (swarmProblem) return { error: swarmProblem };
   return { data: parsed.data };
 }
 

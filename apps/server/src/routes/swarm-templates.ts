@@ -8,6 +8,9 @@ import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { isSafeRelativePath } from "../orchestrator/swarm/deliverable.js";
+import { parseSwarmFile, swarmFile, toSwarmEntry, writeSwarmFile } from "../swarm-file.js";
+import { upsertAgentsFromFile } from "../upsert-agents.js";
+import { upsertSwarmTemplatesFromFile } from "../upsert-swarm-templates.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
 /**
@@ -111,7 +114,10 @@ const updateTemplate = z
 const byName = [sql`lower(${swarmTemplates.name})`, asc(swarmTemplates.id)];
 
 /** Which templates the caller may see, as a WHERE clause. */
-async function visibleTemplateFilter(ctx: AppContext, c: Parameters<typeof actor>[0]): Promise<SQL | undefined> {
+export async function visibleTemplateFilter(
+  ctx: AppContext,
+  c: Parameters<typeof actor>[0],
+): Promise<SQL | undefined> {
   const userId = actor(c);
   if (ctx.env.BENTO_MODE !== "multi") return eq(swarmTemplates.ownerId, userId);
   const memberships = await db(c, ctx)
@@ -197,6 +203,119 @@ export function swarmTemplateRoutes(ctx: AppContext) {
         .returning();
       if (!template) return c.json({ error: "something went wrong saving the template; try again" }, 500);
       return c.json(template, 201);
+    })
+    /**
+     * The templates as a file.
+     *
+     * A swarm template is a team's way of running a swarm, tuned over
+     * weeks and then wanted on a second project or in a second
+     * organization. The whole set reads and writes as one YAML
+     * document, with the agents it names carried alongside it, so what
+     * travels is a thing that works rather than a list of ids that
+     * mean nothing where it lands.
+     */
+    .get("/export", async (c) => {
+      const refusal = await requireSwarms(ctx, c);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const rows = await db(c, ctx)
+        .select()
+        .from(swarmTemplates)
+        .where(await visibleTemplateFilter(ctx, c))
+        .orderBy(...byName);
+      if (rows.length === 0) {
+        return c.json({ error: "there are no swarm templates here to export yet" }, 404);
+      }
+
+      /*
+       * The agents the templates name, by name rather than by id, and
+       * carried in full: a file that referred to agents it did not
+       * define would import into an install that has none and produce
+       * templates that cannot start anything.
+       */
+      const usedIds = [
+        ...new Set(
+          rows
+            .flatMap((row) => [row.plannerProfileId, row.workerProfileId, row.judgeProfileId])
+            .filter((id): id is string => !!id),
+        ),
+      ];
+      const agents = usedIds.length
+        ? await db(c, ctx).select().from(agentProfiles).where(inArray(agentProfiles.id, usedIds))
+        : [];
+      const nameById = new Map(agents.map((agent) => [agent.id, agent.name]));
+
+      const file = {
+        version: 1 as const,
+        swarms: rows.map((row) =>
+          toSwarmEntry({
+            name: row.name,
+            description: row.description,
+            planner: row.plannerProfileId ? (nameById.get(row.plannerProfileId) ?? null) : null,
+            worker: row.workerProfileId ? (nameById.get(row.workerProfileId) ?? null) : null,
+            judge: row.judgeProfileId ? (nameById.get(row.judgeProfileId) ?? null) : null,
+            plannerInstructions: row.plannerInstructions,
+            workerInstructions: row.workerInstructions,
+            isolation: row.workerIsolation,
+            deliverable: row.deliverable,
+            documentPath: row.documentPath,
+            completionCommand: row.completionCommand,
+            maxWorkers: row.maxWorkers,
+            maxPlanDepth: row.maxPlanDepth,
+            budgetUsd: row.budgetUsd,
+            timeLimitMin: row.timeLimitMin,
+            assumedCostUsd: row.assumedCostUsd,
+            longRunWarnMin: row.longRunWarnMin,
+            longRunEscalateMin: row.longRunEscalateMin,
+          }),
+        ),
+        agents: agents.map((agent) => ({
+          name: agent.name,
+          tool: agent.cli,
+          model: agent.model,
+          skill: agent.skill ?? null,
+          extraArgs: agent.extraArgs ?? [],
+        })),
+      };
+      const parsed = swarmFile.safeParse(file);
+      if (!parsed.success) {
+        // Stored rows this format cannot express, which means the
+        // format is behind the schema rather than the data being wrong.
+        return c.json({ error: "these swarm templates cannot be exported yet; please report it" }, 500);
+      }
+      return c.text(writeSwarmFile(parsed.data), 200, {
+        "content-type": "application/yaml; charset=utf-8",
+        "content-disposition": 'attachment; filename="bento-swarms.yaml"',
+      });
+    })
+    /**
+     * Applies a swarm file.
+     *
+     * Templates are matched by name and updated in place, so importing
+     * over a live install keeps the templates its swarms were started
+     * from. The agents come first, because a template cannot point at
+     * one that does not exist yet.
+     */
+    .post("/import", async (c) => {
+      const refusal = await requireSwarms(ctx, c);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const membership = await getActiveOrganizationMembership(ctx, c);
+      if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
+        return c.json({ error: "not found" }, 404);
+      }
+      const organizationId = ctx.env.BENTO_MODE === "multi" ? (membership?.organizationId ?? null) : null;
+
+      const parsed = parseSwarmFile(await c.req.text());
+      if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+
+      const owner = { ownerId: actor(c), organizationId };
+      const agents = await upsertAgentsFromFile(db(c, ctx), parsed.data.agents, owner);
+      if ("error" in agents) return c.json({ error: agents.error }, 400);
+
+      const applied = await upsertSwarmTemplatesFromFile(db(c, ctx), parsed.data.swarms, owner, {
+        isolation: ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree",
+      });
+      if ("error" in applied) return c.json({ error: applied.error }, 400);
+      return c.json({ templates: applied.applied, names: applied.names, agents: parsed.data.agents.length });
     })
     .get("/:id", async (c) => {
       const refusal = await requireSwarms(ctx, c);

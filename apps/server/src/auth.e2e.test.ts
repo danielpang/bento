@@ -1028,6 +1028,21 @@ test("every entity route refuses a foreign tenant", async () => {
     ["DELETE", `/api/mcp/${mcpServer!.id}`],
     // The list is not here: it is scoped to the caller, so it answers
     // 200 with the intruder's own templates, which is checked below.
+    /*
+     * Export, which hands over how a team runs its swarms: the
+     * instructions, the ceilings, and the agents by name. A caller
+     * outside the team has no templates of their own, so the honest
+     * answer is the same "not found" every other route here gives.
+     *
+     * Import is deliberately not in this list, and it is worth saying
+     * why rather than leaving it looking forgotten. It acts on no
+     * entity: it writes templates owned by whoever called it, in their
+     * own organization, exactly as the create route does. A stranger
+     * creating their own template is not a tenant boundary being
+     * crossed, and a 404 there would mean nobody could ever import
+     * their first one.
+     */
+    ["GET", "/api/swarm-templates/export"],
     ["GET", `/api/swarm-templates/${template.id}`],
     ["PATCH", `/api/swarm-templates/${template.id}`, { body: JSON.stringify({ name: "stolen" }) }],
     ["POST", "/api/swarms", { body: JSON.stringify({ projectId: project.id, title: "Injected" }) }],
