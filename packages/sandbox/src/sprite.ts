@@ -103,15 +103,41 @@ export async function spriteExistsWithRetry(
  * Pauses after a transient Sprites control-plane failure while a
  * machine is being acquired.
  *
- * Four tries. A 500 or a dropped connection waits a few seconds. A
- * creation rate limit names its own wait, about a minute, and that
- * replaces the short pause for that try. The budget is the same either
- * way, so a limit that never clears still ends the provision.
+ * Four tries. A 500 or a dropped connection waits a few seconds, and
+ * a lookup that has to confirm a failed create did not make the
+ * machine spends one of these too.
  */
 export const SPRITE_ACQUIRE_RETRY_DELAYS_MS = [2_000, 8_000, 20_000];
 
+/**
+ * How many times a creation rate limit is waited out.
+ *
+ * Separate from the budget above, on purpose. The limit is ten
+ * creates a minute for the whole account, and the API says exactly
+ * when the next one will be accepted. One cold provision spent all
+ * three short waits on a 500 and a lookup that hung, and then met a
+ * 429 with nothing left, so it failed on the one error whose retry
+ * was guaranteed to be answered a minute later. Two waits cover a
+ * window that is still busy when the first one ends. A limit that
+ * never clears still ends the provision.
+ */
+export const SPRITE_ACQUIRE_RATE_LIMIT_WAITS = 2;
+
 /** A hinted retry-after longer than this is a reason to stop, not to wait. */
 const SPRITE_ACQUIRE_RATE_LIMIT_CAP_MS = 90_000;
+
+/**
+ * Pauses between repeated deletes after the control plane fails one.
+ *
+ * Shorter than the acquire ladder: a delete runs from the feature
+ * delete route and from the e2e teardown, both of which have someone
+ * waiting. The teardown once threw "service temporarily unavailable,
+ * please retry" out of deleteSprite, and a machine that was there to
+ * be deleted went on being billed until the workflow's cleanup step
+ * caught it. A 404 is still "already gone". A 4xx other than 408 or
+ * 429 is still answered once.
+ */
+export const SPRITE_DESTROY_RETRY_DELAYS_MS = [2_000, 8_000];
 
 /**
  * Whether another try might get a machine.
@@ -135,10 +161,21 @@ function spriteControlIsRetriable(err: unknown): boolean {
   return /Failed to (?:create|get) sprite \(status (?:408|429|5\d\d)\)/.test(err.message);
 }
 
-function spriteAcquireDelay(err: unknown, failureIndex: number): number | undefined {
-  if (failureIndex >= SPRITE_ACQUIRE_RETRY_DELAYS_MS.length || !spriteControlIsRetriable(err)) return undefined;
-  if (err instanceof APIError && err.isRateLimitError()) {
-    const hinted = (err.getRetryAfterSeconds() ?? 60) * 1000;
+function isSpriteRateLimit(err: unknown): boolean {
+  return err instanceof APIError && err.isRateLimitError();
+}
+
+/**
+ * How long to wait before the next try, or undefined when there is
+ * none left. A rate limit draws on its own budget and waits as long
+ * as the API asked, so the short waits a 500 spent earlier do not
+ * decide whether the one wait that is sure to be answered happens.
+ */
+function spriteAcquireDelay(err: unknown, failureIndex: number, rateLimitIndex: number): number | undefined {
+  if (!spriteControlIsRetriable(err)) return undefined;
+  if (isSpriteRateLimit(err)) {
+    if (rateLimitIndex >= SPRITE_ACQUIRE_RATE_LIMIT_WAITS) return undefined;
+    const hinted = ((err as APIError).getRetryAfterSeconds() ?? 60) * 1000;
     return Math.min(Math.max(hinted, 1_000), SPRITE_ACQUIRE_RATE_LIMIT_CAP_MS);
   }
   return SPRITE_ACQUIRE_RETRY_DELAYS_MS[failureIndex];
@@ -420,6 +457,7 @@ export class SpriteDriver implements SandboxDriver {
     } as Parameters<SpritesClient["createSprite"]>[1];
 
     let failures = 0;
+    let rateLimits = 0;
     let created = false;
     /**
      * After a create that did not hand back the sprite, one 404 is not
@@ -430,14 +468,17 @@ export class SpriteDriver implements SandboxDriver {
     let lastErr: unknown;
 
     const pause = async (err: unknown, message: string): Promise<void> => {
-      const delay = spriteAcquireDelay(err, failures);
-      failures += 1;
+      const delay = spriteAcquireDelay(err, failures, rateLimits);
+      if (isSpriteRateLimit(err)) rateLimits += 1;
+      else failures += 1;
       if (delay === undefined) throw err;
       await say(message);
       await sleep(delay, true);
     };
 
-    for (let turn = 0; turn < 8; turn++) {
+    // Enough turns for every wait in both budgets, the lookups between
+    // them, and the try that finally gives up.
+    for (let turn = 0; turn < 10; turn++) {
       try {
         const sprite = await this.client.getSprite(name);
         return { sprite, created };
@@ -467,11 +508,15 @@ export class SpriteDriver implements SandboxDriver {
       } catch (err) {
         lastErr = err;
         created = true;
-        confirmAbsence = true;
+        // A rate limit refused the request before anything was made,
+        // so there is no machine to look for and no reason to spend a
+        // short wait confirming that. Every other failure might have
+        // created one.
+        confirmAbsence = !isSpriteRateLimit(err);
         if (isSpriteConflict(err)) continue;
         await pause(
           err,
-          err instanceof APIError && err.isRateLimitError()
+          isSpriteRateLimit(err)
             ? "Sprite creation is rate limited. Waiting before trying again."
             : "Creating the sandbox failed on the control plane. Retrying.",
         );
@@ -1036,10 +1081,16 @@ export class SpriteDriver implements SandboxDriver {
    * driver's rule too.
    */
   async destroy(handle: SandboxHandle): Promise<void> {
-    try {
-      await this.client.deleteSprite(handle.externalId);
-    } catch (err) {
-      if (!isSpriteNotFound(err)) throw err;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.client.deleteSprite(handle.externalId);
+        return;
+      } catch (err) {
+        if (isSpriteNotFound(err)) return;
+        const delay = SPRITE_DESTROY_RETRY_DELAYS_MS[attempt];
+        if (delay === undefined || !spriteControlIsRetriable(err)) throw err;
+        await sleep(delay, true);
+      }
     }
   }
 
