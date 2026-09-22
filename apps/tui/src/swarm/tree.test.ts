@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync, readdirSync } from "node:fs";
 import type { SwarmDetailResponse, SwarmRow, SwarmSummaryRow, SwarmTaskRow } from "@bento/api-client";
 import { oneLine, rollUp, swarmTreeLines, swarmView, swarmWords } from "./tree.js";
 import { findSwarm, isOver, summaryLine, watchSwarm, type SwarmClient, type SwarmCommandIo } from "./command.js";
@@ -297,4 +298,19 @@ test("a swarm that is already over is drawn once and not watched", async () => {
   await watchSwarm(client, "sw-1", { out: () => {}, err: () => {}, fail: () => {} }, { settleMs: 1 });
   assert.equal(subscribed, false, "nothing subscribes to a swarm that will never move again");
   assert.equal(isOver(finished), true);
+});
+
+test("no dash reaches a terminal, in any of the swarm command's source", () => {
+  /**
+   * The console has this test over its own swarm files, and a terminal
+   * is no less a place a person reads. The rule bit here once already:
+   * the glyph for a cancelled node was an en dash.
+   */
+  const offenders: string[] = [];
+  for (const name of readdirSync(new URL(".", import.meta.url))) {
+    if (!name.endsWith(".ts") || name.endsWith(".test.ts")) continue;
+    const text = readFileSync(new URL(name, import.meta.url), "utf8");
+    if (text.includes("—") || text.includes("–")) offenders.push(name);
+  }
+  assert.deepEqual(offenders, []);
 });

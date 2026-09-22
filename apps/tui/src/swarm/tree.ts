@@ -19,7 +19,14 @@ const LAST = "└─ ";
 const TRUNK = "│  ";
 const GAP = "   ";
 
-/** One glyph per status, so a column of nodes reads down the page. */
+/**
+ * One glyph per status, so a column of nodes reads down the page.
+ *
+ * No dash among them, which is a rule about copy rather than about
+ * glyphs: a dash in front of a reader is a dash whether it is a
+ * sentence or a status column, and a withdrawn node reads as an empty
+ * circle anyway.
+ */
 const MARK: Record<SwarmTaskRow["status"], string> = {
   open: "·",
   assigned: "◦",
@@ -28,7 +35,7 @@ const MARK: Record<SwarmTaskRow["status"], string> = {
   done: "✓",
   blocked: "!",
   failed: "✗",
-  cancelled: "–",
+  cancelled: "○",
 };
 
 /** What a node's status is called, in the words the console uses. */
