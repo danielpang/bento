@@ -140,6 +140,8 @@ export interface WatchdogResult {
   timedOut: string[];
   /** Swarms this pass asked to try spawning again. */
   retried: string[];
+  /** Nodes this pass stopped calling slow, because they had stopped. */
+  cleared: string[];
 }
 
 /**
@@ -150,7 +152,7 @@ export interface WatchdogResult {
  * second time and a process that restarts loses nothing.
  */
 export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Promise<WatchdogResult> {
-  const result: WatchdogResult = { warned: [], escalated: [], timedOut: [], retried: [] };
+  const result: WatchdogResult = { warned: [], escalated: [], timedOut: [], retried: [], cleared: [] };
   const live = await ctx.db
     .select({
       id: swarms.id,
@@ -190,9 +192,87 @@ export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Prom
     }
 
     await watchRuns(ctx, swarm, thresholds, now, result);
+    await clearStoppedRuns(ctx, swarm, now, result);
     await enforceTimeLimit(ctx, swarm, now, result);
   }
   return result;
+}
+
+/**
+ * Takes back what the clock said, once the thing it was about stopped.
+ *
+ * "This has been going a while" is the one attention state that stops
+ * being true on its own, and the clock is the only thing that knows
+ * it: every other path that clears a node works on a leaf that landed,
+ * was accepted, was retried or was cancelled. A planner's turn has no
+ * node at all, so its clock is said on the root, which is a plan node
+ * no leaf path will ever touch. Left there it held the swarm's whole
+ * headline at "blocked" for the rest of its life, because the status
+ * recompute reads "anything with attention" as blocked, and it latched
+ * the escalation so a planner that really did get stuck later was
+ * never escalated a second time.
+ *
+ * Only the clock's own two words, and only where no run is still
+ * going. A question or a conflict on a node was put there by something
+ * that knows more about it than this does.
+ */
+async function clearStoppedRuns(
+  ctx: AppContext,
+  swarm: WatchedSwarm,
+  now: Date,
+  result: WatchdogResult,
+): Promise<void> {
+  const flagged = await ctx.db
+    .select({ id: swarmTasks.id })
+    .from(swarmTasks)
+    .where(and(eq(swarmTasks.swarmId, swarm.id), inArray(swarmTasks.attention, ["long_running", "escalated"])));
+  if (flagged.length === 0) return;
+
+  /*
+   * Which nodes still have an agent on them, counting the planner's
+   * turn against the root exactly as watchRuns counts it there. The
+   * two have to agree, or the clock would clear the root a second
+   * after saying it.
+   */
+  const running = await ctx.db
+    .select({ taskId: agentRuns.swarmTaskId })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+  const busy = new Set<string>();
+  let rootStandsIn: string | null | undefined;
+  for (const run of running) {
+    if (run.taskId) {
+      busy.add(run.taskId);
+      continue;
+    }
+    if (rootStandsIn === undefined) rootStandsIn = await rootTaskId(ctx, swarm.id);
+    if (rootStandsIn) busy.add(rootStandsIn);
+  }
+
+  const stopped = flagged.filter((task) => !busy.has(task.id)).map((task) => task.id);
+  if (stopped.length === 0) return;
+
+  await ctx.db
+    .update(swarmTasks)
+    .set({ attention: null, updatedAt: now })
+    .where(and(inArray(swarmTasks.id, stopped), inArray(swarmTasks.attention, ["long_running", "escalated"])));
+  for (const taskId of stopped) {
+    await ctx.db.insert(swarmTaskEvents).values({
+      taskId,
+      kind: "note",
+      detail: { reason: "long_running", cleared: true },
+    });
+    result.cleared.push(taskId);
+    ctx.bus.emitBoardEvent({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId,
+    });
+  }
+  // The swarm's headline was held at blocked by these flags, so the
+  // recompute that lifts it has to be asked for.
+  await enqueueSwarmTick(ctx, swarm.id);
 }
 
 type WatchedSwarm = {

@@ -319,3 +319,83 @@ test("a swarm somebody paused by hand is left where they left it", async () => {
   assert.deepEqual(result.retried, []);
   assert.equal(queued.length, 0);
 });
+
+/**
+ * The clock takes back what the clock said.
+ *
+ * "This has been going a while" stops being true when the thing stops
+ * going, and nothing else in the swarm ever clears it: every other
+ * path that clears attention works on a leaf, and a long planner turn
+ * writes its attention on the root, which is a plan node. Left there
+ * it holds the swarm's whole headline at "blocked" for the rest of its
+ * life, and it latches the escalation so a planner that really does
+ * get stuck later is never escalated again.
+ */
+test("a node stops saying it is taking a while once it has stopped", async () => {
+  const swarm = await makeSwarm();
+  const { task, run } = await workingLeaf(swarm.id, ESCALATE_MIN + 1);
+
+  await runWatchdog(ctx, new Date());
+  assert.equal((await readTask(task.id)).attention, "escalated", "the clock said so while it was running");
+
+  // The agent finishes. Nothing else touches this node's attention.
+  await db.update(agentRuns).set({ status: "succeeded", endedAt: new Date() }).where(eq(agentRuns.id, run.id));
+
+  const after = await runWatchdog(ctx, new Date());
+  assert.deepEqual(after.cleared, [task.id]);
+  assert.equal((await readTask(task.id)).attention, null, "and takes it back now that it has stopped");
+});
+
+/**
+ * The same, for the planner, which is the case it was actually broken
+ * for: a planner run has no node of its own, so its clock is said on
+ * the root, and the root is a plan node no leaf path ever clears.
+ */
+test("a long planner turn does not leave the whole swarm blocked for good", async () => {
+  const swarm = await makeSwarm();
+  const [root] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "The plan", nodeType: "plan", status: "working" })
+    .returning();
+  const startedAt = new Date(Date.now() - (ESCALATE_MIN + 1) * 60_000);
+  const [planner] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "planner",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "running",
+      queuedAt: startedAt,
+      startedAt,
+    })
+    .returning();
+
+  await runWatchdog(ctx, new Date());
+  assert.equal((await readTask(root!.id)).attention, "escalated");
+
+  await db.update(agentRuns).set({ status: "succeeded", endedAt: new Date() }).where(eq(agentRuns.id, planner!.id));
+  const after = await runWatchdog(ctx, new Date());
+  assert.deepEqual(after.cleared, [root!.id]);
+  assert.equal((await readTask(root!.id)).attention, null);
+});
+
+/**
+ * A node holding a conflict or a question is not the clock's to clear.
+ *
+ * The clock only ever takes back its own two words. Anything else on a
+ * node was put there by something that knows more about it than "an
+ * agent was on this for a while".
+ */
+test("the clock clears only what the clock wrote", async () => {
+  const swarm = await makeSwarm();
+  const [waiting] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "asked a question", status: "blocked", attention: "question" })
+    .returning();
+
+  const after = await runWatchdog(ctx, new Date());
+  assert.deepEqual(after.cleared, []);
+  assert.equal((await readTask(waiting!.id)).attention, "question", "somebody else's flag stays up");
+});
