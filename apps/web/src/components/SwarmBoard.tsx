@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NewSwarmDialog } from "./NewSwarmDialog.js";
+import { ReopenDialog } from "./ReopenDialog.js";
 import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
 import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
 import { SwarmPage } from "./SwarmPage.js";
@@ -217,6 +218,8 @@ export function SwarmBoard({
   }, [selectedId, taskId, loadNode]);
 
   const [creating, setCreating] = useState(false);
+  /** Whether the reopen dialog is up for the swarm on screen. */
+  const [reopening, setReopening] = useState(false);
 
   const model = useMemo(
     () => buildModel(detail?.tasks ?? [], { expanded, now }),
@@ -295,6 +298,7 @@ export function SwarmBoard({
             onPause: () => selectedId && act(() => swarmApi.pauseSwarm(selectedId)),
             onResume: () => selectedId && act(() => swarmApi.resumeSwarm(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
+            onReopen: () => setReopening(true),
             onWorkers: (workers) => selectedId && act(() => swarmApi.setWorkers(selectedId, workers)),
             onAnswer: (questionId, text) =>
               selectedId && act(() => swarmApi.answerQuestion(selectedId, questionId, text)),
@@ -344,6 +348,31 @@ export function SwarmBoard({
               loadNode(selectedId, id);
             })
           }
+        />
+      )}
+
+      {reopening && detail && selectedId && (
+        <ReopenDialog
+          swarm={detail.swarm}
+          pullRequests={detail.pullRequests}
+          landings={detail.landings}
+          busy={busy}
+          onClose={() => setReopening(false)}
+          onReopen={(input) => {
+            setBusy(true);
+            void swarmApi
+              .reopenSwarm(selectedId, input)
+              .then(() => {
+                setReopening(false);
+                // The follow up node is new, so the tree this page
+                // holds is out of date until the detail comes back.
+                loadDetail(selectedId);
+                loadSwarms();
+                setError("");
+              })
+              .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+              .finally(() => setBusy(false));
+          }}
         />
       )}
 

@@ -51,6 +51,8 @@ interface TaskSeed {
   report?: string;
   flags?: Record<string, unknown>;
   branchName?: string;
+  /** Set on the node a reopen made, and on nothing else. */
+  followUpInstruction?: string;
 }
 
 function task(seed: TaskSeed, position: number, now: number): SwarmTask {
@@ -76,6 +78,7 @@ function task(seed: TaskSeed, position: number, now: number): SwarmTask {
     flags: seed.flags ?? {},
     report: seed.report ?? null,
     acceptanceCriteria: seed.criteria ?? [],
+    followUpInstruction: seed.followUpInstruction ?? null,
     startedAt: seed.startedMinAgo === undefined ? null : iso(now, -seed.startedMinAgo * MINUTE),
     endedAt: seed.endedMinAgo === undefined ? null : iso(now, -seed.endedMinAgo * MINUTE),
     commits:
@@ -318,6 +321,8 @@ function swarmShell(overrides: Partial<Swarm> & Pick<Swarm, "id" | "name" | "sta
     archivedAt: null,
     lastOpenedAt: null,
     question: null,
+    reopenCount: 0,
+    startBranch: null,
     ...overrides,
   };
 }

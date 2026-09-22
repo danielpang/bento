@@ -10,8 +10,10 @@ import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmPage } from "./components/SwarmPage.js";
+import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import { isolationWords } from "./components/SwarmTemplatesPanel.js";
 import { modeSurfaces } from "./swarm/plan.js";
+import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
 import type { SwarmLanding, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
@@ -50,6 +52,7 @@ function tasks(): SwarmTask[] {
     flags: extra.flags ?? {},
     report: extra.report ?? null,
     acceptanceCriteria: extra.acceptanceCriteria ?? [],
+    followUpInstruction: extra.followUpInstruction ?? null,
     startedAt: extra.startedAt ?? null,
     endedAt: extra.endedAt ?? null,
     commits: extra.commits ?? [],
@@ -406,6 +409,7 @@ test("a pull request the console would not link to is drawn without a link", () 
         onPause: () => {},
         onResume: () => {},
         onStop: () => {},
+        onReopen: () => {},
         onWorkers: () => {},
         onAnswer: () => {},
       },
@@ -562,6 +566,7 @@ function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
         onResume: () => {},
         onStop: () => {},
         onCreatePullRequest: () => {},
+        onReopen: () => {},
         onWorkers: () => {},
         onAnswer: () => {},
       },
@@ -744,11 +749,144 @@ test("no dash reaches a reader, in any swarm source", () => {
   const offenders: string[] = [];
   for (const root of roots) {
     for (const name of readdirSync(new URL(`../${root}`, import.meta.url))) {
-      if (!/^(Swarm|BoardModeToggle|CompletionRing|NewSwarm|MergeQueue)/.test(name) && root === "src/components") continue;
+      if (!/^(Swarm|BoardModeToggle|CompletionRing|NewSwarm|MergeQueue|Reopen)/.test(name) && root === "src/components") continue;
       if (!name.endsWith(".ts") && !name.endsWith(".tsx")) continue;
       const text = readFileSync(new URL(`../${root}/${name}`, import.meta.url), "utf8");
       if (text.includes("\u2014") || text.includes("\u2013")) offenders.push(`${root}/${name}`);
     }
   }
   assert.deepEqual(offenders, []);
+});
+
+/* ---------------------------------------------------------------- *
+ * Reopening a swarm: the follow up, in both views and in the dialog.
+ * ---------------------------------------------------------------- */
+
+/** A tree with a follow up subtree in it, as a reopen leaves one. */
+function reopenedTasks(): SwarmTask[] {
+  const base = tasks();
+  const first = base[0]!;
+  return [
+    ...base,
+    {
+      ...first,
+      id: "t-follow",
+      parentId: null,
+      position: 9,
+      nodeType: "plan",
+      status: "working",
+      attention: "none",
+      title: "Follow up 1",
+      description: "Address the review comments on the totals module.",
+      followUpInstruction: "Address the review comments on the totals module.",
+      report: null,
+      commits: [],
+    },
+    {
+      ...first,
+      id: "t-follow-leaf",
+      parentId: "t-follow",
+      position: 0,
+      nodeType: "leaf",
+      status: "working",
+      attention: "none",
+      title: "Rename the totals helper",
+      description: "",
+      followUpInstruction: null,
+      report: null,
+      commits: [],
+    },
+  ];
+}
+
+test("a follow up subtree is marked in the tree and in the outline, and says what it was asked for", () => {
+  /**
+   * The point of the mark is that a person opening a reopened swarm
+   * can tell the first pass from what the review asked for without
+   * reading every title. The instruction itself is printed once, on
+   * the node the reopen made: twenty copies of one sentence is not a
+   * label.
+   */
+  const model = buildSwarmModel(reopenedTasks(), { now: NOW });
+  const root = model.byId.get("t-follow")!;
+  const leaf = model.byId.get("t-follow-leaf")!;
+  assert.equal(root.followUp?.rootId, "t-follow");
+  assert.equal(leaf.followUp?.rootId, "t-follow", "the mark reaches the whole subtree");
+  assert.equal(model.nodes[0]?.followUp, null, "and stops at the first pass");
+
+  const tree = renderToStaticMarkup(
+    createElement(SwarmTree, { model, selectedId: null, onSelect: () => {}, onToggle: () => {} }),
+  );
+  assert.equal((tree.match(/data-follow-up/g) ?? []).length, 2, "both nodes of the subtree carry the mark");
+  assert.match(tree, /Address the review comments on the totals module\./);
+
+  const outline = renderToStaticMarkup(
+    createElement(SwarmOutline, { model, selectedId: null, onSelect: () => {} }),
+  );
+  assert.equal((outline.match(/data-follow-up/g) ?? []).length, 2, "the outline says the same thing");
+  assert.match(outline, /Address the review comments/);
+  assertNoDashes(`${tree}${outline}`, "the follow up labels");
+});
+
+test("the reopen dialog says what reopening will actually do to the pull requests", () => {
+  /**
+   * A person choosing between a reopen and a new swarm is choosing on
+   * three facts: the branch stays the same, the pull requests that are
+   * open are updated rather than joined by a second set, and what
+   * landed stays landed. The dialog itself lives behind a portal, so
+   * what is held here is the sentences it draws.
+   */
+  const one = reopenEffectLines({ branchName: "swarm/checkout" }, [
+    { id: "pr", repoUrl: "https://github.com/acme/app", number: 12, url: "https://github.com/acme/app/pull/12", headSha: "abc" },
+  ], 3);
+  assert.match(one[0]!, /carries on swarm\/checkout/);
+  assert.ok(!one[0]!.includes("second branch is"), "no second branch is offered");
+  assert.match(one[1]!, /acme\/app #12 is updated when the follow up finishes/);
+  assert.match(one[1]!, /rather than a second one being opened/);
+  assert.match(one[2]!, /3 tasks that landed stay landed/);
+
+  const none = reopenEffectLines({ branchName: null }, [], 0);
+  assert.match(none[1]!, /has opened no pull request yet/);
+  assert.match(none[2]!, /Nothing has landed through the merge queue yet/);
+
+  const many = reopenEffectLines({ branchName: "swarm/x" }, [
+    { id: "a", repoUrl: "https://github.com/acme/app", number: 12, url: null, headSha: null },
+    { id: "b", repoUrl: "https://github.com/acme/api", number: 3, url: null, headSha: null },
+  ], 1);
+  assert.match(many[1]!, /The 2 pull requests it already opened \(acme\/app #12, acme\/api #3\)/);
+  assert.match(many[2]!, /The 1 task that landed/);
+
+  assertNoDashes([...one, ...none, ...many].join(" "), "the reopen dialog's sentences");
+});
+
+test("the reopen dialog refuses a ceiling that would start nothing, before the server has to", () => {
+  /**
+   * The server refuses this too, and has to: a swarm put back to
+   * running that the coordinator will not spawn on is a board that
+   * says it is working and never moves. The dialog asks the same two
+   * questions so a person is told while the field is still in front
+   * of them.
+   */
+  const done = { status: "done" as SwarmStatus, budgetUsd: 10, timeLimitMin: null };
+  assert.equal(ceilingRefusal(done, 4, 10, null), null, "room under the budget is fine");
+  assert.match(ceilingRefusal(done, 10, 10, null) ?? "", /Raise the budget/, "none is not");
+  assert.equal(ceilingRefusal(done, 10, 25, null), null, "raising it is the way through");
+  assert.equal(ceilingRefusal(done, 4, null, null), null, "and clearing it entirely is allowed");
+
+  const late = { status: "timed_out" as SwarmStatus, budgetUsd: null, timeLimitMin: 60 };
+  assert.match(ceilingRefusal(late, 4, null, 60) ?? "", /Raise it, or clear it/);
+  assert.equal(ceilingRefusal(late, 4, null, 240), null);
+  assert.equal(ceilingRefusal(late, 4, null, null), null);
+
+  assert.match(ceilingRefusal(done, 4, Number.NaN, null) ?? "", /number of dollars/);
+  assert.match(ceilingRefusal(done, 4, null, 0) ?? "", /whole number of minutes/);
+});
+
+test("Reopen is offered on a swarm that has ended and on nothing else", () => {
+  for (const status of ["done", "stopped", "failed", "budget_exhausted", "timed_out"] as SwarmStatus[]) {
+    assert.equal(canReopen(status), true, `${status} can be reopened`);
+  }
+  for (const status of ["planning", "running", "waiting", "paused"] as SwarmStatus[]) {
+    assert.equal(canReopen(status), false, `${status} cannot`);
+  }
 });

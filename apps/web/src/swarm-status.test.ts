@@ -45,6 +45,7 @@ function leaf(status: TaskStatus, extra: Partial<SwarmTask> = {}): SwarmTask {
     flags: {},
     report: null,
     acceptanceCriteria: [],
+    followUpInstruction: extra.followUpInstruction ?? null,
     startedAt: extra.startedAt ?? null,
     endedAt: extra.endedAt ?? null,
     commits: [],
