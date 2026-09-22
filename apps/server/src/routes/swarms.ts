@@ -38,7 +38,16 @@ import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
-import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import {
+  addLeaf,
+  addedTaskNotice,
+  cancelTaskTree,
+  reassignLeaf,
+  retryLeaf,
+  retryRefusal,
+  splitLeaf,
+} from "../orchestrator/swarm/task-actions.js";
+import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
 import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
 import { reopenRefusal, reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
@@ -890,6 +899,95 @@ export function swarmRoutes(ctx: AppContext) {
         }
         deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
         return c.json(message, 201);
+      },
+    )
+    /**
+     * Adds a task to the plan, because a person saw something the
+     * planner did not.
+     *
+     * The other half of a tree a person and an agent share. It goes in
+     * assigned, because somebody who adds a task has decided it needs
+     * doing and leaving it open would be the planner overruling them
+     * by inaction, and the planner is told about it in the same breath
+     * and can cancel it: objecting is a decision somebody can see.
+     *
+     * Through the same function the planner's own create_task will use
+     * when it grows one, for the reason every other node control is
+     * shared: one rule about what may hang off what, not two.
+     */
+    .post(
+      "/:id/tasks",
+      zValidator(
+        "json",
+        z
+          .object({
+            parentId: z.string().uuid().nullish(),
+            title: z.string().trim().min(1).max(200),
+            description: z.string().max(20_000).optional(),
+            weight: z.number().int().min(1).max(5).optional(),
+          })
+          .strict(),
+      ),
+      async (c) => {
+        const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+        if (!swarm) return c.json({ error: "not found" }, 404);
+        const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+        if (refusal) return c.json(refusal.body, refusal.status);
+        const body = c.req.valid("json");
+
+        if (swarm.status === "cancelled") {
+          return c.json(
+            { error: "This swarm is stopped, so nothing more is added to its plan.", code: "SWARM_STOPPED" },
+            409,
+          );
+        }
+
+        /*
+         * The parent, scoped to this swarm rather than looked up by id
+         * alone, so a node from another team's swarm reads as not
+         * there rather than as one this caller may add work under.
+         */
+        let parent: typeof swarmTasks.$inferSelect | null = null;
+        if (body.parentId) {
+          const [row] = await db(c, ctx)
+            .select()
+            .from(swarmTasks)
+            .where(and(eq(swarmTasks.id, body.parentId), eq(swarmTasks.swarmId, swarm.id)))
+            .limit(1);
+          if (!row) return c.json({ error: "not found" }, 404);
+          parent = row;
+        }
+
+        const created = await addLeaf(db(c, ctx), {
+          swarmId: swarm.id,
+          parent,
+          title: body.title,
+          ...(body.description === undefined ? {} : { description: body.description }),
+          ...(body.weight === undefined ? {} : { weight: body.weight }),
+          actorUserId: actor(c),
+        });
+        if ("refused" in created) return c.json({ error: created.refused, code: "CANNOT_ADD" }, 409);
+
+        /*
+         * And the planner hears about it, as a notice rather than as a
+         * message: this is Bento's sentence about a row it holds, with
+         * the person's own words quoted inside it.
+         */
+        await db(c, ctx).insert(swarmMessages).values({
+          swarmId: swarm.id,
+          source: "system",
+          text: addedTaskNotice({
+            taskId: created.id,
+            title: created.title,
+            description: created.description,
+            parentId: created.parentId,
+            quote: quoteUntrusted,
+          }),
+        });
+
+        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+        saySwarmChanged(ctx, c, swarm);
+        return c.json(created, 201);
       },
     )
     /**

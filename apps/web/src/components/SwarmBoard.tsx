@@ -399,6 +399,7 @@ export function SwarmBoard({
           onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id))}
           onCancel={(id) => selectedId && act(() => swarmApi.cancelTask(selectedId, id))}
           onSplit={(id, children) => selectedId && act(() => swarmApi.splitTask(selectedId, id, children))}
+          onAddTask={(parentId, task) => selectedId && act(() => swarmApi.addTask(selectedId, parentId, task))}
           onReassign={(id, agentProfileId) =>
             selectedId && act(() => swarmApi.reassignTask(selectedId, id, agentProfileId))
           }
