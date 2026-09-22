@@ -7,10 +7,12 @@ import type {
   GitHubRepository,
   MergeStateSummary,
   OpenPullRequest,
+  OpenPullRequestOnBranch,
   PullRequestDetails,
   PullRequestInput,
   PullRequestRef,
   PullRequestUpdateInput,
+  ReviewThread,
   ReviewThreadSummary,
 } from "./client.js";
 import {
@@ -68,6 +70,133 @@ interface ReviewThreadsResponse {
       };
     } | null;
   } | null;
+}
+
+interface OpenThreadsResponse {
+  repository: {
+    pullRequest: {
+      reviewThreads: {
+        nodes: {
+          isResolved: boolean;
+          isOutdated: boolean;
+          path: string | null;
+          line: number | null;
+          comments: { nodes: { author: { login: string } | null; body: string }[] };
+        }[];
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      };
+    } | null;
+  } | null;
+}
+
+/**
+ * The same threads as REVIEW_THREADS_QUERY, with what is in them.
+ *
+ * Its own query rather than a widening of that one, because the two
+ * are read on different paths and for different reasons: a gate asks
+ * how many are open on every evaluation and wants the cheapest
+ * possible answer, and this is asked once, when a swarm starts, and
+ * wants the words. Ten comments per thread, because a thread longer
+ * than that has usually turned into a conversation and its first ten
+ * are what the conclusion was reached from.
+ */
+const OPEN_THREADS_QUERY = `
+  query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 50, after: $cursor) {
+          nodes {
+            isResolved
+            isOutdated
+            path
+            line
+            comments(first: 10) { nodes { author { login } body } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * The unresolved review threads on one pull request, as written.
+ *
+ * Unresolved only: a thread somebody has marked resolved is a
+ * conversation that ended, and handing it to an agent asked to address
+ * the review would have it redo work the reviewer already accepted.
+ *
+ * Capped, and the cap is the point. A pull request that has been
+ * argued over for a month can carry hundreds of threads, and every one
+ * of them would go into a prompt. The first `limit` in GitHub's own
+ * order is what a person reading the pull request would see first.
+ */
+export async function openReviewThreadsVia(
+  octokit: Octokit,
+  ref: PullRequestRef,
+  limit = 40,
+): Promise<ReviewThread[]> {
+  const threads: ReviewThread[] = [];
+  let cursor: string | null = null;
+
+  for (;;) {
+    const response: OpenThreadsResponse = await octokit.graphql(OPEN_THREADS_QUERY, {
+      owner: ref.owner,
+      repo: ref.repo,
+      number: ref.prNumber,
+      cursor,
+    });
+    const page = response.repository?.pullRequest?.reviewThreads;
+    if (!page) break;
+    for (const node of page.nodes) {
+      if (node.isResolved) continue;
+      threads.push({
+        path: node.path ?? null,
+        line: node.line ?? null,
+        outdated: Boolean(node.isOutdated),
+        comments: node.comments.nodes.map((comment) => ({
+          author: comment.author?.login ?? null,
+          body: comment.body,
+        })),
+      });
+      if (threads.length >= limit) return threads;
+    }
+    if (!page.pageInfo.hasNextPage) break;
+    cursor = page.pageInfo.endCursor;
+    if (!cursor) break;
+  }
+  return threads;
+}
+
+/**
+ * The pull request open on one branch, or null.
+ *
+ * The same lookup ensurePullRequestVia makes before it opens one, read
+ * rather than written: a swarm starting from an existing branch wants
+ * to know what is already being asked about it, and the pull request
+ * is where that is.
+ */
+export async function pullRequestForBranchVia(
+  octokit: Octokit,
+  input: { owner: string; repo: string; branch: string },
+): Promise<OpenPullRequestOnBranch | null> {
+  const open = await octokit.pulls.list({
+    owner: input.owner,
+    repo: input.repo,
+    head: `${input.owner}:${input.branch}`,
+    state: "open",
+    per_page: 1,
+  });
+  const found = open.data[0];
+  if (!found) return null;
+  return {
+    prNumber: found.number,
+    url: found.html_url,
+    title: found.title,
+    body: found.body ?? null,
+    base: found.base.ref,
+    isDraft: Boolean(found.draft),
+  };
 }
 
 const REVIEW_THREADS_QUERY = `
@@ -197,6 +326,14 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
 
   reviewThreads(ref: PullRequestRef): Promise<ReviewThreadSummary> {
     return reviewThreadsVia(this.octokit, ref);
+  }
+
+  openReviewThreads(ref: PullRequestRef, limit?: number): Promise<ReviewThread[]> {
+    return openReviewThreadsVia(this.octokit, ref, limit);
+  }
+
+  pullRequestForBranch(input: { owner: string; repo: string; branch: string }): Promise<OpenPullRequestOnBranch | null> {
+    return pullRequestForBranchVia(this.octokit, input);
   }
 
   checks(ref: PullRequestRef): Promise<CheckSummary> {

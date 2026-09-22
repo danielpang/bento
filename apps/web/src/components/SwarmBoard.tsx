@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { BentoClient, RunArtifact } from "@bento/api-client";
 import { NewSwarmDialog } from "./NewSwarmDialog.js";
 import { ReopenDialog } from "./ReopenDialog.js";
 import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
@@ -8,7 +9,14 @@ import { BoardSkeleton } from "./Skeleton.js";
 import { swarmApi } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
-import type { NewSwarmInput, SwarmDetail, SwarmNodeDetail, SwarmSummary, SwarmTemplate } from "../swarm/types.js";
+import type {
+  NewSwarmInput,
+  SwarmArtifact,
+  SwarmDetail,
+  SwarmNodeDetail,
+  SwarmSummary,
+  SwarmTemplate,
+} from "../swarm/types.js";
 import {
   boardSearch,
   browserStorage,
@@ -18,6 +26,17 @@ import {
   rememberSwarmView,
   type SwarmView,
 } from "../swarm/view-state.js";
+
+/**
+ * The artifact viewer, loaded when somebody opens one.
+ *
+ * Lazily, the way the card drawer loads it: it carries a markdown
+ * renderer and a diagram renderer, and a swarm page that never opens
+ * an artifact should not pay for either.
+ */
+const ArtifactViewer = lazy(() =>
+  import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
+);
 
 /**
  * The Swarms board: the strip, the page under it, and the drawer over
@@ -37,9 +56,21 @@ import {
  */
 export function SwarmBoard({
   projectId,
+  client,
   surfaces,
 }: {
   projectId: string;
+  /**
+   * The ordinary API client, for the artifact routes alone.
+   *
+   * Everything else on this board goes through `swarmApi`. The
+   * artifacts are the one thing a swarm shares with a card: the same
+   * routes serve both, under the same rules about never letting agent
+   * bytes run on this origin, and the viewer that draws them takes
+   * this client. A second fetch layer for those three URLs would be a
+   * second place for those rules to be got wrong.
+   */
+  client: BentoClient;
   surfaces: ModeSurfaces;
 }) {
   const storage = useMemo(() => browserStorage(), []);
@@ -144,17 +175,37 @@ export function SwarmBoard({
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }, []);
 
+  /**
+   * What the swarm produced, asked for alongside its plan.
+   *
+   * Its own request because it is its own route, and a failure is not
+   * an error on the page: a swarm whose artifacts could not be read
+   * still has a tree worth watching, and the panel simply does not
+   * draw. Refetched with the detail, so the assembled document appears
+   * when the swarm finishes rather than on the next reload.
+   */
+  const loadArtifacts = useCallback((swarmId: string) => {
+    void swarmApi
+      .listArtifacts(swarmId)
+      .then(setArtifacts)
+      .catch(() => setArtifacts([]));
+  }, []);
+
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setArtifacts([]);
       return;
     }
     setTaskId(null);
     setNode(null);
     setExpanded([]);
+    setArtifacts([]);
+    setOpenArtifact(null);
     rememberSwarmId(storage, projectId, selectedId);
     loadDetail(selectedId);
-  }, [selectedId, projectId, storage, loadDetail]);
+    loadArtifacts(selectedId);
+  }, [selectedId, projectId, storage, loadDetail, loadArtifacts]);
 
   /*
    * A swarm is watched, not read once.
@@ -180,6 +231,9 @@ export function SwarmBoard({
       // The strip's rings and counts come from the list, not the
       // detail, so they go stale in the same way.
       loadSwarms();
+      // And the document, which is written at the moment the swarm
+      // finishes: without this it appears on the next reload.
+      loadArtifacts(selectedId);
     };
     const stop = swarmApi.streamSwarm(
       selectedId,
@@ -195,7 +249,7 @@ export function SwarmBoard({
       stop();
       if (timer !== null) clearTimeout(timer);
     };
-  }, [selectedId, loadDetail, loadSwarms]);
+  }, [selectedId, loadDetail, loadSwarms, loadArtifacts]);
 
   /*
    * The address carries the choice, so a link to this swarm in this
@@ -220,6 +274,9 @@ export function SwarmBoard({
   const [creating, setCreating] = useState(false);
   /** Whether the reopen dialog is up for the swarm on screen. */
   const [reopening, setReopening] = useState(false);
+  /** What this swarm produced for people to read, and the one that is open. */
+  const [artifacts, setArtifacts] = useState<SwarmArtifact[]>([]);
+  const [openArtifact, setOpenArtifact] = useState<RunArtifact | null>(null);
 
   const model = useMemo(
     () => buildModel(detail?.tasks ?? [], { expanded, now }),
@@ -294,6 +351,14 @@ export function SwarmBoard({
           }
           surfaces={surfaces}
           busy={busy}
+          artifacts={artifacts}
+          /*
+           * Handed to the viewer that draws a card's artifacts, which
+           * is where the rules about agent bytes live. The row the
+           * list route sends is the shape that viewer takes, so it is
+           * passed through rather than re-fetched.
+           */
+          onOpenArtifact={(artifact) => setOpenArtifact(artifact as RunArtifact)}
           actions={{
             onPause: () => selectedId && act(() => swarmApi.pauseSwarm(selectedId)),
             onResume: () => selectedId && act(() => swarmApi.resumeSwarm(selectedId)),
@@ -349,6 +414,12 @@ export function SwarmBoard({
             })
           }
         />
+      )}
+
+      {openArtifact && (
+        <Suspense fallback={null}>
+          <ArtifactViewer client={client} artifact={openArtifact} onClose={() => setOpenArtifact(null)} />
+        </Suspense>
       )}
 
       {reopening && detail && selectedId && (

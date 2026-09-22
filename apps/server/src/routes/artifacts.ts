@@ -1,7 +1,9 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import type { runArtifacts } from "@bento/db";
 import type { AppContext } from "../context.js";
-import { getAccessibleArtifact } from "../access.js";
+import { getAccessibleArtifact, getAccessibleSwarmArtifact } from "../access.js";
 import { artifactPreviewPage, ARTIFACT_PREVIEW_POLICY } from "../artifact-preview.js";
+import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
 /**
  * Serves one run artifact: metadata, and the bytes.
@@ -17,6 +19,13 @@ import { artifactPreviewPage, ARTIFACT_PREVIEW_POLICY } from "../artifact-previe
  * types that cannot carry script. The console renders HTML artifacts
  * inside a sandboxed iframe via srcdoc; navigating to this route
  * directly downloads them instead of rendering on the app's origin.
+ *
+ * Both boards' artifacts are served here, and each is resolved through
+ * its own helper. A card's goes through a feature; a swarm's goes
+ * through its swarm and then through the beta gate, so a person who
+ * cannot see that swarms exist cannot learn it from an artifact id.
+ * One helper that accepted either would be a helper that had quietly
+ * widened, which is the shape this file's rule exists to prevent.
  */
 
 /** Types a browser may render at this URL: raster images and plain text. */
@@ -29,10 +38,32 @@ function headerSafeName(path: string): string {
   return safe || "artifact";
 }
 
+
+/**
+ * One artifact, from whichever board it belongs to, or null.
+ *
+ * The card's is tried first because it is the common one, and neither
+ * answer tells the caller which was asked: every refusal here is the
+ * same 404 the access helpers give, so an id belonging to somebody
+ * else's swarm and an id belonging to nothing read alike.
+ */
+async function resolveArtifact(
+  ctx: AppContext,
+  c: Context,
+): Promise<typeof runArtifacts.$inferSelect | null> {
+  const id = c.req.param("id") ?? "";
+  const card = await getAccessibleArtifact(ctx, c, id);
+  if (card) return card;
+  const swarm = await getAccessibleSwarmArtifact(ctx, c, id);
+  if (!swarm) return null;
+  // The same gate every swarm route asks, about the swarm's own team.
+  return (await requireSwarms(ctx, c, swarm.swarm.organizationId)) ? null : swarm.artifact;
+}
+
 export function artifactRoutes(ctx: AppContext) {
   return new Hono()
     .get("/:id/preview", async (c) => {
-      const artifact = await getAccessibleArtifact(ctx, c, c.req.param("id"));
+      const artifact = await resolveArtifact(ctx, c);
       if (!artifact) return c.json({ error: "not found" }, 404);
       let bytes: Buffer | null = artifact.content !== null ? Buffer.from(artifact.content, "utf8") : null;
       if (bytes === null && artifact.storageKey) {
@@ -47,18 +78,33 @@ export function artifactRoutes(ctx: AppContext) {
       return c.html(artifactPreviewPage(artifact, bytes));
     })
     .get("/:id", async (c) => {
-      const artifact = await getAccessibleArtifact(ctx, c, c.req.param("id"));
+      const artifact = await resolveArtifact(ctx, c);
       if (!artifact) return c.json({ error: "not found" }, 404);
       // Stated column by column rather than by subtraction, so a column
       // added to run_artifacts later has to be put here on purpose. The
       // store key stays out (bookkeeping between the server and its
       // bucket); inline content rides along because for text artifacts
-      // it is the useful half of the answer. So does the type, kept out
-      // on purpose: the helper above has already refused everything
-      // that is not a card's, so it would be the same word on every
-      // response this route can ever send.
-      const { id, runId, featureId, stageSlug, stageName, path, kind, mime, size, content, createdAt } = artifact;
-      return c.json({ id, runId, featureId, stageSlug, stageName, path, kind, mime, size, content, createdAt });
+      // it is the useful half of the answer. The type and the swarm are
+      // in, now that both boards are served here: a client that asked
+      // for an id has to be able to tell what it got back.
+      const { id, runId, featureId, swarmId, swarmTaskId, type, stageSlug, stageName, path, kind, mime, size, content, createdAt } =
+        artifact;
+      return c.json({
+        id,
+        runId,
+        featureId,
+        swarmId,
+        swarmTaskId,
+        type,
+        stageSlug,
+        stageName,
+        path,
+        kind,
+        mime,
+        size,
+        content,
+        createdAt,
+      });
     })
     /**
      * Deliberately inside the tenant transaction, store fetch and all,
@@ -70,7 +116,7 @@ export function artifactRoutes(ctx: AppContext) {
      * are not interchangeable: do not move it out to shave the hold.
      */
     .get("/:id/content", async (c) => {
-      const artifact = await getAccessibleArtifact(ctx, c, c.req.param("id"));
+      const artifact = await resolveArtifact(ctx, c);
       if (!artifact) return c.json({ error: "not found" }, 404);
 
       // Artifacts are immutable, so the id is the strongest ETag there is.

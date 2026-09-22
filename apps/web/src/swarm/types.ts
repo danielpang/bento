@@ -234,6 +234,30 @@ export interface Swarm {
   startBranch: string | null;
 }
 
+/**
+ * Something a swarm produced for people to read: its assembled
+ * document, and anything else its agents captured.
+ *
+ * Metadata only. The bytes come from the artifact routes, which is
+ * where every rule about serving agent output lives, and the console
+ * opens them in the same viewer a card's artifacts open in: markdown
+ * through react-markdown with raw HTML off, HTML only inside a
+ * sandboxed iframe, everything else offered as a download.
+ */
+export interface SwarmArtifact {
+  id: string;
+  runId: string;
+  /** The node that produced it, or null for the swarm's own. */
+  swarmTaskId: string | null;
+  stageSlug: string;
+  stageName: string;
+  path: string;
+  kind: "markdown" | "mermaid" | "image" | "html" | "file";
+  mime: string;
+  size: number;
+  createdAt: string;
+}
+
 /** A row of the strip. The list endpoint sends no tree. */
 export interface SwarmSummary {
   id: string;

@@ -4,6 +4,7 @@ import { SWARM_TEMPLATES, draftSwarm, seedSwarms, summarise } from "./fixtures.j
 import type {
   NewSwarmInput,
   Swarm,
+  SwarmArtifact,
   SwarmDetail,
   SwarmLanding,
   SwarmNodeDetail,
@@ -114,6 +115,14 @@ export interface SwarmApi {
    * refetch, for a list nobody looks at until a drawer is open.
    */
   getNode(swarmId: string, taskId: string): Promise<SwarmNodeDetail>;
+  /**
+   * What the swarm produced for people to read.
+   *
+   * Its own request rather than part of the detail, for the reason the
+   * node's commits are: it is a panel a person opens once a swarm has
+   * finished, and the plan is refetched on every board event.
+   */
+  listArtifacts(swarmId: string): Promise<SwarmArtifact[]>;
   /**
    * Sends a message to the agent working one node.
    *
@@ -292,6 +301,13 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         // because the transcript is where an answer belongs.
         void text;
       });
+    },
+    listArtifacts(swarmId) {
+      // The fixtures capture nothing, so there is nothing to list.
+      // Empty rather than invented: the panel draws only when a swarm
+      // actually produced something.
+      void swarmId;
+      return Promise.resolve([]);
     },
     getNode(swarmId, taskId) {
       const detail = find(swarmId);
@@ -861,6 +877,9 @@ export function httpSwarmApi(
     },
     async editTask(swarmId, taskId, edit) {
       await patch(`/api/swarms/${swarmId}/tasks/${taskId}`, edit);
+    },
+    async listArtifacts(swarmId) {
+      return call<SwarmArtifact[]>(`/api/swarms/${swarmId}/artifacts`);
     },
     async getNode(swarmId, taskId) {
       const node = await call<WireNode>(`/api/swarms/${swarmId}/tasks/${taskId}`);

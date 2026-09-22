@@ -6,6 +6,7 @@ import {
   swarmLandings,
   swarmPullRequests,
   swarmTasks,
+  swarmTemplates,
   swarms,
 } from "@bento/db";
 import type { GitHubPublisher } from "@bento/github";
@@ -16,6 +17,7 @@ import { githubConnectionFor } from "../../github.js";
 import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { publishSwarmBranches, type PublishableRepository, type PublishedPullRequest } from "../publish.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
+import { assembleSwarmDocument, isDocumentSwarm, type AssembledDocument } from "./deliverable.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -190,16 +192,59 @@ export async function publishSwarmCompletion(
     .orderBy(desc(runArtifacts.createdAt))
     .limit(1);
 
+  const handle = await swarmSandboxHandle(ctx, swarm.sandboxId);
+  const workspace = swarmWorkspaceKey(swarm.id);
+
+  /**
+   * A document swarm's deliverable is assembled here, before anything
+   * is bundled.
+   *
+   * Here rather than anywhere else because this is the one moment when
+   * everything is true at once: the tree is finished, the merge queue
+   * has put every section on the swarm's branch, and nothing has left
+   * Bento yet. Assembling after the push would put the document in a
+   * second commit nobody asked for; assembling before the last landing
+   * would leave a section out.
+   *
+   * Only on a driver whose checkouts are on this host. Everywhere else
+   * the branch lives inside the machine and the bundle comes back out
+   * of it, so there is nothing here to write into. The swarm still
+   * publishes, and the sections are on the branch as their own files,
+   * which is the honest half of the feature on such a deployment.
+   */
+  let assembled: AssembledDocument | null = null;
+  if (isDocumentSwarm(swarm) && !(handle && ctx.driver.exportRepository)) {
+    const first = repoRows[0]!;
+    const [template] = swarm.templateId
+      ? await ctx.db
+          .select({ documentPath: swarmTemplates.documentPath })
+          .from(swarmTemplates)
+          .where(eq(swarmTemplates.id, swarm.templateId))
+          .limit(1)
+      : [];
+    try {
+      assembled = await assembleSwarmDocument(ctx.db, {
+        swarm,
+        worktreePath: ctx.worktrees.worktreePath(workspace, first.name),
+        templatePath: template?.documentPath ?? null,
+        preamble: design?.content ?? null,
+      });
+    } catch (err) {
+      // Logged and carried on, for the reason a failed repository is:
+      // a swarm that finished must publish what it has rather than
+      // fail to finish over the file that summarizes it.
+      console.error(`swarm ${swarm.id}: could not assemble its document: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const body = swarmPullRequestBody({
     title: swarm.title,
     goal: swarm.goal,
     writeUp: design?.content ?? null,
     tasks,
     landedTaskIds: landedIds.map((row) => row.taskId),
+    documentPath: assembled?.path ?? null,
   });
-
-  const handle = await swarmSandboxHandle(ctx, swarm.sandboxId);
-  const workspace = swarmWorkspaceKey(swarm.id);
   const publishables: PublishableRepository[] = repoRows.map((row) => {
     const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
     return {
@@ -272,10 +317,26 @@ export function swarmPullRequestBody(input: {
   writeUp: string | null;
   tasks: (typeof swarmTasks.$inferSelect)[];
   landedTaskIds: string[];
+  /** The assembled document, on a swarm whose deliverable is one. */
+  documentPath?: string | null;
 }): string {
   const lines: string[] = [`Opened by Bento for the swarm "${input.title}".`, ""];
 
   lines.push("## Goal", "", input.goal.trim() || "(none given)", "");
+
+  /*
+   * Named first, under the goal, on a swarm whose deliverable is a
+   * document. It is the thing the reviewer is here to read, and the
+   * sections underneath it are the working that produced it.
+   */
+  if (input.documentPath) {
+    lines.push(
+      "## The document",
+      "",
+      `This swarm's deliverable is a document. It is assembled from the sections below and committed at ${input.documentPath} on this branch.`,
+      "",
+    );
+  }
 
   if (input.writeUp?.trim()) {
     lines.push("## What the planner wrote", "", input.writeUp.trim(), "");

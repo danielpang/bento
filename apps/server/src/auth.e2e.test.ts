@@ -853,6 +853,29 @@ test("every entity route refuses a foreign tenant", async () => {
     await asOwner("/api/swarm-templates", { method: "POST", body: JSON.stringify({ name: "Mine" }) })
   ).json()) as { id: string };
   assert.ok(template.id, "the owner's swarm template must exist for its routes to be probed");
+  /*
+   * And an artifact belonging to that swarm, so the artifact routes
+   * are probed with both kinds of id. They serve a swarm's artifacts
+   * as well as a card's now, and the two are resolved through
+   * different helpers: a check that only ever passed a card's id would
+   * never touch the swarm half at all.
+   */
+  const [swarmArtifact] = await ctx.db
+    .insert(runArtifacts)
+    .values({
+      runId: run.id,
+      type: "swarm",
+      swarmId: swarm.id,
+      stageSlug: "document",
+      stageName: "Document",
+      path: "docs/mine.md",
+      kind: "markdown",
+      mime: "text/markdown",
+      size: 5,
+      content: "mine.",
+    })
+    .returning({ id: runArtifacts.id });
+  assert.ok(swarmArtifact?.id, "the owner's swarm artifact must exist for the artifact routes to be probed");
 
   // Inserted directly for the same reason as the MCP server row above:
   // the connection routes refuse org-less callers in multi mode (and
@@ -930,6 +953,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/artifacts/${artifact!.id}`],
     ["GET", `/api/artifacts/${artifact!.id}/content`],
     ["GET", `/api/artifacts/${artifact!.id}/preview`],
+    // The same three, on a swarm's artifact rather than a card's.
+    ["GET", `/api/artifacts/${swarmArtifact!.id}`],
+    ["GET", `/api/artifacts/${swarmArtifact!.id}/content`],
+    ["GET", `/api/artifacts/${swarmArtifact!.id}/preview`],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected" }) }],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected", attachments: [{ name: "image.png", mime: "image/png", data: "dGVzdA==" }] }) }],
     ["GET", `/api/features/${feature.id}/conversation`],
@@ -1019,6 +1046,11 @@ test("every entity route refuses a foreign tenant", async () => {
       `/api/swarms/${swarm.id}/reopen`,
       { body: JSON.stringify({ instruction: "address the review comments" }) },
     ],
+    // What the swarm produced for people to read. The bytes are the
+    // artifact routes' to serve, and this is the list that names them:
+    // a foreign tenant learning the ids would be a foreign tenant
+    // holding the handles to another team's agent output.
+    ["GET", `/api/swarms/${swarm.id}/artifacts`],
     ["GET", `/api/swarms/${swarm.id}/messages`],
     ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
     // A real node of the owner's swarm, not an invented id: a route

@@ -10,7 +10,7 @@ import { capUse, formatUsd, spendParts } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { elapsedSince, formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
-import type { SwarmDetail } from "../swarm/types.js";
+import type { SwarmArtifact, SwarmDetail } from "../swarm/types.js";
 import type { SwarmView } from "../swarm/view-state.js";
 
 /** Ticks the header's clock, and only while there is something running. */
@@ -99,6 +99,8 @@ export function SwarmPage({
   actions,
   surfaces,
   busy,
+  artifacts = [],
+  onOpenArtifact,
 }: {
   detail: SwarmDetail;
   model: SwarmModel;
@@ -110,6 +112,10 @@ export function SwarmPage({
   actions: SwarmActions;
   surfaces: ModeSurfaces;
   busy?: boolean;
+  /** What the swarm produced for people to read, newest first. */
+  artifacts?: SwarmArtifact[];
+  /** Opens one in the viewer every other artifact in Bento opens in. */
+  onOpenArtifact?: (artifact: SwarmArtifact) => void;
 }) {
   const swarm = detail.swarm;
   const live = canPause(swarm.status);
@@ -349,6 +355,19 @@ export function SwarmPage({
        * answers what this is costing, and this answers where it went,
        * which is a question somebody asks second and only sometimes.
        */}
+      {/*
+       * What the swarm produced for people to read, above the cost
+       * panel: on a document swarm it is the whole point of the swarm,
+       * and on a code swarm it is whatever its agents captured along
+       * the way. Drawn only when there is something, so an ordinary
+       * swarm carries no empty box.
+       */}
+      <SwarmArtifacts
+        artifacts={artifacts}
+        deliverable={swarm.deliverable}
+        onOpen={onOpenArtifact}
+      />
+
       <SwarmCostPanel spend={swarm.spend} tasks={detail.tasks} budgetUsd={swarm.budgetUsd} />
 
       {detail.landings.length > 0 && (
@@ -360,6 +379,71 @@ export function SwarmPage({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * What the swarm produced for people to read.
+ *
+ * On a document swarm this is the deliverable, so it is named as such
+ * and sits first: the assembled file is what the swarm was for, and a
+ * person opening the page after it finished is looking for it rather
+ * than for the tree.
+ *
+ * Nothing here renders an artifact. Opening one hands it to the same
+ * viewer a card's artifacts open in, which is where the rule lives
+ * that keeps agent bytes off this origin: markdown through
+ * react-markdown with raw HTML off, HTML only inside a sandboxed
+ * iframe, everything else offered as a download. A second renderer
+ * here would be a second place for that to be got wrong.
+ */
+export function SwarmArtifacts({
+  artifacts,
+  deliverable,
+  onOpen,
+}: {
+  artifacts: SwarmArtifact[];
+  deliverable: SwarmDetail["swarm"]["deliverable"];
+  onOpen?: (artifact: SwarmArtifact) => void;
+}) {
+  if (artifacts.length === 0) return null;
+  const document = deliverable === "document" ? artifacts[0] : undefined;
+  const rest = document ? artifacts.slice(1) : artifacts;
+
+  return (
+    <section className="swarm-artifacts">
+      <span className="label">{deliverable === "document" ? "The document" : "What this swarm produced"}</span>
+      {document && (
+        <button
+          type="button"
+          className="swarm-artifact swarm-artifact-lead"
+          disabled={!onOpen}
+          onClick={() => onOpen?.(document)}
+        >
+          <span className="swarm-artifact-name">{document.path}</span>
+          <span className="muted">
+            Assembled from the sections in the plan, and committed on the swarm's branch.
+          </span>
+        </button>
+      )}
+      {rest.length > 0 && (
+        <ul className="swarm-artifact-list">
+          {rest.map((artifact) => (
+            <li key={artifact.id}>
+              <button
+                type="button"
+                className="swarm-artifact"
+                disabled={!onOpen}
+                onClick={() => onOpen?.(artifact)}
+              >
+                <span className="swarm-artifact-name">{artifact.path}</span>
+                <span className="muted">{artifact.kind}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

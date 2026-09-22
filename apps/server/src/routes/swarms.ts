@@ -10,6 +10,7 @@ import {
   ensureSwarmAgents,
   projects,
   repositories,
+  runArtifacts,
   sandboxes,
   swarmLandings,
   swarmMessages,
@@ -35,7 +36,7 @@ import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
-import { workerBranchName } from "../orchestrator/swarm/branches.js";
+import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import { reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
@@ -96,6 +97,16 @@ const LANDINGS_HISTORY = 10;
  */
 const TASK_EVENTS_SHOWN = 50;
 
+/**
+ * How many of a swarm's artifacts the console is sent.
+ *
+ * A swarm of fifty leaves can capture a file per leaf, and the list is
+ * a panel a person glances at rather than a directory they page
+ * through. Newest first, so the assembled document (written last, at
+ * the moment the swarm finished) is at the top.
+ */
+const SWARM_ARTIFACTS_SHOWN = 50;
+
 const createSwarm = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(200),
@@ -104,6 +115,23 @@ const createSwarm = z.object({
   maxWorkers: z.number().int().min(1).max(32).optional(),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
+  /**
+   * A branch that already exists, to start from.
+   *
+   * The swarm's own branch is cut from this rather than from the
+   * repository's default branch, and the planner's first prompt
+   * carries what is on it and what its pull request is still being
+   * asked about. Refused here rather than sanitized: the value reaches
+   * git, and a name with a space, a colon or a leading dash in it is
+   * either a mistake or an argument.
+   */
+  startBranch: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .refine((value) => isSafeBranchName(value), "that is not a branch name")
+    .nullish(),
 });
 
 /**
@@ -249,6 +277,16 @@ export function swarmRoutes(ctx: AppContext) {
           // like it is waiting for them.
           status: "planning",
           branchName: swarmBranchName(slug),
+          /*
+           * What this swarm produces, and where it starts from.
+           *
+           * The deliverable is copied off the template rather than read
+           * back through it later, for the reason the ceilings are
+           * copied: a template edited next month must not change what
+           * a swarm that ran today was producing.
+           */
+          deliverable: template.deliverable,
+          startBranch: body.startBranch ?? null,
           maxWorkers: body.maxWorkers ?? template.maxWorkers,
           budgetUsd,
           timeLimitMin: body.timeLimitMin === undefined ? template.timeLimitMin : body.timeLimitMin ?? null,
@@ -679,6 +717,41 @@ export function swarmRoutes(ctx: AppContext) {
         return c.json({ swarm: reopened.swarm, followUpTaskId: reopened.followUpTaskId, followUp: reopened.followUp }, 201);
       },
     )
+    /**
+     * What this swarm produced for people to read: its assembled
+     * document, and anything else its agents captured.
+     *
+     * Metadata only. The bytes are served by the artifact routes, which
+     * is where every rule about serving agent output lives: a sandboxing
+     * CSP, nosniff, and HTML offered as a download rather than rendered.
+     * Duplicating any of that here would be a second place for it to
+     * drift out of date.
+     */
+    .get("/:id/artifacts", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+
+      const rows = await db(c, ctx)
+        .select({
+          id: runArtifacts.id,
+          runId: runArtifacts.runId,
+          swarmTaskId: runArtifacts.swarmTaskId,
+          stageSlug: runArtifacts.stageSlug,
+          stageName: runArtifacts.stageName,
+          path: runArtifacts.path,
+          kind: runArtifacts.kind,
+          mime: runArtifacts.mime,
+          size: runArtifacts.size,
+          createdAt: runArtifacts.createdAt,
+        })
+        .from(runArtifacts)
+        .where(eq(runArtifacts.swarmId, swarm.id))
+        .orderBy(desc(runArtifacts.createdAt))
+        .limit(SWARM_ARTIFACTS_SHOWN);
+      return c.json(rows);
+    })
     /** The swarm's thread: what people asked, and what agents asked back. */
     .get("/:id/messages", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
