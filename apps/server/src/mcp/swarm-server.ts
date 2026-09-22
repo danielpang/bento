@@ -829,9 +829,19 @@ async function askUser(
         detail: { question: args.question },
       });
     } else {
-      // A question about the goal itself has no leaf to hang off, so it
-      // is the swarm that is waiting. pausedReason is what tells the
-      // board which sentence to print.
+      /*
+       * A question about the goal itself has no leaf to hang off, so
+       * it is the swarm that is waiting, and the reason is where that
+       * is recorded.
+       *
+       * The status is deliberately left alone: it is the tree's, and
+       * the reconciler recomputes it from the tree on the next tick,
+       * so anything written here would not survive. The reason is
+       * therefore the whole of the record, and the board reads it as
+       * waiting whatever the status says (swarmStatusOf in the
+       * console). Answering clears it, in the messages route, which is
+       * the same door that clears a leaf's attention.
+       */
       await tx
         .update(swarms)
         .set({ pausedReason: "attention", updatedAt: new Date() })
