@@ -68,9 +68,16 @@ export type LandOutcome =
   | { ok: false; reason: "empty" }
   /** Git could not reconcile the two. A resolver or a person decides. */
   | { ok: false; reason: "conflict"; detail: string }
-  /** The swarm's branch moved while this was being built. Try again. */
+  /**
+   * Something that will not be true next time refused the fast
+   * forward: the swarm's branch moved while this was being built, or
+   * its checkout was locked by the agent working in it. Try again.
+   */
   | { ok: false; reason: "moved"; detail: string }
-  /** Anything else: a missing branch, a broken checkout, a full disk. */
+  /**
+   * Anything else, which is anything a retry cannot get past: a missing
+   * branch, a swarm checkout that is dirty or detached, a full disk.
+   */
   | { ok: false; reason: "error"; detail: string };
 
 /** Where a landing parks the commit it built, until the fast forward takes it. */
@@ -120,6 +127,31 @@ function isConflict(detail: string): boolean {
   return /conflict|could not apply|patch failed|fix conflicts|automatic merge failed/i.test(detail);
 }
 
+/**
+ * Whether a refused fast forward is worth trying again.
+ *
+ * Only two things make it worth it, and both are about something else
+ * holding the checkout for a moment: the swarm's branch having moved on
+ * (the compare and swap doing its job, and the next attempt is built on
+ * the head it has now), and a git process in the swarm's own sandbox
+ * holding the index lock (the planner runs in that checkout, and the
+ * landing's tests run its test command there).
+ *
+ * Everything else is permanent, and the difference matters more than it
+ * looks: "try again" with nothing counting the tries is a tick and a
+ * land job and a handful of git subprocesses per pass, for ever, and
+ * this catch used to answer it for every failure without reading one
+ * word of what git said. The case it was reached with in practice is a
+ * swarm checkout with uncommitted changes to a file the landing touches
+ * ("error: Your local changes to the following files would be
+ * overwritten by merge"), which no number of retries gets past.
+ */
+export function isRetryableFastForward(detail: string): boolean {
+  return /not possible to fast[- ]forward|diverging branches|non-fast[- ]forward|index\.lock|unable to create|another git process/i.test(
+    detail,
+  );
+}
+
 export async function landWorkerBranch(request: LandRequest): Promise<LandOutcome> {
   const { repoPath, swarmBranch, workerBranch } = request;
   let base: string;
@@ -160,10 +192,16 @@ export async function landWorkerBranch(request: LandRequest): Promise<LandOutcom
    */
   const checkedOut = await git(request.swarmWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
   if (checkedOut !== swarmBranch) {
+    /**
+     * An error rather than something to retry. Nothing in a swarm ever
+     * moves that checkout back onto its branch, so a landing told to
+     * try again here is told to try again for ever; a person has to
+     * look at the checkout.
+     */
     return {
       ok: false,
-      reason: "moved",
-      detail: `the swarm's checkout is on ${checkedOut || "a detached head"} rather than ${swarmBranch}`,
+      reason: "error",
+      detail: `the swarm's checkout is on ${checkedOut || "a detached head"} rather than ${swarmBranch}, so the landing cannot move the branch.`,
     };
   }
 
@@ -231,7 +269,9 @@ export async function landWorkerBranch(request: LandRequest): Promise<LandOutcom
       await git(request.swarmWorktree, ["merge", "--ff-only", landed]);
     } catch (err) {
       const detail = detailOf(err);
-      return { ok: false, reason: "moved", detail };
+      return isRetryableFastForward(detail)
+        ? { ok: false, reason: "moved", detail }
+        : { ok: false, reason: "error", detail };
     } finally {
       await git(repoPath, ["update-ref", "-d", landingRef(request.landingId)]).catch(() => {});
     }
