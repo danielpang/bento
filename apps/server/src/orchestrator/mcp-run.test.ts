@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveGatewayBase } from "./mcp-run.js";
+import type { AgentAdapter } from "@bento/agents";
+import { prepareRunMcp, resolveGatewayBase } from "./mcp-run.js";
 import type { AppContext } from "../context.js";
 
 // resolveGatewayBase is the pure host-resolution rule; the full attach
@@ -40,4 +41,96 @@ test("a sprite on a loopback base has no reachable gateway", () => {
 test("a trailing slash on the base is normalized away", () => {
   const ctx = fakeCtx({ BETTER_AUTH_URL: "https://bento.example.com/" }, "docker");
   assert.equal(resolveGatewayBase(ctx), "https://bento.example.com");
+});
+
+/**
+ * The config write is the first command after provision. When the
+ * sprites info endpoint answers "sprite not found", exec throws before
+ * it yields. That throw used to escape prepareRunMcp, skip finishRun,
+ * and leave the run stuck in "starting". Attaching MCP never fails the
+ * run: the grant is revoked and the transcript says the servers were
+ * left off.
+ */
+test("prepareRunMcp keeps going when writing the config throws", async () => {
+  let writes = 0;
+  let revokes = 0;
+  const notes: string[] = [];
+  const ctx = {
+    env: { BETTER_AUTH_URL: "https://bento.example.com", BENTO_RUN_TIMEOUT_MIN: 30 },
+    driver: {
+      provider: "sprite",
+      async *exec() {
+        writes += 1;
+        throw new Error("sprite not found");
+      },
+    },
+    db: {
+      select() {
+        return {
+          from() {
+            return {
+              where() {
+                return Promise.resolve([]);
+              },
+            };
+          },
+        };
+      },
+      insert() {
+        return {
+          values() {
+            return {
+              onConflictDoUpdate() {
+                return Promise.resolve();
+              },
+            };
+          },
+        };
+      },
+      update() {
+        return {
+          set() {
+            return {
+              where() {
+                revokes += 1;
+                return Promise.resolve();
+              },
+            };
+          },
+        };
+      },
+    },
+  } as unknown as AppContext;
+  const adapter = {
+    cli: "claude",
+    mcp: {
+      renderConfig() {
+        return [{ path: "/opt/bento/mcp/claude.json", content: "{}" }];
+      },
+      extraArgs() {
+        return ["--mcp-config", "/opt/bento/mcp/claude.json"];
+      },
+    },
+  } as unknown as AgentAdapter;
+
+  const result = await prepareRunMcp(ctx, {
+    runId: "run-1",
+    organizationId: "org-1",
+    actingUserId: null,
+    adapter,
+    handle: { externalId: "bento-feature", provider: "sprite", workdir: "/workspace" },
+    restrictNetwork: false,
+    mountedConfigPaths: [],
+    cardTools: true,
+    say: async (text) => {
+      notes.push(text);
+    },
+  });
+
+  assert.equal(writes, 1);
+  assert.equal(revokes, 1);
+  assert.deepEqual(result, { extraArgs: [], cardTools: false, env: {} });
+  assert.equal(notes.length, 1);
+  assert.match(notes[0] ?? "", /Could not write the MCP configuration/);
+  assert.doesNotMatch(notes[0] ?? "", /[—–]/);
 });
