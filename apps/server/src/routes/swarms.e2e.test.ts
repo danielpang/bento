@@ -808,3 +808,23 @@ test("a team over its plan is told before a swarm is written, not after", async 
   }
 });
 
+/**
+ * A swarm's own machine outlives everything else it has.
+ *
+ * Its planner and its coordinator work in one sprite from before the
+ * plan exists until the last leaf lands, and a sprite is billed for as
+ * long as it exists rather than for as long as it is used. Stopping a
+ * swarm is the moment nothing will work in it again.
+ */
+test("stopping a swarm hands its own machine to the reaper", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  queued.length = 0;
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/cancel`)).status, 200);
+  assert.deepEqual(
+    queued.filter((job) => job.queue === "sandbox.reap").map((job) => job.data),
+    [{ swarmId: swarm.id }],
+    "the machine is queued rather than destroyed inline, the way a finished card's is",
+  );
+});

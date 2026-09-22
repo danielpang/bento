@@ -13,6 +13,7 @@ import type { AppContext } from "../../context.js";
 import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
+import { queueSwarmSandboxReap } from "../reap-sandbox.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 
@@ -64,6 +65,11 @@ export const SWARM_TICK_QUEUE = "swarm.tick";
  * again.
  */
 const ACTIVE_SWARM_STATUSES = ["planning", "running", "blocked"] as const;
+
+/** And the states a swarm never comes back from, which end its machine. */
+function swarmIsOver(status: (typeof swarms.$inferSelect)["status"]): boolean {
+  return status === "done" || status === "failed" || status === "cancelled";
+}
 
 /** Whether any swarm on this deployment has work a tick would act on. */
 export async function hasActiveSwarms(ctx: Pick<AppContext, "db">): Promise<boolean> {
@@ -194,6 +200,16 @@ export async function tickSwarm(
     for (const runId of [...(result.plannerRunId ? [result.plannerRunId] : []), ...result.workerRunIds]) {
       await enqueueRun(ctx, runId);
     }
+    /*
+     * A swarm that is over holds a machine nobody is working in, and a
+     * sprite costs money for as long as it exists rather than for as
+     * long as it is used. Queued rather than destroyed here, for the
+     * reason the card's reap is queued: the provider is a network call
+     * away and a finished swarm must not fail to finish because Fly
+     * was slow. Safe to queue twice, because the reap reads the rows
+     * and a machine already gone is no rows.
+     */
+    if (swarmIsOver(result.status)) await queueSwarmSandboxReap(ctx, swarmId);
   }
   return result;
 }

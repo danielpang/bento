@@ -26,6 +26,7 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
+import { queueSwarmSandboxReap } from "../orchestrator/reap-sandbox.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
@@ -409,6 +410,16 @@ export function swarmRoutes(ctx: AppContext) {
         ctx.running.get(run.id)?.abort();
         await markCancelled(ctx, run.id);
       }
+
+      /*
+       * And the swarm's own machine, which nothing will work in again.
+       * Queued rather than destroyed inline, the way a finished card's
+       * is: the provider is a network call away and stopping a swarm
+       * must not fail because Fly was slow. After the commit, so the
+       * reap reads the cancelled runs rather than the active ones it
+       * would refuse to reap under.
+       */
+      deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
       return c.json(cancelled);
     })
     /**

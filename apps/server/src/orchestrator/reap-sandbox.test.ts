@@ -20,6 +20,7 @@ import {
   runMigrations,
   sandboxes,
   stages,
+  swarms,
 } from "@bento/db";
 import { WorktreeManager } from "@bento/sandbox";
 import pg from "pg";
@@ -29,7 +30,7 @@ import { ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
-import { reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { reapFinishedSandboxes, reapSandbox, reapSwarmSandbox } from "./reap-sandbox.js";
 import { swarmWorkspaceKey } from "./swarm/sandbox.js";
 
 const run = promisify(execFile);
@@ -185,6 +186,60 @@ async function seedSucceededRun(featureId: string, stageId: string) {
     })
     .returning();
   return row!;
+}
+
+/**
+ * A swarm and the machine it works in, which is not a card's.
+ *
+ * `featureId` is null on it, which is the whole reason the sweep used
+ * to miss every one of them, and `swarmTaskId` is null because this is
+ * the swarm's own machine rather than a leaf's worker.
+ */
+async function seedSwarm(opts: {
+  title: string;
+  status: (typeof swarms.$inferSelect)["status"];
+  run?: "running" | "succeeded";
+}): Promise<{ swarmId: string; sandboxId: string; externalId: string }> {
+  const [project] = await ctx.db
+    .insert(projects)
+    .values({ ownerId: ctx.userId, name: opts.title, localPath: repoDir })
+    .returning();
+  const [swarm] = await ctx.db
+    .insert(swarms)
+    .values({
+      projectId: project!.id,
+      slug: `s-${randomUUID().slice(0, 8)}`,
+      title: opts.title,
+      status: opts.status,
+    })
+    .returning();
+  const externalId = `swarm-box-${swarm!.id}`;
+  const [sandbox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project!.id,
+      swarmId: swarm!.id,
+      provider: "docker",
+      externalId,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  if (opts.run) {
+    const [profile] = await ctx.db
+      .insert(agentProfiles)
+      .values({ ownerId: ctx.userId, name: `planner-${swarm!.id}`, cli: "fake", model: "fake-1" })
+      .returning();
+    await ctx.db.insert(agentRuns).values({
+      type: "swarm",
+      swarmId: swarm!.id,
+      role: "planner",
+      agentProfileId: profile!.id,
+      prompt: "plan it",
+      status: opts.run,
+    });
+  }
+  return { swarmId: swarm!.id, sandboxId: sandbox!.id, externalId };
 }
 
 /**
@@ -346,4 +401,38 @@ test("the boot sweep reclaims leftover workspaces of finished and deleted cards"
   await stat(ctx.worktrees.workspacePath(active.featureId));
   await stat(path.join(junk, "keep.txt"));
   await stat(path.join(swarmWorkspace, "leaf.txt"));
+});
+
+/**
+ * A swarm's own machine costs money the same way a card's does.
+ *
+ * It is the longest lived machine in the product: provisioned before
+ * the plan exists, still there when the last leaf lands. The sweep
+ * reached it through a join on features, and a swarm machine has no
+ * feature, so an inner join matched none of them: every swarm anybody
+ * ever finished or stopped left its sprite running and billing, and
+ * only deleting the swarm outright took it.
+ */
+test("the boot sweep reclaims the machine of a swarm that is over, and leaves a live one", async () => {
+  const stopped = await seedSwarm({ title: "Swarm stopped", status: "cancelled" });
+  const finished = await seedSwarm({ title: "Swarm done", status: "done" });
+  const live = await seedSwarm({ title: "Swarm running", status: "running" });
+
+  await reapFinishedSandboxes(ctx);
+
+  for (const over of [stopped, finished]) {
+    assert.ok(destroyed.includes(over.externalId), `the driver was asked to destroy ${over.externalId}`);
+    const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, over.sandboxId));
+    assert.equal(row?.status, "destroyed", "and the row says the machine is gone");
+  }
+  assert.equal(destroyed.includes(live.externalId), false, "a swarm still working keeps its machine");
+  const [running] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, live.sandboxId));
+  assert.equal(running?.status, "ready");
+});
+
+test("a swarm's machine is not taken out from under an agent still working in it", async () => {
+  const swarm = await seedSwarm({ title: "Swarm with an agent", status: "cancelled", run: "running" });
+  await assert.rejects(() => reapSwarmSandbox(ctx, swarm.swarmId), /still working/);
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
+  assert.equal(row?.status, "ready", "the row still points at a machine that is there");
 });
