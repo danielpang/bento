@@ -299,7 +299,7 @@ test("the swarm reads back with its plan, and the strip reads back with its numb
   assert.equal((await app.request("/api/swarms?projectId=11111111-1111-1111-1111-111111111111")).status, 404);
 });
 
-test("the detail carries the merge queue, in the queue's own order and words", async () => {
+test("the detail carries the merge queue, the queue first and in its own order", async () => {
   const swarm = await createSwarm();
   const [first] = await db
     .insert(swarmTasks)
@@ -309,24 +309,69 @@ test("the detail carries the merge queue, in the queue's own order and words", a
     .insert(swarmTasks)
     .values({ swarmId: swarm.id, title: "stuck one", status: "working", position: 1 })
     .returning();
+  const [third] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "behind it", status: "done", position: 2 })
+    .returning();
   await db.insert(swarmLandings).values([
+    { swarmId: swarm.id, taskId: third!.id, branchName: "swarm/s-3", position: 2, status: "queued" },
     { swarmId: swarm.id, taskId: second!.id, branchName: "swarm/s-2", position: 1, status: "conflicted", attempt: 2, error: "CONFLICT (content): both changed one file" },
-    { swarmId: swarm.id, taskId: first!.id, branchName: "swarm/s-1", position: 0, status: "landed", attempt: 1 },
+    { swarmId: swarm.id, taskId: first!.id, branchName: "swarm/s-1", position: 0, status: "landed", attempt: 1, endedAt: new Date() },
   ]);
 
   const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
     landings: { taskId: string; status: string; attempt: number; error: string | null; branchName: string | null }[];
   };
-  assert.equal(detail.landings.length, 2);
+  assert.equal(detail.landings.length, 3);
   assert.deepEqual(
     detail.landings.map((row) => row.taskId),
-    [first!.id, second!.id],
-    "by position, which is the queue's own order rather than insertion order",
+    [second!.id, third!.id, first!.id],
+    "what has not finished, in the queue's own order, and then the history behind it",
   );
-  assert.equal(detail.landings[1]!.status, "conflicted", "the server's own word, not a translation of it");
-  assert.equal(detail.landings[1]!.attempt, 2);
-  assert.match(detail.landings[1]!.error ?? "", /both changed one file/);
-  assert.equal(detail.landings[0]!.branchName, "swarm/s-1");
+  assert.equal(detail.landings[0]!.status, "conflicted", "the server's own word, not a translation of it");
+  assert.equal(detail.landings[0]!.attempt, 2);
+  assert.match(detail.landings[0]!.error ?? "", /both changed one file/);
+  assert.equal(detail.landings[2]!.branchName, "swarm/s-1");
+});
+
+test("the merge queue is still visible on a swarm with more landings than the cap", async () => {
+  /**
+   * A long swarm, which is the shape that made this blind.
+   *
+   * position is monotonic per acceptance, so one capped query ordered
+   * by position hands back the oldest rows: a swarm on its twenty first
+   * leaf sent twenty landings that had already finished and left out
+   * the branch that was actually landing and the conflict somebody
+   * opened the panel to find. The panel then drew "one branch at a
+   * time" over a queue whose front it could not see.
+   */
+  const swarm = await createSwarm();
+  for (let index = 0; index < 22; index += 1) {
+    const [task] = await db
+      .insert(swarmTasks)
+      .values({ swarmId: swarm.id, title: `leaf ${index}`, status: "done", position: index })
+      .returning();
+    await db.insert(swarmLandings).values({
+      swarmId: swarm.id,
+      taskId: task!.id,
+      branchName: `swarm/s-${index}`,
+      position: index,
+      status: index < 20 ? "landed" : index === 20 ? "conflicted" : "queued",
+      attempt: 1,
+      ...(index < 20 ? { endedAt: new Date(2026, 0, 1, index) } : {}),
+      ...(index === 20 ? { error: "CONFLICT (content): both changed one file" } : {}),
+    });
+  }
+
+  const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
+    landings: { status: string; branchName: string | null; error: string | null }[];
+  };
+  const byStatus = (status: string) => detail.landings.filter((row) => row.status === status);
+  assert.equal(byStatus("conflicted").length, 1, "the row the whole queue is waiting on");
+  assert.equal(byStatus("conflicted")[0]!.branchName, "swarm/s-20");
+  assert.equal(byStatus("queued").length, 1, "and what is behind it");
+  assert.equal(byStatus("landed").length, 10, "with the history capped rather than filling the answer");
+  assert.ok(detail.landings.length <= 30, "and the whole thing still bounded");
 });
 
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {
