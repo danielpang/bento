@@ -1,10 +1,12 @@
 /**
- * Browser error tracking, using the same PostHog project as the server.
+ * Browser error tracking and identity, using the same PostHog project
+ * as the server and the marketing site.
  *
  * The server already sends product events through posthog-node. This
- * module only captures exceptions: uncaught errors via the SDK, and
- * handled ones that call `captureException`. Product autocapture stays
- * off, so a console click does not mint a second stream of events.
+ * module captures exceptions (uncaught via the SDK, handled via
+ * `captureException`) and aliases the marketing-site anonymous
+ * distinct_id onto the signed-in user. Product autocapture stays off,
+ * so a console click does not mint a second stream of events.
  *
  * The project token comes from `/api/health`, which only includes it
  * in multi mode when POSTHOG_API_KEY is set. That key is a public
@@ -14,6 +16,18 @@
  * constructs a browser client.
  */
 
+/**
+ * Persistence both hosts must share so a visit on usebento.ai and a
+ * signup on app.usebento.ai stay one person. The cookie is set on
+ * `.usebento.ai`; when localStorage already has a stale app id, the
+ * shared cookie wins.
+ */
+export const BROWSER_PERSISTENCE = {
+  persistence: "localStorage+cookie",
+  cross_subdomain_cookie: true,
+  cookieWinsOnConflict: true,
+} as const;
+
 type PostHogClient = {
   captureException: (error: unknown, properties?: Record<string, unknown>) => void;
   identify: (id: string, properties?: Record<string, unknown>) => void;
@@ -21,7 +35,34 @@ type PostHogClient = {
   register: (properties: Record<string, unknown>) => void;
 };
 
+type SessionUser = {
+  id: string;
+  email?: string | null;
+  name?: string | null;
+};
+
+type IdentityRequest =
+  | { type: "identify"; userId: string; properties: Record<string, string> }
+  | { type: "reset" };
+
 let client: PostHogClient | null = null;
+let pending: IdentityRequest | null = null;
+
+/**
+ * What to do when the session hook settles.
+ *
+ * An anonymous hop from the marketing site must not reset(): that
+ * would mint a new distinct_id and overwrite the shared cookie.
+ * Reset only after a signed-in user leaves.
+ */
+export function sessionIdentityChange(
+  previousUserId: string | null,
+  user: SessionUser | null,
+): { type: "identify"; user: SessionUser } | { type: "reset" } | { type: "none" } {
+  if (user) return { type: "identify", user };
+  if (previousUserId) return { type: "reset" };
+  return { type: "none" };
+}
 
 /**
  * Whether the console should load posthog-js from a /api/health body.
@@ -42,19 +83,47 @@ export function captureException(error: unknown, properties?: Record<string, unk
   client?.captureException(error instanceof Error ? error : new Error(String(error)), properties);
 }
 
+function identityProperties(traits?: { email?: string | null; name?: string | null }): Record<string, string> {
+  return {
+    ...(traits?.email ? { email: traits.email } : {}),
+    ...(traits?.name ? { name: traits.name } : {}),
+  };
+}
+
+function applyIdentity(target: PostHogClient, request: IdentityRequest): void {
+  if (request.type === "reset") {
+    target.reset();
+    return;
+  }
+  target.identify(request.userId, request.properties);
+}
+
 export function identifyUser(
   userId: string,
   traits?: { email?: string | null; name?: string | null },
 ): void {
-  if (!client) return;
-  client.identify(userId, {
-    ...(traits?.email ? { email: traits.email } : {}),
-    ...(traits?.name ? { name: traits.name } : {}),
-  });
+  const request: IdentityRequest = { type: "identify", userId, properties: identityProperties(traits) };
+  if (!client) {
+    pending = request;
+    return;
+  }
+  applyIdentity(client, request);
 }
 
 export function resetUser(): void {
-  client?.reset();
+  if (!client) {
+    pending = { type: "reset" };
+    return;
+  }
+  pending = null;
+  client.reset();
+}
+
+function attachClient(next: PostHogClient): void {
+  client = next;
+  if (!pending) return;
+  applyIdentity(client, pending);
+  pending = null;
 }
 
 /**
@@ -80,12 +149,13 @@ export async function startErrorTracking(): Promise<void> {
       autocapture: false,
       capture_pageview: false,
       capture_pageleave: false,
+      ...BROWSER_PERSISTENCE,
     });
     posthog.register({
       environment: cfg.environment,
       bento_mode: body.mode,
     });
-    client = posthog;
+    attachClient(posthog);
   } catch {
     // Error tracking is optional. A console that cannot reach the
     // server already has its own unreachable screen.
