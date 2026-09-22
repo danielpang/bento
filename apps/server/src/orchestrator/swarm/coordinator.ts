@@ -951,9 +951,14 @@ async function spawnWorkers(
      * change the agent every other leaf gets.
      */
     const profileId = task.agentProfileId ?? templateWorker;
-    // Nothing to run it as. The leaf keeps its place in the queue, and
-    // starts the moment a worker agent is set on the template.
-    if (!profileId) break;
+    /*
+     * Nothing to run this one as. The leaf keeps its place in the
+     * queue and starts the moment a worker agent is set on the
+     * template, and its siblings are still this tick's to start: a
+     * leaf somebody reassigned by hand has an agent of its own, and a
+     * template with none must not hold it up.
+     */
+    if (!profileId) continue;
     const started = await deps.startRun(tx, {
       type: "swarm",
       swarmId: swarm.id,
@@ -1326,16 +1331,29 @@ export function swarmStatusFrom(
   if (current === "draft" || current === "planning" || current === "paused" || current === "cancelled") {
     return current;
   }
-  /*
-   * And the two ceilings, for the same reason: a swarm stopped by its
-   * budget or its clock has a tree full of open leaves, which reads as
-   * a swarm at work. Only a spawn that succeeds takes it out of these,
-   * and the spawn step is what writes that.
-   */
-  if (current === "budget_exhausted" || current === "timed_out") return current;
   // Started, with nothing in the plan to summarize.
   if (roots.length === 0) return current;
   const rolled = rollUpStatus("open", roots);
+  /*
+   * The two ceilings hold a swarm still, but they do not make it
+   * unfinishable.
+   *
+   * A swarm stopped by its budget or its clock has a tree full of open
+   * leaves, which reads as a swarm at work, so neither is recomputed
+   * away by the rollup: only a spawn that succeeds takes it out, and
+   * the spawn step writes that itself.
+   *
+   * Except when the tree actually finished. Nothing is killed for
+   * either ceiling, so the workers that were running when it was
+   * reached go on to land their branches, and those landings can be
+   * the last work the plan had. A swarm whose every task is done is
+   * done, whatever stopped it starting more, and without this it would
+   * sit at "out of budget" over a finished tree, publish nothing, and
+   * wait for a person to notice.
+   */
+  if (current === "budget_exhausted" || current === "timed_out") {
+    return rolled === "done" ? "done" : current;
+  }
   switch (rolled) {
     case "done":
       return "done";

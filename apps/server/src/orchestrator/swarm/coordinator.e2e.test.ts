@@ -1092,3 +1092,53 @@ test("the planner is warned once when less than one run's worth of budget is lef
   const after = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
   assert.equal(after.length, 1, "one budget, one warning");
 });
+
+/**
+ * A ceiling stops a swarm starting work. It does not stop the work
+ * that was already going from finishing the plan.
+ *
+ * The workers that were running when the budget was reached are never
+ * killed, so their landings can be the last work the tree had. Without
+ * this the swarm would sit at "out of budget" over a finished tree,
+ * publish nothing, and wait for somebody to notice.
+ */
+test("a swarm that ran out of budget still finishes when its last worker lands", async () => {
+  const swarm = await makeSwarm({ status: "budget_exhausted", pausedReason: "budget", budgetUsd: "10" });
+  const leaf = await makeTask(swarm.id, { title: "the last one", status: "working" });
+
+  const held = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(held?.status, "budget_exhausted", "while the work is in flight, the ending stands");
+
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, leaf.id));
+  const finished = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(finished?.status, "done", "a swarm whose every task is done is done");
+  assert.equal(finished?.becameDone, true, "and it publishes, rather than waiting for a person");
+});
+
+/** A template with no worker does not hold up a leaf that has its own. */
+test("a leaf with its own agent starts even when the template names none", async () => {
+  const [bare] = await db
+    .insert(swarmTemplates)
+    .values({
+      ownerId: "u1",
+      name: "No worker",
+      plannerProfileId: PROFILE,
+      workerProfileId: null,
+      workerIsolation: "worktree",
+    })
+    .returning();
+  const swarm = await makeSwarm({ status: "running", templateId: bare!.id });
+  await makeTask(swarm.id, { title: "template's", status: "assigned", position: 0 });
+  const chosen = await makeTask(swarm.id, {
+    title: "reassigned by hand",
+    status: "assigned",
+    position: 1,
+    agentProfileId: PROFILE,
+  });
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  assert.equal(result?.workerRunIds.length, 1, "the one that has an agent starts");
+  assert.equal(deps.calls.at(-1)?.swarmTaskId, chosen.id);
+  assert.equal((await read(chosen.id)).status, "working");
+});
