@@ -382,3 +382,87 @@ export interface FeatureEvent {
   detail: { failedCriteria?: string[] } | null;
   at: string;
 }
+
+/**
+ * A swarm, as the API sends one.
+ *
+ * The table's own names, because the swarm routes answer with their
+ * rows and a second vocabulary between the server and a terminal is
+ * one more place for the two to disagree. Numerics arrive as strings,
+ * which is what Postgres numeric is: a figure nobody has rounded.
+ */
+export interface SwarmRow {
+  id: string;
+  projectId: string;
+  slug: string;
+  title: string;
+  goal: string;
+  status:
+    | "draft"
+    | "planning"
+    | "running"
+    | "paused"
+    | "blocked"
+    | "done"
+    | "failed"
+    | "cancelled"
+    | "budget_exhausted"
+    | "timed_out";
+  pausedReason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null;
+  branchName: string | null;
+  deliverable?: "code" | "document";
+  startBranch?: string | null;
+  reopenCount?: number;
+  budgetUsd: string | null;
+  maxWorkers: number;
+  timeLimitMin: number | null;
+  spentMeasuredUsd: string;
+  spentEstimatedUsd: string;
+  spentAssumedUsd: string;
+  spentNotionalUsd?: string;
+  archivedAt: string | null;
+  createdAt: string;
+}
+
+/** A row of the swarm list, with the counts the strip draws. */
+export interface SwarmSummaryRow extends SwarmRow {
+  counts: { tasks: number; done: number; attention: number };
+}
+
+/** One node of a swarm's plan. The tree travels flat, each naming its parent. */
+export interface SwarmTaskRow {
+  id: string;
+  parentId: string | null;
+  position: number;
+  nodeType: "plan" | "leaf";
+  title: string;
+  description: string;
+  status: "open" | "assigned" | "working" | "landed" | "done" | "blocked" | "failed" | "cancelled";
+  attention: string | null;
+  weight: number;
+  branchName: string | null;
+  /** What a reopen asked for, on the node that holds its work. */
+  followUpInstruction?: string | null;
+  costMeasuredUsd: string;
+  costEstimatedUsd: string;
+  costAssumedUsd: string;
+  costNotionalUsd?: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+/** One swarm with its plan, as the detail route answers. */
+export interface SwarmDetailResponse {
+  swarm: SwarmRow;
+  tasks: SwarmTaskRow[];
+  activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
+  landings?: {
+    id: string;
+    taskId: string;
+    branchName: string | null;
+    status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
+    attempt: number;
+    error: string | null;
+  }[];
+  pullRequests?: { id: string; repoUrl: string; number: number; url: string; headSha: string | null }[];
+}

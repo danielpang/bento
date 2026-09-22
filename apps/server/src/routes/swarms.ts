@@ -39,7 +39,7 @@ import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
-import { reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
+import { reopenRefusal, reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { budgetRefusal } from "../orchestrator/swarm/ledger.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
@@ -161,6 +161,39 @@ const updateSwarm = z
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: "nothing to change" });
+
+
+/**
+ * Says the swarm changed, once the change is committed.
+ *
+ * Every route below that moves a swarm calls this, and the reason is
+ * the one thing a board event is for: somebody who is not the person
+ * who pressed the button. The console refetches after its own action
+ * and so looked correct while it was the only viewer; a second tab, a
+ * terminal running `bento swarm watch`, and a teammate watching the
+ * same swarm heard nothing at all until the next tick happened to fire
+ * for some other reason. Stopping a swarm from one window left it
+ * running on every other screen.
+ *
+ * After the commit, never inside it, for the reason the coordinator
+ * emits after its transaction: a viewer that refetches on the event
+ * has to find the state the event describes.
+ */
+function saySwarmChanged(
+  ctx: AppContext,
+  c: Context,
+  swarm: Pick<typeof swarms.$inferSelect, "id" | "projectId">,
+  status?: string,
+): void {
+  deferAfterCommit(c, async () => {
+    ctx.bus.emitBoardEvent({
+      type: "swarm_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      ...(status ? { status } : {}),
+    });
+  });
+}
 
 export function swarmRoutes(ctx: AppContext) {
   return new Hono()
@@ -479,6 +512,7 @@ export function swarmRoutes(ctx: AppContext) {
         await db(c, ctx).update(swarms).set({ budgetWarnedAt: null }).where(eq(swarms.id, swarm.id));
       }
       if (ceilingMoved) deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm);
       return c.json(updated);
     })
     /**
@@ -507,6 +541,7 @@ export function swarmRoutes(ctx: AppContext) {
         .set({ status: "paused", pausedReason: "manual", updatedAt: new Date() })
         .where(eq(swarms.id, swarm.id))
         .returning();
+      saySwarmChanged(ctx, c, swarm, "paused");
       return c.json(paused);
     })
     /**
@@ -607,6 +642,7 @@ export function swarmRoutes(ctx: AppContext) {
        * the figures the event reads are the ones this request wrote.
        */
       deferAfterCommit(c, () => captureSwarmSpend(ctx, swarm.id, "cancelled"));
+      saySwarmChanged(ctx, c, swarm, "cancelled");
       return c.json(cancelled);
     })
     /**
@@ -648,6 +684,7 @@ export function swarmRoutes(ctx: AppContext) {
         .where(eq(swarms.id, swarm.id))
         .returning();
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm, "running");
       return c.json(started);
     })
     /**
@@ -688,10 +725,25 @@ export function swarmRoutes(ctx: AppContext) {
         const body = c.req.valid("json");
 
         /*
-         * A swarm whose last agent has not settled yet is one the
-         * coordinator is still about to hear from, and its report
-         * would land on a tree this request is about to change under
-         * it. Waiting a moment is the whole fix.
+         * Whether this swarm can be reopened at all is asked first,
+         * off the row already in hand, because it is the refusal a
+         * person is most likely to hit and the one they can act on. A
+         * swarm that is still running gets "there is nothing to
+         * reopen" rather than "an agent is still finishing", which is
+         * true of every running swarm and says nothing.
+         */
+        const cannot = reopenRefusal(swarm, {
+          ...(body.budgetUsd === undefined ? {} : { budgetUsd: body.budgetUsd }),
+          ...(body.timeLimitMin === undefined ? {} : { timeLimitMin: body.timeLimitMin }),
+        });
+        if (cannot) return c.json({ error: cannot.refused, code: cannot.code }, 409);
+
+        /*
+         * Then, on a swarm that has finished: one whose last agent has
+         * not settled yet is one the coordinator is still about to
+         * hear from, and its report would land on a tree this request
+         * is about to change under it. Waiting a moment is the whole
+         * fix.
          */
         if (await swarmHasActiveRun(db(c, ctx), swarm.id)) {
           return c.json(
@@ -714,6 +766,7 @@ export function swarmRoutes(ctx: AppContext) {
         // The planner hears the instruction through the wake the tick
         // delivers, which is the same door every other message uses.
         deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+        saySwarmChanged(ctx, c, swarm, "running");
         return c.json({ swarm: reopened.swarm, followUpTaskId: reopened.followUpTaskId, followUp: reopened.followUp }, 201);
       },
     )
@@ -949,6 +1002,7 @@ export function swarmRoutes(ctx: AppContext) {
       // The rollup is the reconciler's, not this route's: one place
       // decides what a finished leaf means for the nodes above it.
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm);
       return c.json(done);
     })
     /**

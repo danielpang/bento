@@ -15,6 +15,7 @@ import {
   runServe,
   runSessions,
   runSpend,
+  runSwarm,
 } from "./headless.js";
 
 let options;
@@ -72,6 +73,8 @@ if (options.command === "update") {
   await runSpend(options);
 } else if (options.command === "sessions") {
   await runSessions(options);
+} else if (options.command === "swarm") {
+  await runSwarm(options);
 } else if (options.command === "mcp") {
   await runMcp(options);
 } else {

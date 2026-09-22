@@ -31,6 +31,9 @@ import type {
   Repository,
   RunArtifact,
   Stage,
+  SwarmDetailResponse,
+  SwarmRow,
+  SwarmSummaryRow,
   FlagSnapshot,
 } from "./types.js";
 
@@ -1208,6 +1211,74 @@ export class BentoClient {
     return `${this.baseUrl}/api/artifacts/${artifactId}/content`;
   }
 
+  /* ---------------------------------------------------------------- *
+   * Swarms.
+   *
+   * The same routes the console uses, so a terminal and a browser are
+   * looking at one thing. Every one of them is behind the beta gate on
+   * the server and answers 404 to anybody not on it, which is what a
+   * caller sees when swarms are not available to them.
+   * ---------------------------------------------------------------- */
+
+  /** This project's swarms, newest first, with the counts a list shows. */
+  listSwarms(projectId: string) {
+    return this.request<SwarmSummaryRow[]>(`/api/swarms?projectId=${encodeURIComponent(projectId)}`);
+  }
+
+  /** One swarm with its plan, its active runs, and its merge queue. */
+  getSwarm(swarmId: string) {
+    return this.request<SwarmDetailResponse>(`/api/swarms/${swarmId}`);
+  }
+
+  /** Starts a swarm off, which puts its planner to work at once. */
+  createSwarm(input: {
+    projectId: string;
+    title: string;
+    goal?: string;
+    templateId?: string;
+    maxWorkers?: number;
+    budgetUsd?: number | null;
+    timeLimitMin?: number | null;
+    /** A branch that already exists, to carry on from. */
+    startBranch?: string;
+  }) {
+    return this.request<SwarmRow & { plannerRunId: string | null }>("/api/swarms", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Says the plan is worth running. Resuming a paused swarm is the same door. */
+  startSwarm(swarmId: string) {
+    return this.request<SwarmRow>(`/api/swarms/${swarmId}/start`, { method: "POST" });
+  }
+
+  /**
+   * Stops a swarm for good, agents included.
+   *
+   * Not a pause: pausing lets the workers that are mid task finish,
+   * and this stops them where they are, because a person who pressed
+   * stop is not asking to keep paying for the turn in flight.
+   */
+  stopSwarm(swarmId: string) {
+    return this.request<SwarmRow>(`/api/swarms/${swarmId}/cancel`, { method: "POST" });
+  }
+
+  /**
+   * Takes a finished swarm up again with a follow up, on the same
+   * branch, so the pull requests it already opened are updated rather
+   * than joined by a second set.
+   */
+  reopenSwarm(
+    swarmId: string,
+    input: { instruction: string; budgetUsd?: number | null; timeLimitMin?: number | null },
+  ) {
+    return this.request<{ swarm: SwarmRow; followUpTaskId: string; followUp: number }>(
+      `/api/swarms/${swarmId}/reopen`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+
   /** Pushes the card's branch and opens (or updates) its pull requests. */
   publishFeature(featureId: string) {
     return this.request<{
@@ -1595,6 +1666,39 @@ export class BentoClient {
    * is the caller's cue to refetch a snapshot and fill the gap.
    */
   streamBoard(projectId: string, onEvent: (event: unknown) => void, onReconnect?: () => void): () => void {
+    return this.streamNamedEvents(`${this.baseUrl}/api/board/${projectId}/events`, "board_event", onEvent, onReconnect);
+  }
+
+  /**
+   * One swarm's changes: a node moved, a landing went in, the swarm
+   * finished.
+   *
+   * Scoped to the swarm server side, so a busy card board on the same
+   * project does not wake a terminal watching one swarm. The frames
+   * carry only the wake; whatever is watching refetches the tree,
+   * which is also why a dropped event costs nothing.
+   */
+  streamSwarm(swarmId: string, onEvent: (event: unknown) => void, onReconnect?: () => void): () => void {
+    return this.streamNamedEvents(`${this.baseUrl}/api/swarms/${swarmId}/events`, "swarm_event", onEvent, onReconnect);
+  }
+
+  /**
+   * One named SSE event, from whichever transport this client has.
+   *
+   * Both streams above are the same machinery over a different URL and
+   * a different event name, and the interesting half of it is the
+   * fetch transport: EventSource cannot attach a bearer token and does
+   * not exist in Node at all, so a terminal client reads the stream
+   * over fetch and reconnects itself with a backoff. Written once,
+   * because a second copy of that loop is a second place for the
+   * backoff and the abort handling to drift.
+   */
+  private streamNamedEvents(
+    url: string,
+    eventName: string,
+    onEvent: (event: unknown) => void,
+    onReconnect?: () => void,
+  ): () => void {
     // EventSource cannot attach a bearer token and is absent in Node.
     if (this.tokens || typeof EventSource === "undefined") {
       const controller = new AbortController();
@@ -1605,9 +1709,7 @@ export class BentoClient {
         let failures = 0;
         while (!controller.signal.aborted) {
           try {
-            const response = await this.send(`${this.baseUrl}/api/board/${projectId}/events`, {
-              signal: controller.signal,
-            });
+            const response = await this.send(url, { signal: controller.signal });
             if (!response.ok || !response.body) throw new ApiError(response.status, response.statusText);
             if (controller.signal.aborted) return;
             if (opened) onReconnect?.();
@@ -1621,7 +1723,7 @@ export class BentoClient {
                 if (done) break;
                 failures = 0;
                 for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
-                  if (frame.event !== "board_event") continue;
+                  if (frame.event !== eventName) continue;
                   try {
                     onEvent(JSON.parse(frame.data));
                   } catch {
@@ -1651,15 +1753,13 @@ export class BentoClient {
         release?.();
       };
     }
-    const source = new EventSource(`${this.baseUrl}/api/board/${projectId}/events`, {
-      withCredentials: !this.tokens,
-    });
+    const source = new EventSource(url, { withCredentials: !this.tokens });
     let opened = false;
     source.onopen = () => {
       if (opened) onReconnect?.();
       opened = true;
     };
-    source.addEventListener("board_event", (e) => onEvent(JSON.parse((e as MessageEvent<string>).data)));
+    source.addEventListener(eventName, (e) => onEvent(JSON.parse((e as MessageEvent<string>).data)));
     return () => source.close();
   }
 }

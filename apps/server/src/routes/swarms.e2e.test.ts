@@ -16,6 +16,7 @@ import {
   runMigrations,
   sandboxes,
   repositories,
+  runArtifacts,
   swarmLandings,
   swarmMessages,
   swarmTaskEvents,
@@ -1405,4 +1406,138 @@ test("a person who is not a beta tester is not told the swarms exist", async () 
   } finally {
     ctx.featureFlags = flags;
   }
+});
+
+test("a swarm somebody moved says so on the bus, so every other viewer hears it", async () => {
+  /**
+   * The routes wrote their rows and said nothing.
+   *
+   * The console masked it, because it refetches after its own action,
+   * so it looked right as long as it was the only viewer. A second
+   * tab, a teammate watching the same swarm, and `bento swarm watch`
+   * in a terminal all heard nothing at all: stopping a swarm from one
+   * window left it reading as running on every other screen until some
+   * unrelated tick happened to fire. Found by running the terminal
+   * against a live server, which is the only place it shows.
+   */
+  const swarm = await createSwarm();
+  const heard: { type: string; status?: string }[] = [];
+  const stop = ctx.bus.onBoardEvent(projectId, (event) => {
+    if ("swarmId" in event && event.swarmId === swarm.id) heard.push({ type: event.type, ...("status" in event ? { status: event.status } : {}) });
+  });
+
+  try {
+    await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Leaf" });
+    await post(`/api/swarms/${swarm.id}/start`);
+    await post(`/api/swarms/${swarm.id}/pause`);
+    await app.request(`/api/swarms/${swarm.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ maxWorkers: 3 }),
+    });
+    await post(`/api/swarms/${swarm.id}/cancel`);
+
+    assert.deepEqual(
+      heard.map((event) => event.status ?? event.type),
+      ["running", "paused", "swarm_updated", "cancelled"],
+      "every door that moves a swarm says so",
+    );
+  } finally {
+    stop();
+  }
+});
+
+test("reopening a finished swarm adds a follow up subtree and says so on the bus", async () => {
+  const swarm = await createSwarm();
+  await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Leaf", status: "done" });
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  // The planner this swarm was created with has settled by the time a
+  // real swarm is done, and the reopen route refuses while one has not.
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+
+  const heard: string[] = [];
+  const stop = ctx.bus.onBoardEvent(projectId, (event) => {
+    if ("swarmId" in event && event.swarmId === swarm.id && event.type === "swarm_updated") {
+      heard.push(event.status ?? "");
+    }
+  });
+
+  try {
+    const res = await post(`/api/swarms/${swarm.id}/reopen`, {
+      instruction: "Address the review comments.",
+      budgetUsd: 50,
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { followUpTaskId: string; followUp: number };
+    assert.equal(body.followUp, 1);
+
+    const [node] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, body.followUpTaskId));
+    assert.equal(node!.parentId, null);
+    assert.equal(node!.nodeType, "plan");
+    assert.equal(node!.followUpInstruction, "Address the review comments.");
+
+    const [row] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+    assert.equal(row!.status, "running");
+    assert.equal(row!.reopenCount, 1);
+    assert.equal(row!.budgetUsd, "50");
+    assert.deepEqual(heard, ["running"]);
+  } finally {
+    stop();
+  }
+});
+
+test("a swarm that is still running is not reopened", async () => {
+  const swarm = await createSwarm();
+  const res = await post(`/api/swarms/${swarm.id}/reopen`, { instruction: "more" });
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as { code: string };
+  assert.equal(body.code, "NOT_FINISHED");
+  assert.equal((await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).length, 0);
+});
+
+test("a swarm's artifacts are listed by the swarm, and served by the artifact routes", async () => {
+  const swarm = await createSwarm();
+  const [run] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      role: "planner",
+      swarmId: swarm.id,
+      agentProfileId: (await db.select().from(agentProfiles).limit(1))[0]!.id,
+      prompt: "plan it",
+      status: "succeeded",
+    })
+    .returning();
+  const [artifact] = await db
+    .insert(runArtifacts)
+    .values({
+      runId: run!.id,
+      type: "swarm",
+      swarmId: swarm.id,
+      stageSlug: "document",
+      stageName: "Document",
+      path: "docs/plan.md",
+      kind: "markdown",
+      mime: "text/markdown",
+      size: 5,
+      content: "# Hi\n",
+    })
+    .returning();
+
+  const listed = (await (await app.request(`/api/swarms/${swarm.id}/artifacts`)).json()) as {
+    id: string;
+    path: string;
+    kind: string;
+  }[];
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.path, "docs/plan.md");
+  assert.equal(listed[0]!.kind, "markdown");
+
+  // And the bytes come from the artifact routes, under the rules that
+  // keep agent output from ever running as the console.
+  const content = await app.request(`/api/artifacts/${artifact!.id}/content`);
+  assert.equal(content.status, 200);
+  assert.equal(content.headers.get("content-security-policy"), "sandbox");
+  assert.equal(content.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(await content.text(), "# Hi\n");
 });
