@@ -1,5 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { authClient, signIn, signUp } from "../auth-client.js";
+import {
+  isWaitlistRequired,
+  shouldShowWaitlistJoin,
+  waitlistJoinPayload,
+  type WaitlistMode,
+} from "../waitlist-signin.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { GitHubIcon, GoogleIcon } from "./ProviderIcons.js";
 
@@ -33,6 +39,8 @@ export function SignIn({
   lockEmail = false,
   callbackURL = "/",
   note,
+  waitlistMode,
+  invitedPrefill = false,
 }: {
   social?: { github: boolean; google: boolean };
   /** Open on sign up instead: the invitation page knows the invitee has no account yet. */
@@ -45,6 +53,10 @@ export function SignIn({
    * never surfacing again.
    */
   lockEmail?: boolean;
+  /** Hosted admission. Absent on local and self-hosted installs. */
+  waitlistMode?: WaitlistMode;
+  /** The waitlist invite link preselected signup. Server still decides access. */
+  invitedPrefill?: boolean;
   /**
    * Where to land once the account works. Sign up can detour through a
    * verification email or an OAuth provider, and both come back to this
@@ -66,6 +78,14 @@ export function SignIn({
   const [pendingEmail, setPendingEmail] = useState("");
   const [notice, setNotice] = useState("");
   const [forgot, setForgot] = useState(false);
+  const [refused, setRefused] = useState(false);
+  const [onTheList, setOnTheList] = useState(false);
+  const showWaitlist = shouldShowWaitlistJoin({
+    mode: waitlistMode,
+    invitedPrefill,
+    refused,
+    lockEmail,
+  });
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -88,6 +108,11 @@ export function SignIn({
       if (mode === "up") setPendingEmail(email);
       return;
     }
+    if (isWaitlistRequired(result.error)) {
+      setRefused(true);
+      setMode("up");
+      return;
+    }
     // An unconfirmed address is the one failure with a next step
     // attached, so it gets its own screen instead of a red line.
     const message = result.error.message ?? "";
@@ -106,6 +131,32 @@ export function SignIn({
       setNotice("Sent. Check your inbox again, including the spam folder.");
     } catch {
       setNotice("Could not send it just now. Try again in a moment.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function joinWaitlist(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/waitlist/entries", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(waitlistJoinPayload({ email, name })),
+      });
+      if (res.status === 202) {
+        setOnTheList(true);
+        return;
+      }
+      if (res.status === 429) {
+        setError("Too many tries. Wait a bit and try again.");
+        return;
+      }
+      setError("Could not join just now. Try again in a moment.");
+    } catch {
+      setError("Could not join just now. Try again in a moment.");
     } finally {
       setBusy(false);
     }
@@ -167,6 +218,34 @@ export function SignIn({
     );
   }
 
+  if (onTheList) {
+    return (
+      <div className="center">
+        <div className="card-panel">
+          <div className="auth-head">
+            <BrandLockup size="lg" />
+            <h1>You are on the list</h1>
+          </div>
+          <p className="muted">
+            We will email you at <strong>{email}</strong> when you can create an account. We onboard people
+            in waves so the service stays up for everyone.
+          </p>
+          <p className="auth-foot">
+            <button
+              className="btn-link"
+              onClick={() => {
+                setOnTheList(false);
+                setMode("in");
+              }}
+            >
+              Back to sign in
+            </button>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (forgot) {
     return (
       <div className="center">
@@ -209,16 +288,22 @@ export function SignIn({
       <div className="card-panel">
         <div className="auth-head">
           <BrandLockup size="lg" />
-          <h1>{mode === "in" ? "Sign in" : "Create an account"}</h1>
+          <h1>{mode === "in" ? "Sign in" : showWaitlist ? "Join the waitlist" : "Create an account"}</h1>
           {/* The product's own rule, not a value proposition. A line
               a maintainer would write beats a line a marketing page
               would. */}
-          <p className="muted">{note ?? "One card, one agent, one branch."}</p>
+          <p className="muted">
+            {note ??
+              (showWaitlist
+                ? "We onboard new accounts in waves so the service stays up for everyone."
+                : "One card, one agent, one branch.")}
+          </p>
         </div>
 
         {/* Only providers the server actually has credentials for: a
             button whose flow can only 404 teaches distrust on the very
-            first screen. */}
+            first screen. Social stays available for sign in. A new
+            social identity is still refused by the server hook. */}
         {(social?.github || social?.google) && (
           <>
             <div className="auth-social">
@@ -235,10 +320,38 @@ export function SignIn({
                 </button>
               )}
             </div>
+            {showWaitlist && (
+              <p className="muted">
+                An invite applies to the same email address your provider uses. Existing accounts can still sign in.
+              </p>
+            )}
             <div className="divider">Or</div>
           </>
         )}
 
+        {showWaitlist && mode === "up" ? (
+          <form onSubmit={joinWaitlist} className="section">
+            <label className="field">
+              <span className="label">Name</span>
+              <input className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
+            </label>
+            <label className="field">
+              <span className="label">Email</span>
+              <input
+                className="input"
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
+              />
+            </label>
+            {error && <p className="error">{error}</p>}
+            <button className="btn btn-primary btn-block" type="submit" disabled={busy || !email}>
+              {busy ? "Working..." : "Join the waitlist"}
+            </button>
+          </form>
+        ) : (
         <form onSubmit={submit} className="section">
           {mode === "up" && (
             <label className="field">
@@ -275,12 +388,13 @@ export function SignIn({
             {busy ? "Working..." : mode === "in" ? "Sign in" : "Create an account"}
           </button>
         </form>
+        )}
 
         <div className="auth-foot">
           <p>
             {mode === "in" ? "New here? " : "Already have an account? "}
             <button className="btn-link" onClick={() => setMode(mode === "in" ? "up" : "in")}>
-              {mode === "in" ? "Create an account" : "Sign in"}
+              {mode === "in" ? (waitlistMode === "waitlist" && !invitedPrefill && !lockEmail ? "Join the waitlist" : "Create an account") : "Sign in"}
             </button>
           </p>
           {mode === "in" && (

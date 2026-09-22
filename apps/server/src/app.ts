@@ -42,6 +42,11 @@ export interface AppExtras {
    * tables are not tenant rows.
    */
   cloudRoutes?: Hono;
+  /**
+   * Public waitlist routes, mounted under /api/waitlist before actor
+   * and tenant middleware. Billing stays under /api/billing.
+   */
+  publicRoutes?: Hono;
 }
 
 export function createApp(ctx: AppContext, extras: AppExtras = {}) {
@@ -123,6 +128,10 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
           github: Boolean(ctx.env.GITHUB_CLIENT_ID && ctx.env.GITHUB_CLIENT_SECRET),
           google: Boolean(ctx.env.GOOGLE_CLIENT_ID && ctx.env.GOOGLE_CLIENT_SECRET),
         },
+        // Deployment admission, when the cloud module supplied it.
+        // The console reads this from the existing bootstrap request
+        // rather than calling /api/waitlist/status.
+        ...(ctx.admission ? { waitlist: { mode: ctx.admission.mode() } } : {}),
         // The project token is a public phc_ key. The console uses it
         // to init posthog-js for exception capture.
         ...(posthogKey
@@ -278,6 +287,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   }
 
   if (extras.cloudRoutes) app.route("/api/billing", extras.cloudRoutes);
+  if (extras.publicRoutes) app.route("/api/waitlist", extras.publicRoutes);
 
   // Webhooks authenticate by signature, not by session.
   app.route("/api/webhooks", webhookRoutes(ctx));

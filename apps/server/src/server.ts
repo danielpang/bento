@@ -9,7 +9,8 @@ import { WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
-import { createAuth, type AuthHooks } from "./auth.js";
+import { createAuth, type Auth, type AuthHooks } from "./auth.js";
+import type { CloudRegistration } from "./cloud-contract.js";
 import { reportAuthEvent } from "./auth-events.js";
 import { createMailer, noticeMessage, type NoticeEmailInput } from "./mail.js";
 import { SecretBox } from "./secrets.js";
@@ -113,53 +114,57 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const mailer = createMailer(env);
     /**
      * Filled in by the cloud module below, if one loads. Auth is built
-     * first because the loader needs it to answer "who is asking", so the
-     * hook travels as a holder rather than as a value.
+     * after that module so admission can sit on the user-create hook,
+     * and identify is a closure over the eventual auth instance.
      */
     const authHooks: AuthHooks = {};
-    if (analytics) {
-      const posthog = analytics;
-      authHooks.onUserSignedUp = (u) => {
-        /**
-         * better-auth's adapter runs its hooks inside the sign up's own
-         * transaction, so the row this announces may still roll back (an
-         * account insert failing later in the same sign up). The capture
-         * writes real PII onto a person profile, which must not exist for
-         * an account that never did: wait out the commit, then read the
-         * row back on a pooled connection and count only what is really
-         * there.
-         */
-        setTimeout(() => {
-          void db
-            .select({ id: user.id })
-            .from(user)
-            .where(eq(user.id, u.id))
-            .limit(1)
-            .then(([row]) => {
-              if (!row) return;
-              posthog.capture({
+    /**
+     * better-auth's adapter runs its hooks inside the sign up's own
+     * transaction, so the row this announces may still roll back (an
+     * account insert failing later in the same sign up). Wait out the
+     * commit, then read the row back on a pooled connection and count
+     * only what is really there. The same delay covers waitlist
+     * conversion: marking a row joined before the user exists would
+     * lie about conversion.
+     */
+    authHooks.onUserSignedUp = (u) => {
+      setTimeout(() => {
+        void db
+          .select({ id: user.id })
+          .from(user)
+          .where(eq(user.id, u.id))
+          .limit(1)
+          .then(async ([row]) => {
+            if (!row) return;
+            if (analytics) {
+              analytics.capture({
                 event: "user signed up",
                 userId: u.id,
                 properties: { $set: { email: u.email, name: u.name } },
               });
-              // Counted here, on a row that exists: the after hook
-              // cannot tell a hosted duplicate from a real sign up.
-              reportAuthEvent(posthog, {
+              reportAuthEvent(analytics, {
                 flow: "sign up",
                 outcome: "succeeded",
                 userId: u.id,
                 properties: { method: u.method, route: u.route },
               });
-            })
-            .catch((err: unknown) => {
-              console.warn("could not record the sign up:", err);
-              posthog.captureException(err, u.id, null, { source: "signup_capture" });
-            });
-        }, SIGNUP_CONFIRM_DELAY_MS).unref();
-      };
-      authHooks.onAuthEvent = (event) => reportAuthEvent(posthog, event);
+            }
+            try {
+              await authHooks.admission?.onUserCreated({ userId: u.id, email: u.email });
+            } catch (err: unknown) {
+              console.warn("could not record waitlist conversion:", err);
+            }
+          })
+          .catch((err: unknown) => {
+            console.warn("could not record the sign up:", err);
+            analytics?.captureException(err, u.id, null, { source: "signup_capture" });
+          });
+      }, SIGNUP_CONFIRM_DELAY_MS).unref();
+    };
+    if (analytics) {
+      authHooks.onAuthEvent = (event) => reportAuthEvent(analytics, event);
     }
-    const auth = createAuth(env, db, mailer, authHooks);
+    let auth: Auth | null = null;
 
     if (env.BENTO_MODE === "multi" && !env.BENTO_SECRET_KEY) {
       throw new Error("BENTO_SECRET_KEY is required in multi mode. Generate one with: openssl rand -hex 32");
@@ -207,7 +212,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     };
     const githubApp = createGitHubApp(env);
     if (githubApp) ctx.githubApp = githubApp;
-    if (auth) ctx.auth = auth;
     if (analytics) ctx.analytics = analytics;
     ctx.featureFlags = featureFlags;
 
@@ -242,6 +246,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
      * install never sets the variable and never runs any of this.
      */
     let cloudRoutes: import("hono").Hono | undefined;
+    let publicRoutes: import("hono").Hono | undefined;
     // Multi mode only, by construction: a local or self-hosted single
     // user install must never grow plans, limits, or billing routes,
     // even with the variable set. Everything the module adds hangs off
@@ -261,11 +266,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
           appUrl: string;
           rawEnv: Record<string, string | undefined>;
           identify(headers: Headers): Promise<{ userId: string; organizationId: string; role: string } | null>;
-        }) => Promise<{
-          routes?: import("hono").Hono;
-          entitlements?: AppContext["entitlements"];
-          onOrganizationDeleted?: (organizationId: string) => Promise<void>;
-        }>;
+          capture?(event: { event: string; properties?: Record<string, unknown> }): void;
+        }) => Promise<CloudRegistration>;
       };
       if (typeof mod.registerCloud !== "function") {
         throw new Error(`BENTO_CLOUD_MODULE ${name} does not export registerCloud`);
@@ -284,7 +286,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         appUrl: env.BETTER_AUTH_URL,
         rawEnv,
         // Session and membership stay this server's job: the module gets
-        // an answer, not access to the auth internals.
+        // an answer, not access to the auth internals. The closure reads
+        // the auth variable assigned after this returns; no request can
+        // arrive during startup.
         identify: async (headers) => {
           if (!auth) return null;
           const session = await auth.api.getSession({ headers });
@@ -297,14 +301,35 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
             .limit(1);
           return row ? { userId: session.user.id, organizationId, role: row.role } : null;
         },
+        ...(analytics
+          ? {
+              capture: (event: { event: string; properties?: Record<string, unknown> }) => {
+                analytics.capture({
+                  event: event.event,
+                  ...(event.properties ? { properties: event.properties } : {}),
+                });
+              },
+            }
+          : {}),
       });
       if (registered.entitlements) ctx.entitlements = registered.entitlements;
       if (registered.routes) cloudRoutes = registered.routes;
+      if (registered.publicRoutes) publicRoutes = registered.publicRoutes;
+      if (registered.admission) {
+        authHooks.admission = registered.admission;
+        ctx.admission = registered.admission;
+      }
       if (registered.onOrganizationDeleted) authHooks.onOrganizationDeleted = registered.onOrganizationDeleted;
       console.log(`cloud module loaded from ${name}`);
     }
 
-    const app = createApp(ctx, { ...(cloudRoutes ? { cloudRoutes } : {}) });
+    auth = createAuth(env, db, mailer, authHooks);
+    if (auth) ctx.auth = auth;
+
+    const app = createApp(ctx, {
+      ...(cloudRoutes ? { cloudRoutes } : {}),
+      ...(publicRoutes ? { publicRoutes } : {}),
+    });
     // Local mode binds loopback only; multi mode (hosted or self-hosted)
     // binds all interfaces.
     /**
