@@ -146,6 +146,22 @@ export function swarmRoutes(ctx: AppContext) {
         return c.json({ error: RUNNER_PROJECT_REFUSAL, code: "RUNNER_PROJECT" }, 400);
       }
 
+      /*
+       * The plan's allowance, asked before anything at all is written.
+       *
+       * startRunIfIdle asks it again at the door where the planner
+       * actually starts, and that door is still the one that decides;
+       * this is here because the answer used to arrive after the swarm
+       * row had been inserted, so a team over its limit was left
+       * holding a swarm it could not start and had not asked for. The
+       * organization is the project's, not whichever tab the caller
+       * has open.
+       */
+      if (ctx.entitlements?.canStartRun && project.organizationId) {
+        const overLimit = await ctx.entitlements.canStartRun(project.organizationId);
+        if (overLimit) return c.json({ error: overLimit.reason, code: "PLAN_LIMIT" }, 402);
+      }
+
       const membership = await getActiveOrganizationMembership(ctx, c);
       const template = body.templateId
         ? await getAccessibleSwarmTemplate(ctx, c, body.templateId)
