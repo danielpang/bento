@@ -135,6 +135,27 @@ export async function getAccessibleArtifact(ctx: AppContext, c: Context, artifac
   return feature ? artifact : null;
 }
 
+/**
+ * A swarm's artifact, which is not a card's.
+ *
+ * The same rule and the same 404, resolved through the swarm rather
+ * than through a feature: authority is the row in Postgres, never the
+ * store key, and a swarm reached through its project is how every
+ * other swarm route decides who may read it.
+ *
+ * Separate from getAccessibleArtifact rather than folded into it,
+ * because a caller that wants a card's artifact must not be handed a
+ * swarm's by a helper that quietly widened: the two are reached from
+ * different routes, and the card routes resolve everything through a
+ * feature that a swarm's artifact does not have.
+ */
+export async function getAccessibleSwarmArtifact(ctx: AppContext, c: Context, artifactId: string) {
+  const [artifact] = await db(c, ctx).select().from(runArtifacts).where(eq(runArtifacts.id, artifactId));
+  if (artifact?.type !== "swarm" || !artifact.swarmId) return null;
+  const swarm = await getAccessibleSwarm(ctx, c, artifact.swarmId);
+  return swarm ? { artifact, swarm } : null;
+}
+
 export async function getAccessibleStage(ctx: AppContext, c: Context, stageId: string) {
   const [row] = await db(c, ctx)
     .select({ stage: stages, projectId: pipelines.projectId })

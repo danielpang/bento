@@ -9,7 +9,7 @@ import { SwarmEmpty, SwarmStrip } from "./components/SwarmStrip.js";
 import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
-import { SwarmPage } from "./components/SwarmPage.js";
+import { SwarmArtifacts, SwarmPage } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import { isolationWords } from "./components/SwarmTemplatesPanel.js";
 import { modeSurfaces } from "./swarm/plan.js";
@@ -889,4 +889,60 @@ test("Reopen is offered on a swarm that has ended and on nothing else", () => {
   for (const status of ["planning", "running", "waiting", "paused"] as SwarmStatus[]) {
     assert.equal(canReopen(status), false, `${status} cannot`);
   }
+});
+
+test("a document swarm names its deliverable and offers to open it", () => {
+  /**
+   * The assembled document is what a document swarm was for, so the
+   * page says so and puts it first. Nothing here renders it: opening
+   * one hands it to the viewer a card's artifacts open in, which is
+   * where the rule lives that keeps agent bytes off this origin.
+   */
+  const artifacts = [
+    {
+      id: "a1",
+      runId: "r1",
+      swarmTaskId: null,
+      stageSlug: "document",
+      stageName: "Document",
+      path: "docs/queue-migration.md",
+      kind: "markdown" as const,
+      mime: "text/markdown",
+      size: 900,
+      createdAt: "2026-09-04T11:00:00.000Z",
+    },
+    {
+      id: "a2",
+      runId: "r2",
+      swarmTaskId: "t-1",
+      stageSlug: "worker",
+      stageName: "Worker",
+      path: "artifacts/diagram.png",
+      kind: "image" as const,
+      mime: "image/png",
+      size: 12,
+      createdAt: "2026-09-04T10:00:00.000Z",
+    },
+  ];
+
+  const asDocument = renderToStaticMarkup(
+    createElement(SwarmArtifacts, { artifacts, deliverable: "document", onOpen: () => {} }),
+  );
+  assert.match(asDocument, /The document/);
+  assert.match(asDocument, /docs\/queue-migration\.md/);
+  assert.match(asDocument, /Assembled from the sections in the plan/);
+  assert.match(asDocument, /artifacts\/diagram\.png/, "and whatever else the swarm captured");
+
+  const asCode = renderToStaticMarkup(
+    createElement(SwarmArtifacts, { artifacts, deliverable: "code", onOpen: () => {} }),
+  );
+  assert.match(asCode, /What this swarm produced/);
+  assert.ok(!asCode.includes("Assembled from the sections"), "a code swarm has no assembled document");
+
+  // A swarm that produced nothing carries no empty box.
+  assert.equal(
+    renderToStaticMarkup(createElement(SwarmArtifacts, { artifacts: [], deliverable: "code" })),
+    "",
+  );
+  assertNoDashes(`${asDocument}${asCode}`, "the artifacts panel");
 });

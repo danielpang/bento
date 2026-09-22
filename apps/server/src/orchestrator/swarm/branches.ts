@@ -47,6 +47,33 @@ export function workerBranchName(swarmBranch: string, taskId: string): string {
   return `${swarmBranch}-${taskId.slice(0, BRANCH_ID_CHARS)}`;
 }
 
+/**
+ * Whether a branch name a person typed is one this server will hand to
+ * git.
+ *
+ * Refused rather than sanitized, and checked at the door rather than
+ * at every use. The value reaches `git worktree add` and a `--grep`
+ * pattern, so what is being kept out is not only an injection: a name
+ * with a space or a colon in it is a name git itself refuses, halfway
+ * through provisioning, with an error nobody can act on.
+ *
+ * The rules are git's own, stated positively. Letters, digits, and the
+ * four characters branch names actually use, with a slash allowed
+ * between segments; no leading dash, no ".." anywhere, no segment that
+ * starts with a dot or ends in ".lock", and nothing that ends in a
+ * slash. A name that passes this is a name `git check-ref-format`
+ * accepts.
+ */
+export function isSafeBranchName(value: string): boolean {
+  if (value.length === 0 || value.length > 200) return false;
+  if (value.startsWith("-") || value.startsWith("/") || value.endsWith("/")) return false;
+  if (value.includes("..") || value.includes("@{")) return false;
+  if (!/^[A-Za-z0-9._\-/]+$/.test(value)) return false;
+  return value
+    .split("/")
+    .every((segment) => segment.length > 0 && !segment.startsWith(".") && !segment.endsWith(".lock"));
+}
+
 /** The trailer key. RFC 822 shaped, which is what git's own trailers are. */
 export const TASK_TRAILER = "Bento-Task";
 

@@ -7,6 +7,7 @@ import { getAccessibleSwarmTemplate, getActiveOrganizationMembership } from "../
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
+import { isSafeRelativePath } from "../orchestrator/swarm/deliverable.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
 /**
@@ -29,10 +30,38 @@ import { requireSwarms } from "../orchestrator/swarm/gate.js";
  */
 const workerIsolation = z.enum(["sandbox", "worktree"]);
 
+/**
+ * What a template's swarms produce.
+ *
+ * A description of the work rather than an assertion about the
+ * deployment, so unlike workerIsolation it has a default: a template
+ * that says nothing produces code, which is what every template
+ * written before this field did.
+ */
+const deliverable = z.enum(["code", "document"]);
+
+/**
+ * Where a document swarm's assembled file goes. Relative, inside the
+ * repository, and markdown: the server writes to this path, so a value
+ * that climbs out of the checkout is refused here rather than checked
+ * again at every use.
+ */
+const documentPath = z
+  .string()
+  .trim()
+  .max(400)
+  .refine((value) => isSafeRelativePath(value), "a document path is a relative .md path inside the repository");
+
 const ceilings = {
   maxWorkers: z.number().int().min(1).max(32),
   budgetUsd: z.number().min(0).max(100_000),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7),
+  /**
+   * How deep a plan may be decomposed by an agent other than the one
+   * planner. Capped low on purpose: the failure this bounds is a
+   * planner that plans planners, and no goal needs four levels of it.
+   */
+  maxPlanDepth: z.number().int().min(1).max(3),
 };
 
 const createTemplate = z.object({
@@ -46,6 +75,11 @@ const createTemplate = z.object({
   workerIsolation: workerIsolation.optional(),
   budgetUsd: ceilings.budgetUsd.nullish(),
   timeLimitMin: ceilings.timeLimitMin.nullish(),
+  deliverable: deliverable.default("code"),
+  documentPath: documentPath.nullish(),
+  judgeProfileId: z.string().uuid().nullish(),
+  completionCommand: z.string().max(4000).nullish(),
+  maxPlanDepth: ceilings.maxPlanDepth.default(1),
 });
 
 /**
@@ -65,6 +99,11 @@ const updateTemplate = z
     workerIsolation: workerIsolation.optional(),
     budgetUsd: ceilings.budgetUsd.nullable().optional(),
     timeLimitMin: ceilings.timeLimitMin.nullable().optional(),
+    deliverable: deliverable.optional(),
+    documentPath: documentPath.nullable().optional(),
+    judgeProfileId: z.string().uuid().nullable().optional(),
+    completionCommand: z.string().max(4000).nullable().optional(),
+    maxPlanDepth: ceilings.maxPlanDepth.optional(),
   })
   .refine((value) => Object.keys(value).length > 0, { message: "nothing to change" });
 
@@ -118,7 +157,7 @@ export function swarmTemplateRoutes(ctx: AppContext) {
 
       // An agent named here has to be one the caller may actually use;
       // otherwise a template would be a way to run somebody else's.
-      for (const profileId of [body.plannerProfileId, body.workerProfileId]) {
+      for (const profileId of [body.plannerProfileId, body.workerProfileId, body.judgeProfileId]) {
         if (!profileId) continue;
         if (!(await ownsProfile(ctx, c, profileId))) return c.json({ error: "agent not found" }, 404);
       }
@@ -149,6 +188,11 @@ export function swarmTemplateRoutes(ctx: AppContext) {
           workerIsolation: body.workerIsolation ?? (ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree"),
           budgetUsd: body.budgetUsd === null || body.budgetUsd === undefined ? null : String(body.budgetUsd),
           timeLimitMin: body.timeLimitMin ?? null,
+          deliverable: body.deliverable,
+          documentPath: body.documentPath ?? null,
+          judgeProfileId: body.judgeProfileId ?? null,
+          completionCommand: body.completionCommand ?? null,
+          maxPlanDepth: body.maxPlanDepth,
         })
         .returning();
       if (!template) return c.json({ error: "something went wrong saving the template; try again" }, 500);
@@ -167,7 +211,7 @@ export function swarmTemplateRoutes(ctx: AppContext) {
       const template = await getAccessibleSwarmTemplate(ctx, c, c.req.param("id"));
       if (!template) return c.json({ error: "not found" }, 404);
       const body = c.req.valid("json");
-      for (const profileId of [body.plannerProfileId, body.workerProfileId]) {
+      for (const profileId of [body.plannerProfileId, body.workerProfileId, body.judgeProfileId]) {
         if (!profileId) continue;
         if (!(await ownsProfile(ctx, c, profileId))) return c.json({ error: "agent not found" }, 404);
       }

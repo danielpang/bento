@@ -1193,7 +1193,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         /* A second board of the same project. Its own boundary, like
            the panels: the chunk arrives without blanking the chrome. */
         <Suspense fallback={<BoardSkeleton />}>
-          <SwarmBoard projectId={projectId} surfaces={swarmSurfaces} />
+          <SwarmBoard projectId={projectId} client={client} surfaces={swarmSurfaces} />
         </Suspense>
       ) : boardPending ? (
         <BoardSkeleton />
