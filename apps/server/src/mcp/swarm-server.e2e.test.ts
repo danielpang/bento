@@ -721,6 +721,26 @@ test("a leaf cannot be handed over, and neither can a node too deep for the temp
   assert.equal((await task(under.id))!.status, "open");
 });
 
+test("a node that is already decomposed cannot be handed over", async () => {
+  /**
+   * The handover is a status on the node, and a plan node's status
+   * belongs to the rollup: the next tick rewrites it from its children
+   * before the coordinator looks for nodes to start a planner on. So a
+   * node with children accepted here would be marked, un-marked, and
+   * never started, while the planner had already been told one was
+   * coming.
+   */
+  const swarmId = await swarmWithDepth(3);
+  const { token } = await agentOn("planner", { swarmId });
+  const group = await makeTask(swarmId, { nodeType: "plan", title: "Payments" });
+  await makeTask(swarmId, { parentId: group.id, title: "Refund path" });
+
+  const refused = await call(token, "delegate", { taskId: group.id });
+  assert.ok(refused.isError);
+  assert.match(refused.text, /already has tasks under it/);
+  assert.equal((await task(group.id))!.status, "open", "and nothing was marked");
+});
+
 test("a template that allows one level allows no sub planners at all", async () => {
   /**
    * One level is what every swarm did before this existed: the

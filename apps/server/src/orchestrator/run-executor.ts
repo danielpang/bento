@@ -1398,16 +1398,22 @@ async function buildSubjectPrompt(
    * useful property of a check is that it changes nothing.
    */
   if (subject.run.role === "judge" && subject.task) {
-    const check = finalCheckFor(template);
-    if (check) {
-      return buildFinalCheckPrompt({
-        swarm: subject.swarm,
-        check,
-        agent,
-        repositories: mounted,
-        tasks: await tasksOf(ctx.db, subject.swarm.id),
-      });
-    }
+    /*
+     * The template is read fresh every tick, so a team that cleared
+     * its judge and its completion command between the tick that put
+     * the check on the tree and this run has left nothing to describe.
+     * The check still exists and still gates the root, so it is given
+     * an empty check rather than falling through: what it must not
+     * get is the planner's prompt, which would tell an agent whose
+     * tools are my_task, report and flag to build a plan.
+     */
+    return buildFinalCheckPrompt({
+      swarm: subject.swarm,
+      check: finalCheckFor(template) ?? { judgeProfileId: null, completionCommand: null },
+      agent,
+      repositories: mounted,
+      tasks: await tasksOf(ctx.db, subject.swarm.id),
+    });
   }
   if (subject.run.role === "worker" && subject.task) {
     return buildWorkerPrompt({

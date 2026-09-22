@@ -262,6 +262,15 @@ test("assembling twice commits once", async () => {
   const second = await assembleSwarmDocument(db, { swarm: fx.swarm, worktreePath: fx.worktree });
   assert.equal(second?.committed, false, "nothing changed, so nothing was committed");
   assert.equal(second?.content, first?.content);
+
+  // And one artifact row, not two. The console lists a swarm's
+  // artifacts newest first, so a second copy would be the same file
+  // named twice with nothing to tell a person them apart.
+  const rows = await db
+    .select({ id: runArtifacts.id })
+    .from(runArtifacts)
+    .where(and(eq(runArtifacts.swarmId, fx.swarm.id), eq(runArtifacts.path, first!.path)));
+  assert.equal(rows.length, 1, "a redelivered publish rewrites the document rather than adding one");
 });
 
 test("a code swarm assembles nothing", async () => {

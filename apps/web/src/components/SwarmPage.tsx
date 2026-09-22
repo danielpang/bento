@@ -407,8 +407,17 @@ export function SwarmArtifacts({
   onOpen?: (artifact: SwarmArtifact) => void;
 }) {
   if (artifacts.length === 0) return null;
-  const document = deliverable === "document" ? artifacts[0] : undefined;
-  const rest = document ? artifacts.slice(1) : artifacts;
+  /*
+   * The assembled document is found by what it is, not by where it
+   * sits in the list. It was written last on a swarm's first pass, so
+   * newest first happened to put it at the top; a swarm reopened and
+   * worked again puts its workers' files above it, and the panel would
+   * then caption one of those "assembled from the sections in the
+   * plan".
+   */
+  const document =
+    deliverable === "document" ? artifacts.find((artifact) => artifact.stageSlug === "document") : undefined;
+  const rest = document ? artifacts.filter((artifact) => artifact.id !== document.id) : artifacts;
 
   return (
     <section className="swarm-artifacts">

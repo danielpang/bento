@@ -730,6 +730,28 @@ async function delegate(
       `task ${task.id} is a leaf, so there is nothing to decompose. Use split_task to turn it into a plan node first.`,
     );
   }
+  /*
+   * A node that already has children, refused rather than accepted
+   * and dropped.
+   *
+   * The handover is a status on the node, and a plan node's status
+   * belongs to the rollup: the next tick rewrites it from its children
+   * before the coordinator looks for nodes to put a planner on, so a
+   * node with children would be marked, un-marked, and never started,
+   * while this tool had already answered that a planner was coming.
+   * Asked before the status check for the same reason: on such a node
+   * "working" is the rollup's word for its children, not a planner.
+   */
+  const [child] = await ctx.db
+    .select({ id: swarmTasks.id })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.parentId, task.id))
+    .limit(1);
+  if (child) {
+    throw new ToolRefusal(
+      `task ${task.id} already has tasks under it, so it is decomposed. A planner is handed a node nobody has broken down yet.`,
+    );
+  }
   if (task.status === "assigned" || task.status === "working") {
     return `Task ${task.id} already has a planner of its own.`;
   }
