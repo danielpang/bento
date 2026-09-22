@@ -28,6 +28,10 @@ const sample = {
     },
   ],
   repositories: [{ name: "api", setup: "npm ci", test: "npm test" }],
+  // The swarm half of the same file. Present here with nothing in it,
+  // which is what a project that runs no swarms exports, and what the
+  // round trip has to preserve rather than drop.
+  swarms: [],
 };
 
 test("a pipeline survives the round trip", () => {
