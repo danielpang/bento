@@ -1109,10 +1109,21 @@ test("a swarm that ran out of budget still finishes when its last worker lands",
   const held = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(held?.status, "budget_exhausted", "while the work is in flight, the ending stands");
 
+  assert.equal(held?.becameFinal, null, "and the ending it already had is not reported a second time");
+
   await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, leaf.id));
   const finished = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(finished?.status, "done", "a swarm whose every task is done is done");
   assert.equal(finished?.becameDone, true, "and it publishes, rather than waiting for a person");
+  /*
+   * One spend event per swarm, which is what the event's own contract
+   * promises: the dashboard sums cost_usd rather than counting events.
+   * This swarm has ended twice now, once on its budget and once on its
+   * tree, and the budget's ending is the one that was reported. A
+   * second report here would double every figure on that dashboard,
+   * and it is the designed path rather than an exotic one.
+   */
+  assert.equal(finished?.becameFinal, null, "a swarm that already reported what it spent does not report again");
 });
 
 /** A template with no worker does not hold up a leaf that has its own. */

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BentoClient, FeatureSpend, ProjectUsage, SwarmSpendRow } from "@bento/api-client";
 import { spendReportingTools } from "@bento/core";
-import { compareFeatureSpend, formatFeatureSpend, type SpendSort } from "./spend-format.js";
+import { compareFeatureSpend, formatFeatureSpend, spendHeadline, type SpendSort } from "./spend-format.js";
 import { createRequestGate } from "../latest-request.js";
 import { useToast } from "./Toasts.js";
 import { SpendPageSkeleton } from "./Skeleton.js";
@@ -119,7 +119,7 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
 
 function SpendIntro({ usage }: { usage: ProjectUsage | null }) {
   const { reporting, silent } = spendReportingTools();
-  const measuredRuns = usage ? usage.totalRuns - usage.runsWithoutCost : 0;
+  const swarmRuns = (usage?.bySwarm ?? []).reduce((total, row) => total + row.runs, 0);
   return (
     <header className="spend-intro">
       <h1 className="spend-title">Spend</h1>
@@ -128,16 +128,7 @@ function SpendIntro({ usage }: { usage: ProjectUsage | null }) {
         fails before finishing reports nothing either. Any figure here is a floor rather than a full
         total.
       </p>
-      {usage &&
-        (usage.totalRuns > 0 ? (
-          <p className="spend-total">
-            {usage.runsWithoutCost > 0
-              ? `$${usage.totalUsd.toFixed(2)}+ across ${measuredRuns} of ${usage.totalRuns} runs.`
-              : `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns} run${usage.totalRuns === 1 ? "" : "s"}.`}
-          </p>
-        ) : (
-          <p className="spend-total">No agent runs yet.</p>
-        ))}
+      {usage && <p className="spend-total">{spendHeadline(usage, swarmRuns)}</p>}
       <dl className="spend-coverage">
         <div>
           <dt>Report a cost</dt>
@@ -257,7 +248,10 @@ export function SwarmSpendTable({ rows }: { rows: SwarmSpendRow[] }) {
           {rows.map((row) => (
             <tr key={row.swarmId}>
               <td>
-                <a className="spend-card-link" href={`/?mode=swarms&swarm=${row.swarmId}`} title="Open this swarm">
+                {/* The console reads the board from `board`; `mode` is
+                    a parameter nothing has ever read, so this link
+                    used to open the card board instead. */}
+                <a className="spend-card-link" href={`/?board=swarms&swarm=${row.swarmId}`} title="Open this swarm">
                   {row.title}
                 </a>
               </td>

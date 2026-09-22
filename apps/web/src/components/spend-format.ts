@@ -29,6 +29,38 @@ export function formatFeatureSpend(row: FeatureSpend): string {
 }
 
 /**
+ * The sentence at the top of the Spend page.
+ *
+ * It counts card runs, because that is what the figure beside it is a
+ * sum of: a swarm's runs belong to no card and are grouped as swarms
+ * further down. So it says so. A project worked entirely by swarms
+ * used to open with "No agent runs yet." directly above a table
+ * reporting forty dollars, which is the page disagreeing with itself
+ * in the two lines a person reads first.
+ *
+ * The swarm money is deliberately not added in. Its four tiers are
+ * kept apart everywhere else precisely so that no single figure stands
+ * for a measurement, an estimate, a guess and a list price at once,
+ * and the headline is the worst place in the product to start.
+ */
+export function spendHeadline(
+  usage: { totalUsd: number; totalRuns: number; runsWithoutCost: number },
+  swarmRuns: number,
+): string {
+  if (usage.totalRuns === 0) {
+    // "on cards" only when there is something else on the page for it
+    // to be distinguished from.
+    return swarmRuns > 0 ? "No runs on cards yet." : "No agent runs yet.";
+  }
+  const figure = `$${usage.totalUsd.toFixed(2)}`;
+  if (usage.runsWithoutCost > 0) {
+    const measured = usage.totalRuns - usage.runsWithoutCost;
+    return `${figure}+ across ${measured} of ${usage.totalRuns} runs on cards.`;
+  }
+  return `${figure} across ${usage.totalRuns} run${usage.totalRuns === 1 ? "" : "s"} on cards.`;
+}
+
+/**
  * Compact figure for a finished card's face. Null when there is
  * nothing to print: a missing cost is not shown as zero, and an
  * in-progress card does not wear a number at all.

@@ -1,4 +1,4 @@
-import { capUse, formatUsd, spendParts, tierLabel } from "../swarm/money.js";
+import { capUse, cappedUsd, formatUsd, spendParts, tierLabel } from "../swarm/money.js";
 import { SPEND_TIERS } from "../swarm/layout.js";
 import type { SpendTier, SwarmSpend, SwarmTask } from "../swarm/types.js";
 
@@ -104,7 +104,18 @@ export function spendOverTime(tasks: SwarmTask[]): number[] {
   const points: number[] = [];
   let running = 0;
   for (const task of finished) {
-    running += task.cost.measuredUsd + task.cost.estimatedUsd + task.cost.assumedUsd + task.cost.notionalUsd;
+    /*
+     * What the cap counts, and only that.
+     *
+     * A cumulative line has to accumulate something, so the one figure
+     * it may accumulate is the one that means something on its own:
+     * the three tiers somebody is actually billed for, which is what
+     * the budget is compared against. The fourth is a list price a
+     * subscription had already paid for, and running it into this
+     * total put four kinds of confidence behind one number and then
+     * read that number out as what the swarm ended at.
+     */
+    running += cappedUsd(task.cost);
     points.push(running);
   }
   return points;
@@ -210,7 +221,10 @@ export function SpendSparkline({ points }: { points: number[] }) {
       width={width}
       height={height}
       role="img"
-      aria-label={`Spend over time, ending at ${formatUsd(points[points.length - 1] ?? 0)}`}
+      // Says which figure it is reading out. A bare "ending at $6.00"
+      // is the one thing a total may never be here: a number with no
+      // word saying how well it is known.
+      aria-label={`Spend the budget counts, over time, ending at ${formatUsd(points[points.length - 1] ?? 0)}`}
     >
       <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
     </svg>
