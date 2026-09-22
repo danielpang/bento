@@ -83,6 +83,38 @@ export async function hasActiveSwarms(ctx: Pick<AppContext, "db">): Promise<bool
  */
 const tickWorkers = new WeakSet<object>();
 
+/**
+ * One thing at a time, per boss, for the worker's own lifecycle.
+ *
+ * Starting a worker and stopping one are two steps each: mark the
+ * boss, then talk to pg-boss. Interleaved, they lose ticks. A caller
+ * that read the mark while a stop sat between its delete and its
+ * offWork sent a tick into a queue whose worker was already going
+ * away, and one that read it just after registered a worker the stop
+ * then removed. Everything that touches the mark goes through here, so
+ * a send happens in the same turn as the registration it relies on.
+ *
+ * Lazy registration is untouched: this serializes the starts and
+ * stops, it does not start anything, so a deployment that has never
+ * run a swarm still polls for nothing.
+ */
+const workerLifecycle = new WeakMap<object, Promise<unknown>>();
+
+function inTurn<T>(boss: object, step: () => Promise<T>): Promise<T> {
+  const previous = workerLifecycle.get(boss) ?? Promise.resolve();
+  // Whatever the previous turn did, including throwing, the next one
+  // runs: a failed registration must not wedge the queue for good.
+  const next = previous.then(step, step);
+  workerLifecycle.set(
+    boss,
+    next.then(
+      () => {},
+      () => {},
+    ),
+  );
+  return next;
+}
+
 /** The transaction handle drizzle hands the callback. */
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
@@ -798,11 +830,14 @@ async function recomputeSwarmStatus(
  * send would be a tick per event that each read the same rows.
  */
 export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promise<void> {
-  // The worker first, then the job. A deployment with no swarms runs
-  // none, so the order is what keeps a job from waiting for the next
-  // restart to be read.
-  await ensureSwarmTickWorker(ctx);
-  await ctx.boss.send(SWARM_TICK_QUEUE, { swarmId }, { singletonKey: swarmId });
+  // The worker first, then the job, and both in one turn of the
+  // lifecycle lock: a deployment with no swarms runs no worker, so the
+  // order is what keeps a job from waiting for the next restart to be
+  // read, and the lock is what keeps a stop from landing in between.
+  await inTurn(ctx.boss, async () => {
+    await registerTickWorker(ctx);
+    await ctx.boss.send(SWARM_TICK_QUEUE, { swarmId }, { singletonKey: swarmId });
+  });
 }
 
 /**
@@ -820,6 +855,11 @@ export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promis
  * the await, so a second caller does not register a second worker.
  */
 export async function ensureSwarmTickWorker(ctx: AppContext): Promise<void> {
+  await inTurn(ctx.boss, () => registerTickWorker(ctx));
+}
+
+/** The registration itself. Only ever called inside a lifecycle turn. */
+async function registerTickWorker(ctx: AppContext): Promise<void> {
   if (tickWorkers.has(ctx.boss)) return;
   tickWorkers.add(ctx.boss);
   try {
@@ -828,10 +868,10 @@ export async function ensureSwarmTickWorker(ctx: AppContext): Promise<void> {
       { batchSize: 1, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS },
       captureJobErrors(ctx.analytics, SWARM_TICK_QUEUE, async (jobs) => {
         for (const job of jobs) await tickSwarm(ctx, job.data.swarmId);
-        // Asked after the tick, because the tick is what settles the
-        // last swarm. offWork only flags the worker, so a stop from
-        // inside its own handler does not wait on this job.
-        if (!(await hasActiveSwarms(ctx))) await stopSwarmTickWorker(ctx);
+        // After the tick, because the tick is what settles the last
+        // swarm. offWork only flags the worker, so a stop from inside
+        // its own handler does not wait on this job.
+        await stopSwarmTickWorkerIfIdle(ctx);
       }),
     );
   } catch (err) {
@@ -840,11 +880,33 @@ export async function ensureSwarmTickWorker(ctx: AppContext): Promise<void> {
   }
 }
 
+/**
+ * Stops the worker when this deployment has nothing left to reconcile.
+ *
+ * The question is asked inside the lifecycle turn that would do the
+ * stopping, rather than before it, so a tick enqueued for a live swarm
+ * cannot be sent into a queue this is already leaving: whichever of
+ * the two takes the lock first, the other reads the world it left. A
+ * send that got in first leaves an active swarm for this to find, and
+ * one that comes after finds no worker registered and registers again.
+ */
+export async function stopSwarmTickWorkerIfIdle(ctx: AppContext): Promise<boolean> {
+  return await inTurn(ctx.boss, async () => {
+    if (!tickWorkers.has(ctx.boss)) return false;
+    if (await hasActiveSwarms(ctx)) return false;
+    tickWorkers.delete(ctx.boss);
+    await ctx.boss.offWork(SWARM_TICK_QUEUE);
+    return true;
+  });
+}
+
 /** Stops the tick worker, so an idle deployment stops paying for the poll. */
 export async function stopSwarmTickWorker(ctx: AppContext): Promise<void> {
-  if (!tickWorkers.has(ctx.boss)) return;
-  tickWorkers.delete(ctx.boss);
-  await ctx.boss.offWork(SWARM_TICK_QUEUE);
+  await inTurn(ctx.boss, async () => {
+    if (!tickWorkers.has(ctx.boss)) return;
+    tickWorkers.delete(ctx.boss);
+    await ctx.boss.offWork(SWARM_TICK_QUEUE);
+  });
 }
 
 /**

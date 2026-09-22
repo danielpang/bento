@@ -17,7 +17,14 @@ import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { recoverInterruptedRuns } from "../run-executor.js";
-import { enqueueSwarmTick, hasActiveSwarms, stopSwarmTickWorker, tickAllLiveSwarms } from "./coordinator.js";
+import {
+  enqueueSwarmTick,
+  ensureSwarmTickWorker,
+  hasActiveSwarms,
+  stopSwarmTickWorker,
+  stopSwarmTickWorkerIfIdle,
+  tickAllLiveSwarms,
+} from "./coordinator.js";
 
 /**
  * What a restart does to a swarm.
@@ -292,4 +299,77 @@ test("the worker stops once the last swarm settles", async () => {
   const next = await makeSwarm("running");
   await enqueueSwarmTick(ctx, next.id);
   assert.deepEqual(workers, ["swarm.tick", "swarm.tick"]);
+});
+
+/**
+ * The window between deciding to stop and having stopped.
+ *
+ * Starting the worker and stopping it are two steps each: mark the
+ * boss, then talk to pg-boss. A tick that arrived in between saw a
+ * mark that no longer had a worker behind it, or registered one the
+ * stop then took away, and either way the job sat in the queue until
+ * something else started a swarm. Driven rather than argued about: the
+ * stop is held open, a tick is enqueued into the gap, and the order
+ * the boss was actually called in is the assertion.
+ */
+test("a tick enqueued while the worker is stopping waits for the stop rather than racing it", async () => {
+  const calls: string[] = [];
+  let releaseOffWork: (() => void) | null = null;
+  const holding = {
+    ...ctx,
+    boss: {
+      work: async () => {
+        calls.push("work");
+        return "worker";
+      },
+      offWork: async () => {
+        calls.push("offWork:start");
+        await new Promise<void>((resolve) => {
+          releaseOffWork = resolve;
+        });
+        calls.push("offWork:end");
+      },
+      send: async () => {
+        calls.push("send");
+        return "job";
+      },
+      notifyWorker: () => {},
+    },
+  } as unknown as AppContext;
+
+  const swarm = await makeSwarm("running");
+  await ensureSwarmTickWorker(holding);
+  assert.deepEqual(calls, ["work"]);
+
+  const stopping = stopSwarmTickWorker(holding);
+  // Let the stop reach its offWork and park there.
+  await new Promise((resolve) => setImmediate(resolve));
+  const enqueueing = enqueueSwarmTick(holding, swarm.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["work", "offWork:start"], "nothing is sent into a queue that is being left");
+
+  releaseOffWork!();
+  await stopping;
+  await enqueueing;
+  assert.deepEqual(
+    calls,
+    ["work", "offWork:start", "offWork:end", "work", "send"],
+    "the tick registered a worker of its own and only then sent the job",
+  );
+});
+
+/**
+ * And the same window from the other side: the worker's own handler
+ * asks whether anything is left before it stops, so the question is
+ * asked in the turn that does the stopping rather than before it.
+ */
+test("a worker does not stop while a swarm is still live", async () => {
+  const swarm = await makeSwarm("running");
+  await enqueueSwarmTick(ctx, swarm.id);
+  assert.equal(await stopSwarmTickWorkerIfIdle(ctx), false, "there is still something to reconcile");
+  assert.deepEqual(stopped, []);
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  assert.equal(await stopSwarmTickWorkerIfIdle(ctx), true);
+  assert.deepEqual(stopped, ["swarm.tick"]);
 });
