@@ -816,11 +816,16 @@ export function httpSwarmApi(
     },
     async createSwarm(input) {
       /*
-       * What the route takes, and nothing else. The dialog collects a
-       * few things the server has no home for yet (attachments, a
-       * starting branch, the deliverable, plan only); they are not
-       * sent, because a field the server drops is a promise the
-       * console did not keep.
+       * What the route takes, and nothing else. The dialog still
+       * collects two things the server has no home for (attachments,
+       * and plan only, which is how every swarm begins anyway); they
+       * are not sent, because a field the server drops is a promise
+       * the console did not keep.
+       *
+       * The starting branch is sent now that there is a column for
+       * it. Only when it is an existing one: a new branch is named by
+       * the server after the swarm, and sending the console's preview
+       * of that name would let the two disagree.
        */
       const created = await post<WireSwarm>("/api/swarms", {
         projectId: input.projectId,
@@ -829,6 +834,7 @@ export function httpSwarmApi(
         ...(input.templateId ? { templateId: input.templateId } : {}),
         maxWorkers: input.workers,
         ...(input.budgetUsd === null ? {} : { budgetUsd: input.budgetUsd }),
+        ...(input.start.kind === "existing-branch" ? { startBranch: input.start.name } : {}),
       });
       return { swarm: toSwarm(created), tasks: [], landings: [], ledger: [], pullRequests: [] };
     },
