@@ -9,6 +9,7 @@ import {
   runMigrations,
   swarmLandings,
   swarmTasks,
+  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -336,4 +337,61 @@ test("a swarm under its budget starts, and one with no budget is never refused",
 test("a swarm spending a borrowed subscription runs past its cap", async () => {
   const swarm = await makeSwarm({ budgetUsd: "1", spentNotionalUsd: "500" });
   assert.ok(isRun(await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE })));
+});
+
+/**
+ * What the cap promises once more than one agent is running.
+ *
+ * A run's cost is not recorded until it ends, so spend alone says
+ * nothing about the four workers currently spending it. Checking spend
+ * and nothing else, every worker up to max_workers starts while the
+ * figure is still zero, and a $10 swarm commits $20 of work before the
+ * first charge lands. The promise is that a budget is exceeded by at
+ * most one run, so the runs already going have to be counted at the
+ * figure a run that reports nothing is charged.
+ *
+ * Deliberately not a reservation ledger. Counting the in flight runs
+ * under the same lock is enough, and a column reserving money would
+ * need releasing on every path a run can end by, including the ones
+ * that end when the process does.
+ */
+test("the workers already going count against the budget before they report", async () => {
+  const [template] = await db
+    .insert(swarmTemplates)
+    .values({
+      ownerId: "u1",
+      name: "Five dollars a leaf",
+      plannerProfileId: LOCAL_PROFILE,
+      workerProfileId: LOCAL_PROFILE,
+      workerIsolation: "worktree",
+      assumedCostUsd: "5",
+    })
+    .returning();
+  const swarm = await makeSwarm({ budgetUsd: "10", maxWorkers: 4, templateId: template!.id });
+
+  const started: string[] = [];
+  let refusedFor: string | null = null;
+  for (let i = 0; i < 4; i += 1) {
+    const task = await makeTask(swarm.id, `leaf ${i}`);
+    const answer = await start({
+      swarmId: swarm.id,
+      role: "worker",
+      swarmTaskId: task.id,
+      agentProfileId: LOCAL_PROFILE,
+    });
+    if (isRun(answer)) {
+      started.push(answer.id);
+      continue;
+    }
+    if (typeof answer === "object" && "outOfCompute" in answer) refusedFor = answer.cap ?? null;
+    break;
+  }
+
+  /*
+   * Two at five dollars each is the whole budget. A third would commit
+   * fifteen against a ten dollar cap, which is half a run over the
+   * promise, and a fourth would double it.
+   */
+  assert.equal(started.length, 2, "the budget stops the third worker before it starts");
+  assert.equal(refusedFor, "budget");
 });

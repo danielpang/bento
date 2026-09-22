@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { agentRuns, swarmLandings, type Db } from "@bento/db";
 import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
-import { budgetRefusal } from "./swarm/ledger.js";
+import { assumedCostFor, budgetRefusal } from "./swarm/ledger.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
 /**
@@ -243,7 +243,7 @@ async function insertSwarmRun(
    * spend as it was before either of them started.
    */
   const locked = await tx.execute(
-    sql`select organization_id, max_workers, budget_usd,
+    sql`select organization_id, max_workers, template_id, budget_usd,
                spent_measured_usd, spent_estimated_usd, spent_assumed_usd, spent_notional_usd
           from swarms where id = ${values.swarmId} for update`,
   );
@@ -251,6 +251,7 @@ async function insertSwarmRun(
   const swarm = locked.rows[0] as {
     organization_id: string | null;
     max_workers: number;
+    template_id: string | null;
     budget_usd: string | null;
     spent_measured_usd: string;
     spent_estimated_usd: string;
@@ -353,13 +354,38 @@ async function insertSwarmRun(
    * run that was already going when it was reached, and no agent is
    * ever killed for money.
    */
-  const budget = budgetRefusal({
-    budgetUsd: swarm.budget_usd,
-    spentMeasuredUsd: swarm.spent_measured_usd,
-    spentEstimatedUsd: swarm.spent_estimated_usd,
-    spentAssumedUsd: swarm.spent_assumed_usd,
-    spentNotionalUsd: swarm.spent_notional_usd,
-  });
+  /*
+   * What the agents already going will cost, counted at the figure a
+   * run that reports nothing is charged.
+   *
+   * Only worth the two queries when there is a cap to check it
+   * against, so a swarm with no budget pays for none of this.
+   */
+  let committedUsd = 0;
+  if (swarm.budget_usd !== null) {
+    const [inFlight] = await tx
+      .select({ runs: sql<number>`count(*)::int` })
+      .from(agentRuns)
+      .where(and(inArray(agentRuns.status, ACTIVE_RUN_STATUSES), eq(agentRuns.swarmId, values.swarmId)));
+    const running = inFlight?.runs ?? 0;
+    if (running > 0) {
+      committedUsd = running * (await assumedCostFor(tx as unknown as Db, {
+        id: values.swarmId,
+        templateId: swarm.template_id,
+      }));
+    }
+  }
+
+  const budget = budgetRefusal(
+    {
+      budgetUsd: swarm.budget_usd,
+      spentMeasuredUsd: swarm.spent_measured_usd,
+      spentEstimatedUsd: swarm.spent_estimated_usd,
+      spentAssumedUsd: swarm.spent_assumed_usd,
+      spentNotionalUsd: swarm.spent_notional_usd,
+    },
+    committedUsd,
+  );
   if (budget) return { outOfCompute: budget, cap: "budget" };
 
   const [run] = await tx.insert(agentRuns).values(values).returning();
