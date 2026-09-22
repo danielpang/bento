@@ -229,9 +229,26 @@ export class WorktreeManager {
       // a fresh one is what a follow-up prompt wants, and is why the
       // add below is the -b form rather than a failure.
       const base = startFromBranch ?? options.defaultBranch;
+      /**
+       * A branch that is already here needs no remote at all.
+       *
+       * The refresh below exists for a base branch the remote owns, so
+       * a new card starts from what main is now rather than from what
+       * it was when this checkout was last fetched. A swarm's branch is
+       * the opposite kind of thing: the merge queue owns it, it lives
+       * only in this repository, and nothing pushes it until the swarm
+       * finishes. Asking origin for it fails with "couldn't find remote
+       * ref", which this turns into a sentence about remote access, and
+       * every worker of every swarm on a project with an origin died on
+       * it before its agent had started.
+       */
+      const { stdout: local } = await run("git", ["-C", repoPath, "branch", "--list", base]);
+      const needsRemote = local.trim() === "";
       // Refresh only when creating a branch, never for every stage or card read.
       // Fetch an explicit tracking ref even in repositories with narrow fetch refspecs.
-      const { stdout: remotes } = await run("git", ["-C", repoPath, "remote"]);
+      const { stdout: remotes } = needsRemote
+        ? await run("git", ["-C", repoPath, "remote"])
+        : { stdout: "" };
       if (remotes.split("\n").includes("origin")) {
         try {
           await run(
