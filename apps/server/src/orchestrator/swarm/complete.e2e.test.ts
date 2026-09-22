@@ -117,8 +117,8 @@ before(async () => {
     [PROFILE],
   );
   await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers)
-     values ($1,'u1',null,'T',$2,$2,2)`,
+    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation)
+     values ($1,'u1',null,'T',$2,$2,2,'worktree')`,
     [TEMPLATE, PROFILE],
   );
 

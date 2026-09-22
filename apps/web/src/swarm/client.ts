@@ -363,6 +363,7 @@ export interface WireTemplate {
   id: string;
   name: string;
   description: string;
+  workerIsolation?: "sandbox" | "worktree";
   maxWorkers: number;
   budgetUsd: string | null;
   timeLimitMin: number | null;
@@ -535,6 +536,9 @@ export function toTemplate(row: WireTemplate): SwarmTemplate {
     assumedUsdPerLeaf: 0,
     perLeaf: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 },
     maxWorkers: row.maxWorkers,
+    // A server that predates the column says nothing, which reads the
+    // same way a template that asserts nothing does.
+    workerIsolation: row.workerIsolation ?? "sandbox",
     maxBudgetUsd: row.budgetUsd === null ? null : Number(row.budgetUsd),
     timeLimitMin: row.timeLimitMin,
     typicalLeaves: 0,

@@ -284,6 +284,16 @@ export interface SwarmTemplate {
   /** What the template expects a leaf to cost, by tier. */
   perLeaf: SwarmSpend;
   maxWorkers: number;
+  /**
+   * Where this template's agents work: a machine each, holding its own
+   * clone, or worktrees of the repository already on the server.
+   *
+   * Recorded on the template rather than read off the deployment, so a
+   * swarm made on a local install keeps its shape if that install
+   * later joins a team, and is refused rather than quietly reshaped if
+   * the deployment cannot run it that way.
+   */
+  workerIsolation: "sandbox" | "worktree";
   maxBudgetUsd: number | null;
   timeLimitMin: number | null;
   /** Leaves this template's planner typically produces, for the estimate. */

@@ -65,8 +65,8 @@ before(async () => {
     [PROFILE],
   );
   await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers)
-     values ($1,'u1',null,'T',$2,$2,2)`,
+    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation)
+     values ($1,'u1',null,'T',$2,$2,2,'worktree')`,
     [TEMPLATE, PROFILE],
   );
 
@@ -647,7 +647,7 @@ test("a conflict nothing could ever resolve fails the leaf and lets the queue mo
    */
   const [template] = await db
     .insert(swarmTemplates)
-    .values({ ownerId: "u1", name: "no worker", plannerProfileId: PROFILE, maxWorkers: 2 })
+    .values({ ownerId: "u1", name: "no worker", plannerProfileId: PROFILE, maxWorkers: 2, workerIsolation: "worktree" })
     .returning();
   const swarm = await makeSwarm({ status: "running", templateId: template!.id });
   const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it", position: 0 });

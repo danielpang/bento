@@ -19,6 +19,16 @@ import { requireSwarms } from "../orchestrator/swarm/gate.js";
  * and row-level security then checks what they set.
  */
 
+/**
+ * Where a template's agents work.
+ *
+ * Not defaulted here, because the answer depends on the deployment and
+ * a zod default cannot see it: a local install's agents share the
+ * repository on disk, a hosted one's each get a machine. The handler
+ * fills it in, and a caller that states one is taken at its word.
+ */
+const workerIsolation = z.enum(["sandbox", "worktree"]);
+
 const ceilings = {
   maxWorkers: z.number().int().min(1).max(32),
   budgetUsd: z.number().min(0).max(100_000),
@@ -33,6 +43,7 @@ const createTemplate = z.object({
   plannerInstructions: z.string().max(20_000).nullish(),
   workerInstructions: z.string().max(20_000).nullish(),
   maxWorkers: ceilings.maxWorkers.default(4),
+  workerIsolation: workerIsolation.optional(),
   budgetUsd: ceilings.budgetUsd.nullish(),
   timeLimitMin: ceilings.timeLimitMin.nullish(),
 });
@@ -51,6 +62,7 @@ const updateTemplate = z
     plannerInstructions: z.string().max(20_000).nullable().optional(),
     workerInstructions: z.string().max(20_000).nullable().optional(),
     maxWorkers: ceilings.maxWorkers.optional(),
+    workerIsolation: workerIsolation.optional(),
     budgetUsd: ceilings.budgetUsd.nullable().optional(),
     timeLimitMin: ceilings.timeLimitMin.nullable().optional(),
   })
@@ -128,6 +140,13 @@ export function swarmTemplateRoutes(ctx: AppContext) {
           plannerInstructions: body.plannerInstructions ?? null,
           workerInstructions: body.workerInstructions ?? null,
           maxWorkers: body.maxWorkers,
+          /**
+           * The shape this deployment can actually run, unless the
+           * caller asked for another. Stated on the row rather than
+           * left to the driver, so a template made on a laptop still
+           * says what it is once the install joins a team.
+           */
+          workerIsolation: body.workerIsolation ?? (ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree"),
           budgetUsd: body.budgetUsd === null || body.budgetUsd === undefined ? null : String(body.budgetUsd),
           timeLimitMin: body.timeLimitMin ?? null,
         })
