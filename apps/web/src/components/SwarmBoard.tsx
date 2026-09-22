@@ -306,6 +306,18 @@ export function SwarmBoard({
 
       {task && layoutNode && (
         <SwarmNodeDrawer
+          /*
+           * One drawer instance per node, and not one drawer that
+           * different nodes take turns in.
+           *
+           * The drawer holds a description somebody is part way
+           * through editing and the text of a split they are part way
+           * through writing. Without this, clicking another node in
+           * the tree reused the instance: the header changed, the
+           * unsaved draft did not, and Save then wrote one node's text
+           * onto the other node's row.
+           */
+          key={task.id}
           task={task}
           node={layoutNode}
           {...(node?.taskId === task.id ? { detail: node } : {})}

@@ -13,7 +13,8 @@ import {
   tierNote,
   usdFor,
 } from "./swarm/money.js";
-import type { SwarmSpend } from "./swarm/types.js";
+import { spendOverTime } from "./components/SwarmCostPanel.js";
+import type { SwarmSpend, SwarmTask } from "./swarm/types.js";
 
 /**
  * Money, kept in three pieces.
@@ -159,4 +160,39 @@ test("an estimate is the template's per task figures, kept in their tiers", () =
   assert.equal(line, "About $1.00 measured, $0.20 estimated, $0.40 assumed over 2 tasks.");
   assert.ok(!line.includes("$1.60"));
   assert.match(estimateLine(estimateSwarm(template, 1), 1), /over 1 task\./);
+});
+
+/**
+ * The sparkline is the one place a running figure is unavoidable, and
+ * it was the one place the tiers were added together.
+ *
+ * A cumulative line has to accumulate something, so what it
+ * accumulates has to be a figure that means something on its own. The
+ * only such figure in this design is what the cap counts: the three
+ * tiers somebody is actually billed for. Adding the fourth put a list
+ * price a subscription had already paid for into the same running
+ * total as a measurement, and then read it out to a screen reader as
+ * the figure the swarm ended at.
+ */
+test("the shape of spend over time is the spend the budget counts, and not the fourth tier", () => {
+  const leaf = (endedAt: string | null, cost: Partial<SwarmSpend>): SwarmTask =>
+    ({
+      id: endedAt ?? "open",
+      nodeType: "leaf",
+      endedAt,
+      cost: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0, ...cost },
+    }) as SwarmTask;
+
+  const points = spendOverTime([
+    leaf("2026-01-01T00:00:00Z", { measuredUsd: 1 }),
+    leaf("2026-01-01T00:01:00Z", { estimatedUsd: 2 }),
+    leaf("2026-01-01T00:02:00Z", { assumedUsd: 3 }),
+    // A borrowed subscription's list price, which the budget does not
+    // count and which must not move this line either.
+    leaf("2026-01-01T00:03:00Z", { notionalUsd: 400 }),
+    // Still working, so not on the line at all.
+    leaf(null, { measuredUsd: 99 }),
+  ]);
+  assert.deepEqual(points, [1, 3, 6, 6]);
+  assert.ok(!points.includes(406), "the one number nobody may print, in its cumulative form");
 });

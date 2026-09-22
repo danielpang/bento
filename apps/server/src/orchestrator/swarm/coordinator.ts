@@ -378,8 +378,24 @@ async function runTick(
     landingPromoted: landing.landing?.promoted ?? false,
     status,
     becameDone: status === "done" && swarm.status !== "done",
+    /**
+     * What it spent, reported on the first ending it reaches and not
+     * on any ending after that.
+     *
+     * A swarm ends more than once on the ordinary path: nothing is
+     * killed for a ceiling, so one that stopped on its budget or its
+     * clock goes on to finish the tree its last workers were landing,
+     * and that second transition is a second final status. The event's
+     * own contract is one per finished unit of work, because the
+     * dashboard sums cost_usd rather than counting events, so a second
+     * report would double every figure on it. The ending that is
+     * reported is the one that actually stopped the swarm spawning,
+     * which is also the more informative of the two.
+     */
     becameFinal:
-      status !== swarm.status && (FINAL_SWARM_STATUSES as readonly string[]).includes(status)
+      status !== swarm.status &&
+      (FINAL_SWARM_STATUSES as readonly string[]).includes(status) &&
+      !(FINAL_SWARM_STATUSES as readonly string[]).includes(swarm.status)
         ? (status as SwarmSpendOutcome)
         : null,
   };
