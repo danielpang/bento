@@ -41,6 +41,8 @@ import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/P
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
+import { desktop } from "./desktop.js";
+import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -136,8 +138,6 @@ const client = new BentoClient({
   baseUrl: window.location.origin,
   onBuild: buildWatch.note,
 });
-
-const PROJECT_KEY = "bento:projectId";
 
 export function App() {
   const { data: session, isPending } = useSession();
@@ -429,18 +429,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * every reload, then swapped in the board.
    */
   const [projects, setProjects] = useState<{ id: string; name: string }[] | null>(null);
-  // Remembered across reloads: which board a user was last looking at.
+  // Desktop windows remember their own board across reloads and native menu
+  // navigation. New windows start with the last used project.
   // The list effect below still re-checks the stored id against the
   // rows the current tenant can see, so a stale value from before an
   // organization switch falls back to the first visible project
   // rather than landing on one this session cannot open.
-  const [projectId, setProjectId] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem(PROJECT_KEY) ?? null;
-    } catch {
-      return null;
-    }
-  });
+  const [projectId, setProjectId] = useState<string | null>(() => readProjectSelection(Boolean(desktop)));
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [features, setFeatures] = useState<Feature[]>([]);
@@ -633,18 +628,19 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     if (panel !== "agents") setAgentsIntent(null);
   }, [panel]);
 
-  // Persist the selection so a refresh lands on the same board. The
-  // list effect above has already rejected ids this tenant cannot see,
-  // so anything reaching here is one the session can open. Private
-  // browsing can refuse storage; the write is best effort.
+  // Wait until the list confirms this tenant can see the selected project.
   useEffect(() => {
-    try {
-      if (projectId) localStorage.setItem(PROJECT_KEY, projectId);
-      else localStorage.removeItem(PROJECT_KEY);
-    } catch {
-      // ignore: storage unavailable
-    }
-  }, [projectId]);
+    if (projects === null || (projectId && !projects.some(project => project.id === projectId))) return;
+    rememberProjectSelection(projectId, Boolean(desktop));
+  }, [projectId, projects]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    const name = projects?.find(project => project.id === projectId)?.name;
+    const section = screen === "sessions" ? "Sessions" : screen === "spend" ? "Spend" : null;
+    document.title = [name, section, "Bento"].filter(Boolean).join(" | ");
+    return () => { document.title = "Bento"; };
+  }, [projectId, projects, screen]);
 
   useEffect(() => {
     // Drop the previous project's cards immediately: leaving them up
@@ -1058,6 +1054,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             projectId={projectId}
             onSelect={setProjectId}
             onNewProject={() => setDialog("project")}
+            onOpenProject={desktop ? (id) => { window.open(`/?project=${encodeURIComponent(id)}`, "_blank", "noopener,noreferrer"); } : undefined}
           />
         }
         search={

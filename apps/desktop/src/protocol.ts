@@ -75,14 +75,18 @@ export async function installConsoleProtocol(options: {
         ...(request.method !== "GET" && request.method !== "HEAD" ? { body: await request.arrayBuffer() } : {}),
       });
       if (url.pathname === "/api/auth/sign-out" && response.ok) await options.signedOut();
-      const outgoing = new Headers(response.headers);
+      // Keep Electron's original fetch Response so protocol.handle can relay
+      // its native loader, including cancellation when a window reloads or
+      // closes. Wrapping response.body leaves SSE connections alive and can
+      // exhaust Chromium's per-origin connection pool across project windows.
+      const outgoing = response.headers;
       // The installed console updates with the desktop release. Comparing it
       // with a separately deployed web build would create an endless reload toast.
       outgoing.delete("x-bento-build");
       outgoing.delete("set-cookie");
       outgoing.delete("content-encoding");
       outgoing.delete("content-length");
-      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: outgoing });
+      return response;
     } catch (error) {
       if (request.signal.aborted) return new Response(null, { status: 499 });
       return Response.json({ error: "Cannot reach the Bento server. Check your connection and try again." }, { status: 502 });

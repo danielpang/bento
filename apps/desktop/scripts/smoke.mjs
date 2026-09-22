@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { _electron } from "playwright";
 import { createPool } from "../../../packages/db/dist/index.js";
+import { closeElectron } from "./close-electron.mjs";
 
 // This uses real Postgres and a real Electron utility process. It creates and
 // removes its own database, and never touches the user's projects or profile.
@@ -20,6 +21,7 @@ let database;
 let desktop;
 let page;
 const errors = [];
+const pending = new Set();
 // A real foreign origin proves previews can use external scripts while their
 // requests to the authenticated backend remain blocked.
 const assets = createServer((_request, response) => {
@@ -55,6 +57,9 @@ try {
   });
   desktop.process().stderr.on("data", bytes => process.stderr.write(bytes));
   desktop.process().stdout.on("data", bytes => process.stdout.write(bytes));
+  desktop.context().on("request", request => { if (request.url().includes("/api/")) pending.add(request); });
+  desktop.context().on("response", response => pending.delete(response.request()));
+  desktop.context().on("requestfailed", request => pending.delete(request));
   const launcher = await desktop.firstWindow();
   await launcher.getByRole("heading", { name: "Where do you want to work?" }).waitFor();
   await launcher.locator("summary").click();
@@ -87,6 +92,79 @@ try {
   console.log("PASS: card created through UI and read back from Postgres");
 
   const origin = new URL(page.url()).origin;
+  // All windows share one local server and login, while selecting projects
+  // independently. Exercise native menus, the project picker, and real rows.
+  const runtimePids = await desktop.evaluate(({ app }) => app.getAppMetrics().filter(process => process.name === "Bento local server").map(process => process.pid));
+  assert.equal(runtimePids.length, 1);
+  const newWindow = desktop.waitForEvent("window");
+  await desktop.evaluate(({ Menu }) => {
+    const item = Menu.getApplicationMenu().items.find(item => item.label === "File").submenu.items.find(item => item.label === "New Window");
+    if (item.accelerator !== "CmdOrCtrl+Shift+N") throw new Error("New Window shortcut changed");
+    item.click();
+  });
+  const second = await newWindow;
+  second.on("pageerror", error => errors.push(error.message));
+  await second.locator(".picker-current").filter({ hasText: "Desktop smoke" }).waitFor();
+  const secondRepository = path.join(temporary, "repository-second");
+  execFileSync("git", ["clone", repository, secondRepository], { stdio: "ignore" });
+  await second.locator(".picker-trigger").click();
+  await second.getByRole("menuitem", { name: "New project", exact: true }).click();
+  await second.getByRole("textbox", { name: "Name", exact: true }).fill("Desktop second");
+  await second.getByRole("textbox", { name: "Repository path 1", exact: true }).fill(secondRepository);
+  await second.getByRole("button", { name: "Create", exact: true }).click();
+  await second.locator(".picker-current").filter({ hasText: "Desktop second" }).waitFor();
+  const secondProject = (await database.query("SELECT id FROM projects WHERE name = $1", ["Desktop second"])).rows[0];
+  assert.ok(secondProject?.id);
+  await page.reload();
+  await page.getByText("Created in Electron", { exact: true }).first().waitFor();
+  assert.equal(await page.locator(".picker-current").innerText(), "Desktop smoke");
+  assert.equal(await page.title(), "Desktop smoke | Bento");
+  assert.equal(await second.title(), "Desktop second | Bento");
+
+  await second.bringToFront();
+  const navigated = second.waitForURL(`${origin}/sessions**`);
+  await desktop.evaluate(({ Menu }) => Menu.getApplicationMenu().items.find(item => item.label === "View").submenu.items.find(item => item.label === "Sessions").click());
+  await navigated;
+  await second.locator(".picker-current").filter({ hasText: "Desktop second" }).waitFor();
+  await second.reload();
+  await second.locator(".picker-current").filter({ hasText: "Desktop second" }).waitFor();
+  assert.equal(await second.title(), "Desktop second | Sessions | Bento");
+
+  // More reloads than Chromium's HTTP/1 connection limit catch abandoned SSE
+  // requests that would otherwise leave later project windows loading forever.
+  for (let index = 0; index < 8; index++) {
+    const selected = index % 2 === 0 ? page : second;
+    await selected.reload();
+    await selected.locator(".board:not([aria-busy])").waitFor();
+    assert.equal(await selected.locator(".picker-current").innerText(), index % 2 === 0 ? "Desktop smoke" : "Desktop second");
+  }
+
+  await page.locator(".picker-trigger").click();
+  await page.getByRole("menuitem", { name: "Open project in new window", exact: true }).hover();
+  await page.getByRole("menu", { name: "Open project in new window", exact: true }).waitFor();
+  await page.screenshot({ path: path.join(temporary, "project-window-menu.png") });
+  const projectWindow = desktop.waitForEvent("window");
+  await page.getByRole("menuitem", { name: "Desktop second", exact: true }).click();
+  const third = await projectWindow;
+  third.on("pageerror", error => errors.push(error.message));
+  await third.locator(".picker-current").filter({ hasText: "Desktop second" }).waitFor();
+  assert.equal(new URL(third.url()).searchParams.get("project"), secondProject.id);
+  await third.locator(".picker-trigger").click();
+  await third.getByRole("menuitemradio", { name: "Desktop smoke", exact: true }).click();
+  await third.locator(".picker-current").filter({ hasText: "Desktop smoke" }).waitFor();
+  await third.reload();
+  await third.getByText("Created in Electron", { exact: true }).first().waitFor();
+  assert.equal(new URL(third.url()).searchParams.get("project"), project.id);
+  assert.equal(await second.locator(".picker-current").innerText(), "Desktop second");
+  await second.screenshot({ path: path.join(temporary, "second-project.png") });
+  await third.screenshot({ path: path.join(temporary, "first-project.png") });
+  await page.close();
+  assert.equal(await second.evaluate(async () => (await fetch("/api/health")).status), 200);
+  assert.deepEqual(await desktop.evaluate(({ app }) => app.getAppMetrics().filter(process => process.name === "Bento local server").map(process => process.pid)), runtimePids);
+  await second.close();
+  page = third;
+  console.log("PASS: independent project windows, native navigation, explicit project links, titles, and shared server lifecycle");
+
   const browserSettings = await fetch(`${origin}/settings?tab=mcp`);
   assert.ok(browserSettings.ok);
   assert.ok((await browserSettings.text()).includes('id="root"'));
@@ -153,14 +231,14 @@ try {
   assert.equal(encrypted.includes(Buffer.from(databaseUrl.href)), false);
   console.log("PASS: shared routes and encrypted connection settings");
   await page.evaluate(() => localStorage.setItem("bento-theme", "dark"));
-  await desktop.close(); desktop = undefined;
+  await closeElectron(desktop); desktop = undefined;
   desktop = await _electron.launch({
     ...(process.env.BENTO_DESKTOP_EXECUTABLE ? { executablePath: process.env.BENTO_DESKTOP_EXECUTABLE, args: [] } : { args: [root] }),
     env, timeout: 30_000,
   });
   await desktop.firstWindow();
   page = desktop.windows().find(window => window.url().startsWith(origin)) ?? await desktop.waitForEvent("window", { timeout: 60_000 });
-  await page.waitForURL(`${origin}/`);
+  await page.waitForURL(`${origin}/**`);
   await page.waitForLoadState("domcontentloaded");
   assert.equal(await page.evaluate(() => localStorage.getItem("bento-theme")), "dark");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
@@ -169,11 +247,12 @@ try {
   console.log(`Desktop smoke passed. Screenshots: ${temporary}`);
 } catch (error) {
   console.error(`Desktop smoke failed. Diagnostics: ${temporary}`);
+  console.error("Pending API requests:", [...pending].map(request => request.url()));
   if (page) await page.screenshot({ path: path.join(temporary, "failure.png"), timeout: 5000 }).catch(() => {});
   for (const window of desktop?.windows() ?? []) console.error(window.url(), (await window.locator("body").innerText().catch(() => "")).slice(0, 2000));
   throw error;
 } finally {
-  await desktop?.close().catch(() => {});
+  if (desktop) await closeElectron(desktop).catch(() => {});
   await database?.end();
   await admin.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
   await admin.end();

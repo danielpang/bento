@@ -7,6 +7,7 @@ import path from "node:path";
 import { _electron } from "playwright";
 import { createPool } from "../../../packages/db/dist/index.js";
 import { startServer } from "../../server/dist/lib.js";
+import { closeElectron } from "./close-electron.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "bento-desktop-auth-"));
@@ -80,10 +81,19 @@ try {
   assert.equal(await desktop.evaluate(() => globalThis.desktopExternalUrl), `${origin}/settings?tab=github`);
   assert.equal(await page.evaluate(async () => { try { await window.bentoDesktop.openIntegration("https://example.com"); return false; } catch { return true; } }), true);
   console.log("PASS: actual device login, bearer session, organization selection, and tenant API");
+  const anotherWindow = desktop.waitForEvent("window");
+  await desktop.evaluate(({ Menu }) => Menu.getApplicationMenu().items.find(item => item.label === "File").submenu.items.find(item => item.label === "New Window").click());
+  const second = await anotherWindow;
+  await second.waitForLoadState("domcontentloaded");
+  assert.equal(await second.evaluate(async () => (await (await fetch("/api/auth/get-session")).json()).user.email), "desktop@example.test");
+  await page.close();
+  page = second;
+  assert.equal(await page.evaluate(async () => (await fetch("/api/projects")).status), 200);
+  console.log("PASS: remote windows share the authenticated connection and survive closing another window");
   const encrypted = await readFile(path.join(temporary, "profile/connections.enc"));
   assert.equal(encrypted.includes(Buffer.from(token)), false);
   if (auth.session.token) assert.equal(encrypted.includes(Buffer.from(auth.session.token)), false);
-  await desktop.close(); desktop = undefined;
+  await closeElectron(desktop); desktop = undefined;
   desktop = await launch();
   launcher = await desktop.firstWindow();
   page = desktop.windows().find(window => window.url().startsWith(origin)) ?? await desktop.waitForEvent("window", { timeout: 20_000 });
@@ -95,7 +105,7 @@ try {
   assert.equal(afterLogout, 401);
   console.log("PASS: encrypted login survives restart and sign-out revokes access");
 } finally {
-  await desktop?.close().catch(() => {});
+  if (desktop) await closeElectron(desktop).catch(() => {});
   await server?.stop();
   await admin.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
   await admin.end();
