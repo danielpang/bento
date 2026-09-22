@@ -1873,16 +1873,58 @@ async function announceRunFinished(
 
 /** A run the user stopped. Terminal, but not a failure. */
 export async function markCancelled(ctx: AppContext, runId: string): Promise<void> {
+  /**
+   * What it spent before it was stopped, worked out and written the
+   * same way a run that ended by itself has it written: before the
+   * compare and set, so the tier and the figure land with the status.
+   *
+   * A stopped run reports nothing, so for a swarm run this is the
+   * assumed tier, which is precisely what that tier is for. The agent
+   * ran, tokens were spent, and zero is the one answer that is
+   * certainly wrong. Leaving it out meant every run a person retried
+   * or cancelled was charged to nobody, and a budget that cannot see
+   * what it spent is a budget that cannot refuse.
+   *
+   * A card's run is unaffected: chargeForRun tiers one only when it
+   * actually reported, so the Spend page's totals keep meaning what
+   * they have always meant.
+   */
+  const charge = await chargeForRun(ctx.db, runId, {}).catch((err: unknown) => {
+    console.warn(`could not work out what cancelled run ${runId} cost:`, err);
+    ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "ledger" });
+    return null;
+  });
   const [closed] = await ctx.db
     .update(agentRuns)
     // No error: a cancellation is a choice, and clients render run.error
     // as a failure reason.
-    .set({ status: "cancelled", endedAt: new Date(), error: null })
+    .set({
+      status: "cancelled",
+      endedAt: new Date(),
+      error: null,
+      ...(charge
+        ? {
+            costUsd: String(charge.usd),
+            costTier: charge.tier,
+            inputTokens: charge.inputTokens,
+            outputTokens: charge.outputTokens,
+            pricePerMtok: charge.pricePerMtok,
+          }
+        : {}),
+    })
     // Same compare-and-set as finishRun: a run another path already
     // ended is not cancelled twice, and the loser changes nothing.
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
-    .returning({ id: agentRuns.id });
+    .returning({ id: agentRuns.id, swarmId: agentRuns.swarmId, swarmTaskId: agentRuns.swarmTaskId });
   if (!closed) return;
+  // Behind the compare and set, so a run is charged once however many
+  // paths tried to stop it. Its failure is never the cancel's.
+  if (charge) {
+    await applyRunCharge(ctx.db, closed, charge).catch((err: unknown) => {
+      console.warn(`could not add cancelled run ${runId} to its swarm's ledger:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "ledger" });
+    });
+  }
   await revokeRunGrant(ctx, runId);
   await announceRunFinished(ctx, runId, "cancelled");
   ctx.bus.emitRunDone(runId, "cancelled");
