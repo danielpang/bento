@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -7,7 +8,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { LineChannel, collectExec } from "./driver.js";
-import { SpriteDriver, spriteName } from "./sprite.js";
+import {
+  SpriteDriver,
+  SPRITE_ACQUIRE_RATE_LIMIT_WAITS,
+  SPRITE_ACQUIRE_RETRY_DELAYS_MS,
+  SPRITE_DESTROY_RETRY_DELAYS_MS,
+  SPRITE_LOOKUP_RETRY_DELAYS_MS,
+  spriteExistsWithRetry,
+  spriteName,
+} from "./sprite.js";
 
 /**
  * A sprite lives until something deletes it, and the e2e test's own
@@ -1749,7 +1758,8 @@ test("Sprite repository export returns committed objects without credentials", a
  * dangerous kind of quiet: it swallowed every error, and a refused
  * delete read as a machine gone while it kept running.
  */
-test("destroying a sprite tolerates one that is already gone and reports everything else", async () => {
+test("destroying a sprite tolerates one that is already gone and reports everything else", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const attempted: string[] = [];
   let failure: unknown = null;
   const driver = new SpriteDriver({ token: "sprite-control-token" });
@@ -1771,11 +1781,580 @@ test("destroying a sprite tolerates one that is already gone and reports everyth
   failure = new Error("Failed to delete sprite (status 404): no such sprite");
   await driver.destroy(handle);
 
-  // Everything else has to reach the caller: the delete route answers
-  // 502 and keeps the card, rather than losing the only pointer to a
-  // machine that is still billing.
-  failure = new APIError("upstream is unwell", { statusCode: 500 });
-  await assert.rejects(driver.destroy(handle), /upstream is unwell/);
+  // A refusal has to reach the caller at once: the delete route
+  // answers 502 and keeps the card, rather than losing the only
+  // pointer to a machine that is still billing.
+  attempted.length = 0;
+  failure = new APIError("forbidden", { statusCode: 403 });
+  await assert.rejects(driver.destroy(handle), /forbidden/);
+  assert.equal(attempted.length, 1);
   failure = new Error("fetch failed");
   await assert.rejects(driver.destroy(handle), /fetch failed/);
+  assert.equal(attempted.length, 2);
+
+  // A control plane that is unwell gets asked again, and still
+  // reaches the caller once the waits are spent.
+  attempted.length = 0;
+  failure = new APIError("upstream is unwell", { statusCode: 500 });
+  const pending = driver.destroy(handle).then(
+    () => "ok" as const,
+    (err: Error) => err,
+  );
+  await settle();
+  assert.equal(attempted.length, 1);
+  for (const delay of SPRITE_DESTROY_RETRY_DELAYS_MS) {
+    t.mock.timers.tick(delay);
+    await settle();
+  }
+  const result = await pending;
+  assert.ok(result instanceof Error);
+  assert.match(result.message, /upstream is unwell/);
+  assert.equal(attempted.length, SPRITE_DESTROY_RETRY_DELAYS_MS.length + 1);
+});
+
+/**
+ * The e2e teardown threw "service temporarily unavailable, please
+ * retry" out of deleteSprite during a Sprites incident, which failed
+ * the hook and left the machine for the workflow's cleanup step. The
+ * API said to retry. Now it is.
+ */
+test("destroying a sprite retries a transient control-plane failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  (driver as unknown as { client: { deleteSprite(name: string): Promise<void> } }).client = {
+    async deleteSprite() {
+      calls += 1;
+      if (calls === 1) throw new APIError("service temporarily unavailable, please retry", { statusCode: 503 });
+      if (calls === 2) throw new Error("Network error: fetch failed");
+    },
+  };
+  const handle = { externalId: "bento-feature", provider: "sprite" as const, workdir: "/workspace" };
+
+  let settled = false;
+  const pending = driver.destroy(handle).then(() => {
+    settled = true;
+  });
+  await settle();
+  assert.equal(calls, 1);
+  assert.equal(settled, false);
+  t.mock.timers.tick(SPRITE_DESTROY_RETRY_DELAYS_MS[0]!);
+  await settle();
+  assert.equal(calls, 2);
+  assert.equal(settled, false);
+  t.mock.timers.tick(SPRITE_DESTROY_RETRY_DELAYS_MS[1]!);
+  await pending;
+  assert.equal(calls, 3);
+});
+
+/**
+ * The sandbox e2e asks "does this sprite already exist" before it
+ * creates one. Fly aborted that getSprite at the client's one minute
+ * timeout, and the suite ended before a machine existed. A retry
+ * covers the abort. A timeout is still not "gone", and a status the
+ * API actually returned is still answered once.
+ */
+test("a sprite lookup retries a control-plane timeout and still reports a real failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const notices: string[] = [];
+  let calls = 0;
+  const client = {
+    async getSprite() {
+      calls += 1;
+      throw new Error("Network error: The operation was aborted due to timeout");
+    },
+  };
+  const pending = spriteExistsWithRetry(client as never, "bento-e2e", (err) => {
+    notices.push(err instanceof Error ? err.message : String(err));
+    throw new Error("progress must not replace the lookup error");
+  }).then(
+    (found) => found as boolean | Error,
+    (err: Error) => err,
+  );
+
+  await settle();
+  assert.equal(calls, 1);
+  for (const delay of SPRITE_LOOKUP_RETRY_DELAYS_MS) {
+    t.mock.timers.tick(delay);
+    await settle();
+  }
+  const result = await pending;
+  assert.ok(result instanceof Error);
+  assert.match(result.message, /aborted due to timeout/);
+  assert.equal(calls, SPRITE_LOOKUP_RETRY_DELAYS_MS.length + 1);
+  assert.equal(notices.length, SPRITE_LOOKUP_RETRY_DELAYS_MS.length);
+
+  // The third answer is the one that counts: two aborts, then the sprite.
+  calls = 0;
+  const flaky = {
+    async getSprite() {
+      calls += 1;
+      if (calls < 3) throw new Error("Network error: fetch failed");
+      return { name: "bento-e2e" };
+    },
+  };
+  const found = spriteExistsWithRetry(flaky as never, "bento-e2e");
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[0]!);
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[1]!);
+  await settle();
+  assert.equal(await found, true);
+  assert.equal(calls, 3);
+
+  // A 404 on the last try is "gone", which is what the e2e wants before
+  // it creates a machine.
+  calls = 0;
+  const absent = {
+    async getSprite() {
+      calls += 1;
+      if (calls < 3) throw new Error("Network error: The operation was aborted due to timeout");
+      throw new APIError("sprite not found", { statusCode: 404 });
+    },
+  };
+  const gone = spriteExistsWithRetry(absent as never, "bento-e2e");
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[0]!);
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[1]!);
+  await settle();
+  assert.equal(await gone, false);
+  assert.equal(calls, 3);
+
+  // A response with a status is answered once. Waiting here would turn
+  // a refused token into a long pause.
+  calls = 0;
+  notices.length = 0;
+  const refused = {
+    async getSprite() {
+      calls += 1;
+      throw new APIError("upstream is unwell", { statusCode: 500 });
+    },
+  };
+  await assert.rejects(
+    spriteExistsWithRetry(refused as never, "bento-e2e", (err) => {
+      notices.push(String(err));
+    }),
+    /upstream is unwell/,
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(notices, []);
+});
+
+/**
+ * delete-sprite.ts is a short process whose only pending work during a
+ * lookup retry is this timer. An unref'd timer let Node exit with
+ * "unsettled top-level await" before the retry ran, so a sprite the
+ * test had created was left for the next attempt.
+ */
+test("a sprite lookup retry keeps its backoff on the event loop", async () => {
+  // A separate process: the check replaces setTimeout, which the rest
+  // of this file is also using. The script clears the real timer and
+  // runs the callback itself, so it does not wait out the backoff.
+  const source = `
+    import { APIError } from "@fly/sprites";
+    import { spriteExistsWithRetry } from "./src/sprite.ts";
+    const real = global.setTimeout;
+    let referenced = false;
+    let release = () => {};
+    global.setTimeout = (fn, ms, ...args) => {
+      const timer = real(fn, ms, ...args);
+      referenced = timer.hasRef();
+      release = () => {
+        clearTimeout(timer);
+        fn(...args);
+      };
+      return timer;
+    };
+    let calls = 0;
+    const pending = spriteExistsWithRetry({
+      async getSprite() {
+        calls += 1;
+        if (calls === 1) throw new Error("Network error: The operation was aborted due to timeout");
+        throw new APIError("upstream is unwell", { statusCode: 500 });
+      },
+    }, "bento-e2e");
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    if (!referenced) {
+      console.error("retry backoff was not keeping the event loop alive");
+      process.exit(1);
+    }
+    global.setTimeout = real;
+    release();
+    await pending.then(
+      () => process.exit(1),
+      (err) => {
+        if (!String(err).includes("upstream is unwell")) {
+          console.error(err);
+          process.exit(1);
+        }
+      },
+    );
+  `;
+  const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", source],
+      { cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), "..") },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(`${stderr}\n${stdout}\n${err.message}`));
+        else resolve({ stdout, stderr });
+      },
+    );
+  });
+  assert.equal(stderr, "", stderr);
+  assert.equal(stdout, "");
+});
+
+/**
+ * The sprite a cold provision talks to once acquireSprite has a machine.
+ * The rest of provision has to finish for the retry to count as success.
+ */
+function acquiredSprite() {
+  return {
+    name: "bento-feature",
+    async execFileHTTP() {
+      return { stdout: "", stderr: "", exitCode: 0 };
+    },
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          throw new TypeError("Cannot read properties of null (reading 'map')");
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Cold provision's createSprite threw Fly's HTML 500 page, and the
+ * cleanup step then found the sprite and deleted it. The response was
+ * the failure. The machine was not. A retry has to look the name up
+ * before it spends another create.
+ */
+test("Sprite provisioning retries a control-plane 500 and reuses the sprite a failed create made", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const html500 = () =>
+    new APIError("<title>500 Internal Server Error · Sprites · Fly.io</title>", { statusCode: 500 });
+
+  // The 500 created the machine. The next lookup finds it, so create
+  // runs once.
+  {
+    const messages: string[] = [];
+    let lookups = 0;
+    let creates = 0;
+    const sprite = acquiredSprite();
+    const driver = new SpriteDriver({ token: "token" });
+    (driver as unknown as { client: unknown }).client = {
+      async getSprite() {
+        lookups += 1;
+        if (lookups === 1) throw new APIError("sprite not found", { statusCode: 404 });
+        return sprite;
+      },
+      async createSprite() {
+        creates += 1;
+        throw html500();
+      },
+    };
+    const pending = driver.provision({
+      projectId: "project",
+      featureId: "feature",
+      hostWorkspacePath: "/unused",
+      repositories: [],
+      onProgress: (message) => {
+        messages.push(message);
+      },
+    });
+    await settle();
+    assert.equal(creates, 1);
+    t.mock.timers.tick(SPRITE_ACQUIRE_RETRY_DELAYS_MS[0]!);
+    const handle = await pending;
+    assert.equal(handle.externalId, "bento-feature");
+    assert.equal(creates, 1);
+    assert.ok(messages.some((message) => message.includes("Creating the sandbox failed on the control plane")));
+    assert.ok(messages.some((message) => message.startsWith("Created cloud sandbox")));
+  }
+
+  // Still missing after the failed create: one confirming lookup, then
+  // a second create. When that 500s too, the original error comes back
+  // and no third machine is asked for.
+  {
+    let lookups = 0;
+    let creates = 0;
+    const driver = new SpriteDriver({ token: "token" });
+    (driver as unknown as { client: unknown }).client = {
+      async getSprite() {
+        lookups += 1;
+        throw new APIError("sprite not found", { statusCode: 404 });
+      },
+      async createSprite() {
+        creates += 1;
+        throw html500();
+      },
+    };
+    let settled = false;
+    const pending = driver
+      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .then(
+        () => {
+          settled = true;
+          return "ok" as const;
+        },
+        (err: Error) => {
+          settled = true;
+          return err;
+        },
+      );
+    await settle();
+    assert.equal(creates, 1);
+    // The wait the 500 itself asked for. The sprite is still absent,
+    // and that single 404 must not spend another create.
+    t.mock.timers.tick(SPRITE_ACQUIRE_RETRY_DELAYS_MS[0]!);
+    await settle();
+    assert.equal(creates, 1);
+    // A second look, then one more create. That 500 ends the budget.
+    t.mock.timers.tick(SPRITE_ACQUIRE_RETRY_DELAYS_MS[1]!);
+    await settle();
+    assert.equal(creates, 2);
+    t.mock.timers.tick(SPRITE_ACQUIRE_RETRY_DELAYS_MS[2]!);
+    await settle();
+    const result = await pending;
+    assert.equal(settled, true);
+    assert.ok(result instanceof Error);
+    assert.match(result.message, /500 Internal Server Error/);
+    assert.equal(creates, 2);
+    assert.ok(lookups > 1);
+  }
+
+  // A lookup that 500s has not said the sprite is missing, so it must
+  // not spend a create.
+  {
+    let creates = 0;
+    const driver = new SpriteDriver({ token: "token" });
+    (driver as unknown as { client: unknown }).client = {
+      async getSprite() {
+        throw html500();
+      },
+      async createSprite() {
+        creates += 1;
+        throw new Error("create should not run");
+      },
+    };
+    const pending = driver
+      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .then(
+        () => "ok" as const,
+        (err: Error) => err,
+      );
+    await settle();
+    for (const delay of SPRITE_ACQUIRE_RETRY_DELAYS_MS) {
+      t.mock.timers.tick(delay);
+      await settle();
+    }
+    const result = await pending;
+    assert.ok(result instanceof Error);
+    assert.match(result.message, /500 Internal Server Error/);
+    assert.equal(creates, 0);
+  }
+
+  // A refused create is answered once.
+  {
+    let creates = 0;
+    const driver = new SpriteDriver({ token: "token" });
+    (driver as unknown as { client: unknown }).client = {
+      async getSprite() {
+        throw new APIError("sprite not found", { statusCode: 404 });
+      },
+      async createSprite() {
+        creates += 1;
+        throw new APIError("bad request", { statusCode: 400 });
+      },
+    };
+    let settled = false;
+    const pending = driver
+      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .then(
+        () => {
+          settled = true;
+          return "ok" as const;
+        },
+        (err: Error) => {
+          settled = true;
+          return err;
+        },
+      );
+    await settle();
+    assert.equal(settled, true);
+    assert.equal(creates, 1);
+    const result = await pending;
+    assert.ok(result instanceof Error);
+    assert.match(result.message, /bad request/);
+  }
+
+  // The account allows ten creates a minute. A 429 names its own wait,
+  // and the sprite a previous attempt already made is reused instead
+  // of creating another.
+  {
+    const messages: string[] = [];
+    let lookups = 0;
+    let creates = 0;
+    const sprite = acquiredSprite();
+    const driver = new SpriteDriver({ token: "token" });
+    (driver as unknown as { client: unknown }).client = {
+      async getSprite() {
+        lookups += 1;
+        if (lookups === 1) throw new APIError("sprite not found", { statusCode: 404 });
+        return sprite;
+      },
+      async createSprite() {
+        creates += 1;
+        throw new APIError("Sprite creation rate limit exceeded", {
+          statusCode: 429,
+          retryAfterSeconds: 60,
+        });
+      },
+    };
+    const pending = driver.provision({
+      projectId: "project",
+      featureId: "feature",
+      hostWorkspacePath: "/unused",
+      repositories: [],
+      onProgress: (message) => {
+        messages.push(message);
+      },
+    });
+    await settle();
+    assert.equal(creates, 1);
+    t.mock.timers.tick(59_000);
+    await settle();
+    assert.equal(lookups, 1, "the rate limit wait should elapse before another lookup");
+    t.mock.timers.tick(1_000);
+    const handle = await pending;
+    assert.equal(handle.externalId, "bento-feature");
+    assert.equal(creates, 1);
+    assert.ok(messages.some((message) => message.includes("Sprite creation is rate limited")));
+  }
+});
+
+/**
+ * The sequence sandbox-e2e run 35762235632 went through during a
+ * Sprites incident: a create that 500s, a lookup that 404s, a lookup
+ * that does not answer, a lookup that 404s, and then a 429 with a
+ * minute's retry-after. The three short waits were spent by then, and
+ * the provision died on the one error whose retry was sure to be
+ * answered. The account had made two creates in that minute, not ten.
+ */
+test("Sprite provisioning waits out a rate limit even after the short retries are spent", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const html500 = () =>
+    new APIError("<title>500 Internal Server Error · Sprites · Fly.io</title>", { statusCode: 500 });
+  const rateLimited = () =>
+    new APIError("Sprite creation rate limit exceeded. You can create 10 sprites per minute.", {
+      statusCode: 429,
+      retryAfterSeconds: 60,
+    });
+  const notFound = () => new APIError("sprite not found", { statusCode: 404 });
+
+  // The run as it happened, with the machine arriving on the create
+  // after the rate limit wait.
+  {
+    const messages: string[] = [];
+    let lookups = 0;
+    let creates = 0;
+    const sprite = acquiredSprite();
+    const driver = new SpriteDriver({ token: "token" });
+    (driver as unknown as { client: unknown }).client = {
+      async getSprite() {
+        lookups += 1;
+        if (lookups === 3) throw new Error("Network error: The operation was aborted due to timeout");
+        throw notFound();
+      },
+      async createSprite() {
+        creates += 1;
+        if (creates === 1) throw html500();
+        if (creates === 2) throw rateLimited();
+        return sprite;
+      },
+    };
+    const pending = driver.provision({
+      projectId: "project",
+      featureId: "feature",
+      hostWorkspacePath: "/unused",
+      repositories: [],
+      onProgress: (message) => {
+        messages.push(message);
+      },
+    });
+    await settle();
+    assert.equal(creates, 1);
+    // The 500's wait, then the lookup that confirms the machine is
+    // absent, which spends the second short wait.
+    t.mock.timers.tick(SPRITE_ACQUIRE_RETRY_DELAYS_MS[0]!);
+    await settle();
+    assert.equal(lookups, 2);
+    // A lookup the control plane never answered spends the third.
+    t.mock.timers.tick(SPRITE_ACQUIRE_RETRY_DELAYS_MS[1]!);
+    await settle();
+    assert.equal(lookups, 3);
+    t.mock.timers.tick(SPRITE_ACQUIRE_RETRY_DELAYS_MS[2]!);
+    await settle();
+    // Absent, so a second create, which meets the rate limit. Nothing
+    // is left in the short budget, and that must not matter.
+    assert.equal(lookups, 4);
+    assert.equal(creates, 2);
+    assert.ok(messages.some((message) => message.includes("Sprite creation is rate limited")));
+    t.mock.timers.tick(59_000);
+    await settle();
+    assert.equal(creates, 2, "the create has to wait for the retry-after the API asked for");
+    t.mock.timers.tick(1_000);
+    const handle = await pending;
+    assert.equal(handle.externalId, "bento-feature");
+    assert.equal(creates, 3);
+    assert.ok(messages.some((message) => message.startsWith("Created cloud sandbox")));
+  }
+
+  // A limit that never clears still ends the provision, after exactly
+  // the waits it is allowed, and with the 429 as the reason.
+  {
+    let creates = 0;
+    const driver = new SpriteDriver({ token: "token" });
+    (driver as unknown as { client: unknown }).client = {
+      async getSprite() {
+        throw notFound();
+      },
+      async createSprite() {
+        creates += 1;
+        throw rateLimited();
+      },
+    };
+    const pending = driver
+      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .then(
+        () => "ok" as const,
+        (err: Error) => err,
+      );
+    await settle();
+    assert.equal(creates, 1);
+    for (let wait = 0; wait < SPRITE_ACQUIRE_RATE_LIMIT_WAITS; wait++) {
+      t.mock.timers.tick(60_000);
+      await settle();
+      assert.equal(creates, wait + 2);
+    }
+    const result = await pending;
+    assert.ok(result instanceof Error);
+    assert.match(result.message, /rate limit exceeded/);
+    assert.equal(creates, SPRITE_ACQUIRE_RATE_LIMIT_WAITS + 1);
+  }
 });

@@ -91,6 +91,24 @@ const PI_MIN_VERSION = "0.70.1";
  * bump: warm sprites that already have dsh compare --version to this string.
  */
 const DSH_VERSION = "0.1.1-rc.2";
+/**
+ * dsh 0.1.1-rc.2 depends on @deepseek-ai/cordis-plugin-hmr with a caret.
+ * 1.0.18 removed registerConfig, which a headless run calls to watch
+ * the user patch layer. 1.0.17 is the last release that still provides
+ * it. Installed beside dsh so npm dedupes to this version.
+ *
+ * That pin is not enough on its own. Cordis hides a service from
+ * ctx.get until the plugin fiber is active, and the HMR plugin's
+ * startup waits on a realpath. dsh creates the plugin and then
+ * immediately asks for the service, so the lookup misses and the run
+ * dies with "user patch-layer watching requires the Cordis HMR
+ * service" even when 1.0.17 is the copy on disk. The install patches
+ * that lookup to wait out the startup. The pin file records both, so
+ * a machine that only has the plugin version installs again.
+ */
+const DSH_HMR_VERSION = "1.0.17";
+const DSH_HMR_PIN_VALUE = `${DSH_HMR_VERSION}+wait`;
+const DSH_HMR_PIN = "/opt/bento/dsh-hmr-pin";
 
 /**
  * Idempotent, and safe to run on every provision: a sandbox that already
@@ -192,9 +210,15 @@ cli_stale() {
       ver=$(/opt/bento/dsh/bin/dsh --version 2>/dev/null || true)
       [ -n "$ver" ] || ver=$(/opt/bento/dsh/bin/dsh -V 2>/dev/null || true)
       case "$ver" in
-        *${DSH_VERSION}*) return 1 ;;
+        *${DSH_VERSION}*) ;;
         *) return 0 ;;
       esac
+      # The binary's version does not name the HMR plugin beside it.
+      # A machine installed before the pin has the right dsh and a
+      # headless run that dies, so the pin file is what sends it back
+      # through npm. Missing or different counts as stale.
+      [ "$(cat ${DSH_HMR_PIN} 2>/dev/null || true)" = "${DSH_HMR_PIN_VALUE}" ] && return 1
+      return 0
       ;;
     fx)
       [ ! -f "$FX_CUSTOM_MARKER" ]
@@ -434,8 +458,48 @@ ensure_node() {
 if wanted dsh; then
   if ensure_node; then
     PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/dsh \\
-      @deepseek-ai/dsh@${DSH_VERSION} >/dev/null 2>&1 || echo "bento: dsh install failed" >&2
+      @deepseek-ai/dsh@${DSH_VERSION} @deepseek-ai/cordis-plugin-hmr@${DSH_HMR_VERSION} >/dev/null 2>&1 \\
+      || echo "bento: dsh install failed" >&2
     if [ -x /opt/bento/dsh/bin/dsh ]; then
+      # Cordis answers ctx.get only once the plugin fiber is active.
+      # dsh asks on the same turn it creates the plugin, and the HMR
+      # startup still has a realpath in flight, so the service looks
+      # missing. Wait for it. A second install sees the marker and
+      # leaves the file alone.
+      boot=$(find /opt/bento/dsh -path '*/@deepseek-ai/dsh-app-boot/lib/index.js' -type f 2>/dev/null | head -n 1)
+      if [ -n "$boot" ]; then
+        if ! BENTO_DSH_BOOT="$boot" /opt/bento/node/bin/node <<'BENTO_DSH_HMR_WAIT'
+const fs = require("fs");
+const file = process.env.BENTO_DSH_BOOT;
+const text = fs.readFileSync(file, "utf8");
+if (text.includes("bento-wait-for-hmr")) process.exit(0);
+const bin = "$" + "{binName}";
+const tick = String.fromCharCode(96);
+const message = tick + bin + ": user patch-layer watching requires the Cordis HMR service" + tick;
+const needle = "\\tconst hmr = ctx.get(\\"hmr\\");\\n\\tif (hmr === void 0) throw new Error(" + message + ");";
+const patch = [
+  "\\t// bento-wait-for-hmr: ctx.get hides the service until its fiber is active.",
+  "\\tlet hmr = ctx.get(\\"hmr\\");",
+  "\\tfor (let attempt = 0; hmr === void 0 && attempt < 50; attempt++) {",
+  "\\t\\tawait new Promise((resolve) => setTimeout(resolve, 20));",
+  "\\t\\thmr = ctx.get(\\"hmr\\");",
+  "\\t}",
+  "\\tif (hmr === void 0) throw new Error(" + message + ");",
+].join("\\n");
+if (!text.includes(needle)) {
+  console.error("bento: dsh boot file has no HMR check to patch");
+  process.exit(1);
+}
+fs.writeFileSync(file, text.replace(needle, patch));
+BENTO_DSH_HMR_WAIT
+        then
+          echo "bento: dsh HMR wait patch failed" >&2
+          rm -f /opt/bento/dsh/bin/dsh
+        fi
+      fi
+    fi
+    if [ -x /opt/bento/dsh/bin/dsh ]; then
+      printf '%s\\n' "${DSH_HMR_PIN_VALUE}" > ${DSH_HMR_PIN}
       mkdir -p /opt/bento/dsh-home
       cat > /opt/bento/dsh-home/cordis.patch.yml <<'BENTO_DSH_PROFILE'
 - id: agent-default-model

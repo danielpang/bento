@@ -58,9 +58,11 @@ test("the toolchain installs git and keeps its private Node off the PATH", () =>
 test("dsh is pinned, configured, and initialized for headless sandbox use", async () => {
   assert.equal(TOOLCHAIN_VERSION, 3, "adding dsh must not stampede warm machines with a version bump");
     assert.match(AGENT_TOOLCHAIN_SCRIPT, /@deepseek-ai\/dsh@0\.1\.1-rc\.2/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /@deepseek-ai\/cordis-plugin-hmr@1\.0\.17/);
     assert.match(AGENT_TOOLCHAIN_SCRIPT, /version_below "\$ver" "1\.14\.24"/);
     assert.match(AGENT_TOOLCHAIN_SCRIPT, /version_below "\$ver" "0\.70\.1"/);
-    assert.match(AGENT_TOOLCHAIN_SCRIPT, /\*0\.1\.1-rc\.2\*\) return 1/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /dsh-hmr-pin/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /bento-wait-for-hmr/);
 
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-dsh-"));
   try {
@@ -79,6 +81,8 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
 `,
     );
     assert.match(readFileSync(path.join(root, "npm-installs"), "utf8"), /^@deepseek-ai\/dsh@0\.1\.1-rc\.2$/m);
+    assert.match(readFileSync(path.join(root, "npm-installs"), "utf8"), /^@deepseek-ai\/cordis-plugin-hmr@1\.0\.17$/m);
+    assert.equal(readFileSync(path.join(root, "opt/bento/dsh-hmr-pin"), "utf8").trim(), "1.0.17+wait");
     assert.equal(
       readFileSync(path.join(root, "dsh-runs"), "utf8").trim(),
       "deepseek-v4-pro|danger-full-access|1|--profile headless --dump-config",
@@ -103,6 +107,10 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
     for (const required of [
       "BENTO_NODE_VERSION=22.22.2",
       "@deepseek-ai/dsh@0.1.1-rc.2",
+      "@deepseek-ai/cordis-plugin-hmr@1.0.17",
+      "1.0.17+wait",
+      "bento-wait-for-hmr",
+      "/opt/bento/dsh-hmr-pin",
       "exec /opt/bento/dsh/bin/dsh",
       "for tool in agy claude codex cursor-agent dsh fx muse opencode pi pool",
       "model: !!js process.env.DSH_MODEL",
@@ -417,6 +425,25 @@ test("a warm machine reinstalls only pi when it is too old for native DeepSeek",
   }
 });
 
+test("a warm machine reinstalls dsh when the HMR plugin pin is missing", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-dsh-hmr-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+    rmSync(path.join(root, "opt/bento/dsh-hmr-pin"));
+    rmSync(path.join(root, "npm-installs"), { force: true });
+    const result = sandbox.run();
+    assert.equal(result.status, 0, result.stderr);
+    const installs = readFileSync(path.join(root, "npm-installs"), "utf8");
+    assert.match(installs, /@deepseek-ai\/dsh@0\.1\.1-rc\.2/);
+    assert.match(installs, /@deepseek-ai\/cordis-plugin-hmr@1\.0\.17/);
+    assert.doesNotMatch(installs, /pi-coding-agent/);
+    assert.equal(readFileSync(path.join(root, "opt/bento/dsh-hmr-pin"), "utf8").trim(), "1.0.17+wait");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a warm machine reinstalls only dsh when the installed pin does not match", () => {
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-dsh-stale-"));
   try {
@@ -669,19 +696,25 @@ class ToolchainSandbox {
       path.join(nodeBin, "npm"),
       `#!/bin/sh
 prefix=
-package=
 while [ "$#" -gt 0 ]; do
   if [ "$1" = --prefix ]; then prefix=$2; shift 2; continue; fi
+  case "$1" in
+    -*) shift; continue ;;
+    @*) ;;
+    *) shift; continue ;;
+  esac
   package=$1
   shift
-done
-case "$package" in
-  @deepseek-ai/dsh@*) binary=dsh ;;
-  @earendil-works/pi-coding-agent) binary=pi ;;
-  *) exit 1 ;;
-esac
-mkdir -p "$prefix/bin"
-cat > "$prefix/bin/$binary" <<'EOF'
+  case "$package" in
+    @deepseek-ai/dsh@*) binary=dsh ;;
+    @deepseek-ai/cordis-plugin-hmr@*) binary= ;;
+    @earendil-works/pi-coding-agent) binary=pi ;;
+    *) exit 1 ;;
+  esac
+  printf '%s\\n' "$package" >> ${root}/npm-installs
+  [ -n "$binary" ] || continue
+  mkdir -p "$prefix/bin"
+  cat > "$prefix/bin/$binary" <<'EOF'
 #!/bin/sh
 case "$1" in
   --version|-V)
@@ -695,8 +728,8 @@ case "$1" in
 esac
 printf '%s\\n' "\${DSH_MODEL:-}|\${DSH_PERMISSION_MODE:-}|\${DSH_TELEMETRY_DISABLED:-}|\$*" >> ${root}/dsh-runs
 EOF
-chmod +x "$prefix/bin/$binary"
-printf '%s\\n' "$package" >> ${root}/npm-installs
+  chmod +x "$prefix/bin/$binary"
+done
 `,
     );
 

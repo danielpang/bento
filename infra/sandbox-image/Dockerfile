@@ -89,6 +89,7 @@ RUN arch="$(dpkg --print-architecture)" \
     @earendil-works/pi-coding-agent \
  && PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/dsh \
     @deepseek-ai/dsh@0.1.1-rc.2 \
+    @deepseek-ai/cordis-plugin-hmr@1.0.17 \
  && printf '#!/bin/sh\nPATH=/opt/bento/node/bin:$PATH\nexport PATH\nexec /opt/bento/pi/bin/pi "$@"\n' \
     > /usr/local/bin/pi \
  && printf '%s\n' \
@@ -105,6 +106,7 @@ RUN arch="$(dpkg --print-architecture)" \
     'exec /opt/bento/dsh/bin/dsh "$@"' \
     > /usr/local/bin/dsh \
  && chmod +x /usr/local/bin/pi /usr/local/bin/dsh \
+ && printf '%s\n' '1.0.17+wait' > /opt/bento/dsh-hmr-pin \
  && mkdir -p /opt/bento/dsh-home \
  && printf '%s\n' \
     '- id: agent-default-model' \
@@ -116,6 +118,37 @@ RUN arch="$(dpkg --print-architecture)" \
     > /opt/bento/dsh-home/cordis.patch.yml \
  && DSH_HOME=/opt/bento/dsh-home DSH_MODEL=deepseek-v4-pro DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 \
     /usr/local/bin/dsh --profile headless --dump-config >/dev/null
+
+# Cordis hides a service from ctx.get until the plugin fiber is active.
+# dsh asks on the same turn it creates the HMR plugin, while that
+# plugin is still resolving its base directory, so the lookup misses.
+# The same wait the sprite toolchain applies.
+RUN boot=$(find /opt/bento/dsh -path '*/@deepseek-ai/dsh-app-boot/lib/index.js' -type f | head -n 1) && \
+    test -n "$boot" && \
+    BENTO_DSH_BOOT="$boot" /opt/bento/node/bin/node <<'BENTO_DSH_HMR_WAIT'
+const fs = require("fs");
+const file = process.env.BENTO_DSH_BOOT;
+const text = fs.readFileSync(file, "utf8");
+if (text.includes("bento-wait-for-hmr")) process.exit(0);
+const bin = "$" + "{binName}";
+const tick = String.fromCharCode(96);
+const message = tick + bin + ": user patch-layer watching requires the Cordis HMR service" + tick;
+const needle = "\tconst hmr = ctx.get(\"hmr\");\n\tif (hmr === void 0) throw new Error(" + message + ");";
+const patch = [
+  "\t// bento-wait-for-hmr: ctx.get hides the service until its fiber is active.",
+  "\tlet hmr = ctx.get(\"hmr\");",
+  "\tfor (let attempt = 0; hmr === void 0 && attempt < 50; attempt++) {",
+  "\t\tawait new Promise((resolve) => setTimeout(resolve, 20));",
+  "\t\thmr = ctx.get(\"hmr\");",
+  "\t}",
+  "\tif (hmr === void 0) throw new Error(" + message + ");",
+].join("\n");
+if (!text.includes(needle)) {
+  console.error("bento: dsh boot file has no HMR check to patch");
+  process.exit(1);
+}
+fs.writeFileSync(file, text.replace(needle, patch));
+BENTO_DSH_HMR_WAIT
 
 # Installers drop binaries in their own directories, and an agent is
 # spawned directly rather than through a login shell, so every tool is
