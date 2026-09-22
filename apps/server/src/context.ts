@@ -1,7 +1,14 @@
 import type { Db } from "@bento/db";
 import { user } from "@bento/db";
 import { GitHubApp } from "@bento/github";
-import { DockerDriver, LocalProcessDriver, SpriteDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import {
+  DockerDriver,
+  LocalProcessDriver,
+  SpriteDriver,
+  WorktreeManager,
+  type SandboxDriver,
+  type SpriteLookupRetry,
+} from "@bento/sandbox";
 import type PgBoss from "pg-boss";
 import type pg from "pg";
 import type { Analytics } from "./analytics.js";
@@ -147,7 +154,37 @@ export interface AppContext {
   draining: boolean;
 }
 
-export function createDriver(env: Env): SandboxDriver {
+/**
+ * A command had to look a sprite up more than once.
+ *
+ * One event per command. `retries` is how many lookups failed, so a
+ * sum of that property is the retry volume and a rising count of
+ * events is more commands hitting the info endpoint. The distinct id
+ * is the server: the driver does not know which person or
+ * organization the command belongs to.
+ */
+export const SPRITE_LOOKUP_RETRIED_EVENT = "sprite lookup retried";
+
+export function reportSpriteLookupRetry(analytics: Analytics | null | undefined, info: SpriteLookupRetry): void {
+  try {
+    analytics?.capture({
+      event: SPRITE_LOOKUP_RETRIED_EVENT,
+      properties: {
+        sprite: info.name,
+        retries: info.retries,
+        outcome: info.outcome,
+        reason: info.reason,
+      },
+    });
+  } catch (err) {
+    console.warn(`could not record a sprite lookup retry for ${info.name}:`, err);
+  }
+}
+
+export function createDriver(
+  env: Env,
+  hooks?: { onSpriteLookupRetry?: (info: SpriteLookupRetry) => void },
+): SandboxDriver {
   switch (env.BENTO_SANDBOX_DRIVER) {
     case "sprite": {
       if (!env.SPRITES_TOKEN) {
@@ -156,6 +193,7 @@ export function createDriver(env: Env): SandboxDriver {
       return new SpriteDriver({
         token: env.SPRITES_TOKEN,
         ...(env.SPRITES_REGION ? { region: env.SPRITES_REGION } : {}),
+        ...(hooks?.onSpriteLookupRetry ? { onLookupRetry: hooks.onSpriteLookupRetry } : {}),
       });
     }
     case "local-process":

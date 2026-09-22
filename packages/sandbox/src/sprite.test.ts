@@ -2371,7 +2371,14 @@ test("Sprite exec retries a sprite the info endpoint has not caught up to", asyn
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const child = fakeChild();
   let calls = 0;
-  const driver = new SpriteDriver({ token: "token" });
+  const noted: Array<{ retries: number; outcome: string; reason: string; name: string }> = [];
+  const driver = new SpriteDriver({
+    token: "token",
+    onLookupRetry(info) {
+      noted.push(info);
+      throw new Error("metrics must not fail the command");
+    },
+  });
   (driver as unknown as { client: Record<string, unknown> }).client = {
     async getSprite() {
       calls += 1;
@@ -2406,6 +2413,7 @@ test("Sprite exec retries a sprite the info endpoint has not caught up to", asyn
   assert.ok(!(result instanceof Error), result instanceof Error ? result.message : "");
   assert.equal(result.exitCode, 0);
   assert.equal(calls, 3);
+  assert.deepEqual(noted, [{ name: "bento-feature", retries: 2, outcome: "recovered", reason: "not_found" }]);
 });
 
 test("Sprite exec addresses a sprite by name when the info endpoint keeps saying it is missing", async (t) => {
@@ -2413,7 +2421,13 @@ test("Sprite exec addresses a sprite by name when the info endpoint keeps saying
   const child = fakeChild();
   let lookups = 0;
   let handled: string | null = null;
-  const driver = new SpriteDriver({ token: "token" });
+  const noted: Array<{ name: string; retries: number; outcome: string; reason: string }> = [];
+  const driver = new SpriteDriver({
+    token: "token",
+    onLookupRetry(info) {
+      noted.push(info);
+    },
+  });
   (driver as unknown as { client: Record<string, unknown> }).client = {
     async getSprite() {
       lookups += 1;
@@ -2444,6 +2458,9 @@ test("Sprite exec addresses a sprite by name when the info endpoint keeps saying
   await settle();
   assert.equal(handled, "bento-feature");
   assert.equal(lookups, 5);
+  assert.deepEqual(noted, [
+    { name: "bento-feature", retries: 5, outcome: "addressed_by_name", reason: "not_found" },
+  ]);
   child.emit("spawn");
   child.stdout.write("ok\n");
   child.emit("exit", 0);
@@ -2502,7 +2519,13 @@ test("Sprite exec does not paper over a lookup that failed for another reason", 
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let calls = 0;
   let handled = false;
-  const driver = new SpriteDriver({ token: "token" });
+  const noted: Array<{ name: string; retries: number; outcome: string; reason: string }> = [];
+  const driver = new SpriteDriver({
+    token: "token",
+    onLookupRetry(info) {
+      noted.push(info);
+    },
+  });
   (driver as unknown as { client: Record<string, unknown> }).client = {
     async getSprite() {
       calls += 1;
@@ -2527,8 +2550,10 @@ test("Sprite exec does not paper over a lookup that failed for another reason", 
   assert.match(result.message, /upstream is unwell/);
   assert.equal(handled, false);
   assert.equal(calls, 5);
+  assert.deepEqual(noted, [{ name: "bento-feature", retries: 5, outcome: "failed", reason: "transient" }]);
 
   let unauthorized = 0;
+  noted.length = 0;
   (driver as unknown as { client: Record<string, unknown> }).client = {
     async getSprite() {
       unauthorized += 1;
@@ -2540,4 +2565,41 @@ test("Sprite exec does not paper over a lookup that failed for another reason", 
   };
   await assert.rejects(collectExec(driver.exec(spriteHandle, ["claude"])), /unauthorized/);
   assert.equal(unauthorized, 1);
+  assert.deepEqual(noted, []);
+});
+
+test("Sprite exec reports a lookup that mixed a missing sprite with a blinking API", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const noted: Array<{ name: string; retries: number; outcome: string; reason: string }> = [];
+  const driver = new SpriteDriver({
+    token: "token",
+    onLookupRetry(info) {
+      noted.push(info);
+    },
+  });
+  (driver as unknown as { client: Record<string, unknown> }).client = {
+    async getSprite() {
+      calls += 1;
+      if (calls === 1) throw new APIError("sprite not found", { statusCode: 404 });
+      throw new APIError("upstream is unwell", { statusCode: 500 });
+    },
+    sprite() {
+      throw new Error("a failed lookup must not be addressed by name");
+    },
+  };
+
+  const pending = collectExec(driver.exec(spriteHandle, ["claude"])).then(
+    () => "resolved" as const,
+    (err: Error) => err,
+  );
+  for (let i = 0; i < 6; i++) {
+    await settle();
+    t.mock.timers.tick(2_000);
+  }
+  const result = await pending;
+  assert.ok(result instanceof Error);
+  assert.match(result.message, /upstream is unwell/);
+  assert.equal(calls, 5);
+  assert.deepEqual(noted, [{ name: "bento-feature", retries: 5, outcome: "failed", reason: "mixed" }]);
 });

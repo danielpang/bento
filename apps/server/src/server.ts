@@ -19,7 +19,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { and, eq } from "drizzle-orm";
 import { member, user } from "@bento/db";
-import { createDriver, createGitHubApp, ensureLocalUser, type AppContext } from "./context.js";
+import {
+  createDriver,
+  createGitHubApp,
+  ensureLocalUser,
+  reportSpriteLookupRetry,
+  type AppContext,
+} from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
@@ -203,7 +209,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       pool,
       boss,
       bus: new EventBus(),
-      driver: createDriver(env),
+      driver: createDriver(env, {
+        onSpriteLookupRetry: (info) => reportSpriteLookupRetry(analytics, info),
+      }),
       worktrees: new WorktreeManager(env.BENTO_DATA_DIR),
       secretBox,
       artifacts,

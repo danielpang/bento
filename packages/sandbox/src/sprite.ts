@@ -201,6 +201,21 @@ function spriteLookupIsRetriable(err: unknown): boolean {
   );
 }
 
+/**
+ * One command's sprite info lookup needed more than the first try.
+ *
+ * `retries` is the number of failed lookups. A first try that works
+ * is not reported. `recovered` means a later lookup saw the sprite.
+ * `addressed_by_name` means every lookup said it was missing, so the
+ * command went on by name. `failed` means the lookup gave up.
+ */
+export interface SpriteLookupRetry {
+  name: string;
+  retries: number;
+  outcome: "recovered" | "addressed_by_name" | "failed";
+  reason: "not_found" | "transient" | "mixed";
+}
+
 export interface SpriteDriverOptions {
   token: string;
   /** Sprite size. Agents are IO heavy rather than CPU heavy. */
@@ -211,6 +226,14 @@ export interface SpriteDriverOptions {
   workdir?: string;
   /** Request timeout. Long by default, because provisioning installs. */
   timeoutMs?: number;
+  /**
+   * Told when a command's info lookup had to be tried again.
+   *
+   * A rising count is the info endpoint lagging or 404ing sprites
+   * that still run commands. The notice must not change the command:
+   * a throw here is swallowed.
+   */
+  onLookupRetry?: (info: SpriteLookupRetry) => void;
 }
 
 /**
@@ -564,23 +587,67 @@ export class SpriteDriver implements SandboxDriver {
    * Not-found and a briefly unreachable API are retried. A lookup that
    * still says the sprite is gone falls back to a local handle.
    * client.sprite does not create a machine and does not ask the info
-   * endpoint; every command addresses the sprite by name. Any other
-   * failure is thrown: an expired token must not be hidden behind a
-   * handle that fails the same way inside the command.
+   * endpoint; every command addresses the sprite by name. Creating
+   * here would start an empty machine: a missing sprite is created
+   * by acquireSprite, at provision. Any other failure is thrown: an
+   * expired token must not be hidden behind a handle that fails the
+   * same way inside the command.
+   *
+   * Each lookup that needed a retry is reported. The count is how a
+   * deployment sees the info endpoint getting worse.
    */
   private async openSprite(name: string): Promise<Sprite> {
     const attempts = SPRITE_LOOKUP_DELAYS_MS.length + 1;
+    let notFound = 0;
+    let transient = 0;
+    const report = (outcome: SpriteLookupRetry["outcome"]) => {
+      this.noteLookupRetries(name, notFound, transient, outcome);
+    };
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempt > 0) await sleep(SPRITE_LOOKUP_DELAYS_MS[attempt - 1]!);
       try {
-        return await this.client.getSprite(name);
+        const sprite = await this.client.getSprite(name);
+        report("recovered");
+        return sprite;
       } catch (err) {
-        if (isSpriteNotFound(err)) continue;
-        if (!isTransientSpriteError(err) || attempt === attempts - 1) throw err;
+        if (isSpriteNotFound(err)) {
+          notFound += 1;
+          continue;
+        }
+        if (isTransientSpriteError(err) && attempt < attempts - 1) {
+          transient += 1;
+          continue;
+        }
+        if (isTransientSpriteError(err)) transient += 1;
+        report("failed");
+        throw err;
       }
     }
+    report("addressed_by_name");
     console.warn(`sprite ${name} was not found after ${attempts} lookups; addressing it by name`);
     return this.client.sprite(name);
+  }
+
+  /**
+   * A first lookup that works is the ordinary case and is not an
+   * event. A listener that throws is logged and dropped: the command
+   * is already decided.
+   */
+  private noteLookupRetries(
+    name: string,
+    notFound: number,
+    transient: number,
+    outcome: SpriteLookupRetry["outcome"],
+  ): void {
+    const retries = notFound + transient;
+    if (retries === 0) return;
+    const reason: SpriteLookupRetry["reason"] =
+      notFound > 0 && transient > 0 ? "mixed" : notFound > 0 ? "not_found" : "transient";
+    try {
+      this.options.onLookupRetry?.({ name, retries, outcome, reason });
+    } catch (err) {
+      console.warn(`could not record a sprite lookup retry for ${name}:`, err);
+    }
   }
 
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
