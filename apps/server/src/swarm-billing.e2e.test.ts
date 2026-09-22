@@ -381,6 +381,50 @@ test("every swarm run is announced to the deployment exactly once", async () => 
 });
 
 /**
+ * The same sentence, in dollars.
+ *
+ * The hours have always counted a cancelled run, because the sandbox
+ * ran either way. The money did not: the ledger hung entirely off the
+ * path a run takes when it finishes by itself, so every run a person
+ * stopped spent real tokens that were charged to nobody.
+ *
+ * That is the worst shape this bug could take, because the two new
+ * controls that stop a run are Retry and Cancel, and Retry is the
+ * button somebody presses when a worker is going badly. Ten retries of
+ * a thirty minute worker moved the swarm's spend by nothing at all,
+ * and a budget that cannot see what it spent is a budget that cannot
+ * refuse.
+ */
+test("a run somebody stopped is charged for what it spent", async () => {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+
+  await markCancelled(ctx, swarm.plannerRunId);
+
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run!.status, "cancelled");
+  /*
+   * The assumed tier, which is exactly what it is for: a run that was
+   * stopped printed no cost and no tokens, and zero is the one answer
+   * that is certainly wrong, because the agent ran.
+   */
+  assert.equal(run!.costTier, "assumed", "a stopped run reports nothing, so its figure is a stand in");
+  assert.ok(Number(run!.costUsd) > 0, "and it is not free");
+
+  const [charged] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  assert.equal(
+    Number(charged!.spentAssumedUsd),
+    Number(run!.costUsd),
+    "and the swarm's own ledger is what the budget reads",
+  );
+
+  // Once, like the announcement: the same compare and set guards both.
+  await markCancelled(ctx, swarm.plannerRunId);
+  const [again] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  assert.equal(Number(again!.spentAssumedUsd), Number(run!.costUsd), "a second stop charges nothing again");
+});
+
+/**
  * Local mode has no organization, so none of this is asked at all. The
  * same code, and every question skipped by construction rather than by
  * a branch somebody has to remember to write.
