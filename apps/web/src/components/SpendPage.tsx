@@ -91,13 +91,26 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
         </>
       ) : usage === null ? (
         <SpendPageSkeleton framed={false} />
-      ) : rows.length === 0 ? (
-        <p className="muted">No cards yet. Add one from the board to start tracking spend.</p>
       ) : (
         <>
-          <SpendTable rows={rows} sort={sort} onSort={setSort} />
+          {/*
+           * The cards, and then the swarms, each said only when there
+           * are any.
+           *
+           * An empty card list used to return early for the whole
+           * page, which hid a project's swarm spend behind whether
+           * anybody had made a card: a project worked entirely by
+           * swarms could spend forty dollars and read "no cards yet".
+           * A board can be empty of one kind of work and full of the
+           * other, so each half answers for itself.
+           */}
+          {rows.length === 0 ? (
+            <p className="muted">No cards yet. Add one from the board to start tracking spend.</p>
+          ) : (
+            <SpendTable rows={rows} sort={sort} onSort={setSort} />
+          )}
           <SwarmSpendTable rows={usage.bySwarm ?? []} />
-          <SpendCompletions client={client} projectId={projectId} tick={tick} />
+          {rows.length > 0 && <SpendCompletions client={client} projectId={projectId} tick={tick} />}
         </>
       )}
     </div>
