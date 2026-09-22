@@ -8075,6 +8075,48 @@ a.hours-person-name:hover {
   font-family: var(--mono);
 }
 
+/*
+ * One node's history, resolver runs included. A row per event, the
+ * heading and the note on one line with the time pushed to the end,
+ * so a drawer full of them still reads as a list rather than a log.
+ */
+.swarm-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.swarm-events li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.swarm-event-note {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-event-at {
+  flex: none;
+  font-size: 12px;
+}
+
+/* The node drawer's own composer, under the transcript it belongs to. */
+.swarm-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
 .swarm-confirm {
   position: sticky;
   bottom: 0;

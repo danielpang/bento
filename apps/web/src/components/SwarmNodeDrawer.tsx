@@ -6,7 +6,7 @@ import { attentionWords, isAttention, taskTone, taskWords } from "../swarm/statu
 import { formatCompletion, type SwarmNode } from "../swarm/layout.js";
 import { spendParts, formatUsd } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
-import type { SwarmTask } from "../swarm/types.js";
+import type { SwarmNodeDetail, SwarmTask, SwarmTaskEvent } from "../swarm/types.js";
 
 /**
  * One node, opened.
@@ -25,14 +25,28 @@ import type { SwarmTask } from "../swarm/types.js";
 export function SwarmNodeDrawer({
   task,
   node,
+  detail,
+  repositoriesNamed = 1,
   onClose,
   onMarkDone,
+  onMessage,
   transcript,
   busy,
 }: {
   task: SwarmTask;
   /** The rolled up figures for this node, from the shared model. */
   node: SwarmNode;
+  /**
+   * This node's commits and its history, once the board has fetched
+   * them.
+   *
+   * Absent while the request is in flight, and absent for a caller
+   * that does not fetch them at all, which is what the fixtures do.
+   * The commits then fall back to whatever the plan row carried.
+   */
+  detail?: SwarmNodeDetail;
+  /** How many repositories the project spans, which decides one chip. */
+  repositoriesNamed?: number;
   onClose: () => void;
   /**
    * Marks a leaf done by hand.
@@ -43,6 +57,14 @@ export function SwarmNodeDrawer({
    * that would look like it worked and do nothing.
    */
   onMarkDone?: (taskId: string) => void;
+  /**
+   * Sends a message to the agent on this node.
+   *
+   * Optional for the reason marking done is: a caller with no swarm
+   * selected has nowhere to send it, and a composer wired to nothing
+   * is worse than no composer.
+   */
+  onMessage?: (taskId: string, text: string) => void;
   /**
    * The worker's conversation.
    *
@@ -60,6 +82,12 @@ export function SwarmNodeDrawer({
   const attention = isAttention(task.attention);
   const note = attentionWords(task.attention);
   const flags = Object.entries(task.flags);
+  // The fetched list when there is one, and the plan row's otherwise.
+  // A fetched empty list is an answer, not a missing one, so the
+  // fallback is on the detail being absent rather than on it being
+  // empty.
+  const commits = detail ? detail.commits : task.commits;
+  const events = detail?.events ?? [];
 
   return (
     <aside className="drawer" role="dialog" aria-label={task.title} ref={panel}>
@@ -168,19 +196,49 @@ export function SwarmNodeDrawer({
 
         <section className="section">
           <span className="label">Commits</span>
-          {task.commits.length > 0 ? (
+          {commits.length > 0 ? (
             <ul className="swarm-commits">
-              {task.commits.map((commit) => (
-                <li key={commit.sha}>
+              {commits.map((commit) => (
+                <li key={`${commit.repository ?? ""}${commit.sha}`}>
                   <span className="chip swarm-sha">{commit.sha.slice(0, 7)}</span>
+                  {/* Named only when a project spans more than one, so
+                      the ordinary case is not a column of the same word. */}
+                  {commit.repository && repositoriesNamed > 1 && (
+                    <span className="chip chip-clip">{commit.repository}</span>
+                  )}
                   <span className="swarm-commit-message">{commit.message}</span>
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="muted">Nothing pushed on this branch yet.</p>
+            <p className="muted">
+              No commits carry this task&apos;s trailer yet. They appear here once its agent has
+              committed, and stay after the branch lands.
+            </p>
           )}
         </section>
+
+        {events.length > 0 && (
+          <section className="section">
+            <span className="label">History</span>
+            {/*
+             * What has happened to this node, resolver runs included: a
+             * conflict puts a second agent on a leaf, and this is the
+             * only place on the node that says so. Every value here is
+             * rendered as text, because a `detail` is written by the
+             * coordinator and by agents alike.
+             */}
+            <ul className="swarm-events">
+              {events.map((event) => (
+                <li key={event.id}>
+                  <span className="chip">{eventWords(event)}</span>
+                  <span className="swarm-event-note">{eventNote(event)}</span>
+                  <span className="muted swarm-event-at">{new Date(event.at).toLocaleString()}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
         <section className="section">
           <span className="label">Worker</span>
@@ -189,6 +247,7 @@ export function SwarmNodeDrawer({
               No worker has been on this task yet. The conversation appears here once one starts.
             </p>
           )}
+          {onMessage && <WorkerComposer task={task} busy={busy} onSend={(text) => onMessage(task.id, text)} />}
         </section>
 
         <section className="section">
@@ -243,6 +302,137 @@ export function SwarmNodeDrawer({
       )}
     </aside>
   );
+}
+
+/**
+ * The box for saying something to the agent on one node.
+ *
+ * The card composer's rule is that the box says whether the words go
+ * now or wait, because a person who does not know cannot tell a
+ * message that was read from one that was not. A swarm's worker is the
+ * furthest end of that scale: it is headless, it holds no live
+ * session, and nothing can reach it between the moment it starts and
+ * the moment it reports. So what this box promises is the honest
+ * thing, which is that the message is given to the next agent put on
+ * this task.
+ *
+ * A finished task gets no box at all. There is no next agent, and a
+ * composer over a done node is exactly the control that looks like it
+ * worked and did nothing.
+ */
+export function WorkerComposer({
+  task,
+  busy,
+  onSend,
+}: {
+  task: SwarmTask;
+  busy?: boolean;
+  onSend: (text: string) => void;
+}) {
+  const [text, setText] = useState("");
+  if (task.status === "done" || task.status === "cancelled") {
+    return (
+      <p className="muted">
+        This task is finished, so no agent is coming to read a message. Send one from a task that is
+        still open.
+      </p>
+    );
+  }
+  const send = () => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    setText("");
+    onSend(trimmed);
+  };
+  return (
+    <div className="swarm-composer">
+      <form
+        className="composer"
+        onSubmit={(event) => {
+          event.preventDefault();
+          send();
+        }}
+      >
+        <textarea
+          className="input composer-input"
+          rows={1}
+          value={text}
+          disabled={busy}
+          placeholder="Queue a message..."
+          aria-label="Queue a message for this task"
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter sends and Shift+Enter is the newline, as in the
+            // card composer, so the two boxes behave the same way.
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              send();
+            }
+          }}
+        />
+        <button
+          className="btn btn-primary composer-send"
+          type="submit"
+          disabled={busy || !text.trim()}
+          aria-label="Queue a message for this task"
+        >
+          Send
+        </button>
+      </form>
+      <p className="muted composer-hint">
+        {task.status === "working"
+          ? "An agent is working this task and cannot hear mid turn. Your message is given to the next agent put on it, which is the one that can act on it."
+          : "Your message is given to the agent that picks this task up."}
+      </p>
+    </div>
+  );
+}
+
+/** The heading for one node event, in words rather than in its enum. */
+export function eventWords(event: SwarmTaskEvent): string {
+  switch (event.kind) {
+    case "created":
+      return "Created";
+    case "assigned":
+      return "Assigned";
+    case "status_changed":
+      return event.toStatus ? `Now ${event.toStatus}` : "Status changed";
+    case "attention_raised":
+      // The one an agent other than this node's worker produces: a
+      // conflict, with a resolver put on it.
+      return event.detail?.resolver === "started" ? "Resolver started" : "Needs attention";
+    case "landed":
+      return "Landed";
+    case "note":
+      return "Note";
+    default:
+      return event.kind;
+  }
+}
+
+/**
+ * The sentence under one event's heading.
+ *
+ * Agent written and coordinator written values alike, so it is text.
+ * A run id is printed when there is one, because a resolver run is
+ * otherwise invisible on the node it served.
+ */
+export function eventNote(event: SwarmTaskEvent): string {
+  const detail = event.detail ?? {};
+  const said =
+    typeof detail.conflict === "string"
+      ? detail.conflict
+      : typeof detail.note === "string"
+        ? detail.note
+        : typeof detail.landingError === "string"
+          ? detail.landingError
+          : typeof detail.landingFailed === "string"
+            ? detail.landingFailed
+            : "";
+  const run = event.runId ? `run ${event.runId.slice(0, 8)}` : "";
+  const firstLine = said.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
+  return [firstLine, run].filter((part) => part !== "").join(" · ");
 }
 
 /**

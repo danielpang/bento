@@ -327,3 +327,32 @@ test("a swarm with no plan and no runs still draws", () => {
   assert.equal(read.swarm.workersActive, 0);
   assert.equal(read.swarm.startedAt, null, "the header falls back to when it was created");
 });
+
+
+test("a swarm's pull requests arrive with their addresses checked", async () => {
+  /**
+   * The row is written by the completion path, and a swarm is a tree
+   * of agents reading repositories all day, so the url on it is not
+   * something the console may hand to an anchor unexamined: a
+   * `javascript:` href runs on the console's origin with the session
+   * that is open. The check is here, at the boundary, so no component
+   * has to remember it.
+   */
+  const detail: WireDetail = {
+    swarm: wireSwarm(),
+    tasks: [],
+    activeRuns: [],
+    pullRequests: [
+      { id: "pr-1", repoUrl: "https://github.com/acme/app", number: 12, url: "https://github.com/acme/app/pull/12", headSha: "abc" },
+      { id: "pr-2", repoUrl: "https://github.com/acme/api", number: 13, url: "javascript:alert(document.cookie)", headSha: null },
+    ],
+  };
+  const { doFetch } = fetchStub(detail);
+  const read = await httpSwarmApi("", doFetch).getSwarm("sw-1");
+
+  assert.equal(read.pullRequests.length, 2, "a refused address is still a pull request that exists");
+  assert.equal(read.pullRequests[0]!.url, "https://github.com/acme/app/pull/12");
+  assert.equal(read.pullRequests[0]!.number, 12);
+  assert.equal(read.pullRequests[1]!.url, null, "nothing but http and https becomes an href");
+  assert.equal(read.pullRequests[1]!.number, 13, "and the rest of the row is untouched");
+});

@@ -213,11 +213,29 @@ export function SwarmPage({
 
       {detail.pullRequests.length > 0 && (
         <div className="swarm-prs">
-          {detail.pullRequests.map((pr) => (
-            <a key={pr.id} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer">
-              {pr.repoUrl} #{pr.number}
-            </a>
-          ))}
+          {/*
+           * A chip is a link only when the row carried an address the
+           * console would follow. `client.ts` nulls anything that is
+           * not http or https, because an href is the one place a
+           * string the agents' side of the world wrote could run as
+           * the console. Drawn as text instead, with the reason in the
+           * tooltip, so a pull request that exists is still visible.
+           */}
+          {detail.pullRequests.map((pr) =>
+            pr.url ? (
+              <a key={pr.id} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer">
+                {pr.repoUrl} #{pr.number}
+              </a>
+            ) : (
+              <span
+                key={pr.id}
+                className="chip"
+                title="This pull request's address is not a web link, so it is shown without one."
+              >
+                {pr.repoUrl} #{pr.number}
+              </span>
+            ),
+          )}
         </div>
       )}
 
