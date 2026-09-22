@@ -18,7 +18,7 @@ import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { SWARM_FULL, type NewRun } from "../start-run.js";
-import { rollUpStatus, swarmStatusFrom, tickSwarm, type SwarmTickDeps } from "./coordinator.js";
+import { rollUpStatus, swarmStatusFrom, tickAllLiveSwarms, tickSwarm, type SwarmTickDeps } from "./coordinator.js";
 import { applyRunCharge } from "./ledger.js";
 
 /**
@@ -1141,4 +1141,106 @@ test("a leaf with its own agent starts even when the template names none", async
   assert.equal(result?.workerRunIds.length, 1, "the one that has an agent starts");
   assert.equal(deps.calls.at(-1)?.swarmTaskId, chosen.id);
   assert.equal((await read(chosen.id)).status, "working");
+});
+
+/**
+ * What a restart picks back up.
+ *
+ * A swarm's state is in its rows, so a deploy loses only the jobs that
+ * were in flight, and this is what puts them back. The one that has to
+ * be here and is easiest to leave out is the swarm paused on a plan
+ * limit: it has nothing running, so it looks like nothing to do, and
+ * it is the only state that cannot wake itself. Ticking it is also
+ * what registers the watchdog that is the only thing still asking.
+ */
+test("a restart picks up the swarm that cannot wake itself", async () => {
+  const running = await makeSwarm({ status: "running" });
+  const onHours = await makeSwarm({ status: "paused", pausedReason: "plan_limit" });
+  const byHand = await makeSwarm({ status: "paused", pausedReason: "manual" });
+  const finished = await makeSwarm({ status: "done" });
+
+  const ticked = await tickAllLiveSwarms(ctx);
+  const asked = queued.filter((job) => job.queue === "swarm.tick").map((job) => (job.data as { swarmId?: string }).swarmId);
+  assert.ok(asked.includes(running.id), "a working swarm is ticked");
+  assert.ok(asked.includes(onHours.id), "and so is the one waiting on hours it cannot ask for");
+  assert.ok(!asked.includes(byHand.id), "a person's pause waits for that person");
+  assert.ok(!asked.includes(finished.id), "and a finished swarm is finished");
+  assert.equal(ticked, 2);
+});
+
+/**
+ * The three ceilings, once the tree underneath them has finished.
+ *
+ * Nothing is killed for a ceiling, so the workers that were going when
+ * one bit go on to land their branches, and those landings can be the
+ * last work the plan had. All three stops have to let that tree finish
+ * and publish. The plan limit is the one that matters most, because it
+ * is the only one nobody can lift from here: a swarm left sitting on a
+ * finished tree waits for a person who was never told to come.
+ */
+test("a tree that finished under a ceiling is done, whichever ceiling stopped it", () => {
+  assert.equal(swarmStatusFrom("budget_exhausted", ["done", "done"]), "done");
+  assert.equal(swarmStatusFrom("timed_out", ["done", "done"]), "done");
+  // The plan's hours are a ceiling like the other two. It wears
+  // "paused" only because it is the one that comes back on its own.
+  assert.equal(swarmStatusFrom("paused", ["done", "done"], "plan_limit"), "done");
+  // Still open underneath, so all three hold where they are.
+  assert.equal(swarmStatusFrom("budget_exhausted", ["open", "done"]), "budget_exhausted");
+  assert.equal(swarmStatusFrom("paused", ["open", "done"], "plan_limit"), "paused");
+  // And a person's own pause is still theirs, finished tree or not.
+  assert.equal(swarmStatusFrom("paused", ["done", "done"], "manual"), "paused");
+});
+
+/**
+ * A swarm held on a plan limit, whose last worker landed.
+ *
+ * The whole path rather than the arithmetic: the tick has to notice,
+ * write "done", clear the reason it was paused for, and ask for the
+ * publish. Without that the branch is never pushed and no pull request
+ * is ever opened, and the only thing still looking at the swarm is a
+ * watchdog re-ticking it once a minute for good.
+ */
+test("a plan limit pause whose tree finished publishes rather than waiting for nobody", async () => {
+  const swarm = await makeSwarm({ status: "paused", pausedReason: "plan_limit" });
+  await makeTask(swarm.id, { title: "landed and accepted", status: "done" });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(result?.status, "done", "a finished tree finishes the swarm");
+  assert.equal(result?.becameDone, true, "and the publish is asked for");
+  const after = await readSwarm(swarm.id);
+  assert.equal(after.status, "done");
+  assert.equal(after.pausedReason, null, "nothing is paused any more, so no reason survives");
+});
+
+/**
+ * The mark a ceiling leaves on a leaf, once that leaf is running.
+ *
+ * The attention comes off already. The flag it was written beside did
+ * not, so a leaf with an agent on it went on telling the drawer that
+ * this team was out of agent hours, and kept telling it through every
+ * later retry: the drawer prints the flags verbatim.
+ */
+test("a leaf that starts drops the ceiling it was refused for", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "refused once", status: "assigned" });
+
+  await tickSwarm(ctx, swarm.id, starter([{ outOfCompute: "This team has used its agent hours for the month." }]));
+  const refused = await read(leaf.id);
+  assert.equal(refused.attention, "plan_limit");
+  assert.equal(
+    (refused.flags as { spawnRefusal?: string }).spawnRefusal,
+    "This team has used its agent hours for the month.",
+  );
+
+  // The hours come back, and the same leaf starts.
+  await db.update(swarms).set({ status: "running", pausedReason: null }).where(eq(swarms.id, swarm.id));
+  await tickSwarm(ctx, swarm.id, starter());
+  const started = await read(leaf.id);
+  assert.equal(started.status, "working");
+  assert.equal(started.attention, null);
+  assert.equal(
+    (started.flags as { spawnRefusal?: string }).spawnRefusal,
+    undefined,
+    "a leaf that is working asserts no ceiling",
+  );
 });

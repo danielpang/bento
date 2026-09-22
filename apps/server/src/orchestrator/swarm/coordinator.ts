@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   agentRuns,
   swarmLandings,
@@ -72,9 +72,23 @@ export const SWARM_TICK_QUEUE = "swarm.tick";
  */
 const ACTIVE_SWARM_STATUSES = ["planning", "running", "blocked"] as const;
 
-/** And the states a swarm never comes back from, which end its machine. */
+/**
+ * And the states a swarm is not working in, which end its machine.
+ *
+ * The two ceilings belong here with the three plain endings. A swarm
+ * stopped because it spent too much holding on to a sprite that costs
+ * money by the hour is the one machine nobody would choose to leave
+ * running, and reopening one with a raised ceiling provisions again
+ * the way its first spawn did.
+ */
 function swarmIsOver(status: (typeof swarms.$inferSelect)["status"]): boolean {
-  return status === "done" || status === "failed" || status === "cancelled";
+  return (
+    status === "done" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "budget_exhausted" ||
+    status === "timed_out"
+  );
 }
 
 /** Whether any swarm on this deployment has work a tick would act on. */
@@ -903,6 +917,23 @@ function spawnsFrom(swarm: typeof swarms.$inferSelect): boolean {
 }
 
 /**
+ * The sentence a ceiling wrote on a leaf it refused to start, which
+ * stops being true the moment that leaf starts.
+ *
+ * Read and removed rather than overwritten with null, because the
+ * drawer lists whatever keys a leaf's flags carry: a key set to null
+ * is still a line on the screen.
+ */
+function hasSpawnRefusal(flags: unknown): boolean {
+  return typeof flags === "object" && flags !== null && "spawnRefusal" in flags;
+}
+
+function withoutSpawnRefusal(flags: unknown): Record<string, unknown> {
+  const { spawnRefusal: _dropped, ...rest } = (flags ?? {}) as Record<string, unknown>;
+  return rest;
+}
+
+/**
  * Puts an agent on every ready leaf the swarm still has room for.
  *
  * The ceiling is not counted here: startRunIfIdle counts it under the
@@ -1028,8 +1059,15 @@ async function spawnWorkers(
          * started is no longer waiting for one. Only that mark: a
          * question or a conflict on this leaf is somebody else's to
          * clear.
+         *
+         * Both halves of it. The sentence the refusal wrote is a flag,
+         * and the drawer prints the flags verbatim, so a leaf with an
+         * agent on it went on saying the team was out of agent hours,
+         * and said it through every later retry because a retry carries
+         * the flags forward.
          */
         ...(task.attention === "budget" || task.attention === "plan_limit" ? { attention: null } : {}),
+        ...(hasSpawnRefusal(task.flags) ? { flags: withoutSpawnRefusal(task.flags) } : {}),
         startedAt: task.startedAt ?? now,
         updatedAt: now,
       })
@@ -1043,6 +1081,7 @@ async function spawnWorkers(
     });
     task.status = "working";
     if (task.attention === "budget" || task.attention === "plan_limit") task.attention = null;
+    if (hasSpawnRefusal(task.flags)) task.flags = withoutSpawnRefusal(task.flags);
     runIds.push(started.id);
     events.push({
       type: "swarm_task_updated",
@@ -1327,30 +1366,44 @@ async function startResolver(
 export function swarmStatusFrom(
   current: (typeof swarms.$inferSelect)["status"],
   roots: TaskStatus[],
+  /**
+   * Why a paused swarm is paused, which decides whether the tree may
+   * finish it. A ceiling's pause is nobody's choice; a person's is.
+   */
+  pausedReason?: (typeof swarms.$inferSelect)["pausedReason"],
 ): (typeof swarms.$inferSelect)["status"] {
-  if (current === "draft" || current === "planning" || current === "paused" || current === "cancelled") {
+  if (current === "draft" || current === "planning" || current === "cancelled") {
     return current;
   }
   // Started, with nothing in the plan to summarize.
   if (roots.length === 0) return current;
   const rolled = rollUpStatus("open", roots);
   /*
-   * The two ceilings hold a swarm still, but they do not make it
+   * The three ceilings hold a swarm still, but they do not make it
    * unfinishable.
    *
-   * A swarm stopped by its budget or its clock has a tree full of open
-   * leaves, which reads as a swarm at work, so neither is recomputed
-   * away by the rollup: only a spawn that succeeds takes it out, and
-   * the spawn step writes that itself.
+   * A swarm stopped by its budget, its clock or its plan's hours has a
+   * tree full of open leaves, which reads as a swarm at work, so none
+   * of them is recomputed away by the rollup: only a spawn that
+   * succeeds takes it out, and the spawn step writes that itself.
    *
-   * Except when the tree actually finished. Nothing is killed for
-   * either ceiling, so the workers that were running when it was
-   * reached go on to land their branches, and those landings can be
-   * the last work the plan had. A swarm whose every task is done is
-   * done, whatever stopped it starting more, and without this it would
-   * sit at "out of budget" over a finished tree, publish nothing, and
-   * wait for a person to notice.
+   * Except when the tree actually finished. Nothing is killed for any
+   * ceiling, so the workers that were running when it was reached go
+   * on to land their branches, and those landings can be the last work
+   * the plan had. A swarm whose every task is done is done, whatever
+   * stopped it starting more, and without this it would sit at "out of
+   * budget" over a finished tree, publish nothing, and wait for a
+   * person to notice.
+   *
+   * The plan limit is the one this matters most for. The other two are
+   * endings a person can see and reopen; a plan limit is a pause that
+   * only the watchdog is still looking at, so a finished tree left
+   * under one is a branch that is never pushed and a pull request that
+   * is never opened, with a job a minute asking about it for good.
    */
+  if (current === "paused") {
+    return pausedReason === "plan_limit" && rolled === "done" ? "done" : current;
+  }
   if (current === "budget_exhausted" || current === "timed_out") {
     return rolled === "done" ? "done" : current;
   }
@@ -1415,14 +1468,19 @@ async function recomputeSwarmStatus(
 
   const roots = tasks.filter((task) => task.parentId === null).map((task) => task.status);
   const attention = tasks.some((task) => task.attention !== null && task.status !== "cancelled");
-  const rolled = swarmStatusFrom(swarm.status, roots);
+  const rolled = swarmStatusFrom(swarm.status, roots, swarm.pausedReason);
   // A leaf waiting on a person holds the whole swarm's headline, even
   // while its siblings keep working: a board nobody has to read for a
   // stalled node is a board nobody reads.
   const status = attention && rolled === "running" ? "blocked" : rolled;
   if (status === swarm.status) return status;
 
-  await tx.update(swarms).set({ status, updatedAt: new Date() }).where(eq(swarms.id, swarm.id));
+  await tx
+    .update(swarms)
+    // A swarm that has left a pause is not paused for anything, and a
+    // reason left behind is what the board would still print.
+    .set({ status, ...(swarm.status === "paused" ? { pausedReason: null } : {}), updatedAt: new Date() })
+    .where(eq(swarms.id, swarm.id));
   events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status });
   return status;
 }
@@ -1554,10 +1612,28 @@ export async function stopSwarmTickWorker(ctx: AppContext): Promise<void> {
  * reattached.
  */
 export async function tickAllLiveSwarms(ctx: AppContext): Promise<number> {
+  /*
+   * The watchdog's question rather than the tick worker's, and the
+   * difference is one swarm that would otherwise never move again.
+   *
+   * A swarm paused on a plan limit has nothing in flight, so it is not
+   * "active" in the sense the tick worker means. It is also the only
+   * state that cannot wake itself: its hours come back when a period
+   * rolls over or somebody allows overage, and neither is an event
+   * this server hears about. The watchdog is what asks on its behalf,
+   * and the watchdog is started from this door. Booting with only the
+   * active statuses registered nothing, so a deploy in the half hour
+   * after a team ran out of hours stranded the swarm for good.
+   */
   const live = await ctx.db
     .select({ id: swarms.id })
     .from(swarms)
-    .where(inArray(swarms.status, [...ACTIVE_SWARM_STATUSES]));
+    .where(
+      or(
+        inArray(swarms.status, [...ACTIVE_SWARM_STATUSES]),
+        and(eq(swarms.status, "paused"), eq(swarms.pausedReason, "plan_limit")),
+      ),
+    );
   for (const row of live) await enqueueSwarmTick(ctx, row.id);
   return live.length;
 }
