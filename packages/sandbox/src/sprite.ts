@@ -216,6 +216,31 @@ export interface SpriteLookupRetry {
   reason: "not_found" | "transient" | "mixed";
 }
 
+/**
+ * Whether an exec failed in the WebSocket upgrade, before the command
+ * was running.
+ *
+ * undici reports every failed upgrade as "Received network error or
+ * non-101 status code", and the SDK prefixes that and appends the exec
+ * URL. A 503 or a dropped connection during the handshake both arrive
+ * as that one sentence. A keepalive timeout, a real process exit, and
+ * an HTTP error from getSprite do not. A command that reports the
+ * sandbox is missing is not one of these either: that answer is final.
+ */
+export function execHandshakeIsRetriable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const message = err.message;
+  if (/sprite not found/i.test(message)) return false;
+  if (/Received network error or non-101 status code/i.test(message)) return true;
+  if (/WebSocket closed before open/i.test(message)) return true;
+  return (
+    /^WebSocket error: /.test(message) &&
+    /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|connect refused|network error|aborted due to timeout/i.test(
+      message,
+    )
+  );
+}
+
 export interface SpriteDriverOptions {
   token: string;
   /** Sprite size. Agents are IO heavy rather than CPU heavy. */
@@ -761,6 +786,14 @@ export class SpriteDriver implements SandboxDriver {
     let active: SpriteCommand | null = null;
     let stopKeepaliveGuard: () => void = () => {};
     let killed = false;
+    /**
+     * Set once any connection reaches "spawn". A handshake that never
+     * gets there is retried; a socket that opened and then died is the
+     * reattach path, because the process may still be running.
+     */
+    let connectionOpened = false;
+    let handshakeRetries = 0;
+    let handshakeRecovery: Promise<void> | null = null;
 
     /**
      * The live conversation outlives any single connection: the pump
@@ -825,6 +858,88 @@ export class SpriteDriver implements SandboxDriver {
       }
       push({ kind: "stderr", data: "the connection to the sandbox dropped, reattaching to the running command" });
       void reattach();
+    };
+
+    /**
+     * The upgrade failed before this command was known to be running.
+     *
+     * A non-101 from the control plane does not start the process, so
+     * the reattach path below would look, find nothing, and blame a
+     * process that never existed. Try the upgrade again. If a listing
+     * shows the server did start it (the response was lost after the
+     * process began), attach to that session instead of starting a
+     * second copy. Only a session created with this stream counts: an
+     * older command with the same name is a previous run, not this one.
+     *
+     * The lookup is openSprite, the same one reattach uses. A 404 from
+     * the info endpoint is not the machine being gone. The command
+     * itself saying the sandbox is missing is answered before this
+     * retry starts.
+     */
+    const recoverInitialHandshake = () => {
+      if (handshakeRecovery || done || killed || connectionOpened) return;
+      const delay = EXEC_HANDSHAKE_RETRY_DELAYS_MS[handshakeRetries];
+      if (delay === undefined) {
+        stopKeepaliveGuard();
+        conclude(
+          -1,
+          "the sandbox did not accept the exec connection, and it stayed that way through the retries",
+        );
+        return;
+      }
+      handshakeRetries += 1;
+      handshakeRecovery = (async () => {
+        push({ kind: "stderr", data: "the sandbox did not accept the exec connection, retrying" });
+        await sleep(delay);
+        handshakeRecovery = null;
+        if (done || killed || connectionOpened) return;
+        try {
+          const fresh = await this.openSprite(handle.externalId);
+          const sessions = await fresh.listSessions();
+          if (done || killed || connectionOpened) return;
+          const mine = newestSessionFor(
+            sessions.filter((session) => session.created.getTime() >= startedAt - 15_000),
+            command,
+          );
+          if (!mine) {
+            adoptInitial(fresh);
+            return;
+          }
+          const attach = fresh.spawn(command, [], { sessionId: mine.id });
+          const guard = defuseKeepalive(attach);
+          try {
+            await openedWithin(attach, ATTACH_TIMEOUT_MS);
+          } catch (err) {
+            guard();
+            closeQuietly(attach);
+            if (execHandshakeIsRetriable(err)) {
+              recoverInitialHandshake();
+              return;
+            }
+            throw err;
+          }
+          if (done || killed) {
+            guard();
+            closeQuietly(attach);
+            return;
+          }
+          latest = attach;
+          stopKeepaliveGuard();
+          stopKeepaliveGuard = guard;
+          wire(attach, true);
+          push({ kind: "stderr", data: "reattached to the running command" });
+        } catch (err) {
+          if (done || killed || connectionOpened) return;
+          if (execHandshakeIsRetriable(err) || spriteControlIsRetriable(err) || spriteLookupIsRetriable(err)) {
+            recoverInitialHandshake();
+            return;
+          }
+          conclude(
+            -1,
+            `the sandbox did not accept the exec connection: ${scrubExecUrl(err instanceof Error ? err.message : String(err))}`,
+          );
+        }
+      })();
     };
 
     /**
@@ -930,10 +1045,14 @@ export class SpriteDriver implements SandboxDriver {
         if (stdinDone) child.stdin.end();
         wakeStdin();
       };
-      if (alreadyOpen) activate();
+      if (alreadyOpen) {
+        connectionOpened = true;
+        activate();
+      }
       child.on("spawn", () => {
         if (retired) return;
         open = true;
+        connectionOpened = true;
         activate();
       });
       child.stdout.on("data", (d: Buffer | string) => {
@@ -959,6 +1078,13 @@ export class SpriteDriver implements SandboxDriver {
               -1,
               `the cloud sandbox ${handle.externalId} was not found, so the command was not started. Start the run again to provision a new sandbox.`,
             );
+            return;
+          }
+          // A refused upgrade is not a dropped run: the command was not
+          // running, and blaming a missing session would fail it for a
+          // 503 the control plane asks us to retry.
+          if (!connectionOpened && execHandshakeIsRetriable(err)) {
+            recoverInitialHandshake();
             return;
           }
           lost(null);
@@ -1037,6 +1163,7 @@ export class SpriteDriver implements SandboxDriver {
       : null;
 
     const adoptInitial = (sprite: Sprite) => {
+      stopKeepaliveGuard();
       const child = sprite.spawn(command, args, {
         cwd: opts?.cwd ?? handle.workdir,
         /**
@@ -1316,6 +1443,26 @@ const REATTACH_DELAYS_MS = [1_000, 5_000, 15_000, 30_000, 60_000];
 const ATTACH_TIMEOUT_MS = 30_000;
 
 /**
+ * Pauses after an exec WebSocket upgrade failed before the command was
+ * running.
+ *
+ * Four tries in all, the same shape as acquiring a sprite. The failure
+ * this covers is undici's handshake error ("Received network error or
+ * non-101 status code"): the socket never opened, and the SDK cannot
+ * say whether the proxy returned 503, 404, or dropped the TCP
+ * connection, because a WebSocket client does not expose the HTTP
+ * status. Those are the same control-plane answers getSprite and
+ * deleteSprite already retry. A command that actually ran and exited
+ * is not in this ladder.
+ *
+ * The upgrade URL does carry the whole command. Fly's edge answers
+ * 414 once that URL passes roughly 64KB, and the toolchain script
+ * sits near 22KB, under that line, so a long command is not what
+ * makes this handshake fail. Retrying the upgrade is.
+ */
+export const EXEC_HANDSHAKE_RETRY_DELAYS_MS = [2_000, 8_000, 20_000];
+
+/**
  * How long the first connection of an exec may sit connecting. Longer
  * than an attach attempt, because a hibernated sprite wakes on demand
  * and the wake rides this connect.
@@ -1508,20 +1655,44 @@ function sleep(ms: number, keepAlive = false): Promise<void> {
   });
 }
 
-function runScript(
+/**
+ * A provisioning script the server already started, matched by a prefix
+ * of the script body so a different `sh` on the machine is left alone.
+ *
+ * listSessions failing is not an answer. The upgrade failed because the
+ * control plane was unreachable, and the listing often fails for the
+ * same reason. The caller retries the spawn in that case.
+ */
+async function findProvisionSession(sprite: Sprite, script: string): Promise<{ id: string } | null> {
+  try {
+    const sessions = await sprite.listSessions();
+    const needle = script.slice(0, 80);
+    return (
+      sessions
+        .filter((session) => !session.tty && session.command.startsWith("sh ") && session.command.includes(needle))
+        .sort((a, b) => b.created.getTime() - a.created.getTime())[0] ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One attempt to run a provisioning script, or to collect one the
+ * server already started (sessionId).
+ *
+ * The hold that keeps the machine awake lives with the caller, across
+ * the retries: releasing it during the pause between upgrades would
+ * invite the sleep the hold exists to prevent.
+ */
+function collectProvisionSpawn(
   sprite: Sprite,
-  script: string,
+  command: string,
+  args: string[],
+  options?: { sessionId: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const child = sprite.spawn("sh", ["-c", script]);
+  const child = sprite.spawn(command, args, options);
   const stopKeepaliveGuard = defuseKeepalive(child);
-  /**
-   * Provisioning is the other place a command goes quiet for minutes:
-   * an installer downloading, a clone of a large repository. The
-   * sandbox pausing under one of those ends it the same way it ended
-   * agent runs, and here it would surface as a half installed toolchain
-   * rather than as a lost run.
-   */
-  const awake = holdSpriteAwake(sprite, "provision");
   feedStdin(child);
   return new Promise((resolve, reject) => {
     let stdout = "";
@@ -1531,7 +1702,6 @@ function runScript(
       if (settled) return;
       settled = true;
       stopKeepaliveGuard();
-      awake.release();
       clearTimeout(deadline);
       finish();
     };
@@ -1558,6 +1728,7 @@ function runScript(
       stderr += d.toString();
     });
     child.on("error", (err: Error) => {
+      closeQuietly(child);
       settle(() => reject(err));
     });
     child.on("exit", (code: number | null) => {
@@ -1576,6 +1747,68 @@ function runScript(
       });
     });
   });
+}
+
+function runScript(
+  sprite: Sprite,
+  script: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  /**
+   * Provisioning is the other place a command goes quiet for minutes:
+   * an installer downloading, a clone of a large repository. The
+   * sandbox pausing under one of those ends it the same way it ended
+   * agent runs, and here it would surface as a half installed toolchain
+   * rather than as a lost run.
+   */
+  const awake = holdSpriteAwake(sprite, "provision");
+  const run = (async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        /**
+         * After a refused upgrade, the server may still have started
+         * the script (the 101 was what got lost). Joining that session
+         * is the retry. Starting another `sh -c` of the same installer
+         * would race the one already writing the toolchain.
+         */
+        if (attempt > 0) {
+          const existing = await findProvisionSession(sprite, script);
+          if (existing) return await collectProvisionSpawn(sprite, "sh", [], { sessionId: existing.id });
+        }
+        return await collectProvisionSpawn(sprite, "sh", ["-c", script]);
+      } catch (err) {
+        const delay = execHandshakeIsRetriable(err) ? EXEC_HANDSHAKE_RETRY_DELAYS_MS[attempt] : undefined;
+        if (delay === undefined) throw presentExecFailure(err, attempt + 1);
+        await sleep(delay, true);
+      }
+    }
+  })();
+  return run.finally(() => awake.release());
+}
+
+/**
+ * An error that leaves runScript, which the executor captures whole.
+ *
+ * The SDK appends the exec URL, and that URL is the script. A handshake
+ * failure used to land in PostHog as the entire toolchain. The URL is
+ * removed here, and a refused upgrade is described as what it is: the
+ * command had not started.
+ */
+function presentExecFailure(err: unknown, attempts: number): Error {
+  if (!(err instanceof Error)) return new Error(scrubExecUrl(String(err)));
+  if (!execHandshakeIsRetriable(err)) {
+    if (scrubExecUrl(err.message) === err.message) return err;
+    const withOutput = err as Error & { stdout?: string; stderr?: string };
+    return Object.assign(new Error(scrubExecUrl(err.message)), {
+      stdout: withOutput.stdout,
+      stderr: withOutput.stderr,
+    });
+  }
+  const detail = scrubExecUrl(err.message)
+    .replace(/\s*\(url:\s*\[sandbox exec url\]\)/, "")
+    .trim();
+  return new Error(
+    `the sandbox exec connection failed before the command started (${detail}) after ${attempts} attempts`,
+  );
 }
 
 /**
@@ -1611,7 +1844,10 @@ function feedStdin(child: SpriteCommand): void {
  * the URL must never survive into one.
  */
 function scrubExecUrl(message: string): string {
-  return message.replace(/wss?:\/\/\S+/g, "[sandbox exec url]");
+  // Stop before a closing parenthesis. The SDK wraps the URL in
+  // "(url: ...)", and a greedy match would swallow that paren and
+  // leave the sentence unclosed.
+  return message.replace(/wss?:\/\/[^\s)]+/g, "[sandbox exec url]");
 }
 
 /**
