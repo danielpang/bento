@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { agentRuns, runArtifacts, swarmTasks, swarms, type Db } from "@bento/db";
 
 const exec = promisify(execFile);
@@ -213,7 +213,7 @@ export interface AssembledDocument {
  * a document with a hole in it over a filing mistake helps nobody.
  */
 export async function assembleSwarmDocument(
-  db: Pick<Db, "select" | "insert">,
+  db: Pick<Db, "select" | "insert" | "update">,
   input: {
     swarm: typeof swarms.$inferSelect;
     /** The checkout the merge queue has been landing into. */
@@ -254,26 +254,53 @@ export async function assembleSwarmDocument(
 
   /*
    * The run to hang the artifact off. Any of the swarm's own runs will
-   * do and the newest planner run is the best of them: the document is
-   * the planner's deliverable in the sense that matters here, and the
+   * do, and the newest is the one closest to the document: the
    * artifact routes read the swarm rather than the run to decide who
-   * may see it. A swarm with no run at all records nothing, because
-   * run_artifacts.run_id is not nullable.
+   * may see it, so this is filing rather than authority. A swarm with
+   * no run at all records nothing, because run_artifacts.run_id is not
+   * nullable.
    */
   const runId = input.runId ?? (await newestRunId(db, input.swarm.id));
   if (runId) {
-    await db.insert(runArtifacts).values({
+    /*
+     * One row, rewritten, rather than one row per assembly.
+     *
+     * Publishing is safe to run twice by design (a redelivered job, a
+     * swarm reopened and finished again), and a plain insert made that
+     * cost a second copy of the document every time: the console lists
+     * a swarm's artifacts newest first, so what a person saw was the
+     * same file listed twice with nothing to tell them apart.
+     */
+    const [existing] = await db
+      .select({ id: runArtifacts.id })
+      .from(runArtifacts)
+      .where(
+        and(
+          eq(runArtifacts.swarmId, input.swarm.id),
+          eq(runArtifacts.stageSlug, "document"),
+          eq(runArtifacts.path, relative),
+        ),
+      )
+      .limit(1);
+    const values = {
       runId,
-      type: "swarm",
+      type: "swarm" as const,
       swarmId: input.swarm.id,
       stageSlug: "document",
       stageName: "Document",
       path: relative,
-      kind: "markdown",
+      kind: "markdown" as const,
       mime: "text/markdown",
       size: Buffer.byteLength(content, "utf8"),
       content,
-    });
+    };
+    if (existing) {
+      // createdAt moves with it: the row is the document as it stands
+      // now, and a list ordered by age has to put it where it belongs.
+      await db.update(runArtifacts).set({ ...values, createdAt: new Date() }).where(eq(runArtifacts.id, existing.id));
+    } else {
+      await db.insert(runArtifacts).values(values);
+    }
   }
 
   return {
@@ -305,9 +332,9 @@ async function readSections(
     byParent.set(task.parentId, siblings);
   }
 
-  // What is actually in the sections directory, read once: a worker
-  // may have named its file after the node's title rather than its id,
-  // and looking for both beats a hole in the document.
+  // What is actually in the sections directory, read once, so a leaf
+  // that wrote no file costs a set lookup rather than a failed open
+  // per section.
   const dir = path.join(worktreePath, SECTION_DIR);
   const present = new Set(await readdir(dir).catch(() => []));
 
@@ -359,7 +386,7 @@ async function newestRunId(db: Pick<Db, "select">, swarmId: string): Promise<str
     .select({ id: agentRuns.id })
     .from(agentRuns)
     .where(and(eq(agentRuns.swarmId, swarmId), eq(agentRuns.type, "swarm")))
-    .orderBy(asc(agentRuns.queuedAt))
+    .orderBy(desc(agentRuns.queuedAt))
     .limit(1);
   return row?.id ?? null;
 }
