@@ -300,11 +300,27 @@ async function rollUp(
       next.set(task.id, { status: task.status, cost });
       return cost;
     }
-    let cost = ZERO;
+    /*
+     * A node's own cost columns are left alone, and only its status is
+     * rewritten.
+     *
+     * Who owns the cost rollup: the reader. A row's three figures are
+     * the charges recorded against that one task, and the subtree sum
+     * is derived from them wherever it is wanted (the console's
+     * buildSwarmModel adds a node's own to its children's, and the
+     * swarm's own spend below is the same sum taken here). Writing the
+     * subtree total onto the group row instead made the two agree only
+     * by accident: the console added the children in again on top of
+     * it, and a charge that really belonged to the group (a sub
+     * planner's turn) was overwritten by the next tick.
+     */
+    const own = leafCost(task);
+    let cost = own;
     for (const child of children) cost = addCost(cost, visit(child));
-    // A group's own measured cost is its children's: nothing runs on
-    // the group itself, so anything recorded there is a rollup too.
-    next.set(task.id, { status: rollUpStatus(task.status, children.map((c) => next.get(c.id)!.status)), cost });
+    next.set(task.id, {
+      status: rollUpStatus(task.status, children.map((c) => next.get(c.id)!.status)),
+      cost: own,
+    });
     return cost;
   };
 
