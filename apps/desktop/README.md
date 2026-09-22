@@ -40,13 +40,13 @@ pnpm --filter @bento/desktop package:mac --unsigned --dir --arm64
 pnpm --filter @bento/desktop package:mac --unsigned --arm64 --x64
 ```
 
-Output: `release-dist/desktop`. Bundled Node, deps, migrations, web assets, sandbox Dockerfile. Host Node not required; Docker still needed for local sandboxes.
+Output: `release-dist/desktop`. Bundled Node, deps, migrations, web assets, sandbox Dockerfile. Host Node not required; Docker still needed for local sandboxes. Packaging builds the Finder icon from `assets/icon.png` with macOS `sips` and `iconutil`, including the small list-view sizes.
 
 Unsigned: manual install/update. `--unsigned` applies an ad-hoc signature to seal the finished app, with hardened runtime disabled only for this mode. It does not establish a trusted developer identity or notarize the app, so Gatekeeper still blocks first launch ([Apple guidance](https://support.apple.com/en-us/102445)). Signed: set `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` and omit `--unsigned`. Auto-updates only with `BENTO_RELEASE_TAG` and valid Developer ID signature.
 
 Quit before replacing the app. Launch from `/Applications`, not the mounted DMG.
 
-For a release without Developer ID signing, try opening the installed app, then use **System Settings → Privacy & Security → Open Anyway** if macOS offers it. If it still blocks a download you trust, first compare the DMG's SHA-256 with the release's `SHA256SUMS`. You can then remove quarantine from just your installed Bento copy:
+For a local unsigned build or an older release without Developer ID signing, try opening the installed app, then use **System Settings → Privacy & Security → Open Anyway** if macOS offers it. If it still blocks a download you trust, first compare the DMG's SHA-256 with the release's `SHA256SUMS`. You can then remove quarantine from just your installed Bento copy:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Bento.app
@@ -64,7 +64,7 @@ BENTO_RELEASE_TAG=v0.1.3 pnpm --filter @bento/desktop package:mac --unsigned --a
 
 Without `BENTO_RELEASE_TAG`, version comes from `git describe` (or `-dev` without Git). Manual **Desktop** workflow can rebuild a tag to artifacts only.
 
-Signing secrets: `DESKTOP_CSC_LINK` / `DESKTOP_CSC_KEY_PASSWORD` (or legacy `MACOS_*`). Missing notarization secrets fail the job; no unsigned fallback on failed sign.
+Signing secrets: `DESKTOP_CSC_LINK` / `DESKTOP_CSC_KEY_PASSWORD` (or legacy `MACOS_*`). Both CI workflows require Developer ID signing and notarization. Missing credentials fail before building, and publication rejects unsigned artifacts. `--unsigned` remains available for local testing.
 
 ### Apple signing and automatic updates
 
@@ -80,7 +80,9 @@ Configure these repository Actions secrets before running the Desktop or Release
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password generated for that account | `APPLE_APP_SPECIFIC_PASSWORD` |
 | `APPLE_TEAM_ID` | Developer team that owns the certificate | `APPLE_TEAM_ID` |
 
-Without a certificate, CI deliberately produces unsigned installers with manual updates. With a certificate configured, incomplete credentials, signing errors, or notarization errors fail the build. The workflow verifies the Developer ID signature and notarization staple on both architectures, then checks every updater asset's size and SHA-512 checksum before upload.
+Incomplete credentials, signing errors, or notarization errors fail the build. The workflow verifies the Developer ID signature, expected team, notarization staple, and Gatekeeper acceptance on both architectures, then checks every updater asset's size and SHA-512 checksum before upload. An Apple Development or Mac App Store certificate is not a substitute for Developer ID Application.
+
+Signing and notarization remove the unidentified-developer and unverified-malware blocks. macOS can still display its normal first-launch confirmation for an app downloaded from the internet. See [Apple's Gatekeeper guidance](https://support.apple.com/en-us/102445).
 
 Run the **Desktop** workflow on a tag first to validate signing and notarization without publishing a release. Keep the application ID and signing team consistent across releases so macOS can verify the replacement. An existing unsigned app must be replaced manually with the first signed release; later signed releases can update automatically. [electron-builder requires macOS signing and the ZIP update target](https://www.electron.build/v26/docs/features/auto-update/).
 
@@ -102,7 +104,7 @@ DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5439/app pnpm --filter @bent
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5439/app pnpm --filter @bento/desktop test:auth
 ```
 
-E2E: launches the real app, temp DB/profile, server/migrations/cards/SSE/auth/preferences; no paid APIs. Update smoke (macOS): loopback fixture, real updater/controller, consent, arch paths, checksum/metadata errors; set `BENTO_DESKTOP_EXECUTABLE` for the packaged manual-update menu, toast themes, and dismissal across windows. CI runs this packaged smoke when producing unsigned installers.
+E2E: launches the real app, temp DB/profile, server/migrations/cards/SSE/auth/preferences; no paid APIs. Update smoke (macOS): loopback fixture, real updater/controller, consent, arch paths, checksum/metadata errors; set `BENTO_DESKTOP_EXECUTABLE` for the packaged update menu, toast themes, and dismissal across windows. CI runs this against the signed package and checks automatic download plus restart consent. Local unsigned packages exercise manual downloads. Fixture bytes are never installed by Squirrel.
 
 After packaging both arch:
 

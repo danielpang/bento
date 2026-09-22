@@ -44,7 +44,7 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
         run: node scripts/release-version.mjs "$TAG"
-      - name: Select signing mode
+      - name: Require Apple signing and notarization credentials
         id: signing
         env:
           CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK || secrets.MACOS_CERT_P12 }}
@@ -53,14 +53,9 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
         run: |
-          if [ -z "$CSC_LINK" ]; then
-            echo 'signed=false' >> "$GITHUB_OUTPUT"
-            echo '::notice::No signing certificate configured. Building unsigned installers with manual updates.'
-            exit 0
-          fi
-          for NAME in CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+          for NAME in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!NAME}" ]; then
-              echo "::error::Missing $NAME. A configured signing certificate requires complete signing and notarization settings. See apps/desktop/README.md."
+              echo "::error::Missing $NAME. Mac releases require Developer ID signing and notarization. See apps/desktop/README.md."
               exit 1
             fi
           done
@@ -74,39 +69,34 @@ jobs:
       - run: pnpm --filter @bento/web test
       - name: Build installers
         env:
-          SIGNED: ${{ steps.signing.outputs.signed }}
           BENTO_RELEASE_TAG: ${{ inputs.tag }}
           CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK || secrets.MACOS_CERT_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.DESKTOP_CSC_KEY_PASSWORD || secrets.MACOS_CERT_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID || secrets.MACOS_APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
-        run: |
-          case "$SIGNED" in
-            true) pnpm --filter @bento/desktop package:mac --arm64 --x64 ;;
-            false) pnpm --filter @bento/desktop package:mac --unsigned --arm64 --x64 ;;
-            *) echo '::error::Unknown signing mode.'; exit 1 ;;
-          esac
+        run: pnpm --filter @bento/desktop package:mac --arm64 --x64
       - name: Verify signing, versions, and update assets
         env:
-          SIGNED: ${{ steps.signing.outputs.signed }}
           TAG: ${{ inputs.tag }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
         run: |
           VERSION="$(node scripts/release-version.mjs "$TAG")"
           for ARCH in mac-arm64 mac; do
             ACTUAL="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "release-dist/desktop/$ARCH/Bento.app/Contents/Info.plist")"
             test "$ACTUAL" = "$VERSION"
-            codesign --verify --deep --strict "release-dist/desktop/$ARCH/Bento.app"
-            if [ "$SIGNED" = true ]; then
-              codesign --verify --deep --strict -R 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "release-dist/desktop/$ARCH/Bento.app"
-              xcrun stapler validate "release-dist/desktop/$ARCH/Bento.app"
-            fi
+            APP="release-dist/desktop/$ARCH/Bento.app"
+            codesign --verify --deep --strict -R 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "$APP"
+            TEAM="$(codesign -dv "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+            test "$TEAM" = "$APPLE_TEAM_ID"
+            xcrun stapler validate "$APP"
+            spctl --assess --type execute --verbose=2 "$APP"
           done
           node apps/desktop/scripts/verify-update-artifacts.mjs release-dist/desktop "$TAG"
           cd release-dist/desktop
           shasum -a 256 ./*.dmg ./*.zip ./*.blockmap ./latest-mac.yml > desktop.sha256
-      - name: Verify packaged manual updates
-        if: steps.signing.outputs.signed == 'false'
+      - name: Verify packaged update notifications
+        timeout-minutes: 5
         run: |
           case "$(uname -m)" in
             arm64) APP_DIRECTORY=mac-arm64 ;;

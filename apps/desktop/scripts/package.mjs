@@ -59,6 +59,18 @@ try {
   await pruneWorkspace(stage);
   await cp(path.join(root, "electron-builder.yml"), path.join(stage, "electron-builder.yml"));
   await cp(path.join(root, "entitlements.mac.plist"), path.join(stage, "entitlements.mac.plist"));
+  // builder's PNG converter corrupts the legacy 16px/32px ICNS representations
+  // Finder uses in list view. Build every size with Apple's native tools.
+  const iconset = path.join(temporary, "icon.iconset");
+  await mkdir(iconset);
+  for (const size of [16, 32, 128, 256, 512]) {
+    for (const scale of [1, 2]) {
+      const pixels = String(size * scale);
+      execFileSync("sips", ["-z", pixels, pixels, path.join(root, "assets/icon.png"), "--out",
+        path.join(iconset, `icon_${size}x${size}${scale === 2 ? "@2x" : ""}.png`)], { stdio: "pipe" });
+    }
+  }
+  execFileSync("iconutil", ["-c", "icns", "-o", path.join(stage, "assets/icon.icns"), iconset]);
   const manifestFile = path.join(stage, "package.json");
   const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
   delete manifest.devDependencies;

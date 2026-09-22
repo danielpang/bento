@@ -51,7 +51,7 @@ async function closeDesktop(application) {
   if (result.timedOutAt) console.warn(`Stopped isolated Electron fixture after ${result.timedOutAt} timed out.`);
 }
 try {
-  // Exercise the shipped native menu, including the packaged unsigned policy.
+  // Exercise the shipped native menu with the package's real signing policy.
   desktop = await _electron.launch({ ...(process.env.BENTO_DESKTOP_EXECUTABLE ? { executablePath: process.env.BENTO_DESKTOP_EXECUTABLE, args: [] } : { args: [root] }), env });
   desktop.process().stderr.on("data", bytes => process.stderr.write(bytes));
   const launcher = await desktop.firstWindow();
@@ -71,11 +71,18 @@ try {
       return { response: globalThis.updateSmoke.consent && options.buttons?.includes("Download Update") ? 1 : 0, checkboxChecked: false };
     };
     shell.openExternal = async url => { urls.push(url); };
+    let updateMode;
     if (packaged) {
       // Access the shipped updater through the main-process test inspector.
       // Production has no feed override or testing IPC.
       const require = process.getBuiltinModule("module").createRequire(`${app.getAppPath()}/package.json`);
-      require("electron-updater").autoUpdater.setFeedURL({ provider: "github", owner: "danielpang", repo: "bento", host, protocol: "http" });
+      updateMode = require(`${app.getAppPath()}/package.json`).bentoUpdateMode;
+      if (!["manual", "automatic"].includes(updateMode)) throw new Error(`Unexpected packaged update mode: ${updateMode}`);
+      const updater = require("electron-updater").autoUpdater;
+      if (updater.autoDownload !== (updateMode === "automatic")) throw new Error("Packaged update policy does not match its manifest or signing identity");
+      // Keep downloaded fixture bytes out of the installed app's updater cache.
+      Object.defineProperty(updater.app, "baseCachePath", { value: app.getPath("userData") });
+      updater.setFeedURL({ provider: "github", owner: "danielpang", repo: "bento", host, protocol: "http" });
     }
     const item = Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === "Check for Updates...");
     if (!item) throw new Error("Missing native Check for Updates menu");
@@ -89,17 +96,41 @@ try {
     item.click();
     await waitFor(() => messages.length);
     if (packaged) {
-      await waitFor(() => Menu.getApplicationMenu().items[0].submenu.items.some(item => item.label === "Check for Updates..."));
+      const label = updateMode === "automatic" ? "Restart to Update..." : "Check for Updates...";
+      await waitFor(() => Menu.getApplicationMenu().items[0].submenu.items.some(item => item.label === label && item.enabled));
       if (urls.length) throw new Error("Later opened a download");
     }
-    return { messages, urls, arch: process.arch === "arm64" || app.runningUnderARM64Translation ? "arm64" : "x64" };
+    return { messages, urls, updateMode, arch: process.arch === "arm64" || app.runningUnderARM64Translation ? "arm64" : "x64" };
   }, { host, packaged: Boolean(process.env.BENTO_DESKTOP_EXECUTABLE) });
   if (process.env.BENTO_DESKTOP_EXECUTABLE) {
-    assert.equal(menuResult.messages[0].message, `Bento ${version} is available`);
-    assert.match(menuResult.messages[0].detail, /quit Bento with Cmd\+Q/);
+    const automatic = menuResult.updateMode === "automatic";
+    assert.equal(menuResult.messages[0].message, automatic ? `Install Bento ${version}?` : `Bento ${version} is available`);
+    assert.match(menuResult.messages[0].detail, automatic ? /Bento will restart/ : /quit Bento with Cmd\+Q/);
     const toast = launcher.locator("#bento-update-toast");
     await toast.waitFor({ state: "visible" });
-    assert.ok((await toast.innerText()).includes(`Bento ${version} is available`));
+    assert.ok((await toast.innerText()).includes(version));
+    const action = automatic ? "Restart and update" : "Download update";
+    assert.equal(await toast.getByRole("button", { name: action }).count(), 1);
+    if (automatic) {
+      // Exercise the actual restart button, but always decline installation of
+      // these checksum fixtures. Native replacement needs two real signed apps.
+      const prompts = await desktop.evaluate(() => globalThis.updateSmoke.messages.length);
+      await toast.getByRole("button", { name: action }).click();
+      await desktop.evaluate(async (_, prompts) => {
+        const deadline = Date.now() + 15_000;
+        while (globalThis.updateSmoke.messages.length === prompts) {
+          if (Date.now() > deadline) throw new Error("Restart button did not ask for consent");
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      }, prompts);
+      assert.equal(await desktop.evaluate(() => globalThis.updateSmoke.messages.length), prompts + 1);
+      assert.equal(await desktop.evaluate(({ app }) => {
+        const require = process.getBuiltinModule("module").createRequire(`${app.getAppPath()}/package.json`);
+        return require("electron-updater").autoUpdater.squirrelDownloadedUpdate;
+      }), false);
+      assert.equal(requests.filter(url => url.endsWith(".zip")).length, 1);
+      assert.ok(requests.some(url => url.endsWith(`-${menuResult.arch}.zip`)));
+    }
     for (const theme of ["light", "dark", "navy"]) {
       await launcher.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
       await toast.screenshot({ path: path.join(temporary, `update-toast-${theme}.png`) });
@@ -123,21 +154,24 @@ try {
     await consolePage.reload();
     await consoleToast.waitFor({ state: "hidden" });
 
-    // A later release brings the notice back; its actual button launches the
-    // manual flow without exposing arbitrary download URLs to the renderer.
-    setVersion(`${Number(version.split(".")[0]) + 1}.0.0`);
-    await desktop.evaluate(({ Menu }) => Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === "Check for Updates...").click());
-    await consoleToast.waitFor({ state: "visible" });
-    await desktop.evaluate(() => { globalThis.updateSmoke.consent = true; });
-    await consoleToast.getByRole("button", { name: "Download update" }).click();
-    await consoleToast.waitFor({ state: "hidden" });
-    const urls = await desktop.evaluate(() => globalThis.updateSmoke.urls);
-    assert.deepEqual(urls, [`https://github.com/danielpang/bento/releases/download/v${version}/Bento-${version}-${menuResult.arch}.dmg`]);
-    assert.ok(!requests.some(url => /\.(zip|dmg)$/.test(url)), "Manual checks must not use the automatic installer");
+    if (!automatic) {
+      // A later release brings the notice back; its actual button launches the
+      // manual flow without exposing arbitrary download URLs to the renderer.
+      setVersion(`${Number(version.split(".")[0]) + 1}.0.0`);
+      await desktop.evaluate(({ Menu }) => Menu.getApplicationMenu().items[0].submenu.items.find(item => item.label === "Check for Updates...").click());
+      await consoleToast.waitFor({ state: "visible" });
+      await desktop.evaluate(() => { globalThis.updateSmoke.consent = true; });
+      await consoleToast.getByRole("button", { name: "Download update" }).click();
+      await consoleToast.waitFor({ state: "hidden" });
+      const urls = await desktop.evaluate(() => globalThis.updateSmoke.urls);
+      assert.deepEqual(urls, [`https://github.com/danielpang/bento/releases/download/v${version}/Bento-${version}-${menuResult.arch}.dmg`]);
+      assert.ok(!requests.some(url => /\.(zip|dmg)$/.test(url)), "Manual checks must not use the automatic installer");
+    }
+    assert.ok(!requests.some(url => url.includes("v99")), "A stable client must not request the prerelease");
     setVersion("1.2.3");
-    console.log(`PASS: themed update toast, shared dismissal, console reload, and download button. Screenshots: ${temporary}`);
+    console.log(`PASS: packaged ${menuResult.updateMode} updates, themed toast, shared dismissal, console reload, and consent. Screenshots: ${temporary}`);
   } else assert.match(menuResult.messages[0].detail, /Development builds/);
-  console.log("PASS: native menu follows the development or manual update policy");
+  console.log("PASS: native menu follows the development or packaged update policy");
   await closeDesktop(desktop);
   desktop = undefined;
 
