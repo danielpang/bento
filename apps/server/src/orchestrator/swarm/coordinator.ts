@@ -912,7 +912,14 @@ interface SpawnResult {
  */
 function spawnsFrom(swarm: typeof swarms.$inferSelect): boolean {
   if (swarm.status === "running" || swarm.status === "blocked") return true;
-  if (swarm.status === "budget_exhausted") return true;
+  /*
+   * Both ceiling endings, not just the money one. They are the same
+   * shape: a ceiling a person raises to reopen, where the raise is the
+   * only event that ever lifts it. A swarm whose time limit had been
+   * raised used to tick and start nothing, so the ending a person was
+   * offered a Resume button on was the one ending they could not leave.
+   */
+  if (swarm.status === "budget_exhausted" || swarm.status === "timed_out") return true;
   return swarm.status === "paused" && swarm.pausedReason === "plan_limit";
 }
 

@@ -175,18 +175,33 @@ export async function splitLeaf(
  * time" is the thing a person most wants to know before pressing it a
  * fourth.
  */
+/**
+ * Why this node cannot be retried, or null.
+ *
+ * Apart from the retry itself, because a caller that has something
+ * destructive to do first has to be able to ask before it does it. The
+ * route stops the agent on a leaf before putting the leaf back in the
+ * queue, and a refusal discovered after that is an agent killed for a
+ * request that then answered "nothing changed".
+ */
+export function retryRefusal(task: Task): string | null {
+  if (task.nodeType !== "leaf") {
+    return "A plan node is worked through its own tasks. Retry one of those.";
+  }
+  if (task.status === "cancelled") {
+    return "This task was cancelled. The planner can hand the work out again.";
+  }
+  return null;
+}
+
 export async function retryLeaf(
   tx: TaskWriter,
   input: { task: Task; now?: Date } & Asker,
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
   const now = input.now ?? new Date();
-  if (task.nodeType !== "leaf") {
-    return { refused: "A plan node is worked through its own tasks. Retry one of those." };
-  }
-  if (task.status === "cancelled") {
-    return { refused: "This task was cancelled. The planner can hand the work out again." };
-  }
+  const refused = retryRefusal(task);
+  if (refused) return { refused };
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [updated] = await tx
     .update(swarmTasks)

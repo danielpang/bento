@@ -1192,6 +1192,26 @@ test("a tree that finished under a ceiling is done, whichever ceiling stopped it
 });
 
 /**
+ * And a swarm the clock stopped, once somebody raised the clock.
+ *
+ * The budget's ending could always spawn again, because raising a
+ * budget is the only way that ending ever lifts. The clock's ending is
+ * exactly the same shape and was left out of the same list, so a swarm
+ * whose time limit had been raised ticked and started nothing.
+ */
+test("a swarm whose time limit was raised starts work again", async () => {
+  const swarm = await makeSwarm({ status: "timed_out", pausedReason: "time_limit", timeLimitMin: 240 });
+  const leaf = await makeTask(swarm.id, { title: "still to do", status: "assigned" });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(result?.workerRunIds.length, 1, "the leaf that was waiting starts");
+  assert.equal((await read(leaf.id)).status, "working");
+  const after = await readSwarm(swarm.id);
+  assert.equal(after.status, "running", "and the swarm is working again rather than still timed out");
+  assert.equal(after.pausedReason, null);
+});
+
+/**
  * A swarm held on a plan limit, whose last worker landed.
  *
  * The whole path rather than the arithmetic: the tick has to notice,
