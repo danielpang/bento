@@ -873,3 +873,39 @@ test("a leaf that reported wakes the planner, and only once its worker has finis
   const again = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(again?.plannerRunId, null);
 });
+
+test("the tick that finishes a swarm asks for it to be published, once", async () => {
+  /**
+   * The one thing a swarm does that leaves Bento, and the only door to
+   * it. Keyed on the transition rather than on the status, because a
+   * tick runs again for all sorts of reasons and a job per tick on a
+   * finished swarm is a push per tick.
+   */
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { status: "working" });
+
+  const working = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(working?.becameDone, false);
+  assert.equal(
+    queued.filter((job) => job.queue === "swarm.publish").length,
+    0,
+    "a swarm still working is not published",
+  );
+
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, leaf.id));
+  const finished = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(finished?.status, "done");
+  assert.equal(finished?.becameDone, true);
+  const asked = queued.filter((job) => job.queue === "swarm.publish");
+  assert.equal(asked.length, 1, "the transition is what asks");
+  assert.equal((asked[0]!.data as { swarmId?: string }).swarmId, swarm.id);
+
+  // And again, on a swarm that has been done since the last tick.
+  const again = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(again?.becameDone, false);
+  assert.equal(
+    queued.filter((job) => job.queue === "swarm.publish").length,
+    1,
+    "a second tick on a finished swarm does not publish it a second time",
+  );
+});

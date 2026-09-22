@@ -1017,6 +1017,7 @@ test("every entity route refuses a foreign tenant", async () => {
     // that had lost its access check would find this one and finish
     // it, where a made up id would answer 404 either way and prove
     // nothing.
+    ["GET", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}`],
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/done`],
     // The stream, for the reason the run stream is here: it must refuse
     // before it streams anything.
