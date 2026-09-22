@@ -457,6 +457,21 @@ export const sandboxes = pgTable("sandboxes", {
    * is billed for a container on their own machine.
    */
   size: text("size"),
+  /**
+   * The snapshot this machine was put away at, when its driver can
+   * take one.
+   *
+   * A paused swarm is one nobody is working in and everybody is still
+   * paying for, and the point of a checkpoint is that resuming it
+   * starts from where it stopped rather than from a fresh clone: a
+   * sandbox that spent ten minutes installing a toolchain should not
+   * spend them again.
+   *
+   * On the sandbox rather than on a run, because there is no run at
+   * the moment a person pauses. agent_runs.checkpoint_id is a
+   * different fact: what one run may be rolled back to.
+   */
+  checkpointId: text("checkpoint_id"),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   ...timestamps,
 },

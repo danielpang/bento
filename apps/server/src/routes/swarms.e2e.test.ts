@@ -37,6 +37,7 @@ import { mintRunGrant } from "../mcp/grants.js";
 import { tickSwarm } from "../orchestrator/swarm/coordinator.js";
 import { takeNodeMessages } from "../orchestrator/swarm/node-messages.js";
 import { BENTO_SWARM_SERVER_ID } from "../mcp/swarm-server.js";
+import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
 import { RUNNER_PROJECT_REFUSAL } from "./swarms.js";
 
 /**
@@ -1540,4 +1541,109 @@ test("a swarm's artifacts are listed by the swarm, and served by the artifact ro
   assert.equal(content.headers.get("content-security-policy"), "sandbox");
   assert.equal(content.headers.get("x-content-type-options"), "nosniff");
   assert.equal(await content.text(), "# Hi\n");
+});
+
+/* ---------------------------------------------------------------- *
+ * Putting a swarm away, and taking it out again.
+ * ---------------------------------------------------------------- */
+
+/** A machine this swarm holds, as the executor records one. */
+async function sandboxFor(swarmId: string, externalId = "bento-swarm-1") {
+  const [row] = await db
+    .insert(sandboxes)
+    .values({ projectId, swarmId, provider: "docker", externalId, status: "ready" })
+    .returning();
+  return row!;
+}
+
+test("pausing a swarm checkpoints the machines it holds", async () => {
+  /**
+   * A paused swarm is one nobody is working in and everybody is still
+   * paying for. The machine stays, because a person means to come
+   * back to it, and the point of the checkpoint is that coming back
+   * starts from where it stopped rather than from a fresh clone.
+   */
+  const swarm = await createSwarm();
+  const box = await sandboxFor(swarm.id);
+  const asked: { externalId: string; label: string }[] = [];
+  const driver = {
+    provider: "docker" as const,
+    snapshot: async (handle: { externalId: string }, label: string) => {
+      asked.push({ externalId: handle.externalId, label });
+      return `snap-${handle.externalId}`;
+    },
+  };
+
+  const result = await checkpointSwarmSandboxes(db, driver, swarm.id, "swarm-pause");
+  assert.equal(result.skipped, null);
+  assert.deepEqual(result.checkpointed, [{ sandboxId: box.id, checkpointId: "snap-bento-swarm-1" }]);
+  assert.deepEqual(asked, [{ externalId: "bento-swarm-1", label: "swarm-pause" }]);
+
+  const [after] = await db.select().from(sandboxes).where(eq(sandboxes.id, box.id));
+  assert.equal(after!.checkpointId, "snap-bento-swarm-1");
+  assert.equal(after!.status, "hibernated", "and the row says nothing is working in it");
+});
+
+test("a driver that cannot snapshot is not a failure to pause", async () => {
+  const swarm = await createSwarm();
+  await sandboxFor(swarm.id, "bento-swarm-2");
+  const result = await checkpointSwarmSandboxes(db, { provider: "docker" }, swarm.id, "swarm-pause");
+  assert.deepEqual(result.checkpointed, []);
+  assert.match(result.skipped ?? "", /cannot be snapshotted/);
+});
+
+test("a snapshot that fails leaves the row alone rather than failing the pause", async () => {
+  const swarm = await createSwarm();
+  const box = await sandboxFor(swarm.id, "bento-swarm-3");
+  const driver = {
+    provider: "docker" as const,
+    snapshot: () => Promise.reject(new Error("the provider was unreachable")),
+  };
+
+  const result = await checkpointSwarmSandboxes(db, driver, swarm.id, "swarm-pause");
+  assert.deepEqual(result.checkpointed, []);
+  const [after] = await db.select().from(sandboxes).where(eq(sandboxes.id, box.id));
+  assert.equal(after!.checkpointId, null);
+  assert.equal(after!.status, "ready", "the machine is still there and still what it was");
+});
+
+test("archiving a finished swarm reaps its machine, and archiving a live one does not", async () => {
+  /**
+   * Putting a swarm away is a person saying they are finished with it,
+   * and a machine kept for a swarm nobody will open again is pure
+   * cost. But somebody tidying their strip while a swarm still runs is
+   * not saying that, and destroying a machine an agent is working in
+   * would leave a branch nobody chose.
+   */
+  const live = await createSwarm();
+  assert.equal(archiveReapsSandboxes({ status: "running" }), false);
+  assert.equal(archiveReapsSandboxes({ status: "planning" }), false);
+  assert.equal(archiveReapsSandboxes({ status: "paused" }), false);
+  for (const status of ["done", "failed", "cancelled", "budget_exhausted", "timed_out"] as const) {
+    assert.equal(archiveReapsSandboxes({ status }), true, `${status} is finished with`);
+  }
+
+  await sandboxFor(live.id, "bento-swarm-4");
+  queued.length = 0;
+  await patch(`/api/swarms/${live.id}`, { archived: true });
+  assert.equal(
+    queued.filter((job) => job.queue === "sandbox.reap").length,
+    0,
+    "a swarm that is still planning keeps its machine",
+  );
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, live.id));
+  queued.length = 0;
+  await patch(`/api/swarms/${live.id}`, { archived: true });
+  const reaps = queued.filter((job) => job.queue === "sandbox.reap");
+  assert.equal(reaps.length, 1, "a finished one does not");
+  assert.deepEqual(reaps[0]!.data, { swarmId: live.id });
+
+  // And restoring it simply takes it out again: the next run
+  // provisions a machine the way the first one appeared.
+  queued.length = 0;
+  await patch(`/api/swarms/${live.id}`, { archived: false });
+  const [restored] = await db.select().from(swarms).where(eq(swarms.id, live.id));
+  assert.equal(restored!.archivedAt, null);
+  assert.equal(queued.filter((job) => job.queue === "sandbox.reap").length, 0);
 });
