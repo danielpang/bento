@@ -34,6 +34,24 @@ export interface ProvisionSpec {
     baseBranch?: string | undefined;
     /** Trusted server-created bundle used when credentials cannot enter the sandbox. */
     seedBundle?: Buffer | undefined;
+    /**
+     * A branch the remote does not have, and the commits that make it.
+     *
+     * A swarm's branch lives nowhere but the machine holding it: the
+     * merge queue lands onto it and nothing pushes until the swarm is
+     * finished. So a worker on a driver that clones from the remote
+     * cannot reach it, and a branch cut from the remote's default
+     * branch would have none of what the leaves before it landed: its
+     * agent writes against code the swarm has already moved past, and
+     * its branch conflicts with every one of them at the queue.
+     *
+     * This is that branch, exported from the machine that has it and
+     * carried in. It is an incremental bundle whose prerequisite is a
+     * commit on the base branch, so the seed above has to be fetched
+     * first, and `branch` is the name to give it here. `branch` on
+     * this repository is then cut from it rather than from the base.
+     */
+    startBundle?: { branch: string; data: Buffer } | undefined;
   }[];
   /**
    * Whether this sandbox may reach the network.

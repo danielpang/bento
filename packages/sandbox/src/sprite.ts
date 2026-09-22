@@ -394,13 +394,41 @@ export class SpriteDriver implements SandboxDriver {
       if (repo.seedBundle) {
         const bundlePath = `/tmp/bento-seed-${repo.name}.bundle`;
         const seedBundle = repo.seedBundle;
+        const startPath = `/tmp/bento-start-${repo.name}.bundle`;
         // Filesystem calls carry no SDK timeout at all; see callFilesystem.
         await callFilesystem(
           () => sprite.filesystem("/").writeFile(bundlePath, seedBundle),
           `writing the ${repo.name} seed bundle`,
           sayFilesystemRetry,
         );
+        if (repo.startBundle) {
+          const startData = repo.startBundle.data;
+          await callFilesystem(
+            () => sprite.filesystem("/").writeFile(startPath, startData),
+            `writing the ${repo.name} starting branch`,
+            sayFilesystemRetry,
+          );
+        }
         try {
+          /**
+           * Where this repository's branch is cut from.
+           *
+           * The seed carries the remote's base branch and nothing
+           * else, so ordinarily that is the only starting point there
+           * is. A swarm's worker is the exception: the branch it must
+           * start from is the swarm's, which lives only inside the
+           * machine that has been landing onto it and has never been
+           * pushed anywhere. That branch arrives as a second bundle,
+           * is fetched into a real ref here, and becomes the start
+           * point, so a worker on this driver begins where the leaves
+           * before it finished rather than at the repository's
+           * default branch.
+           *
+           * Incremental, so it is fetched after the seed: its
+           * prerequisite is a commit on the base branch, which the
+           * seed is what brings in.
+           */
+          const startRef = repo.startBundle ? repo.startBundle.branch : `origin/${baseBranch}`;
           const script = [
             "set -eu",
             ...verifyIdentity,
@@ -410,7 +438,16 @@ export class SpriteDriver implements SandboxDriver {
             `  git clone ${shellQuote(bundlePath)} ${shellQuote(dir)}`,
             `  cd ${shellQuote(dir)} && git remote set-url origin ${shellQuote(repo.cloneUrl)}`,
             "fi",
-            `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(`origin/${baseBranch}`)})`,
+            ...(repo.startBundle
+              ? [
+                  // Forced, because a re-provision of the same machine
+                  // finds the ref already there at an older head: the
+                  // swarm's branch has moved since, and the stale one
+                  // is not a start point anybody wants.
+                  `cd ${shellQuote(dir)} && git fetch ${shellQuote(startPath)} +HEAD:refs/heads/${shellQuotePart(repo.startBundle.branch)}`,
+                ]
+              : []),
+            `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
           ].join("\n");
           await runScript(sprite, script);
         } finally {
@@ -419,6 +456,13 @@ export class SpriteDriver implements SandboxDriver {
             "removing the seed bundle",
             sayFilesystemRetry,
           ).catch(() => {});
+          if (repo.startBundle) {
+            await callFilesystem(
+              () => sprite.filesystem("/").rm(startPath),
+              "removing the starting branch bundle",
+              sayFilesystemRetry,
+            ).catch(() => {});
+          }
         }
       } else {
         const script = [

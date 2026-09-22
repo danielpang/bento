@@ -2,10 +2,10 @@ import { eq } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
 import type { PreparedRepository, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
-import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { createRepositorySeed } from "./publish.js";
+import { isolationRefusal, type WorkerIsolation } from "./swarm/sandbox.js";
 
 /**
  * Getting a machine with the project's repositories on one branch.
@@ -45,11 +45,15 @@ export interface ProvisionWorkspaceInput {
   authMounts: { hostPath: string; containerPath: string; readOnly?: boolean }[];
   restrictNetwork: boolean;
   /**
-   * The agent CLIs this machine needs, when the caller can narrow it.
-   * Omitted means the whole set, which is what a swarm's machine gets:
-   * only a card has a pipeline whose stages name their agents.
+   * What the caller's template promised about where its agents work,
+   * when the caller has one.
+   *
+   * A card has none: a stage's checkout is wherever the driver puts
+   * it, and no row anywhere says otherwise. A swarm does, because the
+   * merge queue is built around the answer, and a swarm whose shape
+   * changed underneath it would be a merge queue with nothing to move.
    */
-  agentBinaries?: readonly AgentBinary[];
+  workerIsolation?: WorkerIsolation;
   /** Which rows this machine belongs to. Exactly one board's worth. */
   owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null };
   /**
@@ -79,6 +83,18 @@ export interface ProvisionWorkspaceInput {
    * card's is.
    */
   startFromBranch?: string;
+  /**
+   * The commits that make `startFromBranch`, per repository, for a
+   * driver that cannot be shown a ref on this server.
+   *
+   * A sprite clones from the remote, and a swarm's branch has never
+   * been pushed to one: it exists only inside the machine the merge
+   * queue has been landing onto. So the branch travels as a bundle
+   * rather than as a name, and the sandbox fetches it before cutting
+   * the run's branch from it. Empty or absent on every driver whose
+   * checkouts are on this host, where the name is enough.
+   */
+  startFromBundles?: Map<string, { branch: string; data: Buffer }>;
   /** Progress lines, which go into the transcript of whatever asked. */
   say: (text: string) => Promise<void>;
 }
@@ -108,6 +124,18 @@ export async function provisionWorkspace(
         "Remove one under Settings, Repositories, then run again.",
     );
   }
+
+  /**
+   * The shape the caller promised, before anything is created.
+   *
+   * Above the duplicate check rather than below it because this is the
+   * cheapest refusal there is: a template that asserts checkouts on
+   * this server, on a driver whose sandboxes hold their own clones, is
+   * a swarm that cannot land a single branch. Better to say that than
+   * to provision the machine and find out at the merge queue.
+   */
+  const shape = isolationRefusal(input.workerIsolation ?? "sandbox", ctx.driver.provider);
+  if (shape) throw new Error(shape);
 
   const restarted = new Set(input.restartedRepoUrls ?? []);
   const prepared: PreparedRepository[] =
@@ -190,9 +218,9 @@ export async function provisionWorkspace(
       branch,
       baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
       seedBundle: seedBundles.get(r.id),
+      startBundle: input.startFromBundles?.get(r.name),
     })),
     // Local mode can share the user's own agent logins and git identity.
-    ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
     mounts: [...repoGitMounts, ...input.authMounts],
     image: ctx.env.BENTO_SANDBOX_IMAGE,
     onProgress: input.say,
