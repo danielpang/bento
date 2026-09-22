@@ -406,12 +406,28 @@ export function swarmRoutes(ctx: AppContext) {
         .where(eq(swarms.id, swarm.id))
         .returning();
       /*
-       * Raising the ceiling is a change the reconciler has to act on:
-       * there may be leaves waiting for a worker slot it refused when
-       * the ceiling was lower. Lowering it takes effect as workers
-       * finish; nothing is killed mid task.
+       * Raising either ceiling is a change the reconciler has to act
+       * on, and for the same reason: there may be leaves waiting for a
+       * slot, or for money, that it refused when the ceiling was
+       * lower. A raised budget matters most, because a swarm that
+       * spent its budget is stopped rather than merely slowed, and
+       * nothing else would ever ask again: the money coming back is a
+       * person's decision, not an event.
+       *
+       * Lowering either takes effect as workers finish. Nothing is
+       * killed mid task, which is the rule every ceiling in a swarm
+       * follows.
+       *
+       * The warning latch goes with a changed budget, because a raised
+       * budget is a different budget: running low on it is news again,
+       * and a planner that was told once about the old one would never
+       * be told about this one.
        */
-      if (rest.maxWorkers !== undefined) deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      const ceilingMoved = rest.maxWorkers !== undefined || budgetUsd !== undefined;
+      if (budgetUsd !== undefined) {
+        await db(c, ctx).update(swarms).set({ budgetWarnedAt: null }).where(eq(swarms.id, swarm.id));
+      }
+      if (ceilingMoved) deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       return c.json(updated);
     })
     /**

@@ -1275,3 +1275,31 @@ test("a task's description can be corrected, and its status cannot", async () =>
   assert.equal(refused.status, 400, "where a task is in its life is not something a patch decides");
   assert.equal((await readTask(tree.first.id)).status, tree.first.status);
 });
+
+/**
+ * Raising a budget has to wake the reconciler, or it does nothing.
+ *
+ * A swarm that spent its budget is stopped rather than slowed, and
+ * money coming back is a person's decision rather than an event
+ * anything fires on: without a tick from here, the swarm would sit at
+ * budget_exhausted with a budget it was no longer over.
+ */
+test("raising the budget wakes the swarm, and the planner's warning is due again", async () => {
+  const swarm = await createSwarm();
+  await db
+    .update(swarms)
+    .set({ status: "budget_exhausted", pausedReason: "budget", budgetUsd: "5", budgetWarnedAt: new Date() })
+    .where(eq(swarms.id, swarm.id));
+  queued = [];
+
+  const res = await patch(`/api/swarms/${swarm.id}`, { budgetUsd: 40 });
+  assert.equal(res.status, 200, await res.clone().text());
+
+  const [after] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  assert.equal(Number(after!.budgetUsd), 40);
+  assert.equal(after!.budgetWarnedAt, null, "a raised budget is a different budget: running low on it is news again");
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "and the reconciler is asked to try spawning again",
+  );
+});
