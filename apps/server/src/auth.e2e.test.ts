@@ -1011,6 +1011,14 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/swarms/${swarm.id}/start`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],
+    // Reopening adds work to somebody else's finished swarm, on the
+    // branch their pull request is open on, and can raise the budget
+    // their team is billed for.
+    [
+      "POST",
+      `/api/swarms/${swarm.id}/reopen`,
+      { body: JSON.stringify({ instruction: "address the review comments" }) },
+    ],
     ["GET", `/api/swarms/${swarm.id}/messages`],
     ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
     // A real node of the owner's swarm, not an invented id: a route
