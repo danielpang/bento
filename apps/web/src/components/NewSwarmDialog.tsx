@@ -49,7 +49,7 @@ export function NewSwarmDialog({
 
   const leaves = template?.typicalLeaves ?? 0;
   const estimate = useMemo(
-    () => (template ? estimateSwarm(template, leaves) : { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 }),
+    () => (template ? estimateSwarm(template, leaves) : { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0}),
     [template, leaves],
   );
   /**

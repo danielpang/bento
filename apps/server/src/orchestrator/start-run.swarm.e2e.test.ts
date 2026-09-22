@@ -263,7 +263,13 @@ test("the plan is asked about the team whose swarm it is, and busy is asked firs
   } as unknown as Entitlements;
 
   const answer = await start({ swarmId: swarm.id, role: "planner", agentProfileId: TEAM_PROFILE }, refusing);
-  assert.deepEqual(answer, { outOfCompute: "This team has used its agent hours for the month." });
+  // The refusal says which ceiling, because the two are different
+  // sentences and different next steps on the board: agent hours come
+  // back on their own, and a dollar budget waits for a person.
+  assert.deepEqual(answer, {
+    outOfCompute: "This team has used its agent hours for the month.",
+    cap: "plan",
+  });
   assert.deepEqual(asked, ["org-a"], "the organization comes off the locked swarm row");
   const rows = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
   assert.equal(rows.length, 0, "a refused start inserts nothing");
@@ -291,4 +297,43 @@ test("a swarm outside any organization has no plan to ask", async () => {
     canStartRun: async () => ({ reason: "no" }),
   } as unknown as Entitlements;
   assert.ok(isRun(await start({ swarmId: swarm.id, role: "planner" }, refusing)));
+});
+
+/**
+ * The dollar budget, at the same door the plan is asked at.
+ *
+ * It is the one cap a local install has, so it is checked here rather
+ * than behind entitlements: a deployment with no billing module still
+ * has a person who typed a number into the creation dialog.
+ */
+test("a swarm that has spent its budget starts nothing else", async () => {
+  const swarm = await makeSwarm({ budgetUsd: "10", spentMeasuredUsd: "6", spentAssumedUsd: "4" });
+
+  const answer = await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE });
+  assert.ok(typeof answer === "object" && "outOfCompute" in answer, "the cap refused it");
+  assert.equal(answer.cap, "budget", "and said which cap, because a person raises this one");
+  assert.match(answer.outOfCompute, /Raise the budget/);
+  const rows = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  assert.equal(rows.length, 0, "a refused start inserts nothing");
+});
+
+test("a swarm under its budget starts, and one with no budget is never refused", async () => {
+  const under = await makeSwarm({ budgetUsd: "10", spentMeasuredUsd: "9.99" });
+  assert.ok(isRun(await start({ swarmId: under.id, role: "planner", agentProfileId: LOCAL_PROFILE })));
+
+  const uncapped = await makeSwarm({ spentMeasuredUsd: "9999" });
+  assert.ok(isRun(await start({ swarmId: uncapped.id, role: "planner", agentProfileId: LOCAL_PROFILE })));
+});
+
+/**
+ * The tier the cap does not count.
+ *
+ * A local install lending its runs the operator's own logged in agent
+ * session is spending nothing at the margin: the tool prints a list
+ * price, and the subscription has already paid for the work. Stopping
+ * a swarm on that figure would be refusing it over money nobody owes.
+ */
+test("a swarm spending a borrowed subscription runs past its cap", async () => {
+  const swarm = await makeSwarm({ budgetUsd: "1", spentNotionalUsd: "500" });
+  assert.ok(isRun(await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE })));
 });

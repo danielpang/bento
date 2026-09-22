@@ -44,8 +44,9 @@ function tasks(): SwarmTask[] {
     attention: extra.attention ?? "none",
     weight: extra.weight ?? 1,
     assignedRunId: null,
+    agentProfileId: extra.agentProfileId ?? null,
     branchName: extra.branchName ?? null,
-    cost: extra.cost ?? { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 },
+    cost: extra.cost ?? { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0},
     flags: extra.flags ?? {},
     report: extra.report ?? null,
     acceptanceCriteria: extra.acceptanceCriteria ?? [],
@@ -61,7 +62,7 @@ function tasks(): SwarmTask[] {
       title: "Refund path",
       position: 1,
       attention: "long_running",
-      cost: { measuredUsd: 0.5, estimatedUsd: 0.2, assumedUsd: 0 },
+      cost: { measuredUsd: 0.5, estimatedUsd: 0.2, assumedUsd: 0 , notionalUsd: 0},
       startedAt: new Date(0).toISOString(),
     }),
   ];
@@ -587,7 +588,7 @@ test("the header carries the ring, the branch, the elapsed time and the controls
   assertNoDashes(html, "the swarm header");
 });
 
-test("the header keeps the three spend figures apart, against the cap", () => {
+test("the header keeps every spend figure apart, against the cap", () => {
   const html = pageHtml("multi");
   assert.match(html, />\$5\.08</);
   assert.match(html, />\$0\.37</);
@@ -595,8 +596,8 @@ test("the header keeps the three spend figures apart, against the cap", () => {
   // 5.08 + 0.37 + 0.25, the number that must never appear.
   assert.ok(!html.includes("$5.70"));
   assert.match(html, /against a \$40\.00 cap/);
-  // One track, three fills, each measured on its own.
-  assert.equal(html.match(/class="swarm-cap-fill"/g)?.length, 3);
+  // One track, one fill per tier, each measured on its own.
+  assert.equal(html.match(/class="swarm-cap-fill"/g)?.length, 4);
 });
 
 /**
