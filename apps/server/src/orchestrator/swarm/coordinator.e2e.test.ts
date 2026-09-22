@@ -10,6 +10,7 @@ import {
   swarmLandings,
   swarmMessages,
   swarmTasks,
+  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -580,6 +581,144 @@ test("a conflict whose resolver has finished is tried again, rather than holding
   assert.equal(retried[0]!.resolverRunId, resolver!.id, "and it still names the resolver, so it is not tried twice");
 });
 
+test("a conflict with nobody on it has an agent put on it, every pass until one is", async () => {
+  /**
+   * The state a swarm's queue used to end in.
+   *
+   * A conflict holds the queue on purpose, and the row is marked
+   * conflicted before a resolver is started because a resolver refuses
+   * to start with no conflict waiting. So the start can fail: a team at
+   * its plan limit is the routine way, and busy is another. The row
+   * then said "conflicted" with no resolver named, this step skipped it
+   * (`if (!landing.resolverRunId) continue`) and returned nothing while
+   * any conflict stood, and nothing else in the swarm moves a
+   * conflicted row. One conflict and the swarm's whole queue was over,
+   * with cancelling the swarm the only way out.
+   */
+  const swarm = await makeSwarm({ status: "running" });
+  // Told about already, the way a leaf whose branch the planner
+  // accepted always has been, so the only run either pass could start
+  // is the resolver.
+  const stuck = await makeTask(swarm.id, {
+    title: "stuck",
+    status: "working",
+    report: "did it",
+    flags: { plannerToldAt: "2026-01-01T00:00:00.000Z" },
+  });
+  const waiting = await makeTask(swarm.id, { title: "waiting", status: "done" });
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: stuck.id, position: 0, status: "conflicted", error: "CONFLICT in one file" })
+    .returning();
+  await db.insert(swarmLandings).values({ swarmId: swarm.id, taskId: waiting.id, position: 1 });
+
+  const landed: string[] = [];
+  // The plan limit first, which is transient, and then room.
+  const refused = {
+    ...starter([{ outOfCompute: "this team has used its agent hours for the period." }]),
+    startLanding: async (_tx: unknown, id: string) => void landed.push(id),
+  };
+  const held = await tickSwarm(ctx, swarm.id, refused as unknown as SwarmTickDeps);
+  assert.deepEqual(held?.resolverRunIds, [], "nothing could be started this pass");
+  assert.deepEqual(landed, [], "and the conflict still holds the queue");
+  const stillConflicted = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(stillConflicted[0]!.status, "conflicted");
+  assert.equal(stillConflicted[0]!.resolverRunId, null);
+
+  const deps = { ...starter(), startLanding: async (_tx: unknown, id: string) => void landed.push(id) };
+  const result = await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.equal(result?.resolverRunIds.length, 1, "the next pass asks again, which is the exit the queue needs");
+  const resolverRunId = result!.resolverRunIds[0]!;
+  const [resolver] = await db.select().from(agentRuns).where(eq(agentRuns.id, resolverRunId));
+  assert.equal(resolver!.role, "resolver");
+  assert.equal(resolver!.swarmTaskId, stuck.id);
+  const withResolver = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(withResolver[0]!.resolverRunId, resolverRunId, "named on the row, so a second is not asked for");
+  assert.ok(queuedRunIds().includes(resolverRunId), "and handed to the queue: a run with no job never starts");
+});
+
+test("a conflict nothing could ever resolve fails the leaf and lets the queue move", async () => {
+  /**
+   * The other half. A swarm whose template has no worker agent has
+   * nothing that could be put on a conflict, this pass or any other, so
+   * asking again for ever would be the same wedge one step along. The
+   * leaf fails with a sentence a person can act on, which frees the
+   * queue and puts the leaf in front of the planner.
+   */
+  const [template] = await db
+    .insert(swarmTemplates)
+    .values({ ownerId: "u1", name: "no worker", plannerProfileId: PROFILE, maxWorkers: 2 })
+    .returning();
+  const swarm = await makeSwarm({ status: "running", templateId: template!.id });
+  const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it", position: 0 });
+  const waiting = await makeTask(swarm.id, { title: "waiting", status: "done", position: 1 });
+  const [blocked] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: stuck.id, position: 0, status: "conflicted", error: "CONFLICT in one file" })
+    .returning();
+  const [next] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: waiting.id, position: 1 })
+    .returning();
+
+  const landed: string[] = [];
+  const deps = { ...starter(), startLanding: async (_tx: unknown, id: string) => void landed.push(id) };
+  const result = await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+
+  const rows = await db.select().from(swarmLandings).where(eq(swarmLandings.swarmId, swarm.id));
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  assert.equal(byId.get(blocked!.id)!.status, "failed");
+  assert.match(byId.get(blocked!.id)!.error ?? "", /no worker agent/);
+  assert.match(byId.get(blocked!.id)!.error ?? "", /CONFLICT in one file/, "what git said is kept as well");
+  const leaf = await read(stuck.id);
+  assert.equal(leaf.status, "failed", "which is what puts it in front of the planner");
+  assert.equal(leaf.attention, "conflict");
+  assert.equal((leaf.flags as { plannerToldAt?: string }).plannerToldAt, undefined);
+
+  // And the branch behind it is landing, in the same pass.
+  assert.equal(byId.get(next!.id)!.status, "landing");
+  assert.deepEqual(landed, [next!.id]);
+  assert.equal(result?.landingId, next!.id);
+});
+
+test("a promotion whose job could not be sent gives the claim back", async () => {
+  /**
+   * A row that says "landing" with no job behind it is the one state
+   * the queue cannot leave on its own: the partial unique index refuses
+   * every other landing in that swarm, this tick is retried and
+   * deliberately does not re-enqueue a landing already in flight,
+   * nothing sweeps a claimed row, and the boot time sweep is the next
+   * restart. So a send that throws puts the row back.
+   */
+  const swarm = await makeSwarm({ status: "running" });
+  const done = await makeTask(swarm.id, { title: "ready to land", status: "done" });
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: done.id, position: 0 })
+    .returning();
+
+  const boss = ctx.boss as unknown as { send: (queue: string, data: unknown) => Promise<string> };
+  const real = boss.send;
+  boss.send = async (queue: string, data: unknown) => {
+    if (queue === "swarm.land") throw new Error("the queue is not reachable");
+    return real(queue, data);
+  };
+  try {
+    await assert.rejects(
+      tickSwarm(ctx, swarm.id, { ...starter(), startLanding: async () => {} } as unknown as SwarmTickDeps),
+      /not reachable/,
+      "the failure is not swallowed: pg-boss retries the tick",
+    );
+  } finally {
+    boss.send = real;
+  }
+
+  const [row] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(row!.status, "queued", "back at the front of the queue, for the retried tick to promote again");
+  assert.equal(row!.startedAt, null);
+  assert.equal(row!.attempt, 0, "and the attempt that never happened is not counted against the branch");
+});
+
 test("a conflict holds the queue rather than letting the next branch overtake it", async () => {
   const swarm = await makeSwarm({ status: "running" });
   const stuck = await makeTask(swarm.id, { title: "stuck", status: "done" });
@@ -660,6 +799,41 @@ test("a leaf whose worker stopped without reporting fails, rather than waiting f
   assert.equal(row.status, "failed", "nothing else in a swarm notices a worker that simply stopped");
   assert.equal(row.attention, "failed");
   assert.match(String((row.flags as { workerStopped?: string }).workerStopped), /ran out of context/);
+});
+
+test("a leaf failed for a worker that stopped is news to the planner, even once", async () => {
+  /**
+   * The latch, and why it is not a caller's to remember.
+   *
+   * plannerToldAt is set once per leaf, when its news is folded into a
+   * wake, and the wake's query requires it empty. A leaf failed without
+   * it being cleared is therefore filtered out of every wake there will
+   * ever be: this leaf had already been through the planner once, and
+   * the second time it fails nothing tells anybody.
+   */
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, {
+    title: "abandoned twice",
+    status: "working",
+    report: null,
+    flags: { plannerToldAt: "2026-01-01T00:00:00.000Z" },
+  });
+  await runOn(swarm.id, leaf.id, "failed", "the agent ran out of context");
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  assert.equal((await read(leaf.id)).status, "failed");
+  assert.ok(result?.plannerRunId, "the wake the cleared latch let through");
+  assert.match(
+    deps.calls.find((call) => call.role === "planner")!.prompt!,
+    /abandoned twice/,
+    "and the leaf is in it, rather than filtered out as old news",
+  );
+  assert.notEqual(
+    ((await read(leaf.id)).flags as { plannerToldAt?: string }).plannerToldAt,
+    "2026-01-01T00:00:00.000Z",
+    "and the latch now records this wake rather than the one before it",
+  );
 });
 
 test("a leaf whose worker is still running is left alone", async () => {

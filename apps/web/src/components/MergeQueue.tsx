@@ -155,10 +155,18 @@ function Row({
         <pre className="swarm-queue-error swarm-text">{landing.error}</pre>
       )}
       {landing.status === "conflicted" && (
+        /*
+         * Two sentences, because a conflict with nobody on it is not
+         * the same situation as one being worked, and the words used to
+         * say the queue had given up on it. It has not: an agent is
+         * asked for on every pass, and the ordinary reason there is
+         * none yet is that the team has no agent hours left for the
+         * moment.
+         */
         <p className="muted swarm-queue-note">
           {landing.resolverRunId
             ? "An agent is reconciling this branch with the swarm's branch. Nothing else lands until it is settled."
-            : "Nothing is reconciling this branch, and nothing else lands until it is settled."}
+            : "No agent is on this branch yet. One is asked for each time the swarm is reconciled, and nothing else lands until this is settled."}
         </p>
       )}
     </li>
