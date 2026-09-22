@@ -11,6 +11,7 @@ import { LineChannel, collectExec } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
   SpriteDriver,
+  EXEC_HANDSHAKE_RETRY_DELAYS_MS,
   SPRITE_ACQUIRE_RATE_LIMIT_WAITS,
   SPRITE_ACQUIRE_RETRY_DELAYS_MS,
   SPRITE_DESTROY_RETRY_DELAYS_MS,
@@ -840,11 +841,18 @@ test("Sprite exec feeds live stdin lines and closes stdin when the conversation 
  * carries the whole environment as query parameters, credentials
  * included. Error text ends up in run transcripts, so the URL must
  * not survive into the stream.
+ *
+ * The same error is a refused upgrade, which is retried: a single
+ * ETIMEDOUT used to fail the run, and the credential-bearing URL was
+ * the only copy of the failure. Both have to stay true together.
  */
-test("Sprite exec keeps the credential-bearing exec URL out of error output", async () => {
-  const child = fakeChild();
+test("Sprite exec keeps the credential-bearing exec URL out of error output", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let spawned = 0;
   const sprite = {
     spawn() {
+      spawned += 1;
+      const child = fakeChild();
       queueMicrotask(() => {
         child.emit(
           "error",
@@ -863,13 +871,86 @@ test("Sprite exec keeps the credential-bearing exec URL out of error output", as
   const driver = new SpriteDriver({ token: "token" });
   stubClient(driver, sprite);
 
-  const result = await collectExec(
+  const pending = collectExec(
     driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"]),
   );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
   assert.equal(result.exitCode, -1);
   assert.match(result.stderr, /ETIMEDOUT/);
   assert.match(result.stderr, /\[sandbox exec url\]/);
+  assert.match(result.stderr, /did not accept the exec connection, and it stayed that way through the retries/);
   assert.doesNotMatch(result.stderr, /sk-secret|wss:/);
+  // The first upgrade plus one retry per delay. Stopping earlier would
+  // turn one blip back into a failed run; continuing would not stop.
+  assert.equal(spawned, 1 + EXEC_HANDSHAKE_RETRY_DELAYS_MS.length);
+});
+
+/**
+ * A refused upgrade is not proof the command is gone. When the server
+ * did start it and only the 101 was lost, the retry joins that session
+ * instead of launching a second copy.
+ */
+test("Sprite exec joins a command the refused upgrade had already started", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const started = fakeChild();
+  const attached = fakeChild();
+  const spawns: { args: string[]; sessionId?: string }[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[] = [], options?: { sessionId?: string }) {
+      spawns.push({ args, ...(options?.sessionId ? { sessionId: options.sessionId } : {}) });
+      if (spawns.length === 1) {
+        queueMicrotask(() => {
+          started.emit(
+            "error",
+            new Error(
+              "WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/v1/sprites/x/exec?cmd=claude)",
+            ),
+          );
+        });
+        return started;
+      }
+      queueMicrotask(() => attached.emit("spawn"));
+      return attached;
+    },
+    async listSessions() {
+      return [
+        {
+          id: "sess-started",
+          command: "claude -p do the task",
+          workdir: "/workspace",
+          created: new Date(),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", "do the task"]),
+  );
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  attached.stdout.write('{"type":"result"}\n');
+  attached.emit("exit", 0);
+  const result = await pending;
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /result/);
+  assert.match(result.stderr, /reattached to the running command/);
+  assert.doesNotMatch(result.stderr, /wss:/);
+  assert.equal(spawns.length, 2);
+  assert.equal(spawns[1]?.sessionId, "sess-started");
+  assert.deepEqual(spawns[1]?.args, []);
 });
 
 /**
@@ -1730,6 +1811,242 @@ test("Sprite provisioning gives up on a script whose connection went silent", as
   assert.ok(result instanceof Error, "provisioning must fail rather than hang");
   assert.match(result.message, /did not finish within/);
   assert.ok(killed, "the stuck process was told to stop");
+});
+
+/**
+ * A provisioning exec that dies in the WebSocket upgrade.
+ *
+ * The failure captured from production was undici's handshake error
+ * while the toolchain script was the command, and runScript used to
+ * reject that on the first try with the URL (the whole script) still
+ * attached. The upgrade is retried. The URL does not leave the driver.
+ */
+test("Sprite provisioning retries a refused exec upgrade and then installs", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("\nMARKER=")) {
+          toolchainSpawns += 1;
+          if (toolchainSpawns === 1) {
+            child.emit(
+              "error",
+              new Error(
+                "WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/v1/sprites/bento/exec?cmd=sh&cmd=-c&cmd=MARKER%3Dsecret-script)",
+              ),
+            );
+            return;
+          }
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver.provision({
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+  });
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  const handle = await pending;
+  assert.equal(handle.externalId, "bento-feature");
+  assert.equal(toolchainSpawns, 2);
+});
+
+/**
+ * When the retries are spent, the error the executor captures must not
+ * carry the exec URL. That URL is the script, and it is what PostHog
+ * stored for the handshake failure.
+ */
+test("Sprite provisioning reports a refused exec upgrade without the exec URL", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("\nMARKER=")) {
+          toolchainSpawns += 1;
+          child.emit(
+            "error",
+            new Error(
+              "WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/v1/sprites/bento/exec?cmd=sh&cmd=-c&cmd=MARKER%3Dsecret-script)",
+            ),
+          );
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver
+    .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
+  assert.ok(result instanceof Error);
+  assert.match(result.message, /failed before the command started/);
+  assert.match(result.message, /non-101 status code/);
+  assert.match(result.message, new RegExp(`after ${1 + EXEC_HANDSHAKE_RETRY_DELAYS_MS.length} attempts`));
+  assert.doesNotMatch(result.message, /wss:|secret-script|sandbox exec url/);
+  assert.equal(toolchainSpawns, 1 + EXEC_HANDSHAKE_RETRY_DELAYS_MS.length);
+});
+
+/**
+ * The server can start the script and still fail the client's upgrade.
+ * The retry has to collect that process, not start a second installer.
+ */
+test("Sprite provisioning attaches to a script the refused upgrade already started", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const spawns: { args: string[]; sessionId?: string }[] = [];
+  const sprite = {
+    spawn(file: string, args: string[] = [], options?: { sessionId?: string }) {
+      assert.equal(file, "sh");
+      spawns.push({ args, ...(options?.sessionId ? { sessionId: options.sessionId } : {}) });
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (options?.sessionId) {
+          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 0);
+          return;
+        }
+        if (body.includes("\nMARKER=")) {
+          child.emit(
+            "error",
+            new Error("WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/x)"),
+          );
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      const toolchain = spawns.find((spawn) => (spawn.args[1] ?? "").includes("\nMARKER="));
+      if (!toolchain) return [];
+      return [
+        {
+          id: "install-1",
+          command: `sh -c ${toolchain.args[1]}`,
+          workdir: "/",
+          created: new Date(),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver.provision({
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+  });
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  await pending;
+
+  const installs = spawns.filter((spawn) => (spawn.args[1] ?? "").includes("\nMARKER=") || spawn.sessionId);
+  assert.equal(installs.length, 2);
+  assert.equal(installs[0]?.sessionId, undefined);
+  assert.equal(installs[1]?.sessionId, "install-1");
+  assert.deepEqual(installs[1]?.args, []);
+});
+
+/**
+ * A script that ran and failed is the script's answer, not a transport
+ * failure. Retrying it would hide a real installer error behind another
+ * attempt.
+ */
+test("Sprite provisioning does not retry a script that exited", async () => {
+  let toolchainSpawns = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("\nMARKER=")) {
+          toolchainSpawns += 1;
+          child.stderr.write("installer exploded\n");
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 1);
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /exit code 1/);
+      assert.equal((err as { stderr?: string }).stderr?.includes("installer exploded"), true);
+      return true;
+    },
+  );
+  assert.equal(toolchainSpawns, 1);
 });
 
 /**
