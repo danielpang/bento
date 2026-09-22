@@ -253,6 +253,13 @@
       "when": 1789860420000,
       "tag": "0035_swarm_worker_isolation",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1789860480000,
+      "tag": "0036_run_cost_tiers",
+      "breakpoints": true
     }
   ]
 }

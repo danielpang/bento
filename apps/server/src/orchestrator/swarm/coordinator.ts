@@ -19,6 +19,7 @@ import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
 import { enqueueSwarmPublish } from "./complete.js";
 import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
+import { assumedCostFor, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -325,10 +326,11 @@ async function runTick(
 
   await settleWorkedLeaves(tx, swarm, tasks, events, now);
   const changed = await rollUp(tx, swarm, tasks, events);
+  await warnLowBudget(tx, swarm, now);
   const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
   const spawned = await spawnWorkers(tx, swarm, changed.tasks, deps, events, now);
   const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now);
-  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events);
+  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events, spawned);
 
   return {
     changedTasks: changed.changedCount,
@@ -435,8 +437,6 @@ interface Cost {
   estimated: number;
   assumed: number;
 }
-
-const ZERO: Cost = { measured: 0, estimated: 0, assumed: 0 };
 
 function addCost(a: Cost, b: Cost): Cost {
   return {
@@ -545,8 +545,12 @@ async function rollUp(
     return cost;
   };
 
-  let total = ZERO;
-  for (const root of byParent.get(null) ?? []) total = addCost(total, visit(root));
+  /*
+   * Walked for its writes rather than for a total: visit fills in what
+   * every node's status and cost should be, and the swarm's own spend
+   * is the ledger's (see below).
+   */
+  for (const root of byParent.get(null) ?? []) visit(root);
 
   const updated: Task[] = [];
   for (const task of tasks) {
@@ -594,26 +598,69 @@ async function rollUp(
     }
   }
 
-  const spendChanged =
-    total.measured !== Number(swarm.spentMeasuredUsd)
-    || total.estimated !== Number(swarm.spentEstimatedUsd)
-    || total.assumed !== Number(swarm.spentAssumedUsd);
-  if (spendChanged) {
-    await tx
-      .update(swarms)
-      .set({
-        spentMeasuredUsd: String(total.measured),
-        spentEstimatedUsd: String(total.estimated),
-        spentAssumedUsd: String(total.assumed),
-        updatedAt: new Date(),
-      })
-      .where(eq(swarms.id, swarm.id));
-    swarm.spentMeasuredUsd = String(total.measured);
-    swarm.spentEstimatedUsd = String(total.estimated);
-    swarm.spentAssumedUsd = String(total.assumed);
-  }
-
+  /**
+   * The swarm's own spend is not written here, and that is a change
+   * worth stating.
+   *
+   * It used to be the sum of the tree, which is a smaller number than
+   * the bill: a planner turn and a merge queue resolver belong to no
+   * node, and those are two of the most expensive roles a swarm has.
+   * A budget checked against a total that leaves the planner out is a
+   * budget that lets a swarm spend past it without ever refusing
+   * anything.
+   *
+   * So the ledger adds each run's charge to the swarm as the run ends,
+   * and the swarm's four columns are the authority. The tree's figures
+   * answer the other question, which is what each piece of work cost,
+   * and this step keeps rolling those.
+   */
   return { tasks: updated, changedCount };
+}
+
+/* ------------------------------------------------------------------ *
+ * Step 1b: tell the planner when the money is nearly gone.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Queues one notice when what is left of the budget is less than one
+ * more run.
+ *
+ * The planner is the only actor that can do anything useful with this.
+ * It is the one deciding what happens next, and told in time it can
+ * spend the remainder on the leaf that matters rather than on whatever
+ * came next in tree order. Told nothing, it finds out by having a spawn
+ * refused, which is the same information one run too late.
+ *
+ * Once per budget, which is what the latch on the swarm is for: this
+ * runs on every tick, and a warning per tick would be a planner turn
+ * per tick spent reading the same sentence. Raising the budget clears
+ * the latch, because a raised budget is a different budget and running
+ * low on it is news again.
+ *
+ * A message rather than a field the prompt reads, because the wake
+ * message is how everything else reaches the planner, and folding it
+ * in there means one turn answers the budget, the reports and the
+ * people together.
+ */
+async function warnLowBudget(tx: Tx, swarm: typeof swarms.$inferSelect, now: Date): Promise<void> {
+  if (swarm.budgetWarnedAt) return;
+  if (swarm.status === "cancelled" || swarm.status === "done" || swarm.status === "draft") return;
+  const perRun = await assumedCostFor(tx as unknown as Db, swarm);
+  if (!budgetIsLow(swarm, perRun)) return;
+
+  const cap = Number(swarm.budgetUsd);
+  const spent = enforcedSpend(spendOf(swarm));
+  await tx.insert(swarmMessages).values({
+    swarmId: swarm.id,
+    source: "system",
+    text: [
+      `This swarm has spent ${money(spent)} of its ${money(cap)} budget, which leaves less than one more run.`,
+      "Decide what the rest is worth spending on: finish what is closest to done, cancel what no longer matters, and say what is left undone in your write-up.",
+      "Nothing running is stopped. When the budget is gone the swarm stops starting new work, and a person can raise it.",
+    ].join(" "),
+  });
+  await tx.update(swarms).set({ budgetWarnedAt: now, updatedAt: now }).where(eq(swarms.id, swarm.id));
+  swarm.budgetWarnedAt = now;
 }
 
 /* ------------------------------------------------------------------ *
@@ -736,7 +783,11 @@ async function deliverPlannerWake(
       status: task.status,
       report: task.report,
     })),
-    ...pending.map((message) => ({ kind: "message" as const, text: message.text })),
+    ...pending.map((message) =>
+      message.source === "system"
+        ? ({ kind: "notice" as const, text: message.text })
+        : ({ kind: "message" as const, text: message.text }),
+    ),
   ];
 
   const started = await deps.startRun(tx, {
@@ -802,6 +853,27 @@ async function workerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Prom
 interface SpawnResult {
   runIds: string[];
   refusal: string | null;
+  /** Which ceiling refused, so step five knows which ending this is. */
+  cap: "plan" | "budget" | null;
+}
+
+/**
+ * The states a swarm spawns from.
+ *
+ * The two stalled ones are in the list on purpose, and they are what
+ * makes a ceiling temporary rather than terminal. A swarm paused
+ * because the team ran out of agent hours starts again when the period
+ * rolls over, and one that stopped on its budget starts again when
+ * somebody raises it. Neither is an event anything fires on, so the
+ * answer is to try the spawn and let the door say yes or no: the
+ * watchdog re-ticks these swarms for exactly this step.
+ *
+ * Cancelled, done and failed are not here. Those are endings.
+ */
+function spawnsFrom(swarm: typeof swarms.$inferSelect): boolean {
+  if (swarm.status === "running" || swarm.status === "blocked") return true;
+  if (swarm.status === "budget_exhausted") return true;
+  return swarm.status === "paused" && swarm.pausedReason === "plan_limit";
 }
 
 /**
@@ -833,16 +905,29 @@ async function spawnWorkers(
    * person has not yet said go. That is the whole content of the start
    * route, and it is enforced here rather than there, because the
    * coordinator is what would otherwise spawn regardless.
+   *
+   * A swarm stalled on a ceiling is included, because trying is how a
+   * ceiling that has lifted is noticed. See spawnsFrom.
    */
-  if (swarm.status !== "running" && swarm.status !== "blocked") return { runIds, refusal: null };
+  if (!spawnsFrom(swarm)) return { runIds, refusal: null, cap: null };
 
   const ready = tasks.filter((task) => task.nodeType === "leaf" && task.status === "assigned");
-  if (ready.length === 0) return { runIds, refusal: null };
+  if (ready.length === 0) return { runIds, refusal: null, cap: null };
 
-  const profileId = await workerProfileFor(tx, swarm);
-  if (!profileId) return { runIds, refusal: null };
+  const templateWorker = await workerProfileFor(tx, swarm);
 
   for (const task of ready) {
+    /*
+     * The agent a person chose for this leaf, or the template's.
+     *
+     * Reassigning a leaf that a cheap worker could not finish writes
+     * the choice on the node, so it survives a retry and does not
+     * change the agent every other leaf gets.
+     */
+    const profileId = task.agentProfileId ?? templateWorker;
+    // Nothing to run it as. The leaf keeps its place in the queue, and
+    // starts the moment a worker agent is set on the template.
+    if (!profileId) break;
     const started = await deps.startRun(tx, {
       type: "swarm",
       swarmId: swarm.id,
@@ -869,10 +954,17 @@ async function spawnWorkers(
     // nothing left to spawn on at all.
     if (started === "gone") break;
     if ("outOfCompute" in started) {
+      /*
+       * Which ceiling it was, said on the leaf. The two are different
+       * sentences to the person looking at the board and different
+       * next steps: agent hours come back on their own, and a dollar
+       * budget is raised by somebody.
+       */
+      const attention = started.cap === "budget" ? "budget" : "plan_limit";
       await tx
         .update(swarmTasks)
         .set({
-          attention: "budget",
+          attention,
           flags: { ...task.flags, spawnRefusal: started.outOfCompute },
           updatedAt: now,
         })
@@ -880,11 +972,11 @@ async function spawnWorkers(
       await tx.insert(swarmTaskEvents).values({
         taskId: task.id,
         kind: "attention_raised",
-        detail: { reason: started.outOfCompute },
+        detail: { reason: started.outOfCompute, cap: started.cap ?? "plan" },
       });
       // The in-memory row too, so step five sees the attention this
       // step just raised rather than the tree as it was before it.
-      task.attention = "budget";
+      task.attention = attention;
       events.push({
         type: "swarm_task_updated",
         projectId: swarm.projectId,
@@ -892,12 +984,24 @@ async function spawnWorkers(
         taskId: task.id,
         status: task.status,
       });
-      return { runIds, refusal: started.outOfCompute };
+      return { runIds, refusal: started.outOfCompute, cap: started.cap ?? "plan" };
     }
 
     await tx
       .update(swarmTasks)
-      .set({ status: "working", assignedRunId: started.id, startedAt: task.startedAt ?? now, updatedAt: now })
+      .set({
+        status: "working",
+        assignedRunId: started.id,
+        /*
+         * And the ceiling's mark comes off, because a leaf that just
+         * started is no longer waiting for one. Only that mark: a
+         * question or a conflict on this leaf is somebody else's to
+         * clear.
+         */
+        ...(task.attention === "budget" || task.attention === "plan_limit" ? { attention: null } : {}),
+        startedAt: task.startedAt ?? now,
+        updatedAt: now,
+      })
       .where(eq(swarmTasks.id, task.id));
     await tx.insert(swarmTaskEvents).values({
       taskId: task.id,
@@ -907,6 +1011,7 @@ async function spawnWorkers(
       runId: started.id,
     });
     task.status = "working";
+    if (task.attention === "budget" || task.attention === "plan_limit") task.attention = null;
     runIds.push(started.id);
     events.push({
       type: "swarm_task_updated",
@@ -916,7 +1021,26 @@ async function spawnWorkers(
       status: "working",
     });
   }
-  return { runIds, refusal: null };
+
+  /**
+   * A stalled swarm that just started something is not stalled.
+   *
+   * Written here rather than left to step five, because step five
+   * deliberately never recomputes a swarm out of a state a person or a
+   * ceiling put it in: without this the ceiling would lift, a worker
+   * would start, and the board would go on saying the swarm was out of
+   * money while its agents worked.
+   */
+  if (runIds.length > 0 && swarm.status !== "running" && swarm.status !== "blocked") {
+    await tx
+      .update(swarms)
+      .set({ status: "running", pausedReason: null, updatedAt: now })
+      .where(eq(swarms.id, swarm.id));
+    swarm.status = "running";
+    swarm.pausedReason = null;
+    events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status: "running" });
+  }
+  return { runIds, refusal: null, cap: null };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1176,6 +1300,13 @@ export function swarmStatusFrom(
   if (current === "draft" || current === "planning" || current === "paused" || current === "cancelled") {
     return current;
   }
+  /*
+   * And the two ceilings, for the same reason: a swarm stopped by its
+   * budget or its clock has a tree full of open leaves, which reads as
+   * a swarm at work. Only a spawn that succeeds takes it out of these,
+   * and the spawn step is what writes that.
+   */
+  if (current === "budget_exhausted" || current === "timed_out") return current;
   // Started, with nothing in the plan to summarize.
   if (roots.length === 0) return current;
   const rolled = rollUpStatus("open", roots);
@@ -1199,7 +1330,45 @@ async function recomputeSwarmStatus(
   swarm: typeof swarms.$inferSelect,
   tasks: Task[],
   events: BoardEvent[],
+  spawn: SpawnResult,
 ): Promise<(typeof swarms.$inferSelect)["status"]> {
+  /**
+   * A ceiling that refused a spawn ends the swarm once nothing is
+   * left running, and not a moment before.
+   *
+   * Nothing is killed for either ceiling: the workers that are mid task
+   * finish and their branches land, which is the same rule a card
+   * follows and the reason the two are separate questions. It is only
+   * when the last of them has stopped that a swarm nobody can spawn on
+   * is actually over.
+   *
+   * The two endings are different states because they are different
+   * things to do next. Out of agent hours is the team's plan and comes
+   * back on its own, so the swarm is paused with the reason on it and
+   * the watchdog keeps asking. Out of budget is this swarm's own cap
+   * and comes back only when a person raises it, so it is an ending
+   * that keeps everything that landed and can be reopened.
+   */
+  if (spawn.refusal) {
+    const [active] = await tx
+      .select({ id: agentRuns.id })
+      .from(agentRuns)
+      .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+      .limit(1);
+    if (!active) {
+      const status = spawn.cap === "budget" ? ("budget_exhausted" as const) : ("paused" as const);
+      const pausedReason = spawn.cap === "budget" ? ("budget" as const) : ("plan_limit" as const);
+      if (swarm.status !== status || swarm.pausedReason !== pausedReason) {
+        await tx
+          .update(swarms)
+          .set({ status, pausedReason, updatedAt: new Date() })
+          .where(eq(swarms.id, swarm.id));
+        events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status });
+      }
+      return status;
+    }
+  }
+
   const roots = tasks.filter((task) => task.parentId === null).map((task) => task.status);
   const attention = tasks.some((task) => task.attention !== null && task.status !== "cancelled");
   const rolled = swarmStatusFrom(swarm.status, roots);

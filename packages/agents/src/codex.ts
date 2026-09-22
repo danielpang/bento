@@ -164,6 +164,14 @@ export const codexAdapter: AgentAdapter = {
       case "turn.completed": {
         const ev: AgentEvent = { type: "result", ok: true, raw: parsed };
         if (parsed.thread_id !== undefined) ev.sessionId = parsed.thread_id;
+        /*
+         * Codex prints what it used and never what it cost, which is
+         * the case the estimated tier exists for. The counts are
+         * carried through as counts: pricing them needs a rate card,
+         * and the ledger is where that lives.
+         */
+        if (typeof parsed.usage?.input_tokens === "number") ev.inputTokens = parsed.usage.input_tokens;
+        if (typeof parsed.usage?.output_tokens === "number") ev.outputTokens = parsed.usage.output_tokens;
         return ev;
       }
       case "turn.failed":
@@ -186,10 +194,34 @@ export const codexAdapter: AgentAdapter = {
     const sessionId = result.sessionId ?? (init?.type === "init" ? init.sessionId : undefined);
     const outcome: RunOutcome = { ok: result.ok && exitCode === 0 };
     if (sessionId !== undefined) outcome.sessionId = sessionId;
+    /*
+     * Summed across every turn rather than taken from the last one: a
+     * resumed thread reports per turn, and the run's bill is all of
+     * them. Only the result events carry counts, so this is the same
+     * list the outcome is read from.
+     */
+    const counted = events.filter((event) => event.type === "result");
+    const inputTokens = sumTokens(counted.map((event) => event.inputTokens));
+    const outputTokens = sumTokens(counted.map((event) => event.outputTokens));
+    if (inputTokens !== undefined) outcome.inputTokens = inputTokens;
+    if (outputTokens !== undefined) outcome.outputTokens = outputTokens;
     if (!outcome.ok) outcome.error = result.error ?? `exit code ${exitCode}`;
     return outcome;
   },
 };
+
+/**
+ * Adds up the counts that are there, and answers nothing when none is.
+ *
+ * Zero would be a claim that the run used no tokens, which would then
+ * be priced at nothing and recorded as a measured looking $0.00. A run
+ * whose counts never arrived has to fall through to the assumed tier
+ * instead, and "nothing" is how it says so.
+ */
+function sumTokens(counts: (number | undefined)[]): number | undefined {
+  const known = counts.filter((count): count is number => typeof count === "number" && Number.isFinite(count));
+  return known.length === 0 ? undefined : known.reduce((total, count) => total + count, 0);
+}
 
 /**
  * Whether this Codex profile has OpenRouter selected as its provider.

@@ -30,6 +30,13 @@ export const agentEvent = z.discriminatedUnion("type", [
     ok: z.boolean(),
     sessionId: z.string().optional(),
     costUsd: z.number().optional(),
+    /**
+     * What the tool counted, for the tools that count tokens instead
+     * of dollars. Codex prints these and no cost at all, which is the
+     * whole reason a run can be priced rather than guessed at.
+     */
+    inputTokens: z.number().int().optional(),
+    outputTokens: z.number().int().optional(),
     numTurns: z.number().int().optional(),
     error: z.string().optional(),
     raw: z.unknown().optional(),
@@ -68,6 +75,15 @@ export interface RunOutcome {
   ok: boolean;
   sessionId?: string;
   costUsd?: number;
+  /**
+   * Tokens in and out, when the tool reports those rather than a
+   * price. Kept beside costUsd rather than converted here, because
+   * turning tokens into dollars needs a rate card and an adapter has
+   * no business holding one: the ledger prices them from the model
+   * catalog and records the rate it used.
+   */
+  inputTokens?: number;
+  outputTokens?: number;
   numTurns?: number;
   error?: string;
 }

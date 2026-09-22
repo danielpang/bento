@@ -13,6 +13,13 @@ import { AGENT_CREDENTIALS, MODEL_CATALOG, MODEL_GUIDANCE, modelStringFor, provi
  * Public on purpose. This is a list of model names, identical for every
  * tenant, and holding it behind auth would only mean a sign-in before a
  * person can see which models exist.
+ *
+ * The catalog carries list prices as well as names, refreshed with the
+ * model list by the same script, which is what lets a run that printed
+ * only its token counts be priced rather than guessed at. Prices are
+ * dollars per million tokens, exactly as models.dev publishes them and
+ * as every provider quotes them. They are public for the same reason
+ * the names are: a published price is not anybody's secret.
  */
 export function catalogRoutes() {
   return new Hono()
@@ -29,6 +36,15 @@ export function catalogRoutes() {
      * provider/model. Resolving it here means a client that cannot
      * import @bento/core does not have to know that rule. Without a
      * ?cli it is the bare id, since the answer depends on the tool.
+     *
+     * A model the snapshot prices carries one more line:
+     *   price|<providerId>|<modelId>|<inputPerMtok>|<outputPerMtok>
+     * Its own line rather than two more fields on the model line, so a
+     * client written against the older format keeps parsing: it reads
+     * a word it does not know and skips the line, where two extra
+     * fields would have changed the meaning of a line it thought it
+     * understood. Absent means the snapshot does not price that model,
+     * which is not the same as free.
      */
     .get("/models/plain", (c) => {
       const cli = c.req.query("cli");
@@ -39,6 +55,9 @@ export function catalogRoutes() {
         for (const model of provider.models) {
           const modelString = cli ? modelStringFor(cli, provider.id, model.id) : model.id;
           lines.push(`model|${provider.id}|${model.id}|${modelString}|${model.name}`);
+          if (model.cost) {
+            lines.push(`price|${provider.id}|${model.id}|${model.cost.input}|${model.cost.output}`);
+          }
         }
       }
       return c.text(lines.join("\n"));

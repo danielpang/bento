@@ -57,6 +57,7 @@ import { buildWorkerPrompt } from "./swarm/worker-prompt.js";
 import { taskTrailer } from "./swarm/branches.js";
 import { takeNodeMessages } from "./swarm/node-messages.js";
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
+import { applyRunCharge, chargeForRun } from "./swarm/ledger.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
@@ -178,6 +179,24 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * an agent that cannot run a single command.
    */
   const authMounts = !sharesLogin || Object.keys(authEnv).length > 0 ? [] : await agentAuthMounts(ctx, adapter);
+  /**
+   * Whether this run is about to spend a subscription rather than a
+   * key, recorded now rather than asked at the end.
+   *
+   * The ledger needs it to decide whether a printed cost is a real
+   * charge or a list price somebody had already paid, and the setting
+   * behind it can be changed while a run is in flight. Asked at the
+   * end, a run that borrowed a login would be billed against the
+   * budget because somebody turned sharing off in the meantime.
+   *
+   * It is what was actually handed over, not what the setting says: a
+   * deployment with sharing on but no login on disk gives the agent an
+   * API key, and that run's spend is as real as any other.
+   */
+  const sharedAgentAuth = authMounts.length > 0 || Object.keys(authEnv).length > 0;
+  if (sharedAgentAuth) {
+    await ctx.db.update(agentRuns).set({ sharedAgentAuth: true }).where(eq(agentRuns.id, runId));
+  }
 
   /**
    * The transcript starts before the sandbox does. Provisioning a cold
@@ -1410,12 +1429,39 @@ async function organizationRestrictsNetwork(ctx: AppContext, organizationId: str
 async function finishRun(
   ctx: AppContext,
   runId: string,
-  outcome: { ok: boolean; sessionId?: string; costUsd?: number; numTurns?: number; error?: string },
+  outcome: {
+    ok: boolean;
+    sessionId?: string;
+    costUsd?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    numTurns?: number;
+    error?: string;
+  },
   exitCode: number | null,
 ): Promise<void> {
   // Ending runs belongs to the successor once shutdown starts; see the
   // drain checks in the executor loops.
   if (ctx.draining) return;
+  /**
+   * What this run cost, and how well that is known, worked out before
+   * the run is closed and written in the same statement that closes it.
+   *
+   * Before, so the tier and the figure land together: a run whose cost
+   * was written by a second update would be readable for an instant as
+   * a finished run that cost nothing, and the budget is read on exactly
+   * that path. The rollup onto the swarm happens after the compare and
+   * set below, so it happens once however many loops are driving this
+   * run.
+   */
+  const charge = await chargeForRun(ctx.db, runId, outcome).catch((err: unknown) => {
+    // A ledger that cannot be worked out must not turn a finished run
+    // into a failed one. The run still ends; its cost reads as not
+    // recorded, which is what null in that column means.
+    console.warn(`could not work out what run ${runId} cost:`, err);
+    ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "ledger" });
+    return null;
+  });
   /**
    * Compare-and-set: only a run still active can be finished, and only
    * whoever moved it gets to write the rest (the transcript line, the
@@ -1438,13 +1484,44 @@ async function finishRun(
        * the column; failure now does too.
        */
       ...(outcome.sessionId !== undefined ? { cliSessionId: outcome.sessionId } : {}),
-      costUsd: outcome.costUsd !== undefined ? String(outcome.costUsd) : null,
+      /**
+       * The ledger's figure when it has one, and the tool's own when it
+       * does not.
+       *
+       * They agree for a measured run, which is most of them. Where
+       * they differ is the case the ledger exists for: a run that
+       * printed tokens and no price, or nothing at all, has a figure
+       * only because the ledger worked one out, and writing the tool's
+       * silence here instead would leave the swarm's spend saying that
+       * an agent that ran for an hour cost nothing.
+       */
+      costUsd: charge ? String(charge.usd) : outcome.costUsd !== undefined ? String(outcome.costUsd) : null,
+      ...(charge
+        ? {
+            costTier: charge.tier,
+            inputTokens: charge.inputTokens,
+            outputTokens: charge.outputTokens,
+            pricePerMtok: charge.pricePerMtok,
+          }
+        : {}),
       numTurns: outcome.numTurns ?? null,
       error: outcome.error ?? null,
     })
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
-    .returning({ id: agentRuns.id });
+    .returning({ id: agentRuns.id, swarmId: agentRuns.swarmId, swarmTaskId: agentRuns.swarmTaskId });
   if (!closed) return;
+  /*
+   * The swarm's own totals, behind the compare and set so a run is
+   * charged once. Its failure is never the run's: a swarm whose spend
+   * is a few cents behind is a reporting problem, and a run that
+   * refused to finish because of one is a branch nobody chose.
+   */
+  if (charge) {
+    await applyRunCharge(ctx.db, closed, charge).catch((err: unknown) => {
+      console.warn(`could not add run ${runId} to its swarm's ledger:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "ledger" });
+    });
+  }
   // The run is over, so its gateway token is too. Behind the CAS, so it
   // fires exactly once; a failure here never fails the close.
   await revokeRunGrant(ctx, runId);
