@@ -301,20 +301,32 @@ const number = (value: string | null): number => (value === null ? 0 : Number(va
  */
 export function swarmStatusOf(row: { status: string; pausedReason: Swarm["pausedReason"] }): SwarmStatus {
   if (row.status === "paused") return row.pausedReason === "budget" ? "budget_exhausted" : "paused";
+  if (row.status === "cancelled") return "stopped";
+  if (row.status === "done") return "done";
+  if (row.status === "failed") return "failed";
+  /*
+   * A question the swarm itself asked, which is a swarm waiting for a
+   * person whatever its tree is doing.
+   *
+   * An agent that asks about the goal rather than about one leaf has
+   * no node to hang the attention off, so it records the reason on the
+   * swarm and leaves the status alone: the status is the tree's, and
+   * the next tick would recompute it anyway. The reason is therefore
+   * what the board has to read, and answering is what ends the wait
+   * (the messages route clears it on the way in).
+   */
+  if (row.pausedReason === "attention") return "waiting";
   switch (row.status) {
     case "blocked":
       return "waiting";
-    case "cancelled":
-      return "stopped";
     // A swarm is created planning, so draft is a row nothing writes
     // today. It reads as planning rather than as a sixth word.
     case "draft":
       return "planning";
-    case "planning":
     case "running":
-    case "done":
-    case "failed":
-      return row.status;
+      return "running";
+    case "planning":
+      return "planning";
     default:
       return "planning";
   }

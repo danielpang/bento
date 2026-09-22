@@ -304,6 +304,21 @@ test("a swarm's status is said in the console's words, and a budget stop says so
   assert.equal(status({ status: "failed" }), "failed");
   // A swarm is created planning, so draft is a row nothing writes.
   assert.equal(status({ status: "draft" }), "planning");
+  /*
+   * A question the swarm itself asked reads as waiting, whatever the
+   * tree is doing.
+   *
+   * ask_user with no task has no leaf to raise attention on, so it
+   * records the reason on the swarm and leaves the status alone. Read
+   * off the status alone, such a swarm looked like it was simply
+   * planning or running, and the one thing it needed (an answer) was
+   * nowhere on the board.
+   */
+  assert.equal(status({ status: "planning", pausedReason: "attention" }), "waiting");
+  assert.equal(status({ status: "running", pausedReason: "attention" }), "waiting");
+  // And a swarm that is over is over: nothing is waiting for anybody.
+  assert.equal(status({ status: "cancelled", pausedReason: "attention" }), "stopped");
+  assert.equal(status({ status: "done", pausedReason: "attention" }), "done");
 });
 
 test("a swarm with no plan and no runs still draws", () => {
