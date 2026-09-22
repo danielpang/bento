@@ -48,6 +48,15 @@ export function hasNoLiveTranscript(cli: string): boolean {
 }
 
 /**
+ * What the live pane says while one of those tools is still running.
+ * The name is repeated because the sentence has to stand alone under
+ * the thinking orb, with no heading beside it.
+ */
+export function quietRunMessage(label: string): string {
+  return `${label} does not output messages while it is processing the prompt. ${label} prints one final message when the run ends.`;
+}
+
+/**
  * Whether a live stdin session should stay open after a finished turn,
  * waiting for the user to keep talking.
  *

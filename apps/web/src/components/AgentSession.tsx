@@ -6,6 +6,7 @@ import {
   forgetsBetweenRuns,
   hasNoLiveTranscript,
   modelGuidanceFor,
+  quietRunMessage,
   withProviderOutageAdvice,
   type AgentEvent,
 } from "@bento/core";
@@ -557,10 +558,18 @@ export function AgentSession({
         </div>
       )}
       {latestRun ? (
-        !quietTool && !hasMessages && !draft && runActive && !viewedRunId ? (
-          <div className="chat orb-hero" aria-label="The agent is starting">
+        !hasMessages && !draft && runActive && !viewedRunId ? (
+          <div className="chat orb-hero" aria-label={quietTool ? quietRunMessage(quietLabel) : "The agent is starting"}>
+            {/*
+              fx prints nothing until it exits, so this orb stays for
+              the whole run instead of giving way to a transcript.
+            */}
             <ThinkingOrb state="shaping" size={64} paused={REDUCED_MOTION} />
-            <span className="muted">{workingName} is getting started...</span>
+            {quietTool ? (
+              <QuietRunCopy label={quietLabel} startedAt={latestRun.startedAt} clock={clock} />
+            ) : (
+              <span className="muted">{workingName} is getting started...</span>
+            )}
           </div>
         ) : (
           <div className="chat" ref={paneRef} onScroll={readPosition}>
@@ -578,22 +587,9 @@ export function AgentSession({
               </div>
             ))}
             {quietTool && runActive && !viewedRunId && (
-              <div className="chat-row chat-row-system" role="status" aria-label="No live output from this tool">
-                <ThinkingOrb state="shaping" size={20} paused={REDUCED_MOTION} />
-                <div className="quiet-run-copy">
-                  <strong>No live output from this tool</strong>
-                  <span className="muted">
-                    {quietLabel} prints one final message when the run ends and nothing before it, so this card stays
-                    quiet until then. That is the tool, not a stall. The work still lands on the branch, and Stop ends the run now.
-                  </span>
-                  <span className="muted">Working for {runDuration(latestRun.startedAt, clock)}.</span>
-                  {isLongQuietRun(latestRun.startedAt, clock) && (
-                    <span className="warn">
-                      Still working after 30 minutes, with nothing printed. Nothing on this card can tell whether it is
-                      progressing, because the tool prints nothing until it ends. Stop it if this looks wrong.
-                    </span>
-                  )}
-                </div>
+              <div className="quiet-run" role="status" aria-label={quietRunMessage(quietLabel)}>
+                <ThinkingOrb state="shaping" size={64} paused={REDUCED_MOTION} />
+                <QuietRunCopy label={quietLabel} startedAt={latestRun.startedAt} clock={clock} />
               </div>
             )}
             {/*
@@ -637,7 +633,7 @@ export function AgentSession({
           appears here.
         </p>
       )}
-      {runActive && !viewedRunId && hasMessages && (
+      {runActive && !viewedRunId && hasMessages && !quietTool && (
         <div className="working-row" role="status">
           <ThinkingOrb state={orbStateFor(activity.tool)} size={20} paused={REDUCED_MOTION} aria-label="Agent working" />
           <span className="muted">
@@ -958,6 +954,30 @@ export function runDuration(startedAt: string | null, now: number): string {
 
 export function isLongQuietRun(startedAt: string | null, now: number): boolean {
   return elapsedMs(startedAt, now) >= 30 * 60 * 1000;
+}
+
+/** The sentence under the thinking orb while a quiet tool is still running. */
+function QuietRunCopy({
+  label,
+  startedAt,
+  clock,
+}: {
+  label: string;
+  startedAt: string | null;
+  clock: number;
+}) {
+  return (
+    <div className="quiet-run-copy">
+      <span className="muted">{quietRunMessage(label)}</span>
+      <span className="muted">Working for {runDuration(startedAt, clock)}.</span>
+      {isLongQuietRun(startedAt, clock) && (
+        <span className="warn">
+          Still working after 30 minutes, with nothing printed. Nothing on this card can tell whether it is
+          progressing, because the tool prints nothing until it ends. Stop it if this looks wrong.
+        </span>
+      )}
+    </div>
+  );
 }
 
 /**

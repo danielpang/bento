@@ -145,10 +145,28 @@ test("AgentSession composer is a one-line textarea so a long line can grow it", 
 test("AgentSession explains the quiet DeepSeek Harness run", () => {
   withStorage(() => {
     const html = renderComposer("running", "dsh");
-    assert.match(html, /No live output from this tool/);
-    assert.match(html, /prints one final message when the run ends/);
+    assert.match(html, /class="chat orb-hero"/);
+    assert.match(
+      html,
+      /DeepSeek Harness does not output messages while it is processing the prompt\. DeepSeek Harness prints one final message when the run ends\./,
+    );
     assert.match(html, /Working for/);
+    assert.doesNotMatch(html, /not a stall|stays quiet/);
     assert.match(html, /as a new run with a compacted transcript/);
+  });
+});
+
+test("AgentSession keeps the thinking orb up while fx is running", () => {
+  withStorage(() => {
+    const html = renderComposer("running", "fx");
+    assert.match(html, /class="chat orb-hero"/);
+    assert.match(html, /<canvas[^>]*role="img"[^>]*aria-label="Shaping…"/);
+    assert.match(
+      html,
+      /fx does not output messages while it is processing the prompt\. fx prints one final message when the run ends\./,
+    );
+    assert.doesNotMatch(html, /Waiting for output/);
+    assert.doesNotMatch(html, /not a stall|stays quiet/);
   });
 });
 

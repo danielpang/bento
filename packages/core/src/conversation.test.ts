@@ -5,6 +5,7 @@ import {
   compactTranscript,
   forgetsBetweenRuns,
   hasNoLiveTranscript,
+  quietRunMessage,
   shouldHoldLiveSession,
 } from "./conversation.js";
 
@@ -87,6 +88,10 @@ test("pool and dsh follow-ups stay cold even when a session id exists", () => {
   assert.equal(forgetsBetweenRuns("muse"), false);
   assert.equal(hasNoLiveTranscript("dsh"), true);
   assert.equal(hasNoLiveTranscript("fx"), true);
+  assert.equal(
+    quietRunMessage("fx"),
+    "fx does not output messages while it is processing the prompt. fx prints one final message when the run ends.",
+  );
   assert.equal(hasNoLiveTranscript("pool"), false);
   assert.equal(hasNoLiveTranscript("codex"), false);
   assert.equal(hasNoLiveTranscript("muse"), false);

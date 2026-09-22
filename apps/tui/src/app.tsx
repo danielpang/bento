@@ -15,7 +15,14 @@ import {
   type Project,
   type Stage,
 } from "@bento/api-client";
-import { actorDisplayName, forgetsBetweenRuns, hasNoLiveTranscript, historyTriggerLabel } from "@bento/core";
+import {
+  actorDisplayName,
+  forgetsBetweenRuns,
+  hasNoLiveTranscript,
+  historyTriggerLabel,
+  modelGuidanceFor,
+  quietRunMessage,
+} from "@bento/core";
 import { Workbench, type WorkbenchPage } from "./components/Workbench.js";
 import { Reader } from "./components/Navigator.js";
 import { terminalText } from "./terminal.js";
@@ -176,12 +183,11 @@ export function takeoverTitle(cli: string | undefined, active: boolean, name: st
 
 /**
  * The live log line for a tool that prints nothing until it exits.
- * Shared with the web quiet-run copy so the two clients cannot drift
- * the way FORGETS_BETWEEN_RUNS used to.
+ * The words live in `quietRunMessage` so the console cannot drift.
  */
 export function quietRunStatus(cli: string | undefined, active: boolean): string | null {
   if (!active || !cli || !hasNoLiveTranscript(cli)) return null;
-  return "No live output from this tool. It prints one final message when the run ends. That is the tool, not a stall.";
+  return quietRunMessage(modelGuidanceFor(cli)?.label ?? cli);
 }
 
 /** The requirements standing between this card and the next stage. */
