@@ -1,7 +1,7 @@
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -18,7 +18,7 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
@@ -550,4 +550,146 @@ test("a landing that is not at the front of the queue is not performed", async (
 
   assert.equal(await performLanding(ctx, row!.id), null);
   assert.equal(await git(fx.swarmTree, ["rev-parse", "HEAD"]), head);
+});
+
+/* ---------------------------------------------------------------- *
+ * Test before landing, actually executed.
+ * ---------------------------------------------------------------- */
+
+/**
+ * The checks a landing runs, run for real.
+ *
+ * This is the part of the merge queue that had never once executed. It
+ * needs a sandbox, and the reasoning was that no Docker here means no
+ * sandbox, so only the branch where it returns null was ever taken.
+ * That was too quick: the local process driver is a sandbox as far as
+ * `ctx.driver.exec` is concerned, it runs commands in the workspace's
+ * worktree, and it is what the other end to end suites already use. So
+ * the swarm's own checkout is the sandbox's workdir, the repository's
+ * check is a real command, and both outcomes below are the command
+ * really running and really failing.
+ *
+ * The provider is set to the driver's own name rather than left at
+ * "docker": the landing refuses "sprite" and nothing else, so this is
+ * the honest label for what is executing.
+ */
+async function withLocalDriver<T>(run: () => Promise<T>): Promise<T> {
+  const driver = ctx.driver as unknown as { provider: string; exec?: unknown };
+  const wasProvider = driver.provider;
+  const local = new LocalProcessDriver();
+  driver.provider = "local-process";
+  driver.exec = local.exec.bind(local);
+  try {
+    return await run();
+  } finally {
+    driver.provider = wasProvider;
+    delete driver.exec;
+  }
+}
+
+/**
+ * The machine the checks run on: the swarm's own workspace, which is
+ * where `repositoryPathIn(workdir, name)` finds each repository's
+ * checkout, exactly as a provisioned sandbox would.
+ */
+async function giveSwarmASandbox(swarmId: string): Promise<void> {
+  const workdir = ctx.worktrees.workspacePath(swarmWorkspaceKey(swarmId));
+  const [sandbox] = await db
+    .insert(sandboxes)
+    .values({ projectId: PROJECT, swarmId, provider: "docker", externalId: `local-${swarmId}`, status: "ready", workdir })
+    .returning();
+  await db.update(swarms).set({ sandboxId: sandbox!.id }).where(eq(swarms.id, swarmId));
+}
+
+async function setCheck(command: string | null): Promise<void> {
+  await pool.query(`update repositories set test_command = $2 where project_id = $1`, [PROJECT, command]);
+}
+
+test("a branch that passes the swarm's own checks lands, and the checks really ran", async () => {
+  const fx = await swarmWithLeaf("checks-pass");
+  await commitIn(fx.workerTree, fx.task.id, "totals.txt", "1\n", "add totals");
+  await giveSwarmASandbox(fx.swarm.id);
+
+  /**
+   * The command leaves a trace of where and when it ran, which is the
+   * only way to tell a check that passed from a check that was never
+   * executed: both of them land the branch. What it records is the
+   * commit the swarm's checkout was on, and the assertion is that this
+   * is the fast forwarded head rather than the one before it. The
+   * check has to see the leaf's work, because a leaf that passes alone
+   * and breaks what landed before it is the whole reason a merge queue
+   * runs anything at all.
+   */
+  const marker = path.join(dataDir, "checks-pass.ran");
+  await setCheck(`git rev-parse HEAD > ${marker} && test -f totals.txt`);
+  const before = await git(fx.swarmTree, ["rev-parse", "HEAD"]);
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+
+  const result = await withLocalDriver(() => performLanding(ctx, landing.id));
+  await setCheck(null);
+
+  assert.equal(result?.status, "landed");
+  assert.equal((await taskRow(fx.task.id))!.status, "done");
+  const ran = (await readFile(marker, "utf8")).trim();
+  const after = await git(fx.swarmTree, ["rev-parse", "HEAD"]);
+  assert.notEqual(after, before, "the fast forward happened");
+  assert.equal(ran, after, "and the check ran in the swarm's checkout, after it");
+});
+
+test("a branch whose checks fail goes back to be worked, carrying the output, and is not rolled back", async () => {
+  /**
+   * The other outcome, and the one with a decision in it. The swarm's
+   * branch is deliberately left where the fast forward put it: between
+   * the fast forward and this verdict another landing can have built
+   * on it, and rolling back would discard work that landed cleanly.
+   * The leaf goes back to a worker instead, with the failure as its
+   * rejection, which is what the next agent on it reads.
+   */
+  const fx = await swarmWithLeaf("checks-fail");
+  await commitIn(fx.workerTree, fx.task.id, "broken.txt", "nope\n", "add broken");
+  await giveSwarmASandbox(fx.swarm.id);
+  await alreadyTold(fx.task.id);
+  await setCheck(`echo "totals_spec: 1 failed, 0 passed"; exit 3`);
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+
+  const result = await withLocalDriver(() => performLanding(ctx, landing.id));
+  await setCheck(null);
+
+  assert.equal(result?.status, "failed");
+  const row = await landingRow(landing.id);
+  assert.equal(row!.status, "failed");
+  assert.match(row!.error ?? "", /does not pass app's check/);
+  assert.match(row!.error ?? "", /totals_spec: 1 failed, 0 passed/, "the runner's own words, not an exit code");
+
+  const task = await taskRow(fx.task.id);
+  assert.equal(task!.status, "assigned", "the leaf goes back to a worker rather than to a person");
+  assert.equal(task!.attention, "failed");
+  assert.equal(task!.report, null, "its old report is cleared, so the planner is not shown a stale one");
+  const flags = task!.flags as { rejection?: string; accepted?: unknown };
+  assert.match(flags.rejection ?? "", /totals_spec: 1 failed, 0 passed/);
+  assert.equal(flags.accepted, undefined, "it is no longer an accepted leaf");
+  assert.equal(plannerToldAt(task!), undefined, "and the planner will hear about it");
+
+  // The branch keeps the work. This is the decision worth arguing with,
+  // so it is asserted rather than assumed.
+  assert.equal(
+    await git(fx.swarmTree, ["show", "HEAD:broken.txt"]),
+    "nope",
+    "the swarm's branch is left where the fast forward put it",
+  );
+});
+
+test("a swarm with no machine runs no checks and lands anyway", async () => {
+  /**
+   * Which is the path every deployment without a provisioned sandbox
+   * takes, and the only one that used to be exercised. Kept, and kept
+   * beside the two above so it is clear which of the three is which.
+   */
+  const fx = await swarmWithLeaf("checks-none");
+  await commitIn(fx.workerTree, fx.task.id, "fine.txt", "fine\n", "add fine");
+  await setCheck(`exit 1`);
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const result = await withLocalDriver(() => performLanding(ctx, landing.id));
+  await setCheck(null);
+  assert.equal(result?.status, "landed", "no sandbox is not a reason to stop the merge queue");
 });
