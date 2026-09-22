@@ -5,7 +5,7 @@ import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
 import { SwarmCostPanel } from "./SwarmCostPanel.js";
-import { canPause, canResume, canStart, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
+import { canPause, canReopen, canResume, canStart, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
 import { capUse, formatUsd, spendParts } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { elapsedSince, formatElapsed } from "../swarm/time.js";
@@ -63,6 +63,15 @@ export interface SwarmActions {
    * when it is pressed.
    */
   onCreatePullRequest?: () => void;
+  /**
+   * Opens the reopen dialog for a swarm that has finished.
+   *
+   * Not a resume. Resuming asks a swarm to carry on with the plan it
+   * has; this adds something to a plan that finished, on the same
+   * branch, so the pull requests it already opened are updated rather
+   * than joined by a second set.
+   */
+  onReopen: () => void;
   onWorkers: (workers: number) => void;
   onAnswer: (questionId: string, text: string) => void;
 }
@@ -150,6 +159,17 @@ export function SwarmPage({
               <span className="chip" title="Tasks done, out of the tasks planned">
                 {model.root.doneLeaves} of {model.root.totalLeaves} tasks
               </span>
+              {/* That this is not the first pass, said on the header.
+                  The tree says which subtree each follow up is; this
+                  says there were any. */}
+              {swarm.reopenCount > 0 && (
+                <span
+                  className="chip"
+                  title="This swarm was reopened, so part of its tree is follow up work on the same branch."
+                >
+                  {swarm.reopenCount === 1 ? "Reopened once" : `Reopened ${swarm.reopenCount} times`}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -217,6 +237,22 @@ export function SwarmPage({
           <button className="btn" disabled={busy || !canStop(swarm.status)} onClick={actions.onStop}>
             Stop
           </button>
+          {/*
+            * Reopen, and only on a swarm that has finished. It sits
+            * beside Stop rather than replacing it, for the reason
+            * every other control here stays visible: a button that
+            * disappears reads as a console that forgot the swarm.
+            */}
+          {canReopen(swarm.status) && (
+            <button
+              className="btn"
+              disabled={busy}
+              onClick={actions.onReopen}
+              title="Add a follow up to this swarm, on the same branch and the same pull requests."
+            >
+              Reopen
+            </button>
+          )}
           <button
             className="btn btn-primary"
             disabled={busy || !actions.onCreatePullRequest}

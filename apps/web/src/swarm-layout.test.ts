@@ -54,6 +54,7 @@ function node(
     flags: {},
     report: null,
     acceptanceCriteria: [],
+    followUpInstruction: extra.followUpInstruction ?? null,
     startedAt: extra.startedAt ?? null,
     endedAt: extra.endedAt ?? null,
     commits: [],

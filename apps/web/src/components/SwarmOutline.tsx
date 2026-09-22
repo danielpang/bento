@@ -51,10 +51,23 @@ export function SwarmOutline({
                 style={{ paddingLeft: `${8 + row.depth * 18}px` }}
                 data-selected={row.id === selectedId ? "" : undefined}
                 data-attention={attention ? "" : undefined}
+                /* The same mark the tree puts on a follow up, so
+                   switching view changes the shape of the page and
+                   nothing about what it says. */
+                data-follow-up={row.followUp ? "" : undefined}
                 aria-pressed={row.id === selectedId}
                 onClick={() => onSelect(row.id)}
               >
-                <span className="swarm-row-title">{row.title}</span>
+                <span className="swarm-row-title">
+                  {row.title}
+                  {/* On the node the reopen made, in its own words,
+                      and not repeated down the subtree. */}
+                  {row.followUp?.rootId === row.id && (
+                    <span className="swarm-row-followup" title={row.followUp.instruction}>
+                      {row.followUp.instruction}
+                    </span>
+                  )}
+                </span>
                 <span className="swarm-row-bar">
                   <CompletionBar
                     fraction={row.completion}

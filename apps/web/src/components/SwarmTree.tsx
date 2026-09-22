@@ -117,6 +117,10 @@ function TreeNode({
       data-attention={attention ? "" : undefined}
       data-collapsed={node.collapsed ? "" : undefined}
       data-selected={selected ? "" : undefined}
+      /* Everything a reopen asked for, marked as such, so the first
+         pass and the follow ups are told apart at a glance rather
+         than by reading the titles. */
+      data-follow-up={node.followUp ? "" : undefined}
     >
       <button
         type="button"
@@ -134,6 +138,16 @@ function TreeNode({
           />
           <span className="swarm-node-title">{node.title}</span>
         </span>
+        {/* The instruction, on the node the reopen made and nowhere
+            else. Repeating it on every descendant would be the same
+            sentence twenty times; the tint above is what says the rest
+            of the subtree belongs to it. A person's own words, so it
+            renders as text. */}
+        {node.followUp?.rootId === node.id && (
+          <span className="swarm-node-followup" title={node.followUp.instruction}>
+            {node.followUp.instruction}
+          </span>
+        )}
         <span className="swarm-node-foot">
           <span className="status">
             <span className="dot" data-state={taskTone(node.status)} />

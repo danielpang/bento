@@ -54,6 +54,19 @@ function isAbandoned(status: TaskStatus): boolean {
   return status === "cancelled";
 }
 
+/**
+ * A follow up, as a node inside one reads it.
+ *
+ * `rootId` is the node the reopen made, so a view can tell the head of
+ * a follow up from the work underneath it and label one without
+ * repeating itself on every descendant. `instruction` is what the
+ * person asked for, in their own words, so it renders as text.
+ */
+export interface FollowUp {
+  rootId: string;
+  instruction: string;
+}
+
 export interface SwarmNode {
   id: string;
   parentId: string | null;
@@ -81,6 +94,15 @@ export interface SwarmNode {
   frontier: boolean;
   /** This node, or something under it, is on the frontier. */
   frontierPath: boolean;
+  /**
+   * The follow up this node belongs to, or null for the first pass.
+   *
+   * Set on the node a reopen made and carried down its whole subtree,
+   * which is the only reason it is computed here: the row carries the
+   * instruction on one node, and what both views want to say is that
+   * everything under it is work that follow up asked for.
+   */
+  followUp: FollowUp | null;
   /** Drawn as one filled node, with its subtree folded into it. */
   collapsed: boolean;
   /** Inside somebody else's collapsed subtree. Never drawn in the tree. */
@@ -199,6 +221,11 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       elapsedMs: elapsedFor(task, now),
       frontier: false,
       frontierPath: false,
+      // Filled in on the walk below, because it is inherited from an
+      // ancestor rather than read off the row.
+      followUp: task.followUpInstruction
+        ? { rootId: task.id, instruction: task.followUpInstruction }
+        : null,
       collapsed: false,
       hidden: false,
       x: 0,
@@ -248,16 +275,23 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   const seen = new Set<string>();
   const nodes: SwarmNode[] = [];
 
-  function walk(id: string, depth: number): void {
+  function walk(id: string, depth: number, followUp: FollowUp | null): void {
     if (seen.has(id)) return;
     const node = byId.get(id);
     if (!node) return;
     seen.add(id);
     node.depth = depth;
+    /*
+     * A node's own instruction wins over the one it inherited, so a
+     * swarm reopened twice under the same branch of the tree reads as
+     * the nearer follow up rather than the first one. Otherwise the
+     * ancestor's travels down.
+     */
+    node.followUp = node.followUp ?? followUp;
     nodes.push(node);
-    for (const childId of node.childIds) walk(childId, depth + 1);
+    for (const childId of node.childIds) walk(childId, depth + 1, node.followUp);
   }
-  for (const id of roots) walk(id, 0);
+  for (const id of roots) walk(id, 0, null);
 
   // Deepest first, so a parent reads figures its children have finished.
   for (let i = nodes.length - 1; i >= 0; i -= 1) {
@@ -465,6 +499,8 @@ export interface OutlineRow {
   elapsedMs: number;
   doneLeaves: number;
   totalLeaves: number;
+  /** The follow up this row is inside, or null for the first pass. */
+  followUp: FollowUp | null;
 }
 
 /**
@@ -490,6 +526,7 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     elapsedMs: node.elapsedMs,
     doneLeaves: node.doneLeaves,
     totalLeaves: node.totalLeaves,
+    followUp: node.followUp,
   }));
 }
 
