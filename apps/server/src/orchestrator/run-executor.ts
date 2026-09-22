@@ -71,7 +71,7 @@ import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
-import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox, reapSwarmSandbox } from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
@@ -2174,8 +2174,13 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * Sequentially rather than in parallel: this is housekeeping, and it
    * should never compete with an agent for the provider's rate limit.
    */
-  await ctx.boss.work<{ featureId: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
-    for (const job of jobs) await reapSandbox(ctx, job.data.featureId);
+  await ctx.boss.work<{ featureId?: string; swarmId?: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
+    // One queue, both boards: a job names a card or a swarm, and which
+    // one it names is what says whose machine is being reclaimed.
+    for (const job of jobs) {
+      if (job.data.swarmId) await reapSwarmSandbox(ctx, job.data.swarmId);
+      else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
+    }
   }));
   /**
    * The sweep catches the cards that finished before any of this
