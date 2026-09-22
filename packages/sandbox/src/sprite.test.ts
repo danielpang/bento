@@ -2358,3 +2358,186 @@ test("Sprite provisioning waits out a rate limit even after the short retries ar
     assert.equal(creates, SPRITE_ACQUIRE_RATE_LIMIT_WAITS + 1);
   }
 });
+
+const spriteHandle = { externalId: "bento-feature", provider: "sprite" as const, workdir: "/workspace" };
+
+/**
+ * exec's first act used to be one getSprite, and that call is the MCP
+ * config write. A single "sprite not found" threw out of executeRun
+ * before the agent started. The lookup is retried, and a sprite the
+ * info endpoint never admits is addressed by the name provision stored.
+ */
+test("Sprite exec retries a sprite the info endpoint has not caught up to", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const child = fakeChild();
+  let calls = 0;
+  const driver = new SpriteDriver({ token: "token" });
+  (driver as unknown as { client: Record<string, unknown> }).client = {
+    async getSprite() {
+      calls += 1;
+      if (calls < 3) throw new APIError("sprite not found", { statusCode: 404 });
+      return {
+        spawn() {
+          return child;
+        },
+        async execFileHTTP() {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      };
+    },
+    sprite() {
+      throw new Error("a sprite that appears on retry must not be addressed by name");
+    },
+  };
+
+  const pending = collectExec(driver.exec(spriteHandle, ["claude"])).then(
+    (result) => result,
+    (err: Error) => err,
+  );
+  await settle();
+  t.mock.timers.tick(200);
+  await settle();
+  t.mock.timers.tick(500);
+  await settle();
+  await settle();
+  child.emit("spawn");
+  child.emit("exit", 0);
+  const result = await pending;
+  assert.ok(!(result instanceof Error), result instanceof Error ? result.message : "");
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls, 3);
+});
+
+test("Sprite exec addresses a sprite by name when the info endpoint keeps saying it is missing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const child = fakeChild();
+  let lookups = 0;
+  let handled: string | null = null;
+  const driver = new SpriteDriver({ token: "token" });
+  (driver as unknown as { client: Record<string, unknown> }).client = {
+    async getSprite() {
+      lookups += 1;
+      throw new APIError("sprite not found", { statusCode: 404 });
+    },
+    sprite(name: string) {
+      handled = name;
+      return {
+        spawn() {
+          return child;
+        },
+        async execFileHTTP() {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      };
+    },
+  };
+
+  const pending = collectExec(driver.exec(spriteHandle, ["claude"])).then(
+    (result) => result,
+    (err: Error) => err,
+  );
+  for (const delay of [200, 500, 1_000, 2_000]) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  await settle();
+  assert.equal(handled, "bento-feature");
+  assert.equal(lookups, 5);
+  child.emit("spawn");
+  child.stdout.write("ok\n");
+  child.emit("exit", 0);
+  const result = await pending;
+  assert.ok(!(result instanceof Error), result instanceof Error ? result.message : "");
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /ok/);
+});
+
+test("Sprite exec stops when the command itself reports the sandbox is missing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const child = fakeChild();
+  let spawns = 0;
+  const driver = new SpriteDriver({ token: "token" });
+  (driver as unknown as { client: Record<string, unknown> }).client = {
+    async getSprite() {
+      throw new APIError("sprite not found", { statusCode: 404 });
+    },
+    sprite() {
+      return {
+        spawn() {
+          spawns += 1;
+          queueMicrotask(() => child.emit("error", new Error('HTTP 404: {"error":"sprite not found"}')));
+          return child;
+        },
+        async execFileHTTP() {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+        async listSessions() {
+          throw new Error("should not reattach when the sprite is gone");
+        },
+      };
+    },
+  };
+
+  const pending = collectExec(driver.exec(spriteHandle, ["claude"])).then(
+    (result) => result,
+    (err: Error) => err,
+  );
+  for (const delay of [200, 500, 1_000, 2_000]) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  await settle();
+  const result = await pending;
+  assert.ok(!(result instanceof Error), result instanceof Error ? result.message : "");
+  assert.equal(spawns, 1);
+  assert.equal(result.exitCode, -1);
+  assert.match(result.stderr, /was not found, so the command was not started/);
+  assert.match(result.stderr, /Start the run again to provision a new sandbox/);
+  assert.doesNotMatch(result.stderr, /[—–]/);
+});
+
+test("Sprite exec does not paper over a lookup that failed for another reason", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  let handled = false;
+  const driver = new SpriteDriver({ token: "token" });
+  (driver as unknown as { client: Record<string, unknown> }).client = {
+    async getSprite() {
+      calls += 1;
+      throw new APIError("upstream is unwell", { statusCode: 500 });
+    },
+    sprite() {
+      handled = true;
+      return {};
+    },
+  };
+
+  const pending = collectExec(driver.exec(spriteHandle, ["claude"])).then(
+    () => "resolved" as const,
+    (err: Error) => err,
+  );
+  for (let i = 0; i < 6; i++) {
+    await settle();
+    t.mock.timers.tick(2_000);
+  }
+  const result = await pending;
+  assert.ok(result instanceof Error);
+  assert.match(result.message, /upstream is unwell/);
+  assert.equal(handled, false);
+  assert.equal(calls, 5);
+
+  let unauthorized = 0;
+  (driver as unknown as { client: Record<string, unknown> }).client = {
+    async getSprite() {
+      unauthorized += 1;
+      throw new APIError("unauthorized", { statusCode: 401 });
+    },
+    sprite() {
+      throw new Error("an unauthorized lookup must not fall through to a handle");
+    },
+  };
+  await assert.rejects(collectExec(driver.exec(spriteHandle, ["claude"])), /unauthorized/);
+  assert.equal(unauthorized, 1);
+});

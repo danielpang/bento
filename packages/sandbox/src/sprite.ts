@@ -549,8 +549,42 @@ export class SpriteDriver implements SandboxDriver {
    * entered through attach below, lets a freshly booted server pick up
    * a command a previous process left running.
    */
+  /**
+   * The sprite a command is about to run on.
+   *
+   * The name is already known: provision chose it, and the sandbox row
+   * stores it. getSprite is only a metadata read of that name. The
+   * sprites API answers that read with "sprite not found" in two cases
+   * that are not "this run has no machine": the record lags a create
+   * by a moment, and the info endpoint 404s while exec on the same
+   * name still works. The first command after provision is the MCP
+   * config write, so one of those 404s used to throw out of executeRun
+   * before the agent started, and the run stayed in "starting".
+   *
+   * Not-found and a briefly unreachable API are retried. A lookup that
+   * still says the sprite is gone falls back to a local handle.
+   * client.sprite does not create a machine and does not ask the info
+   * endpoint; every command addresses the sprite by name. Any other
+   * failure is thrown: an expired token must not be hidden behind a
+   * handle that fails the same way inside the command.
+   */
+  private async openSprite(name: string): Promise<Sprite> {
+    const attempts = SPRITE_LOOKUP_DELAYS_MS.length + 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0) await sleep(SPRITE_LOOKUP_DELAYS_MS[attempt - 1]!);
+      try {
+        return await this.client.getSprite(name);
+      } catch (err) {
+        if (isSpriteNotFound(err)) continue;
+        if (!isTransientSpriteError(err) || attempt === attempts - 1) throw err;
+      }
+    }
+    console.warn(`sprite ${name} was not found after ${attempts} lookups; addressing it by name`);
+    return this.client.sprite(name);
+  }
+
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
-    const sprite = await this.client.getSprite(handle.externalId);
+    const sprite = await this.openSprite(handle.externalId);
     const session = this.openSession(handle, argv, opts, sprite);
     session.adoptInitial(sprite);
     yield* session.stream();
@@ -574,7 +608,7 @@ export class SpriteDriver implements SandboxDriver {
   ): Promise<AsyncIterable<ExecChunk> | null> {
     const [command] = argv;
     if (!command) throw new Error("empty argv");
-    const sprite = await this.client.getSprite(handle.externalId);
+    const sprite = await this.openSprite(handle.externalId);
     const mine = newestSessionFor(await sprite.listSessions(), command);
     if (!mine) return null;
 
@@ -727,7 +761,7 @@ export class SpriteDriver implements SandboxDriver {
       for (let attempt = 0; ; attempt++) {
         if (done || killed) return;
         try {
-          const fresh = await this.client.getSprite(handle.externalId);
+          const fresh = await this.openSprite(handle.externalId);
           const sessions = await fresh.listSessions();
           if (done || killed) return;
           const mine = newestSessionFor(sessions, command);
@@ -836,6 +870,18 @@ export class SpriteDriver implements SandboxDriver {
         // the error is its ending; an open one ends through exit.
         if (!open) {
           retire();
+          // The info lookup can 404 for a sprite that is still there,
+          // which is why openSprite falls through to a handle. A
+          // command that then fails the same way is the machine itself
+          // being gone. Reattaching cannot bring it back, and waiting
+          // out that ladder used to hold the run for minutes.
+          if (/sprite not found/i.test(err.message)) {
+            conclude(
+              -1,
+              `the cloud sandbox ${handle.externalId} was not found, so the command was not started. Start the run again to provision a new sandbox.`,
+            );
+            return;
+          }
           lost(null);
         }
       });
@@ -865,7 +911,7 @@ export class SpriteDriver implements SandboxDriver {
      */
     const killOverHttp = async () => {
       try {
-        const fresh = await this.client.getSprite(handle.externalId);
+        const fresh = await this.openSprite(handle.externalId);
         const mine = newestSessionFor(await fresh.listSessions(), command);
         if (!mine) return;
         const stream = await fresh.killSession(mine.id, "SIGTERM", "10s");
@@ -984,7 +1030,7 @@ export class SpriteDriver implements SandboxDriver {
    * stream parked the run in "starting" holding its worker slot.
    */
   async snapshot(handle: SandboxHandle, label: string): Promise<string> {
-    const sprite = await this.client.getSprite(handle.externalId);
+    const sprite = await this.openSprite(handle.externalId);
     const stream = await bounded(sprite.createCheckpoint(label), CHECKPOINT_TIMEOUT_MS, "the checkpoint");
     const failures: string[] = [];
     try {
@@ -1016,7 +1062,7 @@ export class SpriteDriver implements SandboxDriver {
    * happened.
    */
   async restore(handle: SandboxHandle, snapshotId: string): Promise<void> {
-    const sprite = await this.client.getSprite(handle.externalId);
+    const sprite = await this.openSprite(handle.externalId);
     const stream = await bounded(sprite.restoreCheckpoint(snapshotId), RESTORE_TIMEOUT_MS, "the restore");
     const failures: string[] = [];
     try {
@@ -1113,6 +1159,31 @@ export function isSpriteNotFound(err: unknown): boolean {
   if (err instanceof APIError) return err.statusCode === 404;
   return err instanceof Error && /\(status 404\)/.test(err.message);
 }
+
+/**
+ * A lookup that failed because the API blinked, not because it answered.
+ *
+ * 404 is not in here. That answer has its own path (retry, then address
+ * the sprite by name). An expired token or a rejected body is not in
+ * here either: retrying those only delays the failure.
+ */
+function isTransientSpriteError(err: unknown): boolean {
+  if (isSpriteNotFound(err)) return false;
+  if (err instanceof APIError) {
+    return err.statusCode !== undefined && TRANSIENT_SPRITE_STATUSES.has(err.statusCode);
+  }
+  return err instanceof Error && /temporarily unavailable|Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|timed out/i.test(err.message);
+}
+
+const TRANSIENT_SPRITE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/**
+ * Waits between sprite info lookups. Short on purpose: this sits on
+ * the path that writes MCP config before the agent starts, and the
+ * lag it covers is a moment, not an outage. Past the last wait the
+ * caller addresses the sprite by name instead of failing the run.
+ */
+const SPRITE_LOOKUP_DELAYS_MS = [200, 500, 1_000, 2_000];
 
 /**
  * Runs a script through a shell inside the sprite.

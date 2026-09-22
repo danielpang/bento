@@ -319,7 +319,19 @@ async function writeConfigs(
     // The token rides the file content through argv, never opts.env:
     // the sprite driver leaks env into the exec URL, and files do not.
     const script = `mkdir -p ${shellQuote(dir)} && printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(file.path)} && chmod 600 ${shellQuote(file.path)}`;
-    const result = await collectExec(ctx.driver.exec(handle, ["sh", "-c", script], { timeoutMs: EXEC_TIMEOUT_MS }));
+    // exec throws before it yields when the sandbox cannot be addressed
+    // at all (the sprites info endpoint answering "sprite not found"
+    // was that throw). Left uncaught, it escaped prepareRunMcp, skipped
+    // finishRun, and left the run stuck in "starting". A config that
+    // cannot be written is the same outcome as a non-zero exit: this
+    // run goes on without MCP.
+    let result: { exitCode: number; stderr: string };
+    try {
+      result = await collectExec(ctx.driver.exec(handle, ["sh", "-c", script], { timeoutMs: EXEC_TIMEOUT_MS }));
+    } catch (err) {
+      console.error(`could not write ${file.path} into the sandbox:`, err);
+      return false;
+    }
     if (result.exitCode !== 0) {
       console.error(`could not write ${file.path} into the sandbox (exit ${result.exitCode}): ${result.stderr.slice(0, 200)}`);
       return false;
