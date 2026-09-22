@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
 import type { PreparedRepository, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
+import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { createRepositorySeed } from "./publish.js";
@@ -44,6 +45,12 @@ export interface ProvisionWorkspaceInput {
   /** Read-only mounts of the user's own agent logins, in local mode. */
   authMounts: { hostPath: string; containerPath: string; readOnly?: boolean }[];
   restrictNetwork: boolean;
+  /**
+   * The agent CLIs this machine needs, when the caller can narrow it.
+   * Omitted means the whole set, which is what a swarm's machine gets:
+   * only a card has a pipeline whose stages name their agents.
+   */
+  agentBinaries?: readonly AgentBinary[];
   /**
    * What the caller's template promised about where its agents work,
    * when the caller has one.
@@ -221,6 +228,7 @@ export async function provisionWorkspace(
       startBundle: input.startFromBundles?.get(r.name),
     })),
     // Local mode can share the user's own agent logins and git identity.
+    ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
     mounts: [...repoGitMounts, ...input.authMounts],
     image: ctx.env.BENTO_SANDBOX_IMAGE,
     onProgress: input.say,

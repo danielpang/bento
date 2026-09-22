@@ -1491,6 +1491,33 @@ export const swarmTemplates = pgTable("swarm_templates", {
    */
   plannerInstructions: text("planner_instructions"),
   workerInstructions: text("worker_instructions"),
+  /**
+   * Where this template's agents work: each on a machine that holds
+   * its own clone, or all of them in worktrees of the project's
+   * checkout on the server.
+   *
+   * Recorded rather than inferred from the deployment, which is the
+   * whole point of it being here. A local install runs its swarms in
+   * worktrees because a container per worker is a container on the
+   * machine somebody is also using; a hosted one gives each worker a
+   * machine. Read off the driver, that shape would change under a
+   * swarm the moment the install joined a team, and the person who
+   * chose it would never be told.
+   *
+   * "worktree" is an assertion the deployment has to be able to keep.
+   * A driver whose sandboxes hold their own clones cannot, and says so
+   * rather than quietly provisioning the other shape. "sandbox" makes
+   * no assertion: the driver decides, which is what every template
+   * written before this column was doing.
+   *
+   * No default, deliberately. The value a template does not state is
+   * the one that loses a local install its shape, and this repository
+   * has been bitten by exactly that: agent_runs.type and
+   * run_artifacts.type both add a default for the backfill and drop it
+   * in the same migration, so that every insert from then on says what
+   * it is.
+   */
+  workerIsolation: text("worker_isolation", { enum: ["sandbox", "worktree"] }).notNull(),
   /** Starting ceilings. A swarm copies them and may then be changed. */
   maxWorkers: integer("max_workers").notNull().default(4),
   budgetUsd: numeric("budget_usd"),

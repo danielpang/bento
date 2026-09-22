@@ -21,6 +21,21 @@ import type { SwarmTemplate } from "../swarm/types.js";
  * server records what a tool reports its spend in yet, so today this
  * is a list of names and ceilings, which is what is actually known.
  */
+/**
+ * Where a template's agents work, in words.
+ *
+ * Worth printing because it is the setting that decides what a swarm
+ * costs the machine it runs on, and because it is the one a deployment
+ * can refuse: a template that asks for checkouts on the server cannot
+ * run where the sandboxes hold their own clones, and somebody reading
+ * this panel is the person who would need to know why.
+ */
+export function isolationWords(isolation: SwarmTemplate["workerIsolation"]): string {
+  return isolation === "worktree"
+    ? "each in a worktree of the repository on the server"
+    : "each on a machine of its own";
+}
+
 export function SwarmTemplatesPanel() {
   const [templates, setTemplates] = useState<SwarmTemplate[] | null>(null);
 
@@ -75,7 +90,7 @@ export function SwarmTemplatesPanel() {
               {template.typicalLeaves > 0
                 ? `${estimateLine(estimateSwarm(template), template.typicalLeaves)} `
                 : ""}
-              Up to {template.maxWorkers} workers
+              Up to {template.maxWorkers} workers, {isolationWords(template.workerIsolation)}
               {template.maxBudgetUsd === null ? "" : `, ${formatUsd(template.maxBudgetUsd)} cap`}.
             </span>
           </div>
