@@ -205,9 +205,25 @@ test("the states a person owns are never recomputed from the tree", () => {
   assert.equal(swarmStatusFrom("running", []), "running");
 });
 
+/**
+ * Who owns the cost rollup.
+ *
+ * A row's three figures are the charges recorded against that one
+ * task, and the subtree sum is derived from them by whoever is drawing
+ * the subtree. This tick used to write the children's sum onto the
+ * group row instead, which the console then added the children into a
+ * second time, and which threw away any charge the group itself had.
+ */
 test("cost rolls leaves to root, and the swarm's spend is the total", async () => {
   const swarm = await makeSwarm();
-  const group = await makeTask(swarm.id, { nodeType: "plan", title: "G", status: "open" });
+  const group = await makeTask(swarm.id, {
+    nodeType: "plan",
+    title: "G",
+    status: "open",
+    // A charge of the group's own: what a sub planner's turn on it
+    // costs. It is a figure the rollup must not overwrite or drop.
+    costMeasuredUsd: "0.40",
+  });
   await makeTask(swarm.id, {
     parentId: group.id,
     title: "one",
@@ -229,13 +245,13 @@ test("cost rolls leaves to root, and the swarm's spend is the total", async () =
   assert.ok(result);
 
   const rolled = await read(group.id);
-  assert.equal(Number(rolled.costMeasuredUsd), 3.5, "the group's measured cost is its children's");
-  assert.equal(Number(rolled.costEstimatedUsd), 0.25);
-  assert.equal(Number(rolled.costAssumedUsd), 0.75);
+  assert.equal(Number(rolled.costMeasuredUsd), 0.4, "the group keeps its own charge, and not its children's");
+  assert.equal(Number(rolled.costEstimatedUsd), 0);
+  assert.equal(Number(rolled.costAssumedUsd), 0);
   assert.equal(rolled.status, "done", "both children finished, so the group did");
 
   const after = await readSwarm(swarm.id);
-  assert.equal(Number(after.spentMeasuredUsd), 4, "3.50 in the group plus 0.50 loose");
+  assert.equal(Number(after.spentMeasuredUsd), 4.4, "1.50 and 2.00 below, 0.40 on the group, 0.50 loose");
   assert.equal(Number(after.spentEstimatedUsd), 0.25);
   assert.equal(Number(after.spentAssumedUsd), 0.75);
   assert.equal(after.status, "done", "every root finished");

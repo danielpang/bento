@@ -65,9 +65,9 @@ export interface SwarmNode {
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
   weight: number;
-  /** This node's own charges, by tier. A plan node's is its planner. */
+  /** This node's own charges, by tier, as its row carries them. */
   ownCost: SwarmSpend;
-  /** Rolled up through the subtree for a plan, the same as own for a leaf. */
+  /** Own plus the whole subtree's, rolled up here rather than by the server. */
   cost: SwarmSpend;
   /** Weighted share of this subtree's leaves that are done, 0 to 1. */
   completion: number;
@@ -272,6 +272,18 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       node.cost = node.ownCost;
       node.frontierPath = node.frontier;
     } else {
+      /*
+       * A node's own charges, plus everything under it.
+       *
+       * The reader owns this rollup, and the row owns only itself: a
+       * task's three figures are what was charged to that one task,
+       * which is what makes adding the children here count every
+       * charge exactly once. The server's tick agrees (it rewrites a
+       * group's status and leaves its cost columns alone); while it
+       * wrote the subtree total onto the group row as well, this loop
+       * added the children in on top of it and every plan node read
+       * double.
+       */
       let cost = node.ownCost;
       let doneWeight = 0;
       let totalWeight = 0;
