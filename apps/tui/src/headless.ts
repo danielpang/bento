@@ -370,6 +370,179 @@ export async function runSessions(options: CliOptions): Promise<void> {
 }
 
 /**
+ * `bento swarm`: a swarm from a terminal.
+ *
+ * The console draws a swarm as a tree with rings and bezier edges, and
+ * this is not a smaller version of that. It is the four questions
+ * somebody at a prompt has: what swarms are there, what is this one
+ * doing, start another, stop this one. `watch` is the one that earns
+ * its place, because a swarm runs for as long as its agents do and the
+ * thing a person wants is the tree moving.
+ *
+ * The drawing lives in swarm/tree.ts and the four commands in
+ * swarm/command.ts, both pure, so what a terminal prints is held by a
+ * test with no server and no screen. This function is the plumbing:
+ * resolve the project, read the arguments, and print.
+ */
+export async function runSwarm(options: CliOptions): Promise<void> {
+  const { BentoClient } = await import("@bento/api-client");
+  const { findSwarm, listSwarms, showSwarm, watchSwarm } = await import("./swarm/command.js");
+
+  let embedded: { url: string; stop(): Promise<void> } | undefined;
+  let baseUrl = options.server;
+  if (!baseUrl) {
+    embedded = await startEmbedded(options, bootProgress(options));
+    baseUrl = embedded.url;
+  }
+
+  const io = {
+    out: (line: string) => console.log(line),
+    err: (line: string) => console.error(line),
+    // Only a real terminal is cleared. Piped into a file, a redraw
+    // would write escape codes into it and the file would hold one
+    // frame's worth of cursor moves rather than a tree.
+    ...(process.stdout.isTTY ? { clear: () => process.stdout.write("\u001b[2J\u001b[H") } : {}),
+    fail: () => {
+      process.exitCode = 1;
+    },
+  };
+
+  try {
+    const client = new BentoClient({ baseUrl, tokens: new FileTokenStore(baseUrl) });
+    const project = await resolveProject(client, options);
+    if (!project) return;
+    const [action, subject] = options.positionals;
+
+    /** The swarm a bare word names, or a refusal printed for the person. */
+    const resolve = async (wanted: string | undefined): Promise<string | null> => {
+      if (!wanted) {
+        io.err("name a swarm: bento swarm status <name>");
+        io.fail();
+        return null;
+      }
+      const found = findSwarm(await client.listSwarms(project.id), wanted);
+      if ("refused" in found) {
+        io.err(found.refused);
+        io.fail();
+        return null;
+      }
+      return found.swarm.id;
+    };
+
+    switch (action) {
+      case undefined:
+      case "list":
+        await listSwarms(client, project.id, io);
+        return;
+
+      case "new": {
+        const title = subject;
+        if (!title) {
+          io.err("name the swarm: bento swarm new <title> --goal <goal>");
+          io.fail();
+          return;
+        }
+        if (!options.goal?.trim()) {
+          /*
+           * Refused rather than defaulted to the title. The goal is
+           * the planner's entire opening prompt, and a swarm started
+           * from a three word title produces a plan nobody wanted and
+           * bills for it.
+           */
+          io.err("say what the swarm is for: bento swarm new <title> --goal <goal>");
+          io.fail();
+          return;
+        }
+        const created = await client.createSwarm({
+          projectId: project.id,
+          title,
+          goal: options.goal,
+          ...(options.branch ? { startBranch: options.branch } : {}),
+          ...(options.budget === undefined ? {} : { budgetUsd: options.budget }),
+        });
+        io.out(`${created.slug}\tplanning\t${created.id}`);
+        io.out(
+          options.branch
+            ? `Its planner is reading ${options.branch} and whatever its pull request is still being asked about. Watch it with: bento swarm watch ${created.slug}`
+            : `Its planner is at work. Watch it with: bento swarm watch ${created.slug}`,
+        );
+        io.out(`Nothing else starts until you run: bento swarm start ${created.slug}`);
+        return;
+      }
+
+      case "status": {
+        const id = await resolve(subject);
+        if (id) await showSwarm(client, id, io);
+        return;
+      }
+
+      case "watch": {
+        const id = await resolve(subject);
+        if (!id) return;
+        /*
+         * Ctrl+C ends the watch rather than the process, so the last
+         * thing on the screen is a tree rather than a stack trace.
+         */
+        const stop = new AbortController();
+        const interrupt = () => stop.abort();
+        process.once("SIGINT", interrupt);
+        try {
+          await watchSwarm(client, id, io, { signal: stop.signal });
+        } finally {
+          process.off("SIGINT", interrupt);
+        }
+        return;
+      }
+
+      case "start": {
+        const id = await resolve(subject);
+        if (!id) return;
+        const started = await client.startSwarm(id);
+        io.out(`${started.slug}\t${started.status}`);
+        return;
+      }
+
+      case "stop": {
+        const id = await resolve(subject);
+        if (!id) return;
+        const stopped = await client.stopSwarm(id);
+        io.out(`${stopped.slug}\tstopped`);
+        io.out("Its agents were stopped where they were. Everything that landed is kept.");
+        return;
+      }
+
+      case "reopen": {
+        const id = await resolve(subject);
+        if (!id) return;
+        if (!options.instruction?.trim()) {
+          io.err("say what the follow up should do: bento swarm reopen <swarm> --instruction <text>");
+          io.fail();
+          return;
+        }
+        const reopened = await client.reopenSwarm(id, {
+          instruction: options.instruction,
+          ...(options.budget === undefined ? {} : { budgetUsd: options.budget }),
+        });
+        io.out(`${reopened.swarm.slug}\trunning\tfollow up ${reopened.followUp}`);
+        io.out(
+          `The work carries on ${reopened.swarm.branchName ?? "the swarm's branch"}, so the pull requests it already opened are updated rather than joined by a second set.`,
+        );
+        return;
+      }
+
+      default:
+        io.err(`unknown swarm command "${action}". Use list, new, status, watch, start, stop, or reopen.`);
+        io.fail();
+    }
+  } catch (err) {
+    console.error(readableError(err));
+    process.exitCode = 1;
+  } finally {
+    await embedded?.stop().catch(() => {});
+  }
+}
+
+/**
  * Lists, adds, and removes MCP servers the organization's agents can
  * call. OAuth connect lives in the web console: there is no browser
  * here to finish the dance.
