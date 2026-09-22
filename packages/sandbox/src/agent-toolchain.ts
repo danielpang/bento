@@ -91,6 +91,17 @@ const PI_MIN_VERSION = "0.70.1";
  * bump: warm sprites that already have dsh compare --version to this string.
  */
 const DSH_VERSION = "0.1.1-rc.2";
+/**
+ * dsh 0.1.1-rc.2 depends on @deepseek-ai/cordis-plugin-hmr with a caret,
+ * and 1.0.18 removed registerConfig. A headless run watches the user
+ * patch layer through that method, so a fresh install was pulling a
+ * plugin the pinned CLI cannot start: "user patch-layer watching
+ * requires the Cordis HMR service". 1.0.17 is the last release that
+ * still provides it. Installed beside dsh so npm dedupes to this
+ * version instead of the floating one.
+ */
+const DSH_HMR_VERSION = "1.0.17";
+const DSH_HMR_PIN = "/opt/bento/dsh-hmr-pin";
 
 /**
  * Idempotent, and safe to run on every provision: a sandbox that already
@@ -192,9 +203,15 @@ cli_stale() {
       ver=$(/opt/bento/dsh/bin/dsh --version 2>/dev/null || true)
       [ -n "$ver" ] || ver=$(/opt/bento/dsh/bin/dsh -V 2>/dev/null || true)
       case "$ver" in
-        *${DSH_VERSION}*) return 1 ;;
+        *${DSH_VERSION}*) ;;
         *) return 0 ;;
       esac
+      # The binary's version does not name the HMR plugin beside it.
+      # A machine installed before the pin has the right dsh and a
+      # headless run that dies, so the pin file is what sends it back
+      # through npm. Missing or different counts as stale.
+      [ "$(cat ${DSH_HMR_PIN} 2>/dev/null || true)" = "${DSH_HMR_VERSION}" ] && return 1
+      return 0
       ;;
     fx)
       [ ! -f "$FX_CUSTOM_MARKER" ]
@@ -434,8 +451,10 @@ ensure_node() {
 if wanted dsh; then
   if ensure_node; then
     PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/dsh \\
-      @deepseek-ai/dsh@${DSH_VERSION} >/dev/null 2>&1 || echo "bento: dsh install failed" >&2
+      @deepseek-ai/dsh@${DSH_VERSION} @deepseek-ai/cordis-plugin-hmr@${DSH_HMR_VERSION} >/dev/null 2>&1 \\
+      || echo "bento: dsh install failed" >&2
     if [ -x /opt/bento/dsh/bin/dsh ]; then
+      printf '%s\\n' "${DSH_HMR_VERSION}" > ${DSH_HMR_PIN}
       mkdir -p /opt/bento/dsh-home
       cat > /opt/bento/dsh-home/cordis.patch.yml <<'BENTO_DSH_PROFILE'
 - id: agent-default-model

@@ -89,6 +89,7 @@ RUN arch="$(dpkg --print-architecture)" \
     @earendil-works/pi-coding-agent \
  && PATH=/opt/bento/node/bin:$PATH /opt/bento/node/bin/npm install -g --prefix /opt/bento/dsh \
     @deepseek-ai/dsh@0.1.1-rc.2 \
+    @deepseek-ai/cordis-plugin-hmr@1.0.17 \
  && printf '#!/bin/sh\nPATH=/opt/bento/node/bin:$PATH\nexport PATH\nexec /opt/bento/pi/bin/pi "$@"\n' \
     > /usr/local/bin/pi \
  && printf '%s\n' \
@@ -105,6 +106,7 @@ RUN arch="$(dpkg --print-architecture)" \
     'exec /opt/bento/dsh/bin/dsh "$@"' \
     > /usr/local/bin/dsh \
  && chmod +x /usr/local/bin/pi /usr/local/bin/dsh \
+ && printf '%s\n' '1.0.17' > /opt/bento/dsh-hmr-pin \
  && mkdir -p /opt/bento/dsh-home \
  && printf '%s\n' \
     '- id: agent-default-model' \
