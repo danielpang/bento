@@ -1,4 +1,4 @@
-# Implementation: Hosted User Waitlist
+# Add a hosted user waitlist
 
 ## What shipped
 
