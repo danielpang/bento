@@ -15,7 +15,7 @@
  *   node --import tsx scripts/delete-sprite.ts bento-e2e-123-1
  */
 import { SpritesClient } from "@fly/sprites";
-import { spriteExists } from "../src/sprite.js";
+import { spriteExistsWithRetry } from "../src/sprite.js";
 
 const name = process.argv[2];
 const token = process.env.SPRITES_TOKEN;
@@ -31,8 +31,14 @@ if (!token) {
 
 const client = new SpritesClient(token, { timeout: 60_000 });
 
+const lookup = (spriteName: string) =>
+  spriteExistsWithRetry(client, spriteName, (err) => {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`lookup of ${spriteName} failed (${detail}). Retrying.`);
+  });
+
 try {
-  if (!(await spriteExists(client, name))) {
+  if (!(await lookup(name))) {
     console.log(`${name} is already gone`);
     process.exit(0);
   }
@@ -45,7 +51,7 @@ try {
   // billed with nobody looking for it.
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
-    if (!(await spriteExists(client, name))) {
+    if (!(await lookup(name))) {
       console.log(`${name} is deleted`);
       process.exit(0);
     }

@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { LineChannel, collectExec } from "./driver.js";
-import { SpriteDriver, spriteName } from "./sprite.js";
+import { SpriteDriver, SPRITE_LOOKUP_RETRY_DELAYS_MS, spriteExistsWithRetry, spriteName } from "./sprite.js";
 
 /**
  * A sprite lives until something deletes it, and the e2e test's own
@@ -1778,4 +1778,98 @@ test("destroying a sprite tolerates one that is already gone and reports everyth
   await assert.rejects(driver.destroy(handle), /upstream is unwell/);
   failure = new Error("fetch failed");
   await assert.rejects(driver.destroy(handle), /fetch failed/);
+});
+
+/**
+ * The sandbox e2e asks "does this sprite already exist" before it
+ * creates one. Fly aborted that getSprite at the client's one minute
+ * timeout, and the suite ended before a machine existed. A retry
+ * covers the abort. A timeout is still not "gone", and a status the
+ * API actually returned is still answered once.
+ */
+test("a sprite lookup retries a control-plane timeout and still reports a real failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const notices: string[] = [];
+  let calls = 0;
+  const client = {
+    async getSprite() {
+      calls += 1;
+      throw new Error("Network error: The operation was aborted due to timeout");
+    },
+  };
+  const pending = spriteExistsWithRetry(client as never, "bento-e2e", (err) => {
+    notices.push(err instanceof Error ? err.message : String(err));
+    throw new Error("progress must not replace the lookup error");
+  }).then(
+    (found) => found as boolean | Error,
+    (err: Error) => err,
+  );
+
+  await settle();
+  assert.equal(calls, 1);
+  for (const delay of SPRITE_LOOKUP_RETRY_DELAYS_MS) {
+    t.mock.timers.tick(delay);
+    await settle();
+  }
+  const result = await pending;
+  assert.ok(result instanceof Error);
+  assert.match(result.message, /aborted due to timeout/);
+  assert.equal(calls, SPRITE_LOOKUP_RETRY_DELAYS_MS.length + 1);
+  assert.equal(notices.length, SPRITE_LOOKUP_RETRY_DELAYS_MS.length);
+
+  // The third answer is the one that counts: two aborts, then the sprite.
+  calls = 0;
+  const flaky = {
+    async getSprite() {
+      calls += 1;
+      if (calls < 3) throw new Error("Network error: fetch failed");
+      return { name: "bento-e2e" };
+    },
+  };
+  const found = spriteExistsWithRetry(flaky as never, "bento-e2e");
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[0]!);
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[1]!);
+  await settle();
+  assert.equal(await found, true);
+  assert.equal(calls, 3);
+
+  // A 404 on the last try is "gone", which is what the e2e wants before
+  // it creates a machine.
+  calls = 0;
+  const absent = {
+    async getSprite() {
+      calls += 1;
+      if (calls < 3) throw new Error("Network error: The operation was aborted due to timeout");
+      throw new APIError("sprite not found", { statusCode: 404 });
+    },
+  };
+  const gone = spriteExistsWithRetry(absent as never, "bento-e2e");
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[0]!);
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[1]!);
+  await settle();
+  assert.equal(await gone, false);
+  assert.equal(calls, 3);
+
+  // A response with a status is answered once. Waiting here would turn
+  // a refused token into a long pause.
+  calls = 0;
+  notices.length = 0;
+  const refused = {
+    async getSprite() {
+      calls += 1;
+      throw new APIError("upstream is unwell", { statusCode: 500 });
+    },
+  };
+  await assert.rejects(
+    spriteExistsWithRetry(refused as never, "bento-e2e", (err) => {
+      notices.push(String(err));
+    }),
+    /upstream is unwell/,
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(notices, []);
 });

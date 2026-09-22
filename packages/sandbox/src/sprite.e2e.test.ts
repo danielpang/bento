@@ -4,7 +4,7 @@ import { SpritesClient } from "@fly/sprites";
 import { AGENT_BINARIES, TOOLCHAIN_MARKER } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
 import { taskRequest } from "./keep-awake.js";
-import { SpriteDriver, spriteExists, spriteName } from "./sprite.js";
+import { SpriteDriver, spriteExistsWithRetry, spriteName } from "./sprite.js";
 
 /**
  * The one test that provisions a real Fly Sprite and installs the real
@@ -94,9 +94,18 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * of its own for that one question. spriteExists throws rather than
    * guessing when the API cannot answer, which is what stops an
    * unreachable API reading as a tidy machine.
+   *
+   * The lookup is retried when that request is aborted. A cold run's
+   * first getSprite hung until this client's minute-long timeout, and
+   * the suite ended before a machine existed. A missing sprite still
+   * answers 404. A lookup that keeps failing still throws.
    */
   const client = new SpritesClient(token!, { timeout: 60_000 });
-  const exists = () => spriteExists(client, handle.externalId);
+  const exists = () =>
+    spriteExistsWithRetry(client, handle.externalId, (err) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.log(`  sprite lookup failed (${detail}). Retrying.`);
+    });
 
   /**
    * The net under the asserted teardown below, for the paths that never

@@ -54,6 +54,65 @@ export async function spriteExists(client: SpritesClient, name: string): Promise
   }
 }
 
+/**
+ * Pauses between repeated lookups after the Sprites API aborts one.
+ *
+ * The e2e client and the cleanup script time a single getSprite out
+ * at a minute. One abort used to fail the suite before a machine
+ * existed: the request never returned, the SDK reported a network
+ * error, and spriteExists refused to call that "gone". A missing
+ * sprite answers 404 at once, so these waits only run when the API
+ * never answered. Three tries, then the same error propagates.
+ *
+ * The driver's own client waits fifteen minutes because it covers
+ * install scripts. This helper is for the short control-plane client.
+ * Retrying the long one would park a reaper for the better part of
+ * an hour on a single stalled lookup.
+ */
+export const SPRITE_LOOKUP_RETRY_DELAYS_MS = [2_000, 8_000];
+
+/**
+ * spriteExists, tried again when Fly aborts the lookup.
+ *
+ * A timeout is still not "the sprite is gone". After the delays are
+ * spent, the error reaches the caller, which is what keeps an
+ * unreachable API from reading as a deleted machine.
+ */
+export async function spriteExistsWithRetry(
+  client: SpritesClient,
+  name: string,
+  onRetry?: (err: unknown) => void,
+): Promise<boolean> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await spriteExists(client, name);
+    } catch (err) {
+      const delay = SPRITE_LOOKUP_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !spriteLookupIsRetriable(err)) throw err;
+      try {
+        onRetry?.(err);
+      } catch {
+        // A progress line must not replace the lookup error.
+      }
+      await sleep(delay);
+    }
+  }
+}
+
+/**
+ * The SDK wraps a failed fetch as `Network error: <message>` and drops
+ * the cause. An abort and a dropped connection arrive as ordinary
+ * Errors with that prefix. An APIError already carries a status, so
+ * it is answered once.
+ */
+function spriteLookupIsRetriable(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    /^Network error: /.test(err.message) &&
+    /aborted due to timeout|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message)
+  );
+}
+
 export interface SpriteDriverOptions {
   token: string;
   /** Sprite size. Agents are IO heavy rather than CPU heavy. */
