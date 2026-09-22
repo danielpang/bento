@@ -66,8 +66,15 @@ export const RUNNER_PROJECT_REFUSAL =
  * landing now, what is behind it, and did the last few go in. A swarm
  * has a landing per leaf, so the whole list grows without bound and
  * without becoming more useful.
+ *
+ * Counted per half, because the two halves answer different questions
+ * and one cap over both hid the half that matters: the front of the
+ * queue is what is happening, and the history is only how a person
+ * checks that the queue is moving at all. The console draws ten of
+ * that history, so ten is what it is sent.
  */
 const LANDINGS_SHOWN = 20;
+const LANDINGS_HISTORY = 10;
 
 const createSwarm = z.object({
   projectId: z.string().uuid(),
@@ -291,34 +298,57 @@ export function swarmRoutes(ctx: AppContext) {
        * The merge queue, as the panel draws it: what is waiting, what
        * is landing, and the last of what has landed.
        *
-       * Capped rather than whole. A long swarm has a landing per leaf
-       * and the ones from an hour ago answer nothing a person is
-       * asking; the panel shows the last ten, and the cap is here
-       * rather than in the browser so a swarm of two hundred leaves
-       * does not send two hundred rows on every refetch.
+       * Two queries rather than one, and that is the whole point. A
+       * long swarm has a landing per leaf, and one capped query ordered
+       * by position hands back the oldest rows: position is monotonic
+       * per acceptance, so a swarm on its twenty first leaf sent twenty
+       * finished rows and left out the branch that was actually landing
+       * and the conflict somebody opened the panel to find. The panel
+       * then drew "one branch at a time" over a queue it could not see.
        *
-       * Ordered by position, which is the queue's own order, and then
-       * by when the row was made, so two rows that somehow share a
-       * position still draw in a fixed order rather than swapping
-       * between refetches.
+       * So the queue is asked for separately from the history. What has
+       * not finished, in the queue's own order and then by when the row
+       * was made so two rows sharing a position do not swap between
+       * refetches; and the last few that have, newest first. Both
+       * capped, because the cap belongs here rather than in the browser:
+       * a swarm of two hundred leaves must not send two hundred rows on
+       * every refetch.
        */
-      const landings = await db(c, ctx)
-        .select({
-          id: swarmLandings.id,
-          taskId: swarmLandings.taskId,
-          branchName: swarmLandings.branchName,
-          position: swarmLandings.position,
-          status: swarmLandings.status,
-          attempt: swarmLandings.attempt,
-          error: swarmLandings.error,
-          resolverRunId: swarmLandings.resolverRunId,
-          startedAt: swarmLandings.startedAt,
-          endedAt: swarmLandings.endedAt,
-        })
+      const landingColumns = {
+        id: swarmLandings.id,
+        taskId: swarmLandings.taskId,
+        branchName: swarmLandings.branchName,
+        position: swarmLandings.position,
+        status: swarmLandings.status,
+        attempt: swarmLandings.attempt,
+        error: swarmLandings.error,
+        resolverRunId: swarmLandings.resolverRunId,
+        startedAt: swarmLandings.startedAt,
+        endedAt: swarmLandings.endedAt,
+      };
+      const inQueue = await db(c, ctx)
+        .select(landingColumns)
         .from(swarmLandings)
-        .where(eq(swarmLandings.swarmId, swarm.id))
+        .where(
+          and(
+            eq(swarmLandings.swarmId, swarm.id),
+            inArray(swarmLandings.status, ["landing", "conflicted", "queued"]),
+          ),
+        )
         .orderBy(asc(swarmLandings.position), asc(swarmLandings.createdAt))
         .limit(LANDINGS_SHOWN);
+      const finished = await db(c, ctx)
+        .select(landingColumns)
+        .from(swarmLandings)
+        .where(
+          and(
+            eq(swarmLandings.swarmId, swarm.id),
+            inArray(swarmLandings.status, ["landed", "failed", "cancelled"]),
+          ),
+        )
+        .orderBy(desc(swarmLandings.endedAt), desc(swarmLandings.createdAt))
+        .limit(LANDINGS_HISTORY);
+      const landings = [...inQueue, ...finished];
       return c.json({ swarm, tasks, activeRuns: runs, landings });
     })
     .patch("/:id", zValidator("json", updateSwarm), async (c) => {
