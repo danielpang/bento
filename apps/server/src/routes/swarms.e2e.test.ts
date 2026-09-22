@@ -23,7 +23,7 @@ import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/
 import { createApp } from "../app.js";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { SecretBox } from "../secrets.js";
-import { ensureLocalUser, type AppContext } from "../context.js";
+import { ensureLocalUser, type AppContext, type Entitlements } from "../context.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { createFeatureFlags } from "../feature-flags.js";
@@ -764,3 +764,47 @@ async function readSwarm(id: string) {
   const [row] = await db.select().from(swarms).where(eq(swarms.id, id));
   return row!;
 }
+
+/**
+ * A refusal that leaves a swarm behind is worse than a refusal.
+ *
+ * The plan question used to be asked at the planner's door, which is
+ * after the swarm row is written: a team over its limit got a 402 and
+ * a swarm nobody had asked for, in the planning state, with no planner
+ * and no way to start one. The allowance is asked first now, and the
+ * door asks again for the run itself.
+ */
+test("a team over its plan is told before a swarm is written, not after", async () => {
+  await ctx.pool.query(
+    `insert into identity.organization (id,name,slug) values ('org-a','A','org-a') on conflict do nothing`,
+  );
+  const [team] = await db
+    .insert(projects)
+    .values({ ownerId: ctx.userId!, organizationId: "org-a", name: "Team", defaultBranch: "main" })
+    .returning();
+  const asked: string[] = [];
+  ctx.entitlements = {
+    canAddMember: async () => null,
+    canActivateFeature: async () => null,
+    canStartRun: async (organizationId: string) => {
+      asked.push(organizationId);
+      return { reason: "This team has used its agent hours for the month." };
+    },
+  } as unknown as Entitlements;
+  try {
+    const res = await post("/api/swarms", { projectId: team!.id, title: "Over the line", goal: "go" });
+    assert.equal(res.status, 402);
+    const body = (await res.json()) as { error: string; code: string };
+    assert.equal(body.code, "PLAN_LIMIT");
+    assert.match(body.error, /agent hours/);
+    assert.deepEqual(asked, ["org-a"], "the organization is the project's");
+
+    const rows = await db.select().from(swarms).where(eq(swarms.projectId, team!.id));
+    assert.deepEqual(rows, [], "and nothing was persisted for a swarm that was refused");
+    assert.deepEqual(await db.select().from(agentRuns), [], "no planner either");
+  } finally {
+    delete ctx.entitlements;
+    await db.delete(projects).where(eq(projects.id, team!.id));
+  }
+});
+
