@@ -55,7 +55,7 @@ import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants }
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
-import { isInfrastructureFailure } from "../hours-by-feature.js";
+import { unbilledReason } from "../unbilled-reasons.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
@@ -1319,10 +1319,11 @@ async function finishRun(
    * winner's terminal status and stamped a spurious failure line onto a
    * run that had succeeded.
    */
-  // Fly or Bento failed the run. Drop the start so every hours sum
-  // that only knows about started_at counts zero, and skip the billing
-  // hook below so the deployment does not write a usage row either.
-  const exempt = !outcome.ok && isInfrastructureFailure(outcome.error);
+  // A listed unbilled reason (see UNBILLED_REASONS). Drop the start so
+  // every hours sum that only knows about started_at counts zero, and
+  // skip the billing hook below so the deployment does not write a
+  // usage row either.
+  const exempt = !outcome.ok && unbilledReason(outcome.error) !== null;
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({

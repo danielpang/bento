@@ -3,10 +3,12 @@
 -- hours sum already honors: a run with no start counts as zero. The
 -- failure text stays, so the card still says why it went red.
 --
--- Kept in step with isInfrastructureFailure. Caller configuration
--- (two repositories on one checkout, a lockdown this deployment
--- cannot honor) is left alone. So is an agent that ran and failed,
--- a timeout, and a restart.
+-- Backfill for the reasons that existed when this shipped. Adding a
+-- reason later is a row in UNBILLED_REASONS, not another migration:
+-- the hours sum reads the error text. Caller configuration (two
+-- repositories on one checkout, a lockdown this deployment cannot
+-- honor) is left alone. So is an agent that ran and failed, a
+-- timeout, and a restart.
 UPDATE agent_runs
 SET started_at = NULL
 WHERE status = 'failed'
