@@ -7,7 +7,7 @@ import { BoardSkeleton } from "./Skeleton.js";
 import { swarmApi } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
-import type { NewSwarmInput, SwarmDetail, SwarmSummary, SwarmTemplate } from "../swarm/types.js";
+import type { NewSwarmInput, SwarmDetail, SwarmNodeDetail, SwarmSummary, SwarmTemplate } from "../swarm/types.js";
 import {
   boardSearch,
   browserStorage,
@@ -49,6 +49,19 @@ export function SwarmBoard({
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
   const [expanded, setExpanded] = useState<string[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
+  /**
+   * The open node's commits and history.
+   *
+   * Fetched when a node is opened rather than carried on the plan: the
+   * commits are read by grepping a branch per repository for the
+   * node's trailer, and a plan of two hundred nodes would pay for that
+   * on every refetch of a list nobody is looking at.
+   *
+   * Keyed by the node it is for, so a drawer that has been switched to
+   * another node does not draw the previous one's commits while the
+   * new request is in flight.
+   */
+  const [node, setNode] = useState<SwarmNodeDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   /**
@@ -100,6 +113,17 @@ export function SwarmBoard({
       .catch(() => setTemplates([]));
   }, []);
 
+  const loadNode = useCallback((swarmId: string, openTaskId: string) => {
+    void swarmApi
+      .getNode(swarmId, openTaskId)
+      .then((next) => setNode(next))
+      // A node whose detail could not be read still opens: the drawer
+      // falls back to what the plan row carries and says the rest is
+      // not there, rather than the board showing an error over a
+      // request nobody made explicitly.
+      .catch(() => setNode(null));
+  }, []);
+
   const loadDetail = useCallback((swarmId: string) => {
     void swarmApi
       .getSwarm(swarmId)
@@ -116,6 +140,7 @@ export function SwarmBoard({
       return;
     }
     setTaskId(null);
+    setNode(null);
     setExpanded([]);
     rememberSwarmId(storage, projectId, selectedId);
     loadDetail(selectedId);
@@ -173,6 +198,15 @@ export function SwarmBoard({
     window.history.replaceState(null, "", `${window.location.pathname}${search}`);
   }, [selectedId, view]);
 
+  useEffect(() => {
+    if (!selectedId || !taskId) {
+      setNode(null);
+      return;
+    }
+    setNode(null);
+    loadNode(selectedId, taskId);
+  }, [selectedId, taskId, loadNode]);
+
   const [creating, setCreating] = useState(false);
 
   const model = useMemo(
@@ -195,7 +229,7 @@ export function SwarmBoard({
   if (swarms === null) return <BoardSkeleton />;
 
   const task = taskId ? detail?.tasks.find((row) => row.id === taskId) ?? null : null;
-  const node = taskId ? model.byId.get(taskId) ?? null : null;
+  const layoutNode = taskId ? model.byId.get(taskId) ?? null : null;
 
   return (
     <div className="swarm-board">
@@ -261,15 +295,26 @@ export function SwarmBoard({
         <BoardSkeleton />
       )}
 
-      {task && node && (
+      {task && layoutNode && (
         <SwarmNodeDrawer
           task={task}
-          node={node}
+          node={layoutNode}
+          {...(node?.taskId === task.id ? { detail: node } : {})}
           busy={busy}
           onClose={() => setTaskId(null)}
           // act reloads the detail, so the rings above the node move
           // as soon as the reconciler has rolled the finish up.
           onMarkDone={(id) => selectedId && act(() => swarmApi.markTaskDone(selectedId, id))}
+          onMessage={(id, text) =>
+            selectedId &&
+            act(async () => {
+              await swarmApi.messageTask(selectedId, id, text);
+              // The node's own history is what shows the message
+              // landed, so it is re-read rather than left to the next
+              // board event.
+              loadNode(selectedId, id);
+            })
+          }
         />
       )}
 
