@@ -79,7 +79,9 @@ export function teamRoutes(ctx: AppContext) {
      * which cards made it. Hours are summed per feature from the
      * period start the plan already uses (the org's billing
      * anniversary, not the first of the calendar month). A run that
-     * straddles the boundary only counts the overlap.
+     * straddles the boundary only counts the overlap. A run that
+     * failed because Bento or Fly could not run the sprite is left
+     * out: that time is not agent hours.
      *
      * Scoped to the active organization, so a foreign tenant asking
      * for another team's period sees 404, not an empty list of
@@ -105,6 +107,7 @@ export function teamRoutes(ctx: AppContext) {
           title: features.title,
           startedAt: agentRuns.startedAt,
           endedAt: agentRuns.endedAt,
+          error: agentRuns.error,
         })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))

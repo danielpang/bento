@@ -71,6 +71,9 @@ export interface Entitlements {
    * Never awaited on the caller's path and never allowed to fail one:
    * the run is over either way, and a metering error must not turn a
    * finished run into a failed one.
+   *
+   * Not called when the run failed because Bento or Fly could not
+   * start or keep the sprite. Those runs are not agent hours.
    */
   onRunFinished?(runId: string): Promise<void>;
   /**
