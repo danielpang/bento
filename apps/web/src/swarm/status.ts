@@ -149,6 +149,26 @@ export function canResume(status: SwarmStatus): boolean {
   return status === "paused" || status === "budget_exhausted";
 }
 
+/**
+ * Whether Start is offered: a swarm that has been planned and not yet
+ * set going.
+ *
+ * Its own question rather than a third value of canResume, because a
+ * swarm being planned is also a swarm somebody can pause, so the
+ * control sits beside Pause instead of taking its place. Without it a
+ * freshly planned swarm had no way to be started at all: every door
+ * the console has for starting work was behind canResume, which a
+ * planning swarm is not.
+ *
+ * Offered whether or not the plan has arrived. Whether there is
+ * anything to start is the route's answer (it refuses a swarm with an
+ * empty tree, in words), and a button that says nothing is worse than
+ * a refusal that says why.
+ */
+export function canStart(status: SwarmStatus): boolean {
+  return status === "planning";
+}
+
 export function canStop(status: SwarmStatus): boolean {
   return !isSwarmOver(status);
 }

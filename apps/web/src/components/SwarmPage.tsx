@@ -3,7 +3,7 @@ import { CompletionRing } from "./CompletionRing.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
-import { canPause, canResume, canStop, swarmTone, swarmWords } from "../swarm/status.js";
+import { canPause, canResume, canStart, canStop, swarmTone, swarmWords } from "../swarm/status.js";
 import { capUse, formatUsd, spendParts } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { elapsedSince, formatElapsed } from "../swarm/time.js";
@@ -162,6 +162,19 @@ export function SwarmPage({
             disabled={busy || !canStop(swarm.status)}
             onChange={actions.onWorkers}
           />
+          {/*
+            * Start and Pause both, while a swarm is being planned: the
+            * plan is the planner's to finish and the work is the
+            * person's to begin, and either can be wanted first. Start
+            * is the same route as Resume (one door decides when a
+            * swarm may run), so it is the same action under the name
+            * the state calls for.
+            */}
+          {canStart(swarm.status) && (
+            <button className="btn btn-primary" disabled={busy} onClick={actions.onResume}>
+              Start
+            </button>
+          )}
           {canResume(swarm.status) ? (
             <button className="btn" disabled={busy} onClick={actions.onResume}>
               Resume

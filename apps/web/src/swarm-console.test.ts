@@ -12,7 +12,7 @@ import { SwarmPage } from "./components/SwarmPage.js";
 import { modeSurfaces } from "./swarm/plan.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import type { SwarmSummary, SwarmTask } from "./swarm/types.js";
+import type { SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
 import { readFileSync, readdirSync } from "node:fs";
 
 /**
@@ -372,8 +372,9 @@ const NOW = Date.parse("2026-09-04T12:00:00.000Z");
   setItem: () => {},
 };
 
-function pageHtml(mode: "local" | "multi") {
-  const detail = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
+function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
+  const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
+  const detail = status ? { ...seeded, swarm: { ...seeded.swarm, status } } : seeded;
   return renderToStaticMarkup(
     createElement(SwarmPage, {
       detail,
@@ -425,6 +426,30 @@ test("the header keeps the three spend figures apart, against the cap", () => {
   assert.match(html, /against a \$40\.00 cap/);
   // One track, three fills, each measured on its own.
   assert.equal(html.match(/class="swarm-cap-fill"/g)?.length, 3);
+});
+
+/**
+ * The one action a freshly planned swarm needs.
+ *
+ * A swarm is created in the planning state and stays there until a
+ * person says the plan is worth running. The console offered Start
+ * only where it offered Resume, which planning is not, so the header
+ * showed Pause and nothing else: the swarm could be paused, stopped
+ * and re-planned, and never started. Pause stays beside it, because
+ * pausing a planner mid plan is still a thing somebody wants.
+ */
+test("a swarm that has been planned and not started offers Start, beside Pause", () => {
+  const html = pageHtml("multi", "planning");
+  assert.match(html, />Start<\/button>/);
+  assert.match(html, />Pause<\/button>/, "and the planner writing the plan can still be paused");
+  assertNoDashes(html, "the header of a planning swarm");
+
+  // Running, paused and finished swarms are unchanged: Start belongs
+  // to the one state that has a plan and no permission to run it.
+  assert.equal(pageHtml("multi").includes(">Start</button>"), false);
+  assert.equal(pageHtml("multi", "paused").includes(">Start</button>"), false);
+  assert.match(pageHtml("multi", "paused"), />Resume<\/button>/);
+  assert.equal(pageHtml("multi", "done").includes(">Start</button>"), false);
 });
 
 test("a planner question is a banner with the reply in it", () => {
