@@ -342,16 +342,37 @@ export function enforcedSpend(spend: SwarmSpend): number {
  * at most the run that was already going when it was reached, and an
  * agent is never killed for money: an agent stopped mid edit leaves a
  * branch nobody chose, and the time it spent is spent either way.
+ *
+ * Which is why `committedUsd` exists. A swarm runs several agents at
+ * once, and none of them has recorded anything yet, so spend alone
+ * says nothing about the work already in flight: four workers on a ten
+ * dollar swarm all started while the figure was still zero and
+ * committed twenty dollars between them. The runs already going are
+ * counted at the figure a run that reports nothing is charged, which
+ * is the same figure they will be charged if they report nothing, and
+ * the promise holds again at any number of workers.
  */
 export function budgetRefusal(
   swarm: { budgetUsd: string | null; spentMeasuredUsd: string; spentEstimatedUsd: string; spentAssumedUsd: string; spentNotionalUsd: string },
+  /** What the runs already going will cost, at their assumed figure. */
+  committedUsd = 0,
 ): string | null {
   if (swarm.budgetUsd === null) return null;
   const cap = Number(swarm.budgetUsd);
   if (!Number.isFinite(cap) || cap <= 0) return null;
   const spent = enforcedSpend(spendOf(swarm));
-  if (spent < cap) return null;
-  return `This swarm has spent its ${money(cap)} budget (${money(spent)} so far). Raise the budget to let it carry on; what has landed is kept.`;
+  const committed = Number.isFinite(committedUsd) && committedUsd > 0 ? committedUsd : 0;
+  if (spent + committed < cap) return null;
+  /*
+   * The sentence names what was actually spent, not the reservation.
+   * A person reading "spent $10.00 of $10.00" over a swarm whose
+   * ledger says $0.00 would reasonably think the cap was broken.
+   */
+  const note =
+    committed > 0
+      ? `This swarm has committed its ${money(cap)} budget (${money(spent)} spent, ${money(committed)} with agents still working).`
+      : `This swarm has spent its ${money(cap)} budget (${money(spent)} so far).`;
+  return `${note} Raise the budget to let it carry on; what has landed is kept.`;
 }
 
 /**
