@@ -337,6 +337,43 @@ test("everything waiting for the planner arrives as one wake, not one each", asy
   assert.ok(result?.plannerRunId);
 });
 
+/**
+ * The wake is about leaves.
+ *
+ * A group's status is this tick's own rollup of the children it is
+ * telling the planner about in the same message, so folding the group
+ * in spends a turn on a node the planner cannot work, and stamps
+ * plannerToldAt on a row that will never report.
+ */
+test("the planner hears about the leaves that ended, not the groups rolled up around them", async () => {
+  const swarm = await makeSwarm();
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "Checkout group" });
+  const leaf = await makeTask(swarm.id, {
+    parentId: group.id,
+    title: "Swap the provider",
+    status: "done",
+    report: "swapped it",
+  });
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  assert.ok(result?.plannerRunId, "the leaf's report woke the planner");
+  assert.equal((await read(group.id)).status, "done", "and the group rolled up in the same tick");
+
+  const wake = deps.calls.find((call) => call.role === "planner");
+  assert.ok(wake);
+  assert.match(wake.prompt, /Swap the provider/);
+  assert.equal(wake.prompt.includes("Checkout group"), false, "a group is not a node the planner can act on");
+  assert.match(wake.prompt, /Tasks that ended \(1\)/);
+
+  assert.ok((await read(leaf.id)).flags.plannerToldAt, "the leaf is stamped as told");
+  assert.equal(
+    (await read(group.id)).flags.plannerToldAt,
+    undefined,
+    "and the group's latch is still there for whatever it may report",
+  );
+});
+
 test("workers spawn up to the ceiling, and a plan limit stops the loop on the leaf that hit it", async () => {
   const swarm = await makeSwarm({ status: "running" });
   const first = await makeTask(swarm.id, { title: "first", status: "assigned", position: 0 });

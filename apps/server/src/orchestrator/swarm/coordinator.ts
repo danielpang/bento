@@ -428,15 +428,24 @@ async function deliverPlannerWake(
     )
     .orderBy(asc(swarmMessages.createdAt));
 
-  // What the tree did while the planner was away: reports and endings
-  // it has not been told about. Reported and failed leaves only; a
-  // status the planner itself set is not news to it.
+  /*
+   * What the tree did while the planner was away: reports and endings
+   * it has not been told about. Reported and failed leaves only; a
+   * status the planner itself set is not news to it.
+   *
+   * Leaves, said in the query rather than only in this comment. A
+   * group's status is this tick's own rollup of children the planner
+   * is being told about in the same message, so folding the group in
+   * spends a planner turn on something it cannot act on, and burns
+   * the plannerToldAt latch on a node that will never report.
+   */
   const reported = await tx
     .select()
     .from(swarmTasks)
     .where(
       and(
         eq(swarmTasks.swarmId, swarm.id),
+        eq(swarmTasks.nodeType, "leaf"),
         inArray(swarmTasks.status, ["done", "failed"]),
         sql`coalesce((${swarmTasks.flags} ->> 'plannerToldAt'), '') = ''`,
       ),
