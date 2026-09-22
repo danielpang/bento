@@ -46,6 +46,16 @@ export function NewSwarmDialog({
   const [goal, setGoal] = useState("");
   const [budget, setBudget] = useState("");
   const [workers, setWorkers] = useState(template?.maxWorkers ? Math.min(4, template.maxWorkers) : 4);
+  /**
+   * A branch that already exists, to continue.
+   *
+   * Empty is the ordinary case and means a new branch cut from the
+   * repository's default branch. A name here says the work carries on
+   * somebody's feature branch, and the planner's first turn then
+   * carries what is on it and what its pull request is still being
+   * asked about.
+   */
+  const [startBranch, setStartBranch] = useState("");
 
   const leaves = template?.typicalLeaves ?? 0;
   const estimate = useMemo(
@@ -65,7 +75,9 @@ export function NewSwarmDialog({
   // The server names the branch after the swarm, so this is a preview
   // of what it will be rather than a choice.
   const branchName = suggestBranch(name);
-  const ready = name.trim() !== "" && goal.trim() !== "" && template !== null;
+  const continuing = startBranch.trim();
+  const branchRefusal = continuing && !isBranchName(continuing) ? branchNameRefusal : null;
+  const ready = name.trim() !== "" && goal.trim() !== "" && template !== null && branchRefusal === null;
 
   return (
     <Modal
@@ -191,6 +203,22 @@ export function NewSwarmDialog({
           </label>
         </div>
 
+        <label className="field">
+          <span className="field-heading">Start from a branch</span>
+          <input
+            className="input"
+            value={startBranch}
+            placeholder={branchName || "A new branch"}
+            onChange={(e) => setStartBranch(e.target.value)}
+          />
+          <span className="muted">
+            {continuing
+              ? `The swarm's own branch is cut from ${continuing}, and its planner is told what is on it and what its pull request is still being asked about.`
+              : "Leave this empty for a new branch. Name one that already exists to carry on from it, review comments included."}
+          </span>
+          {branchRefusal && <span className="swarm-reopen-refusal">{branchRefusal}</span>}
+        </label>
+
         {/*
           * The money lines, and which of them this mode has.
           *
@@ -231,13 +259,42 @@ export function NewSwarmDialog({
       name: name.trim(),
       goal: goal.trim(),
       attachments: [],
-      start: { kind: "new-branch", name: branchName },
+      start: continuing ? { kind: "existing-branch", name: continuing } : { kind: "new-branch", name: branchName },
+      /*
+       * The template decides this, and the server copies it onto the
+       * swarm. Sent as "code" here because the dialog does not ask:
+       * a field the console states and the server ignores is worse
+       * than one it does not offer.
+       */
       deliverable: "code",
       budgetUsd: parseBudget(budget),
       workers,
       planOnly: true,
     });
   }
+}
+
+/** What the dialog says about a branch name git would refuse. */
+export const branchNameRefusal =
+  "A branch name has no spaces and no colons in it. Check what the branch is actually called, or leave this empty for a new one.";
+
+/**
+ * Whether this is a branch name, asked before the request is sent.
+ *
+ * The server asks the same question and is the one that decides; this
+ * is here so a typo is a sentence under the field rather than a
+ * refusal after the form has been submitted. Git's own rules, stated
+ * positively: letters, digits, and the four characters branch names
+ * use, in segments that do not start with a dot or end in ".lock".
+ */
+export function isBranchName(value: string): boolean {
+  if (value.length === 0 || value.length > 200) return false;
+  if (value.startsWith("-") || value.startsWith("/") || value.endsWith("/")) return false;
+  if (value.includes("..") || value.includes("@{")) return false;
+  if (!/^[A-Za-z0-9._\-/]+$/.test(value)) return false;
+  return value
+    .split("/")
+    .every((segment) => segment.length > 0 && !segment.startsWith(".") && !segment.endsWith(".lock"));
 }
 
 /** A branch name from the swarm's name, as a placeholder and a default. */
