@@ -95,6 +95,37 @@ status every second per viewer, which cost a query per second per open
 stream and delayed agent output by up to a second even though the event
 was already in hand.
 
+## A reattached run fills its gap from the CLI's record, and never repeats itself
+
+A deploy detaches the server from an agent that keeps working in its
+sprite. `recoverInterruptedRuns` reattaches on boot, but attaching
+alone recovers nothing the agent said in between: the draining process
+drops events once `ctx.draining` is set, and the Sprites SDK discards
+the session's history while the attach handshake completes. Users saw
+a transcript with a hole where the deploy was, and a card that jumped
+from mid-task to "done".
+
+The pattern is the one Claude Code, Codex, opencode, and OpenHands all
+use: the agent's own append-only session record is the source of
+truth, every message carries a stable native id, and a reader that
+comes back resumes from what it already has. In Bento that is
+`recover-session.ts`: the reattach path in `resumeInterruptedRun` reads
+the CLI's session file through `sessionRecovery.readLogCommand`,
+appends what the transcript lacks before consuming a line of the live
+stream, and then filters the live stream through `isPersisted` so a
+replayed line is dropped by id rather than appended twice. The id set
+is a snapshot taken at attach (`loadPersistedIds`), never extended
+with live events, because claude-code emits one line per content
+block under one message id and a growing set would drop a message's
+second block.
+
+So when touching this: an adapter with `sessionRecovery` must give
+`persistedIds` an answer for every event shape its stream repeats
+(claude-code names tool calls as `tool_use:<id>` and results as
+`tool_result:<id>`), and a resume path must call `recoverMissedMessages`
+before it reads the stream, not after. The test is "a restart recovers
+what the agent said while no server was attached" in `e2e.test.ts`.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,

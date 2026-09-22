@@ -1,5 +1,5 @@
 import { eq, inArray } from "drizzle-orm";
-import type { AgentAdapter } from "@bento/agents";
+import type { AgentAdapter, SessionRecovery } from "@bento/agents";
 import type { AgentEvent } from "@bento/core";
 import { agentRuns, runEvents } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
@@ -13,12 +13,19 @@ import { appendRunEvent } from "./transcript.js";
  * A server restart detaches the stream but not the agent: the process
  * keeps working in its sandbox, and everything it says while nobody is
  * attached reaches no transcript. The CLI's session storage in the
- * sandbox is the surviving copy of those messages. When the next run
- * resumes the session, this reads that record, diffs it against every
- * message already persisted for the card by CLI-native message id, and
- * appends what is missing to the starting run's transcript, so the
- * user sees what the agent said while Bento was away instead of a
- * conversation that skips from mid-task to "the work is done".
+ * sandbox is the surviving copy of those messages. This reads that
+ * record, diffs it against every message already persisted for the
+ * card by CLI-native message id, and appends what is missing to the
+ * given run's transcript, so the user sees what the agent said while
+ * Bento was away instead of a conversation that skips from mid-task
+ * to "the work is done".
+ *
+ * Two callers, one gap. A boot that reattaches to the still running
+ * agent calls this before it reads a line of the live stream, so the
+ * deploy's worth of messages lands ahead of what follows. A later run
+ * that resumes the session calls it too, for the case where the agent
+ * finished while no server was attached and there was nothing to
+ * reattach to.
  *
  * Idempotent by construction: recovered events carry the same native
  * ids in their raw payload that delivered events do, so a later
@@ -40,6 +47,14 @@ export interface RecoverArgs {
   sessionId: string;
   /** Where the agent runs, for CLIs that key storage on the directory. */
   cwd: string;
+  /**
+   * The ids the card's transcript already holds, when the caller has
+   * them (see loadPersistedIds). Extended in place with every message
+   * recovered here, so a caller that goes on to filter a live stream
+   * against the same set sees the recovered messages as delivered.
+   * Loaded here when absent.
+   */
+  seen?: Set<string>;
 }
 
 export async function recoverMissedMessages(ctx: AppContext, args: RecoverArgs): Promise<void> {
@@ -77,16 +92,64 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
   const held = recovery.parseLog(read.stdout);
   if (held.length === 0) return;
 
-  /**
-   * Everything the card has already shown, whichever run delivered it.
-   * The session spans runs (each resume is a new run in the same CLI
-   * session), so the diff must too, or a resume would "recover" the
-   * whole conversation into one transcript again.
-   */
+  const seen = args.seen ?? (await loadPersistedIds(ctx, recovery, args.featureId));
+
+  const missed = held.filter((message) => {
+    const event: AgentEvent = { type: "message", role: "assistant", text: message.text, raw: message.raw };
+    // No identity means no safe diff; skipping loses nothing that was
+    // ever attributable, and recovering it would duplicate forever.
+    if (recovery.persistedIds(event).length === 0) return false;
+    return !isPersisted(recovery, seen, event);
+  });
+  if (missed.length === 0) return;
+
+  const kept = missed.slice(0, MAX_RECOVERED_MESSAGES);
+  await appendRunEvent(ctx, args.runId, {
+    type: "message",
+    role: "system",
+    text:
+      kept.length === 1
+        ? "The agent kept working while Bento was disconnected. One message it sent during that time follows, recovered from the agent's session record."
+        : `The agent kept working while Bento was disconnected. ${kept.length} messages it sent during that time follow, recovered from the agent's session record.`,
+  });
+  for (const message of kept) {
+    const event: AgentEvent = { type: "message", role: "assistant", text: message.text, raw: message.raw };
+    await appendRunEvent(ctx, args.runId, event);
+    for (const id of recovery.persistedIds(event)) seen.add(id);
+  }
+  if (missed.length > kept.length) {
+    await appendRunEvent(ctx, args.runId, {
+      type: "message",
+      role: "system",
+      text: `${missed.length - kept.length} more recovered message(s) were left out to keep this readable.`,
+    });
+  }
+}
+
+/**
+ * Every native id the card's transcript holds, whichever run delivered
+ * it. The session spans runs (each resume is a new run in the same CLI
+ * session), so the set must too, or a resume would "recover" the whole
+ * conversation into one transcript again.
+ *
+ * A snapshot, on purpose. A reattaching server filters the live stream
+ * against the ids it loaded at attach time and nothing later: the
+ * sandbox may replay output the transcript already has (the first
+ * life's, or the gap this module just recovered), and that is what
+ * the filter drops. It must not learn the ids of the events it goes
+ * on to append, because one message can arrive as several lines under
+ * one id (claude-code emits one line per content block), and a filter
+ * that remembered the first line would drop the rest.
+ */
+export async function loadPersistedIds(
+  ctx: AppContext,
+  recovery: Pick<SessionRecovery, "persistedIds">,
+  featureId: string,
+): Promise<Set<string>> {
   const cardRuns = await ctx.db
     .select({ id: agentRuns.id })
     .from(agentRuns)
-    .where(eq(agentRuns.featureId, args.featureId));
+    .where(eq(agentRuns.featureId, featureId));
   const persisted = cardRuns.length
     ? await ctx.db
         .select({ payload: runEvents.payload })
@@ -102,38 +165,18 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
   for (const row of persisted) {
     for (const id of recovery.persistedIds(row.payload as AgentEvent)) seen.add(id);
   }
+  return seen;
+}
 
-  const missed = held.filter((message) => {
-    const ids = recovery.persistedIds({ type: "message", role: "assistant", text: message.text, raw: message.raw });
-    // No identity means no safe diff; skipping loses nothing that was
-    // ever attributable, and recovering it would duplicate forever.
-    if (ids.length === 0) return false;
-    return !ids.some((id) => seen.has(id));
-  });
-  if (missed.length === 0) return;
-
-  const kept = missed.slice(0, MAX_RECOVERED_MESSAGES);
-  await appendRunEvent(ctx, args.runId, {
-    type: "message",
-    role: "system",
-    text:
-      kept.length === 1
-        ? "The agent kept working while Bento was disconnected. One message it sent during that time follows, recovered from the agent's session record."
-        : `The agent kept working while Bento was disconnected. ${kept.length} messages it sent during that time follow, recovered from the agent's session record.`,
-  });
-  for (const message of kept) {
-    await appendRunEvent(ctx, args.runId, {
-      type: "message",
-      role: "assistant",
-      text: message.text,
-      raw: message.raw,
-    });
-  }
-  if (missed.length > kept.length) {
-    await appendRunEvent(ctx, args.runId, {
-      type: "message",
-      role: "system",
-      text: `${missed.length - kept.length} more recovered message(s) were left out to keep this readable.`,
-    });
-  }
+/**
+ * Whether the transcript already holds this event, by native id. An
+ * event without one is never "already there": it cannot be told from
+ * a new one, and dropping it would lose something real.
+ */
+export function isPersisted(
+  recovery: Pick<SessionRecovery, "persistedIds">,
+  seen: ReadonlySet<string>,
+  event: AgentEvent,
+): boolean {
+  return recovery.persistedIds(event).some((id) => seen.has(id));
 }

@@ -1343,6 +1343,169 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
 });
 
 /**
+ * Attaching is not enough: the agent kept talking between the old
+ * process going quiet and the new one attaching, and none of it
+ * reached the transcript. The reattach reads the CLI's session record
+ * for that gap before it consumes the live stream, and anything the
+ * sandbox replays of what the transcript already holds (the first
+ * life's lines, the gap just recovered) is dropped by native id rather
+ * than appended twice. The claude-code adapter is used for real; only
+ * the sandbox is fake.
+ */
+test("a restart recovers what the agent said while no server was attached", { timeout: 60_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Reattach gap");
+  const feature = await createFeature(project.id, "Card with a gap");
+  const profile = await json<{ id: string }>(
+    await app.request("/api/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "reattach-gap-claude", cli: "claude-code", model: "claude-opus-5" }),
+    }),
+  );
+  const stage = projectStages[0]!;
+
+  const [sandbox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "sprite",
+      externalId: `bento-${feature.id}`,
+      status: "busy",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [running] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stage.id,
+      agentProfileId: profile.id,
+      prompt: "half finished work",
+      status: "running",
+      executor: "server",
+      sandboxId: sandbox!.id,
+      cliSessionId: "sid-gap-1",
+      startedAt: new Date(Date.now() - 60_000),
+    })
+    .returning();
+
+  // The first life: one message and one tool call reached the
+  // transcript before the deploy, in the shapes the live stream writes.
+  const line = (entry: Record<string, unknown>) => `${JSON.stringify(entry)}\n`;
+  const said = (id: string, text: string) => ({
+    type: "assistant",
+    message: { id, role: "assistant", content: [{ type: "text", text }] },
+    session_id: "sid-gap-1",
+  });
+  const called = (id: string, call: string) => ({
+    type: "assistant",
+    message: { id, role: "assistant", content: [{ type: "tool_use", id: call, name: "Bash", input: { command: "ls" } }] },
+    session_id: "sid-gap-1",
+  });
+  const answered = (call: string) => ({
+    type: "user",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: call, content: "README.md" }] },
+    session_id: "sid-gap-1",
+  });
+  for (const raw of [said("msg_1", "Reading the code."), called("msg_2", "toolu_1")]) {
+    await appendRunEvent(ctx, running!.id, claudeCodeAdapter.parseEvent(JSON.stringify(raw))!);
+  }
+
+  // The session record as the sandbox holds it at attach: what was
+  // delivered, plus the message the agent sent into the void.
+  const sessionRecord = [
+    line({ ...said("msg_1", "Reading the code."), uuid: "u-1", sessionId: "sid-gap-1" }),
+    line({ ...called("msg_2", "toolu_1"), uuid: "u-2", sessionId: "sid-gap-1" }),
+    line({ ...said("msg_3", "Tests pass, committing now."), uuid: "u-3", sessionId: "sid-gap-1" }),
+  ].join("");
+
+  const reads: string[] = [];
+  const fakeDriver = {
+    provider: "sprite" as const,
+    async provision(): Promise<never> {
+      throw new Error("recovery must not provision");
+    },
+    exec(_handle: SandboxHandle, argv: string[]): AsyncIterable<{ kind: "stdout"; data: string } | { kind: "exit"; exitCode: number }> {
+      const script = argv.join(" ");
+      reads.push(script);
+      return (async function* () {
+        if (/\.claude\/projects\/.*\/sid-gap-1\.jsonl/.test(script)) {
+          yield { kind: "stdout" as const, data: sessionRecord };
+          yield { kind: "exit" as const, exitCode: 0 };
+          return;
+        }
+        yield { kind: "exit" as const, exitCode: 1 };
+      })();
+    },
+    async attach() {
+      return (async function* () {
+        // What a sandbox that replays its history would send first:
+        // the first life's lines and the gap's message, all of which
+        // the transcript now holds.
+        yield { kind: "stdout" as const, data: line(said("msg_1", "Reading the code.")) };
+        yield { kind: "stdout" as const, data: line(called("msg_2", "toolu_1")) };
+        yield { kind: "stdout" as const, data: line(said("msg_3", "Tests pass, committing now.")) };
+        // Then what is genuinely new: the call's answer, which never
+        // reached the transcript, and the rest of the conversation.
+        yield { kind: "stdout" as const, data: line(answered("toolu_1")) };
+        yield { kind: "stdout" as const, data: line(said("msg_4", "Done, the branch is ready.")) };
+        yield {
+          kind: "stdout" as const,
+          data: line({ type: "result", subtype: "success", is_error: false, session_id: "sid-gap-1", total_cost_usd: 0.02, num_turns: 3 }),
+        };
+        yield { kind: "exit" as const, exitCode: 0 };
+      })();
+    },
+    async destroy() {},
+  };
+  const previousDriver = ctx.driver;
+  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  try {
+    await recoverInterruptedRuns(ctx);
+    assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
+  } finally {
+    ctx.driver = previousDriver;
+  }
+
+  // Other execs follow the finish (artifact capture, the export); the
+  // record itself is read once, at attach.
+  const recordReads = reads.filter((script) => /sid-gap-1\.jsonl/.test(script));
+  assert.equal(recordReads.length, 1, "the session record is read once, at attach");
+  // The slug is the checkout the agent started in, under the sandbox's
+  // workdir, not the workdir itself: the record is keyed on the cwd.
+  assert.match(recordReads[0]!, /projects\/-workspace-[A-Za-z0-9-]+\/sid-gap-1\.jsonl/, "the record is looked up under the directory the agent ran in");
+
+  const rows = (
+    await ctx.db
+      .select({ payload: runEvents.payload })
+      .from(runEvents)
+      .where(eq(runEvents.runId, running!.id))
+      .orderBy(sql`seq`)
+  ).map((r) => r.payload as { type: string; role?: string; text?: string; name?: string; phase?: string });
+  const spoken = rows.map((r) => (r.type === "message" ? `${r.role}: ${r.text}` : `${r.type}: ${r.name} ${r.phase}`));
+
+  const recovered = spoken.findIndex((s) => /kept working while Bento was disconnected/.test(s));
+  const reattached = spoken.findIndex((s) => /reattached to the agent still working/.test(s));
+  assert.ok(recovered >= 0, "the transcript says what was recovered");
+  assert.match(spoken[recovered]!, /One message/, "exactly the one message the transcript lacked");
+  assert.equal(spoken[recovered + 1], "assistant: Tests pass, committing now.", "the missed message follows its explanation");
+  assert.ok(reattached > recovered, "the gap lands before the reattach, in conversation order");
+
+  const count = (needle: string) => spoken.filter((s) => s === needle).length;
+  assert.equal(count("assistant: Reading the code."), 1, "a replayed first-life message is not appended again");
+  assert.equal(count("tool: Bash start"), 1, "a replayed tool call is not appended again");
+  assert.equal(count("assistant: Tests pass, committing now."), 1, "a replay of the recovered message is dropped");
+  assert.equal(count("tool: tool_result end"), 1, "the call's answer, new to the transcript, is kept");
+  assert.equal(count("assistant: Done, the branch is ready."), 1, "the live conversation continues");
+  assert.equal(rows.filter((r) => r.type === "init").length, 0, "no second session marker from a replayed init");
+  assert.ok(
+    spoken.indexOf("tool: tool_result end") > reattached && spoken.indexOf("assistant: Done, the branch is ready.") > spoken.indexOf("tool: tool_result end"),
+    "live events arrive after the reattach line, in stream order",
+  );
+});
+
+/**
  * Reattaching has honest limits: a sandbox that answers without the
  * session means the agent ended while nobody watched, and a run still
  * in "starting" may never have spawned its agent at all. Both keep the
