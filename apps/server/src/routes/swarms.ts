@@ -39,6 +39,7 @@ import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
 import { reopenRefusal, reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { budgetRefusal } from "../orchestrator/swarm/ledger.js";
@@ -512,6 +513,21 @@ export function swarmRoutes(ctx: AppContext) {
         await db(c, ctx).update(swarms).set({ budgetWarnedAt: null }).where(eq(swarms.id, swarm.id));
       }
       if (ceilingMoved) deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      /*
+       * A swarm somebody put away holds a machine nobody will work in
+       * again, and a sprite costs money for as long as it exists
+       * rather than for as long as it is used.
+       *
+       * Only when the swarm is actually finished with: archiving one
+       * that is still running is a person tidying their strip, and
+       * destroying a machine an agent is working in would leave a
+       * branch nobody chose. Queued rather than destroyed inline, for
+       * the reason a finished swarm's reap is queued, and safe to
+       * queue twice because a machine already gone is no rows.
+       */
+      if (archived === true && archiveReapsSandboxes(swarm)) {
+        deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
+      }
       saySwarmChanged(ctx, c, swarm);
       return c.json(updated);
     })
@@ -541,6 +557,18 @@ export function swarmRoutes(ctx: AppContext) {
         .set({ status: "paused", pausedReason: "manual", updatedAt: new Date() })
         .where(eq(swarms.id, swarm.id))
         .returning();
+      /*
+       * And the machines are put away with a point to come back to.
+       *
+       * After the commit and off the request, because the provider is
+       * a network call away and pausing must not fail because Fly was
+       * slow. A driver that cannot snapshot does nothing here, which
+       * is right for the local ones: their containers hold nothing the
+       * repository on this host does not already have.
+       */
+      deferAfterCommit(c, async () => {
+        await checkpointSwarmSandboxes(ctx.db, ctx.driver, swarm.id, `swarm-pause-${swarm.id}`);
+      });
       saySwarmChanged(ctx, c, swarm, "paused");
       return c.json(paused);
     })

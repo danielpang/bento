@@ -79,4 +79,20 @@ ALTER TABLE "swarms" ADD COLUMN "reopen_count" integer DEFAULT 0 NOT NULL;--> st
 -- reopened more than once and each follow up is its own subtree. Null
 -- on every node the first pass created, which is how both views know
 -- which subtree to label.
-ALTER TABLE "swarm_tasks" ADD COLUMN "follow_up_instruction" text;
+ALTER TABLE "swarm_tasks" ADD COLUMN "follow_up_instruction" text;--> statement-breakpoint
+
+-- The snapshot a machine was put away at, when its driver can take
+-- one.
+--
+-- A paused swarm is one nobody is working in and everybody is still
+-- paying for, and the point of a checkpoint is that resuming it starts
+-- from where it stopped rather than from a fresh clone: a sandbox that
+-- spent ten minutes installing a toolchain should not spend them
+-- again. On the sandbox rather than on a run, because there is no run
+-- at the moment a person pauses; agent_runs.checkpoint_id is a
+-- different fact (what one run may be rolled back to).
+--
+-- Null on every driver that cannot snapshot, which is every local one,
+-- and null is not a failure there: their containers hold nothing worth
+-- keeping that the repository on the host does not already have.
+ALTER TABLE "sandboxes" ADD COLUMN "checkpoint_id" text;
