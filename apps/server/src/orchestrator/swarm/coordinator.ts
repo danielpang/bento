@@ -438,8 +438,24 @@ async function settleWorkedLeaves(
   events: BoardEvent[],
   now: Date,
 ): Promise<void> {
+  /*
+   * A plan node handed to a planner of its own is here too, and for
+   * the same reason.
+   *
+   * A sub planner finishes by having written children: the rollup then
+   * owns the node's status and nothing below is stuck. A sub planner
+   * that stopped without writing any leaves that node "working" with
+   * no agent on it and no children to roll up, which nothing else in
+   * the swarm notices, and the subtree never happens. Only a childless
+   * one, because a node with children is the rollup's and not this
+   * step's.
+   */
+  const childless = new Set(tasks.map((task) => task.parentId).filter((id): id is string => id !== null));
   const working = tasks.filter(
-    (task) => task.nodeType === "leaf" && task.status === "working" && !task.report && task.assignedRunId,
+    (task) =>
+      task.status === "working" &&
+      task.assignedRunId &&
+      (task.nodeType === "leaf" ? !task.report : !childless.has(task.id)),
   );
   if (working.length === 0) return;
 
@@ -456,7 +472,9 @@ async function settleWorkedLeaves(
     if (run && (ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) continue;
     const reason = run?.error?.trim()
       ? `the agent working it stopped: ${run.error.trim()}`
-      : "the agent working it stopped without reporting.";
+      : task.nodeType === "plan"
+        ? "the planner given this part of the plan stopped without writing any tasks under it."
+        : "the agent working it stopped without reporting.";
     // Through the one door, so the latch that decides whether the
     // planner ever hears about this leaf is cleared by construction.
     await handLeafToPlanner(tx, {
@@ -991,6 +1009,23 @@ async function spawnWorkers(
    */
   if (!spawnsFrom(swarm)) return { runIds, refusal: null, cap: null };
 
+  /*
+   * A plan node the planner handed over, before the leaves.
+   *
+   * Before, because a sub planner produces leaves and a leaf takes a
+   * worker slot for as long as an agent is on it: starting the planner
+   * of a subtree first is what lets the leaves it writes be picked up
+   * on the next tick rather than a tick after every other leaf has
+   * finished.
+   *
+   * The depth ceiling is the template's, and it is checked at the tool
+   * that marks the node rather than here as well: this step starts
+   * what was marked, and two opinions about how deep a plan may go is
+   * how they come to differ.
+   */
+  const delegatedRunIds = await spawnSubPlanners(tx, swarm, tasks, deps, events, now);
+  runIds.push(...delegatedRunIds);
+
   const ready = tasks.filter((task) => task.nodeType === "leaf" && task.status === "assigned");
   if (ready.length === 0) return { runIds, refusal: null, cap: null };
 
@@ -1134,6 +1169,91 @@ async function spawnWorkers(
     events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status: "running" });
   }
   return { runIds, refusal: null, cap: null };
+}
+
+
+/**
+ * Puts a planner on every plan node that was handed over.
+ *
+ * A sub planner is given one node and the subtree under it, and the
+ * MCP server is what holds it to that: every tool call it makes is
+ * checked against the task its run names. So there is nothing to
+ * scope here beyond starting the run with that task on it.
+ *
+ * It runs as the swarm's own planner agent, not the worker's. What is
+ * being asked for is a plan, and a template that pairs a strong
+ * planner with a cheap worker means exactly that.
+ *
+ * A refusal is quiet. The node keeps its place and starts when the
+ * swarm has room, the same way a leaf does, and the ceiling that
+ * refused it is already being reported by the leaf that hit it.
+ */
+async function spawnSubPlanners(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  deps: SwarmTickDeps,
+  events: BoardEvent[],
+  now: Date,
+): Promise<string[]> {
+  const handed = tasks.filter((task) => task.nodeType === "plan" && task.status === "assigned");
+  if (handed.length === 0) return [];
+
+  const profileId = await plannerProfileFor(tx, swarm);
+  // Nothing to run a planner as. The node keeps its place, and starts
+  // the moment a planner agent is set on the template.
+  if (!profileId) return [];
+
+  const runIds: string[] = [];
+  for (const task of handed) {
+    const started = await deps.startRun(tx, {
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: task.id,
+      role: "subplanner",
+      agentProfileId: profileId,
+      prompt: "",
+      executor: "server",
+      startedBy: swarm.startedBy,
+    });
+    // The swarm is at its ceiling, so there is no room for the nodes
+    // behind this one either.
+    if (started === SWARM_FULL) break;
+    // Something is already planning this node. Its siblings are still
+    // this tick's to start.
+    if (started === "busy") continue;
+    if (started === "gone") break;
+    /*
+     * A ceiling refused it. Left to the leaf spawn below to report,
+     * which is where the sentence about it belongs: a person reading
+     * the board wants one node saying the swarm is out of money, not
+     * every node that was waiting.
+     */
+    if ("outOfCompute" in started) break;
+
+    await tx
+      .update(swarmTasks)
+      .set({ status: "working", assignedRunId: started.id, startedAt: task.startedAt ?? now, updatedAt: now })
+      .where(eq(swarmTasks.id, task.id));
+    await tx.insert(swarmTaskEvents).values({
+      taskId: task.id,
+      kind: "assigned",
+      fromStatus: task.status,
+      toStatus: "working",
+      runId: started.id,
+      detail: { subplanner: true },
+    });
+    task.status = "working";
+    runIds.push(started.id);
+    events.push({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "working",
+    });
+  }
+  return runIds;
 }
 
 /* ------------------------------------------------------------------ *

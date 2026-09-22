@@ -55,7 +55,12 @@ import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
-import { buildPlannerPrompt, quoteUntrusted, type StartBranchState } from "./swarm/planner-prompt.js";
+import {
+  buildPlannerPrompt,
+  buildSubPlannerPrompt,
+  quoteUntrusted,
+  type StartBranchState,
+} from "./swarm/planner-prompt.js";
 import { buildWorkerPrompt } from "./swarm/worker-prompt.js";
 import { isDocumentSwarm, SECTION_DIR } from "./swarm/deliverable.js";
 import { isSafeBranchName, taskTrailer } from "./swarm/branches.js";
@@ -1363,6 +1368,26 @@ async function buildSubjectPrompt(
       repositories: mounted,
       trailer: taskTrailer(subject.task.id),
       quote: quoteUntrusted,
+    });
+  }
+  /*
+   * A planner given one part of the plan gets its own prompt, for the
+   * reason a worker does: handed the opening one, it would read
+   * "split the goal into leaves" and start rewriting a tree somebody
+   * else is halfway through.
+   */
+  if (subject.run.role === "subplanner" && subject.task) {
+    return buildSubPlannerPrompt({
+      swarm: subject.swarm,
+      node: {
+        id: subject.task.id,
+        title: subject.task.title,
+        description: subject.task.description,
+      },
+      agent,
+      repositories: mounted,
+      templateInstructions: template?.plannerInstructions ?? null,
+      hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
     });
   }
   if (subject.run.role === "worker" && subject.task) {
