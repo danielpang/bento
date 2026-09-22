@@ -28,6 +28,7 @@ export type SwarmStatus =
   | "done"
   | "stopped"
   | "budget_exhausted"
+  | "timed_out"
   | "failed";
 
 /** A plan node is decomposed further. A leaf is what a worker is given. */
@@ -44,10 +45,28 @@ export type TaskStatus =
   | "cancelled";
 
 /**
- * Whether this node wants a person, which is a second axis and not a
- * status: a worker that has been going for an hour is still `working`.
+ * Whether this node wants a person, and what about.
+ *
+ * A second axis and not a status: a worker that has been going for an
+ * hour is still `working`, and a leaf holding a question is still
+ * whatever it was doing.
+ *
+ * The reasons are the server's own words, carried through rather than
+ * flattened. They were flattened once, to "escalated", and the board
+ * then told everybody that four different things all needed them
+ * equally: a planner's question, a merge conflict, a failed worker and
+ * a swarm that had run out of money read identically, and none of them
+ * said what to do. The colour is still one colour. The sentence is not.
  */
-export type TaskAttention = "none" | "long_running" | "escalated";
+export type TaskAttention =
+  | "none"
+  | "long_running"
+  | "escalated"
+  | "question"
+  | "failed"
+  | "conflict"
+  | "budget"
+  | "plan_limit";
 
 /**
  * Money, always three figures.
@@ -62,6 +81,16 @@ export interface SwarmSpend {
   measuredUsd: number;
   estimatedUsd: number;
   assumedUsd: number;
+  /**
+   * A printed price that a subscription had already paid for.
+   *
+   * The fourth figure, and the one the budget does not count. A local
+   * install can lend a run the operator's own logged in agent session;
+   * the tool still prints its list price, but the work was already
+   * paid for and the marginal cost of the run is zero. Counting it
+   * would stop a swarm that is costing nothing.
+   */
+  notionalUsd: number;
 }
 
 /**
@@ -132,6 +161,12 @@ export interface SwarmTask {
   weight: number;
   assignedRunId: string | null;
   branchName: string | null;
+  /**
+   * The agent a person chose for this leaf, or null for the template's
+   * own worker. What the drawer's Reassign writes, and what the next
+   * spawn on this leaf reads.
+   */
+  agentProfileId: string | null;
   cost: SwarmSpend;
   /** Coordinator bookkeeping: retry counts, who blocked this, planner notes. */
   flags: Record<string, unknown>;
@@ -236,7 +271,7 @@ export interface SwarmLedgerEntry {
   usd: number;
 }
 
-export type SpendTier = "measured" | "estimated" | "assumed";
+export type SpendTier = "measured" | "estimated" | "assumed" | "notional";
 
 export interface SwarmPullRequest {
   id: string;

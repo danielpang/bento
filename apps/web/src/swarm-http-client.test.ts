@@ -139,13 +139,13 @@ test("one swarm reads back with its plan, its spend and what is working", async 
 
   assert.equal(calls[0]!.url, "/api/swarms/sw-1");
   assert.equal(read.swarm.name, "Checkout rewrite");
-  assert.deepEqual(read.swarm.spend, { measuredUsd: 5.08, estimatedUsd: 0.37, assumedUsd: 0.25 });
+  assert.deepEqual(read.swarm.spend, { measuredUsd: 5.08, estimatedUsd: 0.37, assumedUsd: 0.25 , notionalUsd: 0});
   assert.equal(read.swarm.budgetUsd, 40);
   assert.equal(read.swarm.workers, 4, "the swarm's own ceiling is what the stepper changes");
   assert.equal(read.swarm.workersActive, 1, "the planner is not a worker");
-  assert.deepEqual(read.tasks[0]!.cost, { measuredUsd: 1.5, estimatedUsd: 0.25, assumedUsd: 0 });
+  assert.deepEqual(read.tasks[0]!.cost, { measuredUsd: 1.5, estimatedUsd: 0.25, assumedUsd: 0 , notionalUsd: 0});
   assert.equal(read.tasks[0]!.attention, "none");
-  assert.equal(read.tasks[1]!.attention, "escalated", "a question wants a person");
+  assert.equal(read.tasks[1]!.attention, "question", "the server's own reason, not a severity it was flattened into");
 
   // Nothing is invented for the surfaces the routes do not serve.
   assert.deepEqual(read.landings, []);

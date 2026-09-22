@@ -28,7 +28,7 @@ const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 
 function spend(measured = 0, estimated = 0, assumed = 0): SwarmSpend {
-  return { measuredUsd: measured, estimatedUsd: estimated, assumedUsd: assumed };
+  return { measuredUsd: measured, estimatedUsd: estimated, assumedUsd: assumed , notionalUsd: 0};
 }
 
 function iso(now: number, offsetMs: number): string {
@@ -68,6 +68,9 @@ function task(seed: TaskSeed, position: number, now: number): SwarmTask {
     weight: seed.weight ?? 1,
     assignedRunId:
       seed.status === "working" || seed.status === "assigned" ? `run-${seed.id}` : null,
+    // The template's own worker, which is every leaf until somebody
+    // reassigns one from the drawer.
+    agentProfileId: null,
     branchName: seed.branchName ?? (seed.nodeType === "leaf" ? `bento/${seed.id}` : null),
     cost: seed.cost ?? spend(),
     flags: seed.flags ?? {},
@@ -511,7 +514,7 @@ export const SWARM_TEMPLATES: SwarmTemplate[] = [
       { name: "gemini-cli", tier: "assumed" },
     ],
     assumedUsdPerLeaf: 0.2,
-    perLeaf: { measuredUsd: 0.55, estimatedUsd: 0.12, assumedUsd: 0.2 },
+    perLeaf: { measuredUsd: 0.55, estimatedUsd: 0.12, assumedUsd: 0.2 , notionalUsd: 0},
     maxWorkers: 12,
     workerIsolation: "sandbox",
     maxBudgetUsd: 200,
@@ -529,7 +532,7 @@ export const SWARM_TEMPLATES: SwarmTemplate[] = [
       { name: "writer", tier: "assumed" },
     ],
     assumedUsdPerLeaf: 0.1,
-    perLeaf: { measuredUsd: 0.18, estimatedUsd: 0, assumedUsd: 0.1 },
+    perLeaf: { measuredUsd: 0.18, estimatedUsd: 0, assumedUsd: 0.1 , notionalUsd: 0},
     maxWorkers: 6,
     workerIsolation: "sandbox",
     maxBudgetUsd: 50,
@@ -544,7 +547,7 @@ export const SWARM_TEMPLATES: SwarmTemplate[] = [
     workerModel: "claude-haiku-4",
     tools: [{ name: "claude-code", tier: "measured" }],
     assumedUsdPerLeaf: 0,
-    perLeaf: { measuredUsd: 0.09, estimatedUsd: 0, assumedUsd: 0 },
+    perLeaf: { measuredUsd: 0.09, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0},
     maxWorkers: 16,
     workerIsolation: "sandbox",
     maxBudgetUsd: 25,

@@ -43,6 +43,14 @@ export interface SwarmApi {
   listSwarms(projectId: string): Promise<SwarmSummary[]>;
   getSwarm(swarmId: string): Promise<SwarmDetail>;
   listTemplates(): Promise<SwarmTemplate[]>;
+  /**
+   * The agents a leaf can be handed to.
+   *
+   * The same list the card board's agent picker draws, read here
+   * because reassigning a node is choosing from it. Names only: what
+   * the drawer needs is something to put in a menu.
+   */
+  listAgents(): Promise<{ id: string; name: string }[]>;
   createSwarm(input: NewSwarmInput): Promise<SwarmDetail>;
   pauseSwarm(swarmId: string): Promise<void>;
   /** Resuming is starting: one route decides when a swarm may run. */
@@ -62,6 +70,27 @@ export interface SwarmApi {
    * it should say so.
    */
   markTaskDone(swarmId: string, taskId: string): Promise<void>;
+  /**
+   * The node controls a person steers a swarm with.
+   *
+   * Retry puts a leaf back in the queue with the attempt that failed
+   * cleared off it; the reconciler decides when there is room for it,
+   * which is why nothing here starts an agent directly. Cancel takes
+   * the subtree and stops whatever is on it. Split turns a leaf into
+   * the tasks it should have been. Reassign writes a different agent
+   * on this leaf alone, and null puts it back on the template's own.
+   * Edit is what makes a retry worth doing, since a task that failed
+   * for saying the wrong thing fails again against the same words.
+   */
+  retryTask(swarmId: string, taskId: string): Promise<void>;
+  cancelTask(swarmId: string, taskId: string): Promise<void>;
+  splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
+  reassignTask(swarmId: string, taskId: string, agentProfileId: string | null): Promise<void>;
+  editTask(
+    swarmId: string,
+    taskId: string,
+    edit: { title?: string; description?: string; weight?: number },
+  ): Promise<void>;
   /**
    * One node's commits and its history, asked for when it is opened.
    *
@@ -162,6 +191,12 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     listTemplates() {
       return Promise.resolve(SWARM_TEMPLATES);
     },
+    listAgents() {
+      return Promise.resolve([
+        { id: "agent-planner", name: "Planner" },
+        { id: "agent-worker", name: "Worker" },
+      ]);
+    },
     createSwarm(input) {
       const created = draftSwarm(input, clock());
       projectSwarms(input.projectId).push(created);
@@ -245,6 +280,76 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         );
       });
     },
+    /*
+     * The node controls, kept in memory so the console behaves like a
+     * console: retrying a failed leaf really does put it back in the
+     * queue, and cancelling one really does grey it out. What the
+     * server does with the subtree and the agents is the server's; a
+     * fixture that tried to reproduce it would be a second set of
+     * rules to keep in step.
+     */
+    retryTask(swarmId, taskId) {
+      return mutate(swarmId, (detail) => {
+        detail.tasks = detail.tasks.map((task) =>
+          task.id === taskId
+            ? { ...task, status: "assigned", attention: "none", report: null, endedAt: null }
+            : task,
+        );
+      });
+    },
+    cancelTask(swarmId, taskId) {
+      return mutate(swarmId, (detail) => {
+        const doomed = new Set<string>([taskId]);
+        // The subtree, the way the server takes it: a plan node nobody
+        // needs has no children anybody needs.
+        for (let pass = 0; pass < 64; pass += 1) {
+          const before = doomed.size;
+          for (const task of detail.tasks) {
+            if (task.parentId && doomed.has(task.parentId)) doomed.add(task.id);
+          }
+          if (doomed.size === before) break;
+        }
+        detail.tasks = detail.tasks.map((task) =>
+          doomed.has(task.id)
+            ? { ...task, status: "cancelled", attention: "none", endedAt: new Date(clock()).toISOString() }
+            : task,
+        );
+      });
+    },
+    splitTask(swarmId, taskId, children) {
+      return mutate(swarmId, (detail) => {
+        const parent = detail.tasks.find((task) => task.id === taskId);
+        if (!parent) return;
+        detail.tasks = [
+          ...detail.tasks.map((task) =>
+            task.id === taskId ? { ...task, nodeType: "plan" as const, status: "open" as const } : task,
+          ),
+          ...children.map((child, index) => ({
+            ...parent,
+            id: `${taskId}-${index + 1}`,
+            parentId: taskId,
+            position: index,
+            nodeType: "leaf" as const,
+            status: "open" as const,
+            attention: "none" as const,
+            title: child.title,
+            description: child.description ?? "",
+            report: null,
+            commits: [],
+          })),
+        ];
+      });
+    },
+    reassignTask(swarmId, taskId, agentProfileId) {
+      return mutate(swarmId, (detail) => {
+        detail.tasks = detail.tasks.map((task) => (task.id === taskId ? { ...task, agentProfileId } : task));
+      });
+    },
+    editTask(swarmId, taskId, edit) {
+      return mutate(swarmId, (detail) => {
+        detail.tasks = detail.tasks.map((task) => (task.id === taskId ? { ...task, ...edit } : task));
+      });
+    },
     // Fixtures change only when something here changes them, so there
     // is nothing to hear: the subscription is real and the stream is
     // empty, which is what a fixture should be.
@@ -278,6 +383,12 @@ export interface WireSwarm {
   spentMeasuredUsd: string;
   spentEstimatedUsd: string;
   spentAssumedUsd: string;
+  /**
+   * Optional, because a server older than the tier does not send it.
+   * Absent reads as zero, which is true there: nothing on that
+   * deployment ever borrowed a login.
+   */
+  spentNotionalUsd?: string;
   archivedAt: string | null;
   lastOpenedAt: string | null;
   createdAt: string;
@@ -299,11 +410,13 @@ export interface WireTask {
   weight: number;
   assignedRunId: string | null;
   branchName: string | null;
+  agentProfileId?: string | null;
   flags: Record<string, unknown>;
   report: string | null;
   costMeasuredUsd: string;
   costEstimatedUsd: string;
   costAssumedUsd: string;
+  costNotionalUsd?: string;
   startedAt: string | null;
   endedAt: string | null;
 }
@@ -369,7 +482,13 @@ export interface WireTemplate {
   timeLimitMin: number | null;
 }
 
-const number = (value: string | null): number => (value === null ? 0 : Number(value));
+/**
+ * A numeric column, as JSON sends it. Absent and null both read as
+ * zero: a server that predates a tier is not a server whose swarms
+ * spent an unknown amount in it.
+ */
+const number = (value: string | null | undefined): number =>
+  value === null || value === undefined ? 0 : Number(value);
 
 /**
  * A swarm's status, in the words the console draws.
@@ -414,16 +533,32 @@ export function swarmStatusOf(row: { status: string; pausedReason: Swarm["paused
 }
 
 /**
- * A leaf's attention, in the two severities the console draws.
+ * A leaf's attention, in the server's own words.
  *
- * The server records why as well as how loudly (a question, a
- * conflict, a failure, a budget stop). The console paints one yellow,
- * so every reason that wants a person now reads as escalated.
+ * Carried through rather than flattened. It was flattened once, to
+ * "escalated", and the board then said the same two words about a
+ * planner's question, a merge conflict, a failed worker and a swarm
+ * out of money: all four true, none of them useful, and no two of them
+ * answered the same way. One colour, one sentence each.
+ *
+ * A word this console does not know reads as escalated, which is the
+ * honest fallback: something wants a person, and this build cannot say
+ * what.
  */
+const ATTENTION_WORDS: TaskAttention[] = [
+  "long_running",
+  "escalated",
+  "question",
+  "failed",
+  "conflict",
+  "budget",
+  "plan_limit",
+];
+
 export function attentionOf(attention: string | null): TaskAttention {
   if (attention === null) return "none";
-  if (attention === "long_running") return "long_running";
-  return "escalated";
+  const known = ATTENTION_WORDS.find((word) => word === attention);
+  return known ?? "escalated";
 }
 
 /** One row of the plan, as the tree and the outline read it. */
@@ -440,10 +575,14 @@ export function toTask(row: WireTask): SwarmTask {
     weight: row.weight,
     assignedRunId: row.assignedRunId,
     branchName: row.branchName,
+    agentProfileId: row.agentProfileId ?? null,
     cost: {
       measuredUsd: number(row.costMeasuredUsd),
       estimatedUsd: number(row.costEstimatedUsd),
       assumedUsd: number(row.costAssumedUsd),
+      // A server that predates the tier sends nothing, which reads as
+      // zero: no run there ever borrowed a login.
+      notionalUsd: number(row.costNotionalUsd),
     },
     flags: row.flags,
     report: row.report,
@@ -488,6 +627,7 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
       measuredUsd: number(row.spentMeasuredUsd),
       estimatedUsd: number(row.spentEstimatedUsd),
       assumedUsd: number(row.spentAssumedUsd),
+      notionalUsd: number(row.spentNotionalUsd),
     },
     // The rows carry when a swarm was made and when it was put away,
     // not when its first agent started or its last one stopped. The
@@ -534,7 +674,7 @@ export function toTemplate(row: WireTemplate): SwarmTemplate {
     workerModel: "",
     tools: [],
     assumedUsdPerLeaf: 0,
-    perLeaf: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 },
+    perLeaf: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 },
     maxWorkers: row.maxWorkers,
     // A server that predates the column says nothing, which reads the
     // same way a template that asserts nothing does.
@@ -594,6 +734,10 @@ export function httpSwarmApi(
     async listTemplates() {
       return (await call<WireTemplate[]>("/api/swarm-templates")).map(toTemplate);
     },
+    async listAgents() {
+      const rows = await call<{ id: string; name: string }[]>("/api/profiles");
+      return rows.map((row) => ({ id: row.id, name: row.name }));
+    },
     async createSwarm(input) {
       /*
        * What the route takes, and nothing else. The dialog collects a
@@ -632,6 +776,21 @@ export function httpSwarmApi(
     },
     async markTaskDone(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/done`);
+    },
+    async retryTask(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`);
+    },
+    async cancelTask(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/cancel`);
+    },
+    async splitTask(swarmId, taskId, children) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/split`, { children });
+    },
+    async reassignTask(swarmId, taskId, agentProfileId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/reassign`, { agentProfileId });
+    },
+    async editTask(swarmId, taskId, edit) {
+      await patch(`/api/swarms/${swarmId}/tasks/${taskId}`, edit);
     },
     async getNode(swarmId, taskId) {
       const node = await call<WireNode>(`/api/swarms/${swarmId}/tasks/${taskId}`);
