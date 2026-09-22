@@ -62,6 +62,7 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
     assert.match(AGENT_TOOLCHAIN_SCRIPT, /version_below "\$ver" "1\.14\.24"/);
     assert.match(AGENT_TOOLCHAIN_SCRIPT, /version_below "\$ver" "0\.70\.1"/);
     assert.match(AGENT_TOOLCHAIN_SCRIPT, /dsh-hmr-pin/);
+    assert.match(AGENT_TOOLCHAIN_SCRIPT, /bento-wait-for-hmr/);
 
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-dsh-"));
   try {
@@ -81,7 +82,7 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
     );
     assert.match(readFileSync(path.join(root, "npm-installs"), "utf8"), /^@deepseek-ai\/dsh@0\.1\.1-rc\.2$/m);
     assert.match(readFileSync(path.join(root, "npm-installs"), "utf8"), /^@deepseek-ai\/cordis-plugin-hmr@1\.0\.17$/m);
-    assert.equal(readFileSync(path.join(root, "opt/bento/dsh-hmr-pin"), "utf8").trim(), "1.0.17");
+    assert.equal(readFileSync(path.join(root, "opt/bento/dsh-hmr-pin"), "utf8").trim(), "1.0.17+wait");
     assert.equal(
       readFileSync(path.join(root, "dsh-runs"), "utf8").trim(),
       "deepseek-v4-pro|danger-full-access|1|--profile headless --dump-config",
@@ -107,6 +108,8 @@ test("dsh is pinned, configured, and initialized for headless sandbox use", asyn
       "BENTO_NODE_VERSION=22.22.2",
       "@deepseek-ai/dsh@0.1.1-rc.2",
       "@deepseek-ai/cordis-plugin-hmr@1.0.17",
+      "1.0.17+wait",
+      "bento-wait-for-hmr",
       "/opt/bento/dsh-hmr-pin",
       "exec /opt/bento/dsh/bin/dsh",
       "for tool in agy claude codex cursor-agent dsh fx muse opencode pi pool",
@@ -435,7 +438,7 @@ test("a warm machine reinstalls dsh when the HMR plugin pin is missing", () => {
     assert.match(installs, /@deepseek-ai\/dsh@0\.1\.1-rc\.2/);
     assert.match(installs, /@deepseek-ai\/cordis-plugin-hmr@1\.0\.17/);
     assert.doesNotMatch(installs, /pi-coding-agent/);
-    assert.equal(readFileSync(path.join(root, "opt/bento/dsh-hmr-pin"), "utf8").trim(), "1.0.17");
+    assert.equal(readFileSync(path.join(root, "opt/bento/dsh-hmr-pin"), "utf8").trim(), "1.0.17+wait");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
