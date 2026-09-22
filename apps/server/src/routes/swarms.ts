@@ -37,7 +37,7 @@ import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
-import { cancelTaskTree, reassignLeaf, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
@@ -406,13 +406,13 @@ export function swarmRoutes(ctx: AppContext) {
         .where(eq(swarms.id, swarm.id))
         .returning();
       /*
-       * Raising either ceiling is a change the reconciler has to act
-       * on, and for the same reason: there may be leaves waiting for a
-       * slot, or for money, that it refused when the ceiling was
-       * lower. A raised budget matters most, because a swarm that
-       * spent its budget is stopped rather than merely slowed, and
-       * nothing else would ever ask again: the money coming back is a
-       * person's decision, not an event.
+       * Raising any ceiling is a change the reconciler has to act on,
+       * and for the same reason: there may be leaves waiting for a
+       * slot, for money, or for the clock, that it refused when the
+       * ceiling was lower. The budget and the time limit matter most,
+       * because a swarm that reached either is stopped rather than
+       * merely slowed, and nothing else would ever ask again: raising
+       * one is a person's decision, not an event this server hears.
        *
        * Lowering either takes effect as workers finish. Nothing is
        * killed mid task, which is the rule every ceiling in a swarm
@@ -423,7 +423,8 @@ export function swarmRoutes(ctx: AppContext) {
        * and a planner that was told once about the old one would never
        * be told about this one.
        */
-      const ceilingMoved = rest.maxWorkers !== undefined || budgetUsd !== undefined;
+      const ceilingMoved =
+        rest.maxWorkers !== undefined || budgetUsd !== undefined || rest.timeLimitMin !== undefined;
       if (budgetUsd !== undefined) {
         await db(c, ctx).update(swarms).set({ budgetWarnedAt: null }).where(eq(swarms.id, swarm.id));
       }
@@ -819,10 +820,22 @@ export function swarmRoutes(ctx: AppContext) {
       const { swarm, task } = found;
 
       /*
-       * The agent on it stops first, and then the leaf goes back in the
-       * queue. The other order starts a second agent on a branch the
-       * first one is still committing to, which is the one thing the
-       * merge queue cannot sort out afterwards.
+       * Whether this may be retried at all is asked before anything is
+       * touched, the way split asks it. A refusal that has already
+       * killed an agent is a route that destroyed a branch and then
+       * told the caller nothing had changed: the planner's own cancel
+       * lets a worker finish its turn, so a cancelled leaf can still
+       * have an agent on it, and that leaf is exactly the one somebody
+       * reaches for Retry on.
+       */
+      const refusedFor = retryRefusal(task);
+      if (refusedFor) return c.json({ error: refusedFor, code: "NOT_A_LEAF" }, 409);
+
+      /*
+       * Then the agent on it stops, and then the leaf goes back in the
+       * queue. That order and not the other: the other starts a second
+       * agent on a branch the first one is still committing to, which
+       * is the one thing the merge queue cannot sort out afterwards.
        */
       await stopRunsOnTask(ctx, c, task.id);
       const retried = await retryLeaf(db(c, ctx), { task, actorUserId: actor(c) });

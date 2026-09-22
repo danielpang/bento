@@ -22,6 +22,7 @@ import {
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
 import type { AppContext } from "../context.js";
+import { getBetaTester } from "../feature-flags.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { activeOrg } from "../middleware/actor.js";
@@ -913,23 +914,39 @@ export function projectRoutes(ctx: AppContext) {
        * together unless something keeps them apart, and this is the
        * page where somebody is deciding whether the number is real.
        */
-      const swarmRows = await db(c, ctx)
-        .select({
-          swarmId: swarms.id,
-          title: swarms.title,
-          status: swarms.status,
-          measuredUsd: swarms.spentMeasuredUsd,
-          estimatedUsd: swarms.spentEstimatedUsd,
-          assumedUsd: swarms.spentAssumedUsd,
-          notionalUsd: swarms.spentNotionalUsd,
-          runs: sql<number>`count(${agentRuns.id})`,
-          runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${agentRuns.costUsd} is null)`,
-        })
-        .from(swarms)
-        .leftJoin(agentRuns, and(eq(agentRuns.swarmId, swarms.id), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES])))
-        .where(eq(swarms.projectId, projectId))
-        .groupBy(swarms.id, swarms.title, swarms.status)
-        .orderBy(desc(swarms.createdAt));
+      /*
+       * And only for somebody who is allowed to know swarms exist.
+       *
+       * This route is not a swarm route, and the cards on it are not
+       * behind the flag, so it answers either way. The section does
+       * not: every swarm route refuses a non-tester with 404 rather
+       * than 402 precisely so the feature's existence stays unstated,
+       * and a table of swarm titles and dollar figures on the Spend
+       * page would state it, along with what the rest of the team had
+       * been spending.
+       */
+      const swarmRows = !(await getBetaTester(ctx, c))
+        ? []
+        : await db(c, ctx)
+            .select({
+              swarmId: swarms.id,
+              title: swarms.title,
+              status: swarms.status,
+              measuredUsd: swarms.spentMeasuredUsd,
+              estimatedUsd: swarms.spentEstimatedUsd,
+              assumedUsd: swarms.spentAssumedUsd,
+              notionalUsd: swarms.spentNotionalUsd,
+              runs: sql<number>`count(${agentRuns.id})`,
+              runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${agentRuns.costUsd} is null)`,
+            })
+            .from(swarms)
+            .leftJoin(
+              agentRuns,
+              and(eq(agentRuns.swarmId, swarms.id), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES])),
+            )
+            .where(eq(swarms.projectId, projectId))
+            .groupBy(swarms.id, swarms.title, swarms.status)
+            .orderBy(desc(swarms.createdAt));
 
       const totalUsd = rows.reduce((sum, row) => sum + Number(row.costUsd ?? 0), 0);
       return c.json({

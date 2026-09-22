@@ -1166,6 +1166,47 @@ test("a plan node is not a person's to retry", async () => {
 });
 
 /**
+ * A retry that is refused has to leave everything where it was.
+ *
+ * The planner's own cancel deliberately lets a worker finish its turn,
+ * so a cancelled leaf can still have an agent on it for a while. Open
+ * a swarm just before that happens, press Retry just after, and the
+ * route answered "this task was cancelled, nothing changed" having
+ * already destroyed the run and abandoned its branch. Refusing is
+ * something a route decides before it touches anything, which is how
+ * split has always done it.
+ */
+test("a retry that is refused does not stop the agent first", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const [run] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: tree.first.id,
+      role: "worker",
+      agentProfileId: (await db.select().from(agentProfiles).limit(1))[0]!.id,
+      prompt: "",
+      status: "running",
+    })
+    .returning();
+  const controller = new AbortController();
+  ctx.running.set(run!.id, controller);
+  // The planner cancelled the leaf, and its worker is finishing its turn.
+  await db
+    .update(swarmTasks)
+    .set({ status: "cancelled", assignedRunId: run!.id })
+    .where(eq(swarmTasks.id, tree.first.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(res.status, 409);
+  assert.equal(controller.signal.aborted, false, "nothing was stopped on the caller's behalf");
+  const [untouched] = await db.select().from(agentRuns).where(eq(agentRuns.id, run!.id));
+  assert.equal(untouched!.status, "running", "and the agent is still working its branch");
+});
+
+/**
  * Cancelling takes the subtree, the same rule the planner's own tool
  * follows, because both call the same function.
  */
@@ -1302,4 +1343,66 @@ test("raising the budget wakes the swarm, and the planner's warning is due again
     queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
     "and the reconciler is asked to try spawning again",
   );
+});
+
+/**
+ * The clock's ending gets what the budget's ending got.
+ *
+ * Both are ceilings a person raises to reopen, and only one of them was
+ * wired for it. Raising the time limit changed a column and woke
+ * nothing, and the console offers Resume on a timed out swarm, so the
+ * button was there and the swarm stayed exactly where it was.
+ */
+test("raising the time limit wakes the swarm the clock stopped", async () => {
+  const swarm = await createSwarm();
+  await db
+    .update(swarms)
+    .set({ status: "timed_out", pausedReason: "time_limit", timeLimitMin: 120 })
+    .where(eq(swarms.id, swarm.id));
+  queued = [];
+
+  const res = await patch(`/api/swarms/${swarm.id}`, { timeLimitMin: 240 });
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "a raised ceiling is a reason to try spawning again, whichever ceiling it is",
+  );
+});
+
+/**
+ * The Spend page is not a way around the allowlist.
+ *
+ * Every swarm route answers 404 to somebody who is not a beta tester,
+ * because a 402 would tell them the feature exists. The project's usage
+ * route is not a swarm route and was never gated, and it grew a section
+ * listing every swarm's title, status and spend: the one page in the
+ * console that would have told a non-tester swarms exist, and told them
+ * what their colleagues had been spending on them.
+ *
+ * The cards are not beta, so the route still answers. The swarms come
+ * off it, which is the same thing the console does with a section a
+ * person may not see.
+ */
+test("a person who is not a beta tester is not told the swarms exist", async () => {
+  const swarm = await createSwarm();
+  await db
+    .update(swarms)
+    .set({ spentMeasuredUsd: "40", title: "Rewrite checkout" })
+    .where(eq(swarms.id, swarm.id));
+
+  const asTester = await app.request(`/api/projects/${projectId}/usage`);
+  assert.equal(asTester.status, 200);
+  const seen = (await asTester.json()) as { bySwarm: { swarmId: string }[] };
+  assert.equal(seen.bySwarm.length, 1, "a tester sees the swarm section");
+
+  const flags = ctx.featureFlags;
+  ctx.featureFlags = { isBetaTester: async () => false } as unknown as typeof flags;
+  try {
+    const res = await app.request(`/api/projects/${projectId}/usage`);
+    assert.equal(res.status, 200, "the cards on this page are not behind the flag");
+    const body = (await res.json()) as { bySwarm: unknown[] };
+    assert.deepEqual(body.bySwarm, [], "and the swarms are not on it at all");
+  } finally {
+    ctx.featureFlags = flags;
+  }
 });
