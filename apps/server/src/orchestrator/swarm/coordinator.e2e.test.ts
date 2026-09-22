@@ -16,7 +16,7 @@ import {
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
-import type { NewRun } from "../start-run.js";
+import { SWARM_FULL, type NewRun } from "../start-run.js";
 import { rollUpStatus, swarmStatusFrom, tickSwarm, type SwarmTickDeps } from "./coordinator.js";
 
 /**
@@ -117,7 +117,7 @@ const queuedRunIds = () =>
 
 /** A stubbed door: it records what was asked for, and inserts a real row. */
 function starter(
-  answers: ("run" | "busy" | "gone" | { outOfCompute: string })[] = [],
+  answers: ("run" | "busy" | "gone" | typeof SWARM_FULL | { outOfCompute: string })[] = [],
 ): SwarmTickDeps & { calls: NewRun[] } {
   const calls: NewRun[] = [];
   let index = 0;
@@ -378,6 +378,42 @@ test("workers spawn up to the ceiling, and a plan limit stops the loop on the le
   // A refusal is not a failed tick: pg-boss retrying into the same
   // refusal would say nothing new and would keep saying it.
   assert.equal((await readSwarm(swarm.id)).status, "blocked", "attention holds the swarm's headline");
+});
+
+/**
+ * "Busy" is two different answers, and only one of them is about the
+ * swarm.
+ *
+ * A leaf that already has a run on it says nothing about its siblings;
+ * a swarm at its worker ceiling says there is no room for any of them.
+ * While both were the word "busy", one leaf in the first state stopped
+ * the tick, and every other ready leaf waited for the next one.
+ */
+test("a leaf that already has an agent does not hold up the leaves behind it", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const first = await makeTask(swarm.id, { title: "first", status: "assigned", position: 0 });
+  const second = await makeTask(swarm.id, { title: "second", status: "assigned", position: 1 });
+
+  const deps = starter(["busy"]);
+  const result = await tickSwarm(ctx, swarm.id, deps);
+
+  assert.equal(deps.calls.length, 2, "the leaf behind the busy one was still offered to the door");
+  assert.equal(result?.workerRunIds.length, 1);
+  assert.equal((await read(first.id)).status, "assigned", "the leaf somebody is already on is left alone");
+  assert.equal((await read(second.id)).status, "working", "and the one behind it started");
+  assert.deepEqual(queuedRunIds(), [result!.workerRunIds[0]]);
+});
+
+test("a swarm at its ceiling is not asked again for the leaves behind", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { title: "first", status: "assigned", position: 0 });
+  await makeTask(swarm.id, { title: "second", status: "assigned", position: 1 });
+
+  const deps = starter([SWARM_FULL]);
+  const result = await tickSwarm(ctx, swarm.id, deps);
+
+  assert.equal(deps.calls.length, 1, "a full swarm has no room for any of them");
+  assert.deepEqual(result?.workerRunIds, []);
 });
 
 test("no worker is spawned before somebody starts the swarm", async () => {

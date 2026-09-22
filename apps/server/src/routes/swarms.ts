@@ -30,7 +30,7 @@ import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
-import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
 /**
@@ -207,15 +207,23 @@ export function swarmRoutes(ctx: AppContext) {
         (task) => deferAfterCommit(c, async () => task()),
       );
       if (run === "gone") return c.json({ error: "not found" }, 404);
-      if (run !== "busy" && "outOfCompute" in run) {
-        return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
+      /*
+       * Neither refusal is reachable on a swarm this request just
+       * created: nothing else can be planning it, and a worker ceiling
+       * is a worker's answer rather than a planner's. Folded together
+       * so the swarm still reads back, with no planner run named,
+       * rather than turning into a 500 over a case that cannot happen.
+       */
+      const started = run === "busy" || run === SWARM_FULL ? null : run;
+      if (started && "outOfCompute" in started) {
+        return c.json({ error: started.outOfCompute, code: "PLAN_LIMIT" }, 402);
       }
-      if (run !== "busy") {
+      if (started) {
         deferAfterCommit(c, async () => {
-          await enqueueRun(ctx, run.id);
+          await enqueueRun(ctx, started.id);
         });
       }
-      return c.json({ ...swarm, plannerRunId: run === "busy" ? null : run.id }, 201);
+      return c.json({ ...swarm, plannerRunId: started?.id ?? null }, 201);
     })
     /**
      * One swarm with its plan.

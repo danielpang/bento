@@ -13,7 +13,7 @@ import {
   type Db,
 } from "@bento/db";
 import type { Entitlements } from "../context.js";
-import { startRunIfIdle } from "./start-run.js";
+import { SWARM_FULL, startRunIfIdle } from "./start-run.js";
 
 /**
  * The swarm half of the one door every run start goes through.
@@ -182,10 +182,18 @@ test("one worker per leaf, and never more at once than the swarm allows", async 
   );
 
   assert.ok(isRun(await start({ swarmId: swarm.id, role: "worker", swarmTaskId: two.id })), "the ceiling is two");
+  /*
+   * A different word from the one above, and the difference is the
+   * point: a leaf with an agent on it says nothing about its siblings,
+   * while a swarm at its ceiling says there is no room for any of
+   * them. The coordinator spawns down a list of ready leaves and reads
+   * these two opposite ways; while both were "busy", one leaf already
+   * being worked stopped the whole tick.
+   */
   assert.equal(
     await start({ swarmId: swarm.id, role: "worker", swarmTaskId: three.id }),
-    "busy",
-    "and the third is refused",
+    SWARM_FULL,
+    "and the third is refused because the swarm is full",
   );
 
   await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, first.id));
