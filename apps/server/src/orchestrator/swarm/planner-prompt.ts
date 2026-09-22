@@ -146,6 +146,25 @@ export type PlannerWakeItem =
       kind: "message";
       /** A person's own words. Quoted for the same reason: it is input. */
       text: string;
+    }
+  | {
+      /**
+       * Bento's own words about something it knows: a budget running
+       * low, a worker that has been going far too long.
+       *
+       * Its own kind rather than a message, because the two are read
+       * differently and should be. A message is somebody asking for
+       * something, and printing a server notice under that heading
+       * would tell the planner a person asked for something nobody
+       * asked for.
+       *
+       * The notice itself is written by this server, so it is not
+       * quoted. Anything agent written that it carries (a worker's
+       * last transcript lines) is quoted inside it by whoever composed
+       * it, exactly as a report is.
+       */
+      kind: "notice";
+      text: string;
     };
 
 /**
@@ -182,6 +201,22 @@ export function plannerWakeMessage(items: PlannerWakeItem[]): string {
     lines.push(`Messages from people (${messages.length}):`, "");
     for (const message of messages) {
       lines.push(quoteUntrusted(message.text));
+      lines.push("");
+    }
+  }
+
+  const notices = items.filter((item) => item.kind === "notice");
+  if (notices.length > 0) {
+    /*
+     * Last, and unquoted. These are Bento's own sentences about facts
+     * it holds, so they are instructions to act on rather than input
+     * to weigh, and they come after the reports so the planner reads
+     * them knowing what happened. Anything an agent wrote inside one
+     * arrives already quoted by whoever composed it.
+     */
+    lines.push(`From Bento (${notices.length}):`, "");
+    for (const notice of notices) {
+      lines.push(notice.text);
       lines.push("");
     }
   }

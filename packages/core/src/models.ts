@@ -7,6 +7,58 @@ import { isOllamaModel } from "./ollama.js";
 export interface CatalogModel {
   id: string;
   name: string;
+  /**
+   * What this model lists at, in dollars per million tokens, as
+   * models.dev publishes it.
+   *
+   * Absent for every model whose provider does not publish a price,
+   * and absent from a snapshot taken before prices were carried at
+   * all. Absent is not free: a run whose model has no price here is
+   * charged at the assumed tier rather than priced from its tokens,
+   * which is the difference between a figure worked out from a
+   * published rate and one nobody can source.
+   *
+   * Per million rather than per token because that is how every
+   * provider quotes it, and a figure a person can check against a
+   * price page is a figure they can argue with.
+   */
+  cost?: { input: number; output: number };
+}
+
+/** A model's list price, in dollars per million tokens. */
+export interface ModelPrice {
+  input: number;
+  output: number;
+}
+
+/**
+ * What one model lists at, or nothing.
+ *
+ * Asked with the string an agent profile actually holds, which is not
+ * always a bare model id: the provider agnostic tools store
+ * `provider/model`, Bento's own Ollama runs carry an `ollama/` prefix,
+ * and the Gateway's slugs contain a slash of their own. So the lookup
+ * is by the id inside the catalog, over the provider the pairing rules
+ * already resolve, rather than a map keyed on whatever was typed.
+ *
+ * Nothing for a model the snapshot does not price, and nothing for an
+ * Ollama run, which costs what the machine costs and is not a token
+ * bill at all.
+ */
+export function modelPrice(cli: string, model: string): ModelPrice | undefined {
+  if (isOllamaModel(model)) return undefined;
+  const provider = providerForProfile(cli, model);
+  if (!provider) return undefined;
+  // The id as the catalog holds it: the last segment for the tools
+  // that store provider/model, and the whole string otherwise. Tried
+  // both ways round, because a Gateway slug ("openai/gpt-5.4") is
+  // itself the catalog's id.
+  const listed =
+    provider.models.find((entry) => entry.id === model)
+    ?? provider.models.find((entry) => entry.id === model.slice(model.indexOf("/") + 1));
+  const cost = listed?.cost;
+  if (!cost || !Number.isFinite(cost.input) || !Number.isFinite(cost.output)) return undefined;
+  return { input: cost.input, output: cost.output };
 }
 
 export interface CatalogProvider {

@@ -594,6 +594,45 @@ export const agentRuns = pgTable(
   cliSessionId: text("cli_session_id"),
   exitCode: integer("exit_code"),
   costUsd: numeric("cost_usd"),
+  /**
+   * How well this run's cost is known, which is a different question
+   * from what it was.
+   *
+   * measured is the figure the tool printed. estimated is token counts
+   * priced from the model catalog. assumed is a stand in for a tool
+   * that prints nothing at all. notional is a printed figure a
+   * subscription has already paid for, which is the least true number
+   * in the most trusted tier if it is filed as measured: see
+   * shouldShareAgentAuth.
+   *
+   * Null on every run that ended before the ledger existed, and on a
+   * run that has not ended. Null is "nobody has said", not "free".
+   */
+  costTier: text("cost_tier", { enum: ["measured", "estimated", "assumed", "notional"] }),
+  /** What the tool printed, when it prints tokens rather than dollars. */
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
+  /**
+   * The rate an estimate used, in dollars per million tokens, as
+   * `{ "input": 3, "output": 15 }`.
+   *
+   * Stored on the run rather than looked up when somebody reads it,
+   * because the catalog's prices change and a figure that moves after
+   * the fact is a figure nobody can reconcile against a bill. Two
+   * numbers in one column because they are one fact: the rate card in
+   * force when this run ended.
+   */
+  pricePerMtok: jsonb("price_per_mtok").$type<{ input: number; output: number }>(),
+  /**
+   * Whether this run borrowed the operator's own agent login instead of
+   * an API key.
+   *
+   * Recorded when the agent is started rather than asked at the end,
+   * because the setting can be changed while a run is in flight and the
+   * question the ledger asks is what this run actually used. Local mode
+   * only; multi mode never shares a login.
+   */
+  sharedAgentAuth: boolean("shared_agent_auth").notNull().default(false),
   numTurns: integer("num_turns"),
   error: text("error"),
   queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1522,6 +1561,27 @@ export const swarmTemplates = pgTable("swarm_templates", {
   maxWorkers: integer("max_workers").notNull().default(4),
   budgetUsd: numeric("budget_usd"),
   timeLimitMin: integer("time_limit_min"),
+  /**
+   * What a run that reports nothing is charged to the ledger.
+   *
+   * Null means "work it out": the swarm's own rolling average of the
+   * runs it has measured or estimated so far, and a fixed default
+   * before it has any. A template that states a figure is a team
+   * saying they know their own tools better than an average does.
+   */
+  assumedCostUsd: numeric("assumed_cost_usd"),
+  /**
+   * When a node that is still being worked turns yellow, and when the
+   * planner is woken about it.
+   *
+   * Two thresholds rather than a timeout: a task that takes forty
+   * minutes because it is large is not a failure, and a limit that
+   * stops it throws away the work at the worst moment. The first is
+   * information for a person, the second is a turn the planner spends
+   * deciding whether to wait, message, split, or cancel.
+   */
+  longRunWarnMin: integer("long_run_warn_min").notNull().default(20),
+  longRunEscalateMin: integer("long_run_escalate_min").notNull().default(45),
   ...timestamps,
 });
 
@@ -1558,7 +1618,24 @@ export const swarms = pgTable(
     /** The template this was started from, kept for attribution only. */
     templateId: uuid("template_id").references(() => swarmTemplates.id, { onDelete: "set null" }),
     status: text("status", {
-      enum: ["draft", "planning", "running", "paused", "blocked", "done", "failed", "cancelled"],
+      enum: [
+        "draft",
+        "planning",
+        "running",
+        "paused",
+        "blocked",
+        "done",
+        "failed",
+        "cancelled",
+        /**
+         * The two ceilings a swarm can end on, which are endings and
+         * not pauses: the money ran out, or the clock did. Both keep
+         * everything that landed, and both are the states a reopen
+         * with a raised ceiling starts from.
+         */
+        "budget_exhausted",
+        "timed_out",
+      ],
     })
       .notNull()
       .default("draft"),
@@ -1587,6 +1664,22 @@ export const swarms = pgTable(
     spentMeasuredUsd: numeric("spent_measured_usd").notNull().default("0"),
     spentEstimatedUsd: numeric("spent_estimated_usd").notNull().default("0"),
     spentAssumedUsd: numeric("spent_assumed_usd").notNull().default("0"),
+    /**
+     * Spend on runs that borrowed a subscription rather than a key.
+     *
+     * Its own column because it is the one tier the cap does not
+     * count. The tool printed a list price, the subscription had
+     * already paid for the work, and the marginal cost of the run was
+     * zero: charging it against the budget would stop a swarm that is
+     * costing nothing. Recorded and shown, never enforced.
+     */
+    spentNotionalUsd: numeric("spent_notional_usd").notNull().default("0"),
+    /**
+     * When the planner was last told the budget was running low, so it
+     * is told once rather than on every tick. Cleared when the budget
+     * is raised, because that is a different budget.
+     */
+    budgetWarnedAt: timestamp("budget_warned_at", { withTimezone: true }),
     /**
      * Who started it. Nulled rather than cascaded when the account goes,
      * for the reason agent_runs.started_by is: the swarm and its hours
@@ -1673,7 +1766,7 @@ export const swarmTasks = pgTable(
      * adds something status cannot say.
      */
     attention: text("attention", {
-      enum: ["long_running", "escalated", "question", "failed", "conflict", "budget"],
+      enum: ["long_running", "escalated", "question", "failed", "conflict", "budget", "plan_limit"],
     }),
     /**
      * Rough size, set by the planner. Used to order work and to spread
@@ -1697,10 +1790,22 @@ export const swarmTasks = pgTable(
     flags: jsonb("flags").$type<Record<string, unknown>>().notNull().default({}),
     /** What the worker said it did, once it was done. */
     report: text("report"),
-    /** Spend attributed to this task, counted the three ways a swarm's is. */
+    /** Spend attributed to this task, counted the ways a swarm's is. */
     costMeasuredUsd: numeric("cost_measured_usd").notNull().default("0"),
     costEstimatedUsd: numeric("cost_estimated_usd").notNull().default("0"),
     costAssumedUsd: numeric("cost_assumed_usd").notNull().default("0"),
+    /** The tier the cap does not count. See swarms.spent_notional_usd. */
+    costNotionalUsd: numeric("cost_notional_usd").notNull().default("0"),
+    /**
+     * The agent to put on this leaf, when a person chose one for it.
+     *
+     * Null is the ordinary case: the swarm's template names the worker
+     * and every leaf uses it. Reassigning a leaf that a cheap worker
+     * could not finish to a stronger one writes the choice here, on
+     * the node it was made about, rather than changing the template
+     * and with it every leaf that has not started yet.
+     */
+    agentProfileId: uuid("agent_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     ...timestamps,
@@ -1854,6 +1959,18 @@ export const swarmMessages = pgTable(
     /** Null means the planner: a message about the plan, not a leaf. */
     taskId: uuid("task_id").references(() => swarmTasks.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
+    /**
+     * Who is speaking: a person, or Bento itself.
+     *
+     * The wake message labels the two differently and it matters that
+     * it can. A long run escalation and a budget warning are the
+     * server's own words about facts it holds, and printing them
+     * under "messages from people" would tell the planner that
+     * somebody asked for something nobody asked for. The agent written
+     * text a notice carries (a worker's transcript tail) is quoted as
+     * untrusted inside it, exactly as a report is.
+     */
+    source: text("source", { enum: ["person", "system"] }).notNull().default("person"),
     /**
      * Who wrote it. A continuation run started by this message acts with
      * the author's per-user MCP connections, so attribution here is what
