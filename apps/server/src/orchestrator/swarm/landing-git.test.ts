@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { promisify } from "node:util";
 import { taskTrailer } from "./branches.js";
-import { commitsForTask, landWorkerBranch } from "./landing-git.js";
+import { commitsForTask, isRetryableFastForward, landWorkerBranch } from "./landing-git.js";
 
 const exec = promisify(execFile);
 
@@ -252,17 +252,21 @@ describe("landing a worker's branch", () => {
     assert.ok(commits.length >= 1);
   });
 
-  test("a swarm branch that moved under a landing is reported rather than overwritten", async () => {
-    // Stands in for a second lander, or for a job retried after the
-    // branch had already been taken forward by something else. The
-    // landing is built on the head it read, and the fast forward is
-    // what refuses.
+  test("a detached swarm checkout is an error, because no retry ever attaches it", async () => {
+    /**
+     * `git merge --ff-only` in a detached checkout succeeds and moves
+     * nothing but HEAD, so this is checked before anything is built.
+     *
+     * An error rather than something to try again, and that is the
+     * whole of this test. Nothing in a swarm ever puts that checkout
+     * back onto its branch, so a landing told to retry here retries for
+     * ever: a tick, a land job and a handful of git subprocesses per
+     * pass, against a condition that cannot change on its own.
+     */
     await workerCommit(fx, "swarm/demo-eeee5555", TASK_A, "e.txt", "from e\n");
     const moved = path.join(fx.root, "mover");
     await git(fx.repo, ["worktree", "add", "--quiet", "--detach", moved, "swarm/demo"]);
 
-    // A landing whose swarm worktree is not on the swarm branch cannot
-    // fast forward it, which is the same shape as the branch moving.
     const result = await landWorkerBranch({
       repoPath: fx.repo,
       swarmWorktree: moved,
@@ -273,12 +277,100 @@ describe("landing a worker's branch", () => {
       landingId: "landing-7",
     });
     assert.equal(result.ok, false);
-    assert.equal(result.ok === false && result.reason, "moved");
+    assert.equal(result.ok === false && result.reason, "error");
+    assert.match(result.ok === false ? result.detail : "", /detached head/);
     assert.equal(
       await git(fx.repo, ["rev-parse", "swarm/demo"]),
       await git(fx.swarmWorktree, ["rev-parse", "HEAD"]),
       "the branch is where the swarm's own checkout left it",
     );
+  });
+
+  test("a swarm checkout with uncommitted changes is an error, not a retry", async () => {
+    /**
+     * The case that made the requeue loop real.
+     *
+     * The planner's sandbox mounts the swarm's own checkout, and a
+     * landing runs each repository's test command in it, so a file left
+     * modified there is ordinary rather than exotic. Git refuses the
+     * fast forward with words that match no conflict pattern, which the
+     * catch around it used to answer with "the branch moved": the row
+     * went back to the queue, the next tick promoted it, and it said
+     * the same thing again, for as long as the file stayed dirty.
+     */
+    await workerCommit(fx, "swarm/demo-ffff6666", TASK_A, "shared.txt", "one\nFROM F\nthree\n", "f edits shared");
+    const head = await git(fx.swarmWorktree, ["rev-parse", "HEAD"]);
+    await writeFile(path.join(fx.swarmWorktree, "shared.txt"), "one\nLEFT BEHIND BY A TEST RUN\nthree\n");
+
+    const result = await landWorkerBranch({
+      repoPath: fx.repo,
+      swarmWorktree: fx.swarmWorktree,
+      swarmBranch: "swarm/demo",
+      workerBranch: "swarm/demo-ffff6666",
+      policy: "rebase",
+      mergeMessage: "unused",
+      landingId: "landing-9",
+    });
+    assert.equal(result.ok, false);
+    assert.equal(
+      result.ok === false && result.reason,
+      "error",
+      "git said the local changes would be overwritten, which no number of retries gets past",
+    );
+    assert.match(result.ok === false ? result.detail : "", /local changes/i);
+    assert.equal(await git(fx.swarmWorktree, ["rev-parse", "HEAD"]), head, "and the branch did not move");
+
+    await git(fx.swarmWorktree, ["checkout", "--", "shared.txt"]);
+  });
+
+  test("a locked swarm checkout is worth trying again", async () => {
+    /**
+     * The other half of the classification: a git process in the
+     * swarm's sandbox holding the index lock is exactly the failure a
+     * retry is for, and it has to stay retryable now that the dirty
+     * case does not.
+     */
+    await workerCommit(fx, "swarm/demo-ffff6666", TASK_A, "g.txt", "from g\n", "g adds a file");
+    const gitDir = await git(fx.swarmWorktree, ["rev-parse", "--absolute-git-dir"]);
+    const lock = path.join(gitDir, "index.lock");
+    await writeFile(lock, "");
+    try {
+      const result = await landWorkerBranch({
+        repoPath: fx.repo,
+        swarmWorktree: fx.swarmWorktree,
+        swarmBranch: "swarm/demo",
+        workerBranch: "swarm/demo-ffff6666",
+        policy: "rebase",
+        mergeMessage: "unused",
+        landingId: "landing-10",
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.ok === false && result.reason, "moved", "somebody else is holding the checkout for a moment");
+    } finally {
+      await rm(lock, { force: true });
+    }
+  });
+
+  test("the classification is git's own words, not a guess about them", () => {
+    // Collected from git itself, which is the only place these strings
+    // are defined; a stub would have whatever wording we imagined.
+    assert.equal(isRetryableFastForward("fatal: Not possible to fast-forward, aborting."), true);
+    assert.equal(isRetryableFastForward("hint: Diverging branches can't be fast-forwarded"), true);
+    assert.equal(
+      isRetryableFastForward("error: Unable to create '/repo/.git/worktrees/sw/index.lock': File exists."),
+      true,
+    );
+    assert.equal(
+      isRetryableFastForward(
+        "error: Your local changes to the following files would be overwritten by merge:\n\tshared.txt",
+      ),
+      false,
+    );
+    assert.equal(
+      isRetryableFastForward("error: Untracked working tree file 'a.txt' would be overwritten by merge."),
+      false,
+    );
+    assert.equal(isRetryableFastForward("fatal: not a git repository"), false);
   });
 
   test("a branch that is not there is an error, not a conflict", async () => {
