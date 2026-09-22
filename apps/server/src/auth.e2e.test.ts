@@ -1019,6 +1019,27 @@ test("every entity route refuses a foreign tenant", async () => {
     // nothing.
     ["GET", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}`],
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/done`],
+    // The node controls, which are the routes that retry, stop, split
+    // and reassign somebody else's agents. A split that went through
+    // would rewrite a foreign tree, and a reassign would put this
+    // caller's own agent, and its credentials, on somebody else's work.
+    ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/retry`],
+    ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/cancel`],
+    [
+      "POST",
+      `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/split`,
+      { body: JSON.stringify({ children: [{ title: "Injected" }] }) },
+    ],
+    [
+      "POST",
+      `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/reassign`,
+      { body: JSON.stringify({ agentProfileId: null }) },
+    ],
+    [
+      "PATCH",
+      `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}`,
+      { body: JSON.stringify({ title: "Stolen" }) },
+    ],
     // The stream, for the reason the run stream is here: it must refuse
     // before it streams anything.
     ["GET", `/api/swarms/${swarm.id}/events`],

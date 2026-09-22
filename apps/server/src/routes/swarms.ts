@@ -1,10 +1,11 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import type { SandboxHandle } from "@bento/sandbox";
 import {
+  agentProfiles,
   agentRuns,
   ensureSwarmAgents,
   projects,
@@ -36,6 +37,7 @@ import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
+import { cancelTaskTree, reassignLeaf, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
@@ -773,6 +775,184 @@ export function swarmRoutes(ctx: AppContext) {
       return c.json(done);
     })
     /**
+     * The node controls: retry, cancel, split, reassign, and editing
+     * the description before any of them.
+     *
+     * All five under the swarm rather than on a route of their own, for
+     * the reason the drawer's other routes are: a task id is only
+     * meaningful inside its swarm, and resolving the swarm first is
+     * what makes a task id from another team's swarm read as not there
+     * rather than as a row this caller may not touch.
+     *
+     * What they change, they change through the same functions the
+     * planner's tools use. A person and a planner editing one tree with
+     * two different ideas of what cancelling means is exactly how the
+     * two drift apart.
+     */
+    .post("/:id/tasks/:taskId/retry", async (c) => {
+      const found = await accessibleTask(ctx, c);
+      if ("refusal" in found) return found.refusal;
+      const { swarm, task } = found;
+
+      /*
+       * The agent on it stops first, and then the leaf goes back in the
+       * queue. The other order starts a second agent on a branch the
+       * first one is still committing to, which is the one thing the
+       * merge queue cannot sort out afterwards.
+       */
+      await stopRunsOnTask(ctx, c, task.id);
+      const retried = await retryLeaf(db(c, ctx), { task, actorUserId: actor(c) });
+      if ("refused" in retried) return c.json({ error: retried.refused, code: "NOT_A_LEAF" }, 409);
+      deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      return c.json(retried);
+    })
+    /**
+     * Cancels a node, and everything under it.
+     *
+     * Its agent stops rather than being left to finish: a person
+     * cancelling a task is not asking to keep paying for the turn in
+     * flight. The planner's own cancel_task deliberately lets the run
+     * end on its own, because a planner cancels to change the plan and
+     * a person cancels to stop something.
+     */
+    .post("/:id/tasks/:taskId/cancel", async (c) => {
+      const found = await accessibleTask(ctx, c);
+      if ("refusal" in found) return found.refusal;
+      const { swarm, task } = found;
+
+      const cancelled = await cancelTaskTree(db(c, ctx), { task, actorUserId: actor(c) });
+      for (const id of cancelled) await stopRunsOnTask(ctx, c, id);
+      deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      return c.json({ cancelled });
+    })
+    /**
+     * Splits a leaf into the tasks it should have been.
+     *
+     * The planner is not asked first, and is told afterwards by the
+     * tree changing under it: a person who has read the diff usually
+     * knows before the planner does that a leaf was too big.
+     */
+    .post(
+      "/:id/tasks/:taskId/split",
+      zValidator(
+        "json",
+        z.object({
+          children: z
+            .array(
+              z.object({
+                title: z.string().trim().min(1).max(200),
+                description: z.string().max(20_000).optional(),
+                weight: z.number().int().min(1).max(5).optional(),
+              }),
+            )
+            .min(1)
+            .max(20),
+        }),
+      ),
+      async (c) => {
+        const found = await accessibleTask(ctx, c);
+        if ("refusal" in found) return found.refusal;
+        const { swarm, task } = found;
+
+        const created = await splitLeaf(db(c, ctx), {
+          task,
+          children: c.req.valid("json").children,
+          actorUserId: actor(c),
+        });
+        if ("refused" in created) return c.json({ error: created.refused, code: "CANNOT_SPLIT" }, 409);
+        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+        return c.json({ created }, 201);
+      },
+    )
+    /**
+     * Puts a different agent on one leaf.
+     *
+     * On the leaf rather than on the template, because the answer to
+     * one task a cheap worker could not finish is a stronger agent on
+     * that task, not a stronger agent on every task that has not
+     * started yet. Null puts it back on the template's own worker.
+     *
+     * The agent has to be one this caller can reach, which is the same
+     * check every other route that names an agent makes: an id from
+     * another team's agent list would otherwise become the agent a
+     * swarm runs, with that team's credentials behind it.
+     */
+    .post(
+      "/:id/tasks/:taskId/reassign",
+      zValidator("json", z.object({ agentProfileId: z.string().uuid().nullable() })),
+      async (c) => {
+        const found = await accessibleTask(ctx, c);
+        if ("refusal" in found) return found.refusal;
+        const { swarm, task } = found;
+        const { agentProfileId } = c.req.valid("json");
+
+        if (agentProfileId) {
+          const [profile] = await db(c, ctx)
+            .select({ id: agentProfiles.id })
+            .from(agentProfiles)
+            .where(eq(agentProfiles.id, agentProfileId))
+            .limit(1);
+          if (!profile) return c.json({ error: "not found" }, 404);
+        }
+
+        const reassigned = await reassignLeaf(db(c, ctx), { task, agentProfileId, actorUserId: actor(c) });
+        if ("refused" in reassigned) return c.json({ error: reassigned.refused, code: "NOT_A_LEAF" }, 409);
+        // No tick: reassigning does not start anything. A leaf waiting
+        // its turn keeps its place, and a retry is what pushes it.
+        return c.json(reassigned);
+      },
+    )
+    /**
+     * Edits what a task says, which is what makes retrying it worth
+     * anything.
+     *
+     * A leaf that failed because its description was wrong will fail
+     * again against the same description. This is the half of "edit
+     * before retry" that is not the retry: the two are separate calls
+     * so a person can correct a task without restarting it, which is
+     * the ordinary case while a plan is still being read.
+     *
+     * Not the status, and not the cost. Where a task is in its life is
+     * decided by the routes above and by the reconciler, and a status
+     * accepted here would walk past every one of their rules.
+     */
+    .patch(
+      "/:id/tasks/:taskId",
+      zValidator(
+        "json",
+        z
+          .object({
+            title: z.string().trim().min(1).max(200).optional(),
+            description: z.string().max(20_000).optional(),
+            weight: z.number().int().min(1).max(5).optional(),
+          })
+          .strict()
+          .refine((value) => Object.keys(value).length > 0, { message: "nothing to change" }),
+      ),
+      async (c) => {
+        const found = await accessibleTask(ctx, c);
+        if ("refusal" in found) return found.refusal;
+        const { swarm, task } = found;
+        const body = c.req.valid("json");
+
+        const [updated] = await db(c, ctx)
+          .update(swarmTasks)
+          .set({ ...body, updatedAt: new Date() })
+          .where(eq(swarmTasks.id, task.id))
+          .returning();
+        await db(c, ctx).insert(swarmTaskEvents).values({
+          taskId: task.id,
+          kind: "note",
+          actorUserId: actor(c),
+          detail: { edited: Object.keys(body) },
+        });
+        // The tree changed, so the board should say so. Nothing here
+        // starts work: the rollup is the reconciler's either way.
+        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+        return c.json(updated);
+      },
+    )
+    /**
      * Deletes a swarm and everything under it, machines included.
      *
      * Refused while an agent is working, the way a card is: the run
@@ -911,6 +1091,61 @@ export function swarmRoutes(ctx: AppContext) {
         }
       });
     });
+}
+
+/**
+ * The swarm, the node, and the three refusals the node routes share.
+ *
+ * Written once because it is the part that must never be forgotten:
+ * the swarm is resolved first, the plan gate is asked about that
+ * swarm's own organization, and the task is looked up scoped to the
+ * swarm rather than by id alone. A task id from another team's swarm
+ * then reads as not there, which is the convention every route in this
+ * file follows.
+ */
+async function accessibleTask(
+  ctx: AppContext,
+  c: Context,
+): Promise<
+  | { swarm: typeof swarms.$inferSelect; task: typeof swarmTasks.$inferSelect }
+  | { refusal: Response }
+> {
+  const swarmId = c.req.param("id") ?? "";
+  const taskId = c.req.param("taskId") ?? "";
+  const swarm = await getAccessibleSwarm(ctx, c, swarmId);
+  if (!swarm) return { refusal: c.json({ error: "not found" }, 404) };
+  const gate = await requireSwarms(ctx, c, swarm.organizationId);
+  if (gate) return { refusal: c.json(gate.body, gate.status) };
+
+  const [task] = await db(c, ctx)
+    .select()
+    .from(swarmTasks)
+    .where(and(eq(swarmTasks.id, taskId), eq(swarmTasks.swarmId, swarm.id)))
+    .limit(1);
+  if (!task) return { refusal: c.json({ error: "not found" }, 404) };
+  return { swarm, task };
+}
+
+/**
+ * Stops whatever agent is on one node.
+ *
+ * Through the card board's own cancellation rather than a second one:
+ * markCancelled is a compare and set against the active statuses, so a
+ * run some other path already ended is not ended twice, and it is what
+ * revokes the run's gateway token, meters the hours, and tells the
+ * streams. A run this process is not carrying is marked rather than
+ * interrupted; its token is dead from here either way, so its tools
+ * stop answering.
+ */
+async function stopRunsOnTask(ctx: AppContext, c: Context, taskId: string): Promise<void> {
+  const active = await db(c, ctx)
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.swarmTaskId, taskId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+  for (const run of active) {
+    ctx.running.get(run.id)?.abort();
+    await markCancelled(ctx, run.id);
+  }
 }
 
 /**
