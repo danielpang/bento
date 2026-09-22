@@ -293,9 +293,21 @@ test("a worker sprite is cut from the swarm branch it was handed, not from the d
   assert.ok(removed.includes("/tmp/bento-start-api.bundle"), "the swarm's commits do not stay in /tmp");
 
   const commands = scripts.join("\n");
-  // The swarm's branch becomes a real ref, forced, because a machine
-  // provisioned twice finds the old head on it.
-  assert.match(commands, /git fetch '\/tmp\/bento-start-api\.bundle' \+HEAD:refs\/heads\/swarm\/checkout/);
+  /*
+   * The swarm's branch becomes a real ref, forced, because a machine
+   * provisioned twice finds the old head on it.
+   *
+   * By name, never HEAD. The bundle is built from a range, and a
+   * range bundle carries the branch ref alone: asking it for HEAD
+   * fails with "couldn't find remote ref HEAD", which under set -eu
+   * took the checkout down with it. This assertion said HEAD once,
+   * which is how a command git would refuse passed its own test.
+   */
+  assert.match(
+    commands,
+    /git fetch '\/tmp\/bento-start-api\.bundle' \+refs\/heads\/swarm\/checkout:refs\/heads\/swarm\/checkout/,
+  );
+  assert.doesNotMatch(commands, /\+HEAD:/, "a bundle built from a range has no HEAD to fetch");
   // And the worker's branch is cut from it.
   assert.match(commands, /git checkout -b 'swarm\/checkout-aaaaaaaa' 'swarm\/checkout'/);
   assert.doesNotMatch(
@@ -309,6 +321,81 @@ test("a worker sprite is cut from the swarm branch it was handed, not from the d
     commands.indexOf("bento-seed-api.bundle") < commands.indexOf("bento-start-api.bundle"),
     "the seed is fetched before the branch built on it",
   );
+});
+
+/**
+ * A repository row's repo_url is nullable, so a project can hold a
+ * checkout that has no remote at all. Such a repository still has a
+ * seed bundle when a swarm worker is provisioned from one, and the
+ * bundle is the whole point: the code comes from it, not from a
+ * remote.
+ *
+ * Provisioning used to skip any repository without a clone url before
+ * looking at its seed. The machine then came up with an empty
+ * workspace, no checkout, and nothing said about it, which reads to
+ * everything downstream as a worker that simply did no work.
+ */
+test("a repository seeded from a bundle is provisioned even with no remote to clone from", async () => {
+  const writes: { path: string; data: Buffer }[] = [];
+  const scripts: string[] = [];
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, data: Buffer) {
+          writes.push({ path, data });
+        },
+        async rm() {},
+        async readdir() {
+          return [{ name: "api", isDirectory: () => true }];
+        },
+        async exists() {
+          return true;
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "swarm-1-aaaaaaaa",
+    hostWorkspacePath: "/unused",
+    repositories: [{
+      name: "api",
+      branch: "swarm/checkout-aaaaaaaa",
+      baseBranch: "main",
+      seedBundle: Buffer.from("base history"),
+    }],
+  });
+
+  assert.deepEqual(
+    writes.map((write) => write.path),
+    ["/tmp/bento-seed-api.bundle"],
+    "the seed never reached the machine, so the repository was skipped",
+  );
+  const commands = scripts.join("\n");
+  assert.match(commands, /git clone '\/tmp\/bento-seed-api\.bundle' '\/workspace\/api'/);
+  assert.match(commands, /git checkout -b 'swarm\/checkout-aaaaaaaa'/);
+  /*
+   * And nothing points origin at nowhere, or measures the checkout
+   * against a remote it does not have: an empty comparison matches no
+   * existing origin, so every re-provision would delete the workspace
+   * it was about to use.
+   */
+  assert.doesNotMatch(commands, /git remote set-url origin ''/);
+  assert.doesNotMatch(commands, /current_origin/);
 });
 
 test("a worker with no branch handed to it is still cut from the base branch", async () => {
