@@ -384,17 +384,31 @@ export class SpriteDriver implements SandboxDriver {
       await say("The sandbox filesystem is temporarily unavailable. Retrying.");
     };
     for (const repo of spec.repositories ?? []) {
-      if (!repo.cloneUrl) continue;
+      /*
+       * A repository with neither a remote nor a seed has nothing to
+       * make a checkout from. A worker seeded from bundles has no
+       * remote at all, and skipping it here left its machine with an
+       * empty workspace and no sign of why.
+       */
+      if (!repo.cloneUrl && !repo.seedBundle) continue;
       const dir = `${this.workdir}/${repo.name}`;
       const branch = repo.branch ?? "main";
       const baseBranch = repo.baseBranch ?? "main";
       await say(`Preparing repository ${repo.name}...`);
-      const verifyIdentity = [
-        `if [ -d ${shellQuote(dir)}/.git ]; then`,
-        `  current_origin=$(git -C ${shellQuote(dir)} remote get-url origin 2>/dev/null || true)`,
-        `  if [ "$current_origin" != ${shellQuote(repo.cloneUrl)} ]; then rm -rf ${shellQuote(dir)}; fi`,
-        "fi",
-      ];
+      /*
+       * Only where there is a remote to compare against. A seeded
+       * checkout has no origin, and comparing that against an empty
+       * string matches nothing, so the check would delete the
+       * workspace on every re-provision of the same machine.
+       */
+      const verifyIdentity = repo.cloneUrl
+        ? [
+            `if [ -d ${shellQuote(dir)}/.git ]; then`,
+            `  current_origin=$(git -C ${shellQuote(dir)} remote get-url origin 2>/dev/null || true)`,
+            `  if [ "$current_origin" != ${shellQuote(repo.cloneUrl)} ]; then rm -rf ${shellQuote(dir)}; fi`,
+            "fi",
+          ]
+        : [];
       if (repo.seedBundle) {
         const bundlePath = `/tmp/bento-seed-${repo.name}.bundle`;
         const seedBundle = repo.seedBundle;
@@ -440,7 +454,9 @@ export class SpriteDriver implements SandboxDriver {
             `  cd ${shellQuote(dir)} && git fetch ${shellQuote(bundlePath)} refs/heads/${shellQuotePart(baseBranch)}:refs/remotes/origin/${shellQuotePart(baseBranch)}`,
             "else",
             `  git clone ${shellQuote(bundlePath)} ${shellQuote(dir)}`,
-            `  cd ${shellQuote(dir)} && git remote set-url origin ${shellQuote(repo.cloneUrl)}`,
+            ...(repo.cloneUrl
+              ? [`  cd ${shellQuote(dir)} && git remote set-url origin ${shellQuote(repo.cloneUrl)}`]
+              : []),
             "fi",
             ...(repo.startBundle
               ? [
@@ -448,7 +464,7 @@ export class SpriteDriver implements SandboxDriver {
                   // finds the ref already there at an older head: the
                   // swarm's branch has moved since, and the stale one
                   // is not a start point anybody wants.
-                  `cd ${shellQuote(dir)} && git fetch ${shellQuote(startPath)} +HEAD:refs/heads/${shellQuotePart(repo.startBundle.branch)}`,
+                  `cd ${shellQuote(dir)} && git fetch ${shellQuote(startPath)} +refs/heads/${shellQuotePart(repo.startBundle.branch)}:refs/heads/${shellQuotePart(repo.startBundle.branch)}`,
                 ]
               : []),
             `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
@@ -468,14 +484,17 @@ export class SpriteDriver implements SandboxDriver {
             ).catch(() => {});
           }
         }
-      } else {
+        // No seed, so the remote is the only source there is. The
+        // guard above is what makes this exhaustive.
+      } else if (repo.cloneUrl) {
+        const cloneUrl = repo.cloneUrl;
         const script = [
           "set -eu",
           ...verifyIdentity,
           `if [ -d ${shellQuote(dir)}/.git ]; then`,
           `  cd ${shellQuote(dir)} && git fetch --all --prune`,
           `else`,
-          `  git clone ${shellQuote(repo.cloneUrl)} ${shellQuote(dir)}`,
+          `  git clone ${shellQuote(cloneUrl)} ${shellQuote(dir)}`,
           `fi`,
           `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)})`,
         ].join("\n");
