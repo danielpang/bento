@@ -38,6 +38,7 @@ import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import { reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { budgetRefusal } from "../orchestrator/swarm/ledger.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
@@ -611,6 +612,73 @@ export function swarmRoutes(ctx: AppContext) {
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       return c.json(started);
     })
+    /**
+     * Takes a finished swarm up again with a follow up.
+     *
+     * Its own route rather than a start with an instruction on it,
+     * because it is a different thing: /start is a person saying a
+     * plan is worth running, and this adds work to a swarm that has
+     * already finished and published. What it must not do is give the
+     * swarm a new branch, which is the whole reason it exists: the
+     * pull requests already open on that branch are updated by the
+     * publish at the end, and a second branch would mean a second pull
+     * request over the same change.
+     *
+     * The rules live in reopen.ts, shared with anything else that
+     * reopens a swarm, and both ceilings are refused before anything
+     * is written: a swarm put back to "running" that the coordinator
+     * then refuses to spawn on is a board that says it is working and
+     * never moves.
+     */
+    .post(
+      "/:id/reopen",
+      zValidator(
+        "json",
+        z
+          .object({
+            instruction: z.string().trim().min(1).max(20_000),
+            budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
+            timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
+          })
+          .strict(),
+      ),
+      async (c) => {
+        const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+        if (!swarm) return c.json({ error: "not found" }, 404);
+        const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+        if (refusal) return c.json(refusal.body, refusal.status);
+        const body = c.req.valid("json");
+
+        /*
+         * A swarm whose last agent has not settled yet is one the
+         * coordinator is still about to hear from, and its report
+         * would land on a tree this request is about to change under
+         * it. Waiting a moment is the whole fix.
+         */
+        if (await swarmHasActiveRun(db(c, ctx), swarm.id)) {
+          return c.json(
+            {
+              error: "An agent from this swarm is still finishing. Wait for it to stop, then reopen.",
+              code: "SWARM_BUSY",
+            },
+            409,
+          );
+        }
+
+        const reopened = await reopenSwarm(db(c, ctx), swarm, {
+          instruction: body.instruction,
+          ...(body.budgetUsd === undefined ? {} : { budgetUsd: body.budgetUsd }),
+          ...(body.timeLimitMin === undefined ? {} : { timeLimitMin: body.timeLimitMin }),
+          actorUserId: actor(c),
+        });
+        if ("refused" in reopened) return c.json({ error: reopened.refused, code: reopened.code }, 409);
+
+        // The planner hears the instruction through the wake the tick
+        // delivers, which is the same door every other message uses.
+        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+        return c.json({ swarm: reopened.swarm, followUpTaskId: reopened.followUpTaskId, followUp: reopened.followUp }, 201);
+      },
+    )
     /** The swarm's thread: what people asked, and what agents asked back. */
     .get("/:id/messages", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
