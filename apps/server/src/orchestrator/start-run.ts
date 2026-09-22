@@ -48,6 +48,18 @@ export interface OutOfCompute {
   outOfCompute: string;
 }
 
+/**
+ * A swarm already running as many workers as it was allowed.
+ *
+ * Its own answer rather than a second meaning for "busy", because the
+ * two say opposite things to a caller walking a list of ready leaves:
+ * busy is about this leaf and says nothing about the next one, while
+ * this is about the swarm and stops the walk. They were one word once,
+ * and a single leaf that already had an agent on it then held up every
+ * other ready leaf until the next tick.
+ */
+export const SWARM_FULL = "swarm-full";
+
 /** A run in one of these states is still working (or about to). */
 export const ACTIVE_RUN_STATUSES = ["queued", "starting", "running"] as const;
 
@@ -80,7 +92,25 @@ export const CARD_BUSY_DELETE = "An agent is working this card. Stop it first, t
  * waits for it and then finds no row. "gone" rather than an insert that
  * dies on its foreign key: every caller has something better to say
  * about a card that is not there than a 500.
+ *
+ * Two overloads rather than one signature: only a swarm's worker can
+ * be refused because the swarm is full, so a card's caller is never
+ * handed an answer its own board cannot produce.
  */
+export async function startRunIfIdle(
+  db: Db,
+  values: PipelineNewRun,
+  entitlements?: Entitlements,
+  analytics?: Analytics,
+  defer?: (task: () => void) => void,
+): Promise<AgentRun | "busy" | "gone" | OutOfCompute>;
+export async function startRunIfIdle(
+  db: Db,
+  values: NewRun,
+  entitlements?: Entitlements,
+  analytics?: Analytics,
+  defer?: (task: () => void) => void,
+): Promise<AgentRun | "busy" | "gone" | typeof SWARM_FULL | OutOfCompute>;
 export async function startRunIfIdle(
   db: Db,
   values: NewRun,
@@ -97,12 +127,12 @@ export async function startRunIfIdle(
    * pool, where the transaction below really commits, and omit this.
    */
   defer?: (task: () => void) => void,
-): Promise<AgentRun | "busy" | "gone" | OutOfCompute> {
+): Promise<AgentRun | "busy" | "gone" | typeof SWARM_FULL | OutOfCompute> {
   const result = await db.transaction(async (tx) =>
     values.type === "swarm" ? insertSwarmRun(tx, values, entitlements) : insertPipelineRun(tx, values, entitlements),
   );
 
-  if (result !== "busy" && result !== "gone" && !("outOfCompute" in result)) {
+  if (result !== "busy" && result !== "gone" && result !== SWARM_FULL && !("outOfCompute" in result)) {
     // The insert trigger derived organization_id from the parent row,
     // and RETURNING reads the row after BEFORE triggers ran, so the row
     // carries the tenant without another query.
@@ -185,7 +215,7 @@ async function insertSwarmRun(
   tx: Tx,
   values: SwarmNewRun,
   entitlements?: Entitlements,
-): Promise<AgentRun | "busy" | "gone" | OutOfCompute> {
+): Promise<AgentRun | "busy" | "gone" | typeof SWARM_FULL | OutOfCompute> {
   // A caller bug, not a state: a worker or a sub planner without the
   // leaf it works is a run nothing could ever attribute or finish.
   if ((values.role === "worker" || values.role === "subplanner") && !values.swarmTaskId) {
@@ -238,7 +268,10 @@ async function insertSwarmRun(
           eq(agentRuns.role, "worker"),
         ),
       );
-    if ((counted?.workers ?? 0) >= swarm.max_workers) return "busy" as const;
+    // The swarm's answer, not this leaf's: a caller spawning down a
+    // list of leaves has to be able to tell "somebody is already on
+    // this one" from "there is no room for any of them".
+    if ((counted?.workers ?? 0) >= swarm.max_workers) return SWARM_FULL;
   } else if (values.role === "resolver") {
     // A resolver exists to answer a conflict, so with none waiting
     // there is nothing for it to do. One at a time as well: the merge

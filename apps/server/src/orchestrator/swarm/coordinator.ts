@@ -13,7 +13,7 @@ import type { AppContext } from "../../context.js";
 import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
-import { ACTIVE_RUN_STATUSES, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
+import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 
 /**
@@ -102,7 +102,10 @@ export interface SwarmTickDeps {
    * holds the per role concurrency rules; the coordinator never
    * inserts a run itself.
    */
-  startRun(tx: Tx, values: NewRun): Promise<typeof agentRuns.$inferSelect | "busy" | "gone" | OutOfCompute>;
+  startRun(
+    tx: Tx,
+    values: NewRun,
+  ): Promise<typeof agentRuns.$inferSelect | "busy" | "gone" | typeof SWARM_FULL | OutOfCompute>;
   /**
    * Hands a landing that just reached the front of the queue to
    * whatever performs it.
@@ -471,7 +474,12 @@ async function deliverPlannerWake(
     // are the ones this turn may use. Null when the tree woke it.
     startedBy: pending[0]?.userId ?? null,
   });
-  if (started === "busy" || started === "gone" || "outOfCompute" in started) return null;
+  // The worker ceiling is a worker's answer and never a planner's, and
+  // it is folded in here so the wake stays held rather than being
+  // stamped as delivered by a run that does not exist.
+  if (started === "busy" || started === "gone" || started === SWARM_FULL || "outOfCompute" in started) {
+    return null;
+  }
 
   for (const message of pending) {
     await tx
@@ -567,9 +575,21 @@ async function spawnWorkers(
       executor: "server",
       startedBy: swarm.startedBy,
     });
-    // Full, or something already on this leaf. Either way there is no
-    // room for the leaves behind it either.
-    if (started === "busy" || started === "gone") break;
+    /*
+     * The swarm is at its ceiling, so there is no room for the leaves
+     * behind this one either. This is the only refusal that means
+     * that: "busy" is an answer about one leaf (something is already
+     * on it, which says nothing about its siblings), and the two were
+     * one word until a single leaf with a run on it held up every
+     * other ready leaf until the next tick.
+     */
+    if (started === SWARM_FULL) break;
+    // Something is already working this leaf. Its siblings are still
+    // this tick's to start.
+    if (started === "busy") continue;
+    // The swarm row went while this tick was running, so there is
+    // nothing left to spawn on at all.
+    if (started === "gone") break;
     if ("outOfCompute" in started) {
       await tx
         .update(swarmTasks)
