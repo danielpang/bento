@@ -4,6 +4,7 @@ import {
   attentionWords,
   canPause,
   canResume,
+  canStart,
   canStop,
   isAttention,
   isSwarmOver,
@@ -180,6 +181,18 @@ test("the controls a swarm offers follow the state it is in", () => {
   assert.equal(canResume("paused"), true);
   assert.equal(canResume("budget_exhausted"), true);
   assert.equal(canResume("running"), false);
+  /*
+   * Starting is not resuming, and a planned swarm needs it.
+   *
+   * A swarm is created in planning and stays there until a person
+   * says the plan is worth running. Every door the console had for
+   * starting work was behind canResume, which planning is not, so the
+   * one action that swarm needed was never on screen.
+   */
+  assert.equal(canStart("planning"), true);
+  assert.equal(canStart("running"), false);
+  assert.equal(canStart("paused"), false, "that is Resume, and it says Resume");
+  assert.equal(canStart("done"), false);
   assert.equal(canStop("running"), true);
   assert.equal(canStop("done"), false);
   assert.equal(isSwarmOver("stopped"), true);
