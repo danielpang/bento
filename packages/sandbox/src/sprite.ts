@@ -94,9 +94,60 @@ export async function spriteExistsWithRetry(
       } catch {
         // A progress line must not replace the lookup error.
       }
-      await sleep(delay);
+      await sleep(delay, true);
     }
   }
+}
+
+/**
+ * Pauses after a transient Sprites control-plane failure while a
+ * machine is being acquired.
+ *
+ * Four tries. A 500 or a dropped connection waits a few seconds. A
+ * creation rate limit names its own wait, about a minute, and that
+ * replaces the short pause for that try. The budget is the same either
+ * way, so a limit that never clears still ends the provision.
+ */
+export const SPRITE_ACQUIRE_RETRY_DELAYS_MS = [2_000, 8_000, 20_000];
+
+/** A hinted retry-after longer than this is a reason to stop, not to wait. */
+const SPRITE_ACQUIRE_RATE_LIMIT_CAP_MS = 90_000;
+
+/**
+ * Whether another try might get a machine.
+ *
+ * A 404 is an answer (it is not there) and a 4xx other than 408 or 429
+ * is an answer (the request was refused). A 500, including the HTML
+ * error page Fly sometimes returns in place of JSON, is not: the same
+ * response has been seen from createSprite for a machine that did get
+ * created. A dropped connection is the SDK's `Network error:` wrapper.
+ */
+function spriteControlIsRetriable(err: unknown): boolean {
+  if (err instanceof APIError) {
+    const status = err.statusCode;
+    if (status === 408 || status === 429 || (status !== undefined && status >= 500 && status <= 599)) return true;
+    return /temporarily unavailable|please retry|internal server error/i.test(err.message);
+  }
+  if (!(err instanceof Error)) return false;
+  if (/^Network error: /.test(err.message)) {
+    return /aborted due to timeout|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message);
+  }
+  return /Failed to (?:create|get) sprite \(status (?:408|429|5\d\d)\)/.test(err.message);
+}
+
+function spriteAcquireDelay(err: unknown, failureIndex: number): number | undefined {
+  if (failureIndex >= SPRITE_ACQUIRE_RETRY_DELAYS_MS.length || !spriteControlIsRetriable(err)) return undefined;
+  if (err instanceof APIError && err.isRateLimitError()) {
+    const hinted = (err.getRetryAfterSeconds() ?? 60) * 1000;
+    return Math.min(Math.max(hinted, 1_000), SPRITE_ACQUIRE_RATE_LIMIT_CAP_MS);
+  }
+  return SPRITE_ACQUIRE_RETRY_DELAYS_MS[failureIndex];
+}
+
+/** A create that lost a race with a sprite that is already there. */
+function isSpriteConflict(err: unknown): boolean {
+  if (err instanceof APIError) return err.statusCode === 409;
+  return err instanceof Error && /\(status 409\)|already exists/i.test(err.message);
 }
 
 /**
@@ -173,19 +224,8 @@ export class SpriteDriver implements SandboxDriver {
       await spec.onProgress?.(message);
     };
 
-    let sprite: Sprite;
-    let reused = true;
-    try {
-      sprite = await this.client.getSprite(name);
-    } catch {
-      reused = false;
-      sprite = await this.client.createSprite(name, {
-        ramMB: this.options.ramMB ?? 4096,
-        cpus: this.options.cpus ?? 2,
-        ...(this.options.region ? { region: this.options.region } : {}),
-      } as Parameters<SpritesClient["createSprite"]>[1]);
-    }
-    await say(reused ? `Reusing this card's cloud sandbox (${name}).` : `Created cloud sandbox ${name}.`);
+    const { sprite, created } = await this.acquireSprite(name, say);
+    await say(created ? `Created cloud sandbox ${name}.` : `Reusing this card's cloud sandbox (${name}).`);
 
     // One round trip prepares the workspace and answers whether the
     // agent CLIs are already there, so the wait that follows can be
@@ -354,6 +394,91 @@ export class SpriteDriver implements SandboxDriver {
     }
 
     return { externalId: name, provider: "sprite", workdir: this.workdir };
+  }
+
+  /**
+   * Gets the feature's sprite, creating it only when the API says it
+   * is not there.
+   *
+   * A create that answers 500 can still have created the machine. One
+   * cold provision threw that HTML page and the cleanup step then
+   * found the sprite and deleted it, so the next try looks the name up
+   * before creating again. A second create spends the account's
+   * ten-a-minute budget and can leave a second billed machine behind.
+   *
+   * A lookup that times out or 500s is retried. It is not treated as
+   * "missing", which is what used to fall through into createSprite.
+   */
+  private async acquireSprite(
+    name: string,
+    say: (message: string) => Promise<void>,
+  ): Promise<{ sprite: Sprite; created: boolean }> {
+    const config = {
+      ramMB: this.options.ramMB ?? 4096,
+      cpus: this.options.cpus ?? 2,
+      ...(this.options.region ? { region: this.options.region } : {}),
+    } as Parameters<SpritesClient["createSprite"]>[1];
+
+    let failures = 0;
+    let created = false;
+    /**
+     * After a create that did not hand back the sprite, one 404 is not
+     * yet a reason to create another. The machine can exist before the
+     * lookup sees it.
+     */
+    let confirmAbsence = false;
+    let lastErr: unknown;
+
+    const pause = async (err: unknown, message: string): Promise<void> => {
+      const delay = spriteAcquireDelay(err, failures);
+      failures += 1;
+      if (delay === undefined) throw err;
+      await say(message);
+      await sleep(delay, true);
+    };
+
+    for (let turn = 0; turn < 8; turn++) {
+      try {
+        const sprite = await this.client.getSprite(name);
+        return { sprite, created };
+      } catch (err) {
+        if (!isSpriteNotFound(err)) {
+          lastErr = err;
+          await pause(err, "The sandbox control plane did not answer. Retrying.");
+          continue;
+        }
+      }
+
+      if (confirmAbsence) {
+        confirmAbsence = false;
+        const delay = SPRITE_ACQUIRE_RETRY_DELAYS_MS[failures];
+        failures += 1;
+        if (delay === undefined) {
+          throw lastErr instanceof Error ? lastErr : new Error(`sprite ${name} was not created`);
+        }
+        await say("Checking whether the sandbox was created.");
+        await sleep(delay, true);
+        continue;
+      }
+
+      try {
+        const sprite = await this.client.createSprite(name, config);
+        return { sprite, created: true };
+      } catch (err) {
+        lastErr = err;
+        created = true;
+        confirmAbsence = true;
+        if (isSpriteConflict(err)) continue;
+        await pause(
+          err,
+          err instanceof APIError && err.isRateLimitError()
+            ? "Sprite creation is rate limited. Waiting before trying again."
+            : "Creating the sandbox failed on the control plane. Retrying.",
+        );
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error(`could not acquire sprite ${name}`);
   }
 
   /**
@@ -1106,10 +1231,20 @@ function closeQuietly(child: unknown): void {
   ws?.close?.();
 }
 
-function sleep(ms: number): Promise<void> {
+/**
+ * `keepAlive` holds the timer on the event loop.
+ *
+ * A reattach backoff must not pin a server that is already exiting, so
+ * that timer is unref'd. A lookup or create retry is the work a short
+ * script is waiting on. Unref there lets the process exit while the
+ * promise is still pending, which is the "unsettled top-level await"
+ * the cleanup script died with, and the sprite it was about to delete
+ * stays billed.
+ */
+function sleep(ms: number, keepAlive = false): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
-    timer.unref?.();
+    if (!keepAlive) timer.unref?.();
   });
 }
 
