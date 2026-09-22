@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { LineChannel, collectExec } from "./driver.js";
 import {
+  FILESYSTEM_RETRY_DELAYS_MS,
   SpriteDriver,
   SPRITE_ACQUIRE_RATE_LIMIT_WAITS,
   SPRITE_ACQUIRE_RETRY_DELAYS_MS,
@@ -61,6 +62,37 @@ test("the sandbox e2e workflow deletes the sprite that test creates", async () =
 async function settle(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Runs a provision whose filesystem calls may sleep between retries.
+ * The clock is fake, so a held outage still finishes in this test
+ * instead of waiting out the real backoff. Each delay is armed only
+ * after the previous attempt rejects, so the clock advances one wait
+ * at a time.
+ */
+async function provisionWithFilesystemRetries(
+  t: { mock: { timers: { enable(opts: { apis: Array<"setTimeout" | "setInterval"> }): void; tick(ms: number): void } } },
+  driver: SpriteDriver,
+  spec: Parameters<SpriteDriver["provision"]>[0] = {
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+  },
+): Promise<unknown> {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const outcome = driver.provision(spec).then(
+    (value) => value,
+    (err: unknown) => err,
+  );
+  await settle();
+  await settle();
+  for (const delay of FILESYSTEM_RETRY_DELAYS_MS) {
+    t.mock.timers.tick(delay);
+    await settle();
+    await settle();
+  }
+  return outcome;
 }
 
 type FakeChild = EventEmitter & {
@@ -263,18 +295,38 @@ test("Sprite provisioning leaves the artifacts directory and unreadable director
  * enough: swallowing those would hand back a sandbox whose sweep
  * silently never ran, and a dropped repository's checkout would stay.
  */
-test("Sprite provisioning still fails when the checkout probe fails for other reasons", async () => {
-  const failures: (() => never)[] = [
+test("Sprite provisioning still fails when the checkout probe fails for other reasons", async (t) => {
+  const failures: { fail: () => never; retriable: boolean; pattern: RegExp }[] = [
     // A real 503 through the SDK: FilesystemError, but not a missing path.
-    () => {
-      throw new FilesystemError("stat failed with status 503", "UNKNOWN", "/workspace/leftover/.git", "stat");
+    // Retried, then still a failure, so a held outage cannot skip the sweep.
+    {
+      retriable: true,
+      pattern: /503/,
+      fail: () => {
+        throw new FilesystemError("stat failed with status 503", "UNKNOWN", "/workspace/leftover/.git", "stat");
+      },
     },
     // undici's transport failure: a TypeError, but it carries a cause.
-    () => {
-      throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") });
+    // Not the sprites "please retry" shape, so it fails on the first try.
+    {
+      retriable: false,
+      pattern: /fetch failed/,
+      fail: () => {
+        throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") });
+      },
+    },
+    // A missing status that is not an outage. Retrying it would only
+    // delay the failure, and it must not read as "no checkout".
+    {
+      retriable: false,
+      pattern: /status 404/,
+      fail: () => {
+        throw new FilesystemError("stat failed with status 404", "UNKNOWN", "/workspace/leftover/.git", "stat");
+      },
     },
   ];
-  for (const fail of failures) {
+  for (const { fail, retriable, pattern } of failures) {
+    let probes = 0;
     const sprite = {
       spawn(_file: string, args: string[]) {
         const child = fakeChild();
@@ -292,6 +344,7 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
             return [{ name: "leftover", isDirectory: () => true }];
           },
           async exists() {
+            probes += 1;
             fail();
           },
         };
@@ -300,10 +353,18 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
     const driver = new SpriteDriver({ token: "token" });
     stubClient(driver, sprite);
 
-    await assert.rejects(
-      driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
-      /503|fetch failed/,
-    );
+    const result = retriable
+      ? await provisionWithFilesystemRetries(t, driver)
+      : await driver
+          .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+          .then(
+            () => "resolved",
+            (err: unknown) => err,
+          );
+    if (retriable) t.mock.timers.reset();
+    assert.ok(result instanceof Error, "the checkout probe must still fail the provision");
+    assert.match(result.message, pattern);
+    assert.equal(probes, retriable ? FILESYSTEM_RETRY_DELAYS_MS.length + 1 : 1);
   }
 });
 
@@ -398,6 +459,7 @@ test("Sprite provisioning survives an empty workspace", async () => {
  * forgiven.
  */
 test("Sprite provisioning still fails when the filesystem API does", async () => {
+  let listings = 0;
   const sprite = {
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
@@ -412,6 +474,9 @@ test("Sprite provisioning still fails when the filesystem API does", async () =>
     filesystem() {
       return {
         async readdir() {
+          listings += 1;
+          // A plain Error, not the SDK's FilesystemError. The retry is
+          // only for the shape the sprites API actually returns.
           throw new Error("503 Service Unavailable");
         },
       };
@@ -424,6 +489,114 @@ test("Sprite provisioning still fails when the filesystem API does", async () =>
     driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
     /503/,
   );
+  assert.equal(listings, 1);
+});
+
+/**
+ * The sprites filesystem API answers a blip with FilesystemError
+ * "service temporarily unavailable, please retry" and no status: the
+ * SDK keeps the sentence and drops the HTTP code. Provisioning lists
+ * the workspace on every run, so one blip used to fail the run. The
+ * listing has to be repeated, and the sweep has to use the listing
+ * that finally arrived, not treat the failure as an empty workspace.
+ */
+test("Sprite provisioning retries a temporarily unavailable filesystem and still sweeps", async (t) => {
+  const messages: string[] = [];
+  const removed: string[] = [];
+  let listings = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          listings += 1;
+          if (listings < 3) {
+            throw new FilesystemError(
+              "service temporarily unavailable, please retry",
+              "UNKNOWN",
+              "/workspace",
+              "readdir",
+            );
+          }
+          return [{ name: "removed-repository", isDirectory: () => true }];
+        },
+        async exists(path: string) {
+          return path === "/workspace/removed-repository/.git";
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const result = await provisionWithFilesystemRetries(t, driver, {
+    projectId: "project",
+    featureId: "feature",
+    hostWorkspacePath: "/unused",
+    onProgress: (message) => {
+      messages.push(message);
+    },
+  });
+  assert.ok(!(result instanceof Error), `provision should recover: ${result}`);
+  assert.equal(listings, 3);
+  assert.deepEqual(removed, ["/workspace/removed-repository"]);
+  assert.equal(
+    messages.filter((message) => message.includes("temporarily unavailable")).length,
+    1,
+  );
+});
+
+/**
+ * A retry that never gets an answer still fails the provision with the
+ * API's own sentence. Stopping after the schedule is what keeps a real
+ * outage from parking the run in "starting".
+ */
+test("Sprite provisioning stops retrying when the filesystem stays unavailable", async (t) => {
+  let listings = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          listings += 1;
+          throw new FilesystemError(
+            "service temporarily unavailable, please retry",
+            "UNKNOWN",
+            "/workspace",
+            "readdir",
+          );
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const result = await provisionWithFilesystemRetries(t, driver);
+  assert.ok(result instanceof Error);
+  assert.match(result.message, /service temporarily unavailable, please retry/);
+  assert.equal(listings, FILESYSTEM_RETRY_DELAYS_MS.length + 1);
 });
 
 /**
