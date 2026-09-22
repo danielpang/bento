@@ -98,12 +98,22 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
     const event: AgentEvent = { type: "message", role: "assistant", text: message.text, raw: message.raw };
     // No identity means no safe diff; skipping loses nothing that was
     // ever attributable, and recovering it would duplicate forever.
-    if (recovery.persistedIds(event).length === 0) return false;
-    return !isPersisted(recovery, seen, event);
+    return !isPersisted(recovery, seen, event, { unknownIs: "persisted" });
   });
   if (missed.length === 0) return;
 
   const kept = missed.slice(0, MAX_RECOVERED_MESSAGES);
+  /**
+   * Every missed message becomes known, the ones left out for length
+   * included: the note below says they were left out, and a sandbox
+   * that then replayed them live would append them after the note and
+   * contradict it.
+   */
+  for (const message of missed) {
+    for (const id of recovery.persistedIds({ type: "message", role: "assistant", text: message.text, raw: message.raw })) {
+      seen.add(id);
+    }
+  }
   await appendRunEvent(ctx, args.runId, {
     type: "message",
     role: "system",
@@ -113,9 +123,7 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
         : `The agent kept working while Bento was disconnected. ${kept.length} messages it sent during that time follow, recovered from the agent's session record.`,
   });
   for (const message of kept) {
-    const event: AgentEvent = { type: "message", role: "assistant", text: message.text, raw: message.raw };
-    await appendRunEvent(ctx, args.runId, event);
-    for (const id of recovery.persistedIds(event)) seen.add(id);
+    await appendRunEvent(ctx, args.runId, { type: "message", role: "assistant", text: message.text, raw: message.raw });
   }
   if (missed.length > kept.length) {
     await appendRunEvent(ctx, args.runId, {
@@ -133,13 +141,14 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
  * conversation into one transcript again.
  *
  * A snapshot, on purpose. A reattaching server filters the live stream
- * against the ids it loaded at attach time and nothing later: the
- * sandbox may replay output the transcript already has (the first
- * life's, or the gap this module just recovered), and that is what
- * the filter drops. It must not learn the ids of the events it goes
- * on to append, because one message can arrive as several lines under
- * one id (claude-code emits one line per content block), and a filter
- * that remembered the first line would drop the rest.
+ * against the ids it loaded at attach time plus the ones recovery
+ * adds, and nothing later: the sandbox may replay output the
+ * transcript already has (the first life's, or the gap recovery just
+ * filled), and that is what the filter drops. It must not learn the
+ * ids of the live events it goes on to append, because one message
+ * can arrive as several lines under one id (claude-code emits one
+ * line per content block), and a filter that remembered the first
+ * line would drop the rest.
  */
 export async function loadPersistedIds(
   ctx: AppContext,
@@ -169,14 +178,27 @@ export async function loadPersistedIds(
 }
 
 /**
- * Whether the transcript already holds this event, by native id. An
- * event without one is never "already there": it cannot be told from
- * a new one, and dropping it would lose something real.
+ * Whether the transcript already holds this event, by native id.
+ *
+ * Every id has to match, not any. An adapter may name an event by
+ * more than one id, the finer one first (opencode: the text part,
+ * then the message it belongs to), and a message can go on gaining
+ * parts after its first was persisted. Matching on any id would take
+ * the message id alone as proof and drop every later part of that
+ * message; matching on all of them only drops the part itself.
+ *
+ * An event with no id at all cannot be told from a new one. On a live
+ * stream that means it is delivered, because dropping it would lose
+ * something real; in a recovery diff it means it is skipped, because
+ * recovering it would duplicate forever. The caller says which.
  */
 export function isPersisted(
   recovery: Pick<SessionRecovery, "persistedIds">,
   seen: ReadonlySet<string>,
   event: AgentEvent,
+  options: { unknownIs: "new" | "persisted" } = { unknownIs: "new" },
 ): boolean {
-  return recovery.persistedIds(event).some((id) => seen.has(id));
+  const ids = recovery.persistedIds(event);
+  if (ids.length === 0) return options.unknownIs === "persisted";
+  return ids.every((id) => seen.has(id));
 }

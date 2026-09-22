@@ -2029,14 +2029,16 @@ async function resumeInterruptedRun(
   const recovery = adapter.sessionRecovery ?? null;
   // Best effort, like the recovery itself: the stream is already
   // attached, and a read that fails here must cost the filter, not the
-  // run. Without the set the stream is delivered as it always was.
+  // run. Without the set the stream is delivered as it always was, and
+  // recovery loads a set of its own, so a failure here costs it
+  // nothing but a second attempt at the same query.
   const persisted = recovery
     ? await loadPersistedIds(ctx, recovery, feature.id).catch((err: unknown) => {
         console.warn(`could not load the transcript's ids for run ${run.id}; delivering the stream unfiltered:`, err);
         return null;
       })
     : null;
-  if (recovery && persisted && run.cliSessionId) {
+  if (recovery && run.cliSessionId) {
     await recoverMissedMessages(ctx, {
       handle,
       adapter,
@@ -2044,7 +2046,7 @@ async function resumeInterruptedRun(
       runId: run.id,
       sessionId: run.cliSessionId,
       cwd: workdir,
-      seen: persisted,
+      ...(persisted ? { seen: persisted } : {}),
     });
   }
 

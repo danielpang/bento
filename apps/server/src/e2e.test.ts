@@ -1441,8 +1441,9 @@ test("a restart recovers what the agent said while no server was attached", { ti
     async attach() {
       return (async function* () {
         // What a sandbox that replays its history would send first:
-        // the first life's lines and the gap's message, all of which
-        // the transcript now holds.
+        // the session's start, the first life's lines and the gap's
+        // message, all of which the transcript now holds.
+        yield { kind: "stdout" as const, data: line({ type: "system", subtype: "init", session_id: "sid-gap-1", model: "claude-opus-5" }) };
         yield { kind: "stdout" as const, data: line(said("msg_1", "Reading the code.")) };
         yield { kind: "stdout" as const, data: line(called("msg_2", "toolu_1")) };
         yield { kind: "stdout" as const, data: line(said("msg_3", "Tests pass, committing now.")) };
