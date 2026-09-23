@@ -12,6 +12,7 @@
 import { createDb, createPool } from "@bento/db";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { createAnalytics } from "./analytics.js";
 import { createMailer, noticeMessage } from "./mail.js";
 import { loadEnv } from "./env.js";
 import type { CloudRegistration, WaitlistOperator } from "./cloud-contract.js";
@@ -49,6 +50,7 @@ async function main(argv: string[]): Promise<number> {
   const pool = createPool(env.DATABASE_URL);
   const db = createDb(pool);
   const mailer = createMailer(env);
+  const analytics = createAnalytics(env);
   const name = env.BENTO_CLOUD_MODULE;
   const specifier = name.startsWith(".") || name.startsWith("/") ? pathToFileURL(path.resolve(name)).href : name;
 
@@ -61,6 +63,7 @@ async function main(argv: string[]): Promise<number> {
         appUrl: string;
         rawEnv: Record<string, string | undefined>;
         identify(): Promise<null>;
+        capture?(event: { event: string; properties?: Record<string, unknown> }): void;
       }) => Promise<CloudRegistration>;
     };
     if (typeof mod.registerCloud !== "function") {
@@ -77,6 +80,16 @@ async function main(argv: string[]): Promise<number> {
       async identify() {
         return null;
       },
+      ...(analytics
+        ? {
+            capture: (event: { event: string; properties?: Record<string, unknown> }) => {
+              analytics.capture({
+                event: event.event,
+                ...(event.properties ? { properties: event.properties } : {}),
+              });
+            },
+          }
+        : {}),
     });
     const operator = registered.waitlistOperator;
     if (!operator) {
@@ -136,6 +149,7 @@ async function main(argv: string[]): Promise<number> {
     console.error("usage: waitlist:invite|status|reconcile|retain");
     return 1;
   } finally {
+    await analytics?.shutdown().catch(() => {});
     await pool.end().catch(() => {});
   }
 }

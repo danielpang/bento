@@ -218,24 +218,26 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
            * here too; wrapping /sign-up/email would miss them.
            */
           async before(newUser) {
+            const admission = hooks.admission;
+            // Local and self-hosted installs have no gate. Do not
+            // touch the invitation table on the way to a normal signup.
+            if (!admission) return;
             const email = typeof newUser.email === "string" ? newUser.email : "";
             if (!email) return;
-            if (await hasPendingOrganizationInvitation(db, email)) return;
-            const admission = hooks.admission;
-            if (!admission) return;
-            let decision: Awaited<ReturnType<AdmissionControl["canCreateUser"]>>;
             try {
-              decision = await admission.canCreateUser({ email });
-            } catch {
+              if (await hasPendingOrganizationInvitation(db, email)) return;
+              const decision = await admission.canCreateUser({ email });
+              if (!decision.allowed) {
+                throw new APIError("FORBIDDEN", {
+                  message: "Join the waitlist to create an account.",
+                  code: "WAITLIST_REQUIRED",
+                });
+              }
+            } catch (err) {
+              if (err instanceof APIError) throw err;
               // A store outage must not open signup, and must not
               // look like an ordinary "you are not invited" refusal.
               throw new APIError("SERVICE_UNAVAILABLE", { message: "try again later" });
-            }
-            if (!decision.allowed) {
-              throw new APIError("FORBIDDEN", {
-                message: "Join the waitlist to create an account.",
-                code: "WAITLIST_REQUIRED",
-              });
             }
           },
           async after(newUser, ctx) {
