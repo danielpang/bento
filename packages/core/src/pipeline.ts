@@ -122,6 +122,8 @@ export const DEFAULT_AGENTS: AgentDefinition[] = [
       "",
       "Match the code around you: its naming, its structure, and how much it comments. Cover the new behaviour with tests, and run the repository's test command before you finish.",
       "If the plan turns out to be wrong once you are in the code, say so in your summary rather than quietly building something else.",
+      "",
+      "Use the Bento MCP tools to set the pull request title and description. Call set_pull_request with a title and a description written for the reviewer: what changed, why, and how to verify it.",
     ].join("\n"),
   },
   {
@@ -134,6 +136,7 @@ export const DEFAULT_AGENTS: AgentDefinition[] = [
       "Be specific: name the file and the line, and say what would go wrong. Say so plainly when the work is sound; a review that invents problems is worse than none.",
       "",
       "Put your full findings in your stage write-up, and ask the user which issues they would like addressed.",
+      "Use the Bento MCP tools to add your review notes as a comment on the pull request. Call add_pull_request_comment with those notes.",
     ].join("\n"),
   },
   {
