@@ -1320,17 +1320,17 @@ async function finishRun(
    * run that had succeeded.
    */
   // A listed unbilled reason (see UNBILLED_REASONS): Fly or the sprite
-  // driver failed before the agent started. Drop the start so every
-  // hours sum that only knows about started_at counts zero, and skip
-  // the billing hook below so the deployment does not write a usage
-  // row either. A throw after the agent is running still counts.
+  // driver failed before the agent started. The start time stays. The
+  // billable flag is what the hours sum reads, and the billing hook
+  // below is skipped so the deployment does not write a usage row
+  // either. A throw after the agent is running stays billable.
   const exempt = !outcome.ok && unbilledReason(outcome.error) !== null;
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
       status: outcome.ok ? "succeeded" : "failed",
       endedAt: new Date(),
-      ...(exempt ? { startedAt: null } : {}),
+      billable: !exempt,
       exitCode,
       /**
        * Only when the agent actually said. Overwriting with null on a

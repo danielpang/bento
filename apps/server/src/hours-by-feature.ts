@@ -1,5 +1,3 @@
-import { unbilledReason } from "./unbilled-reasons.js";
-
 /**
  * Wall-clock hours a run spent inside a billing month.
  *
@@ -9,8 +7,8 @@ import { unbilledReason } from "./unbilled-reasons.js";
  * spend. A run that started last period and ended in this one only
  * counts the overlap, so the card breakdown can sit next to the period
  * meter without inventing hours from outside it. A run with no start
- * counts as zero, which is also how an infrastructure failure is
- * recorded once it has been closed.
+ * counts as zero: it never left the queue. Whether a run that did
+ * start counts is its billable flag.
  */
 export function runHoursInPeriod(
   startedAt: Date | null,
@@ -32,17 +30,19 @@ export type RunSlice = {
   title: string;
   startedAt: Date | null;
   endedAt: Date | null;
-  /** The run's failure text, when the hours sum should be able to drop it. */
-  error?: string | null;
+  /**
+   * False when the run is excluded from the hours limit. Missing means
+   * billable, so a caller that has not loaded the column still counts
+   * the run.
+   */
+  billable?: boolean;
 };
 
 /**
- * Hours by card for a billing month. Every run on a feature is summed.
- * Cards that spent nothing in the window are omitted: this is a
- * ranking of spenders, not a board. A run whose error matches
- * UNBILLED_REASONS is omitted even when it still has a start time,
- * so rows written before that start was cleared do not keep spending
- * the quota.
+ * Hours by card for a billing month. Every billable run on a feature
+ * is summed. Cards that spent nothing in the window are omitted: this
+ * is a ranking of spenders, not a board. A run with billable false is
+ * omitted even though it has a start time.
  */
 export function hoursByFeature(
   runs: RunSlice[],
@@ -52,7 +52,7 @@ export function hoursByFeature(
 ): { featureId: string; title: string; agentHours: number }[] {
   const totals = new Map<string, { title: string; hours: number }>();
   for (const run of runs) {
-    if (unbilledReason(run.error)) continue;
+    if (run.billable === false) continue;
     const hours = runHoursInPeriod(run.startedAt, run.endedAt, periodStart, periodEnd, now);
     if (hours <= 0) continue;
     const current = totals.get(run.featureId);

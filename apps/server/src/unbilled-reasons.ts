@@ -1,11 +1,13 @@
 /**
- * Reasons a failed run does not count as agent hours.
+ * Reasons a failed run is marked not billable.
  *
- * Add a row to extend the list. Nothing else has to change: the hours
- * sum and the billing hook both ask `unbilledReason`. The first row
- * whose `match` hits is the one that fires. `except` puts a lookalike
- * back on the clock. Order matters only when two rows could match the
- * same line: put the narrower one first.
+ * Add a row to extend the list. `finishRun` asks `unbilledReason` when
+ * it closes the run and stores the answer on `agent_runs.billable`.
+ * The hours sum and the billing hook read that column. They do not
+ * read the error text again. The first row whose `match` hits is the
+ * one that fires. `except` puts a lookalike back on the clock. Order
+ * matters only when two rows could match the same line: put the
+ * narrower one first.
  *
  * Every match sees only the first line of the stored error. The lines
  * after it are command output, and a phrase in that output must not
@@ -17,9 +19,9 @@
  * fails the process at startup instead of throwing while a run is
  * being closed.
  *
- * A new row applies to the hours breakdown immediately, including runs
- * that already finished, and to runs that finish after it ships. It
- * does not need a migration.
+ * A new row applies to runs that finish after it ships. A run that
+ * already closed keeps the flag it was given. Changing one of those
+ * takes a migration.
  *
  * These rows are only for failures from before the agent starts. A
  * throw once the agent is running (`exec failed:`), a missing binary

@@ -84,7 +84,7 @@ test("hours by feature sums runs on the same card and drops empty ones", () => {
   assert.equal(byId.c, undefined);
 });
 
-test("a sprite that failed to start does not add agent hours", () => {
+test("hours follow the billable flag, and a start time is not what decides", () => {
   const rows = hoursByFeature(
     [
       {
@@ -92,14 +92,14 @@ test("a sprite that failed to start does not add agent hours", () => {
         title: "Rate limit",
         startedAt: new Date("2026-09-10T12:00:00.000Z"),
         endedAt: new Date("2026-09-10T14:00:00.000Z"),
-        error: "sandbox provisioning failed: APIError: service temporarily unavailable, please retry",
+        billable: false,
       },
       {
         featureId: "a",
         title: "Rate limit",
         startedAt: new Date("2026-09-11T00:00:00.000Z"),
         endedAt: new Date("2026-09-11T01:00:00.000Z"),
-        error: "the agent could not apply the patch",
+        billable: true,
       },
     ],
     start,
@@ -109,7 +109,7 @@ test("a sprite that failed to start does not add agent hours", () => {
   assert.equal(rows[0]?.agentHours, 1);
 });
 
-test("an exec failure after the agent was running still adds agent hours", () => {
+test("a run with no billable flag still counts its hours", () => {
   const rows = hoursByFeature(
     [
       {
@@ -117,7 +117,6 @@ test("an exec failure after the agent was running still adds agent hours", () =>
         title: "Rate limit",
         startedAt: new Date("2026-09-10T12:00:00.000Z"),
         endedAt: new Date("2026-09-10T14:00:00.000Z"),
-        error: "exec failed: Error: WebSocket closed",
       },
     ],
     start,
