@@ -2,8 +2,10 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   agentRuns,
+  repositories,
   runArtifacts,
   runEvents,
+  sandboxes,
   swarmLandings,
   swarmMessages,
   swarmTaskEvents,
@@ -14,6 +16,7 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
+import { commitSwarmDesignDocument, SWARM_DESIGN_PATH } from "../orchestrator/swarm/design-document.js";
 import { MCP_PROTOCOL_VERSION } from "./client.js";
 import type { ResolvedGrant } from "./grants.js";
 
@@ -853,16 +856,59 @@ async function askUser(
   return "Asked. The swarm waits for an answer; you will be given it when it arrives.";
 }
 
-/** Where the swarm's design note lives, as an artifact row. */
-const DESIGN_PATH = "plan/design.md";
-
 async function writeDesign(ctx: AppContext, caller: SwarmCaller, args: Args<"write_design">): Promise<string> {
+  const [workspace] = await ctx.db
+    .select({
+      branchName: swarms.branchName,
+      sandboxSwarmId: sandboxes.swarmId,
+      sandboxTaskId: sandboxes.swarmTaskId,
+      sandboxStatus: sandboxes.status,
+      externalId: sandboxes.externalId,
+      workdir: sandboxes.workdir,
+    })
+    .from(agentRuns)
+    .innerJoin(swarms, eq(swarms.id, agentRuns.swarmId))
+    .innerJoin(sandboxes, eq(sandboxes.id, agentRuns.sandboxId))
+    .where(eq(agentRuns.id, caller.runId))
+    .limit(1);
+  const [repository] = await ctx.db
+    .select({ name: repositories.name })
+    .from(repositories)
+    .where(eq(repositories.projectId, caller.projectId))
+    .orderBy(asc(repositories.position))
+    .limit(1);
+
+  if (
+    !workspace
+    || workspace.sandboxSwarmId !== caller.swarmId
+    || workspace.sandboxTaskId !== null
+    || workspace.sandboxStatus === "destroyed"
+  ) {
+    throw new ToolRefusal("the swarm workspace is not available; retry after the planner sandbox is ready");
+  }
+  if (!workspace.branchName || !repository) {
+    throw new ToolRefusal("the swarm has no repository branch to hold its design document");
+  }
+
+  try {
+    await commitSwarmDesignDocument({
+      driver: ctx.driver,
+      handle: { provider: ctx.driver.provider, externalId: workspace.externalId, workdir: workspace.workdir },
+      repositoryName: repository.name,
+      branch: workspace.branchName,
+      content: args.content,
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new ToolRefusal(`the design document could not be committed: ${reason}`);
+  }
+
   await ctx.db.transaction(async (tx) => {
     // One note per swarm: the previous one is replaced rather than
     // added to, so nothing has to guess which of five is current.
     await tx
       .delete(runArtifacts)
-      .where(and(eq(runArtifacts.swarmId, caller.swarmId), eq(runArtifacts.path, DESIGN_PATH)));
+      .where(and(eq(runArtifacts.swarmId, caller.swarmId), eq(runArtifacts.path, SWARM_DESIGN_PATH)));
     await tx.insert(runArtifacts).values({
       runId: caller.runId,
       type: "swarm",
@@ -870,7 +916,7 @@ async function writeDesign(ctx: AppContext, caller: SwarmCaller, args: Args<"wri
       ...(caller.taskId ? { swarmTaskId: caller.taskId } : {}),
       stageSlug: "plan",
       stageName: "Plan",
-      path: DESIGN_PATH,
+      path: SWARM_DESIGN_PATH,
       kind: "markdown",
       mime: "text/markdown",
       size: Buffer.byteLength(args.content, "utf8"),
@@ -884,7 +930,7 @@ async function readDesign(ctx: AppContext, caller: SwarmCaller): Promise<string>
   const [row] = await ctx.db
     .select({ content: runArtifacts.content })
     .from(runArtifacts)
-    .where(and(eq(runArtifacts.swarmId, caller.swarmId), eq(runArtifacts.path, DESIGN_PATH)))
+    .where(and(eq(runArtifacts.swarmId, caller.swarmId), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
     .orderBy(desc(runArtifacts.createdAt))
     .limit(1);
   if (!row?.content) return "There is no design note yet. write_design creates one.";

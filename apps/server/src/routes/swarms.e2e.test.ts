@@ -451,7 +451,7 @@ test("a stopped swarm can then be deleted, agents and all", async () => {
  * {status: "running"} used to resurrect a stopped swarm and set the
  * reconciler going on it again.
  */
-test("a status cannot be patched onto a swarm, whatever else the body carries", async () => {
+test("status and the original goal cannot be patched onto a swarm", async () => {
   const swarm = await createSwarm();
   await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });
   assert.equal((await post(`/api/swarms/${swarm.id}/cancel`)).status, 200);
@@ -464,6 +464,12 @@ test("a status cannot be patched onto a swarm, whatever else the body carries", 
   assert.equal(after.status, "cancelled", "a stopped swarm stays stopped");
   assert.equal(after.title, "Rewrite checkout", "and a refused body changes nothing else either");
   assert.deepEqual(queued, [], "nothing was set going again");
+
+  const changedGoal = await patch(`/api/swarms/${swarm.id}`, {
+    goal: "quietly turn this into different work",
+  });
+  assert.equal(changedGoal.status, 400, "follow-up work goes through reopen instead");
+  assert.equal((await readSwarm(swarm.id)).goal, "make it work", "the request the swarm was created from is history");
 
   // The door that does move a swarm keeps its own refusals.
   const restarted = await post(`/api/swarms/${swarm.id}/start`);

@@ -70,8 +70,14 @@ const createSwarm = z.object({
 });
 
 /**
- * What a person may change about a swarm: what it is called, what it
- * was asked to do, its ceilings, and whether it is put away.
+ * What a person may change about a swarm: what it is called, its
+ * ceilings, and whether it is put away.
+ *
+ * The goal is deliberately absent. It is the immutable request the
+ * swarm was created from, and changing it in place would rewrite the
+ * meaning of every earlier task and run. Further work belongs through
+ * the reopen route as a follow-up, where the original request remains
+ * visible beside the new instruction.
  *
  * Deliberately not its status. Where a swarm is in its life is decided
  * by the routes below, which is where the rules about it live: /start
@@ -83,7 +89,6 @@ const createSwarm = z.object({
 const updateSwarm = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
-    goal: z.string().max(20_000).optional(),
     maxWorkers: z.number().int().min(1).max(32).optional(),
     budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
     timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
