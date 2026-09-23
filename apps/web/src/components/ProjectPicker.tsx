@@ -22,11 +22,13 @@ export function ProjectPicker({
   projectId,
   onSelect,
   onNewProject,
+  onOpenProject,
 }: {
   projects: { id: string; name: string }[];
   projectId: string | null;
   onSelect: (id: string) => void;
   onNewProject: () => void;
+  onOpenProject?: (id: string) => void;
 }) {
   const current = projects.find((project) => project.id === projectId);
 
@@ -61,6 +63,26 @@ export function ProjectPicker({
               ))}
             </Menu.RadioGroup>
             <Menu.Separator className="picker-sep" />
+            {onOpenProject && projects.length > 0 && (
+              <Menu.Sub>
+                <Menu.SubTrigger className="picker-item picker-item-action">
+                  <span className="picker-tick" aria-hidden="true">↗</span>
+                  <span className="picker-item-name">Open project in new window</span>
+                  <span aria-hidden="true">›</span>
+                </Menu.SubTrigger>
+                <Menu.Portal>
+                  <Menu.SubContent className="picker-menu" sideOffset={6} data-portal-layer="" aria-label="Open project in new window">
+                    <Menu.Group className="picker-group">
+                      {projects.map(project => (
+                        <Menu.Item key={project.id} className="picker-item" onSelect={() => onOpenProject(project.id)}>
+                          <span className="picker-item-name">{project.name}</span>
+                        </Menu.Item>
+                      ))}
+                    </Menu.Group>
+                  </Menu.SubContent>
+                </Menu.Portal>
+              </Menu.Sub>
+            )}
             <Menu.Item className="picker-item picker-item-action" onSelect={onNewProject}>
               <span className="picker-tick" aria-hidden="true">
                 +
