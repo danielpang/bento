@@ -11,7 +11,7 @@ import { cursorLoginEnv } from "./cursor-auth.js";
 const run = promisify(execFile);
 
 /** Where a container's agent CLIs look for their config. */
-/** Where a Docker sandbox's user lives: the image runs the agent as root. */
+/** The Docker sandbox runs as root. */
 export const CONTAINER_HOME = "/root";
 
 /**

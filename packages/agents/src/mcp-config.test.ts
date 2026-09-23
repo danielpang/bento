@@ -116,12 +116,7 @@ test("an empty server set still renders a config, so a removed server is cleared
   assert.doesNotMatch(emptyCodex, /\[mcp_servers\./);
 });
 
-/**
- * The sandbox's home is not always root's: a Fly Sprite runs the agent
- * as a user whose HOME is /home/sprite, and every config once written
- * under /root sat where no harness looked. So a config path names the
- * home as `~`, and the write expands it where the command runs.
- */
+// A sprite's HOME is /home/sprite, not /root: `~` must expand in the sandbox.
 test("a home-relative config path is expanded against the sandbox's own HOME", () => {
   assert.equal(sandboxPathExpression("~/.cursor/mcp.json"), `"\${HOME:-/root}"'/.cursor/mcp.json'`);
   assert.equal(sandboxPathExpression("/opt/bento/mcp/claude.json"), "'/opt/bento/mcp/claude.json'");

@@ -126,47 +126,30 @@ export interface McpRemoteServer {
   headers: Record<string, string>;
 }
 
-/**
- * A file to write into the sandbox.
- *
- * The path is absolute, or starts with `~/` for the sandbox user's
- * home. A harness reads its settings from its own home, and which
- * directory that is depends on the sandbox: root's in a Docker
- * container, /home/sprite on a Fly Sprite. Every config was once
- * written under /root, and on a sprite every harness then started
- * without it, the MCP gateway included, while the transcript said
- * the servers were attached. `writeFileCommand` and the server's own
- * writer expand `~` inside the sandbox, against its HOME, so the file
- * lands wherever the harness will look.
- */
+/** A file to write into the sandbox: an absolute path, or `~/` for the sandbox user's home. */
 export interface McpFile {
   path: string;
   content: string;
 }
 
-/** The value as one POSIX shell word, whatever it contains. */
+/** One POSIX shell word. */
 export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-/** Whether the path names the sandbox user's home rather than an absolute place. */
+/** True for `~` and `~/...`. */
 export function isSandboxHomePath(path: string): boolean {
   return path === "~" || path.startsWith("~/");
 }
 
-/**
- * A shell expression naming the path inside the sandbox. A `~/` path
- * becomes `"${HOME:-/root}"'/rest'`: the home is read where the
- * command runs, and /root stands in when HOME is unset, which is what
- * the toolchain script assumes too.
- */
+/** Shell expression for the path; `~/` expands to `"${HOME:-/root}"` where the command runs. */
 export function sandboxPathExpression(path: string): string {
   if (path === "~") return '"${HOME:-/root}"';
   if (path.startsWith("~/")) return `"\${HOME:-/root}"${shellQuote(path.slice(1))}`;
   return shellQuote(path);
 }
 
-/** The path with `~` replaced by a known home, for comparing against mounts. */
+/** `~` replaced by a known home. */
 export function resolveSandboxPath(path: string, home: string): string {
   if (path === "~") return home;
   if (path.startsWith("~/")) return `${home}${path.slice(1)}`;

@@ -549,10 +549,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // the sandbox outlives it. A failed write is said in the transcript,
   // ahead of whatever the tool then reports without it.
   for (const file of files) {
-    // With no sandbox, a file under the agent's home is a file under
-    // the operator's own home, and Bento's single-provider settings
-    // would replace theirs. Said rather than done, the same as MCP
-    // config on this driver.
+    // No sandbox: the agent's home is the operator's own.
     if (ctx.driver.provider === "local-process" && isSandboxHomePath(file.path)) {
       await saySystem(
         `Not writing ${file.path} on this machine, because it would replace your own file, so ${profile.cli} starts without it.`,

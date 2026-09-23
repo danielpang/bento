@@ -286,9 +286,7 @@ export class LocalRunner {
     // Files the tool reads settings from, written before every run
     // because the sandbox outlives it.
     for (const file of adapter.files?.(commandInput) ?? []) {
-      // No sandbox means the agent's home is this machine's, and the
-      // file would replace the person's own. Skipped, as the server
-      // does on its local-process driver.
+      // No sandbox: the agent's home is this machine's.
       if (this.driver.provider === "local-process" && isSandboxHomePath(file.path)) {
         console.warn(`not writing ${file.path} on this machine, because it would replace your own file`);
         continue;

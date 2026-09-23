@@ -224,13 +224,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.deepEqual(broken, [], `installed but not runnable: ${broken.join(", ")}`);
   });
 
-  /**
-   * The sprite's HOME is not /root, and every harness reads its config
-   * from its own home. A config written under /root was never read:
-   * the gateway grant for every hosted run sat unused while the
-   * transcript said the servers were attached. Only a real sprite can
-   * say where a `~/` path lands.
-   */
+  // Configs written under /root were never read: the sprite's HOME is elsewhere.
   await t.test("a home-relative config file lands in the agent's own home", { skip: needsSprite() }, async () => {
     const [, , script] = writeFileCommand({ path: "~/.bento-e2e/probe.json", content: '{"ok":true}' });
     const written = await shell(script!);
@@ -238,9 +232,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     const read = await shell('cat "$HOME/.bento-e2e/probe.json"; rm -rf "$HOME/.bento-e2e"');
     assert.equal(read.exitCode, 0, `the probe is not in $HOME: ${read.stderr}`);
     assert.deepEqual(JSON.parse(read.out), { ok: true });
-    // The write and the read above share one exec, so they agree with
-    // each other by construction. The account's home is what a CLI
-    // spawned any other way falls back to, so HOME has to be that.
+    // Write and read share one exec; HOME must also be the account's home.
     const home = await shell('printf %s "$HOME"; echo; getent passwd "$(id -un)" | cut -d: -f6');
     const [seen, account] = home.out.split("\n").map((line) => line.trim());
     assert.equal(seen, account, "the exec's HOME must be the account's home, or a harness spawned from a login shell reads elsewhere");

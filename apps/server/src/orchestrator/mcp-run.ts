@@ -101,8 +101,7 @@ export async function prepareRunMcp(
 
   // Writing a config into a path mounted read-only from the host would
   // fail the exec; skip the adapter rather than half-attach. Mounts
-  // only exist in Docker sandboxes, so a `~/` config path resolves
-  // against the same home the mounts were placed under.
+  // exist only in Docker, so `~` resolves against its home.
   const renderPaths = capability.renderConfig([]).map((f) => resolveSandboxPath(f.path, CONTAINER_HOME));
   const collision = renderPaths.find((path) => input.mountedConfigPaths.some((m) => pathWithin(path, m)));
   if (collision) {
@@ -317,13 +316,9 @@ async function writeConfigs(
   files: { path: string; content: string }[],
 ): Promise<boolean> {
   for (const file of files) {
-    // The same writer every other harness file goes through, so a
-    // `~/` path is expanded inside the sandbox against its own HOME
-    // (root's in a container, /home/sprite on a sprite) in exactly one
-    // place, and the sprite test that proves where it lands covers
-    // this write too. The token rides the file content through argv,
-    // never opts.env: the sprite driver leaks env into the exec URL,
-    // and files do not.
+    // Shared writer: `~` expands in the sandbox (/home/sprite on a
+    // sprite). The token rides argv, never env, which the sprite
+    // driver leaks into the exec URL.
     const argv = writeFileCommand(file);
     // exec throws before it yields when the sandbox cannot be addressed
     // at all (the sprites info endpoint answering "sprite not found"
