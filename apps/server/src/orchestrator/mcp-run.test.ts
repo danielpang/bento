@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentAdapter } from "@bento/agents";
+import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { prepareRunMcp, resolveGatewayBase } from "./mcp-run.js";
 import type { AppContext } from "../context.js";
 
@@ -121,7 +122,10 @@ test("prepareRunMcp keeps going when writing the config throws", async () => {
     handle: { externalId: "bento-feature", provider: "sprite", workdir: "/workspace" },
     restrictNetwork: false,
     mountedConfigPaths: [],
-    cardTools: true,
+    // Bento's own server, which is what this run has to attach: phase 1
+    // made that an explicit list rather than a cardTools boolean, and
+    // without one there is nothing to write and nothing to revoke.
+    ownServers: [{ id: BENTO_SERVER_ID, slug: BENTO_SERVER_ID }],
     say: async (text) => {
       notes.push(text);
     },
