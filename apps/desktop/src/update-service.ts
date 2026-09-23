@@ -15,7 +15,8 @@ async function updatePolicy(): Promise<{ manual?: boolean; disabledReason?: stri
   }
   try {
     // Fail closed even if someone manually repackages a release manifest.
-    await promisify(execFile)("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", path.resolve(process.execPath, "../../..")], { timeout: 30_000 });
+    // codesign treats requirements without a leading '=' as file paths.
+    await promisify(execFile)("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", path.resolve(process.execPath, "../../..")], { timeout: 30_000 });
   } catch { return { manual: true }; }
   return {};
 }

@@ -86,7 +86,8 @@ jobs:
             ACTUAL="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "release-dist/desktop/$ARCH/Bento.app/Contents/Info.plist")"
             test "$ACTUAL" = "$VERSION"
             APP="release-dist/desktop/$ARCH/Bento.app"
-            codesign --verify --deep --strict -R 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "$APP"
+            # A leading '=' makes this an inline requirement instead of a file path.
+            codesign --verify --deep --strict -R '=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "$APP"
             TEAM="$(codesign -dv "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
             test "$TEAM" = "$APPLE_TEAM_ID"
             xcrun stapler validate "$APP"
