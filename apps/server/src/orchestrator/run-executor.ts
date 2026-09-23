@@ -1319,10 +1319,11 @@ async function finishRun(
    * winner's terminal status and stamped a spurious failure line onto a
    * run that had succeeded.
    */
-  // A listed unbilled reason (see UNBILLED_REASONS). Drop the start so
-  // every hours sum that only knows about started_at counts zero, and
-  // skip the billing hook below so the deployment does not write a
-  // usage row either.
+  // A listed unbilled reason (see UNBILLED_REASONS): Fly or the sprite
+  // driver failed before the agent started. Drop the start so every
+  // hours sum that only knows about started_at counts zero, and skip
+  // the billing hook below so the deployment does not write a usage
+  // row either. A throw after the agent is running still counts.
   const exempt = !outcome.ok && unbilledReason(outcome.error) !== null;
   const [closed] = await ctx.db
     .update(agentRuns)
@@ -1660,9 +1661,10 @@ export async function captureRunFinished(
  * directly, because its runs bill the runner's own machine and have no
  * onRunFinished to announce.
  *
- * `meter` is false for an infrastructure failure. The hook is how a
- * deployment records what a run cost, so not calling it is how that
- * run stays off the quota. Analytics still hears that the run ended.
+ * `meter` is false when the run failed for an unbilled reason. The
+ * hook is how a deployment records what a run cost, so not calling it
+ * is how that run stays off the quota. Analytics still hears that the
+ * run ended.
  */
 async function announceRunFinished(
   ctx: AppContext,

@@ -108,3 +108,20 @@ test("a sprite that failed to start does not add agent hours", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.agentHours, 1);
 });
+
+test("an exec failure after the agent was running still adds agent hours", () => {
+  const rows = hoursByFeature(
+    [
+      {
+        featureId: "a",
+        title: "Rate limit",
+        startedAt: new Date("2026-09-10T12:00:00.000Z"),
+        endedAt: new Date("2026-09-10T14:00:00.000Z"),
+        error: "exec failed: Error: WebSocket closed",
+      },
+    ],
+    start,
+    end,
+  );
+  assert.equal(rows[0]?.agentHours, 2);
+});

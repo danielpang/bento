@@ -80,8 +80,9 @@ export function teamRoutes(ctx: AppContext) {
      * period start the plan already uses (the org's billing
      * anniversary, not the first of the calendar month). A run that
      * straddles the boundary only counts the overlap. A run that
-     * failed because Bento or Fly could not run the sprite is left
-     * out: that time is not agent hours.
+     * failed because Fly or the sprite driver could not create the
+     * machine is left out: that time is not agent hours. Time after
+     * the agent started still counts.
      *
      * Scoped to the active organization, so a foreign tenant asking
      * for another team's period sees 404, not an empty list of
