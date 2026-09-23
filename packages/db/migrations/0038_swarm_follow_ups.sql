@@ -96,3 +96,24 @@ ALTER TABLE "swarm_tasks" ADD COLUMN "follow_up_instruction" text;--> statement-
 -- and null is not a failure there: their containers hold nothing worth
 -- keeping that the repository on the host does not already have.
 ALTER TABLE "sandboxes" ADD COLUMN "checkpoint_id" text;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'swarms'
+      AND column_name = 'deliverable'
+      AND is_nullable = 'NO'
+      AND column_default = '''code''::text'
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'sandboxes'
+      AND column_name = 'checkpoint_id'
+  ) THEN
+    RAISE EXCEPTION '0038_swarm_follow_ups did not install its columns correctly';
+  END IF;
+END $$;

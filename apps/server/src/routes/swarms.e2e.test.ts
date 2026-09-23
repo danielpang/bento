@@ -111,8 +111,11 @@ before(async () => {
       },
       // The tick door starts the reconciler's worker before it queues
       // the job, so a deployment with no swarms registers none.
+      createQueue: async () => {},
       work: async () => "worker",
       offWork: async () => {},
+      schedule: async () => {},
+      unschedule: async () => {},
       notifyWorker: () => {},
     } as unknown as AppContext["boss"],
     bus: new EventBus(),
@@ -1721,4 +1724,21 @@ test("nothing is added to a swarm somebody stopped", async () => {
   const res = await post(`/api/swarms/${swarm.id}/tasks`, { title: "Too late" });
   assert.equal(res.status, 409);
   assert.equal(((await res.json()) as { code: string }).code, "SWARM_STOPPED");
+});
+
+test("finished work cannot be changed without reopening the swarm", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+
+  for (const [path, body] of [
+    [`/api/swarms/${swarm.id}/tasks`, { title: "Too late" }],
+    [`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, undefined],
+    [`/api/swarms/${swarm.id}/tasks/${tree.first.id}/cancel`, undefined],
+    [`/api/swarms/${swarm.id}/tasks/${tree.first.id}/split`, { children: [{ title: "Too late" }] }],
+  ] as const) {
+    const response = await post(path, body);
+    assert.equal(response.status, 409, path);
+    assert.equal(((await response.json()) as { code: string }).code, "SWARM_FINISHED", path);
+  }
 });

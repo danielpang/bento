@@ -35,7 +35,9 @@ const sample = {
 };
 
 test("a pipeline survives the round trip", () => {
-  const parsed = parsePipelineFile(writePipelineFile(sample));
+  const text = writePipelineFile(sample);
+  assert.doesNotMatch(text, /^swarms:/m, "an unused beta surface is not disclosed in an ordinary file");
+  const parsed = parsePipelineFile(text);
   assert.ok(!("error" in parsed), "error" in parsed ? parsed.error : "");
   assert.deepEqual((parsed as { data: typeof sample }).data, sample);
 });

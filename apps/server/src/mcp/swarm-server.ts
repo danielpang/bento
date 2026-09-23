@@ -19,6 +19,7 @@ import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
 import { commitSwarmDesignDocument, SWARM_DESIGN_PATH } from "../orchestrator/swarm/design-document.js";
+import { queueSwarmSlackNotify } from "../orchestrator/slack-notify.js";
 import { MCP_PROTOCOL_VERSION } from "./client.js";
 import type { ResolvedGrant } from "./grants.js";
 
@@ -184,7 +185,7 @@ const str = (description: string) => ({ type: "string", description });
 const TOOLS: Record<ToolName, ToolSpec> = {
   get_tree: {
     description:
-      "The swarm's plan as it stands: every task, its status, its parent, and what it cost. Read this before changing anything.",
+      "The plan you are responsible for as it stands: every visible task, its status, its parent, and what it cost. A sub planner sees only the subtree it was given. Read this before changing anything.",
     roles: ["planner", "subplanner"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
@@ -294,7 +295,7 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   write_design: {
     description:
       "Writes the swarm's design note, replacing the previous one. This is what every agent in the swarm reads for the shape of the whole change.",
-    roles: ["planner", "subplanner"],
+    roles: ["planner"],
     inputSchema: { type: "object", properties: { content: str("Markdown.") }, required: ["content"], additionalProperties: false },
   },
   read_design: {
@@ -585,9 +586,25 @@ async function getTree(ctx: AppContext, caller: SwarmCaller): Promise<string> {
     .from(swarmTasks)
     .where(eq(swarmTasks.swarmId, caller.swarmId))
     .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
-  const tree = rows.map((task) => ({
+  let visible = rows;
+  if (caller.role === "subplanner") {
+    if (!caller.taskId) throw new ToolRefusal("this sub planner has no part of the plan assigned to it");
+    const byId = new Map(rows.map((task) => [task.id, task]));
+    visible = rows.filter((task) => {
+      let current: typeof task | undefined = task;
+      for (let hops = 0; current && hops < 64; hops += 1) {
+        if (current.id === caller.taskId) return true;
+        current = current.parentId ? byId.get(current.parentId) : undefined;
+      }
+      return false;
+    });
+  }
+  const visibleIds = new Set(visible.map((task) => task.id));
+  const tree = visible.map((task) => ({
     id: task.id,
-    parentId: task.parentId,
+    // A sub planner's root is the top of what it was given. Do not
+    // leak the id of a parent it cannot otherwise see.
+    parentId: task.parentId && visibleIds.has(task.parentId) ? task.parentId : null,
     nodeType: task.nodeType,
     title: task.title,
     description: task.description,
@@ -944,7 +961,14 @@ async function askUser(
   args: Args<"ask_user">,
   events: BoardEvent[],
 ): Promise<string> {
-  const task = args.taskId ? await requireTask(ctx, caller, args.taskId) : null;
+  /*
+   * A sub planner is never allowed to raise a swarm-wide question.
+   * Its authority is one subtree, so an unqualified question belongs
+   * to that subtree's root. Otherwise it could pause work owned by the
+   * main planner without even naming a task outside its grant.
+   */
+  const taskId = args.taskId ?? (caller.role === "subplanner" ? caller.taskId : null);
+  const task = taskId ? await requireTask(ctx, caller, taskId) : null;
   await ctx.db.transaction(async (tx) => {
     /**
      * The question goes into the swarm's own thread, which is where a
@@ -991,6 +1015,12 @@ async function askUser(
         .set({ pausedReason: "attention", updatedAt: new Date() })
         .where(eq(swarms.id, caller.swarmId));
     }
+  });
+  await queueSwarmSlackNotify(ctx, {
+    type: "swarm_question",
+    swarmId: caller.swarmId,
+    taskId: task?.id ?? null,
+    question: args.question,
   });
   if (task) events.push(taskEvent(caller, task.id, task.status));
   else events.push({ type: "swarm_updated", projectId: caller.projectId, swarmId: caller.swarmId });

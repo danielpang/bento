@@ -410,6 +410,8 @@ test("a pull request the console would not link to is drawn without a link", () 
         onResume: () => {},
         onStop: () => {},
         onReopen: () => {},
+        onArchive: () => {},
+        onRestore: () => {},
         onWorkers: () => {},
         onAnswer: () => {},
       },
@@ -567,6 +569,8 @@ function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
         onStop: () => {},
         onCreatePullRequest: () => {},
         onReopen: () => {},
+        onArchive: () => {},
+        onRestore: () => {},
         onWorkers: () => {},
         onAnswer: () => {},
       },
@@ -591,6 +595,12 @@ test("the header carries the ring, the branch, the elapsed time and the controls
   assert.match(html, /aria-label="One more worker"/);
   assert.match(html, /aria-label="One fewer worker"/);
   assertNoDashes(html, "the swarm header");
+});
+
+test("a finished swarm can be archived from its own page", () => {
+  const html = pageHtml("multi", "done");
+  assert.match(html, />Reopen<\/button>/);
+  assert.match(html, />Archive<\/button>/);
 });
 
 test("the header keeps every spend figure apart, against the cap", () => {

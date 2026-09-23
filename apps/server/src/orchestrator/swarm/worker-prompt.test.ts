@@ -202,6 +202,7 @@ test("a branch name a person typed is checked before it reaches git", () => {
     "a//b",
     ".hidden",
     "feature/.hidden",
+    "feature/trailing.",
     "feature/x.lock",
     "--upload-pack=touch /tmp/x",
     "a\nb",

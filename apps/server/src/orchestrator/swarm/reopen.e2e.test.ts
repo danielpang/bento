@@ -422,6 +422,33 @@ test("a swarm that ran past its clock is refused unless the reopen raises that t
   assert.equal(reopenRefusal(late!, { timeLimitMin: null }), null, "and clearing it is allowed");
 });
 
+test("a raised time limit must be beyond time already elapsed", async () => {
+  const fx = await finishedSwarm("much-slower");
+  const firstRunAt = new Date(Date.now() - 5 * 60 * 60_000);
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: fx.swarm.id,
+    role: "planner",
+    agentProfileId: PROFILE,
+    prompt: "Plan the original swarm.",
+    status: "succeeded",
+    queuedAt: firstRunAt,
+  });
+  await db
+    .update(swarms)
+    .set({ status: "timed_out", pausedReason: "time_limit", timeLimitMin: 60 })
+    .where(eq(swarms.id, fx.swarm.id));
+  const [late] = await db.select().from(swarms).where(eq(swarms.id, fx.swarm.id));
+
+  const refused = await db.transaction((tx) =>
+    reopenSwarm(tx as unknown as Db, late!, { instruction: "continue", timeLimitMin: 240 }),
+  );
+  assert.ok("refused" in refused);
+  if (!("refused" in refused)) return;
+  assert.equal(refused.code, "TIME_LIMIT");
+  assert.match(refused.refused, /already been open/);
+});
+
 test("reopening twice makes a second subtree rather than adding to the first", async () => {
   const fx = await finishedSwarm("twice");
   const one = await reopenSwarm(db, fx.swarm, { instruction: "first follow up" });

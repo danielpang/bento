@@ -1156,10 +1156,9 @@ export const slackThreadLinks = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
-    featureId: uuid("feature_id")
-      .notNull()
-      .unique()
-      .references(() => features.id, { onDelete: "cascade" }),
+    /** Exactly one board owns the thread. */
+    featureId: uuid("feature_id").references(() => features.id, { onDelete: "cascade" }),
+    swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "cascade" }),
     slackTeamId: text("slack_team_id").notNull(),
     slackChannelId: text("slack_channel_id").notNull(),
     slackThreadTs: text("slack_thread_ts").notNull(),
@@ -1169,9 +1168,20 @@ export const slackThreadLinks = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex("slack_thread_links_org_feature_idx").on(t.organizationId, t.featureId),
-    uniqueIndex("slack_thread_links_local_feature_idx").on(t.featureId).where(sql`${t.organizationId} is null`),
+    uniqueIndex("slack_thread_links_org_feature_idx")
+      .on(t.organizationId, t.featureId)
+      .where(sql`${t.featureId} is not null`),
+    uniqueIndex("slack_thread_links_local_feature_idx")
+      .on(t.featureId)
+      .where(sql`${t.organizationId} is null AND ${t.featureId} is not null`),
+    uniqueIndex("slack_thread_links_org_swarm_idx")
+      .on(t.organizationId, t.swarmId)
+      .where(sql`${t.swarmId} is not null`),
+    uniqueIndex("slack_thread_links_local_swarm_idx")
+      .on(t.swarmId)
+      .where(sql`${t.organizationId} is null AND ${t.swarmId} is not null`),
     uniqueIndex("slack_thread_links_thread_idx").on(t.slackTeamId, t.slackChannelId, t.slackThreadTs),
+    check("slack_thread_links_owner_shape", sql`(${t.featureId} is null) <> (${t.swarmId} is null)`),
   ],
 );
 

@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
 import { stageArtifactPath } from "@bento/core";
 import {
   agentRuns,
@@ -8,12 +8,15 @@ import {
   runArtifacts,
   runEvents,
   slackThreadLinks,
+  slackUserSettings,
   stages,
+  swarmTasks,
+  swarms,
 } from "@bento/db";
 import { markdownToMrkdwn, SlackApiError, truncateWriteUp, type SlackBlock } from "@bento/slack";
 import type { AppContext } from "../context.js";
 import { isPipelineRun } from "./pipeline-run.js";
-import { cardUrl, slackClientFor, slackConnectionByTeam, slackConnectionRow } from "../slack.js";
+import { cardUrl, slackClientFor, slackConnectionByTeam, slackConnectionRow, swarmUrl } from "../slack.js";
 
 /** Slack errors that will not succeed on retry. Drop rather than loop. */
 const PERMANENT_SLACK_ERRORS = new Set([
@@ -41,7 +44,17 @@ export type SlackNotifyJob =
       fromStatus: string | null;
       toStatus: string | null;
     }
-  | { type: "run_finished"; featureId: string; runId: string };
+  | { type: "run_finished"; featureId: string; runId: string }
+  | { type: "swarm_created"; swarmId: string; userId: string }
+  | { type: "swarm_landed"; swarmId: string; taskId: string }
+  | { type: "swarm_question"; swarmId: string; taskId?: string | null; question: string }
+  | { type: "swarm_completed"; swarmId: string };
+
+type SwarmSlackNotifyJob = Extract<SlackNotifyJob, { swarmId: string }>;
+
+function isSwarmSlackNotifyJob(job: SlackNotifyJob): job is SwarmSlackNotifyJob {
+  return "swarmId" in job;
+}
 
 type ThreadLink = typeof slackThreadLinks.$inferSelect;
 
@@ -50,6 +63,15 @@ async function threadLinkFor(ctx: AppContext, featureId: string): Promise<Thread
     .select()
     .from(slackThreadLinks)
     .where(eq(slackThreadLinks.featureId, featureId))
+    .limit(1);
+  return link ?? null;
+}
+
+async function swarmThreadLinkFor(ctx: AppContext, swarmId: string): Promise<ThreadLink | null> {
+  const [link] = await ctx.db
+    .select()
+    .from(slackThreadLinks)
+    .where(eq(slackThreadLinks.swarmId, swarmId))
     .limit(1);
   return link ?? null;
 }
@@ -63,6 +85,10 @@ async function threadLinkFor(ctx: AppContext, featureId: string): Promise<Thread
  * own retryLimit covers Slack API failures after it is queued.
  */
 export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Promise<void> {
+  if (isSwarmSlackNotifyJob(job)) {
+    await queueSwarmSlackNotify(ctx, job);
+    return;
+  }
   const link = await threadLinkFor(ctx, job.featureId);
   if (!link) return;
   let lastErr: unknown;
@@ -76,6 +102,39 @@ export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Pr
   }
   console.error(`slack.notify enqueue for ${job.featureId} failed:`, lastErr);
   ctx.analytics?.captureException(lastErr, null, null, { feature_id: job.featureId, queue: "slack.notify" });
+}
+
+export async function queueSwarmSlackNotify(
+  ctx: AppContext,
+  job: SwarmSlackNotifyJob,
+): Promise<void> {
+  if (job.type === "swarm_created") {
+    const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, job.swarmId)).limit(1);
+    if (!swarm || (await swarmThreadLinkFor(ctx, swarm.id))) return;
+    const org = swarm.organizationId
+      ? eq(slackUserSettings.organizationId, swarm.organizationId)
+      : isNull(slackUserSettings.organizationId);
+    const [setting] = await ctx.db
+      .select({ id: slackUserSettings.id })
+      .from(slackUserSettings)
+      .where(and(org, eq(slackUserSettings.userId, job.userId), isNotNull(slackUserSettings.slackUserId)))
+      .limit(1);
+    if (!setting || !(await slackConnectionRow(ctx, swarm.organizationId))) return;
+  } else if (!(await swarmThreadLinkFor(ctx, job.swarmId))) {
+    return;
+  }
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await ctx.boss.send("slack.notify", job, NOTIFY_SEND_OPTIONS);
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  console.error(`slack.notify enqueue for swarm ${job.swarmId} failed:`, lastErr);
+  ctx.analytics?.captureException(lastErr, null, null, { swarm_id: job.swarmId, queue: "slack.notify" });
 }
 
 /**
@@ -107,6 +166,10 @@ export function gatedReasonJob(featureId: string, stageId: string): SlackNotifyJ
 }
 
 export async function handleSlackNotify(ctx: AppContext, job: SlackNotifyJob): Promise<void> {
+  if (isSwarmSlackNotifyJob(job)) {
+    await handleSwarmSlackNotify(ctx, job);
+    return;
+  }
   const link = await threadLinkFor(ctx, job.featureId);
   if (!link) return;
   const connection = await slackConnectionByTeam(ctx, link.slackTeamId)
@@ -203,10 +266,100 @@ export async function handleSlackNotify(ctx: AppContext, job: SlackNotifyJob): P
   }
 }
 
+async function handleSwarmSlackNotify(
+  ctx: AppContext,
+  job: SwarmSlackNotifyJob,
+): Promise<void> {
+  const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, job.swarmId)).limit(1);
+  if (!swarm) return;
+
+  if (job.type === "swarm_created") {
+    const connection = await slackConnectionRow(ctx, swarm.organizationId);
+    if (!connection) return;
+    const org = swarm.organizationId
+      ? eq(slackUserSettings.organizationId, swarm.organizationId)
+      : isNull(slackUserSettings.organizationId);
+    const [setting] = await ctx.db
+      .select({ slackUserId: slackUserSettings.slackUserId })
+      .from(slackUserSettings)
+      .where(and(org, eq(slackUserSettings.userId, job.userId), isNotNull(slackUserSettings.slackUserId)))
+      .limit(1);
+    if (!setting?.slackUserId) return;
+
+    let link = await swarmThreadLinkFor(ctx, swarm.id);
+    if (!link) {
+      const [inserted] = await ctx.db
+        .insert(slackThreadLinks)
+        .values({
+          organizationId: swarm.organizationId,
+          swarmId: swarm.id,
+          slackTeamId: connection.slackTeamId,
+          slackChannelId: setting.slackUserId,
+          slackThreadTs: `pending:${swarm.id}`,
+          slackUserId: setting.slackUserId,
+        })
+        .onConflictDoNothing()
+        .returning();
+      link = inserted ?? (await swarmThreadLinkFor(ctx, swarm.id));
+    }
+    if (!link || !link.slackThreadTs.startsWith("pending:")) return;
+    const client = await slackClientFor(ctx, connection);
+    if (!client) return;
+    const url = swarmUrl(ctx, swarm.id);
+    const [project] = await ctx.db.select().from(projects).where(eq(projects.id, swarm.projectId)).limit(1);
+    const text = `Started swarm *${swarm.title}* in *${project?.name ?? "the project"}*.`;
+    const posted = await client.postMessage({
+      channel: link.slackChannelId,
+      text,
+      blocks: [section(`${text}\n${markdownToMrkdwn(swarm.goal).slice(0, 2200)}`), actions([urlButton("Open swarm", url)])],
+      clientMsgId: swarm.id,
+    });
+    await ctx.db
+      .update(slackThreadLinks)
+      .set({ slackChannelId: posted.channel, slackThreadTs: posted.ts, updatedAt: new Date() })
+      .where(eq(slackThreadLinks.id, link.id));
+    return;
+  }
+
+  const link = await swarmThreadLinkFor(ctx, swarm.id);
+  if (!link || link.slackThreadTs.startsWith("pending:")) return;
+  const connection = await slackConnectionByTeam(ctx, link.slackTeamId)
+    ?? await slackConnectionRow(ctx, link.organizationId);
+  if (!connection) return;
+  const client = await slackClientFor(ctx, connection);
+  if (!client) return;
+  const url = swarmUrl(ctx, swarm.id);
+  const post = (text: string, blocks: SlackBlock[]) => postThread(client, link, `swarm ${swarm.id}`, text, blocks);
+
+  if (job.type === "swarm_landed") {
+    const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, job.taskId)).limit(1);
+    if (!task || task.swarmId !== swarm.id) return;
+    const text = `Landed *${task.title}*.`;
+    await post(text, [section(text), actions([urlButton("Open swarm", url)])]);
+    return;
+  }
+  if (job.type === "swarm_question") {
+    const text = job.taskId
+      ? `The swarm has a question about a task:\n${markdownToMrkdwn(job.question)}`
+      : `The swarm has a question:\n${markdownToMrkdwn(job.question)}`;
+    await post("The swarm has a question.", [
+      section(`${text.slice(0, 2700)}\n\nReply in this thread so the planner receives your answer.`),
+      actions([urlButton("Open swarm", url)]),
+    ]);
+    return;
+  }
+  if (job.type === "swarm_completed") {
+    await post("This swarm is finished.", [
+      section("This swarm is finished."),
+      actions([urlButton("Open swarm", url)]),
+    ]);
+  }
+}
+
 async function postThread(
   client: NonNullable<Awaited<ReturnType<typeof slackClientFor>>>,
   link: ThreadLink,
-  featureId: string,
+  subject: string,
   text: string,
   blocks: SlackBlock[],
 ): Promise<{ ts: string } | null> {
@@ -219,7 +372,7 @@ async function postThread(
     });
   } catch (err) {
     if (err instanceof SlackApiError && err.code && PERMANENT_SLACK_ERRORS.has(err.code)) {
-      console.error(`slack.notify dropped (${err.code}) for ${featureId}:`, err.message);
+      console.error(`slack.notify dropped (${err.code}) for ${subject}:`, err.message);
       return null;
     }
     throw err;

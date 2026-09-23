@@ -364,6 +364,8 @@ export function SwarmBoard({
             onResume: () => selectedId && act(() => swarmApi.resumeSwarm(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
             onReopen: () => setReopening(true),
+            onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
+            onRestore: () => selectedId && act(() => swarmApi.restoreSwarm(selectedId)),
             onWorkers: (workers) => selectedId && act(() => swarmApi.setWorkers(selectedId, workers)),
             onAnswer: (questionId, text) =>
               selectedId && act(() => swarmApi.answerQuestion(selectedId, questionId, text)),

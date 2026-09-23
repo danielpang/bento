@@ -70,6 +70,11 @@ export interface ReopenInput {
   now?: Date;
 }
 
+interface ReopenCheckInput extends Pick<ReopenInput, "budgetUsd" | "timeLimitMin"> {
+  firstRunAt?: Date | null;
+  now?: Date;
+}
+
 export interface Reopened {
   swarm: Swarm;
   /** The plan node the follow up hangs off. */
@@ -92,7 +97,7 @@ export type ReopenRefusal = { refused: string; code: "NOT_FINISHED" | "BUDGET" |
  * holds: raising the budget in the same call is the ordinary way to
  * reopen a swarm that ran out of money.
  */
-export function reopenRefusal(swarm: Swarm, input: Pick<ReopenInput, "budgetUsd" | "timeLimitMin">): ReopenRefusal | null {
+export function reopenRefusal(swarm: Swarm, input: ReopenCheckInput): ReopenRefusal | null {
   if (!(REOPENABLE_STATUSES as readonly string[]).includes(swarm.status)) {
     return {
       refused: `This swarm is ${swarm.status}, so there is nothing to reopen. Reopening is for a swarm that has finished.`,
@@ -125,6 +130,15 @@ export function reopenRefusal(swarm: Swarm, input: Pick<ReopenInput, "budgetUsd"
         code: "TIME_LIMIT",
       };
     }
+    if (raised !== null && input.firstRunAt) {
+      const elapsed = ((input.now ?? new Date()).getTime() - input.firstRunAt.getTime()) / 60_000;
+      if (raised <= elapsed) {
+        return {
+          refused: `This swarm has already been open for ${Math.ceil(elapsed)} minutes, so a ${raised} minute limit would stop the follow up at once. Raise the limit past the elapsed time, or clear it.`,
+          code: "TIME_LIMIT",
+        };
+      }
+    }
   }
   return null;
 }
@@ -142,10 +156,29 @@ export async function reopenSwarm(
   swarm: Swarm,
   input: ReopenInput,
 ): Promise<Reopened | ReopenRefusal> {
-  const refusal = reopenRefusal(swarm, input);
+  const now = input.now ?? new Date();
+  // Serialize two people reopening the same finished swarm. Without
+  // the lock, both requests can read reopenCount 0, both add Follow up
+  // 1, and both report success while one logical follow up was meant.
+  const [current] = await tx
+    .select()
+    .from(swarms)
+    .where(eq(swarms.id, swarm.id))
+    .for("update")
+    .limit(1);
+  if (!current) throw new Error("the swarm being reopened no longer exists");
+  swarm = current;
+  const [clock] = await tx
+    .select({ at: sql<Date | null>`min(${agentRuns.queuedAt})` })
+    .from(agentRuns)
+    .where(eq(agentRuns.swarmId, swarm.id));
+  const refusal = reopenRefusal(swarm, {
+    ...input,
+    firstRunAt: clock?.at ? new Date(clock.at) : swarm.createdAt,
+    now,
+  });
   if (refusal) return refusal;
 
-  const now = input.now ?? new Date();
   const instruction = input.instruction.trim();
   const followUp = swarm.reopenCount + 1;
 
@@ -234,7 +267,13 @@ export async function reopenSwarm(
       ...(input.timeLimitMin === undefined ? {} : { timeLimitMin: input.timeLimitMin }),
       updatedAt: now,
     })
-    .where(eq(swarms.id, swarm.id))
+    .where(
+      and(
+        eq(swarms.id, swarm.id),
+        eq(swarms.status, swarm.status),
+        eq(swarms.reopenCount, swarm.reopenCount),
+      ),
+    )
     .returning();
   if (!updated) throw new Error("reopening a swarm updated no row");
 

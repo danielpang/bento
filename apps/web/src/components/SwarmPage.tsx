@@ -72,6 +72,10 @@ export interface SwarmActions {
    * than joined by a second set.
    */
   onReopen: () => void;
+  /** Puts a finished swarm in the archived menu and releases its machine. */
+  onArchive: () => void;
+  /** Returns an archived swarm to the strip without changing its work. */
+  onRestore: () => void;
   onWorkers: (workers: number) => void;
   onAnswer: (questionId: string, text: string) => void;
 }
@@ -258,6 +262,22 @@ export function SwarmPage({
             >
               Reopen
             </button>
+          )}
+          {swarm.archivedAt ? (
+            <button className="btn" disabled={busy} onClick={actions.onRestore}>
+              Restore
+            </button>
+          ) : (
+            canReopen(swarm.status) && (
+              <button
+                className="btn"
+                disabled={busy}
+                onClick={actions.onArchive}
+                title="Move this finished swarm to the archived menu and release its workspace."
+              >
+                Archive
+              </button>
+            )
           )}
           <button
             className="btn btn-primary"

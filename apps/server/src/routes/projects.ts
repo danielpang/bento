@@ -1142,11 +1142,14 @@ export function projectRoutes(ctx: AppContext) {
        * asked. A team with none exports none, and the key is left out
        * rather than written empty.
        */
-      const swarmRows = await db(c, ctx)
-        .select()
-        .from(swarmTemplates)
-        .where(await visibleSwarmTemplateFilter(ctx, c))
-        .orderBy(sql`lower(${swarmTemplates.name})`, asc(swarmTemplates.id));
+      const swarmEnabled = !!(await getBetaTester(ctx, c));
+      const swarmRows = swarmEnabled
+        ? await db(c, ctx)
+            .select()
+            .from(swarmTemplates)
+            .where(await visibleSwarmTemplateFilter(ctx, c))
+            .orderBy(sql`lower(${swarmTemplates.name})`, asc(swarmTemplates.id))
+        : [];
 
       const usedIds = [
         ...new Set(
@@ -1239,6 +1242,13 @@ export function projectRoutes(ctx: AppContext) {
       const parsed = parsePipelineFile(await c.req.text());
       if ("error" in parsed) return c.json({ error: parsed.error }, 400);
       const file = parsed.data;
+      // The pipeline route itself is public product, but this optional
+      // part of its file is not. Refuse before agents, stages, or
+      // repository commands are changed, so a non-tester cannot use a
+      // public import as a side door into the beta data model.
+      if (file.swarms.length > 0 && !(await getBetaTester(ctx, c))) {
+        return c.json({ error: "not found" }, 404);
+      }
 
       const [pipeline] = await db(c, ctx).select().from(pipelines).where(eq(pipelines.projectId, projectId));
       if (!pipeline) return c.json({ error: "not found" }, 404);

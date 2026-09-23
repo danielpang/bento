@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
 import {
   agentProfiles,
   features,
@@ -10,6 +10,8 @@ import {
   slackThreadLinks,
   slackUserSettings,
   stages,
+  swarmMessages,
+  swarms,
   user,
 } from "@bento/db";
 import { mentionTitle } from "@bento/slack";
@@ -22,6 +24,8 @@ import {
   slackConnectionByTeam,
 } from "../slack.js";
 import { queueLinearIssueCreate } from "./linear-sync.js";
+import { enqueueSwarmTick } from "./swarm/coordinator.js";
+import { recordSwarmAnswer } from "./swarm/messages.js";
 import {
   activationRefusal,
   advanceFeature,
@@ -123,6 +127,80 @@ async function handleMention(
       channel: job.channelId,
       threadTs: job.threadTs,
       text: UNKNOWN_MEMBER,
+    });
+    return;
+  }
+  const [swarmLink] = await ctx.db
+    .select({ swarmId: slackThreadLinks.swarmId })
+    .from(slackThreadLinks)
+    .where(
+      and(
+        eq(slackThreadLinks.slackTeamId, job.teamId),
+        eq(slackThreadLinks.slackChannelId, job.channelId),
+        eq(slackThreadLinks.slackThreadTs, job.threadTs),
+        isNotNull(slackThreadLinks.swarmId),
+      ),
+    )
+    .limit(1);
+  if (swarmLink?.swarmId) {
+    const [linked] = await ctx.db
+      .select({ swarm: swarms, ownerId: projects.ownerId })
+      .from(swarms)
+      .innerJoin(projects, eq(projects.id, swarms.projectId))
+      .where(eq(swarms.id, swarmLink.swarmId))
+      .limit(1);
+    const allowed = linked
+      && (memberRow.organizationId
+        ? linked.swarm.organizationId === memberRow.organizationId
+        : linked.swarm.organizationId === null && linked.ownerId === memberRow.userId);
+    if (!allowed) {
+      await client.postMessage({ channel: job.channelId, threadTs: job.threadTs, text: NEED_ACCOUNT });
+      return;
+    }
+    const answer = mentionTitle(job.text, botUserId);
+    if (!answer) {
+      await client.postMessage({
+        channel: job.channelId,
+        threadTs: job.threadTs,
+        text: "Write your answer after @bento so the planner can receive it.",
+      });
+      return;
+    }
+    const [question] = await ctx.db
+      .select({ taskId: swarmMessages.taskId })
+      .from(swarmMessages)
+      .where(
+        and(
+          eq(swarmMessages.swarmId, linked.swarm.id),
+          eq(swarmMessages.status, "delivered"),
+          isNotNull(swarmMessages.runId),
+          isNull(swarmMessages.userId),
+          sql`not exists (
+            select 1
+              from "swarm_messages" "answer"
+             where "answer"."swarm_id" = ${swarmMessages.swarmId}
+               and "answer"."user_id" is not null
+               and "answer"."created_at" >= ${swarmMessages.createdAt}
+          )`,
+        ),
+      )
+      .orderBy(desc(swarmMessages.createdAt))
+      .limit(1);
+    // Only the first reply after a task-scoped question belongs to
+    // that task. Later thread messages are general planner guidance;
+    // pinning all of them to the last question could feed a follow-up
+    // to a worker that finished long ago.
+    await recordSwarmAnswer(ctx.db, {
+      swarmId: linked.swarm.id,
+      taskId: question?.taskId ?? null,
+      text: answer,
+      userId: memberRow.userId,
+    });
+    await enqueueSwarmTick(ctx, linked.swarm.id);
+    await client.postMessage({
+      channel: job.channelId,
+      threadTs: job.threadTs,
+      text: "Sent your answer to the planner.",
     });
     return;
   }
@@ -748,10 +826,11 @@ export async function registerSlackJobs(ctx: AppContext): Promise<void> {
       try {
         await handleSlackNotify(ctx, job.data);
       } catch (err) {
-        console.error(`slack.notify ${job.data.featureId} failed:`, err);
+        const subject = "featureId" in job.data ? { feature_id: job.data.featureId } : { swarm_id: job.data.swarmId };
+        console.error(`slack.notify ${"featureId" in job.data ? job.data.featureId : job.data.swarmId} failed:`, err);
         ctx.analytics?.captureException(err, null, null, {
           queue: "slack.notify",
-          feature_id: job.data.featureId,
+          ...subject,
         });
         throw err;
       }

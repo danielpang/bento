@@ -4,6 +4,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { agentRuns, runArtifacts, swarmTasks, swarms, type Db } from "@bento/db";
+import { writeFileCommand } from "@bento/agents";
+import { collectExec, repositoryPathIn, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 
 const exec = promisify(execFile);
 
@@ -41,6 +43,21 @@ const exec = promisify(execFile);
 
 /** Where a leaf's section goes, relative to the first repository's root. */
 export const SECTION_DIR = "docs/sections";
+
+/** The server-owned node that gates a document swarm's completion. */
+export const DOCUMENT_ASSEMBLY_FLAG = "documentAssembly";
+
+/** Whether this is Bento's assembly node rather than agent work. */
+export function isDocumentAssembly(task: Pick<typeof swarmTasks.$inferSelect, "flags">): boolean {
+  return task.flags?.[DOCUMENT_ASSEMBLY_FLAG] === true;
+}
+
+/** Which initial pass or follow up this assembly belongs to. */
+export function documentAssemblyPass(task: Pick<typeof swarmTasks.$inferSelect, "flags">): number | null {
+  if (!isDocumentAssembly(task)) return null;
+  const value = task.flags.reopenCount;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
 
 /** Whether this swarm's leaves write prose rather than code. */
 export function isDocumentSwarm(swarm: Pick<typeof swarms.$inferSelect, "deliverable">): boolean {
@@ -260,49 +277,113 @@ export async function assembleSwarmDocument(
    * no run at all records nothing, because run_artifacts.run_id is not
    * nullable.
    */
-  const runId = input.runId ?? (await newestRunId(db, input.swarm.id));
-  if (runId) {
-    /*
-     * One row, rewritten, rather than one row per assembly.
-     *
-     * Publishing is safe to run twice by design (a redelivered job, a
-     * swarm reopened and finished again), and a plain insert made that
-     * cost a second copy of the document every time: the console lists
-     * a swarm's artifacts newest first, so what a person saw was the
-     * same file listed twice with nothing to tell them apart.
-     */
-    const [existing] = await db
-      .select({ id: runArtifacts.id })
-      .from(runArtifacts)
-      .where(
-        and(
-          eq(runArtifacts.swarmId, input.swarm.id),
-          eq(runArtifacts.stageSlug, "document"),
-          eq(runArtifacts.path, relative),
-        ),
-      )
-      .limit(1);
-    const values = {
-      runId,
-      type: "swarm" as const,
-      swarmId: input.swarm.id,
-      stageSlug: "document",
-      stageName: "Document",
-      path: relative,
-      kind: "markdown" as const,
-      mime: "text/markdown",
-      size: Buffer.byteLength(content, "utf8"),
-      content,
-    };
-    if (existing) {
-      // createdAt moves with it: the row is the document as it stands
-      // now, and a list ordered by age has to put it where it belongs.
-      await db.update(runArtifacts).set({ ...values, createdAt: new Date() }).where(eq(runArtifacts.id, existing.id));
-    } else {
-      await db.insert(runArtifacts).values(values);
-    }
-  }
+  await recordDocumentArtifact(db, {
+    swarmId: input.swarm.id,
+    runId: input.runId ?? (await newestRunId(db, input.swarm.id)),
+    path: relative,
+    content,
+  });
 
+  return {
+    path: relative,
+    content,
+    written: sections.filter((section) => section.body !== null).length,
+    sections: sections.length,
+    committed,
+  };
+}
+
+/**
+ * The same assembly against a repository that lives inside a sandbox.
+ *
+ * Every driver goes through exec, including Sprite. Content is written
+ * by the literal writer used for MCP configuration, and every git
+ * argument is server-owned. Nothing here needs a remote credential in
+ * the machine.
+ */
+export async function assembleSwarmDocumentInSandbox(
+  db: Pick<Db, "select" | "insert" | "update">,
+  input: {
+    swarm: typeof swarms.$inferSelect;
+    driver: SandboxDriver;
+    handle: SandboxHandle;
+    repositoryName: string;
+    branch: string;
+    templatePath?: string | null;
+    preamble?: string | null;
+    runId?: string | null;
+  },
+): Promise<AssembledDocument | null> {
+  if (!isDocumentSwarm(input.swarm)) return null;
+  const tasks = await db
+    .select()
+    .from(swarmTasks)
+    .where(eq(swarmTasks.swarmId, input.swarm.id))
+    .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
+  const cwd = repositoryPathIn(input.handle.workdir, input.repositoryName);
+  const sections = await sectionsFromTasks(tasks, async (task) => {
+    const result = await collectExec(
+      input.driver.exec(input.handle, ["cat", "--", sectionPathFor(task)], { cwd, timeoutMs: 60_000 }),
+    );
+    if (result.exitCode === 0 && result.stdout.trim()) return result.stdout;
+    return task.report?.trim() ? task.report : null;
+  });
+  if (sections.length === 0) return null;
+
+  const content = assembleDocument({
+    title: input.swarm.title,
+    goal: input.swarm.goal,
+    preamble: input.preamble ?? null,
+    sections,
+  });
+  const relative = documentPathFor(input.swarm, input.templatePath);
+  const current = await checkedSandbox(input.driver, input.handle, ["git", "symbolic-ref", "--short", "HEAD"], cwd);
+  if (current.stdout.trim() !== input.branch) {
+    throw new Error(`the swarm checkout is on ${current.stdout.trim() || "no branch"}, not ${input.branch}`);
+  }
+  await checkedSandbox(
+    input.driver,
+    input.handle,
+    writeFileCommand({ path: `${cwd}/${relative}`, content }),
+    cwd,
+  );
+  await checkedSandbox(input.driver, input.handle, ["git", "add", "--", relative], cwd);
+  const changed = await collectExec(
+    input.driver.exec(input.handle, ["git", "diff", "--cached", "--quiet", "--", relative], {
+      cwd,
+      timeoutMs: 60_000,
+    }),
+  );
+  if (changed.exitCode !== 0 && changed.exitCode !== 1) {
+    throw new Error(changed.stderr.trim() || changed.stdout.trim() || `git diff exited ${changed.exitCode}`);
+  }
+  const committed = changed.exitCode === 1;
+  if (committed) {
+    await checkedSandbox(
+      input.driver,
+      input.handle,
+      [
+        "git",
+        "-c",
+        "user.name=Bento",
+        "-c",
+        "user.email=no-reply@usebento.ai",
+        "commit",
+        "--only",
+        "-m",
+        `Assemble ${input.swarm.title}`,
+        "--",
+        relative,
+      ],
+      cwd,
+    );
+  }
+  await recordDocumentArtifact(db, {
+    swarmId: input.swarm.id,
+    runId: input.runId ?? (await newestRunId(db, input.swarm.id)),
+    path: relative,
+    content,
+  });
   return {
     path: relative,
     content,
@@ -324,19 +405,23 @@ async function readSections(
   worktreePath: string,
   tasks: (typeof swarmTasks.$inferSelect)[],
 ): Promise<DocumentSection[]> {
+  const dir = path.join(worktreePath, SECTION_DIR);
+  const present = new Set(await readdir(dir).catch(() => []));
+  return sectionsFromTasks(tasks, (task) => readSection(dir, present, task));
+}
+
+/** Builds the outline once, independently of where its files live. */
+async function sectionsFromTasks(
+  tasks: (typeof swarmTasks.$inferSelect)[],
+  readBody: (task: typeof swarmTasks.$inferSelect) => Promise<string | null>,
+): Promise<DocumentSection[]> {
   const byParent = new Map<string | null, (typeof swarmTasks.$inferSelect)[]>();
   for (const task of tasks) {
-    if (task.status === "cancelled") continue;
+    if (task.status === "cancelled" || isDocumentAssembly(task) || task.flags?.finalCheck === true) continue;
     const siblings = byParent.get(task.parentId) ?? [];
     siblings.push(task);
     byParent.set(task.parentId, siblings);
   }
-
-  // What is actually in the sections directory, read once, so a leaf
-  // that wrote no file costs a set lookup rather than a failed open
-  // per section.
-  const dir = path.join(worktreePath, SECTION_DIR);
-  const present = new Set(await readdir(dir).catch(() => []));
 
   const sections: DocumentSection[] = [];
   const seen = new Set<string>();
@@ -350,7 +435,7 @@ async function readSections(
         sections.push({
           title: task.title,
           depth,
-          body: await readSection(dir, present, task),
+          body: await readBody(task),
           note:
             task.status === "done" || task.status === "landed"
               ? "This section was finished, but nothing was written down for it."
@@ -391,6 +476,56 @@ async function newestRunId(db: Pick<Db, "select">, swarmId: string): Promise<str
   return row?.id ?? null;
 }
 
+/** One artifact row per swarm document, updated after every follow up. */
+async function recordDocumentArtifact(
+  db: Pick<Db, "select" | "insert" | "update">,
+  input: { swarmId: string; runId: string | null; path: string; content: string },
+): Promise<void> {
+  if (!input.runId) throw new Error("the document cannot be filed because this swarm has no run");
+  const [existing] = await db
+    .select({ id: runArtifacts.id })
+    .from(runArtifacts)
+    .where(
+      and(
+        eq(runArtifacts.swarmId, input.swarmId),
+        eq(runArtifacts.stageSlug, "document"),
+        eq(runArtifacts.path, input.path),
+      ),
+    )
+    .limit(1);
+  const values = {
+    runId: input.runId,
+    type: "swarm" as const,
+    swarmId: input.swarmId,
+    stageSlug: "document",
+    stageName: "Document",
+    path: input.path,
+    kind: "markdown" as const,
+    mime: "text/markdown",
+    size: Buffer.byteLength(input.content, "utf8"),
+    content: input.content,
+  };
+  if (existing) {
+    await db.update(runArtifacts).set({ ...values, createdAt: new Date() }).where(eq(runArtifacts.id, existing.id));
+  } else {
+    await db.insert(runArtifacts).values(values);
+  }
+}
+
+/** One trusted sandbox command, with provider detail preserved on failure. */
+async function checkedSandbox(
+  driver: SandboxDriver,
+  handle: SandboxHandle,
+  argv: string[],
+  cwd: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const result = await collectExec(driver.exec(handle, argv, { cwd, timeoutMs: 60_000 }));
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || result.stdout.trim() || `${argv[0]} exited ${result.exitCode}`);
+  }
+  return result;
+}
+
 /**
  * Commits the assembled document, if it changed anything.
  *
@@ -412,21 +547,9 @@ async function commitDocument(worktreePath: string, relative: string, title: str
     GIT_PAGER: "cat",
   };
   const git = (args: string[]) => exec("git", ["-C", worktreePath, ...args], { env, maxBuffer: 32 * 1024 * 1024 });
-  try {
-    await git(["add", "--", relative]);
-    const { stdout } = await git(["status", "--porcelain", "--", relative]);
-    if (!stdout.trim()) return false;
-    await git(["commit", "--quiet", "-m", `Assemble ${title}`, "--", relative]);
-    return true;
-  } catch (err) {
-    /*
-     * Not thrown. The artifact is still recorded and the swarm still
-     * publishes whatever the merge queue landed, which is more useful
-     * than a finished swarm that failed to finish over a file it could
-     * not commit. The reason goes to the log, where the other
-     * publishing failures go.
-     */
-    console.error(`could not commit ${relative}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
+  await git(["add", "--", relative]);
+  const { stdout } = await git(["status", "--porcelain", "--", relative]);
+  if (!stdout.trim()) return false;
+  await git(["commit", "--quiet", "-m", `Assemble ${title}`, "--", relative]);
+  return true;
 }

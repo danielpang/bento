@@ -111,5 +111,10 @@ export function parsePipelineFile(text: string): { data: PipelineFile } | { erro
 
 /** Serialises, with the long skills as readable block scalars. */
 export function writePipelineFile(data: PipelineFile): string {
-  return writeYamlDocument(data);
+  if (data.swarms.length > 0) return writeYamlDocument(data);
+  // Swarms are a gated product surface. An empty key would still tell
+  // a team outside the rollout that the feature exists, and it adds
+  // noise to every pipeline file written before a team uses it.
+  const { swarms: _swarms, ...pipeline } = data;
+  return writeYamlDocument(pipeline);
 }

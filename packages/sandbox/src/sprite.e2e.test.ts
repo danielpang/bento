@@ -80,7 +80,6 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 /** Long: a cold sprite installs ten CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
-const exec = promisify(execFile);
 
 const DSH_MOCK_SERVER = `import { appendFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";

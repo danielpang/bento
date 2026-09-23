@@ -53,12 +53,15 @@ export class SlackClient {
     text: string;
     threadTs?: string;
     blocks?: SlackBlock[];
+    /** Stable id for a root message that may be retried after a crash. */
+    clientMsgId?: string;
   }): Promise<SlackMessageRef> {
     const result = await this.call<{ channel?: string; ts?: string }>("chat.postMessage", {
       channel: input.channel,
       text: input.text,
       ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
       ...(input.blocks ? { blocks: input.blocks } : {}),
+      ...(input.clientMsgId ? { client_msg_id: input.clientMsgId } : {}),
     });
     if (!result.channel || !result.ts) throw new SlackApiError("Slack did not return a message timestamp");
     return { channel: result.channel, ts: result.ts };
@@ -183,7 +186,17 @@ export async function exchangeOAuthCode(
   };
 }
 
-export const SLACK_BOT_SCOPES = ["app_mentions:read", "chat:write", "users:read", "users:read.email"] as const;
+export const SLACK_BOT_SCOPES = [
+  "app_mentions:read",
+  "chat:write",
+  // Swarm threads begin in the creator's App Home conversation. Slack
+  // does not send app_mention events for direct messages, even when a
+  // person explicitly mentions the app, so replies arrive through the
+  // message.im subscription and require this scope.
+  "im:history",
+  "users:read",
+  "users:read.email",
+] as const;
 
 export function slackAuthorizeUrl(input: {
   clientId: string;
