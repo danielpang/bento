@@ -1396,6 +1396,7 @@ test("a restart recovers what the agent said while no server was attached", { ti
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
