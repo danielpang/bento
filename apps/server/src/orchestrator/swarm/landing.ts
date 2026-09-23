@@ -10,12 +10,13 @@ import {
 } from "@bento/db";
 import { resolveRepositoryCommands } from "@bento/core";
 import { collectExec, repositoryPathIn } from "@bento/sandbox";
+import type { SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { landingPolicyFor, landingMergeMessage, workerBranchName } from "./branches.js";
 import { handLeafToPlanner } from "./planner-news.js";
-import { landWorkerBranch, type LandOutcome } from "./landing-git.js";
+import { landWorkerBranch, landWorkerBundles, type LandOutcome } from "./landing-git.js";
 
 /**
  * A landing outcome that stops the attempt.
@@ -173,27 +174,6 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   if (repoRows.length === 0) {
     return finish(ctx, landing, "failed", "this project spans no repositories, so there is nothing to land.");
   }
-  /**
-   * Landing reads and writes checkouts on this host.
-   *
-   * A driver with no host filesystem (the sprite driver clones inside
-   * the machine instead of mounting a worktree) has neither the swarm's
-   * checkout nor the worker's here, so every git call below would fail
-   * on a directory that is not there and the leaf would be failed with
-   * a message about a missing ref. Said plainly instead, because the
-   * answer is not "retry" and not "the worker did something wrong": it
-   * is that this deployment's driver cannot land yet.
-   */
-  if (ctx.driver.provider === "sprite") {
-    return finish(
-      ctx,
-      landing,
-      "failed",
-      "landing a branch needs the repository on the server, and this deployment runs agents on sandboxes that hold their own clones. The leaf's branch is in its sandbox and nothing has been lost.",
-      task,
-    );
-  }
-
   const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
   const workerBranch = landing.branchName ?? task.branchName ?? workerBranchName(swarmBranch, task.id);
   const policy = landingPolicyFor(task);
@@ -201,6 +181,26 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
 
   const landed: string[] = [];
   const problems: { repo: string; outcome: LandFailure }[] = [];
+  const remoteHandles =
+    ctx.driver.provider === "sprite" ? await landingSandboxHandles(ctx, swarm.sandboxId, task.id) : null;
+  if (ctx.driver.provider === "sprite" && !remoteHandles) {
+    return finish(
+      ctx,
+      landing,
+      "failed",
+      "the swarm or worker sandbox is unavailable, so Bento cannot read the branch that is waiting to land.",
+      task,
+    );
+  }
+  if (remoteHandles && (!ctx.driver.exportRepository || !ctx.driver.importRepository)) {
+    return finish(
+      ctx,
+      landing,
+      "failed",
+      "this sandbox driver cannot transfer a reconciled branch back into the swarm sandbox.",
+      task,
+    );
+  }
   for (const repo of repoRows) {
     /**
      * One repository at a time, and a failure in one stops the rest.
@@ -213,15 +213,25 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      * retry starts again from the top, where the repositories that did
      * land read as "already an ancestor" and cost nothing.
      */
-    const outcome = await landWorkerBranch({
-      repoPath: repo.localPath,
-      swarmWorktree: worktreeFor(ctx, swarmWorkspace, repo.name),
-      swarmBranch,
-      workerBranch,
-      policy,
-      mergeMessage: landingMergeMessage(task),
-      landingId: landing.id,
-    });
+    const outcome = remoteHandles
+      ? await landSandboxBranch(ctx, {
+          repoName: repo.name,
+          baseBranch: repo.defaultBranch,
+          swarmBranch,
+          policy,
+          mergeMessage: landingMergeMessage(task),
+          swarmHandle: remoteHandles.swarm,
+          workerHandle: remoteHandles.worker,
+        })
+      : await landWorkerBranch({
+          repoPath: repo.localPath,
+          swarmWorktree: worktreeFor(ctx, swarmWorkspace, repo.name),
+          swarmBranch,
+          workerBranch,
+          policy,
+          mergeMessage: landingMergeMessage(task),
+          landingId: landing.id,
+        });
     if (outcome.ok) {
       if (outcome.commits > 0) landed.push(repo.name);
       continue;
@@ -245,8 +255,9 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      * sandbox, because the code being tested was written by an agent
      * and its test command would otherwise run on the server.
      */
-    const failure = await runLandingTests(ctx, swarm, repoRows, task);
-    if (failure) return failTests(ctx, landing, task, swarm, failure);
+    const check = await runLandingTests(ctx, swarm, repoRows, task);
+    if (check.kind === "failed") return failTests(ctx, landing, task, swarm, check.detail);
+    if (check.kind === "unavailable") return finish(ctx, landing, "failed", check.detail, task);
     return succeed(ctx, landing, task, swarm, landed);
   }
 
@@ -285,6 +296,101 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   return finish(ctx, landing, "failed", `${problem.repo}: ${problem.outcome.detail}`, task);
 }
 
+/** The two machines whose branches a remote landing reconciles. */
+async function landingSandboxHandles(
+  ctx: AppContext,
+  swarmSandboxId: string | null,
+  taskId: string,
+): Promise<{ swarm: SandboxHandle; worker: SandboxHandle } | null> {
+  if (!swarmSandboxId) return null;
+  const [swarmSandbox] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarmSandboxId)).limit(1);
+  const workerRows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, taskId));
+  const workerSandbox = workerRows.find((row) => row.status !== "destroyed");
+  if (
+    !swarmSandbox ||
+    swarmSandbox.status === "destroyed" ||
+    !workerSandbox ||
+    swarmSandbox.provider !== ctx.driver.provider ||
+    workerSandbox.provider !== ctx.driver.provider
+  ) {
+    return null;
+  }
+  return {
+    swarm: {
+      externalId: swarmSandbox.externalId,
+      provider: swarmSandbox.provider,
+      workdir: swarmSandbox.workdir,
+    },
+    worker: {
+      externalId: workerSandbox.externalId,
+      provider: workerSandbox.provider,
+      workdir: workerSandbox.workdir,
+    },
+  };
+}
+
+/**
+ * Lands one repository whose object stores live in two sandboxes.
+ * Export and reconciliation do not move anything. The import is the
+ * single compare-and-swap that changes the swarm branch.
+ */
+async function landSandboxBranch(
+  ctx: AppContext,
+  input: {
+    repoName: string;
+    baseBranch: string;
+    swarmBranch: string;
+    policy: ReturnType<typeof landingPolicyFor>;
+    mergeMessage: string;
+    swarmHandle: SandboxHandle;
+    workerHandle: SandboxHandle;
+  },
+): Promise<LandOutcome> {
+  const exportRepository = ctx.driver.exportRepository!;
+  let swarmBundle;
+  let workerBundle;
+  try {
+    [swarmBundle, workerBundle] = await Promise.all([
+      exportRepository.call(ctx.driver, input.swarmHandle, input.repoName, input.baseBranch, { selfContained: true }),
+      exportRepository.call(ctx.driver, input.workerHandle, input.repoName, input.baseBranch, { selfContained: true }),
+    ]);
+  } catch (err) {
+    return { ok: false, reason: "moved", detail: `could not export the sandbox branches: ${String(err)}` };
+  }
+  if (!swarmBundle || !workerBundle) {
+    return { ok: false, reason: "error", detail: "a sandbox returned no snapshot for its checked out branch." };
+  }
+
+  const reconciled = await landWorkerBundles({
+    swarm: swarmBundle,
+    worker: workerBundle,
+    policy: input.policy,
+    mergeMessage: input.mergeMessage,
+  });
+  if (!reconciled.ok || !reconciled.bundle) return reconciled;
+
+  let imported;
+  try {
+    imported = await ctx.driver.importRepository!(
+      input.swarmHandle,
+      input.repoName,
+      reconciled.bundle,
+      { branch: input.swarmBranch, expectedHeadSha: reconciled.base },
+    );
+  } catch (err) {
+    return { ok: false, reason: "moved", detail: `could not import the reconciled branch: ${String(err)}` };
+  }
+  if (!imported.ok) return imported;
+  if (imported.headSha !== reconciled.head) {
+    return {
+      ok: false,
+      reason: "error",
+      detail: `the sandbox reported ${imported.headSha} after importing ${reconciled.head}.`,
+    };
+  }
+  return { ok: true, base: reconciled.base, head: reconciled.head, commits: reconciled.commits };
+}
+
 /* ------------------------------------------------------------------ *
  * Test before landing.
  * ------------------------------------------------------------------ */
@@ -292,48 +398,65 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
 /**
  * Runs each repository's own check inside the swarm's sandbox.
  *
- * Returns the output of the first one that failed, or null when
- * everything passed or there was nothing to run.
- *
- * A swarm with no sandbox on this deployment runs nothing and says so
- * by passing. That is deliberate rather than an oversight: a landing
- * that refused to proceed without a sandbox would make the merge queue
- * unusable in every deployment whose driver has not provisioned one
- * yet, and the checks a worker ran on its own branch have already
- * passed. What is lost is the cross-leaf case, which is exactly what
- * the row's note records.
+ * A configured check is a gate, so inability to execute it is distinct
+ * from both a passing check and a project that configured no check.
  */
+type LandingCheckResult =
+  | { kind: "passed" | "not_configured" }
+  | { kind: "failed" | "unavailable"; detail: string };
+
 async function runLandingTests(
   ctx: AppContext,
   swarm: typeof swarms.$inferSelect,
   repoRows: (typeof repositories.$inferSelect)[],
   task: typeof swarmTasks.$inferSelect,
-): Promise<string | null> {
+): Promise<LandingCheckResult> {
   const commands = repoRows
     .map((repo) => ({ name: repo.name, command: resolveRepositoryCommands(repo).testCommand?.trim() }))
     .filter((entry): entry is { name: string; command: string } => Boolean(entry.command));
-  if (commands.length === 0) return null;
-  if (!swarm.sandboxId) return null;
+  if (commands.length === 0) return { kind: "not_configured" };
+  if (!swarm.sandboxId) {
+    return {
+      kind: "unavailable",
+      detail: "the project has a landing check, but the swarm has no sandbox in which Bento can run it.",
+    };
+  }
 
   const [sandbox] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
-  if (!sandbox || sandbox.status === "destroyed") return null;
+  if (!sandbox || sandbox.status === "destroyed") {
+    return {
+      kind: "unavailable",
+      detail: "the project has a landing check, but the swarm sandbox is unavailable, so Bento did not mark the landing successful.",
+    };
+  }
   const handle = { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir };
 
   for (const entry of commands) {
-    const result = await collectExec(
-      ctx.driver.exec(handle, ["bash", "-lc", entry.command], {
-        cwd: repositoryPathIn(sandbox.workdir, entry.name),
-      }),
-    ).catch((err: unknown) => ({ exitCode: 1, stdout: "", stderr: String(err) }));
+    let result;
+    try {
+      result = await collectExec(
+        ctx.driver.exec(handle, ["bash", "-lc", entry.command], {
+          cwd: repositoryPathIn(sandbox.workdir, entry.name),
+        }),
+      );
+    } catch (err) {
+      return {
+        kind: "unavailable",
+        detail: `the project has a landing check, but Bento could not run it in the swarm sandbox: ${String(err)}`,
+      };
+    }
     if (result.exitCode === 0) continue;
-    return [
-      `The swarm's branch does not pass ${entry.name}'s check with task ${task.id} on it.`,
-      `Command: ${entry.command}`,
-      "",
-      tail(`${result.stdout ?? ""}\n${result.stderr ?? ""}`),
-    ].join("\n");
+    return {
+      kind: "failed",
+      detail: [
+        `The swarm's branch does not pass ${entry.name}'s check with task ${task.id} on it.`,
+        `Command: ${entry.command}`,
+        "",
+        tail(`${result.stdout ?? ""}\n${result.stderr ?? ""}`),
+      ].join("\n"),
+    };
   }
-  return null;
+  return { kind: "passed" };
 }
 
 /** The last of a long output, which is where a test runner says what failed. */

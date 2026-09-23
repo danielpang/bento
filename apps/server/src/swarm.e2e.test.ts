@@ -264,6 +264,7 @@ test("a swarm plans, works, lands through a conflict, and opens a pull request",
     })
     .returning();
   await db.update(swarms).set({ sandboxId: sandbox!.id }).where(eq(swarms.id, swarm.id));
+  await db.update(agentRuns).set({ sandboxId: sandbox!.id }).where(eq(agentRuns.id, swarm.plannerRunId));
 
   const plannerToken = await grantFor(swarm.plannerRunId, swarm.id);
   await tool(plannerToken, "write_design", {

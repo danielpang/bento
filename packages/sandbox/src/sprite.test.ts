@@ -2359,8 +2359,10 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
 
 test("Sprite repository export returns committed objects without credentials", async () => {
   const bundle = Buffer.from("bundle bytes");
+  let script = "";
   const sprite = {
-    spawn() {
+    spawn(_file: string, args: string[]) {
+      script = args[1] ?? "";
       const child = fakeChild();
       queueMicrotask(() => {
         child.stdout.write(`base-sha\nhead-sha\n${bundle.toString("base64")}\n`);
@@ -2381,6 +2383,96 @@ test("Sprite repository export returns committed objects without credentials", a
   assert.equal(exported?.baseSha, "base-sha");
   assert.equal(exported?.headSha, "head-sha");
   assert.deepEqual(exported?.data, bundle);
+
+  await driver.exportRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    "main",
+    { selfContained: true },
+  );
+  assert.match(script, /git bundle create "\$tmp" HEAD/);
+  assert.doesNotMatch(script, /git bundle create "\$tmp" HEAD "\^\$base_sha"/);
+  assert.doesNotMatch(script, /base_sha.*head_sha.*exit 3/);
+});
+
+test("Sprite repository import uploads a bundle and fast-forwards with a compare-and-swap", async () => {
+  const writes: { path: string; data: Buffer }[] = [];
+  const removed: string[] = [];
+  const scripts: string[] = [];
+  const oldHead = "1".repeat(40);
+  const newHead = "2".repeat(40);
+  const data = Buffer.from("trusted landing bundle");
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      assert.equal(args[0], "-lc");
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.write(`${newHead}\n`);
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, contents: Buffer) {
+          writes.push({ path, data: contents });
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  const outcome = await driver.importRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    { baseSha: oldHead, headSha: newHead, data },
+    { branch: "swarm/demo", expectedHeadSha: oldHead },
+  );
+
+  assert.deepEqual(outcome, { ok: true, headSha: newHead });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0]!.data, data);
+  assert.deepEqual(removed, [writes[0]!.path]);
+  assert.match(scripts[0]!, /symbolic-ref --quiet --short HEAD/);
+  assert.match(scripts[0]!, /git diff --quiet/);
+  assert.match(scripts[0]!, /git merge --ff-only/);
+  assert.doesNotMatch(scripts[0]!, /reset|force/);
+});
+
+test("Sprite repository import classifies a moved head as retryable", async () => {
+  const sprite = {
+    spawn() {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stderr.write("the swarm branch moved from old to new\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 12);
+      });
+      return child;
+    },
+    filesystem() {
+      return { async writeFile() {}, async rm() {} };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+  const outcome = await driver.importRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    { baseSha: "1".repeat(40), headSha: "2".repeat(40), data: Buffer.from("bundle") },
+    { branch: "swarm/demo", expectedHeadSha: "1".repeat(40) },
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.ok === false && outcome.reason, "moved");
 });
 
 /**

@@ -169,6 +169,26 @@ export interface RepositoryBundle {
   data: Buffer;
 }
 
+export interface RepositoryExportOptions {
+  /**
+   * Include every object reachable from HEAD rather than only the
+   * objects newer than baseSha. The merge queue uses this when its
+   * trusted checkout cannot read the sandbox's object store.
+   */
+  selfContained?: boolean;
+}
+
+export interface RepositoryImportOptions {
+  /** Branch that must be checked out and is allowed to move. */
+  branch: string;
+  /** Compare-and-swap precondition for moving branch. */
+  expectedHeadSha: string;
+}
+
+export type RepositoryImportOutcome =
+  | { ok: true; headSha: string }
+  | { ok: false; reason: "moved" | "error"; detail: string };
+
 /**
  * One sandbox per feature. The sandbox is the security boundary: agents run
  * inside it with permission checks disabled, so drivers must never expose
@@ -253,7 +273,19 @@ export interface SandboxDriver {
     handle: SandboxHandle,
     repositoryName: string,
     baseBranch: string,
+    options?: RepositoryExportOptions,
   ): Promise<RepositoryBundle | null>;
+  /**
+   * Fast-forwards a repository inside the sandbox from a trusted
+   * server-created bundle. Implementations must compare HEAD with
+   * expectedHeadSha and must never force the branch.
+   */
+  importRepository?(
+    handle: SandboxHandle,
+    repositoryName: string,
+    bundle: RepositoryBundle,
+    options: RepositoryImportOptions,
+  ): Promise<RepositoryImportOutcome>;
 }
 
 /** Collects an exec stream into buffered output. Convenience for tests and gates. */

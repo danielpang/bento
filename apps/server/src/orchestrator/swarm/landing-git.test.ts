@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { promisify } from "node:util";
 import { taskTrailer } from "./branches.js";
-import { commitsForTask, isRetryableFastForward, landWorkerBranch } from "./landing-git.js";
+import { commitsForTask, isRetryableFastForward, landWorkerBranch, landWorkerBundles } from "./landing-git.js";
+import type { RepositoryBundle } from "@bento/sandbox";
 
 const exec = promisify(execFile);
 
@@ -82,6 +83,64 @@ async function workerCommit(
   await git(tree, ["commit", "--quiet", "-m", `${subject}\n\n${taskTrailer(taskId)}`]);
   return git(tree, ["rev-parse", "HEAD"]);
 }
+
+async function fullBundle(tree: string, output: string): Promise<RepositoryBundle> {
+  const headSha = await git(tree, ["rev-parse", "HEAD^{commit}"]);
+  await git(tree, ["bundle", "create", output, "HEAD"]);
+  return { baseSha: headSha, headSha, data: await readFile(output) };
+}
+
+test("self-contained sandbox bundles reconcile without access to either source repository", async () => {
+  const fx = await fixture();
+  try {
+    const worker = "swarm/demo-bundle111";
+    await workerCommit(fx, worker, TASK_A, "remote.txt", "from a remote sandbox\n");
+    await writeFile(path.join(fx.swarmWorktree, "other.txt"), "landed while the worker ran\n");
+    await git(fx.swarmWorktree, ["add", "."]);
+    await git(fx.swarmWorktree, ["commit", "--quiet", "-m", `other work\n\n${taskTrailer(TASK_B)}`]);
+    const workerTree = path.join(fx.root, worker.replace(/\//g, "_"));
+    const swarmBundle = await fullBundle(fx.swarmWorktree, path.join(fx.root, "swarm.bundle"));
+    const workerBundle = await fullBundle(workerTree, path.join(fx.root, "worker.bundle"));
+
+    const landed = await landWorkerBundles({
+      swarm: swarmBundle,
+      worker: workerBundle,
+      policy: "rebase",
+      mergeMessage: "unused",
+    });
+    assert.ok(landed.ok && landed.bundle, `expected a bundle, got ${JSON.stringify(landed)}`);
+    assert.equal(landed.commits, 1);
+
+    // Apply the returned incremental bundle to a checkout built only
+    // from the exported swarm snapshot. This is the same object graph a
+    // Sprite has and proves no hidden access to fx.repo is required.
+    const target = path.join(fx.root, "target");
+    const resultPath = path.join(fx.root, "result.bundle");
+    await writeFile(resultPath, landed.bundle.data);
+    await exec("git", ["init", "--quiet", target]);
+    await git(target, ["fetch", "--quiet", path.join(fx.root, "swarm.bundle"), "+HEAD:refs/heads/swarm/demo"]);
+    await git(target, ["checkout", "--quiet", "swarm/demo"]);
+    await git(target, ["fetch", "--quiet", resultPath, "+HEAD:refs/bento/landing"]);
+    await git(target, ["merge", "--ff-only", "refs/bento/landing"]);
+    assert.equal(await git(target, ["show", "HEAD:remote.txt"]), "from a remote sandbox");
+
+    // Model a crash after import but before the database status write.
+    // Reconciliation must recognize the already-applied patch and
+    // return no second bundle even when rebase changed the commit sha.
+    const movedSwarm = await fullBundle(target, path.join(fx.root, "moved.bundle"));
+    const retried = await landWorkerBundles({
+      swarm: movedSwarm,
+      worker: workerBundle,
+      policy: "rebase",
+      mergeMessage: "unused",
+    });
+    assert.ok(retried.ok, `expected an idempotent retry, got ${JSON.stringify(retried)}`);
+    assert.equal(retried.commits, 0);
+    assert.equal(retried.bundle, null);
+  } finally {
+    await rm(fx.root, { recursive: true, force: true });
+  }
+});
 
 describe("landing a worker's branch", () => {
   let fx: Fixture;

@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { taskTrailer, type LandingPolicy } from "./branches.js";
+import type { RepositoryBundle } from "@bento/sandbox";
 
 const exec = promisify(execFile);
 
@@ -79,6 +80,10 @@ export type LandOutcome =
    * branch, a swarm checkout that is dirty or detached, a full disk.
    */
   | { ok: false; reason: "error"; detail: string };
+
+export type BundleLandOutcome =
+  | { ok: true; base: string; head: string; commits: number; bundle: RepositoryBundle | null }
+  | Exclude<LandOutcome, { ok: true }>;
 
 /** Where a landing parks the commit it built, until the fast forward takes it. */
 function landingRef(landingId: string): string {
@@ -277,6 +282,76 @@ export async function landWorkerBranch(request: LandRequest): Promise<LandOutcom
     }
 
     return { ok: true, base, head: landed, commits };
+  } catch (err) {
+    const detail = detailOf(err);
+    return isConflict(detail) ? { ok: false, reason: "conflict", detail } : { ok: false, reason: "error", detail };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Reconciles two self-contained snapshots when both repositories live
+ * in remote sandboxes rather than in worktrees on this server.
+ *
+ * This function deliberately stops before moving the swarm branch. It
+ * returns an incremental bundle whose base is the exact swarm head it
+ * read. The driver imports that bundle with the same head as a
+ * compare-and-swap precondition, which gives this path the same crash
+ * and race guarantees as landWorkerBranch.
+ */
+export async function landWorkerBundles(request: {
+  swarm: RepositoryBundle;
+  worker: RepositoryBundle;
+  policy: LandingPolicy;
+  mergeMessage: string;
+}): Promise<BundleLandOutcome> {
+  const root = await mkdtemp(path.join(tmpdir(), "bento-bundle-landing-"));
+  const work = path.join(root, "checkout");
+  const swarmPath = path.join(root, "swarm.bundle");
+  const workerPath = path.join(root, "worker.bundle");
+  const resultPath = path.join(root, "landed.bundle");
+  try {
+    await Promise.all([writeFile(swarmPath, request.swarm.data), writeFile(workerPath, request.worker.data)]);
+    await exec("git", ["init", "--quiet", work]);
+    await git(work, ["fetch", "--no-tags", "--quiet", swarmPath, "+HEAD:refs/heads/base"]);
+    await git(work, ["fetch", "--no-tags", "--quiet", workerPath, "+HEAD:refs/heads/work"]);
+
+    const base = await git(work, ["rev-parse", "refs/heads/base^{commit}"]);
+    const workHead = await git(work, ["rev-parse", "refs/heads/work^{commit}"]);
+    if (base !== request.swarm.headSha || workHead !== request.worker.headSha) {
+      return { ok: false, reason: "error", detail: "a repository bundle did not contain the head it advertised." };
+    }
+    if (workHead === base) return { ok: false, reason: "empty" };
+    try {
+      await git(work, ["merge-base", "--is-ancestor", workHead, base]);
+      return { ok: true, base, head: base, commits: 0, bundle: null };
+    } catch {
+      // The worker has work not yet on the swarm branch.
+    }
+
+    await git(work, ["checkout", "--quiet", "base"]);
+    if (request.policy === "merge") {
+      await git(work, ["merge", "--no-ff", "-m", request.mergeMessage, "work"]);
+    } else {
+      await git(work, ["checkout", "--quiet", "work"]);
+      await git(work, ["rebase", "base"]);
+      await git(work, ["checkout", "--quiet", "base"]);
+      await git(work, ["merge", "--ff-only", "work"]);
+    }
+
+    const head = await git(work, ["rev-parse", "HEAD^{commit}"]);
+    const countOut = await git(work, ["rev-list", "--count", `${base}..${head}`]);
+    const commits = Number(countOut) || 0;
+    if (head === base || commits === 0) return { ok: true, base, head: base, commits: 0, bundle: null };
+    await git(work, ["bundle", "create", resultPath, "HEAD", `^${base}`]);
+    return {
+      ok: true,
+      base,
+      head,
+      commits,
+      bundle: { baseSha: base, headSha: head, data: await readFile(resultPath) },
+    };
   } catch (err) {
     const detail = detailOf(err);
     return isConflict(detail) ? { ok: false, reason: "conflict", detail } : { ok: false, reason: "error", detail };
