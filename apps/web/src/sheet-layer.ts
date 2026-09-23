@@ -60,8 +60,12 @@ export function shouldBlockSheetScroll(input: {
 }): boolean {
   if (input.editable) return false;
   if (Math.abs(input.deltaX) > Math.abs(input.deltaY)) return false;
-  if (!input.inside) return input.lockOutside && input.deltaY !== 0;
-  if (!input.scroller) return input.deltaY !== 0;
+  // No scroller of our own: the board stays put. A dialog portaled out
+  // of the sheet passes its own scroller and is handled below.
+  if (!input.scroller) {
+    if (input.inside) return input.deltaY !== 0;
+    return input.lockOutside && input.deltaY !== 0;
+  }
   const { scrollTop, clientHeight, scrollHeight } = input.scroller;
   const atTop = scrollTop <= 0;
   const atBottom = scrollTop + clientHeight >= scrollHeight - 1;
@@ -81,15 +85,45 @@ function isVerticalScroller(el: HTMLElement): boolean {
   return el.scrollHeight > el.clientHeight + 1;
 }
 
-/** The nearest ancestor of `target`, up to `boundary`, that can scroll vertically. */
-function findVerticalScroller(target: Node, boundary: HTMLElement): HTMLElement | null {
+function hasRoom(el: HTMLElement, deltaY: number): boolean {
+  if (deltaY === 0) return false;
+  const atTop = el.scrollTop <= 0;
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+  if (deltaY > 0 && atTop) return false;
+  if (deltaY < 0 && atBottom) return false;
+  return true;
+}
+
+/**
+ * The scroller a drag should move.
+ *
+ * The nearest overflowing box wins while it still has room. Once it is
+ * at that edge, the search continues outward so a diff inside a form
+ * does not trap the rest of the sheet. The last overflowing box is
+ * returned when every one of them is at its edge, which is what tells
+ * the guard to cancel the drag.
+ */
+function findVerticalScroller(target: Node, boundary: HTMLElement, deltaY: number): HTMLElement | null {
   let el: HTMLElement | null = target instanceof HTMLElement ? target : target.parentElement;
+  let edge: HTMLElement | null = null;
   while (el) {
-    if (isVerticalScroller(el)) return el;
-    if (el === boundary) return null;
+    if (isVerticalScroller(el)) {
+      edge = el;
+      if (hasRoom(el, deltaY)) return el;
+    }
+    if (el === boundary) break;
     el = el.parentElement;
   }
-  return null;
+  return edge;
+}
+
+/** A dialog or menu rendered outside the sheet, or the sheet itself. */
+function gestureBoundary(target: EventTarget | null, sheet: HTMLElement): HTMLElement {
+  if (target instanceof Element) {
+    const portal = target.closest("[data-portal-layer]");
+    if (portal instanceof HTMLElement) return portal;
+  }
+  return sheet;
 }
 
 function applyLift(el: HTMLElement, lift: SheetLift | null): void {
@@ -106,6 +140,33 @@ function applyLift(el: HTMLElement, lift: SheetLift | null): void {
   el.style.bottom = `${lift.bottom}px`;
   el.style.height = `${lift.height}px`;
   el.style.maxHeight = `${lift.height}px`;
+}
+
+/**
+ * A dialog is centered on the layout viewport, which the keyboard does
+ * not shrink, so the bottom of a tall form sits under the keys. Pin
+ * the backdrop to the visible region. The stylesheet then caps the
+ * dialog at that height and the form scrolls inside it.
+ */
+function fitBackdrops(lift: SheetLift | null, offsetTop: number): void {
+  const root = document.documentElement;
+  const nodes = document.querySelectorAll<HTMLElement>(".modal-backdrop");
+  if (!lift) {
+    root.removeAttribute("data-keyboard");
+    for (const node of nodes) {
+      node.style.removeProperty("top");
+      node.style.removeProperty("height");
+      node.style.removeProperty("bottom");
+    }
+    return;
+  }
+  root.setAttribute("data-keyboard", "");
+  const top = Math.max(0, Math.round(offsetTop));
+  for (const node of nodes) {
+    node.style.top = `${top}px`;
+    node.style.bottom = "auto";
+    node.style.height = `${lift.height}px`;
+  }
 }
 
 /** Brings the composer into the sheet without scrolling the page behind it. */
@@ -137,15 +198,17 @@ export function useSheetLayer(panel: RefObject<HTMLElement | null>): void {
       if (!el) return;
       const fixed = getComputedStyle(el).position === "fixed";
       const viewport = window.visualViewport;
-      const lift =
-        fixed && viewport
-          ? sheetLift({
-              innerHeight: window.innerHeight,
-              offsetTop: viewport.offsetTop,
-              height: viewport.height,
-            })
-          : null;
-      applyLift(el, lift);
+      const offsetTop = viewport?.offsetTop ?? 0;
+      const lift = viewport
+        ? sheetLift({
+            innerHeight: window.innerHeight,
+            offsetTop,
+            height: viewport.height,
+          })
+        : null;
+      // A side panel on a wide screen has no keyboard to clear.
+      applyLift(el, fixed ? lift : null);
+      fitBackdrops(media.matches ? lift : null, offsetTop);
       // Only while a field in the sheet is focused. A viewport change
       // is the keyboard moving; scrolling the transcript must not be
       // pulled back down afterwards.
@@ -173,37 +236,39 @@ export function useSheetLayer(panel: RefObject<HTMLElement | null>): void {
       startY: number;
       inside: boolean;
       editable: boolean;
-      scroller: HTMLElement | null;
+      boundary: HTMLElement;
+      target: Node;
     } | null = null;
 
     const onTouchStart = (event: TouchEvent) => {
       const touch = event.touches[0];
       const el = panel.current;
-      if (!touch || !el) {
+      if (!touch || !el || !(event.target instanceof Node)) {
         gesture = null;
         return;
       }
-      const target = event.target;
-      const inside = target instanceof Node && el.contains(target);
+      const boundary = gestureBoundary(event.target, el);
       gesture = {
         startX: touch.clientX,
         startY: touch.clientY,
-        inside,
-        editable: isEditableTarget(target),
-        scroller: inside && target instanceof Node ? findVerticalScroller(target, el) : null,
+        inside: boundary === el && el.contains(event.target),
+        editable: isEditableTarget(event.target),
+        boundary,
+        target: event.target,
       };
     };
 
     const onTouchMove = (event: TouchEvent) => {
       const touch = event.touches[0];
       if (!touch || !gesture) return;
-      const scroller = gesture.scroller;
+      const deltaY = touch.clientY - gesture.startY;
+      const scroller = findVerticalScroller(gesture.target, gesture.boundary, deltaY);
       const block = shouldBlockSheetScroll({
         inside: gesture.inside,
         editable: gesture.editable,
         lockOutside: media.matches,
         deltaX: touch.clientX - gesture.startX,
-        deltaY: touch.clientY - gesture.startY,
+        deltaY,
         scroller: scroller
           ? {
               scrollTop: scroller.scrollTop,
@@ -223,6 +288,7 @@ export function useSheetLayer(panel: RefObject<HTMLElement | null>): void {
     document.addEventListener("touchmove", onTouchMove, { passive: false });
     document.addEventListener("touchend", onTouchEnd);
     document.addEventListener("touchcancel", onTouchEnd);
+    document.addEventListener("focusin", schedule);
     media.addEventListener("change", syncLock);
     media.addEventListener("change", schedule);
     window.addEventListener("resize", schedule);
@@ -234,10 +300,12 @@ export function useSheetLayer(panel: RefObject<HTMLElement | null>): void {
       root.removeAttribute("data-sheet-open");
       const el = panel.current;
       if (el) applyLift(el, null);
+      fitBackdrops(null, 0);
       document.removeEventListener("touchstart", onTouchStart);
       document.removeEventListener("touchmove", onTouchMove);
       document.removeEventListener("touchend", onTouchEnd);
       document.removeEventListener("touchcancel", onTouchEnd);
+      document.removeEventListener("focusin", schedule);
       media.removeEventListener("change", syncLock);
       media.removeEventListener("change", schedule);
       window.removeEventListener("resize", schedule);

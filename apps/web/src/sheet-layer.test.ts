@@ -85,6 +85,31 @@ test("a transcript at its end does not chain into the board", () => {
   );
 });
 
+test("a dialog portaled out of the sheet scrolls when it has room", () => {
+  assert.equal(
+    shouldBlockSheetScroll({
+      inside: false,
+      editable: false,
+      lockOutside: true,
+      deltaX: 0,
+      deltaY: -40,
+      scroller: { scrollTop: 20, clientHeight: 400, scrollHeight: 900 },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldBlockSheetScroll({
+      inside: false,
+      editable: false,
+      lockOutside: true,
+      deltaX: 0,
+      deltaY: -40,
+      scroller: { scrollTop: 500, clientHeight: 400, scrollHeight: 900 },
+    }),
+    true,
+  );
+});
+
 test("typing and sideways pans are left to the control under the finger", () => {
   assert.equal(
     shouldBlockSheetScroll({

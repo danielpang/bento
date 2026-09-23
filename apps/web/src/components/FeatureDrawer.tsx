@@ -730,7 +730,12 @@ export function FeatureDrawer({
 
   return (
     <Tabs.Root value={activeDrawerTab} onValueChange={setDrawerTab} asChild>
-    <aside className="drawer feature-drawer" role="dialog" aria-label={feature.title} ref={panel}>
+    <aside
+      className={`drawer feature-drawer${activeDrawerTab === "activity" ? " sheet-chat" : ""}`}
+      role="dialog"
+      aria-label={feature.title}
+      ref={panel}
+    >
       <header className="drawer-head">
         <div className="feature-topline">
           <span className="feature-kicker">Feature</span>

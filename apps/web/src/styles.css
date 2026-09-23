@@ -1140,6 +1140,10 @@ select.input,
   overflow-x: hidden;
   overflow-y: auto;
   min-width: 0;
+  /* Fill the lane and scroll. A content-sized basis grew past the
+     screen on a phone and the extra cards were clipped. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* An empty lane is an open compartment: the dashed slot is the same
@@ -3565,7 +3569,39 @@ a.pr-row:hover .pr-external {
   }
 
   .drawer-body {
+    /* A flex child with a content minimum clips the tail of a long
+       form and then has nothing to scroll. Zero lets the body become
+       the sheet's scrollport. */
+    min-height: 0;
+    flex: 1 1 auto;
     padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+
+  /* Chat is the whole screen. The stage bars and the agent line repeat
+     what the transcript already says, and giving them up is what makes
+     the conversation the tall region instead of a strip under the header. */
+  .feature-drawer.sheet-chat {
+    top: 0;
+    height: auto;
+    border-radius: 0;
+  }
+
+  .feature-drawer.sheet-chat .feature-progress,
+  .feature-drawer.sheet-chat .feature-agent {
+    display: none;
+  }
+
+  .feature-drawer.sheet-chat .drawer-head {
+    gap: 8px;
+    padding-bottom: 4px;
+  }
+
+  .feature-drawer.sheet-chat .feature-pane-conversation {
+    padding: 8px 12px max(10px, env(safe-area-inset-bottom));
+  }
+
+  .feature-drawer.sheet-chat .composer-hint {
+    margin-bottom: 0;
   }
 }
 
@@ -5819,6 +5855,12 @@ button.lane-agent[data-saving] {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  /* The app shell is a fixed viewport. This page is the scroller, the
+     same way Sessions and Spend are, so a long section reaches its end
+     on a phone. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .settings-layout {
   display: grid;
@@ -6220,6 +6262,7 @@ button.lane-agent[data-saving] {
  */
 .changelog {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   width: 100%;
   max-width: 900px;
@@ -6467,6 +6510,7 @@ button.lane-agent[data-saving] {
 .modal-editor .modal-head .muted { margin-top: 8px; }
 .editor-body {
   min-height: 0;
+  flex: 1 1 auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 24px;
@@ -6501,6 +6545,15 @@ button.lane-agent[data-saving] {
 .modal-editor .actions { gap: 8px; }
 .modal-editor .actions .btn { white-space: normal; }
 .modal-editor > .modal-actions { flex: none; margin: 0; padding: 16px 24px; border-top: 1px solid var(--line); background: var(--panel-raised); }
+/* The keyboard fit in sheet-layer.ts shrinks the backdrop to the
+   visible region. Cap every dialog at that box so Save stays on screen
+   and the fields scroll to it. */
+html[data-keyboard] .modal,
+html[data-keyboard] .modal.modal-large,
+html[data-keyboard] .modal.modal-editor {
+  max-height: 100%;
+}
+
 @media (max-width: 540px) {
   .modal-backdrop:has(.modal-editor) { padding: 12px; }
   .modal.modal-editor { max-height: calc(100dvh - 24px); }
