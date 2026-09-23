@@ -359,7 +359,16 @@ export function budgetRefusal(
 ): string | null {
   if (swarm.budgetUsd === null) return null;
   const cap = Number(swarm.budgetUsd);
-  if (!Number.isFinite(cap) || cap <= 0) return null;
+  /*
+   * Zero is a real cap, not the absence of one. Treating it as
+   * unlimited let a template that deliberately allowed no additional
+   * spend start agents. An invalid or negative value is failed closed
+   * too: routes reject it, but a malformed imported row must not turn
+   * into an unlimited budget.
+   */
+  if (!Number.isFinite(cap) || cap < 0) {
+    return "This swarm has an invalid budget. Set a valid budget to let it carry on; what has landed is kept.";
+  }
   const spent = enforcedSpend(spendOf(swarm));
   const committed = Number.isFinite(committedUsd) && committedUsd > 0 ? committedUsd : 0;
   if (spent + committed < cap) return null;

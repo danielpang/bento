@@ -41,6 +41,7 @@ import {
 import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
+import { unbilledReason } from "../unbilled-reasons.js";
 import { githubConnectionFor } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
@@ -1456,6 +1457,7 @@ async function finishRun(
   // Ending runs belongs to the successor once shutdown starts; see the
   // drain checks in the executor loops.
   if (ctx.draining) return;
+  const unbilled = outcome.ok ? null : unbilledReason(outcome.error);
   /**
    * What this run cost, and how well that is known, worked out before
    * the run is closed and written in the same statement that closes it.
@@ -1467,14 +1469,16 @@ async function finishRun(
    * set below, so it happens once however many loops are driving this
    * run.
    */
-  const charge = await chargeForRun(ctx.db, runId, outcome).catch((err: unknown) => {
-    // A ledger that cannot be worked out must not turn a finished run
-    // into a failed one. The run still ends; its cost reads as not
-    // recorded, which is what null in that column means.
-    console.warn(`could not work out what run ${runId} cost:`, err);
-    ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "ledger" });
-    return null;
-  });
+  const charge = unbilled
+    ? null
+    : await chargeForRun(ctx.db, runId, outcome).catch((err: unknown) => {
+        // A ledger that cannot be worked out must not turn a finished run
+        // into a failed one. The run still ends; its cost reads as not
+        // recorded, which is what null in that column means.
+        console.warn(`could not work out what run ${runId} cost:`, err);
+        ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "ledger" });
+        return null;
+      });
   /**
    * Compare-and-set: only a run still active can be finished, and only
    * whoever moved it gets to write the rest (the transcript line, the
@@ -1488,6 +1492,7 @@ async function finishRun(
     .set({
       status: outcome.ok ? "succeeded" : "failed",
       endedAt: new Date(),
+      billable: unbilled === null,
       exitCode,
       /**
        * Only when the agent actually said. Overwriting with null on a
@@ -1508,7 +1513,13 @@ async function finishRun(
        * silence here instead would leave the swarm's spend saying that
        * an agent that ran for an hour cost nothing.
        */
-      costUsd: charge ? String(charge.usd) : outcome.costUsd !== undefined ? String(outcome.costUsd) : null,
+      costUsd: unbilled
+        ? null
+        : charge
+          ? String(charge.usd)
+          : outcome.costUsd !== undefined
+            ? String(outcome.costUsd)
+            : null,
       ...(charge
         ? {
             costTier: charge.tier,
@@ -1538,7 +1549,7 @@ async function finishRun(
   // The run is over, so its gateway token is too. Behind the CAS, so it
   // fires exactly once; a failure here never fails the close.
   await revokeRunGrant(ctx, runId);
-  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed");
+  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", unbilled === null);
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -1873,9 +1884,10 @@ async function announceRunFinished(
   ctx: AppContext,
   runId: string,
   status: "succeeded" | "failed" | "cancelled",
+  billable = true,
 ): Promise<void> {
   const announce = ctx.entitlements?.onRunFinished;
-  if (announce) {
+  if (announce && billable) {
     void announce(runId).catch((err: unknown) => {
       console.warn(`could not record what run ${runId} cost:`, err);
       ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "billing_on_run_finished" });

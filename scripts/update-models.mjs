@@ -48,6 +48,8 @@ const VERCEL_LOGO =
  * entry is picked up automatically; today it is absent and skipped.
  */
 const INCLUDE = ["anthropic", "openai", "google", "openrouter", "xai", "cursor"];
+/** Providers whose public catalog must carry at least one usable rate. */
+const PRICED_REQUIRED = new Set(["anthropic", "openai", "google", "openrouter", "xai"]);
 
 /**
  * Per-provider overrides the snapshot cannot express.
@@ -121,6 +123,10 @@ if (!gatewayOnly) {
       console.warn(`skipping ${id}: no models listed`);
       continue;
     }
+    const priced = models.filter((model) => model.cost).length;
+    if (PRICED_REQUIRED.has(id) && priced === 0) {
+      throw new Error(`${id} listed ${models.length} models but no input and output prices`);
+    }
 
     const logoRes = await fetch(LOGO(id));
     let logo = "";
@@ -138,7 +144,7 @@ if (!gatewayOnly) {
       logo,
       models,
     });
-    console.log(`${id}: ${models.length} models${logo ? "" : ", no logo"}`);
+    console.log(`${id}: ${models.length} models, ${priced} priced${logo ? "" : ", no logo"}`);
   }
 
   const today = new Date().toISOString().slice(0, 10);
@@ -176,7 +182,7 @@ function listPrice(model) {
   const input = model.cost?.input;
   const output = model.cost?.output;
   if (typeof input !== "number" || typeof output !== "number") return {};
-  if (!Number.isFinite(input) || !Number.isFinite(output)) return {};
+  if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) return {};
   return { cost: { input, output } };
 }
 

@@ -39,6 +39,7 @@ import { workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
+import { budgetRefusal } from "../orchestrator/swarm/ledger.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
@@ -218,6 +219,21 @@ export function swarmRoutes(ctx: AppContext) {
         return c.json({ error: "not found" }, 404);
       }
 
+      const budgetUsd =
+        body.budgetUsd === undefined
+          ? template.budgetUsd
+          : body.budgetUsd === null
+            ? null
+            : String(body.budgetUsd);
+      const budget = budgetRefusal({
+        budgetUsd,
+        spentMeasuredUsd: "0",
+        spentEstimatedUsd: "0",
+        spentAssumedUsd: "0",
+        spentNotionalUsd: "0",
+      });
+      if (budget) return c.json({ error: budget, code: "PLAN_LIMIT" }, 402);
+
       const slug = await uniqueSlug(ctx, c, project.id, body.title);
       const [swarm] = await db(c, ctx)
         .insert(swarms)
@@ -233,12 +249,7 @@ export function swarmRoutes(ctx: AppContext) {
           status: "planning",
           branchName: swarmBranchName(slug),
           maxWorkers: body.maxWorkers ?? template.maxWorkers,
-          budgetUsd:
-            body.budgetUsd === undefined
-              ? template.budgetUsd
-              : body.budgetUsd === null
-                ? null
-                : String(body.budgetUsd),
+          budgetUsd,
           timeLimitMin: body.timeLimitMin === undefined ? template.timeLimitMin : body.timeLimitMin ?? null,
           startedBy: actor(c),
         })
