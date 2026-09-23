@@ -1,8 +1,10 @@
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import pg from "pg";
 import { eq } from "drizzle-orm";
 import {
@@ -12,6 +14,7 @@ import {
   createPool,
   organization,
   projects,
+  repositories,
   runMigrations,
   swarmTasks,
   swarmTemplates,
@@ -26,7 +29,7 @@ import { ensureLocalUser, type AppContext, type Entitlements } from "./context.j
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { createFeatureFlags } from "./feature-flags.js";
-import { markCancelled } from "./orchestrator/run-executor.js";
+import { executeRun, markCancelled } from "./orchestrator/run-executor.js";
 import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
 
 /**
@@ -59,6 +62,7 @@ import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "swarm_billing_test";
 const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+const exec = promisify(execFile);
 
 const ORG = "org-with-a-plan";
 const ORG_WITHOUT_SWARMS = "org-without-swarms";
@@ -184,6 +188,23 @@ before(async () => {
     .values({ ownerId: userId, organizationId: ORG, name: "Swarms", defaultBranch: "main" })
     .returning();
   projectId = project!.id;
+  const repoPath = path.join(dataDir, "repo");
+  await mkdir(repoPath);
+  await exec("git", ["init", "-b", "main"], { cwd: repoPath });
+  await writeFile(path.join(repoPath, "README.md"), "billing fixture\n");
+  await exec("git", ["add", "README.md"], { cwd: repoPath });
+  await exec(
+    "git",
+    ["-c", "user.name=Bento", "-c", "user.email=bento@example.test", "commit", "-m", "fixture"],
+    { cwd: repoPath },
+  );
+  await db.insert(repositories).values({
+    projectId,
+    name: "app",
+    localPath: repoPath,
+    defaultBranch: "main",
+    position: 0,
+  });
   const [refused] = await db
     .insert(projects)
     .values({ ownerId: userId, organizationId: ORG_WITHOUT_SWARMS, name: "No swarms", defaultBranch: "main" })
@@ -267,6 +288,20 @@ test("a team whose plan has swarms is asked, and allowed", async () => {
   const res = await createSwarm();
   assert.equal(res.status, 201, await res.clone().text());
   assert.ok(asked.includes(`canUseSwarms:${ORG}`));
+});
+
+test("a zero-budget swarm is refused before a row is written", async () => {
+  const res = await post("/api/swarms", {
+    projectId,
+    title: "No spend",
+    goal: "wait for a budget",
+    templateId,
+    budgetUsd: 0,
+  });
+  assert.equal(res.status, 402, await res.clone().text());
+  assert.match((await res.json()).error, /\$0\.00 budget/);
+  const rows = await db.select().from(swarms);
+  assert.equal(rows.length, 0, "a refused budget does not leave an unstartable swarm behind");
 });
 
 test("a team with no agent hours left cannot create a swarm either", async () => {
@@ -378,6 +413,36 @@ test("every swarm run is announced to the deployment exactly once", async () => 
   // it twice, which is an hour billed twice.
   await markCancelled(ctx, swarm.plannerRunId);
   assert.deepEqual(finished, [swarm.plannerRunId], "and the second attempt announces nothing");
+});
+
+test("a Sprite provider failure before the agent starts is neither charged nor announced", async () => {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+  const workingDriver = ctx.driver;
+  const failingDriver = new LocalProcessDriver();
+  failingDriver.provision = async () => {
+    const outage = new Error("control plane unavailable");
+    outage.name = "APIError";
+    throw outage;
+  };
+  ctx.driver = failingDriver;
+  try {
+    await executeRun(ctx, swarm.plannerRunId);
+  } finally {
+    ctx.driver = workingDriver;
+  }
+
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run!.status, "failed");
+  assert.equal(run!.billable, false);
+  assert.equal(run!.costUsd, null);
+  assert.equal(run!.costTier, null);
+  assert.deepEqual(finished, [], "the agent-hour meter is not told about work that never started");
+
+  const [uncharged] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  assert.equal(Number(uncharged!.spentMeasuredUsd), 0);
+  assert.equal(Number(uncharged!.spentEstimatedUsd), 0);
+  assert.equal(Number(uncharged!.spentAssumedUsd), 0);
 });
 
 /**

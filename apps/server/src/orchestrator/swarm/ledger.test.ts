@@ -160,6 +160,29 @@ test("a swarm with no budget is never refused", () => {
   );
 });
 
+test("a zero budget refuses the first run", () => {
+  const refusal = budgetRefusal({
+    budgetUsd: "0",
+    spentMeasuredUsd: "0",
+    spentEstimatedUsd: "0",
+    spentAssumedUsd: "0",
+    spentNotionalUsd: "0",
+  });
+  assert.ok(refusal, "zero means spend nothing, not unlimited spend");
+  assert.match(refusal, /\$0\.00 budget/);
+});
+
+test("an invalid stored budget fails closed", () => {
+  const refusal = budgetRefusal({
+    budgetUsd: "not-a-number",
+    spentMeasuredUsd: "0",
+    spentEstimatedUsd: "0",
+    spentAssumedUsd: "0",
+    spentNotionalUsd: "0",
+  });
+  assert.match(refusal ?? "", /invalid budget/);
+});
+
 test("the planner is warned when what is left is less than one more run", () => {
   assert.equal(budgetIsLow(spent("9.80"), 0.5), true, "twenty cents left, half a dollar a run");
   assert.equal(budgetIsLow(spent("5.00"), 0.5), false, "five dollars is ten more runs");

@@ -318,6 +318,16 @@ test("a swarm that has spent its budget starts nothing else", async () => {
   assert.equal(rows.length, 0, "a refused start inserts nothing");
 });
 
+test("a zero budget starts no run", async () => {
+  const swarm = await makeSwarm({ budgetUsd: "0" });
+  const answer = await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE });
+  assert.ok(typeof answer === "object" && "outOfCompute" in answer);
+  assert.equal(answer.cap, "budget");
+  assert.match(answer.outOfCompute, /\$0\.00 budget/);
+  const rows = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  assert.equal(rows.length, 0);
+});
+
 test("a swarm under its budget starts, and one with no budget is never refused", async () => {
   const under = await makeSwarm({ budgetUsd: "10", spentMeasuredUsd: "9.99" });
   assert.ok(isRun(await start({ swarmId: under.id, role: "planner", agentProfileId: LOCAL_PROFILE })));

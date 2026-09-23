@@ -105,12 +105,14 @@ export function teamRoutes(ctx: AppContext) {
           title: features.title,
           startedAt: agentRuns.startedAt,
           endedAt: agentRuns.endedAt,
+          billable: agentRuns.billable,
         })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))
         .where(
           and(
             eq(features.organizationId, membership.organizationId),
+            eq(agentRuns.billable, true),
             isNotNull(agentRuns.startedAt),
             lt(agentRuns.startedAt, to),
             or(isNull(agentRuns.endedAt), gt(agentRuns.endedAt, from)),

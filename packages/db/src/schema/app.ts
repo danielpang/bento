@@ -638,6 +638,16 @@ export const agentRuns = pgTable(
   queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
   startedAt: timestamp("started_at", { withTimezone: true }),
   endedAt: timestamp("ended_at", { withTimezone: true }),
+  /**
+   * Whether this run counts toward usage and billing.
+   *
+   * False only when infrastructure failed before the agent started,
+   * such as a Sprite provider outage while provisioning its machine.
+   * The start time remains an operational fact either way. Normal
+   * agent, configuration, repository, timeout, and restart failures
+   * stay billable.
+   */
+  billable: boolean("billable").notNull().default(true),
   },
   (t) => [
     // "This card's runs, newest first" is the shape of every
