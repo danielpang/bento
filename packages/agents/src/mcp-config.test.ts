@@ -6,6 +6,8 @@ import { fxAdapter } from "./fx.js";
 import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { codexAdapter } from "./codex.js";
+import { antigravityAdapter } from "./antigravity.js";
+import { piAdapter } from "./pi.js";
 import { resolveSandboxPath, sandboxPathExpression, writeFileCommand, type McpRemoteServer } from "./adapter.js";
 
 const servers: McpRemoteServer[] = [
@@ -138,9 +140,18 @@ test("resolveSandboxPath substitutes a known home for comparisons", () => {
   assert.equal(resolveSandboxPath("/opt/bento/mcp/claude.json", "/root"), "/opt/bento/mcp/claude.json");
 });
 
-test("every harness config path is home-relative or absolute, never root's home spelled out", () => {
-  for (const adapter of [cursorAdapter, codexAdapter, opencodeAdapter, fxAdapter, museAdapter, claudeCodeAdapter]) {
-    for (const file of adapter.mcp!.renderConfig(servers)) {
+test("every harness file path is home-relative or absolute, never root's home spelled out", () => {
+  const customProvider = {
+    slug: "team-models", name: "Team models", protocol: "openai" as const,
+    baseUrl: "https://models.example.test/v1", modelId: "vendor/model-a",
+    models: [{ id: "vendor/model-a", name: "Model A" }],
+  };
+  const input = { prompt: "do it", model: "team-models/vendor/model-a", cwd: "/workspace", customProvider };
+  const adapters = [cursorAdapter, codexAdapter, opencodeAdapter, fxAdapter, museAdapter, claudeCodeAdapter, antigravityAdapter, piAdapter];
+  for (const adapter of adapters) {
+    const files = [...(adapter.mcp?.renderConfig(servers) ?? []), ...(adapter.files?.(input) ?? [])];
+    assert.ok(files.length > 0, `${adapter.cli} writes nothing, so this test would not check it`);
+    for (const file of files) {
       assert.ok(file.path.startsWith("~/") || file.path.startsWith("/opt/"), `${adapter.cli}: ${file.path}`);
       assert.doesNotMatch(file.path, /^\/root\//);
     }

@@ -225,13 +225,6 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   /**
-   * agy signs in with a Google account unless settings.json redirects
-   * it to the Gemini API, and it refuses to start when the setting and
-   * the key disagree. The file is written by the same script that
-   * installs the CLI, so a real provision is the only thing that can
-   * say it landed where agy looks for it.
-   */
-  /**
    * The sprite's HOME is not /root, and every harness reads its config
    * from its own home. A config written under /root was never read:
    * the gateway grant for every hosted run sat unused while the
@@ -245,10 +238,22 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     const read = await shell('cat "$HOME/.bento-e2e/probe.json"; rm -rf "$HOME/.bento-e2e"');
     assert.equal(read.exitCode, 0, `the probe is not in $HOME: ${read.stderr}`);
     assert.deepEqual(JSON.parse(read.out), { ok: true });
-    const home = await shell('printf %s "$HOME"');
-    assert.notEqual(home.out.trim(), "/root", "a sprite's home is its own user's, which is the whole point of the check");
+    // The write and the read above share one exec, so they agree with
+    // each other by construction. The account's home is what a CLI
+    // spawned any other way falls back to, so HOME has to be that.
+    const home = await shell('printf %s "$HOME"; echo; getent passwd "$(id -un)" | cut -d: -f6');
+    const [seen, account] = home.out.split("\n").map((line) => line.trim());
+    assert.equal(seen, account, "the exec's HOME must be the account's home, or a harness spawned from a login shell reads elsewhere");
+    assert.notEqual(seen, "/root", "a sprite's home is its own user's, which is the whole point of the check");
   });
 
+  /**
+   * agy signs in with a Google account unless settings.json redirects
+   * it to the Gemini API, and it refuses to start when the setting and
+   * the key disagree. The file is written by the same script that
+   * installs the CLI, so a real provision is the only thing that can
+   * say it landed where agy looks for it.
+   */
   await t.test("agy is provisioned to run on a Gemini API key", { skip: needsSprite() }, async () => {
     const settings = await shell("cat \"$HOME/.gemini/antigravity-cli/settings.json\"");
     assert.equal(settings.exitCode, 0, `agy has no settings file: ${settings.stderr}`);

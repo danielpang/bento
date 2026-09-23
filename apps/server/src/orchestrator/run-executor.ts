@@ -14,6 +14,7 @@ import {
 import {
   getAdapter,
   runAgent,
+  isSandboxHomePath,
   writeFileCommand,
   type AgentAdapter,
   type LiveSession,
@@ -548,6 +549,16 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // the sandbox outlives it. A failed write is said in the transcript,
   // ahead of whatever the tool then reports without it.
   for (const file of files) {
+    // With no sandbox, a file under the agent's home is a file under
+    // the operator's own home, and Bento's single-provider settings
+    // would replace theirs. Said rather than done, the same as MCP
+    // config on this driver.
+    if (ctx.driver.provider === "local-process" && isSandboxHomePath(file.path)) {
+      await saySystem(
+        `Not writing ${file.path} on this machine, because it would replace your own file, so ${profile.cli} starts without it.`,
+      );
+      continue;
+    }
     const written = await collectExec(ctx.driver.exec(handle, writeFileCommand(file), { timeoutMs: 60_000 }));
     if (written.exitCode !== 0) {
       await saySystem(`Could not write ${file.path} into the sandbox, so ${profile.cli} starts without it.`);

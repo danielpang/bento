@@ -1,8 +1,9 @@
 import { and, eq, isNull, or } from "drizzle-orm";
 import { mcpCredentials, mcpServers } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
-import { resolveSandboxPath, sandboxPathExpression, type AgentAdapter, type McpRemoteServer } from "@bento/agents";
+import { resolveSandboxPath, writeFileCommand, type AgentAdapter, type McpRemoteServer } from "@bento/agents";
 import type { AppContext } from "../context.js";
+import { CONTAINER_HOME } from "./agent-auth.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { mintRunGrant, revokeRunGrant } from "../mcp/grants.js";
 
@@ -100,9 +101,9 @@ export async function prepareRunMcp(
 
   // Writing a config into a path mounted read-only from the host would
   // fail the exec; skip the adapter rather than half-attach. Mounts
-  // only exist in Docker sandboxes, whose home is root's, so that is
-  // the home a `~/` config path resolves against here.
-  const renderPaths = capability.renderConfig([]).map((f) => resolveSandboxPath(f.path, "/root"));
+  // only exist in Docker sandboxes, so a `~/` config path resolves
+  // against the same home the mounts were placed under.
+  const renderPaths = capability.renderConfig([]).map((f) => resolveSandboxPath(f.path, CONTAINER_HOME));
   const collision = renderPaths.find((path) => input.mountedConfigPaths.some((m) => pathWithin(path, m)));
   if (collision) {
     if (await hasServers()) {
@@ -316,15 +317,14 @@ async function writeConfigs(
   files: { path: string; content: string }[],
 ): Promise<boolean> {
   for (const file of files) {
-    // Expanded inside the sandbox, against its own HOME: a `~/` path
-    // is root's home in a container and /home/sprite on a sprite, and
-    // a harness only reads the config that lands in its own.
-    const dir = sandboxPathExpression(file.path.replace(/\/[^/]+$/, "") || "/");
-    const target = sandboxPathExpression(file.path);
-    const b64 = Buffer.from(file.content, "utf8").toString("base64");
-    // The token rides the file content through argv, never opts.env:
-    // the sprite driver leaks env into the exec URL, and files do not.
-    const script = `mkdir -p ${dir} && printf %s ${shellQuote(b64)} | base64 -d > ${target} && chmod 600 ${target}`;
+    // The same writer every other harness file goes through, so a
+    // `~/` path is expanded inside the sandbox against its own HOME
+    // (root's in a container, /home/sprite on a sprite) in exactly one
+    // place, and the sprite test that proves where it lands covers
+    // this write too. The token rides the file content through argv,
+    // never opts.env: the sprite driver leaks env into the exec URL,
+    // and files do not.
+    const argv = writeFileCommand(file);
     // exec throws before it yields when the sandbox cannot be addressed
     // at all (the sprites info endpoint answering "sprite not found"
     // was that throw). Left uncaught, it escaped prepareRunMcp, skipped
@@ -333,7 +333,7 @@ async function writeConfigs(
     // run goes on without MCP.
     let result: { exitCode: number; stderr: string };
     try {
-      result = await collectExec(ctx.driver.exec(handle, ["sh", "-c", script], { timeoutMs: EXEC_TIMEOUT_MS }));
+      result = await collectExec(ctx.driver.exec(handle, argv, { timeoutMs: EXEC_TIMEOUT_MS }));
     } catch (err) {
       console.error(`could not write ${file.path} into the sandbox:`, err);
       return false;
@@ -382,6 +382,3 @@ function pathWithin(path: string, mount: string): boolean {
   return norm(path) === norm(mount) || norm(path).startsWith(`${norm(mount)}/`);
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}

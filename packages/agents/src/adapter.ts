@@ -144,6 +144,16 @@ export interface McpFile {
   content: string;
 }
 
+/** The value as one POSIX shell word, whatever it contains. */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** Whether the path names the sandbox user's home rather than an absolute place. */
+export function isSandboxHomePath(path: string): boolean {
+  return path === "~" || path.startsWith("~/");
+}
+
 /**
  * A shell expression naming the path inside the sandbox. A `~/` path
  * becomes `"${HOME:-/root}"'/rest'`: the home is read where the
@@ -151,10 +161,9 @@ export interface McpFile {
  * the toolchain script assumes too.
  */
 export function sandboxPathExpression(path: string): string {
-  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   if (path === "~") return '"${HOME:-/root}"';
-  if (path.startsWith("~/")) return `"\${HOME:-/root}"${quote(path.slice(1))}`;
-  return quote(path);
+  if (path.startsWith("~/")) return `"\${HOME:-/root}"${shellQuote(path.slice(1))}`;
+  return shellQuote(path);
 }
 
 /** The path with `~` replaced by a known home, for comparing against mounts. */
@@ -374,8 +383,7 @@ export function runsOnOllama(names: { ollama: OllamaRoute }, found: Readonly<Rec
  * the exec URL.
  */
 export function writeFileCommand(file: McpFile): string[] {
-  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const dir = sandboxPathExpression(file.path.replace(/\/[^/]+$/, "") || "/");
   const path = sandboxPathExpression(file.path);
-  return ["sh", "-c", `if [ ! -d ${dir} ]; then mkdir -p ${dir} && chmod 700 ${dir}; fi && printf %s ${quote(file.content)} > ${path} && chmod 600 ${path}`];
+  return ["sh", "-c", `if [ ! -d ${dir} ]; then mkdir -p ${dir} && chmod 700 ${dir}; fi && printf %s ${shellQuote(file.content)} > ${path} && chmod 600 ${path}`];
 }
