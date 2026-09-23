@@ -1529,6 +1529,9 @@ select.input,
   flex-direction: column;
   min-width: 0;
   overflow-x: hidden;
+  /* A drag that reaches the end of the sheet must not keep going
+     into the board behind it. */
+  overscroll-behavior: contain;
   animation: slide-in 180ms ease-out;
   z-index: 20;
 }
@@ -1763,6 +1766,7 @@ select.input,
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
   padding: 20px 24px 32px;
 }
 
@@ -1784,12 +1788,14 @@ select.input,
   border-bottom: 0;
 }
 
-/* Conversation owns the available height; its transcript scrolls while
-   the run picker and composer remain reachable. Short windows can
-   still scroll the tab itself instead of clipping the composer. */
+/* The transcript is the only scroller in this tab. A second scroller
+   on the pane let a drag fall through to the board, and a minimum
+   height on the transcript pushed the composer below the sheet. */
 .feature-pane-conversation {
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .feature-conversation > .agent-session {
@@ -1803,8 +1809,12 @@ select.input,
 }
 
 .feature-pane-conversation .chat {
-  flex: 1 1 200px;
-  min-height: 200px;
+  /* height 0 plus flex-grow is what makes a flex child a real
+     scrollport on iOS. A content-sized basis grew with the transcript
+     and the drag moved the board instead. */
+  flex: 1 1 auto;
+  height: 0;
+  min-height: 0;
   max-height: none;
 }
 
@@ -3529,11 +3539,29 @@ a.pr-row:hover .pr-external {
     left: 0;
     width: 100%;
     height: min(88dvh, 100%);
+    overflow: hidden;
+    overscroll-behavior: none;
     border-left: none;
     border-top: 1px solid var(--line-bright);
     border-radius: 14px 14px 0 0;
     box-shadow: 0 -24px 48px var(--shadow-2);
     animation: sheet-up 200ms ease-out;
+  }
+
+  /* While a sheet is open the board is not a scroller. A drag that
+     missed the transcript was moving the lanes behind the card. */
+  html[data-sheet-open],
+  html[data-sheet-open] body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  html[data-sheet-open] .lane-cards,
+  html[data-sheet-open] .board,
+  html[data-sheet-open] .board.work-list,
+  html[data-sheet-open] .sessions-screen,
+  html[data-sheet-open] .spend-screen {
+    overflow: hidden;
   }
 
   .drawer-body {
@@ -3550,6 +3578,50 @@ a.pr-row:hover .pr-external {
     transform: translateY(0);
     opacity: 1;
   }
+}
+
+/*
+ * The software keyboard does not shrink the layout viewport, so a
+ * sheet fixed to the bottom sits under the keys and the field with
+ * it. sheet-layer.ts adds this class and sets the height to the
+ * visible region. The sheet then scrolls as one piece and the
+ * composer sticks to the top of the keys.
+ */
+.drawer.sheet-lifted {
+  top: auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.drawer.sheet-lifted .drawer-body,
+.feature-drawer.sheet-lifted .feature-drawer-body,
+.drawer.sheet-lifted .feature-pane,
+.drawer.sheet-lifted .feature-pane-conversation,
+.drawer.sheet-lifted .conversation-placement,
+.drawer.sheet-lifted .feature-conversation,
+.drawer.sheet-lifted .agent-session,
+.drawer.sheet-lifted .feature-pane-conversation .chat {
+  overflow: visible;
+  flex: none;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.drawer.sheet-lifted .composer-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding-top: 8px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+.drawer.sheet-lifted .composer {
+  margin-top: 0;
 }
 
 /* Feature history. The rail reads as one thread through the events. */
@@ -4491,6 +4563,15 @@ a.pr-row:hover .pr-external {
 .modal {
   max-height: min(85vh, 720px);
   overflow-y: auto;
+}
+
+/* The field and its hint travel together. When the keyboard lifts
+   the sheet, the pair sticks to the bottom of the visible region. */
+.composer-dock {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 /* The composer: input first, stop beside it while the agent works. */
@@ -7488,5 +7569,5 @@ a.hours-person-name:hover {
 .review-chat .agent-session { display: flex; flex-direction: column; gap: 12px; }
 .review-chat .agent-session > :not(.chat) { flex-shrink: 0; }
 .review-chat .chat { flex: 1 1 200px; min-height: 160px; max-height: none; border: 0; padding: 0 4px 0 0; border-radius: 0; }
-.review-chat .composer { margin-top: auto; }
+.review-chat .composer-dock { margin-top: auto; }
 .review-chat .composer-hint { margin-bottom: 0; }
