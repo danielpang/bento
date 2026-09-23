@@ -396,24 +396,90 @@ test("a worker that committed nothing lands as done with no commits", async () =
   assert.equal((await taskRow(fx.task.id))!.status, "done");
 });
 
-test("a deployment whose driver holds the checkouts says so, rather than failing on a missing path", async () => {
+test("a deployment whose driver holds the checkouts in sandboxes lands through bundles", async () => {
   const fx = await swarmWithLeaf("sprite");
   await commitIn(fx.workerTree, fx.task.id, "e.txt", "from e\n", "add e");
   const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
-  const head = await git(fx.swarmTree, ["rev-parse", "HEAD"]);
+  const before = await git(fx.swarmTree, ["rev-parse", "HEAD"]);
 
-  const driver = (ctx as unknown as { driver: { provider: string } }).driver;
-  const was = driver.provider;
-  driver.provider = "sprite";
+  const [swarmSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      provider: "sprite",
+      externalId: `sprite-swarm-${fx.swarm.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ sandboxId: swarmSandbox!.id }).where(eq(swarms.id, fx.swarm.id));
+  await db.insert(sandboxes).values({
+    projectId: PROJECT,
+    swarmId: fx.swarm.id,
+    swarmTaskId: fx.task.id,
+    provider: "sprite",
+    externalId: `sprite-worker-${fx.task.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const original = ctx.driver;
+  const trees = new Map([
+    [`sprite-swarm-${fx.swarm.id}`, fx.swarmTree],
+    [`sprite-worker-${fx.task.id}`, fx.workerTree],
+  ]);
+  ctx.driver = {
+    provider: "sprite",
+    async exportRepository(handle, _name, baseBranch, options) {
+      assert.equal(options?.selfContained, true, "remote landing snapshots must carry their own prerequisite objects");
+      const tree = trees.get(handle.externalId)!;
+      const baseSha = await git(tree, ["merge-base", baseBranch, "HEAD"]);
+      const headSha = await git(tree, ["rev-parse", "HEAD"]);
+      const file = path.join(dataDir, `${handle.externalId}.bundle`);
+      await git(tree, ["bundle", "create", file, "HEAD"]);
+      return { baseSha, headSha, data: await readFile(file) };
+    },
+    async importRepository(handle, _name, bundle, options) {
+      const tree = trees.get(handle.externalId)!;
+      assert.equal(await git(tree, ["symbolic-ref", "--short", "HEAD"]), options.branch);
+      const actual = await git(tree, ["rev-parse", "HEAD"]);
+      if (actual !== options.expectedHeadSha) {
+        return { ok: false as const, reason: "moved" as const, detail: "the branch moved" };
+      }
+      const file = path.join(dataDir, `import-${fx.swarm.id}.bundle`);
+      await writeFile(file, bundle.data);
+      await git(tree, ["fetch", "--quiet", file, "+HEAD:refs/bento/test-landing"]);
+      await git(tree, ["merge", "--ff-only", "refs/bento/test-landing"]);
+      return { ok: true as const, headSha: await git(tree, ["rev-parse", "HEAD"]) };
+    },
+    async *exec() {
+      yield { kind: "exit" as const, exitCode: 0 };
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  };
   try {
     const result = await performLanding(ctx, landing.id);
-    assert.equal(result?.status, "failed");
-    assert.match(result?.reason ?? "", /nothing has been lost/);
-    assert.doesNotMatch(result?.reason ?? "", /ENOENT|fatal:/, "not a git message about a path nobody can act on");
+    assert.equal(result?.status, "landed");
+    assert.deepEqual(result?.landed, ["app"]);
+
+    const after = await git(fx.swarmTree, ["rev-parse", "HEAD"]);
+    assert.notEqual(after, before);
+    assert.equal(await git(fx.swarmTree, ["show", "HEAD:e.txt"]), "from e");
+
+    // The crash window is safe on this path too. The branch moved but
+    // the row did not, so the retry sees the patch already present and
+    // completes without another commit.
+    await db.update(swarmLandings).set({ status: "landing" }).where(eq(swarmLandings.id, landing.id));
+    const retried = await performLanding(ctx, landing.id);
+    assert.equal(retried?.status, "landed");
+    assert.equal(await git(fx.swarmTree, ["rev-parse", "HEAD"]), after);
   } finally {
-    driver.provider = was;
+    ctx.driver = original;
   }
-  assert.equal(await git(fx.swarmTree, ["rev-parse", "HEAD"]), head);
 });
 
 test("a swarm checkout somebody left dirty fails the leaf rather than looping", async () => {
@@ -679,17 +745,59 @@ test("a branch whose checks fail goes back to be worked, carrying the output, an
   );
 });
 
-test("a swarm with no machine runs no checks and lands anyway", async () => {
+test("a configured landing check cannot silently pass without a swarm sandbox", async () => {
+  const fx = await swarmWithLeaf("check-no-sandbox");
+  await commitIn(fx.workerTree, fx.task.id, "unchecked.txt", "must be checked\n");
+  await alreadyTold(fx.task.id);
+  await setCheck("test -f unchecked.txt");
+  try {
+    const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+    const result = await performLanding(ctx, landing.id);
+    assert.equal(result?.status, "failed");
+    assert.match(result?.reason ?? "", /has no sandbox/);
+    const task = await taskRow(fx.task.id);
+    assert.equal(task!.status, "failed");
+    assert.equal(task!.attention, "failed");
+    assert.equal(plannerToldAt(task!), undefined, "the planner is told that the gate could not run");
+  } finally {
+    await setCheck(null);
+  }
+});
+
+test("a configured landing check cannot silently pass in a destroyed swarm sandbox", async () => {
+  const fx = await swarmWithLeaf("check-destroyed-sandbox");
+  await commitIn(fx.workerTree, fx.task.id, "unchecked.txt", "must be checked\n");
+  const [sandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      provider: "docker",
+      externalId: `destroyed-${fx.swarm.id}`,
+      status: "destroyed",
+    })
+    .returning();
+  await db.update(swarms).set({ sandboxId: sandbox!.id }).where(eq(swarms.id, fx.swarm.id));
+  await setCheck("test -f unchecked.txt");
+  try {
+    const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+    const result = await performLanding(ctx, landing.id);
+    assert.equal(result?.status, "failed");
+    assert.match(result?.reason ?? "", /sandbox is unavailable/);
+    assert.equal((await landingRow(landing.id))!.status, "failed");
+  } finally {
+    await setCheck(null);
+  }
+});
+
+test("a project with no configured landing check lands without a swarm sandbox", async () => {
   /**
-   * Which is the path every deployment without a provisioned sandbox
-   * takes, and the only one that used to be exercised. Kept, and kept
-   * beside the two above so it is clear which of the three is which.
+   * No check and a check that could not run are different facts. Only
+   * the latter blocks a landing.
    */
   const fx = await swarmWithLeaf("checks-none");
   await commitIn(fx.workerTree, fx.task.id, "fine.txt", "fine\n", "add fine");
-  await setCheck(`exit 1`);
   const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
   const result = await withLocalDriver(() => performLanding(ctx, landing.id));
-  await setCheck(null);
-  assert.equal(result?.status, "landed", "no sandbox is not a reason to stop the merge queue");
+  assert.equal(result?.status, "landed");
 });

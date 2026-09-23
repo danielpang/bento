@@ -23,7 +23,7 @@ import { WorktreeManager } from "@bento/sandbox";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
-import { SWARM_DESIGN_PATH } from "../../mcp/swarm-server.js";
+import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { publishFinishedSwarm, publishSwarmCompletion, swarmPullRequestBody } from "./complete.js";
 import { swarmWorkspaceKey } from "./sandbox.js";
 

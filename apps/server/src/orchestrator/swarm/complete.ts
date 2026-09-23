@@ -13,7 +13,7 @@ import type { SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { githubConnectionFor } from "../../github.js";
-import { SWARM_DESIGN_PATH } from "../../mcp/swarm-server.js";
+import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { publishSwarmBranches, type PublishableRepository, type PublishedPullRequest } from "../publish.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
