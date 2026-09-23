@@ -7,15 +7,18 @@ import {
   agentRuns,
   createDb,
   createPool,
+  repositories,
   runArtifacts,
   runEvents,
   runMigrations,
+  sandboxes,
   swarmLandings,
   swarmMessages,
   swarmTasks,
   swarms,
   type Db,
 } from "@bento/db";
+import type { ExecChunk, SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { EventBus, type BoardEvent } from "../events.js";
 import { loadEnv } from "../env.js";
@@ -43,6 +46,7 @@ let db: Db;
 let ctx: AppContext;
 let app: Hono;
 let emitted: BoardEvent[];
+let executed: { argv: string[]; cwd: string | undefined }[];
 
 before(async () => {
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -63,14 +67,37 @@ before(async () => {
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
   );
+  await db.insert(repositories).values({ projectId: PROJECT, name: "app", localPath: "/unused", position: 0 });
 
   const bus = new EventBus();
   emitted = [];
+  executed = [];
+  const driver: SandboxDriver = {
+    provider: "local-process",
+    async provision(): Promise<SandboxHandle> {
+      throw new Error("not used by this suite");
+    },
+    async *exec(_handle, argv, options): AsyncIterable<ExecChunk> {
+      executed.push({ argv, cwd: options?.cwd });
+      if (argv[0] === "git" && argv[1] === "symbolic-ref") {
+        yield { kind: "stdout", data: "swarm/test\n" };
+        yield { kind: "exit", exitCode: 0 };
+        return;
+      }
+      if (argv[0] === "git" && argv[1] === "diff") {
+        yield { kind: "exit", exitCode: 1 };
+        return;
+      }
+      yield { kind: "exit", exitCode: 0 };
+    },
+    async destroy(): Promise<void> {},
+  };
   ctx = {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
     pool,
     bus,
+    driver,
     userId: "u1",
   } as unknown as AppContext;
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
@@ -83,7 +110,9 @@ after(async () => {
 
 beforeEach(async () => {
   await pool.query("delete from swarms");
+  await pool.query("delete from sandboxes");
   emitted.length = 0;
+  executed.length = 0;
 });
 
 /** A swarm with a run of one role on it, and the token that run holds. */
@@ -91,19 +120,35 @@ async function agentOn(
   role: "planner" | "subplanner" | "worker",
   options: { taskId?: string; swarmId?: string } = {},
 ): Promise<{ swarmId: string; runId: string; token: string }> {
-  const swarmId =
-    options.swarmId
-    ?? (
-      await db
+  const [swarm] = options.swarmId
+    ? await db.select().from(swarms).where(eq(swarms.id, options.swarmId)).limit(1)
+    : await db
         .insert(swarms)
         .values({
           projectId: PROJECT,
           slug: `s-${Math.random().toString(36).slice(2, 8)}`,
           title: "Swarm",
           status: "running",
+          branchName: "swarm/test",
         })
-        .returning()
-    )[0]!.id;
+        .returning();
+  const swarmId = swarm!.id;
+  let sandboxId = swarm!.sandboxId;
+  if (!sandboxId) {
+    const [sandbox] = await db
+      .insert(sandboxes)
+      .values({
+        projectId: PROJECT,
+        swarmId,
+        provider: "docker",
+        externalId: `sandbox-${swarmId}`,
+        status: "busy",
+        workdir: "/workspace",
+      })
+      .returning();
+    sandboxId = sandbox!.id;
+    await db.update(swarms).set({ sandboxId }).where(eq(swarms.id, swarmId));
+  }
   const [run] = await db
     .insert(agentRuns)
     .values({
@@ -112,6 +157,7 @@ async function agentOn(
       ...(options.taskId ? { swarmTaskId: options.taskId } : {}),
       role,
       agentProfileId: PROFILE,
+      sandboxId,
       prompt: "",
       status: "running",
     })
@@ -410,6 +456,15 @@ test("the design note is one note, replaced rather than added to", async () => {
   assert.equal(rows.length, 1, "one note, not a pile of them");
   assert.equal(rows[0]!.featureId, null, "a swarm's artifact is not a card's");
   assert.equal(rows[0]!.kind, "markdown");
+  assert.equal(rows[0]!.path, "docs/bento/swarm/design.md");
+  assert.ok(
+    executed.some((command) => command.argv[0] === "git" && command.argv.includes("Update swarm design")),
+    "the document is committed on the branch rather than stored only as a row",
+  );
+  assert.ok(
+    executed.some((command) => command.argv[0] === "sh" && command.argv.at(-1)?.includes("Two branches after all.")),
+    "the committed file contains the replacement note",
+  );
   assert.match((await call(token, "read_design")).text, /Two branches after all/);
 });
 
