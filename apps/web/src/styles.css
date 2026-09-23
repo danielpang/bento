@@ -3577,18 +3577,14 @@ a.pr-row:hover .pr-external {
     padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 
-  /* Chat is the whole screen. The stage bars and the agent line repeat
-     what the transcript already says, and giving them up is what makes
-     the conversation the tall region instead of a strip under the header. */
+  /* Chat fills the screen, below the status bar. viewport-fit=cover
+     lets a fixed top edge sit under the clock, so the header starts
+     at the safe inset and the stage and the agent stay visible. */
   .feature-drawer.sheet-chat {
     top: 0;
     height: auto;
     border-radius: 0;
-  }
-
-  .feature-drawer.sheet-chat .feature-progress,
-  .feature-drawer.sheet-chat .feature-agent {
-    display: none;
+    padding-top: env(safe-area-inset-top);
   }
 
   .feature-drawer.sheet-chat .drawer-head {
@@ -5847,20 +5843,27 @@ button.lane-agent[data-saving] {
 }
 
 .settings-page {
-  max-width: 1120px;
   width: 100%;
   min-width: 0;
-  margin: 0 auto;
+  margin: 0;
   padding: 28px 28px 60px;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 24px;
-  /* The app shell is a fixed viewport. This page is the scroller, the
-     same way Sessions and Spend are, so a long section reaches its end
-     on a phone. */
+  /* The shell is a fixed viewport, so this page scrolls, the same way
+     Sessions and Spend do. The scroller is the full width of the
+     window: a max-width column would park the bar in the middle of
+     the screen. overflow-x stays hidden so a wide field cannot turn
+     that into a second bar. */
   flex: 1;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
+}
+
+.settings-page > * {
+  width: min(1120px, 100%);
 }
 .settings-layout {
   display: grid;

@@ -95,26 +95,58 @@ function hasRoom(el: HTMLElement, deltaY: number): boolean {
 }
 
 /**
- * The scroller a drag should move.
+ * The scroller a drag should move, or null when the finger started
+ * outside `boundary`.
  *
  * The nearest overflowing box wins while it still has room. Once it is
- * at that edge, the search continues outward so a diff inside a form
- * does not trap the rest of the sheet. The last overflowing box is
- * returned when every one of them is at its edge, which is what tells
- * the guard to cancel the drag.
+ * at that edge, the search continues outward, stopping at `boundary`,
+ * so a diff inside a form does not trap the rest of the sheet and a
+ * drag on the board cannot borrow a scroller behind the sheet. The
+ * last overflowing box is returned when every one of them is at its
+ * edge, which is what tells the guard to cancel the drag.
  */
-function findVerticalScroller(target: Node, boundary: HTMLElement, deltaY: number): HTMLElement | null {
-  let el: HTMLElement | null = target instanceof HTMLElement ? target : target.parentElement;
-  let edge: HTMLElement | null = null;
+export function nearestVerticalScroller<T>(input: {
+  start: T | null;
+  boundary: T;
+  deltaY: number;
+  parent: (node: T) => T | null;
+  canScroll: (node: T) => boolean;
+  hasRoom: (node: T, deltaY: number) => boolean;
+}): T | null {
+  const { start, boundary, deltaY, parent, canScroll, hasRoom: room } = input;
+  if (!start || !insideBoundary(boundary, start, parent)) return null;
+  let el: T | null = start;
+  let edge: T | null = null;
   while (el) {
-    if (isVerticalScroller(el)) {
+    if (canScroll(el)) {
       edge = el;
-      if (hasRoom(el, deltaY)) return el;
+      if (room(el, deltaY)) return el;
     }
     if (el === boundary) break;
-    el = el.parentElement;
+    el = parent(el);
   }
   return edge;
+}
+
+function insideBoundary<T>(boundary: T, node: T, parent: (node: T) => T | null): boolean {
+  let el: T | null = node;
+  while (el) {
+    if (el === boundary) return true;
+    el = parent(el);
+  }
+  return false;
+}
+
+function findVerticalScroller(target: Node, boundary: HTMLElement, deltaY: number): HTMLElement | null {
+  const start = target instanceof HTMLElement ? target : target.parentElement;
+  return nearestVerticalScroller({
+    start,
+    boundary,
+    deltaY,
+    parent: (node) => node.parentElement,
+    canScroll: isVerticalScroller,
+    hasRoom,
+  });
 }
 
 /** A dialog or menu rendered outside the sheet, or the sheet itself. */
