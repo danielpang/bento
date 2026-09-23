@@ -57,24 +57,47 @@ function manualRelease(arch = "arm64") {
   return { isUpdateAvailable: true, updateInfo: info, versionInfo: info, downloadPromise: null };
 }
 
-test("manual updates wait for a click and consent, without downloading or restarting the app", async () => {
+test("manual background checks show a toast, while downloads still require consent", async () => {
   const urls: string[] = [];
   let consent = false;
   const f = fixture(undefined, { arch: "arm64", confirmDownload: async () => consent, openDownload: async url => { urls.push(url); } });
   assert.equal(f.driver.autoDownload, false);
   assert.equal(f.driver.autoInstallOnAppQuit, false);
   f.updates.start();
-  await f.updates.check();
-  assert.equal(f.checks(), 0);
-  const cancelled = f.updates.check(true);
+  const background = f.updates.check();
   f.result.resolve(manualRelease());
-  await cancelled;
+  await background;
+  assert.equal(f.checks(), 1);
+  assert.deepEqual(f.updates.notice, { version: "1.2.3", action: "download", busy: false });
+  await f.updates.check(true); // Later retains the toast without opening a browser.
   assert.deepEqual(urls, []);
   consent = true;
   await f.updates.check(true);
   assert.deepEqual(urls, ["https://github.com/danielpang/bento/releases/download/v1.2.3/Bento-1.2.3-arm64.dmg"]);
   assert.deepEqual(f.calls, []); // No signature staging, notification, shutdown, or installation.
   assert.equal(f.updates.menu.label, "Check for Updates...");
+  assert.equal(f.updates.notice, null);
+  f.updates.dispose();
+});
+
+test("dismissing an update is shared across windows and only a new version returns", async () => {
+  const f = fixture(undefined, { arch: "arm64", confirmDownload: async () => false, openDownload: async () => {} });
+  f.result.resolve(manualRelease());
+  await f.updates.check();
+  f.updates.dismissNotice();
+  assert.equal(f.updates.notice, null);
+  await f.updates.check();
+  assert.equal(f.updates.notice, null);
+  const next = manualRelease();
+  next.updateInfo.version = "1.2.4";
+  next.updateInfo.tag = "v1.2.4";
+  next.updateInfo.files[0]!.url = "Bento-1.2.4-arm64.dmg";
+  f.driver.checkForUpdates = async () => next;
+  await f.updates.check();
+  assert.equal(f.updates.notice?.version, "1.2.4");
+  f.driver.checkForUpdates = async () => ({ ...next, isUpdateAvailable: false });
+  await f.updates.check();
+  assert.equal(f.updates.notice, null);
 });
 
 test("repeated manual checks share one version lookup and confirmation", async () => {
@@ -144,6 +167,7 @@ test("restart waits for native validation and complete local shutdown", async ()
   const install = f.updates.check(true);
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(f.calls, ["notify", "verify"]);
+  assert.equal(f.updates.notice?.busy, true);
   await f.updates.check(true);
   verified.resolve();
   await new Promise(resolve => setImmediate(resolve));
@@ -151,6 +175,25 @@ test("restart waits for native validation and complete local shutdown", async ()
   stopped.resolve();
   await install;
   assert.deepEqual(f.calls, ["notify", "verify", "shutdown", "install"]);
+});
+
+test("all windows disable the restart notice during consent and recover after Later", async () => {
+  const f = fixture();
+  const consent = deferred<boolean>();
+  const busy: boolean[] = [];
+  let prompts = 0;
+  f.ui.changed = () => { busy.push(f.updates.notice?.busy ?? false); };
+  f.ui.confirmRestart = () => { prompts++; return consent.promise; };
+  f.downloaded();
+  const first = f.updates.check(true);
+  await f.updates.check(true);
+  assert.equal(prompts, 1);
+  assert.equal(f.updates.notice?.busy, true);
+  consent.resolve(false);
+  await first;
+  assert.deepEqual(busy, [false, true, false]);
+  assert.equal(f.updates.notice?.busy, false);
+  assert.ok(!f.calls.includes("verify"));
 });
 
 test("native signature failures preserve the local runtime and allow retry", async () => {

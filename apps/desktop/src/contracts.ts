@@ -1,5 +1,11 @@
 export type DesktopMode = "local" | "remote";
 
+export interface DesktopUpdateNotice {
+  version: string;
+  action: "download" | "restart";
+  busy: boolean;
+}
+
 export interface DesktopSettings {
   mode: DesktopMode;
   serverUrl: string;

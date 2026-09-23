@@ -1,8 +1,10 @@
 import { ipcRenderer } from "electron";
+import { installUpdateToast } from "./update-toast.js";
 
 /** Only trusted main frames install desktop chrome. Artifact frames never do. */
 export function installWindowChrome(kind: "console" | "launcher") {
   if (!process.isMainFrame || process.platform !== "darwin") return;
+  installUpdateToast(kind);
   const fullscreen = (value: boolean) => {
     document.documentElement.toggleAttribute("data-desktop-fullscreen", value);
   };
