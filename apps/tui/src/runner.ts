@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { credentialNamesFor, getAdapter, runAgent, runsOnOllama, writeFileCommand, type CustomProviderSelection } from "@bento/agents";
+import { credentialNamesFor, getAdapter, isSandboxHomePath, runAgent, runsOnOllama, writeFileCommand, type CustomProviderSelection } from "@bento/agents";
 import {
   agentRunPrompt,
   forgetsBetweenRuns,
@@ -286,6 +286,11 @@ export class LocalRunner {
     // Files the tool reads settings from, written before every run
     // because the sandbox outlives it.
     for (const file of adapter.files?.(commandInput) ?? []) {
+      // No sandbox: the agent's home is this machine's.
+      if (this.driver.provider === "local-process" && isSandboxHomePath(file.path)) {
+        console.warn(`not writing ${file.path} on this machine, because it would replace your own file`);
+        continue;
+      }
       let exitCode = 0;
       for await (const chunk of this.driver.exec(handle, writeFileCommand(file), { cwd: workdir })) {
         if (chunk.kind === "exit") exitCode = chunk.exitCode ?? 0;

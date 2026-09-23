@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SpritesClient } from "@fly/sprites";
+import { writeFileCommand } from "@bento/agents";
 import { AGENT_BINARIES, TOOLCHAIN_LEGACY_MARKER, TOOLCHAIN_STAMPS } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
 import { taskRequest } from "./keep-awake.js";
@@ -221,6 +222,21 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
       if (exitCode !== 0) broken.push(`${binary} (exit ${exitCode}: ${(stderr || stdout).trim().slice(0, 200)})`);
     }
     assert.deepEqual(broken, [], `installed but not runnable: ${broken.join(", ")}`);
+  });
+
+  // Configs written under /root were never read: the sprite's HOME is elsewhere.
+  await t.test("a home-relative config file lands in the agent's own home", { skip: needsSprite() }, async () => {
+    const [, , script] = writeFileCommand({ path: "~/.bento-e2e/probe.json", content: '{"ok":true}' });
+    const written = await shell(script!);
+    assert.equal(written.exitCode, 0, `could not write the probe: ${written.stderr}`);
+    const read = await shell('cat "$HOME/.bento-e2e/probe.json"; rm -rf "$HOME/.bento-e2e"');
+    assert.equal(read.exitCode, 0, `the probe is not in $HOME: ${read.stderr}`);
+    assert.deepEqual(JSON.parse(read.out), { ok: true });
+    // Write and read share one exec; HOME must also be the account's home.
+    const home = await shell('printf %s "$HOME"; echo; getent passwd "$(id -un)" | cut -d: -f6');
+    const [seen, account] = home.out.split("\n").map((line) => line.trim());
+    assert.equal(seen, account, "the exec's HOME must be the account's home, or a harness spawned from a login shell reads elsewhere");
+    assert.notEqual(seen, "/root", "a sprite's home is its own user's, which is the whole point of the check");
   });
 
   /**

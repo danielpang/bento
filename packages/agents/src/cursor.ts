@@ -39,7 +39,7 @@ export const cursorAdapter: AgentAdapter = {
       const mcpServers = Object.fromEntries(
         servers.map((s) => [s.slug, { url: s.url, headers: s.headers }]),
       );
-      return [{ path: "/root/.cursor/mcp.json", content: JSON.stringify({ mcpServers }, null, 2) }];
+      return [{ path: "~/.cursor/mcp.json", content: JSON.stringify({ mcpServers }, null, 2) }];
     },
   },
 

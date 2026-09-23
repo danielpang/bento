@@ -113,7 +113,7 @@ export const opencodeAdapter: AgentAdapter = {
       );
       return [
         {
-          path: "/root/.config/opencode/opencode.json",
+          path: "~/.config/opencode/opencode.json",
           content: JSON.stringify({ $schema: "https://opencode.ai/config.json", mcp }, null, 2),
         },
       ];

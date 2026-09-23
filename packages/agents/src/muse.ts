@@ -70,7 +70,7 @@ export const museAdapter: AgentAdapter = {
       );
       return [
         {
-          path: "/root/.config/muse/settings.json",
+          path: "~/.config/muse/settings.json",
           content: JSON.stringify({ schema_version: 1, mcp_servers }, null, 2),
         },
       ];

@@ -126,10 +126,34 @@ export interface McpRemoteServer {
   headers: Record<string, string>;
 }
 
-/** A file to write into the sandbox, absolute path. */
+/** A file to write into the sandbox: an absolute path, or `~/` for the sandbox user's home. */
 export interface McpFile {
   path: string;
   content: string;
+}
+
+/** One POSIX shell word. */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** True for `~` and `~/...`. */
+export function isSandboxHomePath(path: string): boolean {
+  return path === "~" || path.startsWith("~/");
+}
+
+/** Shell expression for the path; `~/` expands to `"${HOME:-/root}"` where the command runs. */
+export function sandboxPathExpression(path: string): string {
+  if (path === "~") return '"${HOME:-/root}"';
+  if (path.startsWith("~/")) return `"\${HOME:-/root}"${shellQuote(path.slice(1))}`;
+  return shellQuote(path);
+}
+
+/** `~` replaced by a known home. */
+export function resolveSandboxPath(path: string, home: string): string {
+  if (path === "~") return home;
+  if (path.startsWith("~/")) return `${home}${path.slice(1)}`;
+  return path;
 }
 
 /**
@@ -342,7 +366,7 @@ export function runsOnOllama(names: { ollama: OllamaRoute }, found: Readonly<Rec
  * the exec URL.
  */
 export function writeFileCommand(file: McpFile): string[] {
-  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-  const dir = file.path.replace(/\/[^/]+$/, "") || "/";
-  return ["sh", "-c", `if [ ! -d ${quote(dir)} ]; then mkdir -p ${quote(dir)} && chmod 700 ${quote(dir)}; fi && printf %s ${quote(file.content)} > ${quote(file.path)} && chmod 600 ${quote(file.path)}`];
+  const dir = sandboxPathExpression(file.path.replace(/\/[^/]+$/, "") || "/");
+  const path = sandboxPathExpression(file.path);
+  return ["sh", "-c", `if [ ! -d ${dir} ]; then mkdir -p ${dir} && chmod 700 ${dir}; fi && printf %s ${shellQuote(file.content)} > ${path} && chmod 600 ${path}`];
 }

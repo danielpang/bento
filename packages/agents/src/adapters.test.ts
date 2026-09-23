@@ -916,7 +916,7 @@ test("antigravity writes its MCP servers where agy reads them", () => {
   const files = antigravityAdapter.mcp!.renderConfig([
     { slug: "linear", url: "https://bento.test/mcp/linear", transport: "http", headers: { Authorization: "Bearer t" } },
   ]);
-  assert.deepEqual(files.map((f) => f.path), ["/root/.gemini/config/mcp_config.json"]);
+  assert.deepEqual(files.map((f) => f.path), ["~/.gemini/config/mcp_config.json"]);
   assert.deepEqual(JSON.parse(files[0]!.content), {
     mcpServers: {
       linear: { serverUrl: "https://bento.test/mcp/linear", headers: { Authorization: "Bearer t" } },
@@ -1035,7 +1035,7 @@ test("muse writes its MCP servers where the CLI reads them", () => {
   const files = museAdapter.mcp!.renderConfig([
     { slug: "linear", url: "https://bento.test/mcp/linear", transport: "http", headers: { Authorization: "Bearer t" } },
   ]);
-  assert.deepEqual(files.map((f) => f.path), ["/root/.config/muse/settings.json"]);
+  assert.deepEqual(files.map((f) => f.path), ["~/.config/muse/settings.json"]);
   assert.deepEqual(JSON.parse(files[0]!.content), {
     schema_version: 1,
     mcp_servers: {
@@ -1182,7 +1182,7 @@ test("custom providers produce harness-specific config without putting keys in f
   };
   const input = { prompt: "do it", model: "team-models/vendor/model-a", cwd: "/workspace", customProvider };
   const piFile = piAdapter.files?.(input)[0];
-  assert.equal(piFile?.path, "/root/.pi/agent/models.json");
+  assert.equal(piFile?.path, "~/.pi/agent/models.json");
   assert.deepEqual(JSON.parse(piFile?.content ?? "{}").providers[customProvider.slug], {
     baseUrl: customProvider.baseUrl,
     api: "openai-completions",
@@ -1200,7 +1200,7 @@ test("custom providers produce harness-specific config without putting keys in f
   assert.equal(dshAdapter.env?.(input).DSH_MODEL, "vendor/model-a");
 
   const fxFile = fxAdapter.files?.(input)[0];
-  assert.equal(fxFile?.path, "/root/.fx/settings.json");
+  assert.equal(fxFile?.path, "~/.fx/settings.json");
   assert.deepEqual(JSON.parse(fxFile?.content ?? "{}").providers[customProvider.slug], {
     protocol: "openai-chat-completions",
     base_url: customProvider.baseUrl,
@@ -1367,7 +1367,7 @@ test("fx writes its MCP servers where the CLI reads them", () => {
   const files = fxAdapter.mcp!.renderConfig([
     { slug: "docs", url: "https://bento.test/mcp", transport: "http", headers: { Authorization: "Bearer t" } },
   ]);
-  assert.deepEqual(files.map((f) => f.path), ["/root/.fx/mcp.json"]);
+  assert.deepEqual(files.map((f) => f.path), ["~/.fx/mcp.json"]);
   assert.deepEqual(JSON.parse(files[0]!.content), {
     mcp: {
       docs: {

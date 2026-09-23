@@ -4,7 +4,7 @@ An organization defines remote MCP servers once. Every supported harness receive
 
 ## What an agent sees
 
-At run start, Bento writes MCP config for the harness. Each enabled server points at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway validates the token, attaches the organization or member credential, and proxies upstream. The token is revoked when the run ends.
+At run start, Bento writes MCP config for the harness, into the harness's own config file under the sandbox user's home (root's in a Docker container, `/home/sprite` on a Fly Sprite). Each enabled server points at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway validates the token, attaches the organization or member credential, and proxies upstream. The token is revoked when the run ends.
 
 Credentials are not exposed in the sandbox config.
 
