@@ -13,6 +13,7 @@ import { createDb, createPool } from "@bento/db";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createAnalytics } from "./analytics.js";
+import { bindWaitlistCapture } from "./waitlist-cloud-capture.js";
 import { createMailer, noticeMessage } from "./mail.js";
 import { loadEnv } from "./env.js";
 import type { CloudRegistration, WaitlistOperator } from "./cloud-contract.js";
@@ -70,6 +71,7 @@ async function main(argv: string[]): Promise<number> {
       console.error(`BENTO_CLOUD_MODULE ${name} does not export registerCloud`);
       return 1;
     }
+    const capture = bindWaitlistCapture(analytics);
     const registered = await mod.registerCloud({
       db,
       mailer,
@@ -80,16 +82,7 @@ async function main(argv: string[]): Promise<number> {
       async identify() {
         return null;
       },
-      ...(analytics
-        ? {
-            capture: (event: { event: string; properties?: Record<string, unknown> }) => {
-              analytics.capture({
-                event: event.event,
-                ...(event.properties ? { properties: event.properties } : {}),
-              });
-            },
-          }
-        : {}),
+      ...(capture ? { capture } : {}),
     });
     const operator = registered.waitlistOperator;
     if (!operator) {

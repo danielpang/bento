@@ -47,6 +47,12 @@ test("the invite query preselects signup and email, then is stripped", () => {
   assert.equal(stripWaitlistParams("/?signup=1&email=a%40b.co"), "/");
 });
 
+test("verification and other 403s are not confused with waitlist refusal", () => {
+  assert.equal(isWaitlistRequired({ status: 403, code: "INVALID_EMAIL" }), false);
+  assert.equal(isWaitlistRequired({ status: 403 }), false);
+  assert.equal(isWaitlistRequired({ status: 500, code: "WAITLIST_REQUIRED" }), true);
+});
+
 test("duplicate-safe join payload sends console as the source", () => {
   assert.deepEqual(waitlistJoinPayload({ email: " ada@example.com ", name: " Ada " }), {
     email: "ada@example.com",

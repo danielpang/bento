@@ -3325,3 +3325,64 @@ test("user-create admission covers the same hook social signup would hit", async
   });
   assert.deepEqual(seen, ["waitlist-hook@bento.test"]);
 });
+
+test("installs without admission never return WAITLIST_REQUIRED on signup", async () => {
+  const res = await app.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "no-admission-gate@bento.test",
+      password: "correct-horse-battery",
+      name: "Local",
+    }),
+  });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { code?: string };
+  assert.notEqual(body.code, "WAITLIST_REQUIRED");
+});
+
+test("an expired organization invitation does not bypass waitlist admission", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "waitlist-expired-invite-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Owner",
+  });
+  const token = owner.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost(
+      "/api/auth/organization/create",
+      { name: "Expired Invite Org", slug: "expired-invite-org" },
+      token,
+    )
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const inviteRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "waitlist-expired-invite@bento.test", role: "member", organizationId: org.id },
+    token,
+  );
+  assert.equal(inviteRes.status, 200, await inviteRes.clone().text());
+  await ctx.db
+    .update(invitation)
+    .set({ expiresAt: new Date(Date.now() - 60_000) })
+    .where(eq(invitation.email, "waitlist-expired-invite@bento.test"));
+
+  const closed = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser() {
+      return { allowed: false, code: "WAITLIST_REQUIRED" };
+    },
+    async onUserCreated() {},
+  });
+  const teammate = await closed.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-expired-invite@bento.test",
+      password: "correct-horse-battery",
+      name: "Too late",
+    }),
+  });
+  assert.equal(teammate.status, 403);
+  assert.equal(((await teammate.json()) as { code?: string }).code, "WAITLIST_REQUIRED");
+});
