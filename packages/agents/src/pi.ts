@@ -33,7 +33,7 @@ export const piAdapter: AgentAdapter = {
     const provider = input.customProvider;
     if (!provider) return [];
     return [{
-      path: "/root/.pi/agent/models.json",
+      path: "~/.pi/agent/models.json",
       content: JSON.stringify({ providers: {
         [provider.slug]: {
           baseUrl: provider.baseUrl,

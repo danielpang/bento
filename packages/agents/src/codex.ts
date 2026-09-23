@@ -89,7 +89,7 @@ export const codexAdapter: AgentAdapter = {
    */
   mcp: {
     renderConfig(servers) {
-      return [{ path: "/root/.codex/config.toml", content: renderCodexConfig(servers) }];
+      return [{ path: "~/.codex/config.toml", content: renderCodexConfig(servers) }];
     },
   },
 

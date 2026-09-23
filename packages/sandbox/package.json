@@ -23,6 +23,7 @@
     "dockerode": "^4.0.4"
   },
   "devDependencies": {
+    "@bento/agents": "workspace:*",
     "@types/dockerode": "^3.3.35",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"

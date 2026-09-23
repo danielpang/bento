@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SpritesClient } from "@fly/sprites";
+import { writeFileCommand } from "@bento/agents";
 import { AGENT_BINARIES, TOOLCHAIN_LEGACY_MARKER, TOOLCHAIN_STAMPS } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
 import { taskRequest } from "./keep-awake.js";
@@ -230,6 +231,24 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * installs the CLI, so a real provision is the only thing that can
    * say it landed where agy looks for it.
    */
+  /**
+   * The sprite's HOME is not /root, and every harness reads its config
+   * from its own home. A config written under /root was never read:
+   * the gateway grant for every hosted run sat unused while the
+   * transcript said the servers were attached. Only a real sprite can
+   * say where a `~/` path lands.
+   */
+  await t.test("a home-relative config file lands in the agent's own home", { skip: needsSprite() }, async () => {
+    const [, , script] = writeFileCommand({ path: "~/.bento-e2e/probe.json", content: '{"ok":true}' });
+    const written = await shell(script!);
+    assert.equal(written.exitCode, 0, `could not write the probe: ${written.stderr}`);
+    const read = await shell('cat "$HOME/.bento-e2e/probe.json"; rm -rf "$HOME/.bento-e2e"');
+    assert.equal(read.exitCode, 0, `the probe is not in $HOME: ${read.stderr}`);
+    assert.deepEqual(JSON.parse(read.out), { ok: true });
+    const home = await shell('printf %s "$HOME"');
+    assert.notEqual(home.out.trim(), "/root", "a sprite's home is its own user's, which is the whole point of the check");
+  });
+
   await t.test("agy is provisioned to run on a Gemini API key", { skip: needsSprite() }, async () => {
     const settings = await shell("cat \"$HOME/.gemini/antigravity-cli/settings.json\"");
     assert.equal(settings.exitCode, 0, `agy has no settings file: ${settings.stderr}`);

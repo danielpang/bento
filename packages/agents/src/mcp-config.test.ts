@@ -6,7 +6,7 @@ import { fxAdapter } from "./fx.js";
 import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { codexAdapter } from "./codex.js";
-import type { McpRemoteServer } from "./adapter.js";
+import { resolveSandboxPath, sandboxPathExpression, writeFileCommand, type McpRemoteServer } from "./adapter.js";
 
 const servers: McpRemoteServer[] = [
   {
@@ -43,7 +43,7 @@ test("claude-code writes a typed mcpServers map and adds the strict flags", () =
 
 test("cursor writes the global mcp.json under the sandbox home", () => {
   const files = cursorAdapter.mcp!.renderConfig(servers);
-  assert.equal(files[0]!.path, "/root/.cursor/mcp.json");
+  assert.equal(files[0]!.path, "~/.cursor/mcp.json");
   const parsed = JSON.parse(files[0]!.content) as { mcpServers: Record<string, { url: string }> };
   assert.equal(parsed.mcpServers.docs!.url, servers[0]!.url);
   // Cursor autoruns MCP tools with the sandbox flags, so no extra argv.
@@ -52,7 +52,7 @@ test("cursor writes the global mcp.json under the sandbox home", () => {
 
 test("opencode marks servers remote and enabled", () => {
   const files = opencodeAdapter.mcp!.renderConfig(servers);
-  assert.equal(files[0]!.path, "/root/.config/opencode/opencode.json");
+  assert.equal(files[0]!.path, "~/.config/opencode/opencode.json");
   const parsed = JSON.parse(files[0]!.content) as {
     mcp: Record<string, { type: string; enabled: boolean; headers: Record<string, string> }>;
   };
@@ -63,7 +63,7 @@ test("opencode marks servers remote and enabled", () => {
 
 test("codex renders TOML tables with a static Authorization header", () => {
   const files = codexAdapter.mcp!.renderConfig(servers);
-  assert.equal(files[0]!.path, "/root/.codex/config.toml");
+  assert.equal(files[0]!.path, "~/.codex/config.toml");
   const toml = files[0]!.content;
   assert.match(toml, /\[model_providers\.openrouter\]/);
   assert.match(toml, /env_key = "OPENROUTER_API_KEY"/);
@@ -86,7 +86,7 @@ test("codex escapes a slug that is not a bare TOML key", () => {
 
 test("fx names the grant through bearer_token_env, never a literal Authorization header", () => {
   const files = fxAdapter.mcp!.renderConfig(servers);
-  assert.equal(files[0]!.path, "/root/.fx/mcp.json");
+  assert.equal(files[0]!.path, "~/.fx/mcp.json");
   const parsed = JSON.parse(files[0]!.content) as {
     mcp: Record<string, { type: string; bearer_token_env?: string; headers?: unknown }>;
   };
@@ -112,4 +112,37 @@ test("an empty server set still renders a config, so a removed server is cleared
   assert.match(emptyCodex, /\[model_providers\.openrouter\]/);
   assert.match(emptyCodex, /\[model_providers\.vercel\]/);
   assert.doesNotMatch(emptyCodex, /\[mcp_servers\./);
+});
+
+/**
+ * The sandbox's home is not always root's: a Fly Sprite runs the agent
+ * as a user whose HOME is /home/sprite, and every config once written
+ * under /root sat where no harness looked. So a config path names the
+ * home as `~`, and the write expands it where the command runs.
+ */
+test("a home-relative config path is expanded against the sandbox's own HOME", () => {
+  assert.equal(sandboxPathExpression("~/.cursor/mcp.json"), `"\${HOME:-/root}"'/.cursor/mcp.json'`);
+  assert.equal(sandboxPathExpression("/opt/bento/mcp/claude.json"), "'/opt/bento/mcp/claude.json'");
+  assert.equal(sandboxPathExpression("~/it's"), `"\${HOME:-/root}"'/it'\\''s'`);
+
+  const [sh, flag, script] = writeFileCommand({ path: "~/.codex/config.toml", content: "x = 1" });
+  assert.deepEqual([sh, flag], ["sh", "-c"]);
+  assert.match(script!, /mkdir -p "\$\{HOME:-\/root\}"'\/\.codex'/);
+  assert.match(script!, /> "\$\{HOME:-\/root\}"'\/\.codex\/config\.toml'/);
+  assert.doesNotMatch(script!, /\/root\/\.codex/, "the home is read in the sandbox, never assumed here");
+});
+
+test("resolveSandboxPath substitutes a known home for comparisons", () => {
+  assert.equal(resolveSandboxPath("~/.codex/config.toml", "/root"), "/root/.codex/config.toml");
+  assert.equal(resolveSandboxPath("~", "/home/sprite"), "/home/sprite");
+  assert.equal(resolveSandboxPath("/opt/bento/mcp/claude.json", "/root"), "/opt/bento/mcp/claude.json");
+});
+
+test("every harness config path is home-relative or absolute, never root's home spelled out", () => {
+  for (const adapter of [cursorAdapter, codexAdapter, opencodeAdapter, fxAdapter, museAdapter, claudeCodeAdapter]) {
+    for (const file of adapter.mcp!.renderConfig(servers)) {
+      assert.ok(file.path.startsWith("~/") || file.path.startsWith("/opt/"), `${adapter.cli}: ${file.path}`);
+      assert.doesNotMatch(file.path, /^\/root\//);
+    }
+  }
 });

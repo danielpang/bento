@@ -52,7 +52,7 @@ export const fxAdapter: AgentAdapter = {
     const provider = input.customProvider;
     if (!provider) return [];
     return [{
-      path: "/root/.fx/settings.json",
+      path: "~/.fx/settings.json",
       content: JSON.stringify({
         providers: {
           [provider.slug]: {
@@ -107,7 +107,7 @@ export const fxAdapter: AgentAdapter = {
       );
       return [
         {
-          path: "/root/.fx/mcp.json",
+          path: "~/.fx/mcp.json",
           content: JSON.stringify({ mcp }, null, 2),
         },
       ];

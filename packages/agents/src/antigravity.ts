@@ -95,7 +95,7 @@ export const antigravityAdapter: AgentAdapter = {
       );
       return [
         {
-          path: "/root/.gemini/config/mcp_config.json",
+          path: "~/.gemini/config/mcp_config.json",
           content: JSON.stringify({ mcpServers }, null, 2),
         },
       ];
