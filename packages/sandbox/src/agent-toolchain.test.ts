@@ -8,10 +8,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AGENT_BINARIES,
+  AGENT_CLI_BINARIES,
   AGENT_TOOLCHAIN_SCRIPT,
-  TOOLCHAIN_MARKER,
+  TOOLCHAIN_LEGACY_MARKER,
+  TOOLCHAIN_STAMPS,
   TOOLCHAIN_VERSION,
+  agentToolchainScript,
+  toolchainBinaries,
   toolchainMissing,
+  toolchainPresenceProbe,
 } from "./agent-toolchain.js";
 
 const dockerfile = path.join(
@@ -806,25 +811,51 @@ EOF
     );
   }
 
-  run(script = this.script): { status: number | null; stdout: string; stderr: string } {
+  run(
+    script = this.script,
+    env: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
     rmSync(path.join(this.root, "fetched"), { force: true });
     const home = path.join(this.root, "home");
     mkdirSync(home, { recursive: true });
     const result = spawnSync("sh", ["-c", script], {
-      env: { PATH: `${this.stubs}:${this.root}/usr/local/bin:/usr/bin:/bin`, HOME: home },
+      env: { PATH: `${this.stubs}:${this.root}/usr/local/bin:/usr/bin:/bin`, HOME: home, ...env },
       encoding: "utf8",
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   }
 
   /**
-   * The same sandbox after a TOOLCHAIN_VERSION bump. A bump renames the
-   * marker, which is the whole of what a warm machine notices, so
-   * rendering the script against a marker it has never seen is a
-   * faithful stand-in for the deploy that follows one.
+   * Drops a stub so the machine's own tool is used instead. For the
+   * handful of assertions that are about a real tool's behaviour rather
+   * than about the script calling it; anything that would reach the
+   * network stays stubbed.
    */
-  runAfterVersionBump(): { status: number | null; stdout: string; stderr: string } {
-    return this.run(this.relocate(AGENT_TOOLCHAIN_SCRIPT.replaceAll(TOOLCHAIN_MARKER, `${TOOLCHAIN_MARKER}-next`)));
+  unstub(name: string): void {
+    rmSync(path.join(this.stubs, name), { force: true });
+  }
+
+  /**
+   * The same sandbox after a TOOLCHAIN_VERSION bump. A bump renames both
+   * versioned paths, which is the whole of what a warm machine notices,
+   * so rendering the script against a stamp directory it has never seen
+   * is a faithful stand-in for the deploy that follows one. The legacy
+   * marker moves too: a bump must not inherit the previous version's
+   * word that every CLI was installed.
+   */
+  runAfterVersionBump(binaries?: readonly string[]): { status: number | null; stdout: string; stderr: string } {
+    const bumped = agentToolchainScript(binaries)
+      .replaceAll(TOOLCHAIN_STAMPS, `${TOOLCHAIN_STAMPS}-next`)
+      .replaceAll(TOOLCHAIN_LEGACY_MARKER, `${TOOLCHAIN_LEGACY_MARKER}-next`);
+    return this.run(this.relocate(bumped));
+  }
+
+  /** The script rendered for one card's agents rather than all ten. */
+  runFor(
+    binaries: readonly string[],
+    env: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
+    return this.run(this.relocate(agentToolchainScript(binaries)), env);
   }
 
   /** The binaries a run could actually spawn afterwards. */
@@ -881,8 +912,15 @@ function writeCliVersion(file: string, version: string): void {
 
 /** The marker names its version, so a bump reinstalls a warm sandbox. */
 test("the marker is versioned", () => {
-  assert.match(TOOLCHAIN_MARKER, /^\/opt\/bento\/toolchain-v\d+$/);
-  assert.ok(AGENT_TOOLCHAIN_SCRIPT.includes(`MARKER=${TOOLCHAIN_MARKER}`));
+  assert.match(TOOLCHAIN_STAMPS, /^\/opt\/bento\/toolchain\/v\d+$/);
+  assert.match(TOOLCHAIN_LEGACY_MARKER, /^\/opt\/bento\/toolchain-v\d+$/);
+  assert.ok(AGENT_TOOLCHAIN_SCRIPT.includes(`STAMPS=${TOOLCHAIN_STAMPS}`));
+  assert.ok(AGENT_TOOLCHAIN_SCRIPT.includes(`LEGACY_MARKER=${TOOLCHAIN_LEGACY_MARKER}`));
+  // The stamps live beside the marker they replaced rather than on top
+  // of it: a warm machine holds that path as a file, and a directory
+  // cannot be created over one.
+  assert.notEqual(TOOLCHAIN_STAMPS, TOOLCHAIN_LEGACY_MARKER);
+  assert.ok(!TOOLCHAIN_STAMPS.startsWith(`${TOOLCHAIN_LEGACY_MARKER}/`));
 });
 
 /**
@@ -904,4 +942,325 @@ test("pool's install accepts the EULA, and only pool's", () => {
     (candidate) => candidate.includes("POOL_INSTALL_ACCEPT_EULA") && !candidate.trim().startsWith("#"),
   );
   assert.equal(mentions.length, 1);
+});
+
+/**
+ * The point of the whole change: a card whose pipeline runs two agents
+ * waits for two installers, not ten plus a private Node it will never
+ * call. Asserted by what the script fetched, because "installed the
+ * right things" and "went to the network for the wrong ones" are the
+ * same on the PATH afterwards and very different on the clock.
+ */
+test("a card's own agents are the only ones installed", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-scoped-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    const result = sandbox.runFor(["claude", "codex"]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.deepEqual(sandbox.published(), ["claude", "codex"]);
+    // Two installers and nothing else. The private Node is the one that
+    // matters most here: it is the single largest download in the
+    // script, and only pi and dsh ever need it.
+    assert.deepEqual(sandbox.fetched().sort(), [
+      "https://chatgpt.com/codex/install.sh",
+      "https://claude.ai/install.sh",
+    ]);
+    assert.equal(
+      sandbox.fetched().filter((url) => url.includes("nodejs.org")).length,
+      0,
+      "a card with no npm-only agent downloaded the private Node",
+    );
+
+    // And the second stage of that card fetches nothing at all.
+    const warm = sandbox.runFor(["claude", "codex"]);
+    assert.equal(warm.status, 0, warm.stderr);
+    assert.deepEqual(sandbox.fetched(), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The case that makes narrowing safe to do at all: an agent can join a
+ * pipeline between a card being created and the stage that runs it. The
+ * sandbox already exists and has never heard of that CLI, so the
+ * provision before that stage has to install it, and only it.
+ */
+test("an agent added to the pipeline later is installed by the stage that needs it", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-added-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.runFor(["claude", "codex"]).stdout), []);
+
+    // Somebody puts an opencode stage on the pipeline. The next
+    // provision asks for three.
+    const grown = sandbox.runFor(["claude", "codex", "opencode"]);
+    assert.equal(grown.status, 0, grown.stderr);
+    assert.deepEqual(toolchainMissing(grown.stdout), []);
+    assert.deepEqual(sandbox.published(), ["claude", "codex", "opencode"]);
+    // Exactly one fetch: the agent that was added. The two already
+    // there are not reinstalled, which is what keeps that stage fast.
+    assert.equal(sandbox.fetched().length, 1);
+    assert.match(sandbox.fetched()[0] ?? "", /releases\/latest\/download\/opencode-linux-/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A card that uses pi does pay for the private Node, and a card that
+ * does not must not. The npm-only agents are the expensive half of the
+ * cold path, so this is the split worth pinning down.
+ */
+test("the private Node is fetched only for the agents that are published on npm", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-node-scope-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    writeFileSync(path.join(root, "stubs/uname"), "#!/bin/sh\nprintf 'x86_64\\n'\n", { mode: 0o755 });
+    // The harness leaves a usable Node already unpacked, which is the
+    // warm case. A genuinely cold machine has none.
+    rmSync(path.join(root, "opt/bento/node"), { recursive: true, force: true });
+
+    assert.deepEqual(toolchainMissing(sandbox.runFor(["claude"]).stdout), []);
+    assert.equal(sandbox.fetched().filter((url) => url.includes("nodejs.org")).length, 0);
+
+    assert.deepEqual(toolchainMissing(sandbox.runFor(["pi"]).stdout), []);
+    assert.equal(sandbox.fetched().filter((url) => url.includes("nodejs.org")).length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The missing line is what provisioning puts in the run's transcript,
+ * so it has to name what this card asked for. Reporting the eight CLIs
+ * nobody wanted would read as a broken sandbox on every healthy run.
+ */
+test("the missing line names only the agents this card asked for", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-scoped-missing-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    sandbox.breaks("claude");
+    const result = sandbox.runFor(["claude", "codex"]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), ["claude"]);
+    assert.deepEqual(sandbox.published(), ["codex"]);
+
+    // And the CLI that failed is the only one retried, because a failed
+    // install leaves no stamp while codex's stays.
+    sandbox.breaks();
+    const retry = sandbox.runFor(["claude", "codex"]);
+    assert.deepEqual(toolchainMissing(retry.stdout), []);
+    assert.deepEqual(sandbox.fetched(), ["https://claude.ai/install.sh"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Warm sprites across the fleet carry the single marker that stamps
+ * replaced. Reading it as "nothing is installed" would make the deploy
+ * that ships stamps reinstall every CLI on every machine at once, which
+ * is the rate limit TOOLCHAIN_VERSION's comment spends forty lines
+ * trying not to trigger.
+ */
+test("a machine holding the marker stamps replaced does not reinstall", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-legacy-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    // Exactly the state a warm sprite is in the moment this ships: every
+    // CLI on the PATH, the old whole-set marker on disk, no stamps.
+    const stamps = path.join(root, TOOLCHAIN_STAMPS.replace(/^\//, ""));
+    const legacy = path.join(root, TOOLCHAIN_LEGACY_MARKER.replace(/^\//, ""));
+    rmSync(stamps, { recursive: true, force: true });
+    writeFileSync(legacy, "");
+
+    const after = sandbox.runFor(["claude", "codex"]);
+    assert.equal(after.status, 0, after.stderr);
+    assert.deepEqual(toolchainMissing(after.stdout), []);
+    assert.deepEqual(sandbox.fetched(), [], "a warm machine reinstalled what it already had");
+
+    /**
+     * And the marker is still there afterwards.
+     *
+     * Consuming it would be tidier, and it would also mean that a
+     * rollback to the version before stamps, or one older machine still
+     * serving during a rolling deploy, saw a sprite with no marker and
+     * no stamps it can read, and reinstalled all ten CLIs. Across the
+     * fleet at once, which is the fan-out this change exists to avoid.
+     */
+    // Stated as the predicate the pre-stamp script runs, `[ -f
+     // /opt/bento/toolchain-v<N> ]`, because that is the whole of what a
+     // rolled-back deploy asks before deciding to reinstall the set.
+    assert.equal(
+      spawnSync("sh", ["-c", `[ -f ${legacy} ]`]).status,
+      0,
+      "the marker a rolled-back deploy reads was consumed",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+/**
+ * The git identity moved above the early exit, so it runs on every
+ * provision rather than only the cold one. `--add` appends another
+ * identical line each time, which on a card with many stages grows
+ * /etc/gitconfig without bound.
+ */
+test("the git identity is written the same way however often it runs", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-gitconfig-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    const gitconfig = path.join(root, "etc/gitconfig");
+    mkdirSync(path.dirname(gitconfig), { recursive: true });
+    /**
+     * The real git, pointed at a system config this test owns. Stubbed
+     * git would only ever prove what the stub does, and the thing under
+     * test is which of git's own flags was used.
+     */
+    sandbox.unstub("git");
+
+    for (let provision = 0; provision < 3; provision += 1) {
+      assert.equal(sandbox.runFor(["claude"], { GIT_CONFIG_SYSTEM: gitconfig }).status, 0);
+    }
+    const written = readFileSync(gitconfig, "utf8");
+    assert.equal(
+      written.split("\n").filter((line) => line.includes("directory")).length,
+      1,
+      `safe.directory was appended once per provision:\n${written}`,
+    );
+    assert.match(written, /no-reply@usebento\.ai/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A version bump is the one thing that must reinstall a CLI that is
+ * present and working, because bumping means the commands Bento builds
+ * now want a newer one. Stamping per CLI must not weaken that, and the
+ * subtle way it could is a machine that installed only codex at the new
+ * version then being asked for claude: the old design would have seen
+ * "this version has run here" and skipped it.
+ */
+test("a bump reinstalls a card's agents one card at a time", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-scoped-bump-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.deepEqual(toolchainMissing(sandbox.run().stdout), []);
+
+    // First card after the bump runs codex, so codex reinstalls.
+    const codexCard = sandbox.runAfterVersionBump(["codex"]);
+    assert.equal(codexCard.status, 0, codexCard.stderr);
+    assert.deepEqual(sandbox.fetched(), ["https://chatgpt.com/codex/install.sh"]);
+
+    // A second card on the same machine runs claude. The bump is still
+    // owed to claude even though the version has already installed
+    // something here, which is exactly what one shared marker got wrong.
+    const claudeCard = sandbox.runAfterVersionBump(["claude"]);
+    assert.equal(claudeCard.status, 0, claudeCard.stderr);
+    assert.deepEqual(sandbox.fetched(), ["https://claude.ai/install.sh"]);
+
+    // And neither card reinstalls the other's agent on a later stage.
+    assert.deepEqual(sandbox.runAfterVersionBump(["codex"]).status, 0);
+    assert.deepEqual(sandbox.fetched(), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Every CLI a profile can name maps to something the script installs. */
+test("every agent CLI maps to a binary the toolchain installs", () => {
+  for (const [cli, binary] of Object.entries(AGENT_CLI_BINARIES)) {
+    if (binary === null) {
+      // The in-process test agent spawns nothing, so it installs nothing.
+      assert.equal(cli, "fake");
+      continue;
+    }
+    assert.ok(
+      (AGENT_BINARIES as readonly string[]).includes(binary),
+      `${cli} maps to ${binary}, which the toolchain does not install`,
+    );
+  }
+});
+
+test("a pipeline's CLIs become the binaries to install, deduplicated and ordered", () => {
+  assert.deepEqual(toolchainBinaries(["claude-code", "codex"]), ["claude", "codex"]);
+  // Order follows AGENT_BINARIES rather than the caller, so the same
+  // pipeline always renders the same script and a warm sandbox is not
+  // re-probed because two stages were listed the other way round.
+  assert.deepEqual(toolchainBinaries(["codex", "claude-code"]), ["claude", "codex"]);
+  assert.deepEqual(toolchainBinaries(["cursor", "cursor", "antigravity"]), ["agy", "cursor-agent"]);
+  // The fake agent needs no sandbox binary, and asking for it alone
+  // must not render a `for tool in ; do` that no shell will parse.
+  assert.deepEqual(toolchainBinaries(["fake"]), []);
+  assert.equal(spawnSync("sh", ["-n", "-c", agentToolchainScript([])]).status, 0);
+  assert.equal(spawnSync("sh", ["-n", "-c", toolchainPresenceProbe([])]).status, 0);
+});
+
+/**
+ * Parsing is not running. A card that asks for no agent still gets a
+ * sandbox that can clone, because git is the repository's business
+ * rather than any agent's and provisioning clones straight afterwards.
+ */
+test("a card that asks for no agent still gets a usable sandbox", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-empty-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    const result = sandbox.runFor([]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(toolchainMissing(result.stdout), []);
+    assert.deepEqual(sandbox.fetched(), [], "a card with no agents went to the network");
+    assert.deepEqual(sandbox.published(), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the presence probe asks about this card's agents and touches no installer", () => {
+  const probe = toolchainPresenceProbe(["claude", "codex"]);
+  assert.match(probe, /for tool in claude codex; do/);
+  assert.ok(probe.includes(TOOLCHAIN_STAMPS));
+  assert.doesNotMatch(probe, /curl|apt-get|install/);
+  assert.equal(spawnSync("sh", ["-n", "-c", probe]).status, 0);
+});
+
+/**
+ * The probe decides one thing: whether the run's transcript promises a
+ * minutes-long wait. Reading only stamps would tell every warm sprite in
+ * the fleet it was about to install, right before installing nothing.
+ */
+test("the presence probe reads the pre-stamp marker too", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-probe-"));
+  try {
+    const stamps = path.join(root, TOOLCHAIN_STAMPS.replace(/^\//, ""));
+    const legacy = path.join(root, TOOLCHAIN_LEGACY_MARKER.replace(/^\//, ""));
+    const probe = toolchainPresenceProbe(["claude", "codex"])
+      .replaceAll(TOOLCHAIN_STAMPS, stamps)
+      .replaceAll(TOOLCHAIN_LEGACY_MARKER, legacy);
+    const ask = () => spawnSync("sh", ["-c", probe], { encoding: "utf8" }).stdout.trim();
+
+    assert.equal(ask(), "tools-absent", "a machine with nothing on it");
+
+    mkdirSync(path.dirname(legacy), { recursive: true });
+    writeFileSync(legacy, "");
+    assert.equal(ask(), "tools-present", "a warm sprite from before stamps");
+
+    rmSync(legacy);
+    mkdirSync(stamps, { recursive: true });
+    writeFileSync(path.join(stamps, "claude"), "");
+    assert.equal(ask(), "tools-absent", "one of the two is stamped, the other is not");
+    writeFileSync(path.join(stamps, "codex"), "");
+    assert.equal(ask(), "tools-present");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -1830,7 +1830,7 @@ test("Sprite provisioning retries a refused exec upgrade and then installs", asy
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nMARKER=")) {
+        if (body.includes("\nSTAMPS=")) {
           toolchainSpawns += 1;
           if (toolchainSpawns === 1) {
             child.emit(
@@ -1885,7 +1885,7 @@ test("Sprite provisioning reports a refused exec upgrade without the exec URL", 
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nMARKER=")) {
+        if (body.includes("\nSTAMPS=")) {
           toolchainSpawns += 1;
           child.emit(
             "error",
@@ -1950,7 +1950,7 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
           child.emit("exit", 0);
           return;
         }
-        if (body.includes("\nMARKER=")) {
+        if (body.includes("\nSTAMPS=")) {
           child.emit(
             "error",
             new Error("WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/x)"),
@@ -1965,7 +1965,7 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
       return child;
     },
     async listSessions() {
-      const toolchain = spawns.find((spawn) => (spawn.args[1] ?? "").includes("\nMARKER="));
+      const toolchain = spawns.find((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS="));
       if (!toolchain) return [];
       return [
         {
@@ -1996,7 +1996,7 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
   await settle();
   await pending;
 
-  const installs = spawns.filter((spawn) => (spawn.args[1] ?? "").includes("\nMARKER=") || spawn.sessionId);
+  const installs = spawns.filter((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS=") || spawn.sessionId);
   assert.equal(installs.length, 2);
   assert.equal(installs[0]?.sessionId, undefined);
   assert.equal(installs[1]?.sessionId, "install-1");
@@ -2015,7 +2015,7 @@ test("Sprite provisioning does not retry a script that exited", async () => {
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nMARKER=")) {
+        if (body.includes("\nSTAMPS=")) {
           toolchainSpawns += 1;
           child.stderr.write("installer exploded\n");
           child.stdout.end();
