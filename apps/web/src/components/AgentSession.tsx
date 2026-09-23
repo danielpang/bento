@@ -660,59 +660,58 @@ export function AgentSession({
         </div>
       )}
       {latestRun && !finished && (
-        <form
-          className="composer"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void send();
-          }}
-        >
-          <textarea
-            ref={composerRef}
-            className="input composer-input"
-            rows={1}
-            value={say}
-            onChange={(e) => setSay(e.target.value)}
-            disabled={busy}
-            placeholder={composer.placeholder}
-            aria-label={composer.ariaLabel}
-            // Enter sends, as it did when this was a single-line
-            // field. Shift+Enter is the newline; wrapping a long
-            // line grows the box on its own.
-            onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void send();
-              }
+        <div className="composer-dock">
+          <form
+            className="composer"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void send();
             }}
-          />
-          {runActive && (
-            <StopButton
+          >
+            <textarea
+              ref={composerRef}
+              className="input composer-input"
+              rows={1}
+              value={say}
+              onChange={(e) => setSay(e.target.value)}
               disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                void client
-                  .cancelRun(latestRun.id)
-                  .then(() => onChanged())
-                  .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-                  .finally(() => setBusy(false));
+              placeholder={composer.placeholder}
+              aria-label={composer.ariaLabel}
+              // Enter sends, as it did when this was a single-line
+              // field. Shift+Enter is the newline; wrapping a long
+              // line grows the box on its own.
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void send();
+                }
               }}
             />
-          )}
-          <button
-            className="btn btn-primary composer-send"
-            type="submit"
-            disabled={busy || !say.trim()}
-            aria-label={composer.ariaLabel}
-            title={composer.ariaLabel}
-          >
-            <SendMark />
-          </button>
-        </form>
-      )}
-      {latestRun && !finished && (
-        <p className="muted composer-hint">
+            {runActive && (
+              <StopButton
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true);
+                  void client
+                    .cancelRun(latestRun.id)
+                    .then(() => onChanged())
+                    .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+                    .finally(() => setBusy(false));
+                }}
+              />
+            )}
+            <button
+              className="btn btn-primary composer-send"
+              type="submit"
+              disabled={busy || !say.trim()}
+              aria-label={composer.ariaLabel}
+              title={composer.ariaLabel}
+            >
+              <SendMark />
+            </button>
+          </form>
+          <p className="muted composer-hint">
           {/* Nothing is running, so no delivery rule applies: saying one
               anyway ("delivered when the run ends") described a run that
               had already finished. */}
@@ -727,7 +726,8 @@ export function AgentSession({
                 : resumes
                   ? "This tool takes messages between runs: yours is delivered the moment the current run ends."
                   : "This tool takes messages between runs: yours is delivered the moment the current run ends, as a new run with a compacted transcript of this conversation."}
-        </p>
+          </p>
+        </div>
       )}
 
     </section>

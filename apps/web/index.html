@@ -2,7 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      resizes-content asks the layout viewport to shrink when the
+      keyboard opens, so a fixed sheet ends above the keys. Browsers
+      that ignore it are handled in sheet-layer.ts.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#0e0d0b" />
     <!--
       The SVG is the real one: it scales to any tab, and its plate

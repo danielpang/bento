@@ -1,5 +1,6 @@
 import { useEffect, useRef, type RefObject } from "react";
 import { forgetsBetweenRuns, hasNoLiveTranscript, reportsCost } from "@bento/core";
+import { useSheetLayer } from "../sheet-layer.js";
 
 /**
  * Escape closes the drawer, matching the Modal's behavior. The drawers
@@ -51,6 +52,7 @@ export function useDismissable<T extends HTMLElement>(onClose: () => void, keepO
   const panel = useRef<T | null>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  useSheetLayer(panel);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
