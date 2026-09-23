@@ -137,3 +137,46 @@ test("claude-code recovery reads its session file and groups by message id", () 
 
   assert.deepEqual(recovery.persistedIds({ type: "message", role: "user", text: "hi" }), [], "user lines have no recovery identity");
 });
+
+/**
+ * A reattaching server drops what the sandbox replays by these ids, so
+ * tool lines need an identity too, and one that cannot collide with
+ * the text that shares their message or with the result that answers
+ * them.
+ */
+test("claude-code tool events carry the tool call id in their own namespaces", () => {
+  const recovery = claudeCodeAdapter.sessionRecovery!;
+  const message = { id: "msg_A", role: "assistant" };
+
+  const started: AgentEvent = {
+    type: "tool",
+    name: "Bash",
+    phase: "start",
+    detail: { command: "ls" },
+    raw: { type: "assistant", message: { ...message, content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls" } }] } },
+  };
+  const ended: AgentEvent = {
+    type: "tool",
+    name: "tool_result",
+    phase: "end",
+    detail: "README.md",
+    raw: { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "README.md" }] } },
+  };
+  const text: AgentEvent = {
+    type: "message",
+    role: "assistant",
+    text: "Listing the repository.",
+    raw: { type: "assistant", message: { ...message, content: [{ type: "text", text: "Listing the repository." }] } },
+  };
+
+  assert.deepEqual(recovery.persistedIds(started), ["tool_use:toolu_1"]);
+  assert.deepEqual(recovery.persistedIds(ended), ["tool_result:toolu_1"]);
+  assert.deepEqual(recovery.persistedIds(text), ["msg_A"], "text in the same message keeps the message id");
+  assert.notDeepEqual(recovery.persistedIds(started), recovery.persistedIds(ended), "a call and its answer are different events");
+
+  assert.deepEqual(
+    recovery.persistedIds({ type: "tool", name: "Bash", phase: "start", raw: { type: "assistant", message: { content: [] } } }),
+    [],
+    "a tool line without a call id has no identity, and is never dropped",
+  );
+});

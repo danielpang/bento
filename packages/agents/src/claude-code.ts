@@ -13,6 +13,10 @@ interface ClaudeContentBlock {
   name?: string;
   input?: unknown;
   content?: unknown;
+  /** On tool_use blocks: the call's id, which its tool_result names. */
+  id?: string;
+  /** On tool_result blocks: the tool_use this answers. */
+  tool_use_id?: string;
 }
 
 interface ClaudeLine {
@@ -215,10 +219,31 @@ export const claudeCodeAdapter: AgentAdapter = {
       });
     },
 
+    /**
+     * Assistant text is keyed by the API message id, the same id the
+     * session file carries, so a recovered message and a streamed one
+     * agree. Tool events are keyed by the tool call's id, in their own
+     * namespaces: one message can carry text and a tool_use, so the
+     * message id alone would make the second look like the first, and
+     * a tool_result names the tool_use it answers, so its id must not
+     * collide with the call's.
+     */
     persistedIds(event: AgentEvent): string[] {
-      if (event.type !== "message" || event.role !== "assistant") return [];
-      const id = (event.raw as { message?: { id?: unknown } } | undefined)?.message?.id;
-      return typeof id === "string" && id !== "" ? [id] : [];
+      const raw = event.raw as { message?: { id?: unknown; content?: ClaudeContentBlock[] } } | undefined;
+      if (event.type === "message" && event.role === "assistant") {
+        const id = raw?.message?.id;
+        return typeof id === "string" && id !== "" ? [id] : [];
+      }
+      if (event.type === "tool") {
+        const blocks = raw?.message?.content ?? [];
+        if (event.phase === "start") {
+          const id = blocks.find((b) => b.type === "tool_use")?.id;
+          return typeof id === "string" && id !== "" ? [`tool_use:${id}`] : [];
+        }
+        const id = blocks.find((b) => b.type === "tool_result")?.tool_use_id;
+        return typeof id === "string" && id !== "" ? [`tool_result:${id}`] : [];
+      }
+      return [];
     },
   },
 

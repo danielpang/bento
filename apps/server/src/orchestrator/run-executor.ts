@@ -59,7 +59,7 @@ import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { appendRunEvent } from "./transcript.js";
-import { recoverMissedMessages } from "./recover-session.js";
+import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
 import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
@@ -1901,7 +1901,7 @@ async function resumeInterruptedRun(
   const grantServers = adapter.mcp ? await runGrantServerIds(ctx, run.id) : [];
   const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
-  const { argv, live, liveChannel } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
     run,
     feature,
     stage,
@@ -2009,6 +2009,47 @@ async function resumeInterruptedRun(
     await liveSession.onTurnFinished(ok);
   };
 
+  /**
+   * The agent did not pause for the deploy. Whatever it said between
+   * the old process going quiet and this attach reached no transcript:
+   * the dying process dropped its events once it was draining, and the
+   * sprite's SDK discards the session's history while the attach
+   * handshake completes. The CLI's own session record in the sandbox
+   * still has those messages, so they are read back and appended now,
+   * before a line of the live stream is consumed, where they belong in
+   * the order of the conversation.
+   *
+   * The same ids then guard the live stream. Should the sandbox replay
+   * output the transcript already holds (the first life's, or the gap
+   * just recovered), the replayed lines are recognized by native id and
+   * dropped, so a reattach can only add to the transcript and never
+   * repeats it. Snapshot semantics on purpose; see loadPersistedIds.
+   * Adapters without recovery get the plain stream, as before.
+   */
+  const recovery = adapter.sessionRecovery ?? null;
+  // Best effort, like the recovery itself: the stream is already
+  // attached, and a read that fails here must cost the filter, not the
+  // run. Without the set the stream is delivered as it always was, and
+  // recovery loads a set of its own, so a failure here costs it
+  // nothing but a second attempt at the same query.
+  const persisted = recovery
+    ? await loadPersistedIds(ctx, recovery, feature.id).catch((err: unknown) => {
+        console.warn(`could not load the transcript's ids for run ${run.id}; delivering the stream unfiltered:`, err);
+        return null;
+      })
+    : null;
+  if (recovery && run.cliSessionId) {
+    await recoverMissedMessages(ctx, {
+      handle,
+      adapter,
+      featureId: feature.id,
+      runId: run.id,
+      sessionId: run.cliSessionId,
+      cwd: workdir,
+      ...(persisted ? { seen: persisted } : {}),
+    });
+  }
+
   emitBoard("running");
   await saySystem("Bento restarted and reattached to the agent still working in the sandbox.");
 
@@ -2022,6 +2063,10 @@ async function resumeInterruptedRun(
       onEvent: async (event) => {
         // A draining process only consumes: its successor has the run.
         if (ctx.draining) return;
+        // The session started in the run's first life, and that life
+        // wrote the marker. An init here is the sandbox replaying it.
+        if (event.type === "init") return;
+        if (recovery && persisted && isPersisted(recovery, persisted, event)) return;
         await appendRunEvent(ctx, run.id, withTrustedCost(profile.cli, profile.model, event));
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);

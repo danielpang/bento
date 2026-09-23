@@ -6,7 +6,7 @@ A feature is a card that moves through pipeline stages. When a card enters a sta
 
 One card, one branch, one sandbox. The sandbox is created on the first agent run and reused for later stages on that card. Setup dependencies and caches from earlier runs remain available.
 
-Hosted sandboxes outlive the server process. If the server restarts during a run, the sandbox continues and the server reattaches.
+Hosted sandboxes outlive the server process. If the server restarts during a run, the sandbox continues and the server reattaches. What the agent said while no server was attached is read back from the CLI's own session record and appended to the transcript before live output resumes, and anything the sandbox replays of a transcript Bento already has is dropped by message id. A deploy neither loses nor repeats the conversation.
 
 Follow-up messages resume the CLI session when the tool exposes a session id (Claude Code, Codex, Cursor, opencode, pi, Antigravity, Muse Code, fx). If the session is unavailable, Bento starts a new run with the stage prompt and a compacted transcript. See [agents.md](./agents.md#talking-to-a-working-agent) for per-tool behavior.
 

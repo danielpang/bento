@@ -99,12 +99,16 @@ export interface SessionRecovery {
   /** The assistant messages the record holds, in conversation order. */
   parseLog(raw: string): RecoveredMessage[];
   /**
-   * The CLI-native ids carried by a persisted assistant message event,
-   * used to tell delivered messages from missed ones. Applies to both
-   * streamed events and previously recovered ones, so recovery is
-   * idempotent. Empty for events that carry no usable identity; those
-   * are never recovered against, because without an id "missing" and
-   * "already there" cannot be told apart.
+   * The CLI-native ids carried by a persisted event, used to tell
+   * delivered messages from missed ones, and, when a server reattaches
+   * to a running agent, to drop what the sandbox replays of a
+   * transcript it already has. Applies to both streamed events and
+   * previously recovered ones, so recovery is idempotent. Assistant
+   * messages must carry one; tool events may, and an adapter that
+   * names them protects its reattached runs from replayed tool lines
+   * too. Empty for events that carry no usable identity; those are
+   * never recovered against or dropped, because without an id
+   * "missing" and "already there" cannot be told apart.
    */
   persistedIds(event: AgentEvent): string[];
 }
