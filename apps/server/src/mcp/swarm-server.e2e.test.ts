@@ -331,6 +331,26 @@ test("a sub planner may only reach the part of the plan it was given", async () 
   await call(sub.token, "create_task", { title: "added" });
   const [added] = await db.select().from(swarmTasks).where(eq(swarmTasks.title, "added"));
   assert.equal(added!.parentId, mine.id);
+
+  const visible = JSON.parse((await call(sub.token, "get_tree")).text) as { id: string; parentId: string | null }[];
+  assert.deepEqual(
+    new Set(visible.map((row) => row.id)),
+    new Set([mine.id, child.id, added!.id]),
+    "its tree does not disclose siblings outside the delegated subtree",
+  );
+  assert.equal(visible.find((row) => row.id === mine.id)?.parentId, null, "its root does not leak an ancestor id");
+
+  const listed = (await rpc(sub.token, "tools/list")).body?.result as { tools: { name: string }[] };
+  assert.ok(!listed.tools.some((tool) => tool.name === "write_design"), "only the main planner can replace the global design");
+  assert.equal((await call(sub.token, "write_design", { content: "replace everything" })).error?.message, "unknown tool write_design");
+
+  await call(sub.token, "ask_user", { question: "Which checkout behavior belongs here?" });
+  assert.equal((await task(mine.id))!.attention, "question", "an unqualified question is scoped to its subtree root");
+  const [question] = await db.select().from(swarmMessages).where(eq(swarmMessages.runId, sub.runId));
+  assert.equal(question?.taskId, mine.id);
+  const [afterQuestion] = await db.select().from(swarms).where(eq(swarms.id, swarmId));
+  assert.equal(afterQuestion?.pausedReason, null, "a sub planner cannot pause the whole swarm");
+
   // The planner itself is not scoped down.
   assert.ok((await call(plannerToken, "assign", { taskId: elsewhere.id })).text.includes("assigned"));
 });

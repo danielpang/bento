@@ -71,7 +71,13 @@ export function isSafeBranchName(value: string): boolean {
   if (!/^[A-Za-z0-9._\-/]+$/.test(value)) return false;
   return value
     .split("/")
-    .every((segment) => segment.length > 0 && !segment.startsWith(".") && !segment.endsWith(".lock"));
+    .every(
+      (segment) =>
+        segment.length > 0
+        && !segment.startsWith(".")
+        && !segment.endsWith(".")
+        && !segment.endsWith(".lock"),
+    );
 }
 
 /** The trailer key. RFC 822 shaped, which is what git's own trailers are. */

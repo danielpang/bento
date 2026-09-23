@@ -17,7 +17,13 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { assembleSwarmDocument, SECTION_DIR } from "./deliverable.js";
+import { LocalProcessDriver } from "@bento/sandbox";
+import {
+  assembleSwarmDocument,
+  assembleSwarmDocumentInSandbox,
+  DOCUMENT_ASSEMBLY_FLAG,
+  SECTION_DIR,
+} from "./deliverable.js";
 
 /**
  * A document swarm's deliverable, against a real checkout.
@@ -203,6 +209,44 @@ test("a document swarm produces one assembled file, on the swarm and on the bran
   assert.equal(artifacts[0]!.mime, "text/markdown");
   assert.equal(artifacts[0]!.content, `${committed}\n`, "the artifact and the commit are the same document");
   assert.equal(artifacts[0]!.featureId, null, "it belongs to the swarm, not to a card");
+});
+
+test("a sandbox-hosted swarm assembles through the driver before it can publish", async () => {
+  const fx = await documentSwarm("sandboxed");
+  await db.insert(swarmTasks).values({
+    swarmId: fx.swarm.id,
+    title: "Assemble document",
+    status: "working",
+    flags: { [DOCUMENT_ASSEMBLY_FLAG]: true, reopenCount: 0 },
+  });
+  await db.insert(swarmTasks).values({
+    swarmId: fx.swarm.id,
+    title: "Final check",
+    status: "done",
+    flags: { finalCheck: true, reopenCount: 0 },
+  });
+  const driver = new LocalProcessDriver();
+  const assembled = await assembleSwarmDocumentInSandbox(db, {
+    swarm: fx.swarm,
+    driver,
+    handle: {
+      externalId: "local",
+      provider: "local-process",
+      workdir: path.dirname(fx.worktree),
+    },
+    repositoryName: path.basename(fx.worktree),
+    branch: "swarm/sandboxed",
+    preamble: "# Overview\n\nWritten before the final check.",
+  });
+
+  assert.ok(assembled);
+  assert.equal(assembled.sections, 4, "server-owned assembly and judge nodes are not document sections");
+  assert.match(await git(fx.worktree, ["show", "swarm/sandboxed:docs/sandboxed.md"]), /Written before the final check/);
+  const [artifact] = await db
+    .select()
+    .from(runArtifacts)
+    .where(and(eq(runArtifacts.swarmId, fx.swarm.id), eq(runArtifacts.stageSlug, "document")));
+  assert.equal(artifact?.content, assembled.content, "the branch and console artifact are the same bytes");
 });
 
 test("a leaf that wrote no section file falls back to its report", async () => {

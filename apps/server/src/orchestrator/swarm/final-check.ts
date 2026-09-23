@@ -122,7 +122,12 @@ export async function ensureFinalCheck(
   if (!wanted) return { created: null };
   if (!treeIsDone(tasks)) return { created: null };
 
-  const existing = tasks.find((task) => isFinalCheck(task) && task.status !== "cancelled");
+  const existing = tasks.find(
+    (task) =>
+      isFinalCheck(task)
+      && task.status !== "cancelled"
+      && Number(task.flags.reopenCount ?? 0) === swarm.reopenCount,
+  );
   if (existing) return { created: null };
 
   const [{ next } = { next: 0 }] = await tx
@@ -147,7 +152,7 @@ export async function ensureFinalCheck(
        * say what happened, not a second opinion.
        */
       agentProfileId: wanted.judgeProfileId,
-      flags: { [FINAL_CHECK_FLAG]: true },
+      flags: { [FINAL_CHECK_FLAG]: true, reopenCount: swarm.reopenCount },
       updatedAt: now,
     })
     .returning();

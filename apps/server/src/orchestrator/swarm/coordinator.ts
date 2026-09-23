@@ -1,6 +1,9 @@
-import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import {
   agentRuns,
+  repositories,
+  runArtifacts,
+  sandboxes,
   swarmLandings,
   swarmMessages,
   swarmTaskEvents,
@@ -19,10 +22,19 @@ import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
 import { enqueueSwarmPublish } from "./complete.js";
 import { ensureFinalCheck, isFinalCheck, templateOf } from "./final-check.js";
+import {
+  assembleSwarmDocumentInSandbox,
+  DOCUMENT_ASSEMBLY_FLAG,
+  documentAssemblyPass,
+  isDocumentAssembly,
+  isDocumentSwarm,
+} from "./deliverable.js";
+import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
 import { assumedCostFor, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
 import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog } from "./watchdog.js";
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
+import { queueSwarmSlackNotify } from "../slack-notify.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -194,6 +206,8 @@ export interface SwarmTickResult {
   landingId: string | null;
   /** Whether this tick is what promoted it, rather than finding it already running. */
   landingPromoted: boolean;
+  /** A server-owned document assembly step ready to run after commit. */
+  documentAssemblyTaskId: string | null;
   /** The swarm's status after the tick. */
   status: (typeof swarms.$inferSelect)["status"];
   /**
@@ -302,6 +316,17 @@ export async function tickSwarm(
         throw err;
       }
     }
+    /*
+     * Assembly touches git and may talk to a remote sandbox, so it is
+     * outside the transaction. Its assigned task is the durable claim:
+     * a crash leaves it ready (or working) for the retried tick, and a
+     * success is reconciled immediately so the final check sees the
+     * document it is judging.
+    */
+    if (result.documentAssemblyTaskId) {
+      const executed = await executeDocumentAssembly(ctx, result.documentAssemblyTaskId);
+      return executed ? tickSwarm(ctx, swarmId, deps) : result;
+    }
     /**
      * A swarm that just finished has one thing left to do, and it is
      * the only thing in a swarm that leaves Bento: push the branch and
@@ -312,7 +337,10 @@ export async function tickSwarm(
      * for every swarm on the deployment. After the commit, because the
      * job reads the swarm's status and refuses anything but "done".
      */
-    if (result.becameDone) await enqueueSwarmPublish(ctx, swarmId);
+    if (result.becameDone) {
+      await enqueueSwarmPublish(ctx, swarmId);
+      await queueSwarmSlackNotify(ctx, { type: "swarm_completed", swarmId });
+    }
     /*
      * And what it cost, once, on whichever ending it reached. On the
      * transition rather than the status, for the reason the publish is:
@@ -363,20 +391,24 @@ async function runTick(
 
   await settleWorkedLeaves(tx, swarm, tasks, events, now);
   /*
-   * The last thing a swarm does, put on the tree before the rollup
-   * reads it.
+   * First make every plan node agree with its children, then decide
+   * whether the whole ordinary tree is ready for its last check.
    *
-   * Before, because the check is a leaf and the root cannot be done
-   * while a leaf under it is not: added after the rollup, the swarm
-   * would read as done for one tick, publish, and only then discover
-   * it had a check to run. A template that asks for neither a judge
-   * nor a command adds nothing here, which is every swarm that ran
-   * before this existed.
+   * The order matters for nested trees. A leaf can become done while
+   * its parent still says working in the rows this tick read. Asking
+   * for the final check before rolling that parent up misses the check,
+   * then the same tick marks the swarm done and publishes it. The new
+   * check is still put on the in-memory tree before spawning and the
+   * final status calculation, so it gates completion immediately.
    */
+  const changed = await rollUp(tx, swarm, tasks, events);
+  const assembly = await ensureDocumentAssembly(tx, swarm, changed.tasks, events, now);
+  if (assembly.created) changed.tasks.push(assembly.created);
+
   const template = await templateOf(tx, swarm);
-  const check = await ensureFinalCheck(tx, swarm, tasks, template, now);
+  const check = await ensureFinalCheck(tx, swarm, changed.tasks, template, now);
   if (check.created) {
-    tasks.push(check.created);
+    changed.tasks.push(check.created);
     events.push({
       type: "swarm_task_updated",
       projectId: swarm.projectId,
@@ -386,7 +418,6 @@ async function runTick(
     });
   }
 
-  const changed = await rollUp(tx, swarm, tasks, events);
   await warnLowBudget(tx, swarm, now);
   const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
   const spawned = await spawnWorkers(tx, swarm, changed.tasks, deps, events, now);
@@ -401,6 +432,7 @@ async function runTick(
     spawnRefusal: spawned.refusal,
     landingId: landing.landing?.id ?? null,
     landingPromoted: landing.landing?.promoted ?? false,
+    documentAssemblyTaskId: assembly.ready?.id ?? null,
     status,
     becameDone: status === "done" && swarm.status !== "done",
     /**
@@ -424,6 +456,234 @@ async function runTick(
         ? (status as SwarmSpendOutcome)
         : null,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Step 1a: assemble a document before anything judges or publishes it.
+ * ------------------------------------------------------------------ */
+
+interface DocumentAssemblyStep {
+  created: Task | null;
+  ready: Task | null;
+}
+
+const DOCUMENT_ASSEMBLY_LEASE_MS = 5 * 60 * 1000;
+
+/**
+ * Adds one server-owned assembly node per pass through the swarm.
+ *
+ * The node is the persisted gate. It is excluded from agent spawning,
+ * but otherwise behaves like a leaf: assigned means the server should
+ * run it, blocked carries a visible failure, Retry puts it back in the
+ * queue, and done lets the final check start. A follow up gets another
+ * node because reopenCount is part of the flag.
+ */
+async function ensureDocumentAssembly(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  events: BoardEvent[],
+  now: Date,
+): Promise<DocumentAssemblyStep> {
+  if (!isDocumentSwarm(swarm)) return { created: null, ready: null };
+  const ordinary = tasks.filter(
+    (task) => task.status !== "cancelled" && !isFinalCheck(task) && !isDocumentAssembly(task),
+  );
+  if (ordinary.length === 0 || !ordinary.every((task) => task.status === "done")) {
+    return { created: null, ready: null };
+  }
+
+  const matching = tasks.filter((task) => documentAssemblyPass(task) === swarm.reopenCount);
+  const complete = matching.find(
+    (task) => task.status === "done" && task.flags.documentAssemblyComplete === true,
+  );
+  if (complete) return { created: null, ready: null };
+  const assigned = matching.find((task) => task.status === "assigned");
+  if (assigned) return { created: null, ready: assigned };
+  const staleWorking = matching.find(
+    (task) =>
+      task.status === "working"
+      && task.updatedAt.getTime() <= now.getTime() - DOCUMENT_ASSEMBLY_LEASE_MS,
+  );
+  if (staleWorking) return { created: null, ready: staleWorking };
+  // The external git work happens after the transaction commits. A
+  // fresh working row is its lease, so a second tick cannot run the
+  // same assembly against the checkout at the same time. A crashed
+  // process is recovered after the short lease above expires.
+  if (matching.some((task) => task.status === "working")) return { created: null, ready: null };
+  // A visible failure waits for an explicit Retry. It must not turn a
+  // transient provider failure into an unbounded loop of git attempts.
+  if (matching.some((task) => task.status === "blocked")) return { created: null, ready: null };
+
+  const [{ next } = { next: 0 }] = await tx
+    .select({ next: sql<number>`coalesce(max(${swarmTasks.position}), -1) + 1` })
+    .from(swarmTasks)
+    .where(and(eq(swarmTasks.swarmId, swarm.id), sql`${swarmTasks.parentId} is null`));
+  const [created] = await tx
+    .insert(swarmTasks)
+    .values({
+      swarmId: swarm.id,
+      parentId: null,
+      position: next,
+      nodeType: "leaf",
+      status: "assigned",
+      title: "Assemble document",
+      description: "Assemble the finished sections into the document this swarm delivers.",
+      flags: { [DOCUMENT_ASSEMBLY_FLAG]: true, reopenCount: swarm.reopenCount },
+      updatedAt: now,
+    })
+    .returning();
+  if (!created) throw new Error("the document assembly step inserted no row");
+  await tx.insert(swarmTaskEvents).values({
+    taskId: created.id,
+    kind: "created",
+    toStatus: "assigned",
+    detail: { documentAssembly: true, reopenCount: swarm.reopenCount },
+  });
+  events.push({
+    type: "swarm_task_updated",
+    projectId: swarm.projectId,
+    swarmId: swarm.id,
+    taskId: created.id,
+    status: "assigned",
+  });
+  return { created, ready: created };
+}
+
+/** Runs the durable assembly step against the swarm's actual sandbox. */
+async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise<boolean> {
+  const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, taskId)).limit(1);
+  if (!task || !isDocumentAssembly(task) || (task.status !== "assigned" && task.status !== "working")) return false;
+  const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, task.swarmId)).limit(1);
+  if (!swarm || documentAssemblyPass(task) !== swarm.reopenCount) return false;
+
+  const claimedAt = new Date();
+  const [claimed] = await ctx.db
+    .update(swarmTasks)
+    .set({ status: "working", startedAt: task.startedAt ?? claimedAt, updatedAt: claimedAt })
+    .where(
+      and(
+        eq(swarmTasks.id, task.id),
+        or(
+          eq(swarmTasks.status, "assigned"),
+          and(
+            eq(swarmTasks.status, "working"),
+            lt(swarmTasks.updatedAt, new Date(claimedAt.getTime() - DOCUMENT_ASSEMBLY_LEASE_MS)),
+          ),
+        ),
+      ),
+    )
+    .returning({ id: swarmTasks.id });
+  if (!claimed) return false;
+
+  try {
+    if (!swarm.branchName) throw new Error("the swarm has no branch to assemble the document on");
+    if (!swarm.sandboxId) throw new Error("the swarm workspace is not available");
+    const [[sandbox], [repository], [template], [design]] = await Promise.all([
+      ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1),
+      ctx.db
+        .select({ name: repositories.name })
+        .from(repositories)
+        .where(eq(repositories.projectId, swarm.projectId))
+        .orderBy(asc(repositories.position))
+        .limit(1),
+      swarm.templateId
+        ? ctx.db
+            .select({ documentPath: swarmTemplates.documentPath })
+            .from(swarmTemplates)
+            .where(eq(swarmTemplates.id, swarm.templateId))
+            .limit(1)
+        : Promise.resolve([]),
+      ctx.db
+        .select({ content: runArtifacts.content })
+        .from(runArtifacts)
+        .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
+        .orderBy(desc(runArtifacts.createdAt))
+        .limit(1),
+    ]);
+    if (!sandbox || sandbox.status === "destroyed") throw new Error("the swarm workspace is not available");
+    if (!repository) throw new Error("the project has no repository for the document");
+    const assembled = await assembleSwarmDocumentInSandbox(ctx.db, {
+      swarm,
+      driver: ctx.driver,
+      handle: { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir },
+      repositoryName: repository.name,
+      branch: swarm.branchName,
+      templatePath: template?.documentPath ?? null,
+      preamble: design?.content ?? null,
+    });
+    if (!assembled) throw new Error("the finished plan had no sections to assemble");
+    const recorded = await ctx.db.transaction(async (tx) => {
+      const [finished] = await tx
+        .update(swarmTasks)
+        .set({
+          status: "done",
+          attention: null,
+          report: `Assembled ${assembled.sections} sections at ${assembled.path}.`,
+          endedAt: new Date(),
+          flags: { ...task.flags, documentAssemblyComplete: true, assemblyError: undefined },
+          updatedAt: new Date(),
+        })
+        .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "working")))
+        .returning({ id: swarmTasks.id });
+      if (!finished) return false;
+      await tx.insert(swarmTaskEvents).values({
+        taskId: task.id,
+        kind: "status_changed",
+        fromStatus: "working",
+        toStatus: "done",
+        detail: { path: assembled.path, sections: assembled.sections, written: assembled.written },
+      });
+      return true;
+    });
+    if (!recorded) return true;
+    ctx.bus.emitBoardEvent({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "done",
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const recorded = await ctx.db.transaction(async (tx) => {
+      const [blocked] = await tx
+        .update(swarmTasks)
+        .set({
+          status: "blocked",
+          attention: "failed",
+          report: `Document assembly failed: ${reason}`,
+          flags: { ...task.flags, assemblyError: reason, plannerToldAt: undefined },
+          updatedAt: new Date(),
+        })
+        .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "working")))
+        .returning({ id: swarmTasks.id });
+      if (!blocked) return false;
+      await tx.insert(swarmTaskEvents).values({
+        taskId: task.id,
+        kind: "status_changed",
+        fromStatus: "working",
+        toStatus: "blocked",
+        detail: { documentAssembly: true, reason },
+      });
+      await tx.insert(swarmMessages).values({
+        swarmId: swarm.id,
+        source: "system",
+        status: "queued",
+        text: `Document assembly for task ${task.id} failed: ${reason}. Inspect the workspace, then retry that task.`,
+      });
+      return true;
+    });
+    if (!recorded) return true;
+    ctx.bus.emitBoardEvent({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "blocked",
+    });
+  }
+  return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1051,7 +1311,9 @@ async function spawnWorkers(
   const delegatedRunIds = await spawnSubPlanners(tx, swarm, tasks, deps, events, now);
   runIds.push(...delegatedRunIds);
 
-  const ready = tasks.filter((task) => task.nodeType === "leaf" && task.status === "assigned");
+  const ready = tasks.filter(
+    (task) => task.nodeType === "leaf" && task.status === "assigned" && !isDocumentAssembly(task),
+  );
   if (ready.length === 0) return { runIds, refusal: null, cap: null };
 
   const templateWorker = await workerProfileFor(tx, swarm);

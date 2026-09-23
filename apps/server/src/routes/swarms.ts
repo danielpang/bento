@@ -19,6 +19,7 @@ import {
   swarmTasks,
   swarmTemplates,
   swarms,
+  type Db,
 } from "@bento/db";
 import {
   canAccessProject,
@@ -52,6 +53,8 @@ import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator
 import { reopenRefusal, reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { budgetRefusal } from "../orchestrator/swarm/ledger.js";
+import { recordSwarmAnswer } from "../orchestrator/swarm/messages.js";
+import { queueSwarmSlackNotify } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
@@ -373,6 +376,7 @@ export function swarmRoutes(ctx: AppContext) {
           await enqueueRun(ctx, started.id);
         });
       }
+      deferAfterCommit(c, () => queueSwarmSlackNotify(ctx, { type: "swarm_created", swarmId: swarm.id, userId: actor(c) }));
       return c.json({ ...swarm, plannerRunId: started?.id ?? null }, 201);
     })
     /**
@@ -792,12 +796,14 @@ export function swarmRoutes(ctx: AppContext) {
           );
         }
 
-        const reopened = await reopenSwarm(db(c, ctx), swarm, {
-          instruction: body.instruction,
-          ...(body.budgetUsd === undefined ? {} : { budgetUsd: body.budgetUsd }),
-          ...(body.timeLimitMin === undefined ? {} : { timeLimitMin: body.timeLimitMin }),
-          actorUserId: actor(c),
-        });
+        const reopened = await db(c, ctx).transaction((tx) =>
+          reopenSwarm(tx as unknown as Db, swarm, {
+            instruction: body.instruction,
+            ...(body.budgetUsd === undefined ? {} : { budgetUsd: body.budgetUsd }),
+            ...(body.timeLimitMin === undefined ? {} : { timeLimitMin: body.timeLimitMin }),
+            actorUserId: actor(c),
+          }),
+        );
         if ("refused" in reopened) return c.json({ error: reopened.refused, code: reopened.code }, 409);
 
         // The planner hears the instruction through the wake the tick
@@ -883,20 +889,12 @@ export function swarmRoutes(ctx: AppContext) {
           if (!task) return c.json({ error: "not found" }, 404);
         }
 
-        const [message] = await db(c, ctx)
-          .insert(swarmMessages)
-          .values({
-            swarmId: swarm.id,
-            ...(body.taskId ? { taskId: body.taskId } : {}),
-            text: body.text,
-            userId: actor(c),
-          })
-          .returning();
-        // An answer is what a swarm waiting on a question was waiting
-        // for, so the wait ends here rather than on the next tick.
-        if (swarm.pausedReason === "attention") {
-          await db(c, ctx).update(swarms).set({ pausedReason: null }).where(eq(swarms.id, swarm.id));
-        }
+        const message = await recordSwarmAnswer(db(c, ctx), {
+          swarmId: swarm.id,
+          taskId: body.taskId ?? null,
+          text: body.text,
+          userId: actor(c),
+        });
         deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
         return c.json(message, 201);
       },
@@ -938,6 +936,15 @@ export function swarmRoutes(ctx: AppContext) {
         if (swarm.status === "cancelled") {
           return c.json(
             { error: "This swarm is stopped, so nothing more is added to its plan.", code: "SWARM_STOPPED" },
+            409,
+          );
+        }
+        if (swarm.status === "done" || swarm.status === "failed") {
+          return c.json(
+            {
+              error: "This swarm has finished. Reopen it with the follow up before adding more work.",
+              code: "SWARM_FINISHED",
+            },
             409,
           );
         }
@@ -1150,6 +1157,8 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
+      const finished = finishedTaskMutationRefusal(c, swarm);
+      if (finished) return finished;
 
       /*
        * Whether this may be retried at all is asked before anything is
@@ -1188,6 +1197,8 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
+      const finished = finishedTaskMutationRefusal(c, swarm);
+      if (finished) return finished;
 
       const cancelled = await cancelTaskTree(db(c, ctx), { task, actorUserId: actor(c) });
       for (const id of cancelled) await stopRunsOnTask(ctx, c, id);
@@ -1222,6 +1233,8 @@ export function swarmRoutes(ctx: AppContext) {
         const found = await accessibleTask(ctx, c);
         if ("refusal" in found) return found.refusal;
         const { swarm, task } = found;
+        const finished = finishedTaskMutationRefusal(c, swarm);
+        if (finished) return finished;
 
         const created = await splitLeaf(db(c, ctx), {
           task,
@@ -1493,6 +1506,21 @@ async function accessibleTask(
     .limit(1);
   if (!task) return { refusal: c.json({ error: "not found" }, 404) };
   return { swarm, task };
+}
+
+/** Status-changing node controls on an ended swarm go through reopen. */
+function finishedTaskMutationRefusal(
+  c: Context,
+  swarm: Pick<typeof swarms.$inferSelect, "status">,
+): Response | null {
+  if (swarm.status !== "done" && swarm.status !== "failed" && swarm.status !== "cancelled") return null;
+  return c.json(
+    {
+      error: "This swarm has finished. Reopen it before changing which work is active.",
+      code: "SWARM_FINISHED",
+    },
+    409,
+  );
 }
 
 /**

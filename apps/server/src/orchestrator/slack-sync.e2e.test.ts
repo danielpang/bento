@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import {
@@ -23,6 +23,9 @@ import {
   runEvents,
   runArtifacts,
   gateChecks,
+  swarmMessages,
+  swarmTasks,
+  swarms,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { DiskArtifactStore } from "../artifact-store.js";
@@ -89,6 +92,7 @@ before(async () => {
   await boss.start();
   await boss.createQueue("slack.notify");
   await boss.createQueue("gate.evaluate");
+  await boss.createQueue("swarm.tick");
   const userId = await ensureLocalUser(db);
 
   ctx = {
@@ -426,6 +430,128 @@ test("notify no-ops when the card was not created from Slack", async () => {
   await queueSlackNotify(ctx, { type: "created", featureId: card!.id });
   assert.equal(notifySent, before);
   assert.equal(slackCalls.length, 0);
+});
+
+test("a swarm gets one Slack thread with landings, questions, completion, and answers", async () => {
+  await ctx.db
+    .insert(slackUserSettings)
+    .values({ userId: LOCAL_USER_ID, slackUserId: MEMBER_SLACK, defaultProjectId: projectId })
+    .onConflictDoNothing();
+  await ctx.db
+    .update(slackUserSettings)
+    .set({ slackUserId: MEMBER_SLACK })
+    .where(eq(slackUserSettings.userId, LOCAL_USER_ID));
+  const [swarm] = await ctx.db
+    .insert(swarms)
+    .values({
+      projectId,
+      slug: `slack-${Math.random().toString(36).slice(2, 8)}`,
+      title: "Audit checkout",
+      goal: "Check the whole checkout flow.",
+      status: "running",
+      branchName: `swarm/slack-${Math.random().toString(36).slice(2, 8)}`,
+      startedBy: LOCAL_USER_ID,
+    })
+    .returning();
+  assert.ok(swarm);
+
+  slackCalls.length = 0;
+  await handleSlackNotify(ctx, { type: "swarm_created", swarmId: swarm.id, userId: LOCAL_USER_ID });
+  const [link] = await ctx.db.select().from(slackThreadLinks).where(eq(slackThreadLinks.swarmId, swarm.id));
+  assert.ok(link);
+  assert.equal(link.featureId, null);
+  assert.ok(!link.slackThreadTs.startsWith("pending:"));
+  const root = slackCalls.find((call) => call.method === "chat.postMessage");
+  assert.equal(root?.body.client_msg_id, swarm.id, "a retried root message has Slack's idempotency key");
+  assert.match(JSON.stringify(root?.body.blocks), /Open swarm/);
+
+  const [task] = await ctx.db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Payment retry", status: "done" })
+    .returning();
+  slackCalls.length = 0;
+  await handleSlackNotify(ctx, { type: "swarm_landed", swarmId: swarm.id, taskId: task!.id });
+  await handleSlackNotify(ctx, {
+    type: "swarm_question",
+    swarmId: swarm.id,
+    taskId: task!.id,
+    question: "Should retries preserve the old receipt?",
+  });
+  await handleSlackNotify(ctx, { type: "swarm_completed", swarmId: swarm.id });
+  const replies = slackCalls.filter((call) => call.method === "chat.postMessage");
+  assert.equal(replies.length, 3);
+  assert.match(String(replies[0]?.body.text), /Landed/);
+  assert.match(JSON.stringify(replies[1]?.body.blocks), /preserve the old receipt/);
+  assert.match(String(replies[2]?.body.text), /finished/);
+
+  const [profile] = await ctx.db
+    .insert(agentProfiles)
+    .values({ ownerId: LOCAL_USER_ID, name: `Slack planner ${swarm.id}`, cli: "fake", model: "fake" })
+    .returning();
+  const [run] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      role: "planner",
+      swarmId: swarm.id,
+      agentProfileId: profile!.id,
+      prompt: "plan",
+      status: "succeeded",
+    })
+    .returning();
+  await ctx.db.insert(swarmMessages).values({
+    swarmId: swarm.id,
+    taskId: task!.id,
+    text: "Should retries preserve the old receipt?",
+    userId: null,
+    runId: run!.id,
+    status: "delivered",
+    deliveredAt: new Date(),
+  });
+  await ctx.db.update(swarmTasks).set({ attention: "question" }).where(eq(swarmTasks.id, task!.id));
+  await ctx.db.update(swarms).set({ pausedReason: "attention" }).where(eq(swarms.id, swarm.id));
+
+  slackCalls.length = 0;
+  await handleSlackInbound(ctx, {
+    kind: "mention",
+    teamId: TEAM,
+    channelId: link.slackChannelId,
+    userId: MEMBER_SLACK,
+    text: `<@${BOT}> yes, keep the original receipt`,
+    ts: "answer.1",
+    threadTs: link.slackThreadTs,
+  });
+  const answers = await ctx.db
+    .select()
+    .from(swarmMessages)
+    .where(eq(swarmMessages.userId, LOCAL_USER_ID));
+  assert.ok(answers.some((row) => row.swarmId === swarm.id && row.text === "yes, keep the original receipt"));
+  const [answeredTask] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, task!.id));
+  const [answeredSwarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  assert.equal(answeredTask?.attention, null);
+  assert.equal(answeredSwarm?.pausedReason, null);
+  assert.ok(slackCalls.some((call) => String(call.body.text).includes("Sent your answer")));
+
+  await handleSlackInbound(ctx, {
+    kind: "mention",
+    teamId: TEAM,
+    channelId: link.slackChannelId,
+    userId: MEMBER_SLACK,
+    text: `<@${BOT}> also keep the retry count visible`,
+    ts: "answer.2",
+    threadTs: link.slackThreadTs,
+  });
+  const followUps = await ctx.db
+    .select()
+    .from(swarmMessages)
+    .where(
+      and(
+        eq(swarmMessages.swarmId, swarm.id),
+        eq(swarmMessages.userId, LOCAL_USER_ID),
+        eq(swarmMessages.text, "also keep the retry count visible"),
+      ),
+    );
+  assert.equal(followUps[0]?.taskId, null, "a later thread message is planner guidance, not another task answer");
 });
 
 test("a finished run posts its write-up, or the last assistant message if there is none", async () => {

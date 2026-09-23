@@ -29,6 +29,7 @@ import { landWorkerBranch, landWorkerBundles, type LandOutcome } from "./landing
 type LandFailure = Exclude<Extract<LandOutcome, { ok: false }>, { reason: "empty" }>;
 import { enqueueSwarmTick } from "./coordinator.js";
 import { queueSwarmTaskSandboxReap } from "../reap-sandbox.js";
+import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -549,6 +550,7 @@ async function succeed(
    * has already succeeded.
    */
   await queueSwarmTaskSandboxReap(ctx, task.id);
+  await queueSwarmSlackNotify(ctx, { type: "swarm_landed", swarmId: swarm.id, taskId: task.id });
   await enqueueSwarmTick(ctx, swarm.id);
   return { landingId: landing.id, status: "landed", landed, resolverRunId: null, reason: null };
 }

@@ -19,6 +19,7 @@ import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { SWARM_FULL, type NewRun } from "../start-run.js";
 import { rollUpStatus, swarmStatusFrom, tickAllLiveSwarms, tickSwarm, type SwarmTickDeps } from "./coordinator.js";
+import { DOCUMENT_ASSEMBLY_FLAG } from "./deliverable.js";
 import { applyRunCharge } from "./ledger.js";
 
 /**
@@ -101,6 +102,9 @@ before(async () => {
       // every tick that promotes a landing throw.
       work: async () => "worker",
       offWork: async () => {},
+      createQueue: async () => {},
+      schedule: async () => {},
+      unschedule: async () => {},
     },
     runWorkers: ["worker-1"],
   } as unknown as AppContext;
@@ -1422,6 +1426,24 @@ test("a finished tree gets a final check, and the swarm is not done until it is"
   assert.equal(last?.becameDone, true);
 });
 
+test("a nested tree is rolled up before its final check is decided", async () => {
+  const swarm = await swarmWithFinalCheck({ completionCommand: "pnpm test" });
+  const group = await makeTask(swarm.id, { nodeType: "plan", title: "Checkout", status: "working" });
+  await makeTask(swarm.id, {
+    parentId: group.id,
+    title: "Line item totals",
+    status: "done",
+  });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.notEqual(result?.status, "done", "the nested tree cannot publish before its check");
+  assert.equal(result?.becameDone, false);
+
+  const rows = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id));
+  assert.equal(rows.find((row) => row.id === group.id)?.status, "done", "the parent was rolled up first");
+  assert.ok(rows.some((row) => row.title === "Final check"), "the same tick added the final check");
+});
+
 test("a template that asks for nothing gets no check, which is every swarm before this", async () => {
   const swarm = await swarmWithFinalCheck({ judgeProfileId: null, completionCommand: null });
   await makeTask(swarm.id, { title: "Line item totals", status: "done" });
@@ -1430,6 +1452,52 @@ test("a template that asks for nothing gets no check, which is every swarm befor
   assert.equal(result?.status, "done");
   assert.equal(result?.becameDone, true);
   assert.equal((await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).length, 1);
+});
+
+test("a document assembly failure blocks visibly and cannot publish or start its judge", async () => {
+  const swarm = await swarmWithFinalCheck({ completionCommand: "review the document" });
+  await db.update(swarms).set({ deliverable: "document" }).where(eq(swarms.id, swarm.id));
+  await makeTask(swarm.id, { title: "The findings", status: "done" });
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  const rows = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id));
+  const assembly = rows.find((row) => row.title === "Assemble document");
+  assert.equal(result?.status, "blocked");
+  assert.equal(result?.becameDone, false);
+  assert.equal(assembly?.status, "blocked");
+  assert.equal(assembly?.attention, "failed");
+  assert.match(assembly?.report ?? "", /branch|workspace/, "the provider failure is on the task");
+  assert.ok(!rows.some((row) => row.title === "Final check"), "a judge cannot run before the document exists");
+  assert.ok(!deps.calls.some((call) => call.role === "judge"));
+});
+
+test("a document assembly lease prevents two ticks from touching git and recovers after a crash", async () => {
+  const swarm = await swarmWithFinalCheck({ completionCommand: "review the document" });
+  await db.update(swarms).set({ deliverable: "document" }).where(eq(swarms.id, swarm.id));
+  await makeTask(swarm.id, { title: "The findings", status: "done" });
+  const assembly = await makeTask(swarm.id, {
+    title: "Assemble document",
+    status: "working",
+    updatedAt: new Date(),
+    flags: { [DOCUMENT_ASSEMBLY_FLAG]: true, reopenCount: 0 },
+  });
+
+  const concurrent = await tickSwarm(ctx, swarm.id, starter());
+  const stillClaimed = await read(assembly.id);
+  assert.equal(concurrent?.status, "running");
+  assert.equal(stillClaimed.status, "working", "a fresh claim belongs to the tick already doing the git work");
+  assert.equal(stillClaimed.report, null);
+
+  await db
+    .update(swarmTasks)
+    .set({ updatedAt: new Date(Date.now() - 10 * 60_000) })
+    .where(eq(swarmTasks.id, assembly.id));
+  const recovered = await tickSwarm(ctx, swarm.id, starter());
+  const failed = await read(assembly.id);
+  assert.equal(recovered?.status, "blocked");
+  assert.equal(failed.status, "blocked", "a stale claim is recovered and its provider failure is visible");
+  assert.match(failed.report ?? "", /branch|workspace/);
 });
 
 test("a check that failed is not replaced by another, it is the planner's to decide about", async () => {
@@ -1453,6 +1521,23 @@ test("a check that failed is not replaced by another, it is the planner's to dec
   const result = await tickSwarm(ctx, swarm.id, starter());
   assert.equal((await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).length, 2);
   assert.notEqual(result?.status, "done", "a swarm whose check failed is not finished");
+});
+
+test("a reopened swarm gets a new final check for its follow up", async () => {
+  const swarm = await swarmWithFinalCheck();
+  await makeTask(swarm.id, { title: "Initial work", status: "done" });
+  await tickSwarm(ctx, swarm.id, starter());
+  const [first] = await db.select().from(swarmTasks).where(eq(swarmTasks.title, "Final check"));
+  assert.ok(first);
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, first!.id));
+
+  await db.update(swarms).set({ reopenCount: 1, status: "running" }).where(eq(swarms.id, swarm.id));
+  await makeTask(swarm.id, { title: "Follow up", status: "done", followUpInstruction: "Address review" });
+  await tickSwarm(ctx, swarm.id, starter());
+
+  const checks = await db.select().from(swarmTasks).where(eq(swarmTasks.title, "Final check"));
+  assert.equal(checks.length, 2, "the first verdict cannot approve later work");
+  assert.equal(checks.find((row) => row.id !== first!.id)?.flags.reopenCount, 1);
 });
 
 test("a check is not added to a tree that is still being worked", async () => {

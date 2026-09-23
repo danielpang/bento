@@ -54,3 +54,8 @@ export function cardUrl(ctx: AppContext, featureId: string): string {
   const base = ctx.env.BETTER_AUTH_URL.replace(/\/$/, "");
   return `${base}/?feature=${featureId}`;
 }
+
+export function swarmUrl(ctx: AppContext, swarmId: string): string {
+  const base = ctx.env.BETTER_AUTH_URL.replace(/\/$/, "");
+  return `${base}/?board=swarms&swarm=${encodeURIComponent(swarmId)}`;
+}
