@@ -547,8 +547,9 @@ export const agentRuns = pgTable(
   queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
   /**
    * When the run was claimed. Null on a run that never left the queue,
-   * and cleared when the run failed because Bento or Fly could not
-   * start or keep the sprite: a missing start is zero agent hours.
+   * and cleared when Fly or the sprite driver could not create the
+   * machine: a missing start is zero agent hours. A run that reached
+   * the agent keeps its start.
    */
   startedAt: timestamp("started_at", { withTimezone: true }),
   endedAt: timestamp("ended_at", { withTimezone: true }),
