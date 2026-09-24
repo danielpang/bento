@@ -35,3 +35,12 @@ test("bento --help lists spend, sessions, and mcp", () => {
   assert.match(HELP, /^ {2}mcp \[list\]/m);
   assert.match(HELP, /mcp add <name> --url/);
 });
+
+test("--base-branch is kept for repos add and repos set, and blank means detect again", () => {
+  const add = parseCliOptions(["repos", "add", "../api", "--base-branch", " master "]);
+  assert.deepEqual(add.positionals, ["add", "../api"]);
+  assert.equal(add.baseBranch, "master");
+  assert.equal(parseCliOptions(["repos", "set", "api", "--base-branch", ""]).baseBranch, "");
+  assert.equal(parseCliOptions(["repos", "add", "../api"]).baseBranch, undefined);
+  assert.match(HELP, /--base-branch <branch>/);
+});

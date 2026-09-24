@@ -153,10 +153,11 @@ export async function runRepos(options: CliOptions): Promise<void> {
       case "list": {
         const repos = await client.listRepositories(project.id);
         // Tab separated, so cut(1) still works now that a row can carry
-        // commands with spaces in them.
+        // commands with spaces in them. The base branch came later, so it
+        // is last and the columns scripts already cut keep their places.
         for (const repo of repos) {
           console.log(
-            [repo.name, repo.localPath, repo.setupCommand ?? "", repo.testCommand ?? ""].join("\t"),
+            [repo.name, repo.localPath, repo.setupCommand ?? "", repo.testCommand ?? "", repo.defaultBranch].join("\t"),
           );
         }
         return;
@@ -171,13 +172,19 @@ export async function runRepos(options: CliOptions): Promise<void> {
           localPath,
           ...(options.setupCommand !== undefined ? { setupCommand: options.setupCommand } : {}),
           ...(options.testCommand !== undefined ? { testCommand: options.testCommand } : {}),
+          // Blank is the same as absent: the server asks the checkout.
+          ...(options.baseBranch ? { defaultBranch: options.baseBranch } : {}),
         });
-        console.log(`${added.name}\t${added.localPath}`);
+        console.log(`${added.name}\t${added.localPath}\t${added.defaultBranch}`);
         return;
       }
       case "set": {
-        if (options.setupCommand === undefined && options.testCommand === undefined) {
-          throw new Error("repos set needs --setup or --test: there is nothing else to change");
+        if (
+          options.setupCommand === undefined &&
+          options.testCommand === undefined &&
+          options.baseBranch === undefined
+        ) {
+          throw new Error("repos set needs --setup, --test, or --base-branch: there is nothing else to change");
         }
         const repos = await client.listRepositories(project.id);
         const target = repos.find((r) => r.name === argument || r.id === argument);
@@ -185,9 +192,13 @@ export async function runRepos(options: CliOptions): Promise<void> {
         const updated = await client.updateRepository(project.id, target.id, {
           ...(options.setupCommand !== undefined ? { setupCommand: options.setupCommand } : {}),
           ...(options.testCommand !== undefined ? { testCommand: options.testCommand } : {}),
+          // Sent even when blank, which asks the checkout for its default
+          // again: how a repository recorded against the wrong trunk is
+          // put right without knowing the right name.
+          ...(options.baseBranch !== undefined ? { defaultBranch: options.baseBranch } : {}),
         });
         console.log(
-          [updated.name, updated.setupCommand ?? "", updated.testCommand ?? ""].join("\t"),
+          [updated.name, updated.setupCommand ?? "", updated.testCommand ?? "", updated.defaultBranch].join("\t"),
         );
         return;
       }

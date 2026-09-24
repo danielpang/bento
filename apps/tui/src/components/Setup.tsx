@@ -984,24 +984,31 @@ export function Setup({
               ? [{ id: "name", label: "Project name (optional)", placeholder: "Use the repository name" }]
               : []),
             { id: "path", label: `Repository path on ${pathLocation}`, value: screen.value, required: true },
+            // Optional because the checkout usually knows: the server
+            // reads origin/HEAD, then main or master. Asked here because
+            // a guess of main is what broke repositories whose trunk is
+            // master, and a team that works off develop has to say so.
+            { id: "branch", label: "Base branch (optional)", placeholder: "Use the repository's default" },
           ]}
-          description="Choose the Git checkout agents will use."
+          description="Choose the Git checkout agents will use. Cards start from the base branch and open pull requests against it."
           submitLabel={project ? "Connect repository" : "Create project"}
           onCancel={() => go({ name: "repos" })}
-          onSubmit={async ({ path: raw = "", name = "" }) => {
+          onSubmit={async ({ path: raw = "", name = "", branch = "" }) => {
             const dir = prepareRepositoryPath(raw, repositoryPathOwner);
             if (!dir) throw new Error("Enter a repository path.");
             const problem = repositoryPathOwner === "client" ? pathProblem(dir) : null;
             if (problem) throw new Error(problem);
+            // Blank is left out rather than sent, so the server detects it.
+            const baseBranch = branch.trim() ? { defaultBranch: branch.trim() } : {};
             if (project) {
               const connected = repos.find((repo) =>
                 sameRepositoryLocation(repo, { localPath: dir, githubRepoId: null }),
               );
               if (connected) throw new Error(`This checkout is already connected as ${connected.name}.`);
-              const added = await client.addRepository(project.id, { localPath: dir });
+              const added = await client.addRepository(project.id, { localPath: dir, ...baseBranch });
               setRepos((current) => [...current, added]);
             } else {
-              await client.createProject({ name: name.trim() || repositoryNameHint(dir), localPath: dir });
+              await client.createProject({ name: name.trim() || repositoryNameHint(dir), localPath: dir, ...baseBranch });
               await load();
             }
             go({ name: "repos" });
@@ -1395,7 +1402,7 @@ export function Setup({
       return (
         <Frame
           title={project ? `Repositories · ${project.name}` : "Repositories"}
-          hint="j/k move · Enter commands · d remove · Escape back"
+          hint="j/k move · Enter settings · d remove · Escape back"
           notice={notice}
           error={reposError || error}
         >
@@ -1406,7 +1413,7 @@ export function Setup({
                 key={repo.id}
                 selected={i === index}
                 label={repo.name}
-                status={`${repo.localPath}${repo.setupCommand ? ` · setup: ${repo.setupCommand}` : ""}${repo.testCommand ? ` · test: ${repo.testCommand}` : ""}`}
+                status={`${repo.localPath} · base: ${repo.defaultBranch}${repo.setupCommand ? ` · setup: ${repo.setupCommand}` : ""}${repo.testCommand ? ` · test: ${repo.testCommand}` : ""}`}
               />
             ))}
             {repos.length === 0 && !reposError && !error && project && (
@@ -1427,8 +1434,14 @@ export function Setup({
       const commands = resolveRepositoryCommands(repo ?? {});
       return (
         <Form
-          title="Repository commands"
+          title="Repository settings"
           fields={[
+            {
+              id: "branch",
+              label: "Base branch (cards start here, pull requests target it)",
+              value: repo?.defaultBranch ?? "",
+              placeholder: "Leave blank to use the repository's default",
+            },
             {
               id: "setup",
               label: "Install dependencies (optional, before work)",
@@ -1449,12 +1462,17 @@ export function Setup({
           }
           fullDescription
           onCancel={() => go({ name: "repos" })}
-          onSubmit={async ({ setup = "", test = "" }) => {
+          onSubmit={async ({ branch = "", setup = "", test = "" }) => {
             if (!project) throw new Error("Choose a project first.");
             const resolved = resolveRepositoryCommands({ setupCommand: setup, testCommand: test });
+            // Sent only when it changed, so saving a command does not
+            // re-check a branch nobody touched. Cleared, it is sent blank,
+            // which asks the checkout for its default again.
+            const nextBranch = branch.trim();
             await client.updateRepository(project.id, screen.repoId, {
               setupCommand: resolved.setupCommand,
               testCommand: resolved.testCommand,
+              ...(nextBranch !== (repo?.defaultBranch ?? "") ? { defaultBranch: nextBranch } : {}),
             });
             await load();
             go({ name: "repos" });

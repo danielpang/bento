@@ -250,6 +250,41 @@ test("project creation can save a name before a repository is connected", async 
   }
 });
 
+test("project creation asks for a base branch once a repository path is given", async () => {
+  const bodies: unknown[] = [];
+  const client = {
+    createProject: async (body: unknown) => {
+      bodies.push(body);
+      return project;
+    },
+  } as unknown as BentoClient;
+  const ui = render(workspace(client, "projects"));
+  try {
+    await ready(ui);
+    ui.stdin.write("Create project");
+    await settle();
+    ui.stdin.write("\r");
+    await ready(ui, /Repository path/);
+    assert.doesNotMatch(ui.lastFrame()!, /Base branch/);
+    ui.stdin.write("Legacy");
+    await settle();
+    ui.stdin.write("\r");
+    await settle();
+    ui.stdin.write("/srv/legacy");
+    await ready(ui, /Base branch/);
+    ui.stdin.write("\r");
+    await settle();
+    ui.stdin.write("master");
+    await settle();
+    ui.stdin.write("\x13");
+    await settle();
+    assert.deepEqual(bodies, [{ name: "Legacy", localPath: "/srv/legacy", defaultBranch: "master" }]);
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
+});
+
 test("stage artifact navigation reads the selected file and returns to conversation history", async () => {
   const readIds: string[] = [];
   const client = {
