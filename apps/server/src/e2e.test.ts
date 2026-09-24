@@ -6092,6 +6092,10 @@ test("no billing surface exists on a local install", async () => {
   const checkout = await app.request("/api/billing/checkout", { method: "POST" });
   assert.equal(checkout.status, 404);
   assert.equal(ctx.entitlements, undefined, "no plan limits outside a cloud deployment");
+  const waitlist = await app.request("/api/waitlist/status");
+  assert.equal(waitlist.status, 404);
+  const health = (await (await app.request("/api/health")).json()) as { waitlist?: unknown };
+  assert.equal("waitlist" in health, false);
 });
 
 

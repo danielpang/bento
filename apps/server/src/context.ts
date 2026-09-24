@@ -14,6 +14,7 @@ import type pg from "pg";
 import type { Analytics } from "./analytics.js";
 import type { FeatureFlags } from "./feature-flags.js";
 import type { ArtifactStore } from "./artifact-store.js";
+import type { AdmissionControl } from "./admission.js";
 import type { Auth } from "./auth.js";
 import type { SecretBox } from "./secrets.js";
 import { EventBus } from "./events.js";
@@ -101,6 +102,11 @@ export interface AppContext {
   auth?: Auth;
   /** Plan limits; absent on open source installs, where nothing is limited. */
   entitlements?: Entitlements;
+  /**
+   * Hosted admission. Absent on local and self-hosted installs, which
+   * keep open signup and never create waitlist tables.
+   */
+  admission?: AdmissionControl;
   /** PostHog, when a key is configured; absent means nothing is sent. */
   analytics?: Analytics;
   /**

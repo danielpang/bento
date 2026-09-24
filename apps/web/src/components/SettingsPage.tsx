@@ -16,6 +16,7 @@ import { McpPanel } from "./McpPanel.js";
 import { SlackPanel } from "./SlackPanel.js";
 import { ProjectsSettings } from "./ProjectsSettings.js";
 import { SignIn } from "./SignIn.js";
+import type { WaitlistMode } from "../waitlist-signin.js";
 import { TeamSettings } from "./TeamSettings.js";
 import { SettingsPageSkeleton } from "./Skeleton.js";
 import { TabScroll } from "./TabScroll.js";
@@ -58,6 +59,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   const { data: session, isPending } = useSession();
   const [mode, setMode] = useState<"local" | "multi" | "unknown">("unknown");
   const [social, setSocial] = useState<{ github: boolean; google: boolean } | undefined>(undefined);
+  const [waitlistMode, setWaitlistMode] = useState<WaitlistMode | undefined>(undefined);
   const [hasBilling, setHasBilling] = useState(false);
   const [wideNavigation, setWideNavigation] = useState(() => window.matchMedia("(min-width: 801px)").matches);
   const [tab, setTab] = useState<Tab>(() => {
@@ -88,6 +90,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
       .then((h) => {
         setMode(h.mode === "multi" ? "multi" : "local");
         setSocial(h.social);
+        setWaitlistMode(h.waitlist?.mode);
       })
       .catch(() => setMode("local"));
     void fetch("/api/billing/plan", { credentials: "include" })
@@ -100,7 +103,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
   }, [client]);
 
   if (mode === "unknown" || (mode === "multi" && isPending)) return <SettingsPageSkeleton />;
-  if (mode === "multi" && !session) return <SignIn social={social} />;
+  if (mode === "multi" && !session) return <SignIn social={social} waitlistMode={waitlistMode} />;
 
   const tabs = settingsSections(mode, { hasBilling, requested: tab }).filter((entry) => entry.id !== "providers" || isBetaTester);
   const active = resolveSettingsTab(tabs, tab);

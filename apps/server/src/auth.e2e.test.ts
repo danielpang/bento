@@ -3306,3 +3306,213 @@ test("creating an agent tags the active organization and refuses a removed membe
   const unwanted = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.name, "Must not exist"));
   assert.equal(unwanted.length, 0);
 });
+
+function gatedAuthApp(admission: NonNullable<AuthHooks["admission"]>) {
+  const gatedAuth = createAuth(ctx.env, ctx.db, { description: "test", async send() {} }, { admission });
+  assert.ok(gatedAuth);
+  return createApp(
+    { ...ctx, auth: gatedAuth, admission },
+    {},
+  );
+}
+
+test("/api/health includes waitlist only when admission is loaded", async () => {
+  const open = await app.request("/api/health");
+  assert.equal(open.status, 200);
+  const openBody = (await open.json()) as { waitlist?: { mode: string } };
+  assert.equal("waitlist" in openBody, false);
+
+  const gated = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser() {
+      return { allowed: false, code: "WAITLIST_REQUIRED" };
+    },
+    async onUserCreated() {},
+  });
+  const closed = await gated.request("/api/health");
+  const closedBody = (await closed.json()) as { waitlist?: { mode: string } };
+  assert.deepEqual(closedBody.waitlist, { mode: "waitlist" });
+});
+
+test("email signup is allowed in open mode and refused in waitlist mode", async () => {
+  const open = gatedAuthApp({
+    mode: () => "open",
+    async canCreateUser() {
+      return { allowed: true, reason: "open" };
+    },
+    async onUserCreated() {},
+  });
+  const allowed = await open.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-open@bento.test",
+      password: "correct-horse-battery",
+      name: "Open",
+    }),
+  });
+  assert.equal(allowed.status, 200);
+
+  const closed = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser() {
+      return { allowed: false, code: "WAITLIST_REQUIRED" };
+    },
+    async onUserCreated() {},
+  });
+  const refused = await closed.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-closed@bento.test",
+      password: "correct-horse-battery",
+      name: "Closed",
+    }),
+  });
+  assert.equal(refused.status, 403);
+  const body = (await refused.json()) as { code?: string; message?: string };
+  assert.equal(body.code, "WAITLIST_REQUIRED");
+  assert.match(body.message ?? "", /waitlist/i);
+});
+
+test("a live waitlist invite admits signup and an expired one does not", async () => {
+  const invited = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser(input) {
+      if (input.email.toLowerCase() === "waitlist-invited@bento.test") {
+        return { allowed: true, reason: "waitlist_invite" };
+      }
+      return { allowed: false, code: "WAITLIST_REQUIRED" };
+    },
+    async onUserCreated() {},
+  });
+  const ok = await invited.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-invited@bento.test",
+      password: "correct-horse-battery",
+      name: "Invited",
+    }),
+  });
+  assert.equal(ok.status, 200);
+
+  const expired = await invited.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-expired@bento.test",
+      password: "correct-horse-battery",
+      name: "Expired",
+    }),
+  });
+  assert.equal(expired.status, 403);
+  assert.equal(((await expired.json()) as { code?: string }).code, "WAITLIST_REQUIRED");
+});
+
+test("a pending organization invitation bypasses waitlist admission", async () => {
+  const owner = await jsonPost("/api/auth/sign-up/email", {
+    email: "waitlist-owner@bento.test",
+    password: "correct-horse-battery",
+    name: "Owner",
+  });
+  const token = owner.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Waitlist Org", slug: "waitlist-org" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const inviteRes = await jsonPost(
+    "/api/auth/organization/invite-member",
+    { email: "waitlist-teammate@bento.test", role: "member", organizationId: org.id },
+    token,
+  );
+  assert.equal(inviteRes.status, 200, await inviteRes.clone().text());
+
+  const closed = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser() {
+      return { allowed: false, code: "WAITLIST_REQUIRED" };
+    },
+    async onUserCreated() {},
+  });
+  const teammate = await closed.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-teammate@bento.test",
+      password: "correct-horse-battery",
+      name: "Teammate",
+    }),
+  });
+  assert.equal(teammate.status, 200, "an invited teammate must still be able to create an account");
+});
+
+test("a waitlist store failure is 503, not an uninvited 403", async () => {
+  const closed = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser() {
+      throw new Error("the database system is starting up");
+    },
+    async onUserCreated() {},
+  });
+  const res = await closed.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-down@bento.test",
+      password: "correct-horse-battery",
+      name: "Down",
+    }),
+  });
+  assert.equal(res.status, 503);
+  const body = (await res.json()) as { code?: string };
+  assert.notEqual(body.code, "WAITLIST_REQUIRED");
+});
+
+test("existing users can sign in while waitlist mode is closed", async () => {
+  const created = await jsonPost("/api/auth/sign-up/email", {
+    email: "waitlist-existing@bento.test",
+    password: "correct-horse-battery",
+    name: "Existing",
+  });
+  assert.equal(created.status, 200);
+
+  const closed = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser() {
+      return { allowed: false, code: "WAITLIST_REQUIRED" };
+    },
+    async onUserCreated() {},
+  });
+  const signedIn = await closed.request("/api/auth/sign-in/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-existing@bento.test",
+      password: "correct-horse-battery",
+    }),
+  });
+  assert.equal(signedIn.status, 200);
+});
+
+test("user-create admission covers the same hook social signup would hit", async () => {
+  const seen: string[] = [];
+  const closed = gatedAuthApp({
+    mode: () => "waitlist",
+    async canCreateUser(input) {
+      seen.push(input.email);
+      return { allowed: false, code: "WAITLIST_REQUIRED" };
+    },
+    async onUserCreated() {},
+  });
+  await closed.request("/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "waitlist-hook@bento.test",
+      password: "correct-horse-battery",
+      name: "Hook",
+    }),
+  });
+  assert.deepEqual(seen, ["waitlist-hook@bento.test"]);
+});
