@@ -12,7 +12,8 @@ import {
  * Keeps this process's model catalog current.
  *
  * Reads models.dev and the AI Gateway once at boot and then every
- * `hours`, and lays what it finds over the committed snapshot. The
+ * `hours`, and puts what it finds in place of the committed snapshot's
+ * lists, so new models appear and sunset ones drop out. The
  * catalog route serves the result, so the console, the TUI, and the Mac
  * app pick up a new Claude or GPT model without anyone running
  * `pnpm models:update` and deploying.
@@ -29,14 +30,25 @@ export function startModelRefresh(options: {
 }): { refresh(): Promise<void>; stop(): void } {
   const log = options.log ?? console;
   let failing = false;
+  /**
+   * The newest list each source gave, by provider. When models.dev is
+   * down but the Gateway answers, Anthropic and OpenAI keep what the
+   * last good read found rather than falling back to the snapshot.
+   */
+  const lastGood = new Map<string, CatalogProvider>();
 
   async function refresh() {
     try {
-      const before = countModels();
+      const before = modelIds();
       const live = await fetchLiveCatalog(options.fetch ? { fetch: options.fetch } : {});
-      applyLiveCatalog(live);
-      const added = countModels() - before;
-      if (failing || added > 0) log.log(`model catalog refreshed${added > 0 ? `: ${added} new models` : ""}`);
+      for (const provider of live) lastGood.set(provider.id, provider);
+      applyLiveCatalog([...lastGood.values()]);
+      const after = modelIds();
+      const added = [...after].filter((id) => !before.has(id)).length;
+      const removed = [...before].filter((id) => !after.has(id)).length;
+      if (failing || added > 0 || removed > 0) {
+        log.log(`model catalog refreshed: ${added} added, ${removed} sunset`);
+      }
       failing = false;
     } catch (err) {
       // Once per outage, not once per interval.
@@ -59,8 +71,8 @@ export function startModelRefresh(options: {
   };
 }
 
-function countModels(): number {
-  return modelCatalog().reduce((sum, provider) => sum + provider.models.length, 0);
+function modelIds(): Set<string> {
+  return new Set(modelCatalog().flatMap((provider) => provider.models.map((m) => `${provider.id}:${m.id}`)));
 }
 
 /**

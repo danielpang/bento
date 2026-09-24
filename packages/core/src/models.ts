@@ -1,7 +1,7 @@
 import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
 import { GATEWAY_CATALOG } from "./model-catalog.gateway.js";
-import { overlayCatalog } from "./model-catalog.live.js";
+import { codingModelsOnly, overlayCatalog } from "./model-catalog.live.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
 import { isOllamaModel } from "./ollama.js";
 
@@ -21,6 +21,14 @@ export interface CatalogProvider {
 }
 
 /**
+ * The half of the catalog a source describes, and so the half a live
+ * refresh replaces. Image, speech, and embedding models are filtered
+ * out of it: the snapshot predates that rule, and they are not models a
+ * coding agent can run.
+ */
+const SNAPSHOT: readonly CatalogProvider[] = codingModelsOnly(mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG));
+
+/**
  * Every provider Bento knows, refreshed ones first.
  *
  * The generated half comes from models.dev. Vercel AI Gateway is a
@@ -35,17 +43,15 @@ export interface CatalogProvider {
  * manual list's way once a refresh carries it.
  *
  * This is the bundled snapshot. What a running process offers is
- * modelCatalog(), which is this plus whatever the last live refresh
- * found.
+ * modelCatalog(), where the last live refresh has replaced the
+ * snapshot's lists.
  */
-export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(
-  mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG),
-  MANUAL_CATALOG,
-);
+export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(SNAPSHOT, MANUAL_CATALOG);
 
 /**
  * The catalog as this process knows it now: the bundled snapshot above
- * with the latest live refresh laid over it (see model-catalog.live.ts).
+ * with the latest live refresh in place of its lists (see
+ * model-catalog.live.ts).
  *
  * Every lookup in this module reads this rather than MODEL_CATALOG, so
  * a pairing check, a picker, and a provider mark all agree about a
@@ -61,13 +67,15 @@ export function modelCatalog(): readonly CatalogProvider[] {
 }
 
 /**
- * Lays a live list over the bundled snapshot. The server passes what it
- * read from models.dev and the Gateway; a client passes what the server
- * served, which is already overlaid and overlays again as a no-op.
- * Never shrinks the list: the snapshot is always underneath.
+ * Replaces the snapshot's lists with live ones, then merges the
+ * hand-maintained ids back on top. The server passes what it read from
+ * models.dev and the Gateway; a client passes what the server served,
+ * which already carries the manual ids, so merging them again adds
+ * nothing. A model a provider has sunset drops out; a provider the live
+ * read did not return keeps its snapshot list. See overlayCatalog.
  */
 export function applyLiveCatalog(live: readonly CatalogProvider[]): void {
-  current = overlayCatalog(MODEL_CATALOG, live);
+  current = mergeCatalogs(overlayCatalog(SNAPSHOT, live), MANUAL_CATALOG);
   version += 1;
   for (const listener of listeners) listener();
 }

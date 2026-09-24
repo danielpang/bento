@@ -56,3 +56,18 @@ test("one source failing does not hold back the other", async () => {
   const down = (async () => new Response("down", { status: 503 })) as typeof fetch;
   await assert.rejects(fetchLiveCatalog({ fetch: down }), /returned 503/);
 });
+
+test("a source that goes down keeps what it last listed", async () => {
+  let modelsDevUp = true;
+  const fetchStub = (async (url: string) => {
+    if (url === MODELS_DEV_URL) return modelsDevUp ? Response.json(modelsDev) : new Response("down", { status: 503 });
+    return Response.json({ data: [{ id: "acme/coder-1", type: "language" }] });
+  }) as typeof fetch;
+  const refresher = startModelRefresh({ hours: 0, fetch: fetchStub, log: quiet });
+  await refresher.refresh();
+  modelsDevUp = false;
+  await refresher.refresh();
+  // Not back to the snapshot, which predates this model.
+  assert.equal(providerForProfile("codex", "gpt-test-9-sol")?.id, "openai");
+  applyLiveCatalog([]);
+});

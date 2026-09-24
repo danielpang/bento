@@ -4,7 +4,8 @@
  *
  * The catalog is committed as well as fetched at runtime: a board that
  * cannot reach the internet still has to offer a model list. The live
- * read only ever adds to it, so no entry disappears between sessions.
+ * read replaces these lists when it succeeds, so a sunset model leaves
+ * the picker without waiting for this script.
  *
  * Only providers whose credentials Bento can actually store are
  * included. Offering a model that no stored key can authenticate would
@@ -23,9 +24,9 @@
  *
  * The server also reads both sources at run time and lays them over
  * this snapshot (packages/core/src/model-catalog.live.ts), so the
- * snapshot is the offline floor rather than the only list. Its
- * INCLUDE, OPTIONS, and PINNED mirror the ones below: change them
- * together.
+ * snapshot is the offline fallback rather than the only list. Its
+ * INCLUDE, OPTIONS, PINNED, and NOT_FOR_CODING mirror the ones below:
+ * change them together.
  *
  * Usage: pnpm models:update
  *        pnpm models:update -- --gateway-only
@@ -57,10 +58,10 @@ const INCLUDE = ["anthropic", "openai", "google", "openrouter", "xai", "cursor"]
  *
  * Bento stores no XAI_API_KEY. Grok is reachable here only through the
  * Cursor CLI, which pays for it with the Cursor key. Imagine image and
- * video models are not something an agent run can use.
+ * video models drop out with every other model agentCapable refuses.
  */
 const OPTIONS = {
-  xai: { env: ["CURSOR_API_KEY"], textOutputOnly: true },
+  xai: { env: ["CURSOR_API_KEY"] },
 };
 
 /**
@@ -100,7 +101,7 @@ if (!gatewayOnly) {
       return at === -1 ? pinned.length : at;
     };
     const models = Object.values(provider.models ?? {})
-      .filter((m) => !options.textOutputOnly || outputsText(m))
+      .filter((m) => isCodingModel(m.id) && agentCapable(m))
       .map((m) => ({ id: m.id, name: m.name ?? m.id }))
       .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
     for (const want of pinned) {
@@ -145,11 +146,33 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(provid
 
 await writeGatewayCatalog();
 
-/** Keep models an agent can actually write with. Image/video-only drops. */
-function outputsText(model) {
+/**
+ * Words in an id that mark a model an agent cannot write code with:
+ * image, video, music, and speech generators, realtime voice,
+ * embeddings, moderation. Whole segments only. Mirrors NOT_FOR_CODING
+ * in packages/core/src/model-catalog.live.ts.
+ */
+const NOT_FOR_CODING = new Set([
+  "audio", "dall", "embed", "embedding", "embeddings", "image", "images", "imagen", "live", "lyria",
+  "moderation", "realtime", "rerank", "sora", "speech", "transcribe", "transcription", "tts", "veo", "whisper",
+]);
+
+function isCodingModel(id) {
+  return !id.toLowerCase().split(/[-/._:~]+/).some((word) => NOT_FOR_CODING.has(word));
+}
+
+/**
+ * Reads text, writes text, calls tools, not deprecated. A field
+ * models.dev leaves out is not held against the model.
+ */
+function agentCapable(model) {
+  if (model.status === "deprecated") return false;
+  if (model.tool_call === false) return false;
+  const input = model.modalities?.input;
   const output = model.modalities?.output;
-  if (!Array.isArray(output) || output.length === 0) return true;
-  return output.includes("text");
+  if (Array.isArray(input) && input.length > 0 && !input.includes("text")) return false;
+  if (Array.isArray(output) && output.length > 0 && !output.includes("text")) return false;
+  return true;
 }
 
 /**
@@ -167,7 +190,7 @@ async function writeGatewayCatalog() {
     return at === -1 ? GATEWAY_PINNED.length : at;
   };
   const models = listed
-    .filter((m) => m?.type === "language" && typeof m.id === "string" && m.id !== "")
+    .filter((m) => m?.type === "language" && typeof m.id === "string" && m.id !== "" && isCodingModel(m.id))
     .map((m) => ({ id: m.id, name: typeof m.name === "string" && m.name !== "" ? m.name : m.id }))
     .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
   for (const want of GATEWAY_PINNED) {
