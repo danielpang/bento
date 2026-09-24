@@ -256,6 +256,61 @@ export function repoCommandsPatch(setup: Uint8Array, test: Uint8Array): Uint8Arr
   return concat3(first, asciiBytes("\"testCommand\":"), concat2(jsonNullable(test), asciiBytes("}")));
 }
 
+/**
+ * The commands plus the base branch, for a save that changed the
+ * branch. A blank branch goes out as "" rather than null: the server
+ * reads blank as "detect it from the checkout again", and refuses null.
+ */
+export function repoSettingsPatch(setup: Uint8Array, test: Uint8Array, branch: Uint8Array): Uint8Array {
+  const commands = repoCommandsPatch(setup, test);
+  const open = commands.slice(0, commands.length - 1);
+  return concat3(open, asciiBytes(",\"defaultBranch\":"), concat2(jsonString(branch), asciiBytes("}")));
+}
+
+/**
+ * A repository to add by path. The branch is left out when blank, so
+ * the server picks the checkout's own default instead of assuming main.
+ */
+export function repoAddBody(path: Uint8Array, branch: Uint8Array): Uint8Array {
+  if (branch.length === 0) return jsonObject1(asciiBytes("localPath"), path);
+  return jsonObject2(asciiBytes("localPath"), path, asciiBytes("defaultBranch"), branch);
+}
+
+/** A new project with its first repository, the branch left out when blank. */
+export function projectCreateBody(name: Uint8Array, path: Uint8Array, branch: Uint8Array): Uint8Array {
+  if (branch.length === 0) return jsonObject2(asciiBytes("name"), name, asciiBytes("localPath"), path);
+  return jsonObject3(
+    asciiBytes("name"),
+    name,
+    asciiBytes("localPath"),
+    path,
+    asciiBytes("defaultBranch"),
+    branch,
+  );
+}
+
+/**
+ * The message in a `{"error":"..."}` refusal, or empty for any other
+ * shape. Only the escapes the server's messages can carry are undone;
+ * anything else keeps its backslash, which reads fine in a notice.
+ */
+export function parseErrorMessage(body: Uint8Array): Uint8Array {
+  const prefix = asciiBytes("{\"error\":\"");
+  if (!body.startsWith(prefix)) return new Uint8Array(0);
+  const out = new Uint8Array(body.length);
+  let at = 0;
+  let i = prefix.length;
+  while (i < body.length) {
+    const b = body[i];
+    if (b === 0x22) return out.slice(0, at);
+    const escaped = b === 0x5c && i + 1 < body.length && (body[i + 1] === 0x22 || body[i + 1] === 0x5c);
+    out[at] = escaped ? body[i + 1] : b;
+    at = at + 1;
+    i = escaped ? i + 2 : i + 1;
+  }
+  return new Uint8Array(0);
+}
+
 /** Enable or disable an MCP server. */
 export function mcpEnabledPatch(enabled: boolean): Uint8Array {
   return enabled ? asciiBytes("{\"enabled\":true}") : asciiBytes("{\"enabled\":false}");
@@ -531,8 +586,11 @@ export interface Repo {
   readonly localPath: Uint8Array;
   readonly setupCommand: Uint8Array;
   readonly testCommand: Uint8Array;
+  /** The branch cards start from. Empty from a server too old to say. */
+  readonly baseBranch: Uint8Array;
   readonly hasSetup: boolean;
   readonly hasTest: boolean;
+  readonly hasBaseBranch: boolean;
   readonly index: number;
 }
 
@@ -806,10 +864,10 @@ export function parseCatalog(body: Uint8Array): readonly CatalogModel[] {
 }
 
 /**
- * Lines are repo|<id>|<name>|<localPath>, then optional
- * setup|<id>|<command> and test|<id>|<command>. Commands live on their
- * own lines so a path or a shell line can contain pipes without
- * colliding.
+ * Lines are repo|<id>|<name>|<localPath>, then branch|<id>|<baseBranch>
+ * and optional setup|<id>|<command> and test|<id>|<command>. Commands
+ * live on their own lines so a path or a shell line can contain pipes
+ * without colliding.
  */
 export function parseRepos(body: Uint8Array): readonly Repo[] {
   const out: Repo[] = [];
@@ -817,6 +875,7 @@ export function parseRepos(body: Uint8Array): readonly Repo[] {
   const repoTag = asciiBytes("repo");
   const setupTag = asciiBytes("setup");
   const testTag = asciiBytes("test");
+  const branchTag = asciiBytes("branch");
   for (let i = 0; i < lines.length; i++) {
     const fields = lines[i].split(asciiBytes("|"));
     if (fields.length < 4 || !bytesEq(fields[0], repoTag)) continue;
@@ -826,8 +885,10 @@ export function parseRepos(body: Uint8Array): readonly Repo[] {
       localPath: joinRest(fields, 3),
       setupCommand: new Uint8Array(0),
       testCommand: new Uint8Array(0),
+      baseBranch: new Uint8Array(0),
       hasSetup: false,
       hasTest: false,
+      hasBaseBranch: false,
       index: out.length,
     });
   }
@@ -836,18 +897,21 @@ export function parseRepos(body: Uint8Array): readonly Repo[] {
     if (fields.length < 3) continue;
     const isSetup = bytesEq(fields[0], setupTag);
     const isTest = bytesEq(fields[0], testTag);
-    if (!isSetup && !isTest) continue;
+    const isBranch = bytesEq(fields[0], branchTag);
+    if (!isSetup && !isTest && !isBranch) continue;
     for (let r = 0; r < out.length; r++) {
       if (!bytesEq(out[r].id, fields[1])) continue;
-      const command = joinRest(fields, 2);
+      const value = joinRest(fields, 2);
       out[r] = {
         id: out[r].id,
         name: out[r].name,
         localPath: out[r].localPath,
-        setupCommand: isSetup ? command : out[r].setupCommand,
-        testCommand: isTest ? command : out[r].testCommand,
-        hasSetup: isSetup ? command.length > 0 : out[r].hasSetup,
-        hasTest: isTest ? command.length > 0 : out[r].hasTest,
+        setupCommand: isSetup ? value : out[r].setupCommand,
+        testCommand: isTest ? value : out[r].testCommand,
+        baseBranch: isBranch ? value : out[r].baseBranch,
+        hasSetup: isSetup ? value.length > 0 : out[r].hasSetup,
+        hasTest: isTest ? value.length > 0 : out[r].hasTest,
+        hasBaseBranch: isBranch ? value.length > 0 : out[r].hasBaseBranch,
         index: out[r].index,
       };
     }

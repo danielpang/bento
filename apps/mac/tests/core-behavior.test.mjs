@@ -293,6 +293,106 @@ test("repository setup and test commands can be saved", () => {
   assert.ok(patch, "expected a repository commands PATCH");
   assert.match(patch, /setupCommand/);
   assert.match(patch, /testCommand/);
+  // Unchanged, the branch stays out, so the server does not re-check it.
+  assert.doesNotMatch(patch, /defaultBranch/);
+});
+
+test("a repository's base branch is parsed, shown for editing, and saved", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "repos_ok",
+      status: 200,
+      body: bytes("repo|repo-1|api|/tmp/api\nbranch|repo-1|master\nrepo|repo-2|web|/tmp/web"),
+    },
+    { kind: "edit_repo", index: 0 },
+    { kind: "repo_branch_edit", edit: insert("-next") },
+    { kind: "submit_repo_commands" },
+  ]);
+
+  const parsed = result.models.find((model) => model.repos?.length === 2);
+  assert.ok(parsed, "expected both repos to parse");
+  assert.equal(parsed.repos[0].baseBranch.$bytes, "master");
+  assert.equal(parsed.repos[0].hasBaseBranch, true);
+  assert.equal(parsed.repos[1].baseBranch.$bytes, "");
+  assert.equal(parsed.repos[1].hasBaseBranch, false);
+
+  const editing = result.models.find((model) => model.editingRepo === 0);
+  assert.equal(editing.repoBranchEdit.text.$bytes, "master");
+
+  const patch = result.commands.find((line) => line.includes("/repositories/repo-1") && line.includes('method="PATCH"'));
+  assert.ok(patch, "expected a repository settings PATCH");
+  assert.match(patch, /\\"defaultBranch\\":\\"master-next\\"}/);
+  assert.match(patch, /\\"setupCommand\\":null/);
+});
+
+test("clearing the base branch asks the server to detect it again", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    { kind: "repos_ok", status: 200, body: bytes("repo|repo-1|api|/tmp/api\nbranch|repo-1|main") },
+    { kind: "edit_repo", index: 0 },
+    { kind: "repo_branch_edit", edit: { kind: "clear" } },
+    { kind: "submit_repo_commands" },
+  ]);
+
+  const patch = result.commands.find((line) => line.includes("/repositories/repo-1") && line.includes('method="PATCH"'));
+  assert.ok(patch, "expected a repository settings PATCH");
+  // Blank, not null: the server refuses null and reads blank as detect.
+  assert.match(patch, /\\"defaultBranch\\":\\"\\"}/);
+});
+
+test("adding a repository sends a base branch only when one is named", () => {
+  const named = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    { kind: "open_new_repo" },
+    { kind: "repo_path_edit", edit: insert("/tmp/legacy") },
+    { kind: "new_repo_branch_edit", edit: insert("master") },
+    { kind: "submit_repo" },
+  ]);
+  const post = named.commands.find((line) => line.includes("/repositories") && line.includes('method="POST"'));
+  assert.ok(post, "expected a repository POST");
+  assert.match(post, /\\"localPath\\":\\"\/tmp\/legacy\\",\\"defaultBranch\\":\\"master\\"}/);
+
+  const blank = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    { kind: "open_new_repo" },
+    { kind: "repo_path_edit", edit: insert("/tmp/legacy") },
+    { kind: "submit_repo" },
+  ]);
+  const plain = blank.commands.find((line) => line.includes("/repositories") && line.includes('method="POST"'));
+  assert.ok(plain, "expected a repository POST");
+  assert.doesNotMatch(plain, /defaultBranch/);
+});
+
+test("a new project can name its repository's base branch", () => {
+  const result = runCore([
+    { kind: "open_new_project" },
+    { kind: "project_name_edit", edit: insert("Legacy") },
+    { kind: "project_path_edit", edit: insert("/tmp/legacy") },
+    { kind: "project_branch_edit", edit: insert("master") },
+    { kind: "submit_project" },
+  ]);
+  const post = result.commands.find((line) => line.includes("/api/projects") && line.includes('method="POST"'));
+  assert.ok(post, "expected a project POST");
+  assert.match(post, /\\"defaultBranch\\":\\"master\\"}/);
+});
+
+test("a refused repository shows the server's reason", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "repos_changed",
+      status: 400,
+      body: bytes('{"error":"/tmp/api has no branch named \\"trunk\\". Check the name."}'),
+    },
+  ]);
+  const model = result.models.at(-1);
+  assert.equal(model.lastError.$bytes, '/tmp/api has no branch named "trunk". Check the name.');
 });
 
 test("spend and sessions panels fetch their plain listings", () => {
