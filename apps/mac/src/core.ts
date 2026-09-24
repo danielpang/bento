@@ -52,9 +52,13 @@ import {
   parseInvitations,
   parseMembers,
   parseOrgs,
+  parseErrorMessage,
   parseTeamIsMulti,
   parseTools,
+  projectCreateBody,
+  repoAddBody,
   repoCommandsPatch,
+  repoSettingsPatch,
   stageAgentPatch,
   stageCreatePrPatch,
   runWords,
@@ -212,6 +216,7 @@ export interface Model {
   // it is submitted; nothing outside the open dialog reads them.
   readonly projectNameEdit: TextEditState;
   readonly projectPathEdit: TextEditState;
+  readonly projectBranchEdit: TextEditState;
   readonly featureTitleEdit: TextEditState;
   readonly takeoverEdit: TextEditState;
   readonly agentNameEdit: TextEditState;
@@ -219,10 +224,12 @@ export interface Model {
   readonly inviteEmailEdit: TextEditState;
   readonly secretValueEdit: TextEditState;
   readonly repoPathEdit: TextEditState;
+  readonly newRepoBranchEdit: TextEditState;
   readonly stageNameEdit: TextEditState;
   readonly gateCmdEdit: TextEditState;
   readonly repoSetupEdit: TextEditState;
   readonly repoTestEdit: TextEditState;
+  readonly repoBranchEdit: TextEditState;
   readonly yamlImportEdit: TextEditState;
   readonly mcpNameEdit: TextEditState;
   readonly mcpUrlEdit: TextEditState;
@@ -346,6 +353,7 @@ export type Msg =
   // Drafts.
   | { readonly kind: "project_name_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "project_path_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "project_branch_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "feature_title_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "takeover_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "agent_name_edit"; readonly edit: TextInputEvent }
@@ -353,10 +361,12 @@ export type Msg =
   | { readonly kind: "invite_email_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "secret_value_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "repo_path_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "new_repo_branch_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "stage_name_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "gate_cmd_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "repo_setup_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "repo_test_edit"; readonly edit: TextInputEvent }
+  | { readonly kind: "repo_branch_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "yaml_import_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "mcp_name_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "mcp_url_edit"; readonly edit: TextInputEvent }
@@ -743,6 +753,7 @@ export function initialModel(): Model {
 
     projectNameEdit: emptyEdit(),
     projectPathEdit: emptyEdit(),
+    projectBranchEdit: emptyEdit(),
     featureTitleEdit: emptyEdit(),
     takeoverEdit: emptyEdit(),
     agentNameEdit: emptyEdit(),
@@ -750,10 +761,12 @@ export function initialModel(): Model {
     inviteEmailEdit: emptyEdit(),
     secretValueEdit: emptyEdit(),
     repoPathEdit: emptyEdit(),
+    newRepoBranchEdit: emptyEdit(),
     stageNameEdit: emptyEdit(),
     gateCmdEdit: emptyEdit(),
     repoSetupEdit: emptyEdit(),
     repoTestEdit: emptyEdit(),
+    repoBranchEdit: emptyEdit(),
     yamlImportEdit: emptyEdit(),
     mcpNameEdit: emptyEdit(),
     mcpUrlEdit: emptyEdit(),
@@ -905,6 +918,17 @@ function refusedWrite(model: Model, status: number): Model {
   };
 }
 
+/**
+ * A refusal whose body says why, shown in the server's words. A 400
+ * from adding a repository names the branch the checkout lacks, which
+ * "status 400" would not.
+ */
+function refusedWriteSaying(model: Model, status: number, body: Uint8Array): Model {
+  const message = status === 400 ? parseErrorMessage(body) : new Uint8Array(0);
+  if (message.length === 0) return refusedWrite(model, status);
+  return { ...model, notice: new Uint8Array(0), lastError: message };
+}
+
 function refusalText(status: number): Uint8Array {
   if (status === 401) return asciiBytes("Your sign in has expired. Choose a different setup to sign in again.");
   if (status === 403) return asciiBytes("You do not have permission for that in this organization.");
@@ -926,6 +950,7 @@ function closedDialog(model: Model): Model {
     confirmText: new Uint8Array(0),
     projectNameEdit: emptyEdit(),
     projectPathEdit: emptyEdit(),
+    projectBranchEdit: emptyEdit(),
     featureTitleEdit: emptyEdit(),
     takeoverEdit: emptyEdit(),
     agentNameEdit: emptyEdit(),
@@ -933,10 +958,12 @@ function closedDialog(model: Model): Model {
     inviteEmailEdit: emptyEdit(),
     secretValueEdit: emptyEdit(),
     repoPathEdit: emptyEdit(),
+    newRepoBranchEdit: emptyEdit(),
     stageNameEdit: emptyEdit(),
     gateCmdEdit: emptyEdit(),
     repoSetupEdit: emptyEdit(),
     repoTestEdit: emptyEdit(),
+    repoBranchEdit: emptyEdit(),
     yamlImportEdit: emptyEdit(),
     mcpNameEdit: emptyEdit(),
     mcpUrlEdit: emptyEdit(),
@@ -976,6 +1003,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return { ...model, projectNameEdit: applyEdit(model.projectNameEdit, msg.edit, SHORT_CAP) };
     case "project_path_edit":
       return { ...model, projectPathEdit: applyEdit(model.projectPathEdit, msg.edit, SHORT_CAP) };
+    case "project_branch_edit":
+      return { ...model, projectBranchEdit: applyEdit(model.projectBranchEdit, msg.edit, SHORT_CAP) };
     case "feature_title_edit":
       return { ...model, featureTitleEdit: applyEdit(model.featureTitleEdit, msg.edit, SHORT_CAP) };
     case "takeover_edit":
@@ -990,6 +1019,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return { ...model, secretValueEdit: applyEdit(model.secretValueEdit, msg.edit, SECRET_CAP) };
     case "repo_path_edit":
       return { ...model, repoPathEdit: applyEdit(model.repoPathEdit, msg.edit, SHORT_CAP) };
+    case "new_repo_branch_edit":
+      return { ...model, newRepoBranchEdit: applyEdit(model.newRepoBranchEdit, msg.edit, SHORT_CAP) };
     case "stage_name_edit":
       return { ...model, stageNameEdit: applyEdit(model.stageNameEdit, msg.edit, SHORT_CAP) };
     case "gate_cmd_edit":
@@ -998,6 +1029,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return { ...model, repoSetupEdit: applyEdit(model.repoSetupEdit, msg.edit, PROMPT_CAP) };
     case "repo_test_edit":
       return { ...model, repoTestEdit: applyEdit(model.repoTestEdit, msg.edit, PROMPT_CAP) };
+    case "repo_branch_edit":
+      return { ...model, repoBranchEdit: applyEdit(model.repoBranchEdit, msg.edit, SHORT_CAP) };
     case "yaml_import_edit":
       return { ...model, yamlImportEdit: applyEdit(model.yamlImportEdit, msg.edit, YAML_CAP) };
     case "mcp_name_edit":
@@ -2306,7 +2339,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             method: "POST",
             timeoutMs: 10000,
             headers: { authorization: authHeader(model), "content-type": "application/json" },
-            body: jsonObject2(asciiBytes("name"), name, asciiBytes("localPath"), path),
+            body: projectCreateBody(name, path, model.projectBranchEdit.text.trim()),
           },
           { key: "act", ok: "projects_changed", err: "act_failed" },
         ),
@@ -2641,19 +2674,32 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         editingRepo: msg.index,
         repoSetupEdit: seedEdit(repo.setupCommand),
         repoTestEdit: seedEdit(repo.testCommand),
+        repoBranchEdit: seedEdit(repo.baseBranch),
       };
     }
 
     case "cancel_repo_edit":
-      return { ...model, editingRepo: -1, repoSetupEdit: emptyEdit(), repoTestEdit: emptyEdit() };
+      return {
+        ...model,
+        editingRepo: -1,
+        repoSetupEdit: emptyEdit(),
+        repoTestEdit: emptyEdit(),
+        repoBranchEdit: emptyEdit(),
+      };
 
     case "submit_repo_commands": {
       if (model.editingRepo < 0 || model.editingRepo >= model.repos.length || !hasSelectedProject(model)) {
         return model;
       }
       const repo = model.repos[model.editingRepo];
+      // The branch goes out only when it changed. Sending it unchanged
+      // would have the server check it against the checkout again, so a
+      // command save could fail over a branch nobody touched.
+      const branch = model.repoBranchEdit.text.trim();
+      const setup = model.repoSetupEdit.text.trim();
+      const test = model.repoTestEdit.text.trim();
       return [
-        { ...model, editingRepo: -1, notice: asciiBytes("Saved the commands") },
+        { ...model, editingRepo: -1, notice: asciiBytes("Saved the repository settings") },
         Cmd.fetch(
           {
             url: concat3(
@@ -2669,7 +2715,9 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             method: "PATCH",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model), "content-type": "application/json" },
-            body: repoCommandsPatch(model.repoSetupEdit.text.trim(), model.repoTestEdit.text.trim()),
+            body: bytesEq(branch, repo.baseBranch)
+              ? repoCommandsPatch(setup, test)
+              : repoSettingsPatch(setup, test, branch),
           },
           { key: "act", ok: "repos_changed", err: "act_failed" },
         ),
@@ -3088,7 +3136,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             method: "POST",
             timeoutMs: 10000,
             headers: { authorization: authHeader(model), "content-type": "application/json" },
-            body: jsonObject1(asciiBytes("localPath"), path),
+            body: repoAddBody(path, model.newRepoBranchEdit.text.trim()),
           },
           { key: "act", ok: "repos_changed", err: "act_failed" },
         ),
@@ -3226,7 +3274,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "repos_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWriteSaying(model, msg.status, msg.body);
       if (!hasSelectedProject(model)) return model;
       return [
         model,
@@ -3397,7 +3445,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "projects_changed": {
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
+      if (msg.status >= 400) return refusedWriteSaying(model, msg.status, msg.body);
       return [
         { ...model, selectCreatedProject: true },
         Cmd.fetch(

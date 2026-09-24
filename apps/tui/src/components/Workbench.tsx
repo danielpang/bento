@@ -253,8 +253,14 @@ export function Workbench({
           [
             { id: "name", label: "Project name", required: true },
             { id: "source", label: "Repository path (optional)", placeholder: "Connect a repository later" },
+            {
+              id: "branch",
+              label: "Base branch (optional)",
+              placeholder: "Use the repository's default",
+              when: (values) => Boolean(values.source?.trim()),
+            },
           ],
-          async ({ name = "", source = "" }) => {
+          async ({ name = "", source = "", branch = "" }) => {
             if (/^(https?:\/\/|git@|ssh:\/\/)/.test(source.trim()))
               throw new Error(
                 "Use a checkout path on the server, or leave this blank to connect a repository later.",
@@ -262,6 +268,8 @@ export function Workbench({
             const created = await client.createProject({
               name: name.trim(),
               ...(source.trim() ? { localPath: source.trim() } : {}),
+              // Blank is left out, so the server asks the checkout.
+              ...(source.trim() && branch.trim() ? { defaultBranch: branch.trim() } : {}),
             });
             onProject(created.id);
             onClose();

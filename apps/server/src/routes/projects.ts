@@ -30,7 +30,7 @@ import {
   visibleProjectFilter,
 } from "../access.js";
 import { githubForOrganization } from "../github.js";
-import { githubRemoteOf } from "../orchestrator/repo-remote.js";
+import { branchExists, detectDefaultBranch, githubRemoteOf } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { duplicateRepositoryLocation, sameRepositoryLocation } from "../repository-identity.js";
 
@@ -44,6 +44,39 @@ const repositoryCommands = {
   setupCommand: z.string().max(4000).nullish().transform((v) => v?.trim() || null),
   testCommand: z.string().max(4000).nullish().transform((v) => v?.trim() || null),
 };
+
+/**
+ * The branch a repository's cards start from and open pull requests
+ * against. Blank means "ask the checkout", which is what most people
+ * want and why the field is optional everywhere.
+ *
+ * Git's own rules for a branch name (`git check-ref-format --branch`),
+ * not a narrower set: a GitHub default such as `release+2` is a real
+ * branch, and refusing it refused a repository nobody had typed
+ * anything about. Those rules already keep the name out of a refspec's
+ * syntax (no colon, no leading dash), which is where it is spliced.
+ */
+const branchName = z
+  .string()
+  .trim()
+  .max(200)
+  .refine(
+    (v) =>
+      v === "" ||
+      (!/[\x00-\x20\x7f~^:?*[\\]/.test(v) &&
+        !v.startsWith("-") &&
+        !v.startsWith("/") &&
+        !v.endsWith("/") &&
+        !v.endsWith(".") &&
+        !v.endsWith(".lock") &&
+        !v.includes("..") &&
+        !v.includes("//") &&
+        !v.includes("@{") &&
+        !v.split("/").some((part) => part.startsWith(".")) &&
+        v !== "@"),
+    { message: "that is not a branch name git accepts" },
+  )
+  .transform((v) => v || undefined);
 
 const repositoryInput = z.object({
   /** Directory name inside the workspace. Defaults to the folder name. */
@@ -64,7 +97,7 @@ const repositoryInput = z.object({
   localPath: z.string().min(1).optional(),
   repoUrl: z.string().optional(),
   githubRepoId: z.string().regex(/^\d+$/).optional(),
-  defaultBranch: z.string().default("main"),
+  defaultBranch: branchName.optional(),
   ...repositoryCommands,
 }).refine((value) => value.localPath || value.githubRepoId, {
   message: "provide a local path or GitHub repository",
@@ -103,7 +136,7 @@ const createProject = z.object({
   name: projectName,
   /** Single repository shorthand. */
   localPath: z.string().min(1).optional(),
-  defaultBranch: z.string().default("main"),
+  defaultBranch: branchName.optional(),
   /** Several repositories, for features that span more than one. */
   repositories: z.array(repositoryInput).max(20).optional(),
 });
@@ -209,8 +242,9 @@ function uniqueNames(names: string[]): string[] {
 
 type RepositoryInput = z.infer<typeof repositoryInput>;
 
-type ResolvedRepository = Omit<RepositoryInput, "localPath" | "githubRepoId" | "repoUrl"> & {
+type ResolvedRepository = Omit<RepositoryInput, "localPath" | "githubRepoId" | "repoUrl" | "defaultBranch"> & {
   localPath: string;
+  defaultBranch: string;
   githubRepoId: string | null;
   repoUrl: string | null;
 };
@@ -252,7 +286,9 @@ async function resolveRepositoryInput(
     const repoUrl =
       input.repoUrl ??
       (ctx.env.BENTO_MODE === "multi" ? null : await githubRemoteOf(localPath));
-    return { ok: true, repo: { ...input, localPath, githubRepoId: null, repoUrl } };
+    const branch = await resolveBaseBranch(ctx, localPath, input.defaultBranch);
+    if ("error" in branch) return { ok: false, error: branch.error };
+    return { ok: true, repo: { ...input, localPath, githubRepoId: null, repoUrl, defaultBranch: branch.branch } };
   }
 
   const github = await githubForOrganization(ctx, organizationId);
@@ -268,9 +304,60 @@ async function resolveRepositoryInput(
       localPath: selected.fullName,
       repoUrl: selected.url,
       githubRepoId: String(selected.id),
-      defaultBranch: selected.defaultBranch,
+      // GitHub knows the repository's default, but a team whose work
+      // lands on a release or develop branch says so here.
+      defaultBranch: input.defaultBranch ?? selected.defaultBranch,
     },
   };
+}
+
+/**
+ * The base branch for a checkout by path: the one named, checked
+ * against the checkout, or the checkout's own default when none was.
+ *
+ * Only in local mode, for the same reason paths are only resolved
+ * there: in any other mode the path names a directory on the runner,
+ * which this process cannot read. There the name is taken as given
+ * and a blank one falls back to `main`, as it always has.
+ */
+async function resolveBaseBranch(
+  ctx: AppContext,
+  localPath: string,
+  requested: string | undefined,
+): Promise<{ branch: string } | { error: string }> {
+  if (ctx.env.BENTO_MODE !== "local") return { branch: requested ?? "main" };
+  if (!requested) return { branch: (await detectDefaultBranch(localPath)) ?? "main" };
+  if (await branchExists(localPath, requested)) return { branch: requested };
+  return {
+    error: `${localPath} has no branch named ${requested}. Check the name, fetch it if it only exists on the remote, or leave the base branch blank to use the repository's default.`,
+  };
+}
+
+/**
+ * The base branch an edit leaves a stored repository on.
+ *
+ * Blank asks whoever knows the default: GitHub for a repository added
+ * from it, the checkout in local mode. Outside local mode nobody here
+ * can read a checkout by path, and the `main` fallback that serves an
+ * add would overwrite a correct `master` with the very name that
+ * failed, so blank keeps what is stored.
+ */
+async function editedBaseBranch(
+  ctx: AppContext,
+  existing: { localPath: string; githubRepoId: string | null; organizationId: string | null; defaultBranch: string },
+  requested: string | undefined,
+): Promise<{ branch: string } | { error: string }> {
+  if (existing.githubRepoId) {
+    if (requested) return { branch: requested };
+    const github = await githubForOrganization(ctx, existing.organizationId);
+    const repo = (await github?.listRepositories())?.find((r) => String(r.id) === existing.githubRepoId);
+    if (!repo) {
+      return { error: "Could not read this repository's default branch from GitHub. Type the branch name instead." };
+    }
+    return { branch: repo.defaultBranch };
+  }
+  if (ctx.env.BENTO_MODE !== "local" && !requested) return { branch: existing.defaultBranch };
+  return resolveBaseBranch(ctx, existing.localPath, requested);
 }
 
 /**
@@ -343,7 +430,7 @@ export function projectRoutes(ctx: AppContext) {
           localPath: first?.localPath ?? null,
           repoUrl: first?.repoUrl ?? null,
           githubRepoId: first?.githubRepoId ?? null,
-          defaultBranch: first?.defaultBranch ?? body.defaultBranch,
+          defaultBranch: first?.defaultBranch ?? body.defaultBranch ?? "main",
         })
         .returning();
       if (!project) return c.json({ error: "something went wrong saving the project; try again" }, 500);
@@ -386,6 +473,7 @@ export function projectRoutes(ctx: AppContext) {
     /**
      * Line format:
      *   repo|<id>|<name>|<localPath>
+     *   branch|<id>|<baseBranch>
      *   setup|<id>|<command>
      *   test|<id>|<command>
      * Path and commands are last on their own lines because each may
@@ -403,6 +491,7 @@ export function projectRoutes(ctx: AppContext) {
       const lines: string[] = [];
       for (const r of rows) {
         lines.push(`repo|${r.id}|${r.name}|${r.localPath}`);
+        lines.push(`branch|${r.id}|${r.defaultBranch}`);
         if (r.setupCommand) lines.push(`setup|${r.id}|${r.setupCommand}`);
         if (r.testCommand) lines.push(`test|${r.id}|${r.testCommand}`);
       }
@@ -474,21 +563,37 @@ export function projectRoutes(ctx: AppContext) {
      */
     .patch(
       "/:id/repositories/:repoId",
-      zValidator("json", z.object(repositoryCommands).partial()),
+      zValidator("json", z.object({ ...repositoryCommands, defaultBranch: branchName }).partial()),
       async (c) => {
         const projectId = c.req.param("id");
         if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
         const body = c.req.valid("json");
+        const where = and(eq(repositories.id, c.req.param("repoId")), eq(repositories.projectId, projectId));
+
+        // A blank branch means "the repository's default again", the
+        // same as at add, so a repository recorded against the wrong
+        // trunk can be put right without anyone knowing the right one.
+        let defaultBranch: string | undefined;
+        if ("defaultBranch" in body) {
+          const [existing] = await db(c, ctx).select().from(repositories).where(where);
+          if (!existing) return c.json({ error: "not found" }, 404);
+          const branch = await editedBaseBranch(ctx, existing, body.defaultBranch);
+          if ("error" in branch) return c.json({ error: branch.error }, 400);
+          defaultBranch = branch.branch;
+        }
+
         const [updated] = await db(c, ctx)
           .update(repositories)
           .set({
             ...("setupCommand" in body ? { setupCommand: body.setupCommand ?? null } : {}),
             ...("testCommand" in body ? { testCommand: body.testCommand ?? null } : {}),
+            ...(defaultBranch ? { defaultBranch } : {}),
             updatedAt: new Date(),
           })
-          .where(and(eq(repositories.id, c.req.param("repoId")), eq(repositories.projectId, projectId)))
+          .where(where)
           .returning();
         if (!updated) return c.json({ error: "not found" }, 404);
+        if (defaultBranch && updated.position === 0) await mirrorFirstRepository(db(c, ctx), projectId, updated);
         return c.json(updated);
       },
     )

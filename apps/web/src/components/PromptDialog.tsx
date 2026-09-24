@@ -239,6 +239,9 @@ export function NewProjectDialog({
   const [name, setName] = useState("");
   // Always at least one row, so the field is never absent.
   const [paths, setPaths] = useState<string[]>([""]);
+  // Beside each path, by index. Blank lets the server read the
+  // checkout's own default, which is right for nearly everyone.
+  const [branches, setBranches] = useState<string[]>([""]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [github, setGitHub] = useState<GitHubConnection | null>(null);
@@ -246,6 +249,7 @@ export function NewProjectDialog({
   const [githubChecked, setGitHubChecked] = useState(false);
   const [githubRepos, setGitHubRepos] = useState<GitHubRepository[]>([]);
   const [selectedRepoIds, setSelectedRepoIds] = useState<string[]>([]);
+  const [githubBranches, setGitHubBranches] = useState<Record<string, string>>({});
   const filled = paths.map((p) => p.trim()).filter(Boolean);
   const hosted = Boolean(github?.configured);
   // Hosted: a name is enough, repositories can arrive after the App is
@@ -263,6 +267,10 @@ export function NewProjectDialog({
     setPaths((current) => current.map((p, i) => (i === index ? value : p)));
   }
 
+  function setBranch(index: number, value: string) {
+    setBranches((current) => current.map((b, i) => (i === index ? value : b)));
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!ready || busy) return;
@@ -278,11 +286,16 @@ export function NewProjectDialog({
                   repoUrl: repo.url,
                   localPath: repo.fullName,
                   name: repo.name,
-                  defaultBranch: repo.defaultBranch,
+                  // Blank leaves it to the server, which asks GitHub.
+                  ...(githubBranches[id]?.trim() ? { defaultBranch: githubBranches[id]!.trim() } : {}),
                 }]
               : [];
           })
-        : filled.map((localPath) => ({ localPath }));
+        : paths.flatMap((path, index) => {
+            const localPath = path.trim();
+            const defaultBranch = branches[index]?.trim();
+            return localPath ? [{ localPath, ...(defaultBranch ? { defaultBranch } : {}) }] : [];
+          });
       await onSubmit(name.trim(), repositories);
       onClose();
     } catch (err) {
@@ -373,17 +386,31 @@ export function NewProjectDialog({
             ) : (
               githubRepos.map((repo) => {
                 const id = String(repo.id);
+                const selected = selectedRepoIds.includes(id);
                 return (
-                  <label key={id} className="gate-check">
-                    <input
-                      type="checkbox"
-                      checked={selectedRepoIds.includes(id)}
-                      onChange={(e) => setSelectedRepoIds((current) =>
-                        e.target.checked ? [...current, id] : current.filter((value) => value !== id)
-                      )}
-                    />
-                    <span className="gate-check-text">{repo.fullName}</span>
-                  </label>
+                  <div key={id} className="actions">
+                    <label className="gate-check">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(e) => setSelectedRepoIds((current) =>
+                          e.target.checked ? [...current, id] : current.filter((value) => value !== id)
+                        )}
+                      />
+                      <span className="gate-check-text">{repo.fullName}</span>
+                    </label>
+                    {selected && (
+                      <input
+                        className="input repo-branch-input"
+                        value={githubBranches[id] ?? ""}
+                        placeholder={repo.defaultBranch}
+                        onChange={(e) => setGitHubBranches((current) => ({ ...current, [id]: e.target.value }))}
+                        spellCheck={false}
+                        aria-label={`Base branch for ${repo.fullName}`}
+                        title="The branch cards start from and open pull requests against"
+                      />
+                    )}
+                  </div>
                 );
               })
             )}
@@ -402,12 +429,24 @@ export function NewProjectDialog({
                 aria-label={`Repository path ${index + 1}`}
               />
               <RepositoryBrowse disabled={busy} onChoose={(path) => setPath(index, path)} />
+              <input
+                className="input repo-branch-input"
+                value={branches[index] ?? ""}
+                placeholder="Base branch"
+                onChange={(e) => setBranch(index, e.target.value)}
+                spellCheck={false}
+                aria-label={`Base branch ${index + 1}`}
+                title="The branch cards start from and open pull requests against. Leave blank to use the repository's default."
+              />
               {paths.length > 1 && (
                 <button
                   type="button"
                   className="btn btn-ghost"
                   disabled={busy}
-                  onClick={() => setPaths((current) => current.filter((_, i) => i !== index))}
+                  onClick={() => {
+                    setPaths((current) => current.filter((_, i) => i !== index));
+                    setBranches((current) => current.filter((_, i) => i !== index));
+                  }}
                   aria-label={`Remove repository path ${index + 1}`}
                 >
                   Remove
@@ -420,13 +459,19 @@ export function NewProjectDialog({
               type="button"
               className="btn btn-ghost"
               disabled={busy}
-              onClick={() => setPaths((current) => [...current, ""])}
+              onClick={() => {
+                setPaths((current) => [...current, ""]);
+                setBranches((current) => [...current, ""]);
+              }}
             >
               Add another repository
             </button>
           </div>
           {/* The order is the workspace order, and the first is where a
               stage's summary is written and its pull request opened. */}
+          <p className="muted">
+            Leave the base branch blank to use the repository's default, such as main or master.
+          </p>
           {filled.length > 1 && (
             <p className="muted">
               Each becomes its own checkout inside a card's workspace. The first is the main one.

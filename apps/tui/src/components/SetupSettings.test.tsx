@@ -264,7 +264,7 @@ test("connecting a repository succeeds even if an unrelated settings refresh wou
     f.client.listProfiles = async () => { throw new Error("profile refresh failed"); };
     ui.stdin.write("/work/app");
     await pause();
-    ui.stdin.write("\r");
+    ui.stdin.write("\x13");
     await ready(ui, "app · /work/app");
     assert.doesNotMatch(ui.lastFrame()!, /profile refresh failed/);
   } finally {
@@ -304,9 +304,100 @@ test("connecting an existing checkout explains the duplicate before sending it",
     await ready(ui, "Connect a repository");
     ui.stdin.write("/work/bento/");
     await pause();
-    ui.stdin.write("\r");
+    ui.stdin.write("\x13");
     await ready(ui, "This checkout is already connected as bento.");
     assert.equal(addCalls, 0);
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
+});
+
+test("connecting a repository sends a named base branch and leaves a blank one to the server", async () => {
+  const f = fixture();
+  const inputs: unknown[] = [];
+  const add = f.client.addRepository.bind(f.client);
+  f.client.addRepository = async (projectId, input) => {
+    inputs.push(input);
+    return add(projectId, input);
+  };
+  const ui = render(
+    <Setup client={f.client} repositoryPathOwner="server" agentsRunLocally={false} onDone={() => {}} />,
+  );
+  try {
+    await ready(ui, "Settings");
+    ui.stdin.write("\r");
+    await ready(ui, "No repositories connected to Project");
+    ui.stdin.write("\r");
+    await ready(ui, "Base branch (optional)");
+    ui.stdin.write("/work/app");
+    await pause();
+    ui.stdin.write("\r");
+    await pause();
+    ui.stdin.write("master");
+    await pause();
+    ui.stdin.write("\x13");
+    await ready(ui, "app · /work/app");
+    ui.stdin.write("j");
+    await pause();
+    ui.stdin.write("\r");
+    await ready(ui, "Connect a repository");
+    ui.stdin.write("/work/api");
+    await pause();
+    ui.stdin.write("\x13");
+    await ready(ui, "api · /work/api");
+    assert.deepEqual(inputs, [{ localPath: "/work/app", defaultBranch: "master" }, { localPath: "/work/api" }]);
+  } finally {
+    ui.unmount();
+    ui.cleanup();
+  }
+});
+
+test("repository settings show the base branch and send it only when it changed", async () => {
+  const f = fixture();
+  const repo: Repository = {
+    id: "repo-one",
+    projectId: "project",
+    name: "bento",
+    localPath: "/work/bento",
+    repoUrl: null,
+    githubRepoId: null,
+    defaultBranch: "main",
+    setupCommand: null,
+    testCommand: null,
+  };
+  f.setRepositories([repo]);
+  const patches: unknown[] = [];
+  f.client.updateRepository = async (_projectId, _repoId, input) => {
+    patches.push(input);
+    const updated = { ...repo, ...input, defaultBranch: input.defaultBranch || "master" } as Repository;
+    f.setRepositories([updated]);
+    return updated;
+  };
+  const ui = render(
+    <Setup client={f.client} repositoryPathOwner="server" agentsRunLocally={false} onDone={() => {}} />,
+  );
+  try {
+    await ready(ui, "Settings");
+    ui.stdin.write("\r");
+    await ready(ui, "bento · /work/bento · base: main");
+    ui.stdin.write("\r");
+    await ready(ui, "Repository settings");
+    assert.match(ui.lastFrame()!, /Base branch/);
+    // Saving the commands alone leaves the branch out of the request.
+    ui.stdin.write("\x13");
+    await ready(ui, "Repositories · Project");
+    ui.stdin.write("\r");
+    await ready(ui, "Repository settings");
+    // Clearing it asks the server to detect the branch again.
+    ui.stdin.write("\x15");
+    await pause();
+    ui.stdin.write("\x13");
+    await ready(ui, "Repositories · Project");
+    assert.deepEqual(patches, [
+      { setupCommand: null, testCommand: null },
+      { setupCommand: null, testCommand: null, defaultBranch: "" },
+    ]);
   } finally {
     ui.unmount();
     ui.cleanup();

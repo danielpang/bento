@@ -38,6 +38,7 @@ export function RepositoriesPanel({
   const [busy, setBusy] = useState(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [newRepo, setNewRepo] = useState("");
+  const [newBranch, setNewBranch] = useState("");
   const [github, setGitHub] = useState<GitHubConnection | null>(null);
   const [githubChecked, setGitHubChecked] = useState(false);
   const [available, setAvailable] = useState<GitHubRepository[]>([]);
@@ -92,12 +93,14 @@ export function RepositoriesPanel({
     }).finally(() => setGitHubChecked(true));
   }, [client, busy, revision]);
 
-  async function act(fn: () => Promise<unknown>) {
+  /** Resolves with what `fn` returned, or undefined when it failed and was toasted. */
+  async function act<T>(fn: () => Promise<T>): Promise<T | undefined> {
     setBusy(true);
     try {
-      await fn();
+      return await fn();
     } catch (err) {
       toast.fail(err);
+      return undefined;
     } finally {
       setBusy(false);
     }
@@ -142,7 +145,10 @@ export function RepositoriesPanel({
                       inferred from position on the page. */}
                   <span className="lane-ord">{String(i + 1).padStart(2, "0")}</span>
                   <span className="repo-card-name">{repo.name}</span>
-                  {i === 0 && <span className="chip chip-soft">main</span>}
+                  {/* Not "main": beside a base branch field, that read as
+                      the branch name even on a repository whose trunk is
+                      master. */}
+                  {i === 0 && <span className="chip chip-soft">primary</span>}
                   <button
                     className="btn btn-ghost"
                     disabled={busy || repos.length === 1}
@@ -198,6 +204,11 @@ export function RepositoriesPanel({
                         <option key={candidate.id} value={candidate.id}>{candidate.fullName}</option>
                       ))}
                   </select>
+                  <BaseBranchInput
+                    value={newBranch}
+                    onChange={setNewBranch}
+                    placeholder={available.find((repo) => String(repo.id) === selectedRepoId)?.defaultBranch}
+                  />
                   <button
                     className="btn btn-primary"
                     disabled={busy || !selectedRepoId}
@@ -210,9 +221,11 @@ export function RepositoriesPanel({
                           name: selected.name,
                           localPath: selected.fullName,
                           repoUrl: selected.url,
-                          defaultBranch: selected.defaultBranch,
+                          // Blank leaves it to the server, which asks GitHub.
+                          ...(newBranch.trim() ? { defaultBranch: newBranch.trim() } : {}),
                         });
                         setSelectedRepoId("");
+                        setNewBranch("");
                       })
                     }
                   >
@@ -276,13 +289,19 @@ export function RepositoriesPanel({
                   title="A full path, or one starting with ~ for the home of the machine the server runs on"
                 />
                 <RepositoryBrowse disabled={busy} onChoose={setNewRepo} />
+                <BaseBranchInput value={newBranch} onChange={setNewBranch} />
                 <button
                   className="btn btn-primary"
                   disabled={busy || !newRepo.trim()}
                   onClick={() =>
                     act(async () => {
-                      await client.addRepository(projectId, { localPath: newRepo.trim() });
+                      const defaultBranch = newBranch.trim();
+                      await client.addRepository(projectId, {
+                        localPath: newRepo.trim(),
+                        ...(defaultBranch ? { defaultBranch } : {}),
+                      });
                       setNewRepo("");
+                      setNewBranch("");
                     })
                   }
                 >
@@ -303,7 +322,9 @@ export function RepositoriesPanel({
             confirmLabel="Remove repository"
             destructive
             onClose={() => setRemoving(null)}
-            onConfirm={() => act(() => client.removeRepository(projectId, removing.id))}
+            onConfirm={async () => {
+              await act(() => client.removeRepository(projectId, removing.id));
+            }}
           />
         )}
       </div>
@@ -312,7 +333,34 @@ export function RepositoriesPanel({
 }
 
 /**
- * The two commands, editable in place.
+ * The base branch for a repository being added. Blank lets the server
+ * read the default from the checkout or from GitHub, which is right
+ * for nearly everyone, so the field says what blank will mean.
+ */
+function BaseBranchInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <input
+      className="input repo-branch-input"
+      placeholder={placeholder ?? "Base branch"}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      spellCheck={false}
+      aria-label="Base branch"
+      title="The branch cards start from and open pull requests against. Leave blank to use the repository's default."
+    />
+  );
+}
+
+/**
+ * The base branch and the two commands, editable in place.
  *
  * Kept beside the checkout they belong to rather than in project
  * settings: which toolchain a repository needs is a fact about that
@@ -326,16 +374,35 @@ function RepositoryCommands({
 }: {
   repo: Repository;
   busy: boolean;
-  onSave: (commands: { setupCommand: string | null; testCommand: string | null }) => void;
+  onSave: (commands: {
+    setupCommand: string | null;
+    testCommand: string | null;
+    defaultBranch?: string;
+  }) => Promise<Repository | undefined>;
 }) {
+  const [branch, setBranch] = useState(repo.defaultBranch);
   const [setup, setSetup] = useState(repo.setupCommand ?? "");
   const [test, setTest] = useState(repo.testCommand ?? "");
   // Saved values win when the server sends fresh ones, unless something
   // is being typed here: reloading mid-edit would discard it.
-  const dirty = setup !== (repo.setupCommand ?? "") || test !== (repo.testCommand ?? "");
+  const branchDirty = branch.trim() !== repo.defaultBranch;
+  const dirty = branchDirty || setup !== (repo.setupCommand ?? "") || test !== (repo.testCommand ?? "");
 
   return (
     <div className="repo-commands">
+      <label className="field">
+        <span className="label">Base branch</span>
+        <span className="field-help">
+          Cards start from it and open pull requests against it. Clear it to use the repository's default.
+        </span>
+        <input
+          className="input repo-branch-input"
+          value={branch}
+          onChange={(e) => setBranch(e.target.value)}
+          placeholder="main"
+          spellCheck={false}
+        />
+      </label>
       <label className="field">
         <span className="label">Setup command</span>
         <span className="field-help">Install the runtime and dependencies in a fresh sandbox.</span>
@@ -363,15 +430,30 @@ function RepositoryCommands({
         <button
           className="btn btn-primary"
           disabled={busy || !dirty}
-          onClick={() => onSave({ setupCommand: setup.trim() || null, testCommand: test.trim() || null })}
+          onClick={async () => {
+            const saved = await onSave({
+              setupCommand: setup.trim() || null,
+              testCommand: test.trim() || null,
+              ...(branchDirty ? { defaultBranch: branch.trim() } : {}),
+            });
+            // What the server stored, not what was typed: a cleared
+            // branch comes back as the default it resolved to, which
+            // may be the very name that was there before.
+            if (saved) {
+              setBranch(saved.defaultBranch);
+              setSetup(saved.setupCommand ?? "");
+              setTest(saved.testCommand ?? "");
+            }
+          }}
         >
-          Save commands
+          Save
         </button>
         {dirty && (
           <button
             className="btn btn-ghost"
             disabled={busy}
             onClick={() => {
+              setBranch(repo.defaultBranch);
               setSetup(repo.setupCommand ?? "");
               setTest(repo.testCommand ?? "");
             }}

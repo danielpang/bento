@@ -52,6 +52,50 @@ async function remoteNames(localPath: string): Promise<string[]> {
 }
 
 /**
+ * The branch a checkout's work starts from, read from the checkout.
+ *
+ * Every repository used to be recorded against `main` unless the caller
+ * said otherwise, and nothing asked. A repository whose trunk is
+ * `master` then failed its first provision with "Could not refresh
+ * origin/main", half an hour after the person who added it had moved on.
+ *
+ * Asks in the order git itself would answer: what origin says its HEAD
+ * is, then whichever of the two conventional names exists, then the
+ * branch the checkout is on. Null when none of that is readable, which
+ * includes a path that is not a git repository on this machine.
+ */
+export async function detectDefaultBranch(localPath: string): Promise<string | null> {
+  const originHead = await gitOutput(localPath, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  if (originHead?.startsWith("origin/")) return originHead.slice("origin/".length);
+  for (const candidate of ["main", "master"]) {
+    if (await branchExists(localPath, candidate)) return candidate;
+  }
+  return await gitOutput(localPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+}
+
+/**
+ * Whether the checkout has the branch locally or as origin's. Nothing is
+ * fetched: a person typing a name wants an answer now, and one that
+ * exists only on a remote this checkout never fetched is worth a word
+ * before the first run rather than after it.
+ */
+export async function branchExists(localPath: string, branch: string): Promise<boolean> {
+  for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
+    if ((await gitOutput(localPath, ["rev-parse", "--verify", "--quiet", ref])) !== null) return true;
+  }
+  return false;
+}
+
+async function gitOutput(localPath: string, args: string[]): Promise<string | null> {
+  try {
+    const { stdout } = await run("git", ["-C", localPath, ...args], { env: gitEnv() });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Nothing here talks to a remote, but a git that decides to ask for a
  * password would hang the request rather than fail it.
  */

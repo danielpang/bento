@@ -480,7 +480,7 @@
         <text foreground="text_muted" wrap="true">Cards move left to right through these stages, each with its own agent and exit rule.</text>
 
         <text>Repositories</text>
-        <text foreground="text_muted" wrap="true">Sandboxes carry no language runtime, so give each one a setup command to install what it needs and a test command for the agent.</text>
+        <text foreground="text_muted" wrap="true">Sandboxes carry no language runtime, so give each one a setup command to install what it needs and a test command for the agent. Cards start from each one's base branch and open pull requests against it.</text>
         <column gap="6">
           <for each="repos" key="index" as="r">
             <column key="{r.index}" background="surface" radius="sm" padding="8" gap="6">
@@ -489,9 +489,12 @@
                   <text>{r.name}</text>
                   <text foreground="text_muted" wrap="true">{r.localPath}</text>
                 </column>
-                <button size="sm" variant="ghost" on-press="edit_repo:{r.index}">Commands</button>
+                <button size="sm" variant="ghost" on-press="edit_repo:{r.index}">Settings</button>
                 <button size="sm" variant="ghost" on-press="delete_repo:{r.index}" label="Remove this repository" icon="trash" />
               </row>
+              <if test="{r.hasBaseBranch}">
+                <text foreground="text_muted" wrap="true">base branch: {r.baseBranch}</text>
+              </if>
               <if test="{r.hasSetup}">
                 <text foreground="text_muted" wrap="true">setup: {r.setupCommand}</text>
               </if>
@@ -503,13 +506,15 @@
         </column>
         <if test="{editingARepo}">
           <column background="surface" radius="md" padding="12" gap="8">
-            <text>Commands for {editingRepoName}</text>
+            <text>Settings for {editingRepoName}</text>
+            <text foreground="text_muted">Base branch</text>
+            <text-field text="{repoBranchEdit.text}" placeholder="Base branch (blank uses the repository's default)" on-input="repo_branch_edit" label="Base branch" />
             <text foreground="text_muted">Setup command</text>
             <text-field text="{repoSetupEdit.text}" placeholder="npm ci" on-input="repo_setup_edit" label="Setup command" />
             <text foreground="text_muted">Test command</text>
             <text-field text="{repoTestEdit.text}" placeholder="npm test" on-input="repo_test_edit" label="Test command" />
             <row gap="8">
-              <button size="sm" variant="primary" on-press="submit_repo_commands">Save commands</button>
+              <button size="sm" variant="primary" on-press="submit_repo_commands">Save</button>
               <button size="sm" variant="ghost" on-press="cancel_repo_edit">Cancel</button>
             </row>
           </column>
@@ -867,6 +872,7 @@
         <text foreground="text_muted" wrap="true">Point Bento at a git repository on this machine. Add more than one if a change usually spans them.</text>
         <text-field text="{projectNameEdit.text}" placeholder="Checkout" on-input="project_name_edit" label="Project name" autofocus="true" />
         <text-field text="{projectPathEdit.text}" placeholder="/Users/you/code/checkout" on-input="project_path_edit" label="Repository path" on-submit="submit_project" />
+        <text-field text="{projectBranchEdit.text}" placeholder="Base branch (blank uses the repository's default)" on-input="project_branch_edit" label="Base branch" on-submit="submit_project" />
         <row gap="8">
           <button size="sm" variant="primary" on-press="submit_project">Create</button>
           <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>
@@ -980,6 +986,7 @@
       <column gap="10" padding="14" min-width="460">
         <text foreground="text_muted" wrap="true">A full path, or one starting with ~ for your home directory.</text>
         <text-field text="{repoPathEdit.text}" placeholder="/path/to/another/checkout or ~/checkout" on-input="repo_path_edit" on-submit="submit_repo" label="Repository path" autofocus="true" />
+        <text-field text="{newRepoBranchEdit.text}" placeholder="Base branch (blank uses the repository's default)" on-input="new_repo_branch_edit" on-submit="submit_repo" label="Base branch" />
         <row gap="8">
           <button size="sm" variant="primary" on-press="submit_repo">Add</button>
           <button size="sm" variant="ghost" on-press="close_dialog">Cancel</button>

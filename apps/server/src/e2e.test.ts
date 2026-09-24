@@ -5162,6 +5162,71 @@ test("a repository added by path keeps the GitHub remote its checkout has", { ti
   assert.equal(rows[0]?.repoUrl, "https://github.com/acme/has-origin");
 });
 
+/**
+ * Every repository was recorded against `main` unless a caller said
+ * otherwise, and no surface asked. A checkout whose trunk is `master`
+ * then failed its first provision with "Could not refresh origin/main".
+ * The checkout knows its own default, so a blank base branch asks it;
+ * a named one is checked against it while someone is still looking.
+ */
+test("a repository's base branch comes from its checkout unless one is named", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("master-trunk");
+  await run("git", ["-C", checkout, "branch", "-m", "main", "master"]);
+  await run("git", ["-C", checkout, "branch", "release"]);
+
+  const project = await json<{ id: string; defaultBranch: string }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Master trunk", localPath: checkout }),
+    }),
+  );
+  await unassignStages(project.id);
+  assert.equal(project.defaultBranch, "master", "detected, not assumed");
+  const [repo] = await json<{ id: string; defaultBranch: string }[]>(
+    await app.request(`/api/projects/${project.id}/repositories`),
+  );
+  assert.equal(repo?.defaultBranch, "master");
+
+  const plain = await (await app.request(`/api/projects/${project.id}/repositories/plain`)).text();
+  assert.match(plain, new RegExp(`^branch\\|${repo!.id}\\|master$`, "m"));
+
+  const patch = (body: unknown) =>
+    app.request(`/api/projects/${project.id}/repositories/${repo!.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const missing = await patch({ defaultBranch: "develop" });
+  assert.equal(missing.status, 400);
+  assert.match(((await missing.json()) as { error: string }).error, /no branch named develop/);
+
+  const renamed = await patch({ defaultBranch: "release" });
+  assert.equal(renamed.status, 200);
+  assert.equal((await json<{ defaultBranch: string }>(renamed)).defaultBranch, "release");
+  const mirrored = await json<{ defaultBranch: string }>(await app.request(`/api/projects/${project.id}`));
+  assert.equal(mirrored.defaultBranch, "release", "the project follows its first repository");
+
+  const cleared = await patch({ defaultBranch: "" });
+  assert.equal((await json<{ defaultBranch: string }>(cleared)).defaultBranch, "master", "blank asks the checkout again");
+
+  const refused = await app.request("/api/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Wrong trunk", repositories: [{ localPath: checkout, defaultBranch: "main" }] }),
+  });
+  assert.equal(refused.status, 400);
+  assert.match(((await refused.json()) as { error: string }).error, /no branch named main/);
+
+  const injected = await app.request("/api/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Odd trunk", repositories: [{ localPath: checkout, defaultBranch: "--upload-pack=x" }] }),
+  });
+  assert.equal(injected.status, 400, "a name git would read as an option never reaches it");
+});
+
 test("a repository stored without a remote is linked the next time it publishes", { timeout: 60_000 }, async () => {
   const checkout = await fixtureRepo("backfill");
   const project = await json<{ id: string; repoUrl: string | null }>(

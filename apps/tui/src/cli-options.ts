@@ -44,6 +44,12 @@ export interface CliOptions {
    */
   setupCommand?: string;
   testCommand?: string;
+  /**
+   * The branch cards start from and open pull requests against, for
+   * `repos add` and `repos set`. Empty string asks the checkout for its
+   * default, which is also what leaving it out does on `repos add`.
+   */
+  baseBranch?: string;
   /** Model for `agents add` and `agents edit`. */
   model?: string;
   /** New name for `agents edit`. */
@@ -86,13 +92,15 @@ Commands
                        Sign this machine in. Used by the desktop app; the login
                        is shared with the other commands.
   repos [list]         Repositories the project spans, one per line.
-  repos add <path> [--setup <cmd>] [--test <cmd>]
+  repos add <path> [--setup <cmd>] [--test <cmd>] [--base-branch <branch>]
                        Add a checkout. A card's workspace then holds a
                        worktree of each, side by side, so a change across
                        two of them is still one card.
-  repos set <name> [--setup <cmd>] [--test <cmd>]
-                       Change what a repository installs and how its work
-                       is checked. Pass an empty string to clear one.
+  repos set <name> [--setup <cmd>] [--test <cmd>] [--base-branch <branch>]
+                       Change what a repository installs, how its work is
+                       checked, or the branch cards start from. Pass an
+                       empty string to clear a command, or to detect the
+                       base branch from the checkout again.
   repos remove <name>  Remove one. A project keeps at least one.
   agents [list]        Coding agents, one per line: name, tool, model, skill.
   agents add <name> --tool <cli> --model <model> [--skill <text>]
@@ -148,6 +156,10 @@ Options
                        and no language runtime, so this is where a
                        repository installs the toolchain it needs.
   --test <cmd>         Shell the agent is told to run to check its work.
+  --base-branch <branch>
+                       Branch cards start from and open pull requests
+                       against. Without it, bento uses the repository's
+                       default (origin/HEAD, then main or master).
   --skill <text>       The agent's operating instructions, sent with every
                        run. Define what its stage write-up must contain.
   --tool <cli>         Coding tool for an agent: claude-code, codex, cursor,
@@ -252,6 +264,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
       skill: { type: "string" },
       setup: { type: "string" },
       test: { type: "string" },
+      "base-branch": { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
     },
@@ -301,6 +314,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
     ...(values.skill !== undefined ? { skill: values.skill } : {}),
     ...(values.setup !== undefined ? { setupCommand: values.setup } : {}),
     ...(values.test !== undefined ? { testCommand: values.test } : {}),
+    ...(values["base-branch"] !== undefined ? { baseBranch: values["base-branch"].trim() } : {}),
     ...(values.name ? { agentName: values.name } : {}),
     ...(values.url ? { url: values.url } : {}),
     ...(values.key ? { mcpKey: values.key } : {}),
