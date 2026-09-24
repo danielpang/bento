@@ -4,6 +4,7 @@ import path from "node:path";
 import { ensureLocalPostgres, startServer, type RunningServer } from "@bento/server";
 import { createDockerClient } from "@bento/sandbox";
 import type { RuntimeCommand, RuntimeEvent } from "./contracts.js";
+import { parseBuildStep, sandboxProgressMessage } from "./sandbox-progress.js";
 
 const parent = process.parentPort;
 if (!parent) throw new Error("The Bento runtime must be started by the desktop application.");
@@ -23,19 +24,36 @@ async function start(command: Extract<RuntimeCommand, { type: "start" }>): Promi
     if (stopping) return;
     const images = await docker.listImages({ filters: { reference: [settings.sandboxImage] } });
     if (!images.length) {
-      send({ type: "progress", message: "Preparing the agent sandbox. The first build can take several minutes." });
-      const stream = await docker.buildImage({ context: command.sandboxDirectory, src: ["Dockerfile"] }, { t: settings.sandboxImage });
-      await new Promise<void>((resolve, reject) => {
-        docker.modem.followProgress(stream, (error) => error ? reject(error) : resolve());
-      });
+      // One step installs every agent CLI and runs for minutes, so the
+      // elapsed time ticks on its own to show the build has not stalled.
+      const began = Date.now();
+      let current: ReturnType<typeof parseBuildStep> = null;
+      const report = () => send({ type: "progress", message: sandboxProgressMessage(current, Date.now() - began) });
+      report();
+      const ticker = setInterval(report, 5_000);
+      try {
+        const stream = await docker.buildImage({ context: command.sandboxDirectory, src: ["Dockerfile"] }, { t: settings.sandboxImage });
+        await new Promise<void>((resolve, reject) => {
+          docker.modem.followProgress(
+            stream,
+            (error) => error ? reject(error) : resolve(),
+            (event: { stream?: string }) => {
+              const step = parseBuildStep(event);
+              if (step) { current = step; report(); }
+            },
+          );
+        });
+      } finally {
+        clearInterval(ticker);
+      }
     }
   }
   if (stopping) return;
   if (settings.mode === "local") {
-    send({ type: "progress", message: "Starting the local database..." });
+    send({ type: "progress", message: "Starting the local database. On first launch this includes a download." });
     const databaseUrl = settings.databaseUrl || (await ensureLocalPostgres()).databaseUrl;
     if (stopping) return;
-    send({ type: "progress", message: "Applying migrations and starting Bento..." });
+    send({ type: "progress", message: "Almost there. Setting up the database and starting Bento..." });
     // Keep the origin stable across restarts, so Chromium retains appearance,
     // project selection, and board preferences. Reserve it before startup to
     // avoid a port race and give OAuth/MCP the right origin from the beginning.
