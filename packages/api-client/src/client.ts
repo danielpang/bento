@@ -710,11 +710,15 @@ export class BentoClient {
     });
   }
 
-  /** The setup and test commands, changed without re-adding the checkout. */
+  /**
+   * The setup and test commands and the base branch, changed without
+   * re-adding the checkout. A blank base branch asks the checkout for
+   * its default again.
+   */
   updateRepository(
     projectId: string,
     repositoryId: string,
-    input: { setupCommand?: string | null; testCommand?: string | null },
+    input: { setupCommand?: string | null; testCommand?: string | null; defaultBranch?: string },
   ) {
     return this.request<Repository>(`/api/projects/${projectId}/repositories/${repositoryId}`, {
       method: "PATCH",

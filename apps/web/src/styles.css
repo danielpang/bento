@@ -2417,6 +2417,16 @@ a.pr-row:hover .pr-external {
   min-height: 56px;
 }
 
+/* A branch name is short and typed, never pasted prose: a narrow field
+   beside the path it belongs to, in the same face as the commands. */
+.repo-branch-input {
+  font-family: var(--mono);
+  font-size: 12px;
+  flex: none;
+  width: 160px;
+  max-width: 100%;
+}
+
 .gate-check-text {
   flex: 1;
   min-width: 0;

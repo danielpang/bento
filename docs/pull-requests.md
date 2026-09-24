@@ -8,6 +8,8 @@ If you want an agent to create a PR for their changes you can Enable **Create a 
 
 A new card starts from the repository's configured base branch, not whichever branch is checked out on the host. Worktree-based sandboxes fetch `origin/<base>` before creating the branch. Repositories without an origin use the local base branch. If the base cannot be fetched or found, setup stops with an error instead of inheriting unrelated commits. Existing card worktrees retain their commits and unfinished work.
 
+The base branch is set when a repository is added, in the console, the Mac app, or the terminal. Left blank, Bento reads it from the checkout: what `origin/HEAD` points at, then `main` or `master`, then the branch that is checked out. A GitHub repository uses its GitHub default. Change it later beside the repository's setup and test commands; clearing it reads the checkout's default again.
+
 **You can also click the Create PR** button in the card drawer publishes current commits without waiting for stage completion.
 
 The card lists open pull requests by repository. Multi-repo cards require a PR in each repo for completion gates (`checks_pass`, `pr_comments_resolved`). Untouched repositories are skipped. Stages without the flag keep work in the worktree only.
