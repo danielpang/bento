@@ -11,7 +11,7 @@ export function describeStep(instruction: string): string {
   if (/apt-get/.test(instruction)) return "Installing git and search tools";
   if (/fetch_run|install\.sh/.test(instruction)) return "Installing the agent tools (Claude Code, Codex, and others)";
   if (/nodejs\.org|npm install/.test(instruction)) return "Installing the Node based agent tools";
-  return "Finishing the sandbox";
+  return "Configuring the sandbox";
 }
 
 /**
