@@ -1,7 +1,7 @@
 import { useKeyboardInput as useInput } from "./mouse.js";
 import { useBoardMouse } from "./mouse.js";
 import { MouseActions, MouseButton } from "./components/MouseControls.js";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Box, Text, useApp, useStdin, useWindowSize, usePaste, type DOMElement } from "ink";
 import {
   ApiError,
@@ -17,11 +17,14 @@ import {
 } from "@bento/api-client";
 import {
   actorDisplayName,
+  applyLiveCatalog,
   forgetsBetweenRuns,
   hasNoLiveTranscript,
   historyTriggerLabel,
+  modelCatalogVersion,
   modelGuidanceFor,
   quietRunMessage,
+  subscribeModelCatalog,
 } from "@bento/core";
 import { Workbench, type WorkbenchPage } from "./components/Workbench.js";
 import { Reader } from "./components/Navigator.js";
@@ -215,6 +218,15 @@ export function Console({
   const { isRawModeSupported } = useStdin();
   const [tokens] = useState(() => new FileTokenStore(baseUrl));
   const [client] = useState(() => new BentoClient({ baseUrl, tokens }));
+  /**
+   * The server's catalog includes models its live refresh found after
+   * this build's snapshot. Re-rendering on arrival is what puts them in
+   * the agent pickers; a failure keeps the snapshot.
+   */
+  useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion);
+  useEffect(() => {
+    void client.modelCatalog().then(applyLiveCatalog, () => {});
+  }, [client]);
   const [screen, setScreen] = useState<Screen>("loading");
   const [connectionFailed, setConnectionFailed] = useState(false);
 

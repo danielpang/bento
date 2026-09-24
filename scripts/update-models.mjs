@@ -2,10 +2,9 @@
 /**
  * Refreshes the model catalog from models.dev.
  *
- * The catalog is committed rather than fetched at runtime: a board that
- * cannot reach the internet still has to offer a model list, and a
- * dropdown whose contents change under you between sessions is worse
- * than one that changes when someone runs this script.
+ * The catalog is committed as well as fetched at runtime: a board that
+ * cannot reach the internet still has to offer a model list. The live
+ * read only ever adds to it, so no entry disappears between sessions.
  *
  * Only providers whose credentials Bento can actually store are
  * included. Offering a model that no stored key can authenticate would
@@ -21,6 +20,12 @@
  * provider whose ids match what the Gateway takes (`moonshotai/kimi-k3`).
  * Those slugs come from https://ai-gateway.vercel.sh/v1/models, language
  * models only. Image, video, and embedding ids are not agent models.
+ *
+ * The server also reads both sources at run time and lays them over
+ * this snapshot (packages/core/src/model-catalog.live.ts), so the
+ * snapshot is the offline floor rather than the only list. Its
+ * INCLUDE, OPTIONS, and PINNED mirror the ones below: change them
+ * together.
  *
  * Usage: pnpm models:update
  *        pnpm models:update -- --gateway-only

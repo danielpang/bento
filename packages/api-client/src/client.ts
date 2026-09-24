@@ -6,7 +6,7 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
@@ -1275,6 +1275,15 @@ export class BentoClient {
       secrets: { id: string; name: string; hint: string }[];
       canManage: boolean;
     }>("/api/secrets");
+  }
+
+  /**
+   * The model catalog as the server knows it now, which includes models
+   * its live refresh found after the bundled snapshot was taken. Pass
+   * the answer to applyLiveCatalog from @bento/core.
+   */
+  modelCatalog() {
+    return this.request<CatalogProvider[]>("/api/catalog/models");
   }
 
   listCustomProviders() {

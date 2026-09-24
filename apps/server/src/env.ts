@@ -45,6 +45,13 @@ const envSchema = z.object({
    * this: their gate has to run when the turn ends.
    */
   BENTO_LIVE_IDLE_SEC: z.coerce.number().int().min(0).default(90),
+  /**
+   * How often to read models.dev and the AI Gateway's model list, in
+   * hours, so a newly released model shows up in the pickers without a
+   * snapshot refresh and a deploy. 0 turns it off, for a board with no
+   * internet access; the committed snapshot is served either way.
+   */
+  BENTO_MODEL_REFRESH_HOURS: z.coerce.number().min(0).default(6),
 
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),

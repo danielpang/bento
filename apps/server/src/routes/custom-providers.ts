@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq, isNull } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { CUSTOM_PROVIDER_PROTOCOLS, MODEL_CATALOG } from "@bento/core";
+import { CUSTOM_PROVIDER_PROTOCOLS, modelCatalog } from "@bento/core";
 import { customModelProviders } from "@bento/db";
 import { getAccessibleCustomProvider, getActiveOrganizationMembership } from "../access.js";
 import type { AppContext } from "../context.js";
@@ -24,7 +24,7 @@ const providerInput = z.object({
   models: z.array(model).min(1).max(100).refine((models) => new Set(models.map((m) => m.id)).size === models.length, "Model IDs must be unique"),
 });
 const keyInput = z.object({ apiKey: z.string().min(1).max(8192) });
-const reservedSlug = (value: string) => MODEL_CATALOG.some((provider) =>
+const reservedSlug = (value: string) => modelCatalog().some((provider) =>
   provider.id === value || provider.models.some((entry) => entry.id.startsWith(`${value}/`)));
 
 function publicProvider(row: typeof customModelProviders.$inferSelect) {

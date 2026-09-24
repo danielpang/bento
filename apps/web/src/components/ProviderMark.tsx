@@ -1,4 +1,5 @@
 import { providerForProfile } from "@bento/core";
+import { useModelCatalog } from "../model-catalog.js";
 
 /**
  * The logo of the provider an agent runs against.
@@ -18,6 +19,7 @@ export function ProviderMark({
   /** True where the provider's name is already beside it in text. */
   decorative?: boolean;
 }) {
+  useModelCatalog();
   const provider = providerForProfile(cli, model);
   if (!provider?.logo) return null;
   return (

@@ -11,6 +11,7 @@ import { ContactDialog } from "./ContactDialog.js";
 import { ProviderKeysCard } from "./Credentials.js";
 import { CustomProviderKeys } from "./CustomProviders.js";
 import { BetaOnly, useBetaTesters } from "../beta.js";
+import { useModelCatalog } from "../model-catalog.js";
 import { ProviderMark } from "./ProviderMark.js";
 import { SecretField } from "./SecretField.js";
 import { YamlFileActions, downloadYaml } from "./YamlFileActions.js";
@@ -73,6 +74,8 @@ export function AgentsPanel({
   initialAction?: { editId?: string; new?: boolean };
 }) {
   const beta = useBetaTesters();
+  // The pickers below read the catalog during render.
+  useModelCatalog();
   const [section, setSection] = useState<"agents" | "connections" | "files">("agents");
   const toast = useToast();
   const panel = useDismissable<HTMLElement>(onClose);

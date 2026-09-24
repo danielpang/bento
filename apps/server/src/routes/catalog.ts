@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { AGENT_CREDENTIALS, MODEL_CATALOG, MODEL_GUIDANCE, modelStringFor, providersForCli } from "@bento/core";
+import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelCatalog, modelStringFor, providersForCli } from "@bento/core";
 
 /**
  * The provider and model choices, served rather than bundled.
@@ -8,7 +8,9 @@ import { AGENT_CREDENTIALS, MODEL_CATALOG, MODEL_GUIDANCE, modelStringFor, provi
  * toolchain and never reads node_modules, so it cannot import the
  * catalog from @bento/core the way the console and the CLI do. Serving
  * it keeps one source of truth: refreshing the snapshot updates every
- * client at once.
+ * client at once. It is also where a live refresh reaches clients:
+ * the server lays models.dev over the snapshot on a timer (see
+ * model-refresh.ts), and every client applies what this serves.
  *
  * Public on purpose. This is a list of model names, identical for every
  * tenant, and holding it behind auth would only mean a sign-in before a
@@ -16,7 +18,7 @@ import { AGENT_CREDENTIALS, MODEL_CATALOG, MODEL_GUIDANCE, modelStringFor, provi
  */
 export function catalogRoutes() {
   return new Hono()
-    .get("/models", (c) => c.json(MODEL_CATALOG))
+    .get("/models", (c) => c.json(modelCatalog()))
     /**
      * Line format, for clients that parse bytes rather than JSON:
      *   provider|<id>|<name>
@@ -32,7 +34,7 @@ export function catalogRoutes() {
      */
     .get("/models/plain", (c) => {
       const cli = c.req.query("cli");
-      const providers = cli ? providersForCli(cli) : MODEL_CATALOG;
+      const providers = cli ? providersForCli(cli) : modelCatalog();
       const lines: string[] = [];
       for (const provider of providers) {
         lines.push(`provider|${provider.id}|${provider.name}`);
