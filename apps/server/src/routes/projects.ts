@@ -48,18 +48,34 @@ const repositoryCommands = {
 /**
  * The branch a repository's cards start from and open pull requests
  * against. Blank means "ask the checkout", which is what most people
- * want and why the field is optional everywhere. The character set is
- * narrower than git's, because the name is spliced into a fetch refspec
- * and a name git would take but no one types is not worth the risk.
+ * want and why the field is optional everywhere.
+ *
+ * Git's own rules for a branch name (`git check-ref-format --branch`),
+ * not a narrower set: a GitHub default such as `release+2` is a real
+ * branch, and refusing it refused a repository nobody had typed
+ * anything about. Those rules already keep the name out of a refspec's
+ * syntax (no colon, no leading dash), which is where it is spliced.
  */
 const branchName = z
   .string()
   .trim()
   .max(200)
-  .regex(/^[A-Za-z0-9._/-]*$/, "use letters, numbers, dots, dashes, underscores, or slashes")
-  .refine((v) => !v.startsWith("-") && !v.includes("..") && !v.endsWith("/") && !v.endsWith(".lock"), {
-    message: "that is not a branch name git accepts",
-  })
+  .refine(
+    (v) =>
+      v === "" ||
+      (!/[\x00-\x20\x7f~^:?*[\\]/.test(v) &&
+        !v.startsWith("-") &&
+        !v.startsWith("/") &&
+        !v.endsWith("/") &&
+        !v.endsWith(".") &&
+        !v.endsWith(".lock") &&
+        !v.includes("..") &&
+        !v.includes("//") &&
+        !v.includes("@{") &&
+        !v.split("/").some((part) => part.startsWith(".")) &&
+        v !== "@"),
+    { message: "that is not a branch name git accepts" },
+  )
   .transform((v) => v || undefined);
 
 const repositoryInput = z.object({
@@ -318,6 +334,33 @@ async function resolveBaseBranch(
 }
 
 /**
+ * The base branch an edit leaves a stored repository on.
+ *
+ * Blank asks whoever knows the default: GitHub for a repository added
+ * from it, the checkout in local mode. Outside local mode nobody here
+ * can read a checkout by path, and the `main` fallback that serves an
+ * add would overwrite a correct `master` with the very name that
+ * failed, so blank keeps what is stored.
+ */
+async function editedBaseBranch(
+  ctx: AppContext,
+  existing: { localPath: string; githubRepoId: string | null; organizationId: string | null; defaultBranch: string },
+  requested: string | undefined,
+): Promise<{ branch: string } | { error: string }> {
+  if (existing.githubRepoId) {
+    if (requested) return { branch: requested };
+    const github = await githubForOrganization(ctx, existing.organizationId);
+    const repo = (await github?.listRepositories())?.find((r) => String(r.id) === existing.githubRepoId);
+    if (!repo) {
+      return { error: "Could not read this repository's default branch from GitHub. Type the branch name instead." };
+    }
+    return { branch: repo.defaultBranch };
+  }
+  if (ctx.env.BENTO_MODE !== "local" && !requested) return { branch: existing.defaultBranch };
+  return resolveBaseBranch(ctx, existing.localPath, requested);
+}
+
+/**
  * Unordered, an update rewrites the row at the end of the table, so
  * renaming a project moved it to the bottom of every list. Case-folded,
  * and the id breaks ties.
@@ -527,22 +570,16 @@ export function projectRoutes(ctx: AppContext) {
         const body = c.req.valid("json");
         const where = and(eq(repositories.id, c.req.param("repoId")), eq(repositories.projectId, projectId));
 
-        // A blank branch means "ask the checkout again", the same as at
-        // add, so a repository recorded against the wrong trunk can be
-        // put right without anyone knowing what the right one is.
+        // A blank branch means "the repository's default again", the
+        // same as at add, so a repository recorded against the wrong
+        // trunk can be put right without anyone knowing the right one.
         let defaultBranch: string | undefined;
         if ("defaultBranch" in body) {
           const [existing] = await db(c, ctx).select().from(repositories).where(where);
           if (!existing) return c.json({ error: "not found" }, 404);
-          if (existing.githubRepoId && !body.defaultBranch) {
-            defaultBranch = existing.defaultBranch;
-          } else if (existing.githubRepoId) {
-            defaultBranch = body.defaultBranch;
-          } else {
-            const branch = await resolveBaseBranch(ctx, existing.localPath, body.defaultBranch);
-            if ("error" in branch) return c.json({ error: branch.error }, 400);
-            defaultBranch = branch.branch;
-          }
+          const branch = await editedBaseBranch(ctx, existing, body.defaultBranch);
+          if ("error" in branch) return c.json({ error: branch.error }, 400);
+          defaultBranch = branch.branch;
         }
 
         const [updated] = await db(c, ctx)

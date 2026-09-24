@@ -195,6 +195,44 @@ test("resources are scoped to their owner", async () => {
 });
 
 /**
+ * A path in multi mode names a directory on the runner, which the server
+ * cannot read. Clearing the base branch there once fell back to `main`,
+ * overwriting a correct `master` with the name that failed provisioning
+ * in the first place. Blank keeps what is stored; a name is taken as given.
+ */
+test("clearing a runner repository's base branch keeps the stored one", async () => {
+  const signedUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "runner-branch@bento.test",
+    password: "correct-horse-battery",
+    name: "Runner",
+  });
+  const token = signedUp.headers.get("set-auth-token")!;
+  const created = await jsonPost(
+    "/api/projects",
+    { name: "Runner branch", repositories: [{ localPath: "/tmp", defaultBranch: "master" }] },
+    token,
+  );
+  assert.equal(created.status, 201);
+  const projectId = ((await created.json()) as { id: string }).id;
+  const [repo] = (await (
+    await app.request(`/api/projects/${projectId}/repositories`, { headers: { authorization: `Bearer ${token}` } })
+  ).json()) as { id: string; defaultBranch: string }[];
+  assert.equal(repo?.defaultBranch, "master");
+
+  const patch = async (defaultBranch: string) => {
+    const res = await app.request(`/api/projects/${projectId}/repositories/${repo!.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ defaultBranch }),
+    });
+    assert.equal(res.status, 200);
+    return ((await res.json()) as { defaultBranch: string }).defaultBranch;
+  };
+  assert.equal(await patch(""), "master", "blank keeps the stored branch rather than writing main");
+  assert.equal(await patch("trunk"), "trunk");
+});
+
+/**
  * The device flow has two contract details that are easy to get wrong
  * and only show up against a real server: the endpoints take JSON
  * despite RFC 8628 specifying form encoding, and a code must be claimed
@@ -1707,7 +1745,9 @@ test("a GitHub App installation is bound to the active organization", async () =
             owner: "acme",
             url: "https://github.com/acme/api",
             cloneUrl: "https://github.com/acme/api.git",
-            defaultBranch: "main",
+            // Outside the narrow set a person would type, but a branch
+            // git and GitHub both accept.
+            defaultBranch: "release+2",
           }];
         },
       };
@@ -1772,6 +1812,24 @@ test("a GitHub App installation is bound to the active organization", async () =
       })),
       [{ githubRepoId: "99", repoUrl: "https://github.com/acme/api" }],
     );
+
+    // The base branch follows GitHub's default unless one is named, and
+    // clearing a named one asks GitHub again rather than keeping it.
+    const [installed] = (await (
+      await app.request(`/api/projects/${projectId}/repositories`, { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { id: string; defaultBranch: string }[];
+    assert.equal(installed?.defaultBranch, "release+2");
+    const setBranch = async (defaultBranch: string) => {
+      const res = await app.request(`/api/projects/${projectId}/repositories/${installed!.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ defaultBranch }),
+      });
+      assert.equal(res.status, 200);
+      return ((await res.json()) as { defaultBranch: string }).defaultBranch;
+    };
+    assert.equal(await setBranch("develop"), "develop");
+    assert.equal(await setBranch(""), "release+2", "cleared, it is GitHub's default again");
     const unauthorized = await jsonPost(
       "/api/projects",
       { name: "Not granted", repositories: [{ githubRepoId: "100" }] },

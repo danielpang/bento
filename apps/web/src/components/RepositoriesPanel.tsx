@@ -93,12 +93,14 @@ export function RepositoriesPanel({
     }).finally(() => setGitHubChecked(true));
   }, [client, busy, revision]);
 
-  async function act(fn: () => Promise<unknown>) {
+  /** Resolves with what `fn` returned, or undefined when it failed and was toasted. */
+  async function act<T>(fn: () => Promise<T>): Promise<T | undefined> {
     setBusy(true);
     try {
-      await fn();
+      return await fn();
     } catch (err) {
       toast.fail(err);
+      return undefined;
     } finally {
       setBusy(false);
     }
@@ -143,7 +145,10 @@ export function RepositoriesPanel({
                       inferred from position on the page. */}
                   <span className="lane-ord">{String(i + 1).padStart(2, "0")}</span>
                   <span className="repo-card-name">{repo.name}</span>
-                  {i === 0 && <span className="chip chip-soft">main</span>}
+                  {/* Not "main": beside a base branch field, that read as
+                      the branch name even on a repository whose trunk is
+                      master. */}
+                  {i === 0 && <span className="chip chip-soft">primary</span>}
                   <button
                     className="btn btn-ghost"
                     disabled={busy || repos.length === 1}
@@ -157,11 +162,7 @@ export function RepositoriesPanel({
                 <span className="repo-card-path" title={repo.localPath}>
                   {repo.localPath}
                 </span>
-                {/* Keyed by the branch too: a cleared one comes back as
-                    whatever the checkout's default turned out to be, and
-                    the field should show that rather than stay blank. */}
                 <RepositoryCommands
-                  key={repo.defaultBranch}
                   repo={repo}
                   busy={busy}
                   onSave={(commands) =>
@@ -220,7 +221,8 @@ export function RepositoriesPanel({
                           name: selected.name,
                           localPath: selected.fullName,
                           repoUrl: selected.url,
-                          defaultBranch: newBranch.trim() || selected.defaultBranch,
+                          // Blank leaves it to the server, which asks GitHub.
+                          ...(newBranch.trim() ? { defaultBranch: newBranch.trim() } : {}),
                         });
                         setSelectedRepoId("");
                         setNewBranch("");
@@ -320,7 +322,9 @@ export function RepositoriesPanel({
             confirmLabel="Remove repository"
             destructive
             onClose={() => setRemoving(null)}
-            onConfirm={() => act(() => client.removeRepository(projectId, removing.id))}
+            onConfirm={async () => {
+              await act(() => client.removeRepository(projectId, removing.id));
+            }}
           />
         )}
       </div>
@@ -370,7 +374,11 @@ function RepositoryCommands({
 }: {
   repo: Repository;
   busy: boolean;
-  onSave: (commands: { setupCommand: string | null; testCommand: string | null; defaultBranch?: string }) => void;
+  onSave: (commands: {
+    setupCommand: string | null;
+    testCommand: string | null;
+    defaultBranch?: string;
+  }) => Promise<Repository | undefined>;
 }) {
   const [branch, setBranch] = useState(repo.defaultBranch);
   const [setup, setSetup] = useState(repo.setupCommand ?? "");
@@ -422,13 +430,21 @@ function RepositoryCommands({
         <button
           className="btn btn-primary"
           disabled={busy || !dirty}
-          onClick={() =>
-            onSave({
+          onClick={async () => {
+            const saved = await onSave({
               setupCommand: setup.trim() || null,
               testCommand: test.trim() || null,
               ...(branchDirty ? { defaultBranch: branch.trim() } : {}),
-            })
-          }
+            });
+            // What the server stored, not what was typed: a cleared
+            // branch comes back as the default it resolved to, which
+            // may be the very name that was there before.
+            if (saved) {
+              setBranch(saved.defaultBranch);
+              setSetup(saved.setupCommand ?? "");
+              setTest(saved.testCommand ?? "");
+            }
+          }}
         >
           Save
         </button>

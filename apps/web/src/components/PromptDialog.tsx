@@ -286,7 +286,8 @@ export function NewProjectDialog({
                   repoUrl: repo.url,
                   localPath: repo.fullName,
                   name: repo.name,
-                  defaultBranch: githubBranches[id]?.trim() || repo.defaultBranch,
+                  // Blank leaves it to the server, which asks GitHub.
+                  ...(githubBranches[id]?.trim() ? { defaultBranch: githubBranches[id]!.trim() } : {}),
                 }]
               : [];
           })
