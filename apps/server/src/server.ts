@@ -31,7 +31,6 @@ import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
 import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
 import { applyInitialAgentAuthSharing } from "./settings.js";
-import { startModelRefresh } from "./model-refresh.js";
 
 export interface StartOptions {
   /** Overrides applied on top of the process environment. */
@@ -342,9 +341,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         handle.once("error", reject);
       });
 
-    // After the listener, so a boot that fails leaves no timer behind.
-    const modelRefresh = startModelRefresh({ hours: env.BENTO_MODEL_REFRESH_HOURS });
-
     if (!options.quiet) {
       console.log(
         `bento server listening on http://${hostname}:${server.port} (${env.BENTO_MODE} mode, ${env.BENTO_SANDBOX_DRIVER} sandboxes, ${env.BENTO_MAX_CONCURRENT_RUNS} run workers)`,
@@ -370,7 +366,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
          * writer.
          */
         ctx.draining = true;
-        modelRefresh.stop();
         await new Promise<void>((resolve) => {
           /**
            * Stop accepting, then sever what is still open. An SSE stream

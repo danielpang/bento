@@ -1,0 +1,94 @@
+name: Model catalog
+
+# Refreshes the committed model catalog from models.dev and the AI
+# Gateway, and opens a pull request when it changed.
+#
+# The catalog is fetched here, once, rather than by every server
+# machine: servers read the committed snapshot and never call out. A
+# new model (or one a provider has sunset) reaches users with the next
+# deploy after this pull request merges. scripts/update-models.mjs
+# rewrites the snapshot wholesale and drops models an agent cannot code
+# with (image, video, speech, embedding, no tool calling, deprecated).
+#
+#   nightly  so a release is in front of a reviewer the next morning
+#   by hand  the day a model ships, rather than waiting for the night
+#
+# Pull requests opened with the default GITHUB_TOKEN do not trigger
+# other workflows, so ci.yml would not run on them. Set a
+# MODELS_UPDATE_TOKEN secret (a fine-grained token with contents and
+# pull request write access) to have CI run as usual. Without it, the
+# core typecheck and tests below are the check. Either way, "Allow
+# GitHub Actions to create and approve pull requests" must be on under
+# Settings, Actions, General.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: models-update
+  cancel-in-progress: false
+
+env:
+  BRANCH: bot/model-catalog
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.MODELS_UPDATE_TOKEN || github.token }}
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm models:update
+
+      - name: See whether the catalog changed
+        id: diff
+        run: |
+          if git diff --quiet -- packages/core/src/model-catalog.generated.ts packages/core/src/model-catalog.gateway.ts; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "The catalog is already current."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat
+          fi
+
+      # A refresh can drop a model a test or the manual catalog names.
+      # Better found here than by whoever merges the pull request.
+      - if: steps.diff.outputs.changed == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.diff.outputs.changed == 'true'
+        run: pnpm --filter @bento/core typecheck
+      - if: steps.diff.outputs.changed == 'true'
+        run: pnpm --filter @bento/core test
+
+      # One branch the job owns, force pushed each run, so there is at
+      # most one open catalog pull request and it always holds the
+      # latest snapshot.
+      - name: Open or update the pull request
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.MODELS_UPDATE_TOKEN || github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add packages/core/src/model-catalog.generated.ts packages/core/src/model-catalog.gateway.ts
+          git commit -m "Refresh the model catalog from models.dev"
+          git push --force origin "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
+              --title "Refresh the model catalog" \
+              --body "Nightly refresh from models.dev and the AI Gateway by \`pnpm models:update\`. New models are added, sunset ones removed, and models an agent cannot code with are filtered out. Review the diff for anything that should be pinned or hand listed in \`model-catalog.manual.ts\`."
+          fi

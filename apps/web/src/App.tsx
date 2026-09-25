@@ -41,7 +41,6 @@ import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/P
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
-import { loadLiveModels } from "./model-catalog.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -139,10 +138,6 @@ const client = new BentoClient({
 });
 
 const PROJECT_KEY = "bento:projectId";
-
-// Public and tenant-free, so it does not wait on a session. Fired at
-// module load so the pickers have it long before anyone opens them.
-void loadLiveModels(client);
 
 export function App() {
   const { data: session, isPending } = useSession();

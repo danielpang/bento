@@ -2,10 +2,12 @@
 /**
  * Refreshes the model catalog from models.dev.
  *
- * The catalog is committed as well as fetched at runtime: a board that
- * cannot reach the internet still has to offer a model list. The live
- * read replaces these lists when it succeeds, so a sunset model leaves
- * the picker without waiting for this script.
+ * The catalog is committed rather than fetched at runtime: a board that
+ * cannot reach the internet still has to offer a model list, and one
+ * fetch in CI beats one per server machine. .github/workflows/models.yml
+ * runs this nightly and opens a pull request when the list changed, so
+ * a new model lands with the next deploy. Each run rewrites the snapshot
+ * wholesale, which is also how a model a provider has sunset drops out.
  *
  * Only providers whose credentials Bento can actually store are
  * included. Offering a model that no stored key can authenticate would
@@ -21,12 +23,6 @@
  * provider whose ids match what the Gateway takes (`moonshotai/kimi-k3`).
  * Those slugs come from https://ai-gateway.vercel.sh/v1/models, language
  * models only. Image, video, and embedding ids are not agent models.
- *
- * The server also reads both sources at run time and lays them over
- * this snapshot (packages/core/src/model-catalog.live.ts), so the
- * snapshot is the offline fallback rather than the only list. Its
- * INCLUDE, OPTIONS, PINNED, and NOT_FOR_CODING mirror the ones below:
- * change them together.
  *
  * Usage: pnpm models:update
  *        pnpm models:update -- --gateway-only
@@ -63,6 +59,20 @@ const INCLUDE = ["anthropic", "openai", "google", "openrouter", "xai", "cursor"]
 const OPTIONS = {
   xai: { env: ["CURSOR_API_KEY"] },
 };
+
+/**
+ * Words in an id that mark a model an agent cannot write code with:
+ * image, video, music, and speech generators, realtime voice,
+ * embeddings, moderation. Whole segments of the id only, so
+ * `gpt-image-2` and `gemini-3.1-flash-live-preview` go and nothing whose
+ * name merely contains the letters does. models.dev also says what a
+ * model outputs and whether it calls tools (see agentCapable); the id
+ * catches what it describes loosely, and is all the Gateway gives.
+ */
+const NOT_FOR_CODING = new Set([
+  "audio", "dall", "embed", "embedding", "embeddings", "image", "images", "imagen", "live", "lyria",
+  "moderation", "realtime", "rerank", "sora", "speech", "transcribe", "transcription", "tts", "veo", "whisper",
+]);
 
 /**
  * Models to lift to the top of a provider's list.
@@ -145,17 +155,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(provid
 }
 
 await writeGatewayCatalog();
-
-/**
- * Words in an id that mark a model an agent cannot write code with:
- * image, video, music, and speech generators, realtime voice,
- * embeddings, moderation. Whole segments only. Mirrors NOT_FOR_CODING
- * in packages/core/src/model-catalog.live.ts.
- */
-const NOT_FOR_CODING = new Set([
-  "audio", "dall", "embed", "embedding", "embeddings", "image", "images", "imagen", "live", "lyria",
-  "moderation", "realtime", "rerank", "sora", "speech", "transcribe", "transcription", "tts", "veo", "whisper",
-]);
 
 function isCodingModel(id) {
   return !id.toLowerCase().split(/[-/._:~]+/).some((word) => NOT_FOR_CODING.has(word));

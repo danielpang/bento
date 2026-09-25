@@ -1,7 +1,6 @@
 import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
 import { GATEWAY_CATALOG } from "./model-catalog.gateway.js";
-import { codingModelsOnly, overlayCatalog } from "./model-catalog.live.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
 import { isOllamaModel } from "./ollama.js";
 
@@ -21,14 +20,6 @@ export interface CatalogProvider {
 }
 
 /**
- * The half of the catalog a source describes, and so the half a live
- * refresh replaces. Image, speech, and embedding models are filtered
- * out of it: the snapshot predates that rule, and they are not models a
- * coding agent can run.
- */
-const SNAPSHOT: readonly CatalogProvider[] = codingModelsOnly(mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG));
-
-/**
  * Every provider Bento knows, refreshed ones first.
  *
  * The generated half comes from models.dev. Vercel AI Gateway is a
@@ -41,56 +32,11 @@ const SNAPSHOT: readonly CatalogProvider[] = codingModelsOnly(mergeCatalogs(GENE
  * are appended, so Composer stays listed even after models.dev grows a
  * Cursor provider of its own, and a hand-added id drops out of the
  * manual list's way once a refresh carries it.
- *
- * This is the bundled snapshot. What a running process offers is
- * modelCatalog(), where the last live refresh has replaced the
- * snapshot's lists.
  */
-export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(SNAPSHOT, MANUAL_CATALOG);
-
-/**
- * The catalog as this process knows it now: the bundled snapshot above
- * with the latest live refresh in place of its lists (see
- * model-catalog.live.ts).
- *
- * Every lookup in this module reads this rather than MODEL_CATALOG, so
- * a pairing check, a picker, and a provider mark all agree about a
- * model released after the snapshot. Until a refresh lands it is the
- * snapshot, which is what an offline board keeps.
- */
-let current: readonly CatalogProvider[] = MODEL_CATALOG;
-let version = 0;
-const listeners = new Set<() => void>();
-
-export function modelCatalog(): readonly CatalogProvider[] {
-  return current;
-}
-
-/**
- * Replaces the snapshot's lists with live ones, then merges the
- * hand-maintained ids back on top. The server passes what it read from
- * models.dev and the Gateway; a client passes what the server served,
- * which already carries the manual ids, so merging them again adds
- * nothing. A model a provider has sunset drops out; a provider the live
- * read did not return keeps its snapshot list. See overlayCatalog.
- */
-export function applyLiveCatalog(live: readonly CatalogProvider[]): void {
-  current = mergeCatalogs(overlayCatalog(SNAPSHOT, live), MANUAL_CATALOG);
-  version += 1;
-  for (const listener of listeners) listener();
-}
-
-/** Changes on every applyLiveCatalog, for useSyncExternalStore. */
-export function modelCatalogVersion(): number {
-  return version;
-}
-
-export function subscribeModelCatalog(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
-}
+export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(
+  mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG),
+  MANUAL_CATALOG,
+);
 
 /** Generated providers first; manual ids fill gaps on the same provider. */
 export function mergeCatalogs(
@@ -174,7 +120,7 @@ const BY_CLI: Record<string, readonly string[]> = {
 export function providersForCli(cli: string): CatalogProvider[] {
   const allowed = BY_CLI[cli] ?? [];
   return allowed
-    .map((id) => current.find((p) => p.id === id))
+    .map((id) => MODEL_CATALOG.find((p) => p.id === id))
     .filter((p): p is CatalogProvider => Boolean(p));
 }
 
@@ -229,7 +175,7 @@ export function withTrustedCost<T extends { type: string; costUsd?: number | und
 }
 
 export function providerById(id: string): CatalogProvider | undefined {
-  return current.find((p) => p.id === id);
+  return MODEL_CATALOG.find((p) => p.id === id);
 }
 
 /**
@@ -398,14 +344,14 @@ function namesItsProvider(cli: string): boolean {
 function providerOfModel(model: string): CatalogProvider | undefined {
   const slash = model.indexOf("/");
   if (slash > 0) {
-    const named = current.find((p) => p.id === model.slice(0, slash));
+    const named = MODEL_CATALOG.find((p) => p.id === model.slice(0, slash));
     if (named) return named;
   }
   // Never Ollama by a bare id, for the reason providerForProfile gives. A
   // tool that cannot reach Ollama was allowed a model like gpt-oss:20b
   // before Ollama was listed (Codex pointed at an Ollama server of its
   // own), and listing it must not turn that into a refusal.
-  return current.find((p) => p.id !== "ollama" && p.models.some((m) => m.id === model));
+  return MODEL_CATALOG.find((p) => p.id !== "ollama" && p.models.some((m) => m.id === model));
 }
 
 /**
@@ -424,7 +370,7 @@ export function checkAgentPairing(cli: string, model: string): AgentPairing {
   // the run starts, so keep it typeable on bare-id tools too.
   const prefix = model.split("/", 1)[0];
   if (guidance?.bareModelId && model.includes("/") && !routesToOllama(cli, model)
-    && current.some((provider) => provider.id === prefix)) {
+    && MODEL_CATALOG.some((provider) => provider.id === prefix)) {
     const example = guidance.examples[0] ?? guidance.defaultModel;
     return {
       status: "impossible",
