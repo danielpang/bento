@@ -954,6 +954,17 @@ export function FeatureDrawer({
                   Undo this run
                 </button>
               )}
+              {showPullRequests && (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={overviewPublishDisabled}
+                  title={overviewPublishReason}
+                  onClick={() => void publishNow()}
+                >
+                  {publishing ? "Creating..." : "Create PR"}
+                </button>
+              )}
             </div>
             <div className="danger-row">
               <button
