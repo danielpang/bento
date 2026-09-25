@@ -130,13 +130,14 @@ export interface ModelOptions {
   longRunMs?: number;
 }
 
-const NO_SPEND: SwarmSpend = { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 };
+const NO_SPEND: SwarmSpend = { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 };
 
 export function addSpend(a: SwarmSpend, b: SwarmSpend): SwarmSpend {
   return {
     measuredUsd: a.measuredUsd + b.measuredUsd,
     estimatedUsd: a.estimatedUsd + b.estimatedUsd,
     assumedUsd: a.assumedUsd + b.assumedUsd,
+    notionalUsd: a.notionalUsd + b.notionalUsd,
   };
 }
 
@@ -567,4 +568,8 @@ export function createModelCache(): (tasks: SwarmTask[], options?: ModelOptions)
 }
 
 /** Every tier, in the order they are always printed. */
-export const SPEND_TIERS: SpendTier[] = ["measured", "estimated", "assumed"];
+/**
+ * Every tier, in the order they are always printed: most trustworthy
+ * first, and the one the budget does not count last.
+ */
+export const SPEND_TIERS: SpendTier[] = ["measured", "estimated", "assumed", "notional"];

@@ -46,6 +46,8 @@ export function SwarmBoard({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SwarmDetail | null>(null);
   const [templates, setTemplates] = useState<SwarmTemplate[]>([]);
+  /** The agents a node can be reassigned to, for the drawer's picker. */
+  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
   const [expanded, setExpanded] = useState<string[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
@@ -111,6 +113,13 @@ export function SwarmBoard({
       .listTemplates()
       .then(setTemplates)
       .catch(() => setTemplates([]));
+    // An empty list is not an error here: the drawer then offers no
+    // reassign picker, which is the truthful answer for a console that
+    // could not read the agents.
+    void swarmApi
+      .listAgents()
+      .then(setAgents)
+      .catch(() => setAgents([]));
   }, []);
 
   const loadNode = useCallback((swarmId: string, openTaskId: string) => {
@@ -297,6 +306,18 @@ export function SwarmBoard({
 
       {task && layoutNode && (
         <SwarmNodeDrawer
+          /*
+           * One drawer instance per node, and not one drawer that
+           * different nodes take turns in.
+           *
+           * The drawer holds a description somebody is part way
+           * through editing and the text of a split they are part way
+           * through writing. Without this, clicking another node in
+           * the tree reused the instance: the header changed, the
+           * unsaved draft did not, and Save then wrote one node's text
+           * onto the other node's row.
+           */
+          key={task.id}
           task={task}
           node={layoutNode}
           {...(node?.taskId === task.id ? { detail: node } : {})}
@@ -305,6 +326,14 @@ export function SwarmBoard({
           // act reloads the detail, so the rings above the node move
           // as soon as the reconciler has rolled the finish up.
           onMarkDone={(id) => selectedId && act(() => swarmApi.markTaskDone(selectedId, id))}
+          agents={agents}
+          onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id))}
+          onCancel={(id) => selectedId && act(() => swarmApi.cancelTask(selectedId, id))}
+          onSplit={(id, children) => selectedId && act(() => swarmApi.splitTask(selectedId, id, children))}
+          onReassign={(id, agentProfileId) =>
+            selectedId && act(() => swarmApi.reassignTask(selectedId, id, agentProfileId))
+          }
+          onEdit={(id, edit) => selectedId && act(() => swarmApi.editTask(selectedId, id, edit))}
           onMessage={(id, text) =>
             selectedId &&
             act(async () => {

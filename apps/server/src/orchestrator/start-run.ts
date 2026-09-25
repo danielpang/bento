@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { agentRuns, swarmLandings, type Db } from "@bento/db";
 import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
+import { assumedCostFor, budgetRefusal } from "./swarm/ledger.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
 /**
@@ -46,6 +47,19 @@ export type NewRun = PipelineNewRun | SwarmNewRun;
  */
 export interface OutOfCompute {
   outOfCompute: string;
+  /**
+   * Which ceiling said no.
+   *
+   * "plan" is the team's compute allowance, which comes back when the
+   * period rolls over or somebody allows overage; "budget" is the
+   * swarm's own dollar cap, which only a person raises. They read the
+   * same to a caller that just wants to stop, and they are two
+   * different sentences and two different next steps to the person
+   * looking at the board, so the tree is told which one it was.
+   *
+   * Absent on the card board, which has only the plan.
+   */
+  cap?: "plan" | "budget";
 }
 
 /**
@@ -222,11 +236,28 @@ async function insertSwarmRun(
     throw new Error(`a swarm ${values.role} run must name its task`);
   }
 
+  /*
+   * The ceilings come off the locked row as well as the tenant, which
+   * is what makes the budget a real cap rather than a number on a
+   * screen: two spawns racing each other would otherwise both read the
+   * spend as it was before either of them started.
+   */
   const locked = await tx.execute(
-    sql`select organization_id, max_workers from swarms where id = ${values.swarmId} for update`,
+    sql`select organization_id, max_workers, template_id, budget_usd,
+               spent_measured_usd, spent_estimated_usd, spent_assumed_usd, spent_notional_usd
+          from swarms where id = ${values.swarmId} for update`,
   );
   if (locked.rows.length === 0) return "gone" as const;
-  const swarm = locked.rows[0] as { organization_id: string | null; max_workers: number };
+  const swarm = locked.rows[0] as {
+    organization_id: string | null;
+    max_workers: number;
+    template_id: string | null;
+    budget_usd: string | null;
+    spent_measured_usd: string;
+    spent_estimated_usd: string;
+    spent_assumed_usd: string;
+    spent_notional_usd: string;
+  };
   const organizationId = swarm.organization_id ?? null;
 
   /** Whether any run matching this is queued, starting, or running. */
@@ -300,8 +331,62 @@ async function insertSwarmRun(
   // question about the team whose swarm this is.
   if (entitlements?.canStartRun && organizationId) {
     const refusal = await entitlements.canStartRun(organizationId);
-    if (refusal) return { outOfCompute: refusal.reason };
+    if (refusal) return { outOfCompute: refusal.reason, cap: "plan" };
   }
+
+  /**
+   * Then the swarm's own dollar cap, and in this order for a reason.
+   *
+   * The plan is the deployment's business and comes back on its own (a
+   * period rolls over, somebody allows overage); the budget is this
+   * swarm's and only a person raises it. Asking the plan first means a
+   * team that has run out of hours is told that, rather than being
+   * told about a cap they would still be under.
+   *
+   * Notional spend is not counted, which is the one rule the budget
+   * has that the plan does not: see the ledger. A local install
+   * lending its runs a logged in subscription is spending nothing at
+   * the margin, and stopping it at a cap would be refusing a swarm
+   * over a list price somebody had already paid.
+   *
+   * It is a cap on starting, never on running. The cost of a run is
+   * not known until it ends, so a budget can be passed by at most the
+   * run that was already going when it was reached, and no agent is
+   * ever killed for money.
+   */
+  /*
+   * What the agents already going will cost, counted at the figure a
+   * run that reports nothing is charged.
+   *
+   * Only worth the two queries when there is a cap to check it
+   * against, so a swarm with no budget pays for none of this.
+   */
+  let committedUsd = 0;
+  if (swarm.budget_usd !== null) {
+    const [inFlight] = await tx
+      .select({ runs: sql<number>`count(*)::int` })
+      .from(agentRuns)
+      .where(and(inArray(agentRuns.status, ACTIVE_RUN_STATUSES), eq(agentRuns.swarmId, values.swarmId)));
+    const running = inFlight?.runs ?? 0;
+    if (running > 0) {
+      committedUsd = running * (await assumedCostFor(tx as unknown as Db, {
+        id: values.swarmId,
+        templateId: swarm.template_id,
+      }));
+    }
+  }
+
+  const budget = budgetRefusal(
+    {
+      budgetUsd: swarm.budget_usd,
+      spentMeasuredUsd: swarm.spent_measured_usd,
+      spentEstimatedUsd: swarm.spent_estimated_usd,
+      spentAssumedUsd: swarm.spent_assumed_usd,
+      spentNotionalUsd: swarm.spent_notional_usd,
+    },
+    committedUsd,
+  );
+  if (budget) return { outOfCompute: budget, cap: "budget" };
 
   const [run] = await tx.insert(agentRuns).values(values).returning();
   if (!run) throw new Error("run insert returned no row");

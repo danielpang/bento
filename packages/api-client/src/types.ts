@@ -215,6 +215,37 @@ export interface ProjectUsage {
   }[];
   /** Every card, including ones that have never run. */
   byFeature: FeatureSpend[];
+  /**
+   * Every swarm, as a swarm.
+   *
+   * A swarm's runs belong to no card, so they are absent from
+   * `byFeature` entirely: without this a swarm that cost forty dollars
+   * would be nowhere on the page. Optional, because a server older
+   * than swarms does not send it.
+   */
+  bySwarm?: SwarmSpendRow[];
+}
+
+/**
+ * One swarm's spend, split the way it is recorded.
+ *
+ * Four figures and no total, for the reason the swarm board keeps them
+ * apart: measured is what the tools printed, estimated is priced from
+ * the tokens they printed, assumed stands in for tools that print
+ * nothing, and notional is a list price a subscription had already
+ * paid for. Adding them would put four kinds of confidence behind one
+ * number on the page where somebody is deciding whether to believe it.
+ */
+export interface SwarmSpendRow {
+  swarmId: string;
+  title: string;
+  status: string;
+  runs: number;
+  runsWithoutCost: number;
+  measuredUsd: number;
+  estimatedUsd: number;
+  assumedUsd: number;
+  notionalUsd: number;
 }
 
 /**

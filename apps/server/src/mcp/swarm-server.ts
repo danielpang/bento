@@ -13,6 +13,7 @@ import {
   swarms,
 } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { cancelTaskTree, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
@@ -638,51 +639,25 @@ async function splitTask(
   events: BoardEvent[],
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
-  if (task.nodeType !== "leaf") {
-    throw new ToolRefusal(`task ${task.id} is already a plan node; add to it with create_task.`);
-  }
-  if (task.status === "working" || task.status === "landed") {
-    throw new ToolRefusal(`an agent is working ${task.id} right now. Cancel it first, or wait for its report.`);
-  }
-  if (task.status === "done") throw new ToolRefusal(`task ${task.id} is already done, so splitting it would lose its work.`);
-
-  const created: string[] = [];
-  await ctx.db.transaction(async (tx) => {
-    await tx
-      .update(swarmTasks)
-      // A plan node is never worked directly, so the leaf's own
-      // assignment goes with the split: whatever it was waiting for,
-      // its children are what waits now.
-      .set({ nodeType: "plan", status: "open", attention: null, assignedRunId: null, updatedAt: new Date() })
-      .where(eq(swarmTasks.id, task.id));
-    let position = 0;
-    for (const child of args.children) {
-      const [row] = await tx
-        .insert(swarmTasks)
-        .values({
-          swarmId: caller.swarmId,
-          parentId: task.id,
-          position: position++,
-          nodeType: "leaf",
-          title: child.title,
-          description: child.description,
-          weight: child.weight,
-        })
-        .returning({ id: swarmTasks.id });
-      if (row) created.push(row.id);
-    }
-    for (const id of created) {
-      await tx.insert(swarmTaskEvents).values({ taskId: id, kind: "created", toStatus: "open", runId: caller.runId });
-    }
-    await tx.insert(swarmTaskEvents).values({
-      taskId: task.id,
-      kind: "note",
-      fromStatus: task.status,
-      toStatus: "open",
+  /*
+   * The same function the drawer's Split calls. What splitting a leaf
+   * means (it becomes a plan node, its assignment goes to its
+   * children, and a leaf being worked or already done is refused) is
+   * one rule, and a second copy of it here is how the planner's tree
+   * and a person's tree would start to differ.
+   */
+  const created = await ctx.db.transaction(async (tx) =>
+    splitLeaf(tx, {
+      task,
+      children: args.children.map((child) => ({
+        title: child.title,
+        description: child.description,
+        weight: child.weight,
+      })),
       runId: caller.runId,
-      detail: { split: created.length },
-    });
-  });
+    }),
+  );
+  if ("refused" in created) throw new ToolRefusal(created.refused);
   events.push(taskEvent(caller, task.id, "open"));
   for (const id of created) events.push(taskEvent(caller, id, "open"));
   return `Split ${task.id} into ${created.length} tasks: ${created.join(", ")}. None of them is started; assign the ones that are ready.`;
@@ -722,41 +697,15 @@ async function cancelTask(
   events: BoardEvent[],
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
-  // The subtree goes with it: a plan node nobody needs has no children
-  // anybody needs.
-  const subtree = await descendants(ctx, task.id);
-  const ids = [task.id, ...subtree];
-  const cancelled = await ctx.db
-    .update(swarmTasks)
-    .set({ status: "cancelled", attention: null, endedAt: new Date(), updatedAt: new Date() })
-    .where(and(inArray(swarmTasks.id, ids), sql`${swarmTasks.status} <> 'cancelled'`))
-    .returning({ id: swarmTasks.id });
-  for (const row of cancelled) {
-    await ctx.db.insert(swarmTaskEvents).values({
-      taskId: row.id,
-      kind: "status_changed",
-      toStatus: "cancelled",
-      runId: caller.runId,
-      ...(args.reason ? { detail: { reason: args.reason } } : {}),
-    });
-    events.push(taskEvent(caller, row.id, "cancelled"));
-  }
+  // Through the shared rule, so the subtree goes whoever asked: a plan
+  // node nobody needs has no children anybody needs.
+  const cancelled = await cancelTaskTree(ctx.db, {
+    task,
+    reason: args.reason ?? null,
+    runId: caller.runId,
+  });
+  for (const id of cancelled) events.push(taskEvent(caller, id, "cancelled"));
   return `Cancelled ${cancelled.length} task(s). An agent already working one of them stops when its run ends.`;
-}
-
-/** Every node under this one. Bounded by the tree, walked one level at a time. */
-async function descendants(ctx: AppContext, taskId: string): Promise<string[]> {
-  const found: string[] = [];
-  let frontier = [taskId];
-  for (let depth = 0; depth < 64 && frontier.length > 0; depth += 1) {
-    const rows = await ctx.db
-      .select({ id: swarmTasks.id })
-      .from(swarmTasks)
-      .where(inArray(swarmTasks.parentId, frontier));
-    frontier = rows.map((row) => row.id);
-    found.push(...frontier);
-  }
-  return found;
 }
 
 async function accept(

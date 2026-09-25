@@ -9,6 +9,7 @@ import {
   runMigrations,
   swarmLandings,
   swarmTasks,
+  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -263,7 +264,13 @@ test("the plan is asked about the team whose swarm it is, and busy is asked firs
   } as unknown as Entitlements;
 
   const answer = await start({ swarmId: swarm.id, role: "planner", agentProfileId: TEAM_PROFILE }, refusing);
-  assert.deepEqual(answer, { outOfCompute: "This team has used its agent hours for the month." });
+  // The refusal says which ceiling, because the two are different
+  // sentences and different next steps on the board: agent hours come
+  // back on their own, and a dollar budget waits for a person.
+  assert.deepEqual(answer, {
+    outOfCompute: "This team has used its agent hours for the month.",
+    cap: "plan",
+  });
   assert.deepEqual(asked, ["org-a"], "the organization comes off the locked swarm row");
   const rows = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
   assert.equal(rows.length, 0, "a refused start inserts nothing");
@@ -291,4 +298,110 @@ test("a swarm outside any organization has no plan to ask", async () => {
     canStartRun: async () => ({ reason: "no" }),
   } as unknown as Entitlements;
   assert.ok(isRun(await start({ swarmId: swarm.id, role: "planner" }, refusing)));
+});
+
+/**
+ * The dollar budget, at the same door the plan is asked at.
+ *
+ * It is the one cap a local install has, so it is checked here rather
+ * than behind entitlements: a deployment with no billing module still
+ * has a person who typed a number into the creation dialog.
+ */
+test("a swarm that has spent its budget starts nothing else", async () => {
+  const swarm = await makeSwarm({ budgetUsd: "10", spentMeasuredUsd: "6", spentAssumedUsd: "4" });
+
+  const answer = await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE });
+  assert.ok(typeof answer === "object" && "outOfCompute" in answer, "the cap refused it");
+  assert.equal(answer.cap, "budget", "and said which cap, because a person raises this one");
+  assert.match(answer.outOfCompute, /Raise the budget/);
+  const rows = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  assert.equal(rows.length, 0, "a refused start inserts nothing");
+});
+
+test("a zero budget starts no run", async () => {
+  const swarm = await makeSwarm({ budgetUsd: "0" });
+  const answer = await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE });
+  assert.ok(typeof answer === "object" && "outOfCompute" in answer);
+  assert.equal(answer.cap, "budget");
+  assert.match(answer.outOfCompute, /\$0\.00 budget/);
+  const rows = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  assert.equal(rows.length, 0);
+});
+
+test("a swarm under its budget starts, and one with no budget is never refused", async () => {
+  const under = await makeSwarm({ budgetUsd: "10", spentMeasuredUsd: "9.99" });
+  assert.ok(isRun(await start({ swarmId: under.id, role: "planner", agentProfileId: LOCAL_PROFILE })));
+
+  const uncapped = await makeSwarm({ spentMeasuredUsd: "9999" });
+  assert.ok(isRun(await start({ swarmId: uncapped.id, role: "planner", agentProfileId: LOCAL_PROFILE })));
+});
+
+/**
+ * The tier the cap does not count.
+ *
+ * A local install lending its runs the operator's own logged in agent
+ * session is spending nothing at the margin: the tool prints a list
+ * price, and the subscription has already paid for the work. Stopping
+ * a swarm on that figure would be refusing it over money nobody owes.
+ */
+test("a swarm spending a borrowed subscription runs past its cap", async () => {
+  const swarm = await makeSwarm({ budgetUsd: "1", spentNotionalUsd: "500" });
+  assert.ok(isRun(await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE })));
+});
+
+/**
+ * What the cap promises once more than one agent is running.
+ *
+ * A run's cost is not recorded until it ends, so spend alone says
+ * nothing about the four workers currently spending it. Checking spend
+ * and nothing else, every worker up to max_workers starts while the
+ * figure is still zero, and a $10 swarm commits $20 of work before the
+ * first charge lands. The promise is that a budget is exceeded by at
+ * most one run, so the runs already going have to be counted at the
+ * figure a run that reports nothing is charged.
+ *
+ * Deliberately not a reservation ledger. Counting the in flight runs
+ * under the same lock is enough, and a column reserving money would
+ * need releasing on every path a run can end by, including the ones
+ * that end when the process does.
+ */
+test("the workers already going count against the budget before they report", async () => {
+  const [template] = await db
+    .insert(swarmTemplates)
+    .values({
+      ownerId: "u1",
+      name: "Five dollars a leaf",
+      plannerProfileId: LOCAL_PROFILE,
+      workerProfileId: LOCAL_PROFILE,
+      workerIsolation: "worktree",
+      assumedCostUsd: "5",
+    })
+    .returning();
+  const swarm = await makeSwarm({ budgetUsd: "10", maxWorkers: 4, templateId: template!.id });
+
+  const started: string[] = [];
+  let refusedFor: string | null = null;
+  for (let i = 0; i < 4; i += 1) {
+    const task = await makeTask(swarm.id, `leaf ${i}`);
+    const answer = await start({
+      swarmId: swarm.id,
+      role: "worker",
+      swarmTaskId: task.id,
+      agentProfileId: LOCAL_PROFILE,
+    });
+    if (isRun(answer)) {
+      started.push(answer.id);
+      continue;
+    }
+    if (typeof answer === "object" && "outOfCompute" in answer) refusedFor = answer.cap ?? null;
+    break;
+  }
+
+  /*
+   * Two at five dollars each is the whole budget. A third would commit
+   * fifteen against a ten dollar cap, which is half a run over the
+   * promise, and a fourth would double it.
+   */
+  assert.equal(started.length, 2, "the budget stops the third worker before it starts");
+  assert.equal(refusedFor, "budget");
 });

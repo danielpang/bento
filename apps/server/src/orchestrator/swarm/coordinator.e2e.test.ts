@@ -18,7 +18,8 @@ import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { SWARM_FULL, type NewRun } from "../start-run.js";
-import { rollUpStatus, swarmStatusFrom, tickSwarm, type SwarmTickDeps } from "./coordinator.js";
+import { rollUpStatus, swarmStatusFrom, tickAllLiveSwarms, tickSwarm, type SwarmTickDeps } from "./coordinator.js";
+import { applyRunCharge } from "./ledger.js";
 
 /**
  * The coordinator, against a real database and a stubbed run starter.
@@ -123,7 +124,13 @@ const queuedRunIds = () =>
 
 /** A stubbed door: it records what was asked for, and inserts a real row. */
 function starter(
-  answers: ("run" | "busy" | "gone" | typeof SWARM_FULL | { outOfCompute: string })[] = [],
+  answers: (
+    | "run"
+    | "busy"
+    | "gone"
+    | typeof SWARM_FULL
+    | { outOfCompute: string; cap?: "plan" | "budget" }
+  )[] = [],
 ): SwarmTickDeps & { calls: NewRun[] } {
   const calls: NewRun[] = [];
   let index = 0;
@@ -220,7 +227,7 @@ test("the states a person owns are never recomputed from the tree", () => {
  * group row instead, which the console then added the children into a
  * second time, and which threw away any charge the group itself had.
  */
-test("cost rolls leaves to root, and the swarm's spend is the total", async () => {
+test("a node keeps its own charges, and the swarm's spend is not the tree's sum", async () => {
   const swarm = await makeSwarm();
   const group = await makeTask(swarm.id, {
     nodeType: "plan",
@@ -256,12 +263,71 @@ test("cost rolls leaves to root, and the swarm's spend is the total", async () =
   assert.equal(Number(rolled.costAssumedUsd), 0);
   assert.equal(rolled.status, "done", "both children finished, so the group did");
 
+  /*
+   * And the swarm's own spend is untouched by any of that.
+   *
+   * It used to be written here as the sum of the tree, which is a
+   * smaller number than the bill: a planner turn and a merge queue
+   * resolver hang off no node at all, and a budget checked against a
+   * total that leaves out the two most expensive roles in a swarm is a
+   * budget that never refuses anything. The ledger adds each run's
+   * charge to these columns as the run ends, so the tick recomputing
+   * them from the tree would erase every charge that has no node.
+   */
   const after = await readSwarm(swarm.id);
-  assert.equal(Number(after.spentMeasuredUsd), 4.4, "1.50 and 2.00 below, 0.40 on the group, 0.50 loose");
-  assert.equal(Number(after.spentEstimatedUsd), 0.25);
-  assert.equal(Number(after.spentAssumedUsd), 0.75);
+  assert.equal(Number(after.spentMeasuredUsd), 0, "the tick does not write the swarm's spend; the ledger does");
+  assert.equal(Number(after.spentEstimatedUsd), 0);
+  assert.equal(Number(after.spentAssumedUsd), 0);
   assert.equal(after.status, "done", "every root finished");
   assert.equal(result.status, "done");
+});
+
+/**
+ * The charge that proves who owns the swarm's total.
+ *
+ * A planner's turn belongs to the swarm and to no node in it, so it is
+ * the whole difference between the two possible owners: read off the
+ * tree it is invisible, and the budget would be checked against a
+ * figure missing the role that usually costs the most.
+ */
+test("a planner's charge reaches the swarm even though it hangs off no node", async () => {
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "one", status: "done" });
+
+  const [planner] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "planner",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "succeeded",
+    })
+    .returning();
+  await applyRunCharge(db, { swarmId: swarm.id, swarmTaskId: null }, {
+    tier: "measured",
+    usd: 2.5,
+    inputTokens: null,
+    outputTokens: null,
+    pricePerMtok: null,
+  });
+  await applyRunCharge(db, { swarmId: swarm.id, swarmTaskId: leaf.id }, {
+    tier: "assumed",
+    usd: 0.5,
+    inputTokens: null,
+    outputTokens: null,
+    pricePerMtok: null,
+  });
+  assert.ok(planner);
+
+  await tickSwarm(ctx, swarm.id, starter());
+
+  const after = await readSwarm(swarm.id);
+  assert.equal(Number(after.spentMeasuredUsd), 2.5, "the planner's turn is on the swarm, and no tick erases it");
+  assert.equal(Number(after.spentAssumedUsd), 0.5);
+  const worked = await read(leaf.id);
+  assert.equal(Number(worked.costAssumedUsd), 0.5, "and the leaf carries its own");
 });
 
 test("a tick applied twice changes nothing the second time", async () => {
@@ -405,7 +471,10 @@ test("workers spawn up to the ceiling, and a plan limit stops the loop on the le
   // The first starts; the second is refused for compute; the third is
   // never asked about, because there is no reason to think it would go
   // any better.
-  const deps = starter(["run", { outOfCompute: "This team has used its agent hours for the month." }]);
+  const deps = starter([
+    "run",
+    { outOfCompute: "This team has used its agent hours for the month.", cap: "plan" },
+  ]);
   const result = await tickSwarm(ctx, swarm.id, deps);
 
   assert.equal(deps.calls.length, 2, "the loop stopped at the refusal");
@@ -427,7 +496,10 @@ test("workers spawn up to the ceiling, and a plan limit stops the loop on the le
 
   const refused = await read(second.id);
   assert.equal(refused.status, "assigned", "a refused leaf keeps its place in the queue");
-  assert.equal(refused.attention, "budget", "and says on the board why it is waiting");
+  // Which ceiling, not just that there was one: agent hours come back
+  // on their own, and a dollar budget waits for a person, so the two
+  // are different sentences and different next steps on the board.
+  assert.equal(refused.attention, "plan_limit", "and says on the board which ceiling it is waiting on");
   assert.equal(
     (refused.flags as { spawnRefusal?: string }).spawnRefusal,
     "This team has used its agent hours for the month.",
@@ -907,5 +979,299 @@ test("the tick that finishes a swarm asks for it to be published, once", async (
     queued.filter((job) => job.queue === "swarm.publish").length,
     1,
     "a second tick on a finished swarm does not publish it a second time",
+  );
+});
+
+/* ---------------------------------------------------------------- *
+ * Money, and the two ceilings that stop a spawn.
+ * ---------------------------------------------------------------- */
+
+/**
+ * Out of budget is an ending, and it waits for the agents to stop.
+ *
+ * Nothing is killed for money: an agent stopped mid edit leaves a
+ * branch nobody chose, and its time is spent either way. So the
+ * refusal stops the next spawn, and the swarm ends only once the last
+ * worker has finished, which is the same rule a card follows.
+ */
+test("a budget refusal ends the swarm once nothing is running", async () => {
+  const swarm = await makeSwarm({ status: "running", budgetUsd: "10" });
+  const leaf = await makeTask(swarm.id, { title: "leaf", status: "assigned" });
+  const refusal = { outOfCompute: "This swarm has spent its $10.00 budget.", cap: "budget" as const };
+
+  const [running] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "worker",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "running",
+    })
+    .returning();
+  assert.ok(running);
+
+  const held = await tickSwarm(ctx, swarm.id, starter([refusal]));
+  assert.equal(held?.spawnRefusal, refusal.outOfCompute);
+  assert.notEqual((await readSwarm(swarm.id)).status, "budget_exhausted", "the worker that is going finishes");
+  assert.equal((await read(leaf.id)).attention, "budget", "and the leaf says which ceiling it is waiting on");
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, running.id));
+  const ended = await tickSwarm(ctx, swarm.id, starter([refusal]));
+  assert.equal(ended?.status, "budget_exhausted");
+  const after = await readSwarm(swarm.id);
+  assert.equal(after.status, "budget_exhausted");
+  assert.equal(after.pausedReason, "budget");
+});
+
+/**
+ * Out of agent hours is a pause, because it comes back on its own.
+ *
+ * The period rolls over, or somebody allows overage, and neither is an
+ * event this server hears about: the swarm has to ask again. So it is
+ * paused with the reason recorded, and a tick that manages to start
+ * something takes it straight back out.
+ */
+test("a plan limit pauses the swarm, and a later tick that can spawn resumes it", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "leaf", status: "assigned" });
+
+  const stalled = await tickSwarm(
+    ctx,
+    swarm.id,
+    starter([{ outOfCompute: "This team has used its agent hours.", cap: "plan" }]),
+  );
+  assert.equal(stalled?.status, "paused");
+  const paused = await readSwarm(swarm.id);
+  assert.equal(paused.pausedReason, "plan_limit");
+  assert.equal((await read(leaf.id)).attention, "plan_limit");
+
+  const resumed = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(resumed?.workerRunIds.length, 1, "the spawn is asked for again rather than waiting for a person");
+  assert.equal(resumed?.status, "running");
+  const back = await readSwarm(swarm.id);
+  assert.equal(back.status, "running");
+  assert.equal(back.pausedReason, null);
+  assert.equal((await read(leaf.id)).attention, null, "and the leaf stops saying it is waiting");
+});
+
+/** A swarm a person paused is not a swarm a ceiling paused. */
+test("a swarm somebody paused by hand is left alone", async () => {
+  const swarm = await makeSwarm({ status: "paused", pausedReason: "manual" });
+  await makeTask(swarm.id, { title: "leaf", status: "assigned" });
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  assert.equal(deps.calls.filter((call) => call.role === "worker").length, 0, "nothing is spawned");
+  assert.equal(result?.status, "paused");
+  assert.equal((await readSwarm(swarm.id)).pausedReason, "manual");
+});
+
+/**
+ * The planner is told the money is nearly gone, once.
+ *
+ * Told in time it can spend the remainder on the leaf that matters.
+ * Told every tick it would spend a turn a minute reading the same
+ * sentence, which is itself money.
+ */
+test("the planner is warned once when less than one run's worth of budget is left", async () => {
+  const swarm = await makeSwarm({ status: "running", budgetUsd: "10", spentMeasuredUsd: "9.80" });
+  await makeTask(swarm.id, { title: "leaf", status: "open" });
+
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(first?.plannerRunId, "the warning is delivered as a planner turn");
+  const notices = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0]!.source, "system", "Bento's own words, not a person's");
+  assert.match(notices[0]!.text, /budget/);
+  assert.ok((await readSwarm(swarm.id)).budgetWarnedAt, "and the latch is set");
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await tickSwarm(ctx, swarm.id, starter());
+  const after = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
+  assert.equal(after.length, 1, "one budget, one warning");
+});
+
+/**
+ * A ceiling stops a swarm starting work. It does not stop the work
+ * that was already going from finishing the plan.
+ *
+ * The workers that were running when the budget was reached are never
+ * killed, so their landings can be the last work the tree had. Without
+ * this the swarm would sit at "out of budget" over a finished tree,
+ * publish nothing, and wait for somebody to notice.
+ */
+test("a swarm that ran out of budget still finishes when its last worker lands", async () => {
+  const swarm = await makeSwarm({ status: "budget_exhausted", pausedReason: "budget", budgetUsd: "10" });
+  const leaf = await makeTask(swarm.id, { title: "the last one", status: "working" });
+
+  const held = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(held?.status, "budget_exhausted", "while the work is in flight, the ending stands");
+
+  assert.equal(held?.becameFinal, null, "and the ending it already had is not reported a second time");
+
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, leaf.id));
+  const finished = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(finished?.status, "done", "a swarm whose every task is done is done");
+  assert.equal(finished?.becameDone, true, "and it publishes, rather than waiting for a person");
+  /*
+   * One spend event per swarm, which is what the event's own contract
+   * promises: the dashboard sums cost_usd rather than counting events.
+   * This swarm has ended twice now, once on its budget and once on its
+   * tree, and the budget's ending is the one that was reported. A
+   * second report here would double every figure on that dashboard,
+   * and it is the designed path rather than an exotic one.
+   */
+  assert.equal(finished?.becameFinal, null, "a swarm that already reported what it spent does not report again");
+});
+
+/** A template with no worker does not hold up a leaf that has its own. */
+test("a leaf with its own agent starts even when the template names none", async () => {
+  const [bare] = await db
+    .insert(swarmTemplates)
+    .values({
+      ownerId: "u1",
+      name: "No worker",
+      plannerProfileId: PROFILE,
+      workerProfileId: null,
+      workerIsolation: "worktree",
+    })
+    .returning();
+  const swarm = await makeSwarm({ status: "running", templateId: bare!.id });
+  await makeTask(swarm.id, { title: "template's", status: "assigned", position: 0 });
+  const chosen = await makeTask(swarm.id, {
+    title: "reassigned by hand",
+    status: "assigned",
+    position: 1,
+    agentProfileId: PROFILE,
+  });
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  assert.equal(result?.workerRunIds.length, 1, "the one that has an agent starts");
+  assert.equal(deps.calls.at(-1)?.swarmTaskId, chosen.id);
+  assert.equal((await read(chosen.id)).status, "working");
+});
+
+/**
+ * What a restart picks back up.
+ *
+ * A swarm's state is in its rows, so a deploy loses only the jobs that
+ * were in flight, and this is what puts them back. The one that has to
+ * be here and is easiest to leave out is the swarm paused on a plan
+ * limit: it has nothing running, so it looks like nothing to do, and
+ * it is the only state that cannot wake itself. Ticking it is also
+ * what registers the watchdog that is the only thing still asking.
+ */
+test("a restart picks up the swarm that cannot wake itself", async () => {
+  const running = await makeSwarm({ status: "running" });
+  const onHours = await makeSwarm({ status: "paused", pausedReason: "plan_limit" });
+  const byHand = await makeSwarm({ status: "paused", pausedReason: "manual" });
+  const finished = await makeSwarm({ status: "done" });
+
+  const ticked = await tickAllLiveSwarms(ctx);
+  const asked = queued.filter((job) => job.queue === "swarm.tick").map((job) => (job.data as { swarmId?: string }).swarmId);
+  assert.ok(asked.includes(running.id), "a working swarm is ticked");
+  assert.ok(asked.includes(onHours.id), "and so is the one waiting on hours it cannot ask for");
+  assert.ok(!asked.includes(byHand.id), "a person's pause waits for that person");
+  assert.ok(!asked.includes(finished.id), "and a finished swarm is finished");
+  assert.equal(ticked, 2);
+});
+
+/**
+ * The three ceilings, once the tree underneath them has finished.
+ *
+ * Nothing is killed for a ceiling, so the workers that were going when
+ * one bit go on to land their branches, and those landings can be the
+ * last work the plan had. All three stops have to let that tree finish
+ * and publish. The plan limit is the one that matters most, because it
+ * is the only one nobody can lift from here: a swarm left sitting on a
+ * finished tree waits for a person who was never told to come.
+ */
+test("a tree that finished under a ceiling is done, whichever ceiling stopped it", () => {
+  assert.equal(swarmStatusFrom("budget_exhausted", ["done", "done"]), "done");
+  assert.equal(swarmStatusFrom("timed_out", ["done", "done"]), "done");
+  // The plan's hours are a ceiling like the other two. It wears
+  // "paused" only because it is the one that comes back on its own.
+  assert.equal(swarmStatusFrom("paused", ["done", "done"], "plan_limit"), "done");
+  // Still open underneath, so all three hold where they are.
+  assert.equal(swarmStatusFrom("budget_exhausted", ["open", "done"]), "budget_exhausted");
+  assert.equal(swarmStatusFrom("paused", ["open", "done"], "plan_limit"), "paused");
+  // And a person's own pause is still theirs, finished tree or not.
+  assert.equal(swarmStatusFrom("paused", ["done", "done"], "manual"), "paused");
+});
+
+/**
+ * And a swarm the clock stopped, once somebody raised the clock.
+ *
+ * The budget's ending could always spawn again, because raising a
+ * budget is the only way that ending ever lifts. The clock's ending is
+ * exactly the same shape and was left out of the same list, so a swarm
+ * whose time limit had been raised ticked and started nothing.
+ */
+test("a swarm whose time limit was raised starts work again", async () => {
+  const swarm = await makeSwarm({ status: "timed_out", pausedReason: "time_limit", timeLimitMin: 240 });
+  const leaf = await makeTask(swarm.id, { title: "still to do", status: "assigned" });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(result?.workerRunIds.length, 1, "the leaf that was waiting starts");
+  assert.equal((await read(leaf.id)).status, "working");
+  const after = await readSwarm(swarm.id);
+  assert.equal(after.status, "running", "and the swarm is working again rather than still timed out");
+  assert.equal(after.pausedReason, null);
+});
+
+/**
+ * A swarm held on a plan limit, whose last worker landed.
+ *
+ * The whole path rather than the arithmetic: the tick has to notice,
+ * write "done", clear the reason it was paused for, and ask for the
+ * publish. Without that the branch is never pushed and no pull request
+ * is ever opened, and the only thing still looking at the swarm is a
+ * watchdog re-ticking it once a minute for good.
+ */
+test("a plan limit pause whose tree finished publishes rather than waiting for nobody", async () => {
+  const swarm = await makeSwarm({ status: "paused", pausedReason: "plan_limit" });
+  await makeTask(swarm.id, { title: "landed and accepted", status: "done" });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(result?.status, "done", "a finished tree finishes the swarm");
+  assert.equal(result?.becameDone, true, "and the publish is asked for");
+  const after = await readSwarm(swarm.id);
+  assert.equal(after.status, "done");
+  assert.equal(after.pausedReason, null, "nothing is paused any more, so no reason survives");
+});
+
+/**
+ * The mark a ceiling leaves on a leaf, once that leaf is running.
+ *
+ * The attention comes off already. The flag it was written beside did
+ * not, so a leaf with an agent on it went on telling the drawer that
+ * this team was out of agent hours, and kept telling it through every
+ * later retry: the drawer prints the flags verbatim.
+ */
+test("a leaf that starts drops the ceiling it was refused for", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "refused once", status: "assigned" });
+
+  await tickSwarm(ctx, swarm.id, starter([{ outOfCompute: "This team has used its agent hours for the month." }]));
+  const refused = await read(leaf.id);
+  assert.equal(refused.attention, "plan_limit");
+  assert.equal(
+    (refused.flags as { spawnRefusal?: string }).spawnRefusal,
+    "This team has used its agent hours for the month.",
+  );
+
+  // The hours come back, and the same leaf starts.
+  await db.update(swarms).set({ status: "running", pausedReason: null }).where(eq(swarms.id, swarm.id));
+  await tickSwarm(ctx, swarm.id, starter());
+  const started = await read(leaf.id);
+  assert.equal(started.status, "working");
+  assert.equal(started.attention, null);
+  assert.equal(
+    (started.flags as { spawnRefusal?: string }).spawnRefusal,
+    undefined,
+    "a leaf that is working asserts no ceiling",
   );
 });

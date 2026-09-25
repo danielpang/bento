@@ -54,6 +54,7 @@ export function swarmTone(status: SwarmStatus): Tone {
     case "paused":
     case "waiting":
     case "budget_exhausted":
+    case "timed_out":
       return "gated";
     default:
       return "idle";
@@ -77,6 +78,8 @@ export function swarmWords(status: SwarmStatus): string {
       return "stopped";
     case "budget_exhausted":
       return "out of budget";
+    case "timed_out":
+      return "out of time";
     case "failed":
       return "failed";
     default:
@@ -111,11 +114,59 @@ export function taskWords(status: TaskStatus): string {
 /**
  * The second axis, in words. Null when nothing is asking for anybody,
  * which is most of the tree most of the time.
+ *
+ * One sentence per reason, because the reasons are what a person acts
+ * on. They all used to read "needs you", which is true of all of them
+ * and useful about none: a merge conflict wants a resolver, a question
+ * wants an answer, and a swarm out of budget wants a decision about
+ * money. The colour stays one colour.
  */
 export function attentionWords(attention: TaskAttention): string | null {
-  if (attention === "long_running") return "running long";
-  if (attention === "escalated") return "needs you";
-  return null;
+  switch (attention) {
+    case "long_running":
+      return "running long";
+    case "escalated":
+      return "the planner was told";
+    case "question":
+      return "waiting on you";
+    case "failed":
+      return "failed";
+    case "conflict":
+      return "conflict";
+    case "budget":
+      return "out of budget";
+    case "plan_limit":
+      return "waiting for agent hours";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The longer sentence, for the drawer and for a node's tooltip.
+ *
+ * The chip has room for two words and this has room for what to do
+ * about it, which is the part somebody opening a yellow node came for.
+ */
+export function attentionNote(attention: TaskAttention): string | null {
+  switch (attention) {
+    case "long_running":
+      return "This has been going longer than this swarm's warning threshold. The transcript below says whether it is working or going round in circles.";
+    case "escalated":
+      return "It went past the escalation threshold, so the planner was woken with the last of its transcript. It can wait, message the worker, split the task, or cancel it. So can you.";
+    case "question":
+      return "Something here needs an answer before it can go on.";
+    case "failed":
+      return "This one did not finish. Retry it, edit it and retry it, or give it to a different agent.";
+    case "conflict":
+      return "Its branch could not be landed as it was. A resolver agent reconciles it, and a second conflict fails the task.";
+    case "budget":
+      return "This swarm has spent its budget, so nothing new starts. Raise the budget to carry on; what has landed is kept.";
+    case "plan_limit":
+      return "This team has used the agent hours on its plan, so nothing new starts. It carries on by itself when the hours come back.";
+    default:
+      return null;
+  }
 }
 
 /**
@@ -135,6 +186,40 @@ export function isSwarmOver(status: SwarmStatus): boolean {
 }
 
 /**
+ * Why a swarm is not starting anything, in a sentence, or null.
+ *
+ * The header's own line. A swarm that has stopped moving is the moment
+ * a person most needs to be told which of four different things
+ * happened, and "paused" on its own says none of them.
+ */
+export function pausedWords(
+  status: SwarmStatus,
+  reason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null,
+): string | null {
+  if (status === "budget_exhausted") {
+    return "This swarm has spent its budget. Nothing running was stopped, and raising the budget starts it again.";
+  }
+  if (status === "timed_out") {
+    return "This swarm reached its time limit. What landed is kept, and raising the limit starts it again.";
+  }
+  if (status !== "paused") return null;
+  switch (reason) {
+    case "plan_limit":
+      return "This team has used the agent hours on its plan, so no new agents are starting. The swarm carries on by itself when the hours come back.";
+    case "budget":
+      return "This swarm has spent its budget, so no new agents are starting.";
+    case "time_limit":
+      return "This swarm reached its time limit, so no new agents are starting.";
+    case "attention":
+      return "Something in this swarm is waiting on you.";
+    case "error":
+      return "This swarm stopped on an error. Its plan and everything that landed are still here.";
+    default:
+      return "Paused. Agents that were working finished their turn; Resume starts the next one.";
+  }
+}
+
+/**
  * Whether pausing, stopping, and the worker stepper do anything.
  *
  * A finished swarm keeps its buttons visible and disabled rather than
@@ -146,7 +231,7 @@ export function canPause(status: SwarmStatus): boolean {
 }
 
 export function canResume(status: SwarmStatus): boolean {
-  return status === "paused" || status === "budget_exhausted";
+  return status === "paused" || status === "budget_exhausted" || status === "timed_out";
 }
 
 /**

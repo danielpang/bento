@@ -46,6 +46,8 @@ const VERCEL_LOGO =
  * entry is picked up automatically; today it is absent and skipped.
  */
 const INCLUDE = ["anthropic", "openai", "google", "openrouter", "xai", "cursor"];
+/** Providers whose public catalog must carry at least one usable rate. */
+const PRICED_REQUIRED = new Set(["anthropic", "openai", "google", "openrouter", "xai"]);
 
 /**
  * Per-provider overrides the snapshot cannot express.
@@ -96,7 +98,7 @@ if (!gatewayOnly) {
     };
     const models = Object.values(provider.models ?? {})
       .filter((m) => !options.textOutputOnly || outputsText(m))
-      .map((m) => ({ id: m.id, name: m.name ?? m.id }))
+      .map((m) => ({ id: m.id, name: m.name ?? m.id, ...listPrice(m) }))
       .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
     for (const want of pinned) {
       if (!models.some((m) => m.id === want)) console.warn(`  pinned model ${want} is not in ${id}`);
@@ -104,6 +106,10 @@ if (!gatewayOnly) {
     if (models.length === 0) {
       console.warn(`skipping ${id}: no models listed`);
       continue;
+    }
+    const priced = models.filter((model) => model.cost).length;
+    if (PRICED_REQUIRED.has(id) && priced === 0) {
+      throw new Error(`${id} listed ${models.length} models but no input and output prices`);
     }
 
     const logoRes = await fetch(LOGO(id));
@@ -122,7 +128,7 @@ if (!gatewayOnly) {
       logo,
       models,
     });
-    console.log(`${id}: ${models.length} models${logo ? "" : ", no logo"}`);
+    console.log(`${id}: ${models.length} models, ${priced} priced${logo ? "" : ", no logo"}`);
   }
 
   const today = new Date().toISOString().slice(0, 10);
@@ -139,6 +145,27 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(provid
 }
 
 await writeGatewayCatalog();
+
+/**
+ * What a model lists at, in dollars per million tokens.
+ *
+ * models.dev quotes `cost.input` and `cost.output` in exactly those
+ * units, so the figures are copied rather than converted. Only the two
+ * that price a run are kept: cache reads and cache writes are real
+ * charges, but no agent CLI reports its cache token counts, so
+ * carrying them would be a number nothing could ever multiply.
+ *
+ * A model the snapshot does not price keeps no `cost` key at all,
+ * which is what the ledger reads as "this cannot be estimated" and
+ * charges at the assumed tier instead. A zero would read as free.
+ */
+function listPrice(model) {
+  const input = model.cost?.input;
+  const output = model.cost?.output;
+  if (typeof input !== "number" || typeof output !== "number") return {};
+  if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) return {};
+  return { cost: { input, output } };
+}
 
 /** Keep models an agent can actually write with. Image/video-only drops. */
 function outputsText(model) {
@@ -161,6 +188,17 @@ async function writeGatewayCatalog() {
     const at = GATEWAY_PINNED.indexOf(modelId);
     return at === -1 ? GATEWAY_PINNED.length : at;
   };
+  /*
+   * No prices here, deliberately.
+   *
+   * The models.dev half carries `cost` in dollars per million tokens,
+   * which is the unit every provider quotes and the unit the ledger
+   * multiplies. The Gateway's listing is a different API with its own
+   * shape and its own units, and a price copied into the wrong unit is
+   * a budget wrong by six orders of magnitude. A Gateway model without
+   * a price is charged at the assumed tier, which is the honest answer
+   * until somebody reads that response and writes the conversion down.
+   */
   const models = listed
     .filter((m) => m?.type === "language" && typeof m.id === "string" && m.id !== "")
     .map((m) => ({ id: m.id, name: typeof m.name === "string" && m.name !== "" ? m.name : m.id }))

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MODEL_GUIDANCE } from "./credentials.js";
 import {
+  MODEL_CATALOG,
   checkAgentPairing,
   customModelStringFor,
   customProviderRunError,
@@ -14,6 +15,23 @@ import {
   trustedCostUsd,
   withTrustedCost,
 } from "./models.js";
+
+test("the generated provider catalog carries usable list prices", () => {
+  for (const id of ["anthropic", "openai", "google", "openrouter", "xai"]) {
+    const provider = MODEL_CATALOG.find((entry) => entry.id === id);
+    assert.ok(provider, `${id} is missing from the catalog`);
+    const priced = provider.models.filter((model) => model.cost);
+    assert.ok(priced.length > 0, `${id} has no priced model, so token-only runs would all be assumed`);
+    assert.ok(
+      priced.every((model) =>
+        Number.isFinite(model.cost!.input)
+        && Number.isFinite(model.cost!.output)
+        && model.cost!.input >= 0
+        && model.cost!.output >= 0),
+      `${id} carries an invalid list price`,
+    );
+  }
+});
 
 test("a prefixed model string names its own provider", () => {
   assert.equal(providerForProfile("opencode", "anthropic/claude-sonnet-5")?.id, "anthropic");

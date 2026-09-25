@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BentoClient, FeatureSpend, ProjectUsage } from "@bento/api-client";
+import type { BentoClient, FeatureSpend, ProjectUsage, SwarmSpendRow } from "@bento/api-client";
 import { spendReportingTools } from "@bento/core";
-import { compareFeatureSpend, formatFeatureSpend, type SpendSort } from "./spend-format.js";
+import { compareFeatureSpend, formatFeatureSpend, spendHeadline, type SpendSort } from "./spend-format.js";
 import { createRequestGate } from "../latest-request.js";
 import { useToast } from "./Toasts.js";
 import { SpendPageSkeleton } from "./Skeleton.js";
@@ -91,12 +91,26 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
         </>
       ) : usage === null ? (
         <SpendPageSkeleton framed={false} />
-      ) : rows.length === 0 ? (
-        <p className="muted">No cards yet. Add one from the board to start tracking spend.</p>
       ) : (
         <>
-          <SpendTable rows={rows} sort={sort} onSort={setSort} />
-          <SpendCompletions client={client} projectId={projectId} tick={tick} />
+          {/*
+           * The cards, and then the swarms, each said only when there
+           * are any.
+           *
+           * An empty card list used to return early for the whole
+           * page, which hid a project's swarm spend behind whether
+           * anybody had made a card: a project worked entirely by
+           * swarms could spend forty dollars and read "no cards yet".
+           * A board can be empty of one kind of work and full of the
+           * other, so each half answers for itself.
+           */}
+          {rows.length === 0 ? (
+            <p className="muted">No cards yet. Add one from the board to start tracking spend.</p>
+          ) : (
+            <SpendTable rows={rows} sort={sort} onSort={setSort} />
+          )}
+          <SwarmSpendTable rows={usage.bySwarm ?? []} />
+          {rows.length > 0 && <SpendCompletions client={client} projectId={projectId} tick={tick} />}
         </>
       )}
     </div>
@@ -105,7 +119,7 @@ export function SpendPage({ client, projectId }: { client: BentoClient; projectI
 
 function SpendIntro({ usage }: { usage: ProjectUsage | null }) {
   const { reporting, silent } = spendReportingTools();
-  const measuredRuns = usage ? usage.totalRuns - usage.runsWithoutCost : 0;
+  const swarmRuns = (usage?.bySwarm ?? []).reduce((total, row) => total + row.runs, 0);
   return (
     <header className="spend-intro">
       <h1 className="spend-title">Spend</h1>
@@ -114,16 +128,7 @@ function SpendIntro({ usage }: { usage: ProjectUsage | null }) {
         fails before finishing reports nothing either. Any figure here is a floor rather than a full
         total.
       </p>
-      {usage &&
-        (usage.totalRuns > 0 ? (
-          <p className="spend-total">
-            {usage.runsWithoutCost > 0
-              ? `$${usage.totalUsd.toFixed(2)}+ across ${measuredRuns} of ${usage.totalRuns} runs.`
-              : `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns} run${usage.totalRuns === 1 ? "" : "s"}.`}
-          </p>
-        ) : (
-          <p className="spend-total">No agent runs yet.</p>
-        ))}
+      {usage && <p className="spend-total">{spendHeadline(usage, swarmRuns)}</p>}
       <dl className="spend-coverage">
         <div>
           <dt>Report a cost</dt>
@@ -193,6 +198,88 @@ function SpendTable({
       </tbody>
     </table>
   );
+}
+
+/**
+ * The swarms, under the cards and grouped as swarms.
+ *
+ * A swarm is one goal worked by many agents, and its runs are not
+ * forty unrelated rows: nobody wants to read forty lines to find out
+ * what one swarm cost. The tiers stay apart here for the same reason
+ * they stay apart everywhere else, and the column that matters most is
+ * the assumed one, because that is the part of the number nobody
+ * measured.
+ *
+ * Absent rather than empty when there are no swarms: a heading over
+ * nothing is a feature advertising itself on a page about money.
+ */
+export function SwarmSpendTable({ rows }: { rows: SwarmSpendRow[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <section className="spend-swarms">
+      <h2 className="spend-title">Swarms</h2>
+      <p className="spend-lede">
+        One row per swarm, not one per agent. Each figure is split by how well it is known: what the
+        tools reported, what was priced from the tokens they printed, what had to be assumed for
+        tools that report nothing, and what a subscription had already paid for.
+      </p>
+      <table className="spend-table">
+        <thead>
+          <tr>
+            <th scope="col">Swarm</th>
+            <th scope="col" className="spend-col">
+              Measured
+            </th>
+            <th scope="col" className="spend-col">
+              Estimated
+            </th>
+            <th scope="col" className="spend-col">
+              Assumed
+            </th>
+            <th scope="col" className="spend-col">
+              Notional
+            </th>
+            <th scope="col" className="spend-col">
+              Runs
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.swarmId}>
+              <td>
+                {/* The console reads the board from `board`; `mode` is
+                    a parameter nothing has ever read, so this link
+                    used to open the card board instead. */}
+                <a className="spend-card-link" href={`/?board=swarms&swarm=${row.swarmId}`} title="Open this swarm">
+                  {row.title}
+                </a>
+              </td>
+              <td className="spend-col spend-tier-cell">{dollars(row.measuredUsd)}</td>
+              <td className="spend-col spend-tier-cell">{dollars(row.estimatedUsd)}</td>
+              <td className="spend-col spend-tier-cell" title="Nobody measured this part.">
+                {dollars(row.assumedUsd)}
+              </td>
+              <td
+                className="spend-col spend-tier-cell"
+                title="A list price for work a subscription had already paid for. It counts against no budget."
+              >
+                {dollars(row.notionalUsd)}
+              </td>
+              <td className="spend-col">{row.runs}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+/** A figure, or a dash where there is nothing in that tier at all. */
+function dollars(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return "0";
+  if (usd < 0.01) return "<$0.01";
+  return `$${usd.toFixed(2)}`;
 }
 
 function titleSort(sort: SpendSort): "ascending" | "descending" | "none" {

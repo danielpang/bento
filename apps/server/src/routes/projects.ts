@@ -17,10 +17,12 @@ import {
   runEvents,
   seedDefaultPipeline,
   stages,
+  swarms,
 } from "@bento/db";
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
 import type { AppContext } from "../context.js";
+import { getBetaTester } from "../feature-flags.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { activeOrg } from "../middleware/actor.js";
@@ -1003,6 +1005,54 @@ export function projectRoutes(ctx: AppContext) {
         .where(eq(features.projectId, projectId))
         .groupBy(features.id, features.title);
 
+      /**
+       * The swarms, as swarms rather than as forty unrelated runs.
+       *
+       * A swarm's runs have no feature, so they are absent from the
+       * card rollup above and would be absent from this page
+       * altogether: the first thing a person would notice is that a
+       * swarm which cost forty dollars is nowhere on the spend page.
+       *
+       * Grouped by swarm and split by tier, because that is the only
+       * shape in which the figure means anything: a swarm's total is a
+       * measurement, an estimate, a stand in and a list price added
+       * together unless something keeps them apart, and this is the
+       * page where somebody is deciding whether the number is real.
+       */
+      /*
+       * And only for somebody who is allowed to know swarms exist.
+       *
+       * This route is not a swarm route, and the cards on it are not
+       * behind the flag, so it answers either way. The section does
+       * not: every swarm route refuses a non-tester with 404 rather
+       * than 402 precisely so the feature's existence stays unstated,
+       * and a table of swarm titles and dollar figures on the Spend
+       * page would state it, along with what the rest of the team had
+       * been spending.
+       */
+      const swarmRows = !(await getBetaTester(ctx, c))
+        ? []
+        : await db(c, ctx)
+            .select({
+              swarmId: swarms.id,
+              title: swarms.title,
+              status: swarms.status,
+              measuredUsd: swarms.spentMeasuredUsd,
+              estimatedUsd: swarms.spentEstimatedUsd,
+              assumedUsd: swarms.spentAssumedUsd,
+              notionalUsd: swarms.spentNotionalUsd,
+              runs: sql<number>`count(${agentRuns.id})`,
+              runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${agentRuns.costUsd} is null)`,
+            })
+            .from(swarms)
+            .leftJoin(
+              agentRuns,
+              and(eq(agentRuns.swarmId, swarms.id), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES])),
+            )
+            .where(eq(swarms.projectId, projectId))
+            .groupBy(swarms.id, swarms.title, swarms.status)
+            .orderBy(desc(swarms.createdAt));
+
       const totalUsd = rows.reduce((sum, row) => sum + Number(row.costUsd ?? 0), 0);
       return c.json({
         totalUsd,
@@ -1022,6 +1072,17 @@ export function projectRoutes(ctx: AppContext) {
           // the card reported a figure, which is not the same as $0.
           costUsd: row.costUsd === null ? null : Number(row.costUsd),
           runsWithoutCost: Number(row.runsWithoutCost),
+        })),
+        bySwarm: swarmRows.map((row) => ({
+          swarmId: row.swarmId,
+          title: row.title,
+          status: row.status,
+          runs: Number(row.runs),
+          runsWithoutCost: Number(row.runsWithoutCost),
+          measuredUsd: Number(row.measuredUsd),
+          estimatedUsd: Number(row.estimatedUsd),
+          assumedUsd: Number(row.assumedUsd),
+          notionalUsd: Number(row.notionalUsd),
         })),
       });
     })
