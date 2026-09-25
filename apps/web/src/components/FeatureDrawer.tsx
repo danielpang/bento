@@ -148,6 +148,8 @@ export function FeatureDrawer({
   const [publishNotes, setPublishNotes] = useState<{ text: string; failed?: boolean }[]>([]);
   /** True while a publish request is in flight, which on hosted can be a minute. */
   const [publishing, setPublishing] = useState(false);
+  /** Set before the first await, so the second Create PR button cannot start another publish. */
+  const publishingRef = useRef(false);
   /** The card's open pull requests, one per repository it was published to. */
   const [pullRequests, setPullRequests] = useState<FeaturePullRequest[]>([]);
   /**
@@ -390,14 +392,18 @@ export function FeatureDrawer({
 
   /** The on-demand half of publishing: push the branch and open the PRs now. */
   async function publishNow() {
-    setBusy(true);
-    setPublishing(true);
-    setPublishNotes([]);
-    // The request wakes the sandbox, pushes, and opens the pull request
-    // in one go, which can take a minute on a hibernated one. A silent
-    // button read as a dead one, and the repeat clicks queued nothing.
-    toast.note("Creating the pull request. It will show up here shortly.");
+    // Overview offers this twice. setState has not re-rendered yet when the
+    // second click lands, so the ref is what keeps one press from publishing twice.
+    if (publishingRef.current) return;
+    publishingRef.current = true;
     try {
+      setBusy(true);
+      setPublishing(true);
+      setPublishNotes([]);
+      // The request wakes the sandbox, pushes, and opens the pull request
+      // in one go, which can take a minute on a hibernated one. A silent
+      // button read as a dead one, and the repeat clicks queued nothing.
+      toast.note("Creating the pull request. It will show up here shortly.");
       const { published, failures, rebaseRun } = await client.publishFeature(feature.id);
       if (rebaseRun) {
         toast.note(
@@ -433,6 +439,7 @@ export function FeatureDrawer({
     } catch (err) {
       toast.fail(err);
     } finally {
+      publishingRef.current = false;
       setBusy(false);
       setPublishing(false);
     }

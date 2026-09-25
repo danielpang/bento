@@ -11,9 +11,18 @@ const DROPPED_RESPONSE_HEADERS = new Set([
  * `session.fetch` does not close an HTTP event stream when the page
  * reloads, so Command-R leaves the old stream occupying a socket and the
  * reloaded board's API calls never leave the pending state.
+ *
+ * Only plain HTTP GET and HEAD take this path. HTTPS stays on Chromium so
+ * a remote server still uses the system proxy and certificate store. A
+ * POST whose path happens to end in `/events` carries a body this proxy
+ * does not forward, so it stays on `session.fetch` too.
  */
 export function isLongLivedApiStream(url: URL, headers: Headers): boolean {
   return url.pathname.endsWith("/events") || (headers.get("accept") ?? "").includes("text/event-stream");
+}
+
+export function shouldProxyApiStream(method: string, url: URL, headers: Headers): boolean {
+  return (method === "GET" || method === "HEAD") && url.protocol === "http:" && isLongLivedApiStream(url, headers);
 }
 
 /**
@@ -34,6 +43,11 @@ export function proxyApiStream(request: Request): Promise<Response> {
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let upstream: ReturnType<typeof httpRequest> | undefined;
+    const onAbort = () => {
+      upstream?.destroy();
+      if (!settled) fail(new DOMException("The operation was aborted.", "AbortError"));
+    };
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
@@ -42,25 +56,24 @@ export function proxyApiStream(request: Request): Promise<Response> {
       else reject(error instanceof Error ? error : new Error(String(error)));
     };
     const options: RequestOptions = { method: request.method, headers, agent: false };
-    const upstream = transport(url, options, (incoming) => {
-      if (settled) {
+    upstream = transport(url, options, (incoming) => {
+      const current = upstream;
+      if (settled || !current) {
         incoming.destroy();
-        upstream.destroy();
+        current?.destroy();
         return;
       }
       settled = true;
-      resolve(streamResponse(upstream, incoming, () => request.signal.removeEventListener("abort", onAbort)));
+      resolve(streamResponse(current, incoming, () => request.signal.removeEventListener("abort", onAbort)));
     });
-    const onAbort = () => {
-      upstream.destroy();
-      if (!settled) fail(new DOMException("The operation was aborted.", "AbortError"));
-    };
+    // Attached before any abort path can destroy the socket. An error with
+    // no listener is thrown by Node, not returned to the caller.
+    upstream.on("error", fail);
     if (request.signal.aborted) {
       onAbort();
       return;
     }
     request.signal.addEventListener("abort", onAbort, { once: true });
-    upstream.on("error", fail);
     upstream.end();
   });
 }

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { Session } from "electron";
-import { isLongLivedApiStream, proxyApiStream } from "./http-proxy.js";
+import { proxyApiStream, shouldProxyApiStream } from "./http-proxy.js";
 import { assetPath, canProxyApi, isApiPath, isConsolePage } from "./security.js";
 
 const MIME: Record<string, string> = {
@@ -70,10 +70,10 @@ export async function installConsoleProtocol(options: {
     // better-auth's CSRF checks enabled, including its trusted origin check.
     headers.set("origin", origin);
     try {
-      // Event streams go through Node. session.fetch keeps an aborted HTTP
-      // stream open, and a reload then fills Chromium's per-host connection
-      // cap until the board's next requests never complete.
-      const response = isLongLivedApiStream(url, headers)
+      // HTTP event streams go through Node. session.fetch keeps an aborted
+      // HTTP stream open, and a reload then fills Chromium's per-host
+      // connection cap until the board's next requests never complete.
+      const response = shouldProxyApiStream(request.method, url, headers)
         ? await proxyApiStream(new Request(request.url, { method: request.method, headers, signal: request.signal }))
         : await session.fetch(request.url, {
           method: request.method, headers, redirect: "manual", credentials: "omit",
