@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { ExecChunk, ExecOptions, ProvisionSpec, SandboxDriver, SandboxHandle } from "./driver.js";
+import { execTimeoutMessage, type ExecChunk, type ExecOptions, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "./driver.js";
 
 /**
  * Runs commands as plain host processes in the feature's worktree.
@@ -97,6 +97,7 @@ export class LocalProcessDriver implements SandboxDriver {
 
     const timeout = opts?.timeoutMs
       ? setTimeout(() => {
+          push({ kind: "stderr", data: execTimeoutMessage(opts.timeoutMs!) });
           child.kill("SIGKILL");
         }, opts.timeoutMs)
       : null;

@@ -76,6 +76,21 @@ export type ExecChunk =
   | { kind: "stderr"; data: string }
   | { kind: "exit"; exitCode: number };
 
+/**
+ * What every driver writes to stderr when it stops an exec at
+ * ExecOptions.timeoutMs. The stopped process usually dies without
+ * saying why, so this line is the only record that the stop was ours,
+ * and the server recognizes a run limit by it (isExecTimeout). One
+ * wording, here, so a driver cannot reword it out from under that check.
+ */
+export function execTimeoutMessage(timeoutMs: number): string {
+  return `exec timeout: the command reached its ${Math.round(timeoutMs / 1000)} second limit`;
+}
+
+export function isExecTimeout(text: string): boolean {
+  return text.includes("exec timeout: ");
+}
+
 export interface ExecOptions {
   cwd?: string;
   env?: Record<string, string>;

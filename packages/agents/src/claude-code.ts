@@ -145,6 +145,13 @@ export const claudeCodeAdapter: AgentAdapter = {
     } catch {
       return null;
     }
+    /**
+     * A tool running past thirty seconds gets a tool_progress heartbeat
+     * every thirty seconds after that. They carry no words, and falling
+     * through to the stderr tail, they buried a timed out run's reason
+     * under a page of heartbeat JSON.
+     */
+    if (parsed.type === "tool_progress") return { channel: "text", text: "" };
     if (parsed.type !== "stream_event") return null;
     const delta = parsed.event?.delta;
     if (parsed.event?.type === "content_block_delta" && delta) {

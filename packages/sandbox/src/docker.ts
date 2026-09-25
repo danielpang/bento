@@ -1,7 +1,7 @@
 import type Docker from "dockerode";
 import { randomUUID } from "node:crypto";
 import { createDockerClient } from "./docker-client.js";
-import type { ExecChunk, ExecOptions, ProvisionSpec, SandboxDriver, SandboxHandle } from "./driver.js";
+import { execTimeoutMessage, type ExecChunk, type ExecOptions, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "./driver.js";
 
 const DEFAULT_IMAGE = "bento-sandbox:dev";
 
@@ -213,7 +213,7 @@ export class DockerDriver implements SandboxDriver {
 
     const timeout = opts?.timeoutMs
       ? setTimeout(() => {
-          stop(`exec timeout: the command reached its ${opts.timeoutMs! / 1000} second limit`);
+          stop(execTimeoutMessage(opts.timeoutMs!));
         }, opts.timeoutMs)
       : null;
 

@@ -8,6 +8,7 @@ import {
 } from "./agent-toolchain.js";
 import {
   collectExec,
+  execTimeoutMessage,
   type ExecChunk,
   type ExecOptions,
   type ProvisionSpec,
@@ -1168,10 +1169,7 @@ export class SpriteDriver implements SandboxDriver {
     // stopping was ours.
     const timeout = opts?.timeoutMs
       ? setTimeout(() => {
-          push({
-            kind: "stderr",
-            data: `the run hit its ${Math.round(opts.timeoutMs! / 60_000)} minute limit and was stopped`,
-          });
+          push({ kind: "stderr", data: execTimeoutMessage(opts.timeoutMs!) });
           kill();
         }, opts.timeoutMs)
       : null;
