@@ -7648,6 +7648,104 @@ a.hours-person-name:hover {
   padding: 10px 16px 0;
 }
 
+/*
+ * The merge queue, under the plan.
+ *
+ * A list rather than a table: every row is one branch and the columns
+ * would be three, two of which are usually empty. The rows keep the
+ * board's own status dot, so "landing" here and "working" on the tree
+ * read as the same kind of fact.
+ */
+.swarm-queue {
+  margin: 20px 16px 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.swarm-queue-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-queue-empty {
+  padding: 12px 14px;
+  margin: 0;
+}
+
+.swarm-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.swarm-queue-row {
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-queue-row:last-child {
+  border-bottom: 0;
+}
+
+.swarm-queue-row[data-on] {
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.swarm-queue-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.swarm-queue-row-main:disabled {
+  cursor: default;
+}
+
+.swarm-queue-row-main .status {
+  flex: 0 0 auto;
+  min-width: 78px;
+}
+
+.swarm-queue-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * What git said. Wrapped rather than scrolled sideways, because the
+ * part that answers the question is the file name at the end of the
+ * line, and pre-wrap is what keeps its own line breaks.
+ */
+.swarm-queue-error {
+  margin: 0;
+  padding: 0 14px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.swarm-queue-note {
+  margin: 0;
+  padding: 0 14px 10px;
+}
+
 .swarm-viewbar {
   display: flex;
   align-items: center;
@@ -7985,6 +8083,48 @@ a.hours-person-name:hover {
 
 .swarm-sha {
   font-family: var(--mono);
+}
+
+/*
+ * One node's history, resolver runs included. A row per event, the
+ * heading and the note on one line with the time pushed to the end,
+ * so a drawer full of them still reads as a list rather than a log.
+ */
+.swarm-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.swarm-events li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.swarm-event-note {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-event-at {
+  flex: none;
+  font-size: 12px;
+}
+
+/* The node drawer's own composer, under the transcript it belongs to. */
+.swarm-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
 }
 
 .swarm-confirm {

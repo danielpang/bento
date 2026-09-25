@@ -383,3 +383,46 @@ test("a worktree reaped and then ensured again comes back with its commits", asy
   const { stdout: head } = await run("git", ["-C", again!.worktreePath, "rev-parse", "HEAD"]);
   assert.equal(head.trim(), sha.trim(), "the branch's commits are still there after the workspace was removed");
 });
+
+test("a branch that lives only here is not asked of the remote", async () => {
+  /**
+   * The swarm's branch is the case this closes. The merge queue owns
+   * it, it exists only in this repository, and nothing pushes it until
+   * the swarm finishes, so asking origin for it fails with "couldn't
+   * find remote ref". That was turned into a sentence about remote
+   * access, and it killed every worker of every swarm on a project
+   * whose checkout has an origin, before its agent had started.
+   *
+   * The refresh below it is still worth having: a base branch the
+   * remote owns should be fetched, so a new branch starts from what
+   * main is now. Only a branch already here skips it.
+   */
+  const repo = await fixtureRepo();
+  const remote = await scratchDir("bento-worktree-remote-");
+  await run("git", ["-C", remote, "init", "-q", "--bare", "-b", "main"]);
+  await run("git", ["-C", repo, "remote", "add", "origin", remote]);
+  await run("git", ["-C", repo, "push", "-q", "origin", "main"]);
+
+  const data = await scratchDir("bento-worktree-data-");
+  const manager = new WorktreeManager(data);
+
+  // A branch the remote has never heard of, made here.
+  await manager.ensureAll([{ name: "app", localPath: repo, defaultBranch: "main" }], "swarm-1", "swarm/demo");
+  await writeFile(path.join(manager.worktreePath("swarm-1", "app"), "landed.txt"), "landed\n");
+  await run("git", ["-C", manager.worktreePath("swarm-1", "app"), "add", "-A"]);
+  await run(
+    "git",
+    ["-C", manager.worktreePath("swarm-1", "app"), "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "-qm", "landed"],
+  );
+
+  // And a second workspace branched off it, which is a swarm's worker.
+  const [prepared] = await manager.ensureAll(
+    [{ name: "app", localPath: repo, defaultBranch: "main", startFromBranch: "swarm/demo" }],
+    "swarm-1-aaaaaaaa",
+    "swarm/demo-aaaaaaaa",
+  );
+  const { stdout: head } = await run("git", ["-C", prepared!.worktreePath, "rev-parse", "--abbrev-ref", "HEAD"]);
+  assert.equal(head.trim(), "swarm/demo-aaaaaaaa");
+  const { stdout: landed } = await run("git", ["-C", prepared!.worktreePath, "show", "HEAD:landed.txt"]);
+  assert.equal(landed.trim(), "landed", "it started from the branch, with what had landed on it");
+});

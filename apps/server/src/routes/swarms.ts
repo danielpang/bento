@@ -8,9 +8,12 @@ import {
   agentRuns,
   ensureSwarmAgents,
   projects,
+  repositories,
   sandboxes,
   swarmLandings,
   swarmMessages,
+  swarmPullRequests,
+  swarmTaskEvents,
   swarmTasks,
   swarmTemplates,
   swarms,
@@ -31,6 +34,8 @@ import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
+import { workerBranchName } from "../orchestrator/swarm/branches.js";
+import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
@@ -58,6 +63,33 @@ import { enqueueRun } from "../orchestrator/queue.js";
  */
 export const RUNNER_PROJECT_REFUSAL =
   "Swarms need Bento to hold the sandboxes, because the merge queue lands one branch onto another inside them. This project runs its agents on your own machines, so it cannot run a swarm. Use a card, or move the project to server-run agents.";
+
+/**
+ * How much of the merge queue the detail carries.
+ *
+ * Enough to answer what a person opens the panel to ask: what is
+ * landing now, what is behind it, and did the last few go in. A swarm
+ * has a landing per leaf, so the whole list grows without bound and
+ * without becoming more useful.
+ *
+ * Counted per half, because the two halves answer different questions
+ * and one cap over both hid the half that matters: the front of the
+ * queue is what is happening, and the history is only how a person
+ * checks that the queue is moving at all. The console draws ten of
+ * that history, so ten is what it is sent.
+ */
+const LANDINGS_SHOWN = 20;
+const LANDINGS_HISTORY = 10;
+
+/**
+ * How much of one node's history the drawer is sent.
+ *
+ * A node that was assigned, reported, rejected and reassigned six
+ * times has an event per step, and the drawer is something a person
+ * reads rather than a log they page through. The newest are the ones
+ * that explain where the node is now.
+ */
+const TASK_EVENTS_SHOWN = 50;
 
 const createSwarm = z.object({
   projectId: z.string().uuid(),
@@ -277,7 +309,80 @@ export function swarmRoutes(ctx: AppContext) {
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
         .orderBy(desc(agentRuns.queuedAt));
-      return c.json({ swarm, tasks, activeRuns: runs });
+      /**
+       * The merge queue, as the panel draws it: what is waiting, what
+       * is landing, and the last of what has landed.
+       *
+       * Two queries rather than one, and that is the whole point. A
+       * long swarm has a landing per leaf, and one capped query ordered
+       * by position hands back the oldest rows: position is monotonic
+       * per acceptance, so a swarm on its twenty first leaf sent twenty
+       * finished rows and left out the branch that was actually landing
+       * and the conflict somebody opened the panel to find. The panel
+       * then drew "one branch at a time" over a queue it could not see.
+       *
+       * So the queue is asked for separately from the history. What has
+       * not finished, in the queue's own order and then by when the row
+       * was made so two rows sharing a position do not swap between
+       * refetches; and the last few that have, newest first. Both
+       * capped, because the cap belongs here rather than in the browser:
+       * a swarm of two hundred leaves must not send two hundred rows on
+       * every refetch.
+       */
+      const landingColumns = {
+        id: swarmLandings.id,
+        taskId: swarmLandings.taskId,
+        branchName: swarmLandings.branchName,
+        position: swarmLandings.position,
+        status: swarmLandings.status,
+        attempt: swarmLandings.attempt,
+        error: swarmLandings.error,
+        resolverRunId: swarmLandings.resolverRunId,
+        startedAt: swarmLandings.startedAt,
+        endedAt: swarmLandings.endedAt,
+      };
+      const inQueue = await db(c, ctx)
+        .select(landingColumns)
+        .from(swarmLandings)
+        .where(
+          and(
+            eq(swarmLandings.swarmId, swarm.id),
+            inArray(swarmLandings.status, ["landing", "conflicted", "queued"]),
+          ),
+        )
+        .orderBy(asc(swarmLandings.position), asc(swarmLandings.createdAt))
+        .limit(LANDINGS_SHOWN);
+      const finished = await db(c, ctx)
+        .select(landingColumns)
+        .from(swarmLandings)
+        .where(
+          and(
+            eq(swarmLandings.swarmId, swarm.id),
+            inArray(swarmLandings.status, ["landed", "failed", "cancelled"]),
+          ),
+        )
+        .orderBy(desc(swarmLandings.endedAt), desc(swarmLandings.createdAt))
+        .limit(LANDINGS_HISTORY);
+      const landings = [...inQueue, ...finished];
+      /**
+       * What the swarm published, for the chips on the header.
+       *
+       * Through the tenant-scoped handle like everything else here, so
+       * a row somebody else's swarm owns is not reachable by asking for
+       * this one. One per repository, so no cap is needed.
+       */
+      const pullRequests = await db(c, ctx)
+        .select({
+          id: swarmPullRequests.id,
+          repoUrl: swarmPullRequests.repoUrl,
+          number: swarmPullRequests.number,
+          url: swarmPullRequests.url,
+          headSha: swarmPullRequests.headSha,
+        })
+        .from(swarmPullRequests)
+        .where(eq(swarmPullRequests.swarmId, swarm.id))
+        .orderBy(asc(swarmPullRequests.createdAt));
+      return c.json({ swarm, tasks, activeRuns: runs, landings, pullRequests });
     })
     .patch("/:id", zValidator("json", updateSwarm), async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
@@ -528,6 +633,56 @@ export function swarmRoutes(ctx: AppContext) {
       },
     )
     /**
+     * One node, in the detail the drawer needs and the plan does not
+     * carry: what was committed for it, and what has happened to it.
+     *
+     * Its own route rather than fields on the plan. The commits are
+     * read out of git by grepping a branch for the task's trailer, so
+     * a plan of two hundred nodes on a project spanning three
+     * repositories would be six hundred git processes per refetch, for
+     * a list nobody is looking at until they open one node. The
+     * drawer asks for the node it opened.
+     */
+    .get("/:id/tasks/:taskId", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+
+      // Scoped to this swarm, so a task id from another team's swarm
+      // reads as not there rather than as one this caller may not read.
+      const [task] = await db(c, ctx)
+        .select()
+        .from(swarmTasks)
+        .where(and(eq(swarmTasks.id, c.req.param("taskId")), eq(swarmTasks.swarmId, swarm.id)))
+        .limit(1);
+      if (!task) return c.json({ error: "not found" }, 404);
+
+      /**
+       * What has happened to this node, resolver runs included.
+       *
+       * The events are already written by everything that touches a
+       * task: the planner creating and assigning it, the queue raising
+       * a conflict and putting an agent on it, the landing that
+       * finished it. `runId` is what makes a resolver legible here,
+       * because it is the only record on the node itself that an agent
+       * other than its worker was ever on it.
+       *
+       * Newest last, capped: a node that has been retried all day is
+       * still a drawer somebody scrolls, not a log.
+       */
+      const events = await db(c, ctx)
+        .select()
+        .from(swarmTaskEvents)
+        .where(eq(swarmTaskEvents.taskId, task.id))
+        .orderBy(desc(swarmTaskEvents.at))
+        .limit(TASK_EVENTS_SHOWN);
+      events.reverse();
+
+      const commits = await taskCommits(ctx, c, swarm, task);
+      return c.json({ task, events, commits });
+    })
+    /**
      * Marks a leaf done, because a person says so.
      *
      * The tree is an agent's to fill in and a person's to correct. A
@@ -759,6 +914,52 @@ export function swarmRoutes(ctx: AppContext) {
 }
 
 /**
+ * What one node's worker committed, read out of git.
+ *
+ * Through the `Bento-Task` trailer rather than from a column, which is
+ * the whole reason the trailer exists: landing a worker's branch
+ * rebases its commits onto the swarm's branch, every sha changes, and
+ * a list of shas recorded when the work was done would name commits
+ * that are no longer in any branch. The trailer survives the rebase,
+ * so the same question can be asked of whichever branch the work is on
+ * now.
+ *
+ * Which branch that is depends on where the node got to. Before it
+ * lands, its commits are only on its own branch; after, they are on
+ * the swarm's and its own branch may have been deleted. The swarm's
+ * branch is asked first because that is where landed work is, and the
+ * node's own branch answers for work that has not landed yet.
+ *
+ * A deployment whose driver keeps the repository inside the machine
+ * has no checkout here to read, and `commitsForTask` answers an
+ * unreadable repository with nothing rather than an error: the drawer
+ * then says no commits, which is the truthful answer for a console
+ * that cannot see them.
+ */
+async function taskCommits(
+  ctx: AppContext,
+  c: Parameters<typeof actor>[0],
+  swarm: typeof swarms.$inferSelect,
+  task: typeof swarmTasks.$inferSelect,
+): Promise<{ repository: string; sha: string; subject: string; at: string }[]> {
+  const repoRows = await db(c, ctx)
+    .select({ name: repositories.name, localPath: repositories.localPath })
+    .from(repositories)
+    .where(eq(repositories.projectId, swarm.projectId))
+    .orderBy(asc(repositories.position));
+
+  const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
+  const own = task.branchName ?? workerBranchName(swarmBranch, task.id);
+  const found: { repository: string; sha: string; subject: string; at: string }[] = [];
+  for (const repo of repoRows) {
+    const landed = await commitsForTask(repo.localPath, swarmBranch, task.id);
+    const onBranch = landed.length > 0 ? landed : await commitsForTask(repo.localPath, own, task.id);
+    found.push(...onBranch.map((commit) => ({ repository: repo.name, ...commit })));
+  }
+  return found;
+}
+
+/**
  * The template a swarm starts from when the caller named none.
  *
  * Created rather than refused, with the seeded planner and worker, for
@@ -797,6 +998,35 @@ async function defaultTemplate(
       description: "The planner and worker a swarm uses when nobody has chosen others.",
       plannerProfileId: agents.planner,
       workerProfileId: agents.worker,
+      /**
+       * Two at once on a local install, four on a hosted one.
+       *
+       * A hosted worker is its own machine, so four of them cost four
+       * machines and nothing of the person's laptop. A local worker is
+       * a worktree and a container on the machine somebody is also
+       * using: four agents each running the repository's test command
+       * is four builds competing for the same cores, and the install
+       * that is meant to be watched becomes the one nobody can type on.
+       *
+       * Written onto the template rather than read from the mode at
+       * spawn time, so an install that later joins a team keeps the
+       * shape its swarms already had, and so a person who wants four
+       * can simply set four. A number nobody can see and nobody can
+       * change is not a default, it is a rule.
+       */
+      maxWorkers: ctx.env.BENTO_MODE === "multi" ? 4 : 2,
+      /**
+       * And where those workers work, written down for the same
+       * reason the number is.
+       *
+       * A local install's agents share the repository it already has
+       * on disk, each in a worktree of its own; a hosted one gives
+       * each agent a machine holding its own clone. Recorded rather
+       * than read off the driver every time, so an install that later
+       * joins a team is told its swarms cannot keep their shape
+       * instead of quietly being given another one.
+       */
+      workerIsolation: ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree",
     })
     .returning();
   return created ?? null;

@@ -6,6 +6,7 @@ import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { createRepositorySeed } from "./publish.js";
+import { isolationRefusal, type WorkerIsolation } from "./swarm/sandbox.js";
 
 /**
  * Getting a machine with the project's repositories on one branch.
@@ -50,6 +51,16 @@ export interface ProvisionWorkspaceInput {
    * only a card has a pipeline whose stages name their agents.
    */
   agentBinaries?: readonly AgentBinary[];
+  /**
+   * What the caller's template promised about where its agents work,
+   * when the caller has one.
+   *
+   * A card has none: a stage's checkout is wherever the driver puts
+   * it, and no row anywhere says otherwise. A swarm does, because the
+   * merge queue is built around the answer, and a swarm whose shape
+   * changed underneath it would be a merge queue with nothing to move.
+   */
+  workerIsolation?: WorkerIsolation;
   /** Which rows this machine belongs to. Exactly one board's worth. */
   owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null };
   /**
@@ -65,6 +76,32 @@ export interface ProvisionWorkspaceInput {
    * old one stood and that work travels with the card.
    */
   restartedRepoUrls?: string[];
+  /**
+   * The branch a new branch here starts from, instead of each
+   * repository's default branch.
+   *
+   * A swarm's worker sets it to the swarm's branch, and that is the
+   * whole of what makes a swarm one change rather than several. A leaf
+   * branched off the repository's default branch has none of what the
+   * leaves before it landed, so its agent writes against code that is
+   * already out of date and its branch conflicts with every one of
+   * them at the merge queue. Only the branch's starting point: an
+   * existing worktree is left where its agent was working, the way a
+   * card's is.
+   */
+  startFromBranch?: string;
+  /**
+   * The commits that make `startFromBranch`, per repository, for a
+   * driver that cannot be shown a ref on this server.
+   *
+   * A sprite clones from the remote, and a swarm's branch has never
+   * been pushed to one: it exists only inside the machine the merge
+   * queue has been landing onto. So the branch travels as a bundle
+   * rather than as a name, and the sandbox fetches it before cutting
+   * the run's branch from it. Empty or absent on every driver whose
+   * checkouts are on this host, where the name is enough.
+   */
+  startFromBundles?: Map<string, { branch: string; data: Buffer }>;
   /** Progress lines, which go into the transcript of whatever asked. */
   say: (text: string) => Promise<void>;
 }
@@ -95,6 +132,18 @@ export async function provisionWorkspace(
     );
   }
 
+  /**
+   * The shape the caller promised, before anything is created.
+   *
+   * Above the duplicate check rather than below it because this is the
+   * cheapest refusal there is: a template that asserts checkouts on
+   * this server, on a driver whose sandboxes hold their own clones, is
+   * a swarm that cannot land a single branch. Better to say that than
+   * to provision the machine and find out at the merge queue.
+   */
+  const shape = isolationRefusal(input.workerIsolation ?? "sandbox", ctx.driver.provider);
+  if (shape) throw new Error(shape);
+
   const restarted = new Set(input.restartedRepoUrls ?? []);
   const prepared: PreparedRepository[] =
     ctx.driver.provider === "sprite"
@@ -104,7 +153,11 @@ export async function provisionWorkspace(
             name: r.name,
             localPath: r.localPath,
             defaultBranch: r.defaultBranch,
-            ...(r.repoUrl && restarted.has(r.repoUrl) ? { startFromBranch: r.defaultBranch } : {}),
+            ...(r.repoUrl && restarted.has(r.repoUrl)
+              ? { startFromBranch: r.defaultBranch }
+              : input.startFromBranch
+                ? { startFromBranch: input.startFromBranch }
+                : {}),
           })),
           workspaceKey,
           branch,
@@ -172,6 +225,7 @@ export async function provisionWorkspace(
       branch,
       baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
       seedBundle: seedBundles.get(r.id),
+      startBundle: input.startFromBundles?.get(r.name),
     })),
     // Local mode can share the user's own agent logins and git identity.
     ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),

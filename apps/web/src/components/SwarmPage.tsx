@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CompletionRing } from "./CompletionRing.js";
+import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
@@ -212,11 +213,29 @@ export function SwarmPage({
 
       {detail.pullRequests.length > 0 && (
         <div className="swarm-prs">
-          {detail.pullRequests.map((pr) => (
-            <a key={pr.id} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer">
-              {pr.repoUrl} #{pr.number}
-            </a>
-          ))}
+          {/*
+           * A chip is a link only when the row carried an address the
+           * console would follow. `client.ts` nulls anything that is
+           * not http or https, because an href is the one place a
+           * string the agents' side of the world wrote could run as
+           * the console. Drawn as text instead, with the reason in the
+           * tooltip, so a pull request that exists is still visible.
+           */}
+          {detail.pullRequests.map((pr) =>
+            pr.url ? (
+              <a key={pr.id} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer">
+                {pr.repoUrl} #{pr.number}
+              </a>
+            ) : (
+              <span
+                key={pr.id}
+                className="chip"
+                title="This pull request's address is not a web link, so it is shown without one."
+              >
+                {pr.repoUrl} #{pr.number}
+              </span>
+            ),
+          )}
         </div>
       )}
 
@@ -250,6 +269,23 @@ export function SwarmPage({
         <SwarmTree model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode} />
       ) : (
         <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect} />
+      )}
+
+      {/*
+       * Under the plan rather than beside it. The tree is what a person
+       * came for, and the queue is the answer to a question they only
+       * ask once something has stopped moving: whose branch is in, and
+       * what is holding the rest up. Drawn at all only once something
+       * has been accepted, so a swarm that is still planning does not
+       * carry an empty box it will never fill.
+       */}
+      {detail.landings.length > 0 && (
+        <MergeQueue
+          landings={detail.landings}
+          tasks={detail.tasks}
+          selectedId={selectedId}
+          onSelect={onSelect}
+        />
       )}
     </div>
   );
