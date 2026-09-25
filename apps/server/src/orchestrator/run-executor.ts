@@ -33,7 +33,7 @@ import {
   sandboxes,
   stages,
 } from "@bento/db";
-import { collectExec, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
@@ -985,10 +985,10 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      * The run limit stops the CLI mid-turn, so it never reports a
      * result, and the error is "stopped before reporting a result" plus
      * whatever the stream said last. The drivers name the stop in that
-     * tail (Docker "exec timeout", Sprites "minute limit"); a thrown
-     * timeout already gets this sentence from execFailureReason.
+     * tail (execTimeoutMessage); a thrown timeout already gets this
+     * sentence from execFailureReason.
      */
-    const timedOut = stoppedByRunLimit(outcome.error ?? "");
+    const timedOut = isExecTimeout(outcome.error ?? "");
     // A revoked login has exactly one fix, so the failure names it.
     // Keychain-copied tokens die whenever Claude Code rotates its
     // session, which makes this the most common auth failure.
@@ -1175,11 +1175,6 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   await ctx.boss.send("gate.evaluate", { featureId: feature.id });
 }
 
-/** Each driver's own words for stopping an exec at its timeout. */
-export function stoppedByRunLimit(error: string): boolean {
-  return /exec timeout|minute limit and was stopped/.test(error);
-}
-
 function runLimitReason(ctx: AppContext): string {
   return `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`;
 }
@@ -1189,7 +1184,7 @@ function runLimitReason(ctx: AppContext): string {
  * raw error, which is at least honest about being unexpected.
  */
 function execFailureReason(ctx: AppContext, err: unknown): string {
-  return stoppedByRunLimit(String(err))
+  return isExecTimeout(String(err))
     ? runLimitReason(ctx)
     : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
       ? "Docker is not reachable from the server. Check that Docker is running, then run again."

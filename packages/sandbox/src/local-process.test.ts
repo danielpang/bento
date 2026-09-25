@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { LocalProcessDriver } from "./local-process.js";
-import { collectExec } from "./driver.js";
+import { collectExec, isExecTimeout } from "./driver.js";
 
 test("local driver streams stdout and exit code", async () => {
   const driver = new LocalProcessDriver();
@@ -26,4 +26,21 @@ test("local driver reports missing binary as exit 127", async () => {
   });
   const result = await collectExec(driver.exec(handle, ["definitely-not-a-real-binary-xyz"]));
   assert.equal(result.exitCode, 127);
+});
+
+/**
+ * The server tells a run limit from any other death by the driver's
+ * timeout line in the stream. A local process killed without one read
+ * as "stopped before reporting a result".
+ */
+test("local driver names a timeout in the stream it kills", async () => {
+  const driver = new LocalProcessDriver();
+  const handle = await driver.provision({
+    projectId: "p1",
+    featureId: "f3",
+    hostWorkspacePath: tmpdir(),
+  });
+  const result = await collectExec(driver.exec(handle, ["sleep", "5"], { timeoutMs: 100 }));
+  assert.ok(isExecTimeout(result.stderr), result.stderr);
+  assert.notEqual(result.exitCode, 0);
 });
