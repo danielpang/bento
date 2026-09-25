@@ -68,7 +68,7 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
       and(
         eq(agentRuns.featureId, feature.id),
         eq(agentRuns.stageId, stage.id),
-        ne(agentRuns.kind, "rebase"),
+        ne(agentRuns.role, "rebase"),
       ),
     )
     .orderBy(desc(agentRuns.queuedAt))
@@ -1110,12 +1110,12 @@ async function judgeStageWork(
     .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.stageId, stage.id)))
     .orderBy(desc(agentRuns.queuedAt));
   const isJudgeRun = (run: (typeof runs)[number]) =>
-    run.agentProfileId === criterion.agentProfileId && run.kind === "judge";
+    run.agentProfileId === criterion.agentProfileId && run.role === "judge";
   const latestJudge = runs.find(isJudgeRun);
   // A rebase run is maintenance on the pull request, not new stage
   // work: counting it here made a completed verdict look stale and
   // spawned a fresh paid judge run over unchanged work.
-  const latestWork = runs.find((run) => !isJudgeRun(run) && run.kind !== "rebase");
+  const latestWork = runs.find((run) => !isJudgeRun(run) && run.role !== "rebase");
 
   // The stage's own agent has not run yet and is coming: let the work
   // happen before anyone judges it.
@@ -1165,11 +1165,12 @@ async function judgeStageWork(
   }
 
   const run = await startRunIfIdle(ctx.db, {
+    type: "pipeline" as const,
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: judgeProfile.id,
     prompt: buildJudgePrompt(stage, judgeProfile),
-    kind: "judge",
+    role: "judge",
     executor: executor === "runner" ? "runner" : "server",
   }, ctx.entitlements, ctx.analytics);
   if (run === "busy") {

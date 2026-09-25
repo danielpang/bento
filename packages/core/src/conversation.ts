@@ -26,7 +26,7 @@ export interface AgentRunPromptInput {
   /** Prior turns, already compacted, for a run that cannot resume. */
   compacted?: string;
   /** Judge runs keep their own prompt and never take a compacted history. */
-  kind?: string;
+  role?: string;
 }
 
 /**
@@ -68,11 +68,11 @@ export function quietRunMessage(label: string): string {
  */
 export function shouldHoldLiveSession(input: {
   ok: boolean;
-  kind: string;
+  role: string;
   gateType: string;
   idleSec: number;
 }): boolean {
-  return input.ok && input.kind === "task" && input.gateType === "manual" && input.idleSec > 0;
+  return input.ok && input.role === "stage" && input.gateType === "manual" && input.idleSec > 0;
 }
 
 /**
@@ -91,7 +91,7 @@ export function agentRunPrompt(input: AgentRunPromptInput): string {
   // Prepending the stage prompt would tell the agent to do the stage's
   // work again, and a cold-session rebase run that obeyed would push a
   // stage's worth of new code onto a pull request nobody asked to grow.
-  if (input.kind === "judge" || input.kind === "rebase") return followUp;
+  if (input.role === "judge" || input.role === "rebase") return followUp;
   if (input.resume && !forgetsBetweenRuns(input.cli)) return followUp;
 
   const parts = [input.stagePrompt];

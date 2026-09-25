@@ -458,7 +458,7 @@ async function getFeatureStatus(ctx: AppContext, conn: ResolvedConnection, args:
     .select({
       id: agentRuns.id,
       status: agentRuns.status,
-      kind: agentRuns.kind,
+      role: agentRuns.role,
       queuedAt: agentRuns.queuedAt,
       endedAt: agentRuns.endedAt,
       error: agentRuns.error,
