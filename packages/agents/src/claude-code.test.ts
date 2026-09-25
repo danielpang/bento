@@ -144,3 +144,12 @@ test("fake adapter round trips through its own parser", () => {
   assert.equal(outcome.ok, true);
   assert.equal(outcome.sessionId, "fake-session-1");
 });
+
+/**
+ * A long Bash call streams tool_progress heartbeats. Left to fall into
+ * the stderr tail, they were the whole "reason" a timed out run showed.
+ */
+test("claude-code adapter consumes tool_progress heartbeats without a delta or event", () => {
+  const line = `{"type":"tool_progress","tool_use_id":"toolu_1-heartbeat-16","tool_name":"Bash","parent_tool_use_id":"toolu_1","elapsed_time_seconds":510,"heartbeat":true,"session_id":"s","uuid":"u"}`;
+  assert.deepEqual(claudeCodeAdapter.parseDelta?.(line), { channel: "text", text: "" });
+});

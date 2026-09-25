@@ -981,6 +981,14 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       await ctx.boss.send("gate.evaluate", { featureId: feature.id });
       return;
     }
+    /**
+     * The run limit stops the CLI mid-turn, so it never reports a
+     * result, and the error is "stopped before reporting a result" plus
+     * whatever the stream said last. The drivers name the stop in that
+     * tail (Docker "exec timeout", Sprites "minute limit"); a thrown
+     * timeout already gets this sentence from execFailureReason.
+     */
+    const timedOut = stoppedByRunLimit(outcome.error ?? "");
     // A revoked login has exactly one fix, so the failure names it.
     // Keychain-copied tokens die whenever Claude Code rotates its
     // session, which makes this the most common auth failure.
@@ -1003,8 +1011,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     const providerAdvice = toolAdvice
       ? `${outcome.error} ${toolAdvice}`
       : withProviderOutageAdvice(outcome.error ?? "", { cli: profile.cli, model: profile.model });
-    const enriched =
-      authDead && profile.cli === "claude-code"
+    const enriched = timedOut
+      ? { ...outcome, error: runLimitReason(ctx) }
+      : authDead && profile.cli === "claude-code"
         ? {
             ...outcome,
             error: `${outcome.error} The Claude login is no longer valid: mint a fresh token with claude setup-token and save it under Agents (Claude subscription token), then run again.`,
@@ -1166,13 +1175,22 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   await ctx.boss.send("gate.evaluate", { featureId: feature.id });
 }
 
+/** Each driver's own words for stopping an exec at its timeout. */
+export function stoppedByRunLimit(error: string): boolean {
+  return /exec timeout|minute limit and was stopped/.test(error);
+}
+
+function runLimitReason(ctx: AppContext): string {
+  return `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`;
+}
+
 /**
  * The two common exec failures get sentences; anything else keeps the
  * raw error, which is at least honest about being unexpected.
  */
 function execFailureReason(ctx: AppContext, err: unknown): string {
-  return /exec timeout/.test(String(err))
-    ? `The agent hit the ${ctx.env.BENTO_RUN_TIMEOUT_MIN} minute run limit and was stopped. Send it a message to continue where it left off.`
+  return stoppedByRunLimit(String(err))
+    ? runLimitReason(ctx)
     : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
       ? "Docker is not reachable from the server. Check that Docker is running, then run again."
       : `exec failed: ${String(err)}`;

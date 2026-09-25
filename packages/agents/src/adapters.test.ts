@@ -220,6 +220,25 @@ test("cursor thinking is live output, never a successful result or raw JSON in a
   assert.doesNotMatch(result.outcome.error!, /thinking|Already committed|subtype/);
 });
 
+test("claude-code tool_progress heartbeats stay out of a timed out run's error", async () => {
+  const heartbeat = (n: number) =>
+    `{"type":"tool_progress","tool_use_id":"toolu_1-heartbeat-${n}","tool_name":"Bash","parent_tool_use_id":"toolu_1","elapsed_time_seconds":${n * 30},"heartbeat":true,"session_id":"s","uuid":"u${n}"}\n`;
+  const result = await runAgent({
+    adapter: claudeCodeAdapter,
+    argv: ["claude"],
+    exec: async function* () {
+      for (let n = 1; n <= 20; n++) yield { kind: "stdout", data: heartbeat(n) };
+      yield { kind: "stderr", data: "exec timeout: the command reached its 7200 second limit" };
+      yield { kind: "exit", exitCode: -1 };
+    },
+  });
+  assert.equal(result.outcome.ok, false);
+  assert.equal(
+    result.outcome.error,
+    "Claude Code stopped before reporting a result (exit code -1): exec timeout: the command reached its 7200 second limit",
+  );
+});
+
 test("opencode parses its NDJSON envelope", () => {
   const events = parseAll(opencodeAdapter, [
     `{"type":"step_start","timestamp":1,"sessionID":"ses_9","part":{}}`,

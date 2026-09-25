@@ -11,6 +11,7 @@ import {
   poolFailureAdvice,
   runDurationSeconds,
   runnerReportedError,
+  stoppedByRunLimit,
 } from "./run-executor.js";
 import type { Analytics } from "../analytics.js";
 import type { AppContext } from "../context.js";
@@ -344,4 +345,19 @@ test("a run that never started has no duration, and no analytics means no query"
   );
   await captureRunFinished({ analytics: null, db } as unknown as AppContext, "run-1", "failed");
   assert.equal(queried, false);
+});
+
+/**
+ * The drivers do not throw at the run limit: they stop the process and
+ * say so in the stream, so the error arrives as "stopped before
+ * reporting a result" with the driver's words in its tail.
+ */
+test("a run stopped at its limit is recognized in either driver's words", () => {
+  assert.ok(
+    stoppedByRunLimit(
+      "Claude Code stopped before reporting a result (exit code -1): exec timeout: the command reached its 7200 second limit",
+    ),
+  );
+  assert.ok(stoppedByRunLimit("pi stopped before reporting a result (exit code -1): the run hit its 120 minute limit and was stopped"));
+  assert.ok(!stoppedByRunLimit("Claude Code stopped before reporting a result (exit code 1): Bash timed out after 120000ms"));
 });
