@@ -30,7 +30,7 @@ import {
   visibleProjectFilter,
 } from "../access.js";
 import { githubForOrganization } from "../github.js";
-import { branchExists, detectDefaultBranch, githubRemoteOf } from "../orchestrator/repo-remote.js";
+import { branchExists, detectDefaultBranch, githubRemoteOf, linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { duplicateRepositoryLocation, sameRepositoryLocation } from "../repository-identity.js";
 
@@ -468,7 +468,12 @@ export function projectRoutes(ctx: AppContext) {
         .from(repositories)
         .where(eq(repositories.projectId, c.req.param("id")))
         .orderBy(asc(repositories.position));
-      return c.json(rows);
+      // Publishing reads a missing remote from the checkout, but Create PR
+      // stays disabled until the stored row has one. Linking here is what
+      // lets a local project, including one whose origin was added later,
+      // reach that button.
+      if (ctx.env.BENTO_MODE === "multi") return c.json(rows);
+      return c.json(await linkGitHubRemotes(db(c, ctx), rows));
     })
     /**
      * Line format:

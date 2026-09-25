@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { Session } from "electron";
+import { isLongLivedApiStream, proxyApiStream } from "./http-proxy.js";
 import { assetPath, canProxyApi, isApiPath, isConsolePage } from "./security.js";
 
 const MIME: Record<string, string> = {
@@ -69,11 +70,16 @@ export async function installConsoleProtocol(options: {
     // better-auth's CSRF checks enabled, including its trusted origin check.
     headers.set("origin", origin);
     try {
-      const response = await session.fetch(request.url, {
-        method: request.method, headers, redirect: "manual", credentials: "omit",
-        bypassCustomProtocolHandlers: true, signal: request.signal,
-        ...(request.method !== "GET" && request.method !== "HEAD" ? { body: await request.arrayBuffer() } : {}),
-      });
+      // Event streams go through Node. session.fetch keeps an aborted HTTP
+      // stream open, and a reload then fills Chromium's per-host connection
+      // cap until the board's next requests never complete.
+      const response = isLongLivedApiStream(url, headers)
+        ? await proxyApiStream(new Request(request.url, { method: request.method, headers, signal: request.signal }))
+        : await session.fetch(request.url, {
+          method: request.method, headers, redirect: "manual", credentials: "omit",
+          bypassCustomProtocolHandlers: true, signal: request.signal,
+          ...(request.method !== "GET" && request.method !== "HEAD" ? { body: await request.arrayBuffer() } : {}),
+        });
       if (url.pathname === "/api/auth/sign-out" && response.ok) await options.signedOut();
       const outgoing = new Headers(response.headers);
       // The installed console updates with the desktop release. Comparing it

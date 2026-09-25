@@ -571,6 +571,24 @@ export function FeatureDrawer({
       : runActive
         ? "An agent is working this card. Publish when it finishes."
         : undefined;
+  /**
+   * The card opens on Overview. The per-repository row lives on Changes,
+   * which is also where Fix conflicts sits, so a stage set to publish
+   * still needs the action where the rest of the next step is.
+   */
+  const reposKnown = loadedId === feature.id;
+  const missingRemote = reposKnown && projectRepos.length > 0 && projectRepos.every((repo) => !repo.repoUrl);
+  const noRepositories = reposKnown && projectRepos.length === 0;
+  const overviewPublishDisabled = publishDisabled || detailsPending || missingRemote || noRepositories;
+  const overviewPublishReason = !feature.branchName
+    ? "Run an agent on this card first."
+    : canPublish === false
+      ? "Needs a GitHub connection. Save a GitHub token under Settings, GitHub."
+      : missingRemote
+        ? "This repository has no GitHub remote configured."
+        : noRepositories
+          ? "This project has no repositories yet. Add one under project settings."
+          : publishDisabledReason;
   const resolveDisabled = busy || runActive;
   const resolveDisabledReason = runActive
     ? "An agent is working this card. Fix conflicts when it finishes."
@@ -864,7 +882,25 @@ export function FeatureDrawer({
                 Start pipeline
               </button>
             )}
+            {showPullRequests && (
+              <button
+                type="button"
+                className="btn"
+                disabled={overviewPublishDisabled}
+                title={overviewPublishReason}
+                onClick={() => void publishNow()}
+              >
+                {publishing ? "Creating..." : "Create PR"}
+              </button>
+            )}
           </div>
+          {showPullRequests && publishNotes.length > 0 && (
+            publishNotes.map((note, i) => (
+              <p key={i} className={note.failed ? "warn" : "muted"}>
+                {note.text}
+              </p>
+            ))
+          )}
           {needsRecovery && stageAgent && !finished && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
           {needsRecovery && !stageAgent && !finished && <button className="btn btn-primary recovery-action" onClick={showConversation}>Review the last run</button>}
           {/* Why the last run failed, where the eye lands. The same
