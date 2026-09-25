@@ -56,6 +56,7 @@ import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants }
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
+import { unbilledReason } from "../unbilled-reasons.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
@@ -1350,11 +1351,18 @@ async function finishRun(
    * winner's terminal status and stamped a spurious failure line onto a
    * run that had succeeded.
    */
+  // A listed unbilled reason (see UNBILLED_REASONS): Fly or the sprite
+  // driver failed before the agent started. The start time stays. The
+  // billable flag is what the hours sum reads, and the billing hook
+  // below is skipped so the deployment does not write a usage row
+  // either. A throw after the agent is running stays billable.
+  const exempt = !outcome.ok && unbilledReason(outcome.error) !== null;
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
       status: outcome.ok ? "succeeded" : "failed",
       endedAt: new Date(),
+      billable: !exempt,
       exitCode,
       /**
        * Only when the agent actually said. Overwriting with null on a
@@ -1374,7 +1382,7 @@ async function finishRun(
   // The run is over, so its gateway token is too. Behind the CAS, so it
   // fires exactly once; a failure here never fails the close.
   await revokeRunGrant(ctx, runId);
-  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed");
+  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", !exempt);
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -1684,13 +1692,19 @@ export async function captureRunFinished(
  * compare-and-set; the runner report route calls captureRunFinished
  * directly, because its runs bill the runner's own machine and have no
  * onRunFinished to announce.
+ *
+ * `meter` is false when the run failed for an unbilled reason. The
+ * hook is how a deployment records what a run cost, so not calling it
+ * is how that run stays off the quota. Analytics still hears that the
+ * run ended.
  */
 async function announceRunFinished(
   ctx: AppContext,
   runId: string,
   status: "succeeded" | "failed" | "cancelled",
+  meter = true,
 ): Promise<void> {
-  const announce = ctx.entitlements?.onRunFinished;
+  const announce = meter ? ctx.entitlements?.onRunFinished : undefined;
   if (announce) {
     void announce(runId).catch((err: unknown) => {
       console.warn(`could not record what run ${runId} cost:`, err);

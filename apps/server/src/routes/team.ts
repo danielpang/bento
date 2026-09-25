@@ -79,7 +79,10 @@ export function teamRoutes(ctx: AppContext) {
      * which cards made it. Hours are summed per feature from the
      * period start the plan already uses (the org's billing
      * anniversary, not the first of the calendar month). A run that
-     * straddles the boundary only counts the overlap.
+     * straddles the boundary only counts the overlap. A run with
+     * billable false is left out: Fly or the sprite driver could not
+     * create the machine, so that time is not agent hours. Time after
+     * the agent started stays billable and still counts.
      *
      * Scoped to the active organization, so a foreign tenant asking
      * for another team's period sees 404, not an empty list of
@@ -105,12 +108,14 @@ export function teamRoutes(ctx: AppContext) {
           title: features.title,
           startedAt: agentRuns.startedAt,
           endedAt: agentRuns.endedAt,
+          billable: agentRuns.billable,
         })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))
         .where(
           and(
             eq(features.organizationId, membership.organizationId),
+            eq(agentRuns.billable, true),
             isNotNull(agentRuns.startedAt),
             lt(agentRuns.startedAt, to),
             or(isNull(agentRuns.endedAt), gt(agentRuns.endedAt, from)),

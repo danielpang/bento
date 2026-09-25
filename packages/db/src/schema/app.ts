@@ -545,8 +545,17 @@ export const agentRuns = pgTable(
   numTurns: integer("num_turns"),
   error: text("error"),
   queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+  /** When the run was claimed. Null on a run that never left the queue. */
   startedAt: timestamp("started_at", { withTimezone: true }),
   endedAt: timestamp("ended_at", { withTimezone: true }),
+  /**
+   * Whether this run counts toward the agent-hours limit. False when
+   * the run failed for a reason in UNBILLED_REASONS: Fly or the sprite
+   * driver could not create the machine, so the agent never started.
+   * True for every other run, including ones still in progress. The
+   * start time stays either way. The hours sum reads this column.
+   */
+  billable: boolean("billable").notNull().default(true),
   },
   // "This card's runs, newest first" is the shape of every conversation,
   // resume, and session query; without this it is a table scan per ask.
