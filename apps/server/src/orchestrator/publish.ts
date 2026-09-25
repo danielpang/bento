@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { and, eq } from "drizzle-orm";
-import { featurePullRequests, features } from "@bento/db";
+import { featurePullRequests, features, swarmPullRequests } from "@bento/db";
 import { STAGE_ARTIFACT_DIR } from "@bento/core";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { RepositoryBundle } from "@bento/sandbox";
@@ -192,33 +192,201 @@ export async function publishFeatureBranches(
     onlyRepositories?: string[];
   } = {},
 ): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
+  const result = await publishBranches(publisher, {
+    branch: args.branch,
+    title: args.featureTitle,
+    body: options.draft
+      ? [
+          `Opened by Bento for "${args.featureTitle}".`,
+          "",
+          "This pull request is a draft because the branch could not be rebased onto the base branch automatically. It may have merge conflicts until the branch is rebased.",
+        ].join("\n")
+      : `Opened by Bento for "${args.featureTitle}".`,
+    repositories: args.repositories,
+    protectedBranchRefusal: (branch) =>
+      `the card's branch is named ${branch}, which is a protected branch. Rename the feature branch, then run again.`,
+    ...options,
+    /**
+     * The lease this push holds: the commit Bento itself last pushed
+     * to the branch. A lease read from the remote at push time can
+     * only ever agree with the remote, so it protected nothing; a
+     * commit somebody pushed in between must fail the push, not be
+     * rewritten away. Null (rows from before this column, or a first
+     * push) falls back to the read-at-push behavior.
+     */
+    lease: async (repo) => {
+      const [known] = await db
+        .select({ headSha: featurePullRequests.headSha })
+        .from(featurePullRequests)
+        .where(
+          and(
+            eq(featurePullRequests.featureId, args.featureId),
+            eq(featurePullRequests.repoUrl, repo.repoUrl),
+            // This branch's lease, not the card's. A card that merged
+            // one branch and started another has a row for each, and
+            // holding the old branch's head against a push to the new
+            // one would fail every publish after the first rotation.
+            eq(featurePullRequests.branch, args.branch),
+          ),
+        )
+        .limit(1);
+      return known?.headSha ?? null;
+    },
+    record: async (repo, pr) => {
+      await db
+        .insert(featurePullRequests)
+        .values({
+          featureId: args.featureId,
+          repositoryId: repo.id,
+          repoUrl: repo.repoUrl,
+          branch: args.branch,
+          number: pr.prNumber,
+          url: pr.url,
+          headSha: pr.headSha,
+        })
+        .onConflictDoUpdate({
+          target: [featurePullRequests.featureId, featurePullRequests.repoUrl, featurePullRequests.branch],
+          set: { number: pr.prNumber, url: pr.url, headSha: pr.headSha, updatedAt: new Date() },
+        });
+    },
+  });
+
+  // The feature's own pr_number mirrors the first repository's, the way
+  // a project mirrors its first repository. Anything with room for one
+  // pull request shows that one.
+  const first = result.published[0];
+  if (first) {
+    await db.update(features).set({ prNumber: first.prNumber }).where(eq(features.id, args.featureId));
+  }
+
+  return result;
+}
+
+/**
+ * Pushes a swarm's branch and opens one pull request per repository it
+ * touched.
+ *
+ * The same mechanism as a card's, deliberately: the bundle export, the
+ * trusted checkout, the lease held against the commit Bento itself last
+ * pushed, and the write-up stripping are all things a swarm needs
+ * exactly as a card needs them, and a second copy of any of them is a
+ * second place for the push credential to be got wrong. What differs is
+ * only which rows record the result and what the body says.
+ *
+ * The row keeps the head that was pushed, which is the lease the next
+ * publish of the same swarm holds. A swarm that is reopened in phase 4
+ * will publish again onto the same branch, and a push that could not
+ * tell its own last commit from somebody else's would force over a
+ * reviewer's.
+ */
+export async function publishSwarmBranches(
+  db: Db,
+  publisher: GitHubPublisher,
+  args: {
+    swarmId: string;
+    title: string;
+    body: string;
+    branch: string;
+    repositories: PublishableRepository[];
+  },
+  options: {
+    remoteUrl?: (owner: string, repo: string) => string;
+    includeStageNotes?: boolean;
+  } = {},
+): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
+  return publishBranches(publisher, {
+    branch: args.branch,
+    title: args.title,
+    body: args.body,
+    repositories: args.repositories,
+    protectedBranchRefusal: (branch) =>
+      `this swarm's branch is named ${branch}, which is a protected branch. Nothing was pushed.`,
+    ...options,
+    lease: async (repo) => {
+      const [known] = await db
+        .select({ headSha: swarmPullRequests.headSha })
+        .from(swarmPullRequests)
+        .where(and(eq(swarmPullRequests.swarmId, args.swarmId), eq(swarmPullRequests.repoUrl, repo.repoUrl)))
+        .limit(1);
+      return known?.headSha ?? null;
+    },
+    record: async (repo, pr) => {
+      await db
+        .insert(swarmPullRequests)
+        .values({
+          swarmId: args.swarmId,
+          repositoryId: repo.id,
+          repoUrl: repo.repoUrl,
+          number: pr.prNumber,
+          url: pr.url,
+          headSha: pr.headSha,
+        })
+        .onConflictDoUpdate({
+          target: [swarmPullRequests.swarmId, swarmPullRequests.repoUrl],
+          set: { number: pr.prNumber, url: pr.url, headSha: pr.headSha, updatedAt: new Date() },
+        });
+    },
+  });
+}
+
+/** A repository that got as far as having a remote to push to. */
+type PublishableRemote = PublishableRepository & { repoUrl: string };
+
+/**
+ * One branch, into every repository it has commits in.
+ *
+ * Both boards go through here, for the reason both boards provision
+ * through one function: everything below this line is about a branch
+ * and a credential rather than about a card or a swarm, and a fix to
+ * any of it has to reach both. What a caller brings is the lease to
+ * hold, the row to write, and the words for the refusals.
+ *
+ * One repository failing does not stop the others: a pull request that
+ * did open is still worth recording, and the run itself already
+ * succeeded. Failures are returned rather than thrown.
+ */
+async function publishBranches(
+  publisher: GitHubPublisher,
+  plan: {
+    branch: string;
+    title: string;
+    body: string;
+    repositories: PublishableRepository[];
+    /** What to say when the branch is one nothing may push to. */
+    protectedBranchRefusal: (branch: string) => string;
+    lease: (repo: PublishableRemote) => Promise<string | null>;
+    record: (
+      repo: PublishableRemote,
+      pr: { prNumber: number; url: string; headSha: string },
+    ) => Promise<void>;
+    remoteUrl?: (owner: string, repo: string) => string;
+    includeStageNotes?: boolean;
+    draft?: boolean;
+    onlyRepositories?: string[];
+  },
+): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
   const published: PublishedPullRequest[] = [];
   const failures: { name: string; reason: string }[] = [];
 
   // Refused for the whole batch rather than per repository: if the
   // branch is the trunk, nothing about this run should reach a remote.
-  if (PROTECTED_BRANCHES.has(args.branch.toLowerCase())) {
+  if (PROTECTED_BRANCHES.has(plan.branch.toLowerCase())) {
     // "all repositories" rather than the branch in the repo-name slot:
     // the transcript renders these as "Could not publish <name>: ...".
     return {
       published,
-      failures: [
-        {
-          name: "any repository",
-          reason: `the card's branch is named ${args.branch}, which is a protected branch. Rename the feature branch, then run again.`,
-        },
-      ],
+      failures: [{ name: "any repository", reason: plan.protectedBranchRefusal(plan.branch) }],
     };
   }
 
-  const only = options.onlyRepositories ? new Set(options.onlyRepositories) : null;
+  const only = plan.onlyRepositories ? new Set(plan.onlyRepositories) : null;
 
-  for (const repo of args.repositories) {
+  for (const repo of plan.repositories) {
     if (only && !only.has(repo.name)) continue;
-    // Publishing only happens when a stage asked for it, so a
+    // Publishing only happens when something asked for it, so a
     // repository that cannot be published is worth saying out loud
-    // rather than skipping: the person who turned the mode on is
-    // waiting for a pull request that will otherwise never appear.
+    // rather than skipping: the person waiting for a pull request is
+    // otherwise waiting for one that will never appear.
     if (!repo.repoUrl) {
       failures.push({
         name: repo.name,
@@ -227,6 +395,7 @@ export async function publishFeatureBranches(
       });
       continue;
     }
+    const remoteRepo: PublishableRemote = { ...repo, repoUrl: repo.repoUrl };
     const parsed = parseRepoUrl(repo.repoUrl);
     if (!parsed) {
       failures.push({ name: repo.name, reason: `not a GitHub remote: ${repo.repoUrl}` });
@@ -252,88 +421,38 @@ export async function publishFeatureBranches(
       // The persisted URL is parsed only as an owner/repository identity.
       // A mutable worktree origin is never consulted, so an agent cannot
       // redirect this credential to a server it controls.
-      const remote = options.remoteUrl?.(parsed.owner, parsed.repo)
+      const remote = plan.remoteUrl?.(parsed.owner, parsed.repo)
         ?? `https://github.com/${parsed.owner}/${parsed.repo}.git`;
-      /**
-       * The lease this push holds: the commit Bento itself last pushed
-       * to the branch. A lease read from the remote at push time can
-       * only ever agree with the remote, so it protected nothing; a
-       * commit somebody pushed in between must fail the push, not be
-       * rewritten away. Null (rows from before this column, or a first
-       * push) falls back to the read-at-push behavior.
-       */
-      const [known] = await db
-        .select({ headSha: featurePullRequests.headSha })
-        .from(featurePullRequests)
-        .where(
-          and(
-            eq(featurePullRequests.featureId, args.featureId),
-            eq(featurePullRequests.repoUrl, repo.repoUrl),
-            // This branch's lease, not the card's. A card that merged
-            // one branch and started another has a row for each, and
-            // holding the old branch's head against a push to the new
-            // one would fail every publish after the first rotation.
-            eq(featurePullRequests.branch, args.branch),
-          ),
-        )
-        .limit(1);
-      const pushedHead = await pushBundle(bundle, remote, repo.defaultBranch, args.branch, token, {
-        includeStageNotes: options.includeStageNotes === true,
+      const expectedRemoteHead = await plan.lease(remoteRepo);
+      const pushedHead = await pushBundle(bundle, remote, repo.defaultBranch, plan.branch, token, {
+        includeStageNotes: plan.includeStageNotes === true,
         label: `${parsed.owner}/${parsed.repo}`,
-        expectedRemoteHead: known?.headSha ?? null,
-        skipAncestryCheck: options.draft === true,
+        expectedRemoteHead,
+        skipAncestryCheck: plan.draft === true,
       });
 
       const pr = await publisher.ensurePullRequest({
         owner: parsed.owner,
         repo: parsed.repo,
-        head: args.branch,
+        head: plan.branch,
         base: repo.defaultBranch,
-        title: args.featureTitle,
-        body: options.draft
-          ? [
-              `Opened by Bento for "${args.featureTitle}".`,
-              "",
-              "This pull request is a draft because the branch could not be rebased onto the base branch automatically. It may have merge conflicts until the branch is rebased.",
-            ].join("\n")
-          : `Opened by Bento for "${args.featureTitle}".`,
-        draft: options.draft === true,
+        title: plan.title,
+        body: plan.body,
+        draft: plan.draft === true,
       });
 
-      await db
-        .insert(featurePullRequests)
-        .values({
-          featureId: args.featureId,
-          repositoryId: repo.id,
-          repoUrl: repo.repoUrl,
-          branch: args.branch,
-          number: pr.prNumber,
-          url: pr.url,
-          headSha: pushedHead,
-        })
-        .onConflictDoUpdate({
-          target: [featurePullRequests.featureId, featurePullRequests.repoUrl, featurePullRequests.branch],
-          set: { number: pr.prNumber, url: pr.url, headSha: pushedHead, updatedAt: new Date() },
-        });
+      await plan.record(remoteRepo, { prNumber: pr.prNumber, url: pr.url, headSha: pushedHead });
 
       published.push({
         name: repo.name,
         repoUrl: repo.repoUrl,
         prNumber: pr.prNumber,
         url: pr.url,
-        ...(options.draft ? { draft: true } : {}),
+        ...(plan.draft ? { draft: true } : {}),
       });
     } catch (err) {
       failures.push({ name: repo.name, reason: reasonOf(err) });
     }
-  }
-
-  // The feature's own pr_number mirrors the first repository's, the way
-  // a project mirrors its first repository. Anything with room for one
-  // pull request shows that one.
-  const first = published[0];
-  if (first) {
-    await db.update(features).set({ prNumber: first.prNumber }).where(eq(features.id, args.featureId));
   }
 
   return { published, failures };
@@ -402,7 +521,7 @@ async function pushBundle(
      */
     if (options.expectedRemoteHead && actual && actual !== options.expectedRemoteHead) {
       throw new Error(
-        `the branch moved on GitHub since Bento last pushed it (someone pushed commits to ${branch}). Pull those commits into the card's branch, or push manually, then try again.`,
+        `the branch moved on GitHub since Bento last pushed it (someone pushed commits to ${branch}). Pull those commits into this branch, or push manually, then try again.`,
       );
     }
     await run(

@@ -659,8 +659,8 @@ const SWARM = {
 
 test("a swarm and everything under it belongs to one organization", async () => {
   await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name)
-     values ($1,'u1','org-a','Ship a feature')`,
+    `insert into swarm_templates (id,owner_id,organization_id,name,worker_isolation)
+     values ($1,'u1','org-a','Ship a feature','sandbox')`,
     [SWARM.template],
   );
   await pool.query(

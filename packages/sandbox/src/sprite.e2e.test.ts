@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { SpritesClient } from "@fly/sprites";
 import { writeFileCommand } from "@bento/agents";
 import { AGENT_BINARIES, TOOLCHAIN_LEGACY_MARKER, TOOLCHAIN_STAMPS } from "./agent-toolchain.js";
@@ -53,6 +58,7 @@ const workspaceKey = `e2e-${runTag}`;
 
 /** Long: a cold sprite installs ten CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
+const exec = promisify(execFile);
 
 const DSH_MOCK_SERVER = `import { appendFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -207,6 +213,74 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.deepEqual(failed, [], `provisioning could not install every CLI: ${failed.join(" ")}`);
     assert.deepEqual(await present(), expected);
     up = true;
+  });
+
+  await t.test("a real sprite accepts a credential-free landing bundle with a head lease", { skip: needsSprite() }, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "bento-sprite-landing-"));
+    try {
+      const repo = path.join(root, "repo");
+      const seedPath = path.join(root, "seed.bundle");
+      await exec("git", ["init", "--quiet", "-b", "main", repo]);
+      await writeFile(path.join(repo, "base.txt"), "base\n");
+      const identity = {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Bento test",
+        GIT_AUTHOR_EMAIL: "bento@localhost",
+        GIT_COMMITTER_NAME: "Bento test",
+        GIT_COMMITTER_EMAIL: "bento@localhost",
+      };
+      await exec("git", ["-C", repo, "add", "."]);
+      await exec("git", ["-C", repo, "commit", "--quiet", "-m", "base"], { env: identity });
+      await exec("git", ["-C", repo, "bundle", "create", seedPath, "main"]);
+
+      await driver.provision({
+        projectId: "sprite-e2e",
+        workspaceKey,
+        hostWorkspacePath: "/unused",
+        agentBinaries: [],
+        repositories: [
+          {
+            name: "landing-e2e",
+            cloneUrl: "https://example.invalid/landing-e2e.git",
+            baseBranch: "main",
+            branch: "swarm/e2e",
+            seedBundle: await readFile(seedPath),
+          },
+        ],
+      });
+
+      const made = await shell(
+        [
+          "cd /workspace/landing-e2e",
+          "before=$(git rev-parse HEAD)",
+          "git config user.name 'Bento test'",
+          "git config user.email 'bento@localhost'",
+          "printf 'landed\\n' > landed.txt",
+          "git add landed.txt",
+          "git commit --quiet -m landed",
+          "printf '%s\\n%s\\n' \"$before\" \"$(git rev-parse HEAD)\"",
+        ].join(" && "),
+      );
+      assert.equal(made.exitCode, 0, made.stderr);
+      const [before, landedHead] = made.out.split("\n");
+      assert.ok(before && landedHead);
+
+      const bundle = await driver.exportRepository(handle, "landing-e2e", "main", { selfContained: true });
+      assert.ok(bundle);
+      assert.equal(bundle.headSha, landedHead);
+      assert.equal((await shell(`git -C /workspace/landing-e2e reset --hard ${before}`)).exitCode, 0);
+
+      const imported = await driver.importRepository(handle, "landing-e2e", bundle, {
+        branch: "swarm/e2e",
+        expectedHeadSha: before,
+      });
+      assert.deepEqual(imported, { ok: true, headSha: landedHead });
+      const verified = await shell("git -C /workspace/landing-e2e status --porcelain && cat /workspace/landing-e2e/landed.txt");
+      assert.equal(verified.exitCode, 0, verified.stderr);
+      assert.equal(verified.out, "landed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   /**

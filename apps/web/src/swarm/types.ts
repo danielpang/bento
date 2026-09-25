@@ -64,11 +64,57 @@ export interface SwarmSpend {
   assumedUsd: number;
 }
 
-/** A commit a worker pushed to its own branch, before the landing. */
+/**
+ * A commit made for one node, found by its `Bento-Task` trailer.
+ *
+ * Read out of git rather than stored: landing rebases a worker's
+ * commits onto the swarm's branch and every sha changes, so a list
+ * recorded when the work was done would name commits no branch has.
+ * `repository` is which of the project's repositories it is in, which
+ * matters as soon as a project spans more than one.
+ */
 export interface TaskCommit {
   sha: string;
   message: string;
   at: string;
+  repository?: string;
+}
+
+/**
+ * Something that happened to one node.
+ *
+ * `kind` is the server's own word (created, assigned, status_changed,
+ * attention_raised, landed, note), and `runId` is what makes a
+ * resolver visible: it is the only record on the node itself that an
+ * agent other than its worker was ever put on it.
+ *
+ * `detail` is loosely typed on purpose. It is coordinator bookkeeping
+ * and agent written, so it is rendered as text the way a flag's value
+ * is, never interpreted.
+ */
+export interface SwarmTaskEvent {
+  id: string;
+  kind: string;
+  at: string;
+  fromStatus: string | null;
+  toStatus: string | null;
+  runId: string | null;
+  detail: Record<string, unknown> | null;
+}
+
+/**
+ * What the drawer asks for when a node is opened.
+ *
+ * Its own request rather than fields on the plan: the commits are read
+ * by grepping a branch per repository, which is a git process per node
+ * per repository, and nobody is looking at them until a node is open.
+ *
+ *   GET /api/swarms/:id/tasks/:taskId  ->  SwarmNodeDetail
+ */
+export interface SwarmNodeDetail {
+  taskId: string;
+  commits: TaskCommit[];
+  events: SwarmTaskEvent[];
 }
 
 export interface SwarmTask {
@@ -161,9 +207,19 @@ export interface SwarmLanding {
   taskId: string;
   branchName: string | null;
   position: number;
-  status: "queued" | "landing" | "landed" | "conflict" | "failed";
+  /**
+   * The server's own words, not a translation of them. The panel picks
+   * the label; a second vocabulary here was how "conflict" and
+   * "conflicted" came to mean the same thing in two files, and a row
+   * whose status matched neither drew as nothing at all.
+   */
+  status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
   attempt: number;
   error: string | null;
+  /** The agent reconciling this branch, when one was started. */
+  resolverRunId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
 }
 
 /**
@@ -186,7 +242,16 @@ export interface SwarmPullRequest {
   id: string;
   repoUrl: string;
   number: number;
-  url: string;
+  /**
+   * Where to send somebody who clicks it, or null.
+   *
+   * Null is not "no pull request": it is a url the console refused to
+   * link to. The row is written on a path agents are on, and an
+   * `href` is not inert, so `client.ts` runs what the server sent
+   * through `externalHttpUrl` and anything that is not an http address
+   * arrives here as null. The chip then draws as text.
+   */
+  url: string | null;
   headSha: string | null;
 }
 
@@ -219,6 +284,16 @@ export interface SwarmTemplate {
   /** What the template expects a leaf to cost, by tier. */
   perLeaf: SwarmSpend;
   maxWorkers: number;
+  /**
+   * Where this template's agents work: a machine each, holding its own
+   * clone, or worktrees of the repository already on the server.
+   *
+   * Recorded on the template rather than read off the deployment, so a
+   * swarm made on a local install keeps its shape if that install
+   * later joins a team, and is refused rather than quietly reshaped if
+   * the deployment cannot run it that way.
+   */
+  workerIsolation: "sandbox" | "worktree";
   maxBudgetUsd: number | null;
   timeLimitMin: number | null;
   /** Leaves this template's planner typically produces, for the estimate. */

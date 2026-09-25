@@ -14,8 +14,12 @@ import {
   projects,
   runMigrations,
   sandboxes,
+  repositories,
   swarmLandings,
+  swarmMessages,
+  swarmTaskEvents,
   swarmTasks,
+  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -29,6 +33,7 @@ import { loadEnv } from "../env.js";
 import { createFeatureFlags } from "../feature-flags.js";
 import { mintRunGrant } from "../mcp/grants.js";
 import { tickSwarm } from "../orchestrator/swarm/coordinator.js";
+import { takeNodeMessages } from "../orchestrator/swarm/node-messages.js";
 import { BENTO_SWARM_SERVER_ID } from "../mcp/swarm-server.js";
 import { RUNNER_PROJECT_REFUSAL } from "./swarms.js";
 
@@ -49,6 +54,8 @@ let ctx: AppContext;
 let app: ReturnType<typeof createApp>;
 let db: Db;
 let projectId: string;
+/** The project's repository on disk, for the route that reads git. */
+let repoDir: string;
 /** Jobs the routes queued, instead of a real pg-boss. */
 let queued: { queue: string; data: unknown; options?: unknown }[];
 /** Every statement the pool ran, so a stream can be held to its budget. */
@@ -62,7 +69,7 @@ before(async () => {
   await admin.end();
   await runMigrations(testUrl);
 
-  const repoDir = await mkdtemp(path.join(tmpdir(), "bento-swarm-repo-"));
+  repoDir = await mkdtemp(path.join(tmpdir(), "bento-swarm-repo-"));
   await run("git", ["-C", repoDir, "init", "-b", "main"]);
   await writeFile(path.join(repoDir, "README.md"), "fixture\n");
   await run("git", ["-C", repoDir, "add", "-A"]);
@@ -297,6 +304,81 @@ test("the swarm reads back with its plan, and the strip reads back with its numb
 
   // A project that is not there is not a filter, it is a 404.
   assert.equal((await app.request("/api/swarms?projectId=11111111-1111-1111-1111-111111111111")).status, 404);
+});
+
+test("the detail carries the merge queue, the queue first and in its own order", async () => {
+  const swarm = await createSwarm();
+  const [first] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "landed one", status: "done", position: 0 })
+    .returning();
+  const [second] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "stuck one", status: "working", position: 1 })
+    .returning();
+  const [third] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "behind it", status: "done", position: 2 })
+    .returning();
+  await db.insert(swarmLandings).values([
+    { swarmId: swarm.id, taskId: third!.id, branchName: "swarm/s-3", position: 2, status: "queued" },
+    { swarmId: swarm.id, taskId: second!.id, branchName: "swarm/s-2", position: 1, status: "conflicted", attempt: 2, error: "CONFLICT (content): both changed one file" },
+    { swarmId: swarm.id, taskId: first!.id, branchName: "swarm/s-1", position: 0, status: "landed", attempt: 1, endedAt: new Date() },
+  ]);
+
+  const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
+    landings: { taskId: string; status: string; attempt: number; error: string | null; branchName: string | null }[];
+  };
+  assert.equal(detail.landings.length, 3);
+  assert.deepEqual(
+    detail.landings.map((row) => row.taskId),
+    [second!.id, third!.id, first!.id],
+    "what has not finished, in the queue's own order, and then the history behind it",
+  );
+  assert.equal(detail.landings[0]!.status, "conflicted", "the server's own word, not a translation of it");
+  assert.equal(detail.landings[0]!.attempt, 2);
+  assert.match(detail.landings[0]!.error ?? "", /both changed one file/);
+  assert.equal(detail.landings[2]!.branchName, "swarm/s-1");
+});
+
+test("the merge queue is still visible on a swarm with more landings than the cap", async () => {
+  /**
+   * A long swarm, which is the shape that made this blind.
+   *
+   * position is monotonic per acceptance, so one capped query ordered
+   * by position hands back the oldest rows: a swarm on its twenty first
+   * leaf sent twenty landings that had already finished and left out
+   * the branch that was actually landing and the conflict somebody
+   * opened the panel to find. The panel then drew "one branch at a
+   * time" over a queue whose front it could not see.
+   */
+  const swarm = await createSwarm();
+  for (let index = 0; index < 22; index += 1) {
+    const [task] = await db
+      .insert(swarmTasks)
+      .values({ swarmId: swarm.id, title: `leaf ${index}`, status: "done", position: index })
+      .returning();
+    await db.insert(swarmLandings).values({
+      swarmId: swarm.id,
+      taskId: task!.id,
+      branchName: `swarm/s-${index}`,
+      position: index,
+      status: index < 20 ? "landed" : index === 20 ? "conflicted" : "queued",
+      attempt: 1,
+      ...(index < 20 ? { endedAt: new Date(2026, 0, 1, index) } : {}),
+      ...(index === 20 ? { error: "CONFLICT (content): both changed one file" } : {}),
+    });
+  }
+
+  const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
+    landings: { status: string; branchName: string | null; error: string | null }[];
+  };
+  const byStatus = (status: string) => detail.landings.filter((row) => row.status === status);
+  assert.equal(byStatus("conflicted").length, 1, "the row the whole queue is waiting on");
+  assert.equal(byStatus("conflicted")[0]!.branchName, "swarm/s-20");
+  assert.equal(byStatus("queued").length, 1, "and what is behind it");
+  assert.equal(byStatus("landed").length, 10, "with the history capped rather than filling the answer");
+  assert.ok(detail.landings.length <= 30, "and the whole thing still bounded");
 });
 
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {
@@ -770,6 +852,179 @@ async function readSwarm(id: string) {
   const [row] = await db.select().from(swarms).where(eq(swarms.id, id));
   return row!;
 }
+
+/* ---------------------------------------------------------------- *
+ * One node, opened.
+ * ---------------------------------------------------------------- */
+
+/** The project's checkout, for the tests that need git to answer. */
+async function withRepository<T>(run: () => Promise<T>): Promise<T> {
+  const [row] = await db
+    .insert(repositories)
+    .values({ projectId, name: "app", localPath: repoDir, defaultBranch: "main", position: 0 })
+    .returning();
+  try {
+    return await run();
+  } finally {
+    await db.delete(repositories).where(eq(repositories.id, row!.id));
+  }
+}
+
+test("a node answers with the commits its trailer names and the history it has", async () => {
+  /**
+   * The commits are found through the `Bento-Task` trailer rather than
+   * through a column, which is what makes them survive the rebase a
+   * landing performs. So the test writes a real commit with a real
+   * trailer on a real branch and asks the route for it.
+   */
+  const swarm = await createSwarm();
+  const [task] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Totals", branchName: `${swarm.branchName}-aaaaaaaa` })
+    .returning();
+  await db.insert(swarmTaskEvents).values([
+    { taskId: task!.id, kind: "assigned", toStatus: "assigned" },
+    {
+      taskId: task!.id,
+      kind: "attention_raised",
+      runId: swarm.plannerRunId,
+      detail: { conflict: "shared.txt: both modified", resolver: "started" },
+    },
+  ]);
+
+  const git = (...args: string[]) =>
+    run("git", ["-C", repoDir, ...args], {
+      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@b.dev", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@b.dev" },
+    });
+  await git("checkout", "-q", "-b", task!.branchName!);
+  await writeFile(path.join(repoDir, "totals.ts"), "export const total = 1;\n");
+  await git("add", "-A");
+  await git("commit", "-qm", `Line item totals\n\nBento-Task: ${task!.id}`);
+  await git("checkout", "-q", "main");
+
+  const body = await withRepository(async () => {
+    const res = await app.request(`/api/swarms/${swarm.id}/tasks/${task!.id}`);
+    assert.equal(res.status, 200);
+    return (await res.json()) as {
+      task: { id: string };
+      commits: { repository: string; sha: string; subject: string }[];
+      events: { kind: string; runId: string | null; detail: Record<string, unknown> | null }[];
+    };
+  });
+
+  assert.equal(body.task.id, task!.id);
+  assert.equal(body.commits.length, 1, "the commit carrying this task's trailer, and only that one");
+  assert.equal(body.commits[0]!.subject, "Line item totals");
+  assert.equal(body.commits[0]!.repository, "app");
+  assert.deepEqual(
+    body.events.map((event) => event.kind),
+    ["assigned", "attention_raised"],
+    "oldest first, so the drawer reads down",
+  );
+  assert.equal(body.events[1]!.runId, swarm.plannerRunId, "and a resolver's run is named on the node it served");
+
+  await git("branch", "-qD", task!.branchName!);
+});
+
+test("a node of another swarm is not this swarm's to read", async () => {
+  const mine = await createSwarm();
+  const theirs = await createSwarm({ title: "Another" });
+  const [task] = await db.insert(swarmTasks).values({ swarmId: theirs.id, title: "Theirs" }).returning();
+  assert.equal((await app.request(`/api/swarms/${mine.id}/tasks/${task!.id}`)).status, 404);
+});
+
+test("a message to a node is queued against that node, and is refused for a node that is not there", async () => {
+  /**
+   * The composer in the node drawer sends here. The row carries the
+   * task, which is what keeps it out of the planner's wake: the planner
+   * is woken by messages addressed to the plan, and this one is for
+   * whichever agent works the leaf next.
+   */
+  const swarm = await createSwarm();
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Totals" }).returning();
+
+  const res = await post(`/api/swarms/${swarm.id}/messages`, { text: "use the existing helper", taskId: task!.id });
+  assert.equal(res.status, 201);
+
+  const rows = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.taskId, task!.id);
+  assert.equal(rows[0]!.status, "queued");
+
+  const stranger = await post(`/api/swarms/${swarm.id}/messages`, {
+    text: "nope",
+    taskId: "11111111-1111-1111-1111-111111111111",
+  });
+  assert.equal(stranger.status, 404, "a node that is not this swarm's is not there");
+});
+
+test("a node's messages are handed to one run, oldest first, and never twice", async () => {
+  /**
+   * The other end of the composer. A message that stayed queued after
+   * an agent read it would be shown to the next one as well, which on
+   * a leaf that keeps being sent back is the same note every time; and
+   * one handed to two runs would be two agents acting on it.
+   */
+  const swarm = await createSwarm();
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Totals" }).returning();
+  const [other] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Elsewhere" }).returning();
+
+  await post(`/api/swarms/${swarm.id}/messages`, { text: "first", taskId: task!.id });
+  await post(`/api/swarms/${swarm.id}/messages`, { text: "second", taskId: task!.id });
+  await post(`/api/swarms/${swarm.id}/messages`, { text: "not this leaf", taskId: other!.id });
+  await post(`/api/swarms/${swarm.id}/messages`, { text: "for the plan" });
+
+  const taken = await takeNodeMessages(db, task!.id, swarm.plannerRunId);
+  assert.deepEqual(
+    taken.map((message) => message.text),
+    ["first", "second"],
+    "this node's, in the order they were typed",
+  );
+
+  const again = await takeNodeMessages(db, task!.id, swarm.plannerRunId);
+  assert.deepEqual(again, [], "a delivered message is not handed to the next run as well");
+
+  const rows = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
+  const byText = new Map(rows.map((row) => [row.text, row]));
+  assert.equal(byText.get("first")!.status, "delivered");
+  assert.equal(byText.get("first")!.runId, swarm.plannerRunId);
+  assert.equal(byText.get("not this leaf")!.status, "queued", "another node's is left where it was");
+  assert.equal(byText.get("for the plan")!.status, "queued", "and the planner's is still the planner's");
+});
+
+test("a local install's default template runs its agents in worktrees, two at a time", async () => {
+  /**
+   * The shape is written onto the template rather than read off the
+   * driver every time a run starts. A container per worker is a
+   * container on the machine somebody is also using, which is why a
+   * local install wants worktrees and two of them; recording it is
+   * what stops that shape changing under a swarm if the install later
+   * joins a team.
+   */
+  const swarm = await createSwarm({ title: "Shape" });
+  const [template] = await db.select().from(swarmTemplates).where(eq(swarmTemplates.id, swarm.templateId!));
+  assert.equal(template!.name, "Default");
+  assert.equal(template!.workerIsolation, "worktree");
+  assert.equal(template!.maxWorkers, 2);
+});
+
+test("a template states its shape, and takes the one it is given", async () => {
+  const made = await post("/api/swarm-templates", { name: "Hosted shape", workerIsolation: "sandbox" });
+  assert.equal(made.status, 201);
+  const row = (await made.json()) as { workerIsolation: string };
+  assert.equal(row.workerIsolation, "sandbox", "a caller that states one is taken at its word");
+
+  const implied = await post("/api/swarm-templates", { name: "Local shape" });
+  assert.equal(implied.status, 201);
+  assert.equal(
+    ((await implied.json()) as { workerIsolation: string }).workerIsolation,
+    "worktree",
+    "and this deployment's own shape otherwise",
+  );
+
+  const nonsense = await post("/api/swarm-templates", { name: "Nope", workerIsolation: "vm" });
+  assert.equal(nonsense.status, 400, "a shape nothing can run is not stored");
+});
 
 /**
  * A refusal that leaves a swarm behind is worse than a refusal.

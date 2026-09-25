@@ -1,9 +1,12 @@
+import { externalHttpUrl } from "../external-url.js";
 import { buildSwarmModel } from "./layout.js";
 import { SWARM_TEMPLATES, draftSwarm, seedSwarms, summarise } from "./fixtures.js";
 import type {
   NewSwarmInput,
   Swarm,
   SwarmDetail,
+  SwarmLanding,
+  SwarmNodeDetail,
   SwarmPullRequest,
   SwarmStatus,
   SwarmSummary,
@@ -59,6 +62,24 @@ export interface SwarmApi {
    * it should say so.
    */
   markTaskDone(swarmId: string, taskId: string): Promise<void>;
+  /**
+   * One node's commits and its history, asked for when it is opened.
+   *
+   * Not part of the plan the page already holds, because reading the
+   * commits means grepping a branch per repository for the node's
+   * trailer: a plan of two hundred nodes would pay for that on every
+   * refetch, for a list nobody looks at until a drawer is open.
+   */
+  getNode(swarmId: string, taskId: string): Promise<SwarmNodeDetail>;
+  /**
+   * Sends a message to the agent working one node.
+   *
+   * The same door the planner's messages go through, with the node
+   * named. Queued rather than delivered: a headless agent cannot hear
+   * mid turn, so the coordinator folds what is waiting into the next
+   * one. The composer says so rather than implying it arrived.
+   */
+  messageTask(swarmId: string, taskId: string, text: string): Promise<void>;
   /**
    * The swarm's own event stream, for as long as one is open.
    *
@@ -189,6 +210,20 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         void text;
       });
     },
+    getNode(swarmId, taskId) {
+      const detail = find(swarmId);
+      const task = detail?.tasks.find((row) => row.id === taskId);
+      // The fixtures carry commits on the task itself, which is where
+      // they lived before the node route existed. No events: nothing
+      // in the fixtures writes one.
+      return Promise.resolve({ taskId, commits: task?.commits ?? [], events: [] });
+    },
+    messageTask(swarmId, taskId, text) {
+      void swarmId;
+      void taskId;
+      void text;
+      return Promise.resolve();
+    },
     createPullRequest(swarmId) {
       const detail = find(swarmId);
       const pr: SwarmPullRequest = {
@@ -273,16 +308,62 @@ export interface WireTask {
   endedAt: string | null;
 }
 
+/** One row of the merge queue, as the detail sends it. */
+export interface WireLanding {
+  id: string;
+  taskId: string;
+  branchName: string | null;
+  position: number;
+  status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
+  attempt: number;
+  error: string | null;
+  resolverRunId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
 export interface WireDetail {
   swarm: WireSwarm;
   tasks: WireTask[];
   activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
+  /**
+   * Optional, because a detail from a server that predates the merge
+   * queue has none and a panel that read undefined.length would take
+   * the whole page down over a field that is only ever informational.
+   */
+  landings?: WireLanding[];
+  /** Optional for the same reason the landings are. */
+  pullRequests?: WirePullRequest[];
+}
+
+/** One node, as its own route sends it. */
+export interface WireNode {
+  commits?: { repository?: string; sha: string; subject: string; at: string }[];
+  events?: {
+    id: string;
+    kind: string;
+    at: string;
+    fromStatus: string | null;
+    toStatus: string | null;
+    runId: string | null;
+    detail: Record<string, unknown> | null;
+  }[];
+}
+
+/** One pull request a finished swarm opened, as the detail sends it. */
+export interface WirePullRequest {
+  id: string;
+  repoUrl: string;
+  number: number;
+  url: string;
+  headSha: string | null;
 }
 
 export interface WireTemplate {
   id: string;
   name: string;
   description: string;
+  workerIsolation?: "sandbox" | "worktree";
   maxWorkers: number;
   budgetUsd: string | null;
   timeLimitMin: number | null;
@@ -455,6 +536,9 @@ export function toTemplate(row: WireTemplate): SwarmTemplate {
     assumedUsdPerLeaf: 0,
     perLeaf: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 },
     maxWorkers: row.maxWorkers,
+    // A server that predates the column says nothing, which reads the
+    // same way a template that asserts nothing does.
+    workerIsolation: row.workerIsolation ?? "sandbox",
     maxBudgetUsd: row.budgetUsd === null ? null : Number(row.budgetUsd),
     timeLimitMin: row.timeLimitMin,
     typicalLeaves: 0,
@@ -549,6 +633,13 @@ export function httpSwarmApi(
     async markTaskDone(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/done`);
     },
+    async getNode(swarmId, taskId) {
+      const node = await call<WireNode>(`/api/swarms/${swarmId}/tasks/${taskId}`);
+      return toNode(taskId, node);
+    },
+    async messageTask(swarmId, taskId, text) {
+      await post(`/api/swarms/${swarmId}/messages`, { text, taskId });
+    },
     streamSwarm(swarmId, onEvent, onReconnect) {
       // No EventSource is not an error: the console still works, it
       // just reads the board when it is asked to rather than as it
@@ -581,13 +672,82 @@ export function toDetail(detail: WireDetail): SwarmDetail {
   return {
     swarm: toSwarm(detail.swarm, working),
     tasks: detail.tasks.map(toTask),
-    // The merge queue, the ledger and this swarm's pull requests are
-    // not served yet. Empty, so nothing is drawn rather than drawn
-    // wrong; the surfaces that read them render only when they hold
-    // something.
-    landings: [],
+    landings: (detail.landings ?? []).map(toLanding),
+    // The ledger is not served yet. Empty, so nothing is drawn rather
+    // than drawn wrong; the panel that reads it renders only when it
+    // holds something.
     ledger: [],
-    pullRequests: [],
+    pullRequests: (detail.pullRequests ?? []).map(toPullRequest),
+  };
+}
+
+/**
+ * One pull request the swarm opened.
+ *
+ * The url is checked rather than copied. Everything else on this row
+ * is drawn as text, and text is safe whatever wrote it; a url becomes
+ * an `href`, and an `href` with a `javascript:` scheme runs on the
+ * console's origin with the session that is open. `externalHttpUrl`
+ * answers with an address or with null, and the header draws a chip
+ * without a link for null.
+ */
+export function toPullRequest(row: WirePullRequest): SwarmPullRequest {
+  return {
+    id: row.id,
+    repoUrl: row.repoUrl,
+    number: row.number,
+    url: externalHttpUrl(row.url),
+    headSha: row.headSha,
+  };
+}
+
+/**
+ * One node's commits and history, as the drawer reads them.
+ *
+ * The server calls a commit's first line its subject, which is git's
+ * word for it; the console has called it the message since the card
+ * board, so the translation happens here rather than in the drawer.
+ */
+export function toNode(taskId: string, node: WireNode): SwarmNodeDetail {
+  return {
+    taskId,
+    commits: (node.commits ?? []).map((commit) => ({
+      sha: commit.sha,
+      message: commit.subject,
+      at: commit.at,
+      ...(commit.repository ? { repository: commit.repository } : {}),
+    })),
+    events: (node.events ?? []).map((event) => ({
+      id: event.id,
+      kind: event.kind,
+      at: event.at,
+      fromStatus: event.fromStatus,
+      toStatus: event.toStatus,
+      runId: event.runId,
+      detail: event.detail,
+    })),
+  };
+}
+
+/**
+ * One merge queue row.
+ *
+ * Copied field for field rather than spread, so a column added to the
+ * server's response reaches the page only once somebody has decided
+ * what it means here.
+ */
+function toLanding(landing: WireLanding): SwarmLanding {
+  return {
+    id: landing.id,
+    taskId: landing.taskId,
+    branchName: landing.branchName,
+    position: landing.position,
+    status: landing.status,
+    attempt: landing.attempt,
+    error: landing.error,
+    resolverRunId: landing.resolverRunId,
+    startedAt: landing.startedAt,
+    endedAt: landing.endedAt,
   };
 }
 
