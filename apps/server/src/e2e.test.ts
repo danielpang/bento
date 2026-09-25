@@ -320,6 +320,23 @@ test("local mode can manage machine credentials", async () => {
   assert.deepEqual(await json(await app.request("/api/secrets")), { secrets: [], canManage: true });
 });
 
+test("a saved GitHub token lets local mode publish", async () => {
+  const created = await json<{ id: string }>(
+    await app.request("/api/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "GITHUB_TOKEN", value: "github_pat_local_publish" }),
+    }),
+  );
+  try {
+    const status = await json<{ canPublish: boolean }>(await app.request("/api/github/status"));
+    assert.equal(status.canPublish, true);
+  } finally {
+    const removed = await app.request(`/api/secrets/${created.id}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+  }
+});
+
 /**
  * A run with no credential fails before the agent starts, and the
  * reason has to reach a person: it lands in the transcript (the one
@@ -5249,6 +5266,30 @@ test("a repository stored without a remote is linked the next time it publishes"
   // Remembered, so gate criteria and hosted clones see the same link.
   const reread = await ctx.db.select().from(repositories).where(eq(repositories.projectId, project.id));
   assert.equal(reread[0]?.repoUrl, "https://github.com/acme/backfill");
+});
+
+test("listing repositories links a GitHub remote added after the project", { timeout: 60_000 }, async () => {
+  const checkout = await fixtureRepo("listed-later");
+  const project = await json<{ id: string; repoUrl: string | null }>(
+    await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Listed later", localPath: checkout }),
+    }),
+  );
+  await unassignStages(project.id);
+  assert.equal(project.repoUrl, null);
+
+  await run("git", ["-C", checkout, "remote", "add", "origin", "git@github.com:acme/listed-later.git"]);
+  const rows = await json<{ repoUrl: string | null }[]>(
+    await app.request(`/api/projects/${project.id}/repositories`),
+  );
+  assert.equal(rows[0]?.repoUrl, "https://github.com/acme/listed-later");
+
+  const again = await json<{ repoUrl: string | null }[]>(
+    await app.request(`/api/projects/${project.id}/repositories`),
+  );
+  assert.equal(again[0]?.repoUrl, "https://github.com/acme/listed-later");
 });
 
 test("the server pushes each repository the agent committed in", { timeout: 90_000 }, async () => {

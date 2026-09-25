@@ -103,6 +103,16 @@ try {
   await page.getByText("Arrived over SSE", { exact: true }).first().waitFor({ timeout: 15_000 });
   console.log("PASS: live board updates through the streaming protocol proxy");
 
+  // The board stream is open. Reloading must drop it. One leaked HTTP
+  // stream is enough to fill Chromium's per-host cap after a few tries,
+  // and the next document then paints with no API data behind it.
+  for (let attempt = 1; attempt <= 7; attempt += 1) {
+    await page.reload();
+    await page.getByText("Arrived over SSE", { exact: true }).first().waitFor({ timeout: 15_000 });
+    assert.equal((await api("/api/health")).mode, "local");
+  }
+  console.log("PASS: reloading the live board keeps the API reachable");
+
   // Historical artifact fixture. No active run is inserted or agent spawned.
   const stage = (await database.query("SELECT s.id, s.slug, s.name, s.default_agent_profile_id FROM stages s JOIN pipelines p ON p.id = s.pipeline_id WHERE p.project_id = $1 ORDER BY s.position LIMIT 1", [project.id])).rows[0];
   const run = (await database.query("INSERT INTO agent_runs (feature_id, stage_id, agent_profile_id, status, prompt) VALUES ($1, $2, $3, 'succeeded', 'Historical desktop fixture') RETURNING id", [rows.rows[0].id, stage.id, stage.default_agent_profile_id])).rows[0];

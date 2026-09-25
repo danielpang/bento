@@ -41,7 +41,7 @@ export function githubRoutes(ctx: AppContext) {
     return c.json({
       configured: Boolean(ctx.githubApp && ctx.env.GITHUB_APP_SLUG),
       connected: Boolean(installation),
-      canPublish: Boolean(await githubConnectionFor(ctx, organizationId)),
+      canPublish: Boolean(await githubConnectionFor(ctx, organizationId, db(c, ctx))),
       canManage: membership ? canManage(membership.role) : false,
       installation: installation ?? null,
       // Installing is gated on the caller's own GitHub identity, so the
