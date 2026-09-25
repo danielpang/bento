@@ -177,7 +177,7 @@ async function resolveLocalCheckout(input: string): Promise<{ path: string } | {
     return {
       error: trimmed.startsWith("~")
         ? `The server's home is ${os.homedir()}, so ${trimmed} means ${expanded}, and nothing is there. Type the full path to the checkout instead.`
-        : `${expanded} does not exist on the machine running the server. If the server runs in a container, use the path the checkout is mounted at inside it.`,
+        : `${expanded} does not exist on the machine running the server. For Docker Compose, set BENTO_REPOS in .env to an absolute directory containing this checkout, then recreate the server container.`,
     };
   }
   return { path: expanded };

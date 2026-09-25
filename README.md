@@ -57,7 +57,7 @@ Open **[http://localhost:4400](http://localhost:4400)**.
 
 That builds the server, the console, and the sandbox image agents run in, starts Postgres, applies migrations, and serves. Everything else you configure in the console.
 
-Agents work in sandboxes that the server creates through your Docker daemon, so each repository has to exist inside the server container at the same path it has on your machine. You cannot mount a directory into a container that is already running. Set `BENTO_REPOS` so your code can be accessed in the container.
+Agents work in sandboxes that the server creates through your Docker daemon, so each repository has to exist inside the server container at the same path it has on your machine. Set `BENTO_REPOS` to an absolute directory containing your checkouts. If you add or change it after starting Compose, run `docker compose up -d --no-build --no-deps --force-recreate server` to apply the mount.
 
 ## Building your first feature
 
