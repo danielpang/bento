@@ -449,9 +449,9 @@ export function TeamSettings({ client }: { client: BentoClient }) {
  *
  * Opt in, and fail closed: an agent can read anything its sandbox can,
  * so a team handling sensitive code may want its runs to have no route
- * out at all. The deployment has to provide that network, and the
- * control says so rather than offering a switch that quietly does
- * nothing.
+ * out at all. The deployment has to provide that network. Where it
+ * does not, the card is hidden rather than showing a switch nobody can
+ * turn on, unless the team already has it on and needs to turn it off.
  */
 function NetworkPolicyCard() {
   const toast = useToast();
@@ -469,6 +469,7 @@ function NetworkPolicyCard() {
 
   if (!ready) return <SettingsCardSkeleton rows={2} />;
   if (!state) return null;
+  if (!state.supported && !state.restrictNetwork) return null;
 
   async function toggle(next: boolean) {
     setBusy(true);
@@ -493,22 +494,23 @@ function NetworkPolicyCard() {
     <section className="section settings-card">
       <h3 className="settings-title">Agent network access</h3>
       <p className="muted">
-        Agents can reach the internet from the sandbox, so they can install packages and read docs.
-        Block it to run them with no route out.
+        Agents can reach the internet by default. Turn this on to block outbound traffic from
+        their sandboxes, except what your server's restricted network allows.
       </p>
       {!state.supported && (
         <p className="muted">
-          This cannot be turned on until the server has BENTO_SANDBOX_RESTRICTED_NETWORK.
+          This server no longer has a restricted network, so agent runs will fail until you turn
+          this off.
         </p>
       )}
       <label className="gate-check">
         <input
           type="checkbox"
           checked={state.restrictNetwork}
-          disabled={busy || !state.canEdit || (!state.supported && !state.restrictNetwork)}
+          disabled={busy || !state.canEdit}
           onChange={(e) => void toggle(e.target.checked)}
         />
-        <span className="gate-check-text">Block network access for every agent in this team.</span>
+        <span className="gate-check-text">Block network access for this team's agents</span>
       </label>
       {!state.canEdit && <p className="muted">Only an owner or admin can change this.</p>}
     </section>

@@ -137,10 +137,10 @@ export function accountSettings(
             list("Agent network access", [
               choice("status", policy.restrictNetwork ? "Restricted network" : "Unrestricted network", () =>
                 read("Network policy", [
-                  "Restricted agents run with no route to the internet. This can prevent package installs and documentation access.",
-                  policy.supported
-                    ? "This deployment supports network restrictions."
-                    : "This deployment does not support network restrictions.",
+                  "Agents can reach the internet by default. Restricting blocks outbound traffic from their sandboxes, except what your server's restricted network allows.",
+                  ...(policy.supported
+                    ? []
+                    : ["This server no longer has a restricted network, so agent runs will fail until you allow outbound traffic again."]),
                   "Changes apply to newly provisioned sandboxes.",
                 ]),
               ),
