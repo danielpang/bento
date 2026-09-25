@@ -75,10 +75,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
     "logo": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCA0MCA0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTMyLjgzNzcgMTcuMjgyQzMzLjIxMjcgMTYuMjUgMzMuMzA3MiAxNS4yMTggMzMuMjEyNyAxNC4xODc1QzMzLjExOTcgMTMuMTU3MSAzMi43NDQ3IDEyLjEyNTEgMzIuMjc1MiAxMS4xODc2QzMxLjQzMjIgOS43ODIwOSAzMC4yMTI3IDguNjU3MSAyOC44MDcyIDguMDAwMUMyNy4zMDcyIDcuMzQ0NjEgMjUuNzEyNyA3LjE1NzExIDI0LjExOTcgNy41MzIxMUMyMy4zNjk4IDYuNzgyMTIgMjIuNTI1MyA2LjEyNTEyIDIxLjU4NzggNS42NTcxM0MyMC42NTAzIDUuMTg5MTMgMTkuNTI1MyA1LjAwMDEzIDE4LjQ5NDggNS4wMDAxM0MxNi44ODUxIDQuOTkwNzQgMTUuMzEyNSA1LjQ4MjQ2IDEzLjk5NDggNi40MDcxMkMxMi42ODI0IDcuMzQzMTEgMTEuNzQ0OSA4LjY1NzEgMTEuMjc1NCAxMC4xNTcxQzEwLjE1MDQgMTAuNDM3NiA5LjIxMjg5IDEwLjkwNzEgOC4yNzUzOSAxMS40Njk2QzcuNDMyNCAxMi4xMjUxIDYuNzc1NDEgMTIuOTY5NiA2LjIxMjkxIDEzLjgxMjZDNS4zNjk5MiAxNS4yMTk1IDUuMDg3OTIgMTYuODEyNSA1LjI3NTQyIDE4LjQwN0M1LjQ2Mzk5IDE5Ljk5NjggNi4xMTYwNSAyMS40OTYgNy4xNTA0IDIyLjcxOEM2Ljc5NjA4IDIzLjcwODYgNi42Njc5NSAyNC43NjU5IDYuNzc1NDEgMjUuODEyNEM2Ljg2OTkxIDI2Ljg0NDQgNy4yNDQ5IDI3Ljg3NDkgNy43MTI5IDI4LjgxMjRDOC41NTczOSAzMC4yMTk0IDkuNzc1MzggMzEuMzQ0NCAxMS4xODI0IDMxLjk5OTlDMTIuNjgyNCAzMi42NTY5IDE0LjI3NTMgMzIuODQ0NCAxNS44Njk4IDMyLjQ2OTRDMTYuNjE5OCAzMy4yMTk0IDE3LjQ2MjggMzMuODc0OSAxOC40MDAzIDM0LjM0NDRDMTkuMzM3OCAzNC44MTM5IDIwLjQ2MjggMzQuOTk5OSAyMS40OTQ4IDM0Ljk5OTlDMjMuMTA0MyAzNS4wMDk3IDI0LjY3NjkgMzQuNTE4NSAyNS45OTQ3IDMzLjU5NDRDMjcuMzA3MiAzMi42NTY5IDI4LjI0NDcgMzEuMzQ0NCAyOC43MTI3IDI5Ljg0NDRDMjkuNzcxOSAyOS42NDMyIDMwLjc2ODIgMjkuMTkzNCAzMS42MTk3IDI4LjUzMTlDMzIuNDYyNyAyNy44NzQ5IDMzLjIxMjcgMjcuMTI0OSAzMy42ODIyIDI2LjE4NzRDMzQuNTI1MSAyNC43ODE5IDM0LjgwNzEgMjMuMTg3NSAzNC42MTk2IDIxLjU5NDVDMzQuNDMyMiAyMCAzMy44Njk3IDE4LjUwMTUgMzIuODM3NyAxNy4yODJaTTIxLjU4NzggMzMuMDMwNEMyMC4wODc4IDMzLjAzMDQgMTguOTYyOCAzMi41NjA5IDE3LjkzMjMgMzEuNzE3OUMxNy45MzIzIDMxLjcxNzkgMTguMDI1MyAzMS42MjM0IDE4LjExOTggMzEuNjIzNEwyNC4xMTk3IDI4LjE1NTRDMjQuMjg2MiAyOC4wODAzIDI0LjQxOTYgMjcuOTQ2OSAyNC40OTQ3IDI3Ljc4MDRDMjQuNTY5OCAyNy42MzYgMjQuNjAyMSAyNy40NzMxIDI0LjU4NzcgMjcuMzEwOVYxOC44NzVMMjcuMTE5NyAyMC4zNzVWMjcuMzEyNEMyNy4xNDU1IDI4LjA1NDcgMjcuMDIxNSAyOC43OTQ1IDI2Ljc1NSAyOS40ODc4QzI2LjQ4ODUgMzAuMTgxIDI2LjA4NSAzMC44MTM0IDI1LjU2ODcgMzEuMzQ3M0MyNS4wNTIzIDMxLjg4MTEgMjQuNDMzNyAzMi4zMDU0IDIzLjc0OTcgMzIuNTk0OUMyMy4wNjU4IDMyLjg4NDMgMjIuMzMwNSAzMy4wMzE0IDIxLjU4NzggMzMuMDMwNFpNOS40OTQ4OCAyNy44NzQ5QzguODM3ODkgMjYuNzQ5OSA4LjU1NzM5IDI1LjQzNzQgOC44Mzc4OSAyNC4xMjVDOC44Mzc4OSAyNC4xMjUgOC45MzIzOSAyNC4yMTk1IDkuMDI1MzkgMjQuMjE5NUwxNS4wMjUzIDI3LjY4NzRDMTUuMTY5MyAyNy43NjM4IDE1LjMzMjUgMjcuNzk2NiAxNS40OTQ4IDI3Ljc4MTlDMTUuNjgyMyAyNy43ODE5IDE1Ljg2OTggMjcuNzgxOSAxNS45NjI4IDI3LjY4NzRMMjMuMjc1MyAyMy40Njk1VjI2LjM3NDlMMTcuMTgyMyAyOS45Mzc0QzE2LjU1MDYgMzAuMzA0MiAxNS44NTI3IDMwLjU0MjcgMTUuMTI4NyAzMC42MzkzQzE0LjQwNDYgMzAuNzM1OCAxMy42Njg2IDMwLjY4ODQgMTIuOTYyOSAzMC40OTk5QzExLjQ2MjkgMzAuMTI0OSAxMC4yNDQ5IDI5LjE4NzQgOS40OTQ4OCAyNy44NzQ5Wk03LjkwMDQgMTQuODQ0NUM4LjU2MjM5IDEzLjcyMzQgOS41ODgyNiAxMi44NjI3IDEwLjgwNzQgMTIuNDA1NlYxOS41MzJDMTAuODA3NCAxOS43MTggMTAuODA3NCAxOS45MDcgMTAuOTAwNCAyMEMxMC45NzU1IDIwLjE2NjUgMTEuMTA4OSAyMC4yOTk4IDExLjI3NTQgMjAuMzc1TDE4LjU4NzggMjQuNTk0NEwxNi4wNTczIDI2LjA5NDRMMTAuMDU3NCAyMi42MjVDOS40MTg0MiAyMi4yNjM5IDguODU3NDIgMjEuNzc5NyA4LjQwNjg0IDIxLjIwMDRDNy45NTYyNyAyMC42MjExIDcuNjI1MDYgMTkuOTU4MiA3LjQzMjQgMTkuMjVDNy4wNTc0MSAxNy44NDQ1IDcuMTUwNCAxNi4xNTcgNy45MDA0IDE0Ljg0NDVaTTI4LjYxOTcgMTkuNjI1TDIxLjMwNzMgMTUuNDA3TDIzLjgzNzcgMTMuOTA3MUwyOS44Mzc3IDE3LjM3NUMzMC43NzUyIDE3LjkzNzUgMzEuNTI1MiAxOC42ODc1IDMxLjk5NDcgMTkuNjI1QzMyLjQ2NDIgMjAuNTYyNSAzMi43NDQ3IDIxLjU5NDUgMzIuNjUwMiAyMi43MTk1QzMyLjU2MDMgMjMuNzc1NSAzMi4xNjk5IDI0Ljc4MzcgMzEuNTI1MiAyNS42MjQ5QzMwLjg2OTcgMjYuNDY5NCAzMC4wMjUyIDI3LjEyNDkgMjguOTk0NyAyNy40OTk5VjIwLjM3NUMyOC45OTQ3IDIwLjE4NzUgMjguOTk0NyAyMCAyOC45MDAyIDE5LjkwN0MyOC45MDAyIDE5LjkwNyAyOC44MDcyIDE5LjcxOCAyOC42MTk3IDE5LjYyNVpNMzEuMTUwMiAxNS44NzVDMzEuMTUwMiAxNS44NzUgMzEuMDU3MiAxNS43ODIgMzAuOTYyNyAxNS43ODJMMjQuOTYyNyAxMi4zMTI2QzI0Ljc3NTIgMTIuMjE5NiAyNC42ODIyIDEyLjIxOTYgMjQuNDk0NyAxMi4yMTk2QzI0LjMwNzIgMTIuMjE5NiAyNC4xMTk3IDEyLjIxOTYgMjQuMDI1MiAxMi4zMTI2TDE2LjcxMjggMTYuNTMyVjEzLjYyNTFMMjIuODA3MyAxMC4wNjI2QzIzLjc0NDggOS41MDAwOSAyNC43NzUyIDkuMzEyNTkgMjUuOTAwMiA5LjMxMjU5QzI2LjkzMjIgOS4zMTI1OSAyNy45NjI3IDkuNjg3NTkgMjguOTAwMiAxMC4zNDQ2QzI5Ljc0NDcgMTEuMDAwMSAzMC40OTQ3IDExLjg0NDYgMzAuODY5NyAxMi43ODIxQzMxLjI0NDcgMTMuNzE5NiAzMS4zMzc3IDE0Ljg0NDUgMzEuMTUwMiAxNS44NzVaTTE1LjQwMDMgMjEuMTI1TDEyLjg2OTkgMTkuNjI1VjEyLjU5NDZDMTIuODY5OSAxMS41NjI2IDEzLjE1MDMgMTAuNDM3NiAxMy43MTI4IDkuNTk0NTlDMTQuMjc1MyA4LjY1NzEgMTUuMTE5OCA4LjAwMDEgMTYuMDU3MyA3LjUzMjExQzE3LjAxMjcgNy4wNTI0OSAxOC4wOTU2IDYuODg4MTIgMTkuMTUwMyA3LjA2MjYxQzIwLjE4MjMgNy4xNTcxMSAyMS4yMTI4IDcuNjI1MTEgMjIuMDU3MyA4LjI4MjFDMjIuMDU3MyA4LjI4MjEgMjEuOTYyOCA4LjM3NTEgMjEuODY5OCA4LjM3NTFMMTUuODY5OCAxMS44NDQ2QzE1LjcwMzMgMTEuOTE5NyAxNS41NyAxMi4wNTMxIDE1LjQ5NDggMTIuMjE5NkMxNS40MDAzIDEyLjQwNzEgMTUuNDAwMyAxMi41MDAxIDE1LjQwMDMgMTIuNjg3NlYyMS4xMjVaTTE2LjcxMjggMTguMTI1TDE5Ljk5NDggMTYuMjVMMjMuMjc1MyAxOC4xMjVWMjEuODc1TDE5Ljk5NDggMjMuNzVMMTYuNzEyOCAyMS44NzVWMTguMTI1WiIgZmlsbD0iY3VycmVudENvbG9yIi8+Cjwvc3ZnPgo=",
     "models": [
       {
-        "id": "chatgpt-image-latest",
-        "name": "chatgpt-image-latest"
-      },
-      {
         "id": "gpt-3.5-turbo",
         "name": "GPT-3.5-turbo"
       },
@@ -207,26 +203,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         "name": "GPT-5.6 Terra"
       },
       {
-        "id": "gpt-image-1",
-        "name": "gpt-image-1"
-      },
-      {
-        "id": "gpt-image-1-mini",
-        "name": "gpt-image-1-mini"
-      },
-      {
-        "id": "gpt-image-1.5",
-        "name": "gpt-image-1.5"
-      },
-      {
-        "id": "gpt-image-2",
-        "name": "gpt-image-2"
-      },
-      {
-        "id": "gpt-realtime-2.1",
-        "name": "GPT-Realtime-2.1"
-      },
-      {
         "id": "o1",
         "name": "o1"
       },
@@ -249,18 +225,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
       {
         "id": "o4-mini",
         "name": "o4-mini"
-      },
-      {
-        "id": "text-embedding-3-large",
-        "name": "text-embedding-3-large"
-      },
-      {
-        "id": "text-embedding-3-small",
-        "name": "text-embedding-3-small"
-      },
-      {
-        "id": "text-embedding-ada-002",
-        "name": "text-embedding-ada-002"
       }
     ]
   },
@@ -291,64 +255,24 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         "name": "Gemini 2.5 Flash"
       },
       {
-        "id": "gemini-2.5-flash-image",
-        "name": "Nano Banana"
-      },
-      {
         "id": "gemini-2.5-flash-lite",
         "name": "Gemini 2.5 Flash-Lite"
-      },
-      {
-        "id": "gemini-2.5-flash-preview-tts",
-        "name": "Gemini 2.5 Flash Preview TTS"
       },
       {
         "id": "gemini-2.5-pro",
         "name": "Gemini 2.5 Pro"
       },
       {
-        "id": "gemini-2.5-pro-preview-tts",
-        "name": "Gemini 2.5 Pro Preview TTS"
-      },
-      {
         "id": "gemini-3-flash-preview",
         "name": "Gemini 3 Flash Preview"
-      },
-      {
-        "id": "gemini-3-pro-image",
-        "name": "Nano Banana Pro"
-      },
-      {
-        "id": "gemini-3-pro-image-preview",
-        "name": "Nano Banana Pro"
-      },
-      {
-        "id": "gemini-3.1-flash-image",
-        "name": "Nano Banana 2"
-      },
-      {
-        "id": "gemini-3.1-flash-image-preview",
-        "name": "Nano Banana 2"
       },
       {
         "id": "gemini-3.1-flash-lite",
         "name": "Gemini 3.1 Flash Lite"
       },
       {
-        "id": "gemini-3.1-flash-lite-image",
-        "name": "Nano Banana 2 Lite"
-      },
-      {
         "id": "gemini-3.1-flash-lite-preview",
         "name": "Gemini 3.1 Flash Lite Preview"
-      },
-      {
-        "id": "gemini-3.1-flash-live-preview",
-        "name": "Gemini 3.1 Flash Live Preview"
-      },
-      {
-        "id": "gemini-3.1-flash-tts-preview",
-        "name": "Gemini 3.1 Flash TTS Preview"
       },
       {
         "id": "gemini-3.1-pro-preview",
@@ -367,24 +291,12 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         "name": "Gemini 3.5 Flash Lite"
       },
       {
-        "id": "gemini-3.5-live-translate-preview",
-        "name": "Gemini 3.5 Live Translate Preview"
-      },
-      {
         "id": "gemini-3.6-flash",
         "name": "Gemini 3.6 Flash"
       },
       {
         "id": "gemini-3.7-flash",
         "name": "Gemini 3.7 Flash"
-      },
-      {
-        "id": "gemini-embedding-001",
-        "name": "Gemini Embedding 001"
-      },
-      {
-        "id": "gemini-embedding-2",
-        "name": "Gemini Embedding 2"
       },
       {
         "id": "gemini-flash-latest",
@@ -409,26 +321,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
       {
         "id": "gemma-4-31b-it",
         "name": "Gemma 4 31B IT"
-      },
-      {
-        "id": "lyria-3-clip-preview",
-        "name": "Lyria 3 Clip Preview"
-      },
-      {
-        "id": "lyria-3-pro-preview",
-        "name": "Lyria 3 Pro Preview"
-      },
-      {
-        "id": "veo-3.1-fast-generate-preview",
-        "name": "Veo 3.1 fast"
-      },
-      {
-        "id": "veo-3.1-generate-preview",
-        "name": "Veo 3.1"
-      },
-      {
-        "id": "veo-3.1-lite-generate-preview",
-        "name": "Veo 3.1 lite"
       }
     ]
   },
@@ -733,10 +625,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         "name": "Gemini 2.5 Flash"
       },
       {
-        "id": "google/gemini-2.5-flash-image",
-        "name": "Nano Banana"
-      },
-      {
         "id": "google/gemini-2.5-flash-lite",
         "name": "Gemini 2.5 Flash-Lite"
       },
@@ -757,28 +645,8 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         "name": "Gemini 3 Flash Preview"
       },
       {
-        "id": "google/gemini-3-pro-image",
-        "name": "Nano Banana Pro"
-      },
-      {
-        "id": "google/gemini-3-pro-image-preview",
-        "name": "Nano Banana Pro"
-      },
-      {
-        "id": "google/gemini-3.1-flash-image",
-        "name": "Nano Banana 2"
-      },
-      {
-        "id": "google/gemini-3.1-flash-image-preview",
-        "name": "Nano Banana 2"
-      },
-      {
         "id": "google/gemini-3.1-flash-lite",
         "name": "Gemini 3.1 Flash Lite"
-      },
-      {
-        "id": "google/gemini-3.1-flash-lite-image",
-        "name": "Nano Banana 2 Lite"
       },
       {
         "id": "google/gemini-3.1-flash-lite-preview",
@@ -843,14 +711,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
       {
         "id": "google/gemma-4-31b-it:free",
         "name": "Gemma 4 31B (free)"
-      },
-      {
-        "id": "google/lyria-3-clip-preview",
-        "name": "Lyria 3 Clip Preview"
-      },
-      {
-        "id": "google/lyria-3-pro-preview",
-        "name": "Lyria 3 Pro Preview"
       },
       {
         "id": "gryphe/mythomax-l2-13b",
@@ -1241,14 +1101,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         "name": "GPT-5"
       },
       {
-        "id": "openai/gpt-5-image",
-        "name": "GPT-5 Image"
-      },
-      {
-        "id": "openai/gpt-5-image-mini",
-        "name": "GPT-5 Image Mini"
-      },
-      {
         "id": "openai/gpt-5-mini",
         "name": "GPT-5 Mini"
       },
@@ -1301,10 +1153,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         "name": "GPT-5.4"
       },
       {
-        "id": "openai/gpt-5.4-image-2",
-        "name": "GPT-5.4 Image 2"
-      },
-      {
         "id": "openai/gpt-5.4-mini",
         "name": "GPT-5.4 mini"
       },
@@ -1347,14 +1195,6 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
       {
         "id": "openai/gpt-5.6-terra-pro",
         "name": "GPT-5.6 Terra Pro"
-      },
-      {
-        "id": "openai/gpt-audio",
-        "name": "GPT Audio"
-      },
-      {
-        "id": "openai/gpt-audio-mini",
-        "name": "GPT Audio Mini"
       },
       {
         "id": "openai/gpt-chat-latest",

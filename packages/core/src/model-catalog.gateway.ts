@@ -289,10 +289,6 @@ export const GATEWAY_CATALOG: readonly CatalogProvider[] = [
         "name": "Gemini 2.5 Flash"
       },
       {
-        "id": "google/gemini-2.5-flash-image",
-        "name": "Nano Banana (Gemini 2.5 Flash Image)"
-      },
-      {
         "id": "google/gemini-2.5-flash-lite",
         "name": "Gemini 2.5 Flash Lite"
       },
@@ -305,24 +301,8 @@ export const GATEWAY_CATALOG: readonly CatalogProvider[] = [
         "name": "Gemini 3 Flash"
       },
       {
-        "id": "google/gemini-3-pro-image",
-        "name": "Nano Banana Pro (Gemini 3 Pro Image)"
-      },
-      {
-        "id": "google/gemini-3.1-flash-image",
-        "name": "Gemini 3.1 Flash Image (Nano Banana 2)"
-      },
-      {
-        "id": "google/gemini-3.1-flash-image-preview",
-        "name": "Gemini 3.1 Flash Image Preview (Nano Banana 2)"
-      },
-      {
         "id": "google/gemini-3.1-flash-lite",
         "name": "Gemini 3.1 Flash Lite"
-      },
-      {
-        "id": "google/gemini-3.1-flash-lite-image",
-        "name": "Gemini 3.1 Flash Lite Image (Nano Banana 2 Lite)"
       },
       {
         "id": "google/gemini-3.1-pro-preview",

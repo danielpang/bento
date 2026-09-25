@@ -54,7 +54,10 @@ export const MANUAL_CATALOG: readonly CatalogProvider[] = [
      * Delete this entry once `pnpm models:update` brings the id in;
      * until then the merge keeps it from duplicating.
      */
-    models: [{ id: "claude-fable-5-1", name: "Claude Fable 5.1" }],
+    models: [
+      { id: "claude-opus-5-5", name: "Claude Opus 5.5" },
+      { id: "claude-fable-5-1", name: "Claude Fable 5.1" },
+    ],
   },
   {
     id: "deepseek",

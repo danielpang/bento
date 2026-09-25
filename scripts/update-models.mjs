@@ -3,9 +3,11 @@
  * Refreshes the model catalog from models.dev.
  *
  * The catalog is committed rather than fetched at runtime: a board that
- * cannot reach the internet still has to offer a model list, and a
- * dropdown whose contents change under you between sessions is worse
- * than one that changes when someone runs this script.
+ * cannot reach the internet still has to offer a model list, and one
+ * fetch in CI beats one per server machine. .github/workflows/models.yml
+ * runs this nightly and opens a pull request when the list changed, so
+ * a new model lands with the next deploy. Each run rewrites the snapshot
+ * wholesale, which is also how a model a provider has sunset drops out.
  *
  * Only providers whose credentials Bento can actually store are
  * included. Offering a model that no stored key can authenticate would
@@ -25,7 +27,7 @@
  * Usage: pnpm models:update
  *        pnpm models:update -- --gateway-only
  */
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,11 +54,25 @@ const INCLUDE = ["anthropic", "openai", "google", "openrouter", "xai", "cursor"]
  *
  * Bento stores no XAI_API_KEY. Grok is reachable here only through the
  * Cursor CLI, which pays for it with the Cursor key. Imagine image and
- * video models are not something an agent run can use.
+ * video models drop out with every other model agentCapable refuses.
  */
 const OPTIONS = {
-  xai: { env: ["CURSOR_API_KEY"], textOutputOnly: true },
+  xai: { env: ["CURSOR_API_KEY"] },
 };
+
+/**
+ * Words in an id that mark a model an agent cannot write code with:
+ * image, video, music, and speech generators, realtime voice,
+ * embeddings, moderation. Whole segments of the id only, so
+ * `gpt-image-2` and `gemini-3.1-flash-live-preview` go and nothing whose
+ * name merely contains the letters does. models.dev also says what a
+ * model outputs and whether it calls tools (see agentCapable); the id
+ * catches what it describes loosely, and is all the Gateway gives.
+ */
+const NOT_FOR_CODING = new Set([
+  "audio", "dall", "embed", "embedding", "embeddings", "image", "images", "imagen", "live", "lyria",
+  "moderation", "realtime", "rerank", "sora", "speech", "transcribe", "transcription", "tts", "veo", "whisper",
+]);
 
 /**
  * Models to lift to the top of a provider's list.
@@ -95,7 +111,7 @@ if (!gatewayOnly) {
       return at === -1 ? pinned.length : at;
     };
     const models = Object.values(provider.models ?? {})
-      .filter((m) => !options.textOutputOnly || outputsText(m))
+      .filter((m) => isCodingModel(m.id) && agentCapable(m))
       .map((m) => ({ id: m.id, name: m.name ?? m.id }))
       .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
     for (const want of pinned) {
@@ -134,17 +150,27 @@ import type { CatalogProvider } from "./models.js";
 export const MODEL_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(providers, null, 2)};
 `;
 
-  await writeFile(out, body);
-  console.log(`\nwrote ${path.relative(root, out)} (${(body.length / 1024).toFixed(0)} KB)`);
+  await writeIfChanged(out, body);
 }
 
 await writeGatewayCatalog();
 
-/** Keep models an agent can actually write with. Image/video-only drops. */
-function outputsText(model) {
+function isCodingModel(id) {
+  return !id.toLowerCase().split(/[-/._:~]+/).some((word) => NOT_FOR_CODING.has(word));
+}
+
+/**
+ * Reads text, writes text, calls tools, not deprecated. A field
+ * models.dev leaves out is not held against the model.
+ */
+function agentCapable(model) {
+  if (model.status === "deprecated") return false;
+  if (model.tool_call === false) return false;
+  const input = model.modalities?.input;
   const output = model.modalities?.output;
-  if (!Array.isArray(output) || output.length === 0) return true;
-  return output.includes("text");
+  if (Array.isArray(input) && input.length > 0 && !input.includes("text")) return false;
+  if (Array.isArray(output) && output.length > 0 && !output.includes("text")) return false;
+  return true;
 }
 
 /**
@@ -162,7 +188,7 @@ async function writeGatewayCatalog() {
     return at === -1 ? GATEWAY_PINNED.length : at;
   };
   const models = listed
-    .filter((m) => m?.type === "language" && typeof m.id === "string" && m.id !== "")
+    .filter((m) => m?.type === "language" && typeof m.id === "string" && m.id !== "" && isCodingModel(m.id))
     .map((m) => ({ id: m.id, name: typeof m.name === "string" && m.name !== "" ? m.name : m.id }))
     .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
   for (const want of GATEWAY_PINNED) {
@@ -187,7 +213,24 @@ import type { CatalogProvider } from "./models.js";
 
 export const GATEWAY_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(catalog, null, 2)};
 `;
-  await writeFile(gatewayOut, body);
   console.log(`vercel: ${models.length} language models`);
-  console.log(`wrote ${path.relative(root, gatewayOut)} (${(body.length / 1024).toFixed(0)} KB)`);
+  await writeIfChanged(gatewayOut, body);
+}
+
+/**
+ * Writes a snapshot only when its models changed. The header carries
+ * the date it was taken, so rewriting an unchanged list would still
+ * leave a diff, and the nightly workflow (models.yml) would open a pull
+ * request every night that changes nothing but the date.
+ */
+async function writeIfChanged(file, body) {
+  const withoutDate = (text) => text.replace(/^\/\/ Snapshot taken .*$/m, "");
+  const current = await readFile(file, "utf8").catch(() => "");
+  const name = path.relative(root, file);
+  if (withoutDate(current) === withoutDate(body)) {
+    console.log(`${name} is already current`);
+    return;
+  }
+  await writeFile(file, body);
+  console.log(`wrote ${name} (${(body.length / 1024).toFixed(0)} KB)`);
 }
