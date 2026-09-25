@@ -1,6 +1,9 @@
-import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import {
   agentRuns,
+  repositories,
+  runArtifacts,
+  sandboxes,
   swarmLandings,
   swarmMessages,
   swarmTaskEvents,
@@ -18,10 +21,20 @@ import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle, type NewRun, type OutO
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
 import { enqueueSwarmPublish } from "./complete.js";
+import { ensureFinalCheck, isFinalCheck, templateOf } from "./final-check.js";
+import {
+  assembleSwarmDocumentInSandbox,
+  DOCUMENT_ASSEMBLY_FLAG,
+  documentAssemblyPass,
+  isDocumentAssembly,
+  isDocumentSwarm,
+} from "./deliverable.js";
+import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
 import { assumedCostFor, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
 import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog } from "./watchdog.js";
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
+import { queueSwarmSlackNotify } from "../slack-notify.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -193,6 +206,8 @@ export interface SwarmTickResult {
   landingId: string | null;
   /** Whether this tick is what promoted it, rather than finding it already running. */
   landingPromoted: boolean;
+  /** A server-owned document assembly step ready to run after commit. */
+  documentAssemblyTaskId: string | null;
   /** The swarm's status after the tick. */
   status: (typeof swarms.$inferSelect)["status"];
   /**
@@ -301,6 +316,17 @@ export async function tickSwarm(
         throw err;
       }
     }
+    /*
+     * Assembly touches git and may talk to a remote sandbox, so it is
+     * outside the transaction. Its assigned task is the durable claim:
+     * a crash leaves it ready (or working) for the retried tick, and a
+     * success is reconciled immediately so the final check sees the
+     * document it is judging.
+    */
+    if (result.documentAssemblyTaskId) {
+      const executed = await executeDocumentAssembly(ctx, result.documentAssemblyTaskId);
+      return executed ? tickSwarm(ctx, swarmId, deps) : result;
+    }
     /**
      * A swarm that just finished has one thing left to do, and it is
      * the only thing in a swarm that leaves Bento: push the branch and
@@ -311,7 +337,10 @@ export async function tickSwarm(
      * for every swarm on the deployment. After the commit, because the
      * job reads the swarm's status and refuses anything but "done".
      */
-    if (result.becameDone) await enqueueSwarmPublish(ctx, swarmId);
+    if (result.becameDone) {
+      await enqueueSwarmPublish(ctx, swarmId);
+      await queueSwarmSlackNotify(ctx, { type: "swarm_completed", swarmId });
+    }
     /*
      * And what it cost, once, on whichever ending it reached. On the
      * transition rather than the status, for the reason the publish is:
@@ -361,7 +390,34 @@ async function runTick(
     .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
 
   await settleWorkedLeaves(tx, swarm, tasks, events, now);
+  /*
+   * First make every plan node agree with its children, then decide
+   * whether the whole ordinary tree is ready for its last check.
+   *
+   * The order matters for nested trees. A leaf can become done while
+   * its parent still says working in the rows this tick read. Asking
+   * for the final check before rolling that parent up misses the check,
+   * then the same tick marks the swarm done and publishes it. The new
+   * check is still put on the in-memory tree before spawning and the
+   * final status calculation, so it gates completion immediately.
+   */
   const changed = await rollUp(tx, swarm, tasks, events);
+  const assembly = await ensureDocumentAssembly(tx, swarm, changed.tasks, events, now);
+  if (assembly.created) changed.tasks.push(assembly.created);
+
+  const template = await templateOf(tx, swarm);
+  const check = await ensureFinalCheck(tx, swarm, changed.tasks, template, now);
+  if (check.created) {
+    changed.tasks.push(check.created);
+    events.push({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: check.created.id,
+      status: check.created.status,
+    });
+  }
+
   await warnLowBudget(tx, swarm, now);
   const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
   const spawned = await spawnWorkers(tx, swarm, changed.tasks, deps, events, now);
@@ -376,6 +432,7 @@ async function runTick(
     spawnRefusal: spawned.refusal,
     landingId: landing.landing?.id ?? null,
     landingPromoted: landing.landing?.promoted ?? false,
+    documentAssemblyTaskId: assembly.ready?.id ?? null,
     status,
     becameDone: status === "done" && swarm.status !== "done",
     /**
@@ -399,6 +456,234 @@ async function runTick(
         ? (status as SwarmSpendOutcome)
         : null,
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Step 1a: assemble a document before anything judges or publishes it.
+ * ------------------------------------------------------------------ */
+
+interface DocumentAssemblyStep {
+  created: Task | null;
+  ready: Task | null;
+}
+
+const DOCUMENT_ASSEMBLY_LEASE_MS = 5 * 60 * 1000;
+
+/**
+ * Adds one server-owned assembly node per pass through the swarm.
+ *
+ * The node is the persisted gate. It is excluded from agent spawning,
+ * but otherwise behaves like a leaf: assigned means the server should
+ * run it, blocked carries a visible failure, Retry puts it back in the
+ * queue, and done lets the final check start. A follow up gets another
+ * node because reopenCount is part of the flag.
+ */
+async function ensureDocumentAssembly(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  events: BoardEvent[],
+  now: Date,
+): Promise<DocumentAssemblyStep> {
+  if (!isDocumentSwarm(swarm)) return { created: null, ready: null };
+  const ordinary = tasks.filter(
+    (task) => task.status !== "cancelled" && !isFinalCheck(task) && !isDocumentAssembly(task),
+  );
+  if (ordinary.length === 0 || !ordinary.every((task) => task.status === "done")) {
+    return { created: null, ready: null };
+  }
+
+  const matching = tasks.filter((task) => documentAssemblyPass(task) === swarm.reopenCount);
+  const complete = matching.find(
+    (task) => task.status === "done" && task.flags.documentAssemblyComplete === true,
+  );
+  if (complete) return { created: null, ready: null };
+  const assigned = matching.find((task) => task.status === "assigned");
+  if (assigned) return { created: null, ready: assigned };
+  const staleWorking = matching.find(
+    (task) =>
+      task.status === "working"
+      && task.updatedAt.getTime() <= now.getTime() - DOCUMENT_ASSEMBLY_LEASE_MS,
+  );
+  if (staleWorking) return { created: null, ready: staleWorking };
+  // The external git work happens after the transaction commits. A
+  // fresh working row is its lease, so a second tick cannot run the
+  // same assembly against the checkout at the same time. A crashed
+  // process is recovered after the short lease above expires.
+  if (matching.some((task) => task.status === "working")) return { created: null, ready: null };
+  // A visible failure waits for an explicit Retry. It must not turn a
+  // transient provider failure into an unbounded loop of git attempts.
+  if (matching.some((task) => task.status === "blocked")) return { created: null, ready: null };
+
+  const [{ next } = { next: 0 }] = await tx
+    .select({ next: sql<number>`coalesce(max(${swarmTasks.position}), -1) + 1` })
+    .from(swarmTasks)
+    .where(and(eq(swarmTasks.swarmId, swarm.id), sql`${swarmTasks.parentId} is null`));
+  const [created] = await tx
+    .insert(swarmTasks)
+    .values({
+      swarmId: swarm.id,
+      parentId: null,
+      position: next,
+      nodeType: "leaf",
+      status: "assigned",
+      title: "Assemble document",
+      description: "Assemble the finished sections into the document this swarm delivers.",
+      flags: { [DOCUMENT_ASSEMBLY_FLAG]: true, reopenCount: swarm.reopenCount },
+      updatedAt: now,
+    })
+    .returning();
+  if (!created) throw new Error("the document assembly step inserted no row");
+  await tx.insert(swarmTaskEvents).values({
+    taskId: created.id,
+    kind: "created",
+    toStatus: "assigned",
+    detail: { documentAssembly: true, reopenCount: swarm.reopenCount },
+  });
+  events.push({
+    type: "swarm_task_updated",
+    projectId: swarm.projectId,
+    swarmId: swarm.id,
+    taskId: created.id,
+    status: "assigned",
+  });
+  return { created, ready: created };
+}
+
+/** Runs the durable assembly step against the swarm's actual sandbox. */
+async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise<boolean> {
+  const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, taskId)).limit(1);
+  if (!task || !isDocumentAssembly(task) || (task.status !== "assigned" && task.status !== "working")) return false;
+  const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, task.swarmId)).limit(1);
+  if (!swarm || documentAssemblyPass(task) !== swarm.reopenCount) return false;
+
+  const claimedAt = new Date();
+  const [claimed] = await ctx.db
+    .update(swarmTasks)
+    .set({ status: "working", startedAt: task.startedAt ?? claimedAt, updatedAt: claimedAt })
+    .where(
+      and(
+        eq(swarmTasks.id, task.id),
+        or(
+          eq(swarmTasks.status, "assigned"),
+          and(
+            eq(swarmTasks.status, "working"),
+            lt(swarmTasks.updatedAt, new Date(claimedAt.getTime() - DOCUMENT_ASSEMBLY_LEASE_MS)),
+          ),
+        ),
+      ),
+    )
+    .returning({ id: swarmTasks.id });
+  if (!claimed) return false;
+
+  try {
+    if (!swarm.branchName) throw new Error("the swarm has no branch to assemble the document on");
+    if (!swarm.sandboxId) throw new Error("the swarm workspace is not available");
+    const [[sandbox], [repository], [template], [design]] = await Promise.all([
+      ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1),
+      ctx.db
+        .select({ name: repositories.name })
+        .from(repositories)
+        .where(eq(repositories.projectId, swarm.projectId))
+        .orderBy(asc(repositories.position))
+        .limit(1),
+      swarm.templateId
+        ? ctx.db
+            .select({ documentPath: swarmTemplates.documentPath })
+            .from(swarmTemplates)
+            .where(eq(swarmTemplates.id, swarm.templateId))
+            .limit(1)
+        : Promise.resolve([]),
+      ctx.db
+        .select({ content: runArtifacts.content })
+        .from(runArtifacts)
+        .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
+        .orderBy(desc(runArtifacts.createdAt))
+        .limit(1),
+    ]);
+    if (!sandbox || sandbox.status === "destroyed") throw new Error("the swarm workspace is not available");
+    if (!repository) throw new Error("the project has no repository for the document");
+    const assembled = await assembleSwarmDocumentInSandbox(ctx.db, {
+      swarm,
+      driver: ctx.driver,
+      handle: { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir },
+      repositoryName: repository.name,
+      branch: swarm.branchName,
+      templatePath: template?.documentPath ?? null,
+      preamble: design?.content ?? null,
+    });
+    if (!assembled) throw new Error("the finished plan had no sections to assemble");
+    const recorded = await ctx.db.transaction(async (tx) => {
+      const [finished] = await tx
+        .update(swarmTasks)
+        .set({
+          status: "done",
+          attention: null,
+          report: `Assembled ${assembled.sections} sections at ${assembled.path}.`,
+          endedAt: new Date(),
+          flags: { ...task.flags, documentAssemblyComplete: true, assemblyError: undefined },
+          updatedAt: new Date(),
+        })
+        .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "working")))
+        .returning({ id: swarmTasks.id });
+      if (!finished) return false;
+      await tx.insert(swarmTaskEvents).values({
+        taskId: task.id,
+        kind: "status_changed",
+        fromStatus: "working",
+        toStatus: "done",
+        detail: { path: assembled.path, sections: assembled.sections, written: assembled.written },
+      });
+      return true;
+    });
+    if (!recorded) return true;
+    ctx.bus.emitBoardEvent({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "done",
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const recorded = await ctx.db.transaction(async (tx) => {
+      const [blocked] = await tx
+        .update(swarmTasks)
+        .set({
+          status: "blocked",
+          attention: "failed",
+          report: `Document assembly failed: ${reason}`,
+          flags: { ...task.flags, assemblyError: reason, plannerToldAt: undefined },
+          updatedAt: new Date(),
+        })
+        .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "working")))
+        .returning({ id: swarmTasks.id });
+      if (!blocked) return false;
+      await tx.insert(swarmTaskEvents).values({
+        taskId: task.id,
+        kind: "status_changed",
+        fromStatus: "working",
+        toStatus: "blocked",
+        detail: { documentAssembly: true, reason },
+      });
+      await tx.insert(swarmMessages).values({
+        swarmId: swarm.id,
+        source: "system",
+        status: "queued",
+        text: `Document assembly for task ${task.id} failed: ${reason}. Inspect the workspace, then retry that task.`,
+      });
+      return true;
+    });
+    if (!recorded) return true;
+    ctx.bus.emitBoardEvent({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "blocked",
+    });
+  }
+  return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -438,8 +723,24 @@ async function settleWorkedLeaves(
   events: BoardEvent[],
   now: Date,
 ): Promise<void> {
+  /*
+   * A plan node handed to a planner of its own is here too, and for
+   * the same reason.
+   *
+   * A sub planner finishes by having written children: the rollup then
+   * owns the node's status and nothing below is stuck. A sub planner
+   * that stopped without writing any leaves that node "working" with
+   * no agent on it and no children to roll up, which nothing else in
+   * the swarm notices, and the subtree never happens. Only a childless
+   * one, because a node with children is the rollup's and not this
+   * step's.
+   */
+  const childless = new Set(tasks.map((task) => task.parentId).filter((id): id is string => id !== null));
   const working = tasks.filter(
-    (task) => task.nodeType === "leaf" && task.status === "working" && !task.report && task.assignedRunId,
+    (task) =>
+      task.status === "working" &&
+      task.assignedRunId &&
+      (task.nodeType === "leaf" ? !task.report : !childless.has(task.id)),
   );
   if (working.length === 0) return;
 
@@ -456,7 +757,9 @@ async function settleWorkedLeaves(
     if (run && (ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) continue;
     const reason = run?.error?.trim()
       ? `the agent working it stopped: ${run.error.trim()}`
-      : "the agent working it stopped without reporting.";
+      : task.nodeType === "plan"
+        ? "the planner given this part of the plan stopped without writing any tasks under it."
+        : "the agent working it stopped without reporting.";
     // Through the one door, so the latch that decides whether the
     // planner ever hears about this leaf is cleared by construction.
     await handLeafToPlanner(tx, {
@@ -991,7 +1294,26 @@ async function spawnWorkers(
    */
   if (!spawnsFrom(swarm)) return { runIds, refusal: null, cap: null };
 
-  const ready = tasks.filter((task) => task.nodeType === "leaf" && task.status === "assigned");
+  /*
+   * A plan node the planner handed over, before the leaves.
+   *
+   * Before, because a sub planner produces leaves and a leaf takes a
+   * worker slot for as long as an agent is on it: starting the planner
+   * of a subtree first is what lets the leaves it writes be picked up
+   * on the next tick rather than a tick after every other leaf has
+   * finished.
+   *
+   * The depth ceiling is the template's, and it is checked at the tool
+   * that marks the node rather than here as well: this step starts
+   * what was marked, and two opinions about how deep a plan may go is
+   * how they come to differ.
+   */
+  const delegatedRunIds = await spawnSubPlanners(tx, swarm, tasks, deps, events, now);
+  runIds.push(...delegatedRunIds);
+
+  const ready = tasks.filter(
+    (task) => task.nodeType === "leaf" && task.status === "assigned" && !isDocumentAssembly(task),
+  );
   if (ready.length === 0) return { runIds, refusal: null, cap: null };
 
   const templateWorker = await workerProfileFor(tx, swarm);
@@ -1017,7 +1339,14 @@ async function spawnWorkers(
       type: "swarm",
       swarmId: swarm.id,
       swarmTaskId: task.id,
-      role: "worker",
+      /*
+       * The final check is a judge, and the role says so on the run.
+       * It is what the executor reads to give it the judge's prompt
+       * rather than a worker's, and it is what makes the run legible
+       * afterwards: an agent that changed nothing and ruled on the
+       * work is not a worker, whatever table it shares.
+       */
+      role: isFinalCheck(task) ? "judge" : "worker",
       agentProfileId: profileId,
       prompt: "",
       executor: "server",
@@ -1134,6 +1463,91 @@ async function spawnWorkers(
     events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status: "running" });
   }
   return { runIds, refusal: null, cap: null };
+}
+
+
+/**
+ * Puts a planner on every plan node that was handed over.
+ *
+ * A sub planner is given one node and the subtree under it, and the
+ * MCP server is what holds it to that: every tool call it makes is
+ * checked against the task its run names. So there is nothing to
+ * scope here beyond starting the run with that task on it.
+ *
+ * It runs as the swarm's own planner agent, not the worker's. What is
+ * being asked for is a plan, and a template that pairs a strong
+ * planner with a cheap worker means exactly that.
+ *
+ * A refusal is quiet. The node keeps its place and starts when the
+ * swarm has room, the same way a leaf does, and the ceiling that
+ * refused it is already being reported by the leaf that hit it.
+ */
+async function spawnSubPlanners(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  deps: SwarmTickDeps,
+  events: BoardEvent[],
+  now: Date,
+): Promise<string[]> {
+  const handed = tasks.filter((task) => task.nodeType === "plan" && task.status === "assigned");
+  if (handed.length === 0) return [];
+
+  const profileId = await plannerProfileFor(tx, swarm);
+  // Nothing to run a planner as. The node keeps its place, and starts
+  // the moment a planner agent is set on the template.
+  if (!profileId) return [];
+
+  const runIds: string[] = [];
+  for (const task of handed) {
+    const started = await deps.startRun(tx, {
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: task.id,
+      role: "subplanner",
+      agentProfileId: profileId,
+      prompt: "",
+      executor: "server",
+      startedBy: swarm.startedBy,
+    });
+    // The swarm is at its ceiling, so there is no room for the nodes
+    // behind this one either.
+    if (started === SWARM_FULL) break;
+    // Something is already planning this node. Its siblings are still
+    // this tick's to start.
+    if (started === "busy") continue;
+    if (started === "gone") break;
+    /*
+     * A ceiling refused it. Left to the leaf spawn below to report,
+     * which is where the sentence about it belongs: a person reading
+     * the board wants one node saying the swarm is out of money, not
+     * every node that was waiting.
+     */
+    if ("outOfCompute" in started) break;
+
+    await tx
+      .update(swarmTasks)
+      .set({ status: "working", assignedRunId: started.id, startedAt: task.startedAt ?? now, updatedAt: now })
+      .where(eq(swarmTasks.id, task.id));
+    await tx.insert(swarmTaskEvents).values({
+      taskId: task.id,
+      kind: "assigned",
+      fromStatus: task.status,
+      toStatus: "working",
+      runId: started.id,
+      detail: { subplanner: true },
+    });
+    task.status = "working";
+    runIds.push(started.id);
+    events.push({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: task.id,
+      status: "working",
+    });
+  }
+  return runIds;
 }
 
 /* ------------------------------------------------------------------ *

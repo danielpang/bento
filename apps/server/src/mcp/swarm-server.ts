@@ -10,6 +10,7 @@ import {
   swarmMessages,
   swarmTaskEvents,
   swarmTasks,
+  swarmTemplates,
   swarms,
 } from "@bento/db";
 import type { AppContext } from "../context.js";
@@ -18,6 +19,7 @@ import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
 import { commitSwarmDesignDocument, SWARM_DESIGN_PATH } from "../orchestrator/swarm/design-document.js";
+import { queueSwarmSlackNotify } from "../orchestrator/slack-notify.js";
 import { MCP_PROTOCOL_VERSION } from "./client.js";
 import type { ResolvedGrant } from "./grants.js";
 
@@ -141,6 +143,7 @@ const shapes = {
     })
     .strip(),
   assign: z.object({ taskId: uuidArg }).strip(),
+  delegate: z.object({ taskId: uuidArg }).strip(),
   cancel_task: z.object({ taskId: uuidArg, reason: z.string().max(2000).default("") }).strip(),
   accept: z.object({ taskId: uuidArg, note: z.string().max(4000).default("") }).strip(),
   reject: z.object({ taskId: uuidArg, reason: z.string().min(1).max(4000) }).strip(),
@@ -182,7 +185,7 @@ const str = (description: string) => ({ type: "string", description });
 const TOOLS: Record<ToolName, ToolSpec> = {
   get_tree: {
     description:
-      "The swarm's plan as it stands: every task, its status, its parent, and what it cost. Read this before changing anything.",
+      "The plan you are responsible for as it stands: every visible task, its status, its parent, and what it cost. A sub planner sees only the subtree it was given. Read this before changing anything.",
     roles: ["planner", "subplanner"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
@@ -235,6 +238,17 @@ const TOOLS: Record<ToolName, ToolSpec> = {
     roles: ["planner", "subplanner"],
     inputSchema: { type: "object", properties: { taskId: str("The leaf to assign.") }, required: ["taskId"], additionalProperties: false },
   },
+  delegate: {
+    description:
+      "Hands one plan node to a planner of its own, which decomposes that node and nothing else. Use it when a part of the goal is large enough to need its own plan and you would rather not hold all of it yourself. Refused when this swarm's template does not allow plans that deep.",
+    roles: ["planner", "subplanner"],
+    inputSchema: {
+      type: "object",
+      properties: { taskId: str("The plan node to hand over.") },
+      required: ["taskId"],
+      additionalProperties: false,
+    },
+  },
   cancel_task: {
     description: "Withdraws a task and everything under it. Use it for work the plan no longer needs.",
     roles: ["planner", "subplanner"],
@@ -281,13 +295,13 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   write_design: {
     description:
       "Writes the swarm's design note, replacing the previous one. This is what every agent in the swarm reads for the shape of the whole change.",
-    roles: ["planner", "subplanner"],
+    roles: ["planner"],
     inputSchema: { type: "object", properties: { content: str("Markdown.") }, required: ["content"], additionalProperties: false },
   },
   read_design: {
     description:
       "The swarm's design note: how the whole change fits together, written by the planner. Every agent in the swarm reads the same one.",
-    roles: ["planner", "subplanner", "worker"],
+    roles: ["planner", "subplanner", "worker", "judge"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   read_report: {
@@ -309,13 +323,13 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   my_task: {
     description:
       "The task you were given, as the plan holds it now: its title, what finished means for it, and why it was sent back if it was. Read it before you start.",
-    roles: ["worker"],
+    roles: ["worker", "judge"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   report: {
     description:
       "How you finish. Say what you did, what you did not do, and anything you found that the plan should know. The planner reads it and either accepts your branch into the merge queue or sends it back with a reason.",
-    roles: ["worker"],
+    roles: ["worker", "judge"],
     inputSchema: {
       type: "object",
       properties: { summary: str("What you did, what you did not, and what the plan should know.") },
@@ -326,7 +340,7 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   flag: {
     description:
       "For when you cannot finish: a decision that is not yours, a blocker you cannot clear, or a task that turns out to belong to files somebody else is working. Brings the planner or a person to your task.",
-    roles: ["worker"],
+    roles: ["worker", "judge"],
     inputSchema: {
       type: "object",
       properties: {
@@ -481,6 +495,8 @@ async function runTool(
       return splitTask(ctx, caller, args as Args<"split_task">, events);
     case "assign":
       return assign(ctx, caller, args as Args<"assign">, events);
+    case "delegate":
+      return delegate(ctx, caller, args as Args<"delegate">, events);
     case "cancel_task":
       return cancelTask(ctx, caller, args as Args<"cancel_task">, events);
     case "accept":
@@ -570,9 +586,25 @@ async function getTree(ctx: AppContext, caller: SwarmCaller): Promise<string> {
     .from(swarmTasks)
     .where(eq(swarmTasks.swarmId, caller.swarmId))
     .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
-  const tree = rows.map((task) => ({
+  let visible = rows;
+  if (caller.role === "subplanner") {
+    if (!caller.taskId) throw new ToolRefusal("this sub planner has no part of the plan assigned to it");
+    const byId = new Map(rows.map((task) => [task.id, task]));
+    visible = rows.filter((task) => {
+      let current: typeof task | undefined = task;
+      for (let hops = 0; current && hops < 64; hops += 1) {
+        if (current.id === caller.taskId) return true;
+        current = current.parentId ? byId.get(current.parentId) : undefined;
+      }
+      return false;
+    });
+  }
+  const visibleIds = new Set(visible.map((task) => task.id));
+  const tree = visible.map((task) => ({
     id: task.id,
-    parentId: task.parentId,
+    // A sub planner's root is the top of what it was given. Do not
+    // leak the id of a parent it cannot otherwise see.
+    parentId: task.parentId && visibleIds.has(task.parentId) ? task.parentId : null,
     nodeType: task.nodeType,
     title: task.title,
     description: task.description,
@@ -688,6 +720,115 @@ async function assign(
   });
   events.push(taskEvent(caller, task.id, "assigned"));
   return `Task ${task.id} is assigned. An agent starts on it when the swarm has room.`;
+}
+
+/**
+ * Hands one plan node to a planner of its own.
+ *
+ * The node is marked assigned, and the coordinator does the rest: it
+ * is the only thing that starts runs, and a tool that started one
+ * itself would be a second door past startRunIfIdle.
+ *
+ * Refused for a leaf, for a node that already has children, and for a
+ * node deeper than this swarm's template allows. The depth is the
+ * point of the ceiling: what it bounds is a planner that plans
+ * planners, and a refusal that says which template setting stopped it
+ * is one a team can act on.
+ */
+async function delegate(
+  ctx: AppContext,
+  caller: SwarmCaller,
+  args: Args<"delegate">,
+  events: BoardEvent[],
+): Promise<string> {
+  const task = await requireTask(ctx, caller, args.taskId);
+  if (task.nodeType !== "plan") {
+    throw new ToolRefusal(
+      `task ${task.id} is a leaf, so there is nothing to decompose. Use split_task to turn it into a plan node first.`,
+    );
+  }
+  /*
+   * A node that already has children, refused rather than accepted
+   * and dropped.
+   *
+   * The handover is a status on the node, and a plan node's status
+   * belongs to the rollup: the next tick rewrites it from its children
+   * before the coordinator looks for nodes to put a planner on, so a
+   * node with children would be marked, un-marked, and never started,
+   * while this tool had already answered that a planner was coming.
+   * Asked before the status check for the same reason: on such a node
+   * "working" is the rollup's word for its children, not a planner.
+   */
+  const [child] = await ctx.db
+    .select({ id: swarmTasks.id })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.parentId, task.id))
+    .limit(1);
+  if (child) {
+    throw new ToolRefusal(
+      `task ${task.id} already has tasks under it, so it is decomposed. A planner is handed a node nobody has broken down yet.`,
+    );
+  }
+  if (task.status === "assigned" || task.status === "working") {
+    return `Task ${task.id} already has a planner of its own.`;
+  }
+
+  const allowed = await delegationDepth(ctx, caller.swarmId);
+  const depth = await depthOf(ctx, task.id);
+  /*
+   * The swarm's own planner is level one, so a planner on a node at
+   * depth d is level d + 2. A template that allows one level allows
+   * no sub planners at all, which is what every swarm did before this
+   * existed.
+   */
+  if (depth + 2 > allowed) {
+    throw new ToolRefusal(
+      allowed <= 1
+        ? "this swarm's template does not allow sub planners, so decompose this node yourself."
+        : `this swarm's template allows plans ${allowed} levels deep, and a planner on ${task.id} would be level ${depth + 2}. Decompose it yourself.`,
+    );
+  }
+
+  await ctx.db
+    .update(swarmTasks)
+    .set({ status: "assigned", attention: null, updatedAt: new Date() })
+    .where(eq(swarmTasks.id, task.id));
+  await ctx.db.insert(swarmTaskEvents).values({
+    taskId: task.id,
+    kind: "status_changed",
+    fromStatus: task.status,
+    toStatus: "assigned",
+    runId: caller.runId,
+    detail: { delegated: true },
+  });
+  events.push(taskEvent(caller, task.id, "assigned"));
+  return `Task ${task.id} is handed to a planner of its own. It starts when the swarm has room, and it may only touch that node and what it puts under it.`;
+}
+
+/** How deep this swarm's template lets a plan be decomposed by an agent. */
+async function delegationDepth(ctx: AppContext, swarmId: string): Promise<number> {
+  const [row] = await ctx.db
+    .select({ maxPlanDepth: swarmTemplates.maxPlanDepth })
+    .from(swarms)
+    .leftJoin(swarmTemplates, eq(swarmTemplates.id, swarms.templateId))
+    .where(eq(swarms.id, swarmId))
+    .limit(1);
+  return row?.maxPlanDepth ?? 1;
+}
+
+/** How far this node sits from the top of the tree. A root is zero. */
+async function depthOf(ctx: AppContext, taskId: string): Promise<number> {
+  let current: string | null = taskId;
+  for (let depth = 0; depth < 64; depth += 1) {
+    const [row]: { parentId: string | null }[] = await ctx.db
+      .select({ parentId: swarmTasks.parentId })
+      .from(swarmTasks)
+      .where(eq(swarmTasks.id, current!))
+      .limit(1);
+    if (!row?.parentId) return depth;
+    current = row.parentId;
+  }
+  return 64;
 }
 
 async function cancelTask(
@@ -820,7 +961,14 @@ async function askUser(
   args: Args<"ask_user">,
   events: BoardEvent[],
 ): Promise<string> {
-  const task = args.taskId ? await requireTask(ctx, caller, args.taskId) : null;
+  /*
+   * A sub planner is never allowed to raise a swarm-wide question.
+   * Its authority is one subtree, so an unqualified question belongs
+   * to that subtree's root. Otherwise it could pause work owned by the
+   * main planner without even naming a task outside its grant.
+   */
+  const taskId = args.taskId ?? (caller.role === "subplanner" ? caller.taskId : null);
+  const task = taskId ? await requireTask(ctx, caller, taskId) : null;
   await ctx.db.transaction(async (tx) => {
     /**
      * The question goes into the swarm's own thread, which is where a
@@ -867,6 +1015,12 @@ async function askUser(
         .set({ pausedReason: "attention", updatedAt: new Date() })
         .where(eq(swarms.id, caller.swarmId));
     }
+  });
+  await queueSwarmSlackNotify(ctx, {
+    type: "swarm_question",
+    swarmId: caller.swarmId,
+    taskId: task?.id ?? null,
+    question: args.question,
   });
   if (task) events.push(taskEvent(caller, task.id, task.status));
   else events.push({ type: "swarm_updated", projectId: caller.projectId, swarmId: caller.swarmId });

@@ -189,6 +189,15 @@ export async function publishSwarmCompletion(
     .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
     .orderBy(desc(runArtifacts.createdAt))
     .limit(1);
+  const [document] = await ctx.db
+    .select({ path: runArtifacts.path })
+    .from(runArtifacts)
+    .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.stageSlug, "document")))
+    .orderBy(desc(runArtifacts.createdAt))
+    .limit(1);
+
+  const handle = await swarmSandboxHandle(ctx, swarm.sandboxId);
+  const workspace = swarmWorkspaceKey(swarm.id);
 
   const body = swarmPullRequestBody({
     title: swarm.title,
@@ -196,10 +205,8 @@ export async function publishSwarmCompletion(
     writeUp: design?.content ?? null,
     tasks,
     landedTaskIds: landedIds.map((row) => row.taskId),
+    documentPath: document?.path ?? null,
   });
-
-  const handle = await swarmSandboxHandle(ctx, swarm.sandboxId);
-  const workspace = swarmWorkspaceKey(swarm.id);
   const publishables: PublishableRepository[] = repoRows.map((row) => {
     const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
     return {
@@ -272,10 +279,26 @@ export function swarmPullRequestBody(input: {
   writeUp: string | null;
   tasks: (typeof swarmTasks.$inferSelect)[];
   landedTaskIds: string[];
+  /** The assembled document, on a swarm whose deliverable is one. */
+  documentPath?: string | null;
 }): string {
   const lines: string[] = [`Opened by Bento for the swarm "${input.title}".`, ""];
 
   lines.push("## Goal", "", input.goal.trim() || "(none given)", "");
+
+  /*
+   * Named first, under the goal, on a swarm whose deliverable is a
+   * document. It is the thing the reviewer is here to read, and the
+   * sections underneath it are the working that produced it.
+   */
+  if (input.documentPath) {
+    lines.push(
+      "## The document",
+      "",
+      `This swarm's deliverable is a document. It is assembled from the sections below and committed at ${input.documentPath} on this branch.`,
+      "",
+    );
+  }
 
   if (input.writeUp?.trim()) {
     lines.push("## What the planner wrote", "", input.writeUp.trim(), "");

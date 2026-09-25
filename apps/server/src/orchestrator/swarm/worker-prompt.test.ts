@@ -3,13 +3,14 @@ import { test } from "node:test";
 import type { swarmTasks, swarms } from "@bento/db";
 import {
   commitPolicyLines,
+  isSafeBranchName,
   landingMergeMessage,
   landingPolicyFor,
   parseTaskTrailer,
   taskTrailer,
   workerBranchName,
 } from "./branches.js";
-import { buildWorkerPrompt } from "./worker-prompt.js";
+import { buildWorkerPrompt, documentSectionLines } from "./worker-prompt.js";
 
 const TASK_ID = "1e7c2b4a-3d5f-4c11-9b88-2a6d4f0e1c33";
 
@@ -177,4 +178,44 @@ test("a message that could close the quote it is in cannot", () => {
     messages: [{ text: nasty }],
   });
   assert.match(prompt, /~{13}/, "the fence is longer than the longest run inside it");
+});
+
+test("a branch name a person typed is checked before it reaches git", () => {
+  /**
+   * The value goes into `git worktree add`, so what is being kept out
+   * is not only an injection: a name with a space or a colon in it is
+   * one git itself refuses, halfway through provisioning, with an
+   * error nobody can act on.
+   */
+  for (const good of ["main", "feature/totals", "release-1.2", "a/b/c", "fix_thing"]) {
+    assert.equal(isSafeBranchName(good), true, `${good} is a branch name`);
+  }
+  for (const bad of [
+    "",
+    "-force",
+    "/leading",
+    "trailing/",
+    "has space",
+    "has:colon",
+    "a..b",
+    "a@{0}",
+    "a//b",
+    ".hidden",
+    "feature/.hidden",
+    "feature/trailing.",
+    "feature/x.lock",
+    "--upload-pack=touch /tmp/x",
+    "a\nb",
+  ]) {
+    assert.equal(isSafeBranchName(bad), false, `${bad} is not`);
+  }
+});
+
+test("a document swarm's leaf is told to write a section and to build nothing", () => {
+  const task = { id: "11111111-2222-3333-4444-555555555555", title: "Why it matters" } as never;
+  const lines = documentSectionLines(task, "/workspace/app").join("\n");
+  assert.match(lines, /deliverable is a document/);
+  assert.match(lines, /\/workspace\/app\/docs\/sections\/11111111-2222-3333-4444-555555555555\.md/);
+  assert.match(lines, /do not edit another section's file/);
+  assert.match(lines, /no build to run and no test command here/);
 });

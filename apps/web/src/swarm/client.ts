@@ -4,6 +4,7 @@ import { SWARM_TEMPLATES, draftSwarm, seedSwarms, summarise } from "./fixtures.j
 import type {
   NewSwarmInput,
   Swarm,
+  SwarmArtifact,
   SwarmDetail,
   SwarmLanding,
   SwarmNodeDetail,
@@ -56,6 +57,20 @@ export interface SwarmApi {
   /** Resuming is starting: one route decides when a swarm may run. */
   resumeSwarm(swarmId: string): Promise<void>;
   stopSwarm(swarmId: string): Promise<void>;
+  /**
+   * Takes a finished swarm up again with a follow up.
+   *
+   * Not a resume. Resuming is a swarm that was paused; this is one
+   * that finished and published, being asked for more on the same
+   * branch, so the pull requests it already opened are updated rather
+   * than joined by a second set. The raised ceilings travel with the
+   * instruction because a swarm that stopped on one would otherwise be
+   * reopened into stopping on it again.
+   */
+  reopenSwarm(
+    swarmId: string,
+    input: { instruction: string; budgetUsd?: number | null; timeLimitMin?: number | null },
+  ): Promise<void>;
   archiveSwarm(swarmId: string): Promise<void>;
   restoreSwarm(swarmId: string): Promise<void>;
   setWorkers(swarmId: string, workers: number): Promise<void>;
@@ -85,6 +100,13 @@ export interface SwarmApi {
   retryTask(swarmId: string, taskId: string): Promise<void>;
   cancelTask(swarmId: string, taskId: string): Promise<void>;
   splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
+  /**
+   * Adds a task to the plan under one of its plan nodes.
+   *
+   * The other half of a tree a person and an agent share. It goes in
+   * ready to be worked, and the planner is told and may object.
+   */
+  addTask(swarmId: string, parentId: string, task: { title: string; description?: string }): Promise<void>;
   reassignTask(swarmId: string, taskId: string, agentProfileId: string | null): Promise<void>;
   editTask(
     swarmId: string,
@@ -100,6 +122,14 @@ export interface SwarmApi {
    * refetch, for a list nobody looks at until a drawer is open.
    */
   getNode(swarmId: string, taskId: string): Promise<SwarmNodeDetail>;
+  /**
+   * What the swarm produced for people to read.
+   *
+   * Its own request rather than part of the detail, for the reason the
+   * node's commits are: it is a panel a person opens once a swarm has
+   * finished, and the plan is refetched on every board event.
+   */
+  listArtifacts(swarmId: string): Promise<SwarmArtifact[]>;
   /**
    * Sends a message to the agent working one node.
    *
@@ -220,6 +250,40 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         detail.swarm.endedAt = new Date(clock()).toISOString();
       });
     },
+    reopenSwarm(swarmId, input) {
+      return mutate(swarmId, (detail) => {
+        const followUp = detail.swarm.reopenCount + 1;
+        detail.swarm.status = "running";
+        detail.swarm.pausedReason = null;
+        detail.swarm.endedAt = null;
+        detail.swarm.archivedAt = null;
+        detail.swarm.reopenCount = followUp;
+        if (input.budgetUsd !== undefined) detail.swarm.budgetUsd = input.budgetUsd;
+        if (input.timeLimitMin !== undefined) detail.swarm.timeLimitMin = input.timeLimitMin;
+        const first = detail.tasks[0];
+        if (!first) return;
+        // A plan node at the top of the tree, the way the server makes
+        // one: the fixtures are how the console is driven in tests, so
+        // what they model has to be the shape the routes produce.
+        detail.tasks = [
+          ...detail.tasks,
+          {
+            ...first,
+            id: `${detail.swarm.id}-follow-up-${followUp}`,
+            parentId: null,
+            position: detail.tasks.filter((task) => task.parentId === null).length,
+            nodeType: "plan",
+            status: "open",
+            attention: "none",
+            title: `Follow up ${followUp}`,
+            description: input.instruction,
+            followUpInstruction: input.instruction,
+            report: null,
+            commits: [],
+          },
+        ];
+      });
+    },
     archiveSwarm(swarmId) {
       return mutate(swarmId, (detail) => {
         detail.swarm.archivedAt = new Date(clock()).toISOString();
@@ -244,6 +308,13 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         // because the transcript is where an answer belongs.
         void text;
       });
+    },
+    listArtifacts(swarmId) {
+      // The fixtures capture nothing, so there is nothing to list.
+      // Empty rather than invented: the panel draws only when a swarm
+      // actually produced something.
+      void swarmId;
+      return Promise.resolve([]);
     },
     getNode(swarmId, taskId) {
       const detail = find(swarmId);
@@ -340,6 +411,28 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         ];
       });
     },
+    addTask(swarmId, parentId, task) {
+      return mutate(swarmId, (detail) => {
+        const parent = detail.tasks.find((row) => row.id === parentId);
+        if (!parent) return;
+        detail.tasks = [
+          ...detail.tasks,
+          {
+            ...parent,
+            id: `${parentId}-added-${detail.tasks.length}`,
+            parentId,
+            position: detail.tasks.filter((row) => row.parentId === parentId).length,
+            nodeType: "leaf" as const,
+            status: "assigned" as const,
+            attention: "none" as const,
+            title: task.title,
+            description: task.description ?? "",
+            report: null,
+            commits: [],
+          },
+        ];
+      });
+    },
     reassignTask(swarmId, taskId, agentProfileId) {
       return mutate(swarmId, (detail) => {
         detail.tasks = detail.tasks.map((task) => (task.id === taskId ? { ...task, agentProfileId } : task));
@@ -389,6 +482,15 @@ export interface WireSwarm {
    * deployment ever borrowed a login.
    */
   spentNotionalUsd?: string;
+  /**
+   * Optional for the reason the notional tier is: a server that
+   * predates the column sends nothing, and nothing reads as the first
+   * pass of a code swarm started from no branch, which is what every
+   * swarm on such a server is.
+   */
+  deliverable?: "code" | "document";
+  startBranch?: string | null;
+  reopenCount?: number;
   archivedAt: string | null;
   lastOpenedAt: string | null;
   createdAt: string;
@@ -417,6 +519,8 @@ export interface WireTask {
   costEstimatedUsd: string;
   costAssumedUsd: string;
   costNotionalUsd?: string;
+  /** Optional for the reason the swarm's deliverable is. */
+  followUpInstruction?: string | null;
   startedAt: string | null;
   endedAt: string | null;
 }
@@ -590,6 +694,7 @@ export function toTask(row: WireTask): SwarmTask {
     // list yet. Empty rather than invented: the drawer already says so
     // in words when there is nothing to show.
     acceptanceCriteria: [],
+    followUpInstruction: row.followUpInstruction ?? null,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     commits: [],
@@ -614,9 +719,7 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     status: swarmStatusOf(row),
     pausedReason: row.pausedReason,
     branchName: row.branchName,
-    // Every swarm on this branch produces code. Nothing on the server
-    // records a second kind yet.
-    deliverable: "code",
+    deliverable: row.deliverable ?? "code",
     templateId: row.templateId,
     budgetUsd: row.budgetUsd === null ? null : Number(row.budgetUsd),
     maxWorkers: WORKER_CEILING,
@@ -640,6 +743,8 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     // A planner's question reaches the board as attention on the node
     // that asked it. There is no question row to answer yet.
     question: null,
+    reopenCount: row.reopenCount ?? 0,
+    startBranch: row.startBranch ?? null,
   };
 }
 
@@ -740,11 +845,16 @@ export function httpSwarmApi(
     },
     async createSwarm(input) {
       /*
-       * What the route takes, and nothing else. The dialog collects a
-       * few things the server has no home for yet (attachments, a
-       * starting branch, the deliverable, plan only); they are not
-       * sent, because a field the server drops is a promise the
-       * console did not keep.
+       * What the route takes, and nothing else. The dialog still
+       * collects two things the server has no home for (attachments,
+       * and plan only, which is how every swarm begins anyway); they
+       * are not sent, because a field the server drops is a promise
+       * the console did not keep.
+       *
+       * The starting branch is sent now that there is a column for
+       * it. Only when it is an existing one: a new branch is named by
+       * the server after the swarm, and sending the console's preview
+       * of that name would let the two disagree.
        */
       const created = await post<WireSwarm>("/api/swarms", {
         projectId: input.projectId,
@@ -753,6 +863,7 @@ export function httpSwarmApi(
         ...(input.templateId ? { templateId: input.templateId } : {}),
         maxWorkers: input.workers,
         ...(input.budgetUsd === null ? {} : { budgetUsd: input.budgetUsd }),
+        ...(input.start.kind === "existing-branch" ? { startBranch: input.start.name } : {}),
       });
       return { swarm: toSwarm(created), tasks: [], landings: [], ledger: [], pullRequests: [] };
     },
@@ -764,6 +875,16 @@ export function httpSwarmApi(
     },
     async stopSwarm(swarmId) {
       await post(`/api/swarms/${swarmId}/cancel`);
+    },
+    async reopenSwarm(swarmId, input) {
+      // The ceilings travel only when the dialog collected them. An
+      // absent field leaves the swarm's own, which is what "reopen
+      // without raising anything" has to mean on the server too.
+      await post(`/api/swarms/${swarmId}/reopen`, {
+        instruction: input.instruction,
+        ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),
+        ...(input.timeLimitMin === undefined ? {} : { timeLimitMin: input.timeLimitMin }),
+      });
     },
     async archiveSwarm(swarmId) {
       await patch(`/api/swarms/${swarmId}`, { archived: true });
@@ -786,11 +907,17 @@ export function httpSwarmApi(
     async splitTask(swarmId, taskId, children) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/split`, { children });
     },
+    async addTask(swarmId, parentId, task) {
+      await post(`/api/swarms/${swarmId}/tasks`, { parentId, ...task });
+    },
     async reassignTask(swarmId, taskId, agentProfileId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/reassign`, { agentProfileId });
     },
     async editTask(swarmId, taskId, edit) {
       await patch(`/api/swarms/${swarmId}/tasks/${taskId}`, edit);
+    },
+    async listArtifacts(swarmId) {
+      return call<SwarmArtifact[]>(`/api/swarms/${swarmId}/artifacts`);
     },
     async getNode(swarmId, taskId) {
       const node = await call<WireNode>(`/api/swarms/${swarmId}/tasks/${taskId}`);

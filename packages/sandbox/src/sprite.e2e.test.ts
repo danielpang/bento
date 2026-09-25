@@ -56,9 +56,30 @@ const runTag = process.env.GITHUB_RUN_ID
   : `local-${Date.now()}`;
 const workspaceKey = `e2e-${runTag}`;
 
+/**
+ * git on the runner, for building the bundles a swarm's worker is
+ * seeded from. Nothing here runs inside the sandbox: what is being
+ * checked is that what this side produces is what the other side can
+ * use.
+ */
+const exec = promisify(execFile);
+async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await exec("git", ["-C", cwd, ...args], {
+    maxBuffer: 32 * 1024 * 1024,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "test@localhost",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "test@localhost",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  });
+  return stdout;
+}
+
 /** Long: a cold sprite installs ten CLIs and a private Node. */
 const PROVISION_TIMEOUT_MS = 25 * 60_000;
-const exec = promisify(execFile);
 
 const DSH_MOCK_SERVER = `import { appendFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -722,6 +743,134 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     // is not holding, whatever the exit code says.
     assert.doesNotMatch(result.stderr, /went to sleep/);
     assert.doesNotMatch(result.stderr, /closed before the command reported an exit/);
+  });
+
+  /**
+   * A swarm's worker, provisioned the way a swarm actually provisions
+   * one: from bundles rather than from a remote.
+   *
+   * This is the path no stub can check. A swarm's branch exists in
+   * exactly one place, the machine its merge queue has been landing
+   * onto, because a swarm pushes once and only at the end. So a worker
+   * on a driver that clones from the remote cannot reach it: it is
+   * seeded with a bundle of the base branch and a second, incremental
+   * bundle carrying the swarm's branch, and its own work comes back
+   * out as a third bundle for the queue to land.
+   *
+   * Every one of those three steps is git talking to git inside a real
+   * machine, and the failures live in the seams: a bundle whose
+   * prerequisite commit is not in the seed, a branch cut from the base
+   * instead of from the swarm's head, an export that returns the
+   * commits already on the base as well as the new ones. A stub agrees
+   * with all of them.
+   *
+   * On the same sprite as everything above, deliberately. A second
+   * machine would be a second name, and the workflow's cleanup deletes
+   * one: a leaked sprite is billed until somebody notices.
+   */
+  await t.test("a worker seeded from bundles lands its work back out", { skip: needsSprite() }, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "bento-swarm-seed-"));
+    try {
+      const origin = path.join(root, "origin");
+      await git(root, ["init", "--quiet", "-b", "main", origin]);
+      await writeFile(path.join(origin, "totals.ts"), "export const total = 0;\n");
+      await git(origin, ["add", "."]);
+      await git(origin, ["commit", "--quiet", "-m", "base"]);
+      const baseSha = (await git(origin, ["rev-parse", "HEAD"])).trim();
+
+      // What the seed is: the base branch, whole.
+      const seedPath = path.join(root, "seed.bundle");
+      await git(origin, ["bundle", "create", seedPath, "main"]);
+
+      /*
+       * And what the swarm's branch is: a commit the remote has never
+       * seen, carried as an incremental bundle whose prerequisite is
+       * the base commit above. This is exactly what the merge queue
+       * leaves behind after one leaf has landed.
+       */
+      await git(origin, ["checkout", "--quiet", "-b", "swarm/e2e"]);
+      await writeFile(path.join(origin, "totals.ts"), "export const total = 1;\n");
+      await git(origin, ["commit", "--quiet", "-am", "Line item totals"]);
+      const swarmSha = (await git(origin, ["rev-parse", "HEAD"])).trim();
+      const startPath = path.join(root, "start.bundle");
+      await git(origin, ["bundle", "create", startPath, `${baseSha}..swarm/e2e`]);
+      await git(origin, ["checkout", "--quiet", "main"]);
+
+      await driver.provision({
+        projectId: "sprite-e2e",
+        workspaceKey,
+        hostWorkspacePath: "/unused",
+        repositories: [
+          {
+            name: "app",
+            branch: "swarm/e2e-aaaaaaaa",
+            baseBranch: "main",
+            seedBundle: await readFile(seedPath),
+            startBundle: { branch: "swarm/e2e", data: await readFile(startPath) },
+          },
+        ],
+        onProgress: (message) => console.log(`  ${message}`),
+      });
+
+      /*
+       * The worker's branch is cut from the swarm's head, not from the
+       * base. This is the assertion the whole path exists for: a
+       * worker that started from main would write against code the
+       * swarm has already moved past, and its branch would conflict
+       * with every leaf that landed before it.
+       */
+      const head = await shell("cd /workspace/app && git rev-parse HEAD");
+      assert.equal(head.out, swarmSha, "the worker did not start from the swarm's branch");
+      const file = await shell("cd /workspace/app && cat totals.ts");
+      assert.equal(file.out, "export const total = 1;", "and the landed leaf's work is not in its checkout");
+      const branch = await shell("cd /workspace/app && git rev-parse --abbrev-ref HEAD");
+      assert.equal(branch.out, "swarm/e2e-aaaaaaaa", "the worker is not on its own branch");
+
+      // Then the worker works, the way one does: a commit with the
+      // trailer the merge queue matches on.
+      const committed = await shell(
+        [
+          "cd /workspace/app",
+          "printf 'export const total = 2;\\n' > totals.ts",
+          "git add totals.ts",
+          "git -c user.name=Worker -c user.email=w@localhost commit --quiet -m 'Round the total' -m 'Bento-Task: 11111111-2222-3333-4444-555555555555'",
+          "git rev-parse HEAD",
+        ].join("\n"),
+      );
+      assert.equal(committed.exitCode, 0, `the worker could not commit: ${committed.stderr || committed.out}`);
+
+      /*
+       * And the queue reads it back out. Incremental against the
+       * swarm's branch rather than against the base, so what travels
+       * is this leaf's commit and not the one that already landed.
+       */
+      const exported = await driver.exportRepository(handle, "app", "swarm/e2e");
+      assert.ok(exported, "the worker's commit did not come back out of the machine");
+      assert.equal(exported!.headSha, committed.out.split("\n").at(-1)!.trim());
+      assert.equal(exported!.baseSha, swarmSha, "the export is against the base, not the swarm's branch");
+
+      // The last step is the landing, so the bundle has to apply onto
+      // the branch it says it is based on.
+      const landing = path.join(root, "landing.bundle");
+      await writeFile(landing, exported!.data);
+      await git(origin, ["checkout", "--quiet", "swarm/e2e"]);
+      await git(origin, ["bundle", "verify", landing]);
+      await git(origin, ["fetch", "--quiet", landing, "HEAD"]);
+      const fetched = (await git(origin, ["rev-parse", "FETCH_HEAD^{commit}"])).trim();
+      assert.equal(fetched, exported!.headSha, "what the bundle carried is not the commit it declared");
+      assert.equal(
+        (await git(origin, ["show", `${fetched}:totals.ts`])).trim(),
+        "export const total = 2;",
+        "the worker's change did not survive the trip out",
+      );
+      assert.match(
+        await git(origin, ["log", "-1", "--format=%B", fetched]),
+        /Bento-Task: 11111111-2222-3333-4444-555555555555/,
+        "the trailer the merge queue matches on did not survive either",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   /**

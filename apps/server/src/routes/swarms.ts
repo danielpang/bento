@@ -10,6 +10,7 @@ import {
   ensureSwarmAgents,
   projects,
   repositories,
+  runArtifacts,
   sandboxes,
   swarmLandings,
   swarmMessages,
@@ -18,6 +19,7 @@ import {
   swarmTasks,
   swarmTemplates,
   swarms,
+  type Db,
 } from "@bento/db";
 import {
   canAccessProject,
@@ -35,11 +37,24 @@ import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
-import { workerBranchName } from "../orchestrator/swarm/branches.js";
+import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
-import { cancelTaskTree, reassignLeaf, retryLeaf, retryRefusal, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import {
+  addLeaf,
+  addedTaskNotice,
+  cancelTaskTree,
+  reassignLeaf,
+  retryLeaf,
+  retryRefusal,
+  splitLeaf,
+} from "../orchestrator/swarm/task-actions.js";
+import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
+import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
+import { reopenRefusal, reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { budgetRefusal } from "../orchestrator/swarm/ledger.js";
+import { recordSwarmAnswer } from "../orchestrator/swarm/messages.js";
+import { queueSwarmSlackNotify } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
@@ -95,6 +110,16 @@ const LANDINGS_HISTORY = 10;
  */
 const TASK_EVENTS_SHOWN = 50;
 
+/**
+ * How many of a swarm's artifacts the console is sent.
+ *
+ * A swarm of fifty leaves can capture a file per leaf, and the list is
+ * a panel a person glances at rather than a directory they page
+ * through. Newest first, so the assembled document (written last, at
+ * the moment the swarm finished) is at the top.
+ */
+const SWARM_ARTIFACTS_SHOWN = 50;
+
 const createSwarm = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(200),
@@ -103,6 +128,23 @@ const createSwarm = z.object({
   maxWorkers: z.number().int().min(1).max(32).optional(),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
+  /**
+   * A branch that already exists, to start from.
+   *
+   * The swarm's own branch is cut from this rather than from the
+   * repository's default branch, and the planner's first prompt
+   * carries what is on it and what its pull request is still being
+   * asked about. Refused here rather than sanitized: the value reaches
+   * git, and a name with a space, a colon or a leading dash in it is
+   * either a mistake or an argument.
+   */
+  startBranch: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .refine((value) => isSafeBranchName(value), "that is not a branch name")
+    .nullish(),
 });
 
 /**
@@ -132,6 +174,39 @@ const updateSwarm = z
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: "nothing to change" });
+
+
+/**
+ * Says the swarm changed, once the change is committed.
+ *
+ * Every route below that moves a swarm calls this, and the reason is
+ * the one thing a board event is for: somebody who is not the person
+ * who pressed the button. The console refetches after its own action
+ * and so looked correct while it was the only viewer; a second tab, a
+ * terminal running `bento swarm watch`, and a teammate watching the
+ * same swarm heard nothing at all until the next tick happened to fire
+ * for some other reason. Stopping a swarm from one window left it
+ * running on every other screen.
+ *
+ * After the commit, never inside it, for the reason the coordinator
+ * emits after its transaction: a viewer that refetches on the event
+ * has to find the state the event describes.
+ */
+function saySwarmChanged(
+  ctx: AppContext,
+  c: Context,
+  swarm: Pick<typeof swarms.$inferSelect, "id" | "projectId">,
+  status?: string,
+): void {
+  deferAfterCommit(c, async () => {
+    ctx.bus.emitBoardEvent({
+      type: "swarm_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      ...(status ? { status } : {}),
+    });
+  });
+}
 
 export function swarmRoutes(ctx: AppContext) {
   return new Hono()
@@ -248,6 +323,16 @@ export function swarmRoutes(ctx: AppContext) {
           // like it is waiting for them.
           status: "planning",
           branchName: swarmBranchName(slug),
+          /*
+           * What this swarm produces, and where it starts from.
+           *
+           * The deliverable is copied off the template rather than read
+           * back through it later, for the reason the ceilings are
+           * copied: a template edited next month must not change what
+           * a swarm that ran today was producing.
+           */
+          deliverable: template.deliverable,
+          startBranch: body.startBranch ?? null,
           maxWorkers: body.maxWorkers ?? template.maxWorkers,
           budgetUsd,
           timeLimitMin: body.timeLimitMin === undefined ? template.timeLimitMin : body.timeLimitMin ?? null,
@@ -291,6 +376,7 @@ export function swarmRoutes(ctx: AppContext) {
           await enqueueRun(ctx, started.id);
         });
       }
+      deferAfterCommit(c, () => queueSwarmSlackNotify(ctx, { type: "swarm_created", swarmId: swarm.id, userId: actor(c) }));
       return c.json({ ...swarm, plannerRunId: started?.id ?? null }, 201);
     })
     /**
@@ -440,6 +526,22 @@ export function swarmRoutes(ctx: AppContext) {
         await db(c, ctx).update(swarms).set({ budgetWarnedAt: null }).where(eq(swarms.id, swarm.id));
       }
       if (ceilingMoved) deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      /*
+       * A swarm somebody put away holds a machine nobody will work in
+       * again, and a sprite costs money for as long as it exists
+       * rather than for as long as it is used.
+       *
+       * Only when the swarm is actually finished with: archiving one
+       * that is still running is a person tidying their strip, and
+       * destroying a machine an agent is working in would leave a
+       * branch nobody chose. Queued rather than destroyed inline, for
+       * the reason a finished swarm's reap is queued, and safe to
+       * queue twice because a machine already gone is no rows.
+       */
+      if (archived === true && archiveReapsSandboxes(swarm)) {
+        deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
+      }
+      saySwarmChanged(ctx, c, swarm);
       return c.json(updated);
     })
     /**
@@ -468,6 +570,19 @@ export function swarmRoutes(ctx: AppContext) {
         .set({ status: "paused", pausedReason: "manual", updatedAt: new Date() })
         .where(eq(swarms.id, swarm.id))
         .returning();
+      /*
+       * And the machines are put away with a point to come back to.
+       *
+       * After the commit and off the request, because the provider is
+       * a network call away and pausing must not fail because Fly was
+       * slow. A driver that cannot snapshot does nothing here, which
+       * is right for the local ones: their containers hold nothing the
+       * repository on this host does not already have.
+       */
+      deferAfterCommit(c, async () => {
+        await checkpointSwarmSandboxes(ctx.db, ctx.driver, swarm.id, `swarm-pause-${swarm.id}`);
+      });
+      saySwarmChanged(ctx, c, swarm, "paused");
       return c.json(paused);
     })
     /**
@@ -568,6 +683,7 @@ export function swarmRoutes(ctx: AppContext) {
        * the figures the event reads are the ones this request wrote.
        */
       deferAfterCommit(c, () => captureSwarmSpend(ctx, swarm.id, "cancelled"));
+      saySwarmChanged(ctx, c, swarm, "cancelled");
       return c.json(cancelled);
     })
     /**
@@ -609,7 +725,128 @@ export function swarmRoutes(ctx: AppContext) {
         .where(eq(swarms.id, swarm.id))
         .returning();
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm, "running");
       return c.json(started);
+    })
+    /**
+     * Takes a finished swarm up again with a follow up.
+     *
+     * Its own route rather than a start with an instruction on it,
+     * because it is a different thing: /start is a person saying a
+     * plan is worth running, and this adds work to a swarm that has
+     * already finished and published. What it must not do is give the
+     * swarm a new branch, which is the whole reason it exists: the
+     * pull requests already open on that branch are updated by the
+     * publish at the end, and a second branch would mean a second pull
+     * request over the same change.
+     *
+     * The rules live in reopen.ts, shared with anything else that
+     * reopens a swarm, and both ceilings are refused before anything
+     * is written: a swarm put back to "running" that the coordinator
+     * then refuses to spawn on is a board that says it is working and
+     * never moves.
+     */
+    .post(
+      "/:id/reopen",
+      zValidator(
+        "json",
+        z
+          .object({
+            instruction: z.string().trim().min(1).max(20_000),
+            budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
+            timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
+          })
+          .strict(),
+      ),
+      async (c) => {
+        const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+        if (!swarm) return c.json({ error: "not found" }, 404);
+        const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+        if (refusal) return c.json(refusal.body, refusal.status);
+        const body = c.req.valid("json");
+
+        /*
+         * Whether this swarm can be reopened at all is asked first,
+         * off the row already in hand, because it is the refusal a
+         * person is most likely to hit and the one they can act on. A
+         * swarm that is still running gets "there is nothing to
+         * reopen" rather than "an agent is still finishing", which is
+         * true of every running swarm and says nothing.
+         */
+        const cannot = reopenRefusal(swarm, {
+          ...(body.budgetUsd === undefined ? {} : { budgetUsd: body.budgetUsd }),
+          ...(body.timeLimitMin === undefined ? {} : { timeLimitMin: body.timeLimitMin }),
+        });
+        if (cannot) return c.json({ error: cannot.refused, code: cannot.code }, 409);
+
+        /*
+         * Then, on a swarm that has finished: one whose last agent has
+         * not settled yet is one the coordinator is still about to
+         * hear from, and its report would land on a tree this request
+         * is about to change under it. Waiting a moment is the whole
+         * fix.
+         */
+        if (await swarmHasActiveRun(db(c, ctx), swarm.id)) {
+          return c.json(
+            {
+              error: "An agent from this swarm is still finishing. Wait for it to stop, then reopen.",
+              code: "SWARM_BUSY",
+            },
+            409,
+          );
+        }
+
+        const reopened = await db(c, ctx).transaction((tx) =>
+          reopenSwarm(tx as unknown as Db, swarm, {
+            instruction: body.instruction,
+            ...(body.budgetUsd === undefined ? {} : { budgetUsd: body.budgetUsd }),
+            ...(body.timeLimitMin === undefined ? {} : { timeLimitMin: body.timeLimitMin }),
+            actorUserId: actor(c),
+          }),
+        );
+        if ("refused" in reopened) return c.json({ error: reopened.refused, code: reopened.code }, 409);
+
+        // The planner hears the instruction through the wake the tick
+        // delivers, which is the same door every other message uses.
+        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+        saySwarmChanged(ctx, c, swarm, "running");
+        return c.json({ swarm: reopened.swarm, followUpTaskId: reopened.followUpTaskId, followUp: reopened.followUp }, 201);
+      },
+    )
+    /**
+     * What this swarm produced for people to read: its assembled
+     * document, and anything else its agents captured.
+     *
+     * Metadata only. The bytes are served by the artifact routes, which
+     * is where every rule about serving agent output lives: a sandboxing
+     * CSP, nosniff, and HTML offered as a download rather than rendered.
+     * Duplicating any of that here would be a second place for it to
+     * drift out of date.
+     */
+    .get("/:id/artifacts", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+
+      const rows = await db(c, ctx)
+        .select({
+          id: runArtifacts.id,
+          runId: runArtifacts.runId,
+          swarmTaskId: runArtifacts.swarmTaskId,
+          stageSlug: runArtifacts.stageSlug,
+          stageName: runArtifacts.stageName,
+          path: runArtifacts.path,
+          kind: runArtifacts.kind,
+          mime: runArtifacts.mime,
+          size: runArtifacts.size,
+          createdAt: runArtifacts.createdAt,
+        })
+        .from(runArtifacts)
+        .where(eq(runArtifacts.swarmId, swarm.id))
+        .orderBy(desc(runArtifacts.createdAt))
+        .limit(SWARM_ARTIFACTS_SHOWN);
+      return c.json(rows);
     })
     /** The swarm's thread: what people asked, and what agents asked back. */
     .get("/:id/messages", async (c) => {
@@ -652,22 +889,112 @@ export function swarmRoutes(ctx: AppContext) {
           if (!task) return c.json({ error: "not found" }, 404);
         }
 
-        const [message] = await db(c, ctx)
-          .insert(swarmMessages)
-          .values({
-            swarmId: swarm.id,
-            ...(body.taskId ? { taskId: body.taskId } : {}),
-            text: body.text,
-            userId: actor(c),
-          })
-          .returning();
-        // An answer is what a swarm waiting on a question was waiting
-        // for, so the wait ends here rather than on the next tick.
-        if (swarm.pausedReason === "attention") {
-          await db(c, ctx).update(swarms).set({ pausedReason: null }).where(eq(swarms.id, swarm.id));
-        }
+        const message = await recordSwarmAnswer(db(c, ctx), {
+          swarmId: swarm.id,
+          taskId: body.taskId ?? null,
+          text: body.text,
+          userId: actor(c),
+        });
         deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
         return c.json(message, 201);
+      },
+    )
+    /**
+     * Adds a task to the plan, because a person saw something the
+     * planner did not.
+     *
+     * The other half of a tree a person and an agent share. It goes in
+     * assigned, because somebody who adds a task has decided it needs
+     * doing and leaving it open would be the planner overruling them
+     * by inaction, and the planner is told about it in the same breath
+     * and can cancel it: objecting is a decision somebody can see.
+     *
+     * Through the same function the planner's own create_task will use
+     * when it grows one, for the reason every other node control is
+     * shared: one rule about what may hang off what, not two.
+     */
+    .post(
+      "/:id/tasks",
+      zValidator(
+        "json",
+        z
+          .object({
+            parentId: z.string().uuid().nullish(),
+            title: z.string().trim().min(1).max(200),
+            description: z.string().max(20_000).optional(),
+            weight: z.number().int().min(1).max(5).optional(),
+          })
+          .strict(),
+      ),
+      async (c) => {
+        const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+        if (!swarm) return c.json({ error: "not found" }, 404);
+        const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+        if (refusal) return c.json(refusal.body, refusal.status);
+        const body = c.req.valid("json");
+
+        if (swarm.status === "cancelled") {
+          return c.json(
+            { error: "This swarm is stopped, so nothing more is added to its plan.", code: "SWARM_STOPPED" },
+            409,
+          );
+        }
+        if (swarm.status === "done" || swarm.status === "failed") {
+          return c.json(
+            {
+              error: "This swarm has finished. Reopen it with the follow up before adding more work.",
+              code: "SWARM_FINISHED",
+            },
+            409,
+          );
+        }
+
+        /*
+         * The parent, scoped to this swarm rather than looked up by id
+         * alone, so a node from another team's swarm reads as not
+         * there rather than as one this caller may add work under.
+         */
+        let parent: typeof swarmTasks.$inferSelect | null = null;
+        if (body.parentId) {
+          const [row] = await db(c, ctx)
+            .select()
+            .from(swarmTasks)
+            .where(and(eq(swarmTasks.id, body.parentId), eq(swarmTasks.swarmId, swarm.id)))
+            .limit(1);
+          if (!row) return c.json({ error: "not found" }, 404);
+          parent = row;
+        }
+
+        const created = await addLeaf(db(c, ctx), {
+          swarmId: swarm.id,
+          parent,
+          title: body.title,
+          ...(body.description === undefined ? {} : { description: body.description }),
+          ...(body.weight === undefined ? {} : { weight: body.weight }),
+          actorUserId: actor(c),
+        });
+        if ("refused" in created) return c.json({ error: created.refused, code: "CANNOT_ADD" }, 409);
+
+        /*
+         * And the planner hears about it, as a notice rather than as a
+         * message: this is Bento's sentence about a row it holds, with
+         * the person's own words quoted inside it.
+         */
+        await db(c, ctx).insert(swarmMessages).values({
+          swarmId: swarm.id,
+          source: "system",
+          text: addedTaskNotice({
+            taskId: created.id,
+            title: created.title,
+            description: created.description,
+            parentId: created.parentId,
+            quote: quoteUntrusted,
+          }),
+        });
+
+        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+        saySwarmChanged(ctx, c, swarm);
+        return c.json(created, 201);
       },
     )
     /**
@@ -808,6 +1135,7 @@ export function swarmRoutes(ctx: AppContext) {
       // The rollup is the reconciler's, not this route's: one place
       // decides what a finished leaf means for the nodes above it.
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm);
       return c.json(done);
     })
     /**
@@ -829,6 +1157,8 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
+      const finished = finishedTaskMutationRefusal(c, swarm);
+      if (finished) return finished;
 
       /*
        * Whether this may be retried at all is asked before anything is
@@ -867,6 +1197,8 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
+      const finished = finishedTaskMutationRefusal(c, swarm);
+      if (finished) return finished;
 
       const cancelled = await cancelTaskTree(db(c, ctx), { task, actorUserId: actor(c) });
       for (const id of cancelled) await stopRunsOnTask(ctx, c, id);
@@ -901,6 +1233,8 @@ export function swarmRoutes(ctx: AppContext) {
         const found = await accessibleTask(ctx, c);
         if ("refusal" in found) return found.refusal;
         const { swarm, task } = found;
+        const finished = finishedTaskMutationRefusal(c, swarm);
+        if (finished) return finished;
 
         const created = await splitLeaf(db(c, ctx), {
           task,
@@ -1172,6 +1506,21 @@ async function accessibleTask(
     .limit(1);
   if (!task) return { refusal: c.json({ error: "not found" }, 404) };
   return { swarm, task };
+}
+
+/** Status-changing node controls on an ended swarm go through reopen. */
+function finishedTaskMutationRefusal(
+  c: Context,
+  swarm: Pick<typeof swarms.$inferSelect, "status">,
+): Response | null {
+  if (swarm.status !== "done" && swarm.status !== "failed" && swarm.status !== "cancelled") return null;
+  return c.json(
+    {
+      error: "This swarm has finished. Reopen it before changing which work is active.",
+      code: "SWARM_FINISHED",
+    },
+    409,
+  );
 }
 
 /**

@@ -174,6 +174,15 @@ export interface SwarmTask {
   report: string | null;
   /** What "done" means for this leaf, as the planner wrote it. */
   acceptanceCriteria: string[];
+  /**
+   * What a reopen asked for, on the node that holds its work.
+   *
+   * Null on every node the first pass created. Both views read it to
+   * label a follow up: the node carries the instruction, and the label
+   * reaches its subtree because the model walks it down. A person's own
+   * words, so it renders as text.
+   */
+  followUpInstruction: string | null;
   startedAt: string | null;
   endedAt: string | null;
   commits: TaskCommit[];
@@ -216,6 +225,37 @@ export interface Swarm {
   archivedAt: string | null;
   lastOpenedAt: string | null;
   question: PlannerQuestion | null;
+  /**
+   * How many times this swarm has been reopened. Zero is the first
+   * pass, which is most of them.
+   */
+  reopenCount: number;
+  /** The branch this swarm was started from, when a person named one. */
+  startBranch: string | null;
+}
+
+/**
+ * Something a swarm produced for people to read: its assembled
+ * document, and anything else its agents captured.
+ *
+ * Metadata only. The bytes come from the artifact routes, which is
+ * where every rule about serving agent output lives, and the console
+ * opens them in the same viewer a card's artifacts open in: markdown
+ * through react-markdown with raw HTML off, HTML only inside a
+ * sandboxed iframe, everything else offered as a download.
+ */
+export interface SwarmArtifact {
+  id: string;
+  runId: string;
+  /** The node that produced it, or null for the swarm's own. */
+  swarmTaskId: string | null;
+  stageSlug: string;
+  stageName: string;
+  path: string;
+  kind: "markdown" | "mermaid" | "image" | "html" | "file";
+  mime: string;
+  size: number;
+  createdAt: string;
 }
 
 /** A row of the strip. The list endpoint sends no tree. */

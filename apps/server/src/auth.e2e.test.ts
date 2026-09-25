@@ -891,6 +891,29 @@ test("every entity route refuses a foreign tenant", async () => {
     await asOwner("/api/swarm-templates", { method: "POST", body: JSON.stringify({ name: "Mine" }) })
   ).json()) as { id: string };
   assert.ok(template.id, "the owner's swarm template must exist for its routes to be probed");
+  /*
+   * And an artifact belonging to that swarm, so the artifact routes
+   * are probed with both kinds of id. They serve a swarm's artifacts
+   * as well as a card's now, and the two are resolved through
+   * different helpers: a check that only ever passed a card's id would
+   * never touch the swarm half at all.
+   */
+  const [swarmArtifact] = await ctx.db
+    .insert(runArtifacts)
+    .values({
+      runId: run.id,
+      type: "swarm",
+      swarmId: swarm.id,
+      stageSlug: "document",
+      stageName: "Document",
+      path: "docs/mine.md",
+      kind: "markdown",
+      mime: "text/markdown",
+      size: 5,
+      content: "mine.",
+    })
+    .returning({ id: runArtifacts.id });
+  assert.ok(swarmArtifact?.id, "the owner's swarm artifact must exist for the artifact routes to be probed");
 
   // Inserted directly for the same reason as the MCP server row above:
   // the connection routes refuse org-less callers in multi mode (and
@@ -968,6 +991,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/artifacts/${artifact!.id}`],
     ["GET", `/api/artifacts/${artifact!.id}/content`],
     ["GET", `/api/artifacts/${artifact!.id}/preview`],
+    // The same three, on a swarm's artifact rather than a card's.
+    ["GET", `/api/artifacts/${swarmArtifact!.id}`],
+    ["GET", `/api/artifacts/${swarmArtifact!.id}/content`],
+    ["GET", `/api/artifacts/${swarmArtifact!.id}/preview`],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected" }) }],
     ["POST", `/api/features/${feature.id}/message`, { body: JSON.stringify({ text: "injected", attachments: [{ name: "image.png", mime: "image/png", data: "dGVzdA==" }] }) }],
     ["GET", `/api/features/${feature.id}/conversation`],
@@ -1039,6 +1066,21 @@ test("every entity route refuses a foreign tenant", async () => {
     ["DELETE", `/api/mcp/${mcpServer!.id}`],
     // The list is not here: it is scoped to the caller, so it answers
     // 200 with the intruder's own templates, which is checked below.
+    /*
+     * Export, which hands over how a team runs its swarms: the
+     * instructions, the ceilings, and the agents by name. A caller
+     * outside the team has no templates of their own, so the honest
+     * answer is the same "not found" every other route here gives.
+     *
+     * Import is deliberately not in this list, and it is worth saying
+     * why rather than leaving it looking forgotten. It acts on no
+     * entity: it writes templates owned by whoever called it, in their
+     * own organization, exactly as the create route does. A stranger
+     * creating their own template is not a tenant boundary being
+     * crossed, and a 404 there would mean nobody could ever import
+     * their first one.
+     */
+    ["GET", "/api/swarm-templates/export"],
     ["GET", `/api/swarm-templates/${template.id}`],
     ["PATCH", `/api/swarm-templates/${template.id}`, { body: JSON.stringify({ name: "stolen" }) }],
     ["POST", "/api/swarms", { body: JSON.stringify({ projectId: project.id, title: "Injected" }) }],
@@ -1049,12 +1091,28 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/swarms/${swarm.id}/start`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],
+    // Reopening adds work to somebody else's finished swarm, on the
+    // branch their pull request is open on, and can raise the budget
+    // their team is billed for.
+    [
+      "POST",
+      `/api/swarms/${swarm.id}/reopen`,
+      { body: JSON.stringify({ instruction: "address the review comments" }) },
+    ],
+    // What the swarm produced for people to read. The bytes are the
+    // artifact routes' to serve, and this is the list that names them:
+    // a foreign tenant learning the ids would be a foreign tenant
+    // holding the handles to another team's agent output.
+    ["GET", `/api/swarms/${swarm.id}/artifacts`],
     ["GET", `/api/swarms/${swarm.id}/messages`],
     ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
     // A real node of the owner's swarm, not an invented id: a route
     // that had lost its access check would find this one and finish
     // it, where a made up id would answer 404 either way and prove
     // nothing.
+    // Adding work to somebody else's plan, which their agents would
+    // then go and do with their credentials.
+    ["POST", `/api/swarms/${swarm.id}/tasks`, { body: JSON.stringify({ title: "Injected" }) }],
     ["GET", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}`],
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/done`],
     // The node controls, which are the routes that retry, stop, split

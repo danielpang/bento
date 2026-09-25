@@ -457,6 +457,21 @@ export const sandboxes = pgTable("sandboxes", {
    * is billed for a container on their own machine.
    */
   size: text("size"),
+  /**
+   * The snapshot this machine was put away at, when its driver can
+   * take one.
+   *
+   * A paused swarm is one nobody is working in and everybody is still
+   * paying for, and the point of a checkpoint is that resuming it
+   * starts from where it stopped rather than from a fresh clone: a
+   * sandbox that spent ten minutes installing a toolchain should not
+   * spend them again.
+   *
+   * On the sandbox rather than on a run, because there is no run at
+   * the moment a person pauses. agent_runs.checkpoint_id is a
+   * different fact: what one run may be rolled back to.
+   */
+  checkpointId: text("checkpoint_id"),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   ...timestamps,
 },
@@ -1141,10 +1156,9 @@ export const slackThreadLinks = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
-    featureId: uuid("feature_id")
-      .notNull()
-      .unique()
-      .references(() => features.id, { onDelete: "cascade" }),
+    /** Exactly one board owns the thread. */
+    featureId: uuid("feature_id").references(() => features.id, { onDelete: "cascade" }),
+    swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "cascade" }),
     slackTeamId: text("slack_team_id").notNull(),
     slackChannelId: text("slack_channel_id").notNull(),
     slackThreadTs: text("slack_thread_ts").notNull(),
@@ -1154,9 +1168,20 @@ export const slackThreadLinks = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex("slack_thread_links_org_feature_idx").on(t.organizationId, t.featureId),
-    uniqueIndex("slack_thread_links_local_feature_idx").on(t.featureId).where(sql`${t.organizationId} is null`),
+    uniqueIndex("slack_thread_links_org_feature_idx")
+      .on(t.organizationId, t.featureId)
+      .where(sql`${t.featureId} is not null`),
+    uniqueIndex("slack_thread_links_local_feature_idx")
+      .on(t.featureId)
+      .where(sql`${t.organizationId} is null AND ${t.featureId} is not null`),
+    uniqueIndex("slack_thread_links_org_swarm_idx")
+      .on(t.organizationId, t.swarmId)
+      .where(sql`${t.swarmId} is not null`),
+    uniqueIndex("slack_thread_links_local_swarm_idx")
+      .on(t.swarmId)
+      .where(sql`${t.organizationId} is null AND ${t.swarmId} is not null`),
     uniqueIndex("slack_thread_links_thread_idx").on(t.slackTeamId, t.slackChannelId, t.slackThreadTs),
+    check("slack_thread_links_owner_shape", sql`(${t.featureId} is null) <> (${t.swarmId} is null)`),
   ],
 );
 
@@ -1592,6 +1617,60 @@ export const swarmTemplates = pgTable("swarm_templates", {
    */
   longRunWarnMin: integer("long_run_warn_min").notNull().default(20),
   longRunEscalateMin: integer("long_run_escalate_min").notNull().default(45),
+  /**
+   * What this template's swarms produce: a change to the code, or a
+   * document.
+   *
+   * The same tree of leaves worked by the same agents either way. What
+   * changes is three things: a leaf writes a section rather than a
+   * change, the planner assembles those sections into one file at the
+   * end, and a repository's setup and test commands are skipped,
+   * because there is nothing to build and nothing to test.
+   *
+   * A default here, unlike workerIsolation's. That one is an assertion
+   * about the deployment, and a template that made none had to go on
+   * making none. This is a description of the work, and "code" is what
+   * every swarm written before this column actually produced.
+   */
+  deliverable: text("deliverable", { enum: ["code", "document"] })
+    .notNull()
+    .default("code"),
+  /**
+   * Where a document swarm writes its assembled file, relative to the
+   * first repository's root. Null means docs/<slug>.md, worked out from
+   * the swarm rather than written down once per template.
+   */
+  documentPath: text("document_path"),
+  /**
+   * The agent that reads a finished swarm before it is called done.
+   *
+   * Null is the ordinary case, and a swarm is done when its tree is. An
+   * agent here is a team saying a swarm's own account of itself is not
+   * enough: the judge reads the branch and either passes it or sends it
+   * back with a reason, which becomes a leaf like any other.
+   */
+  judgeProfileId: uuid("judge_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+  /**
+   * A command that has to pass before that same moment, run once in the
+   * swarm's own checkout.
+   *
+   * Separate from a repository's test command, which every leaf runs
+   * against its own branch. This one is about the whole change, at the
+   * end: what a person would run themselves before calling a swarm
+   * finished.
+   */
+  completionCommand: text("completion_command"),
+  /**
+   * How deep a plan may be decomposed by an agent other than the one
+   * planner.
+   *
+   * One is what happens today: the planner writes the whole tree. Two
+   * lets a plan node be handed to a sub planner, which is given that
+   * node's subtree and nothing else. A ceiling rather than a switch,
+   * because the cost of getting it wrong is a planner that plans
+   * planners.
+   */
+  maxPlanDepth: integer("max_plan_depth").notNull().default(1),
   ...timestamps,
 });
 
@@ -1670,6 +1749,34 @@ export const swarms = pgTable(
     budgetUsd: numeric("budget_usd"),
     maxWorkers: integer("max_workers").notNull().default(4),
     timeLimitMin: integer("time_limit_min"),
+    /**
+     * What this swarm produces, copied from its template when it starts.
+     *
+     * Copied rather than read back through the template, for the reason
+     * the ceilings are copied: a template edited in March must not
+     * change what a swarm that ran in February was producing.
+     */
+    deliverable: text("deliverable", { enum: ["code", "document"] })
+      .notNull()
+      .default("code"),
+    /**
+     * The branch this swarm was started from, when a person named one.
+     *
+     * Null is the ordinary case: the swarm's branch is cut from each
+     * repository's default branch. A name here says the work continues
+     * on a branch that already exists, so the swarm's branch is cut
+     * from that instead, and the planner's first prompt carries what is
+     * on it and what its pull request is still being asked about.
+     */
+    startBranch: text("start_branch"),
+    /**
+     * How many times this swarm has been reopened with a follow up.
+     *
+     * Counted rather than worked out from the tree: it is what names
+     * the follow up nodes, and what tells a person reading the header
+     * that this is not the first pass.
+     */
+    reopenCount: integer("reopen_count").notNull().default(0),
     /** Spend so far, by how well it is known. See the table comment. */
     spentMeasuredUsd: numeric("spent_measured_usd").notNull().default("0"),
     spentEstimatedUsd: numeric("spent_estimated_usd").notNull().default("0"),
@@ -1800,6 +1907,16 @@ export const swarmTasks = pgTable(
     flags: jsonb("flags").$type<Record<string, unknown>>().notNull().default({}),
     /** What the worker said it did, once it was done. */
     report: text("report"),
+    /**
+     * The instruction a reopen was given, written on the node that
+     * holds the work it asked for.
+     *
+     * On the node rather than on the swarm, because a swarm can be
+     * reopened more than once and each follow up is its own subtree.
+     * Null on everything the first pass created, which is how the tree
+     * and the outline know which subtree to label, and with what.
+     */
+    followUpInstruction: text("follow_up_instruction"),
     /** Spend attributed to this task, counted the ways a swarm's is. */
     costMeasuredUsd: numeric("cost_measured_usd").notNull().default("0"),
     costEstimatedUsd: numeric("cost_estimated_usd").notNull().default("0"),

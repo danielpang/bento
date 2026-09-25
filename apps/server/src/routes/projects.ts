@@ -17,9 +17,13 @@ import {
   runEvents,
   seedDefaultPipeline,
   stages,
+  swarmTemplates,
   swarms,
 } from "@bento/db";
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
+import { toSwarmEntry } from "../swarm-file.js";
+import { visibleTemplateFilter as visibleSwarmTemplateFilter } from "./swarm-templates.js";
+import { upsertSwarmTemplatesFromFile } from "../upsert-swarm-templates.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
 import type { AppContext } from "../context.js";
 import { getBetaTester } from "../feature-flags.js";
@@ -1233,7 +1237,33 @@ export function projectRoutes(ctx: AppContext) {
         db(c, ctx).select().from(stages).where(eq(stages.pipelineId, pipeline.id)).orderBy(asc(stages.position)),
         db(c, ctx).select().from(repositories).where(eq(repositories.projectId, projectId)).orderBy(asc(repositories.position)),
       ]);
-      const usedIds = [...new Set(stageRows.map((s) => s.defaultAgentProfileId).filter((id): id is string => !!id))];
+      /*
+       * The swarm templates this team uses travel in the same file.
+       *
+       * Owner keyed rather than parented by the project, which is why
+       * they are read by this caller's visibility rather than by the
+       * project: what is being exported is "how this team runs a
+       * swarm", and it is the same answer whichever of their projects
+       * asked. A team with none exports none, and the key is left out
+       * rather than written empty.
+       */
+      const swarmEnabled = !!(await getBetaTester(ctx, c));
+      const swarmRows = swarmEnabled
+        ? await db(c, ctx)
+            .select()
+            .from(swarmTemplates)
+            .where(await visibleSwarmTemplateFilter(ctx, c))
+            .orderBy(sql`lower(${swarmTemplates.name})`, asc(swarmTemplates.id))
+        : [];
+
+      const usedIds = [
+        ...new Set(
+          [
+            ...stageRows.map((s) => s.defaultAgentProfileId),
+            ...swarmRows.flatMap((row) => [row.plannerProfileId, row.workerProfileId, row.judgeProfileId]),
+          ].filter((id): id is string => !!id),
+        ),
+      ];
       const agentRows = usedIds.length
         ? await db(c, ctx).select().from(agentProfiles).where(inArray(agentProfiles.id, usedIds))
         : [];
@@ -1263,6 +1293,28 @@ export function projectRoutes(ctx: AppContext) {
         repositories: repoRows
           .filter((repo) => repo.setupCommand || repo.testCommand)
           .map((repo) => ({ name: repo.name, setup: repo.setupCommand, test: repo.testCommand })),
+        swarms: swarmRows.map((row) =>
+          toSwarmEntry({
+            name: row.name,
+            description: row.description,
+            planner: row.plannerProfileId ? (nameById.get(row.plannerProfileId) ?? null) : null,
+            worker: row.workerProfileId ? (nameById.get(row.workerProfileId) ?? null) : null,
+            judge: row.judgeProfileId ? (nameById.get(row.judgeProfileId) ?? null) : null,
+            plannerInstructions: row.plannerInstructions,
+            workerInstructions: row.workerInstructions,
+            isolation: row.workerIsolation,
+            deliverable: row.deliverable,
+            documentPath: row.documentPath,
+            completionCommand: row.completionCommand,
+            maxWorkers: row.maxWorkers,
+            maxPlanDepth: row.maxPlanDepth,
+            budgetUsd: row.budgetUsd,
+            timeLimitMin: row.timeLimitMin,
+            assumedCostUsd: row.assumedCostUsd,
+            longRunWarnMin: row.longRunWarnMin,
+            longRunEscalateMin: row.longRunEscalateMin,
+          }),
+        ),
       };
       const parsed = pipelineFile.safeParse(file);
       if (!parsed.success) {
@@ -1295,6 +1347,13 @@ export function projectRoutes(ctx: AppContext) {
       const parsed = parsePipelineFile(await c.req.text());
       if ("error" in parsed) return c.json({ error: parsed.error }, 400);
       const file = parsed.data;
+      // The pipeline route itself is public product, but this optional
+      // part of its file is not. Refuse before agents, stages, or
+      // repository commands are changed, so a non-tester cannot use a
+      // public import as a side door into the beta data model.
+      if (file.swarms.length > 0 && !(await getBetaTester(ctx, c))) {
+        return c.json({ error: "not found" }, 404);
+      }
 
       const [pipeline] = await db(c, ctx).select().from(pipelines).where(eq(pipelines.projectId, projectId));
       if (!pipeline) return c.json({ error: "not found" }, 404);
@@ -1376,9 +1435,24 @@ export function projectRoutes(ctx: AppContext) {
           .where(eq(repositories.id, target.id));
       }
 
+      /*
+       * And the swarm templates, after the agents, because a template
+       * cannot point at one that does not exist yet. Matched by name
+       * and updated in place, through the same function the standalone
+       * swarm file uses.
+       */
+      const swarmsApplied = await upsertSwarmTemplatesFromFile(
+        db(c, ctx),
+        file.swarms,
+        { ownerId: actor(c), organizationId: membership?.organizationId ?? null },
+        { isolation: ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree" },
+      );
+      if ("error" in swarmsApplied) return c.json({ error: swarmsApplied.error }, 400);
+
       return c.json({
         stages: file.pipeline.stages.length,
         agents: file.agents.length,
+        swarms: swarmsApplied.applied,
         removedStages: doomed.map((stage) => stage.name),
         // Named rather than swallowed: a file written for another
         // project can carry commands for checkouts this one lacks.

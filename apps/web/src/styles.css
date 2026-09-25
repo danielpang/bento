@@ -7914,6 +7914,39 @@ a.hours-person-name:hover {
   text-overflow: ellipsis;
 }
 
+/*
+ * A follow up, in both views.
+ *
+ * The tint says "this subtree is work a reopen asked for", and it
+ * reaches every node under the follow up because the model carries the
+ * follow up down the tree. The instruction itself is printed once, on
+ * the node the reopen made: twenty copies of one sentence is not a
+ * label, it is noise.
+ */
+.swarm-node[data-follow-up] {
+  border-style: dashed;
+}
+
+.swarm-node-followup,
+.swarm-row-followup {
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-node-followup {
+  display: block;
+  margin-top: 2px;
+}
+
+.swarm-row-followup {
+  display: inline;
+  margin-left: 8px;
+}
+
 .swarm-node-fold {
   position: absolute;
   right: -8px;
@@ -8002,6 +8035,95 @@ a.hours-person-name:hover {
 
 .swarm-attention-chip {
   border-color: var(--gated);
+  color: var(--gated);
+}
+
+/* What a swarm produced, on its page. */
+.swarm-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.swarm-artifact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: inherit;
+  cursor: pointer;
+}
+
+.swarm-artifact:disabled {
+  cursor: default;
+}
+
+.swarm-artifact-lead {
+  border-color: var(--line-bright);
+}
+
+.swarm-artifact-name {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.swarm-artifact-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Reopening a finished swarm. */
+.swarm-reopen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.swarm-reopen-ledger,
+.swarm-reopen-effect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.swarm-reopen-ceilings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.swarm-reopen-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.swarm-reopen-refusal {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--gated);
 }
 

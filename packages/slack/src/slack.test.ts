@@ -55,6 +55,7 @@ test("slackAuthorizeUrl names the bot scopes", () => {
   });
   assert.ok(url.includes("client_id=cid"));
   assert.ok(url.includes("app_mentions%3Aread"));
+  assert.ok(url.includes("im%3Ahistory"));
   assert.ok(url.includes("state=abc"));
 });
 
@@ -65,7 +66,7 @@ test("SlackClient posts with a Bearer token", async () => {
     return new Response(JSON.stringify({ ok: true, channel: "C1", ts: "1.0" }), { status: 200 });
   }) as typeof fetch;
   const client = new SlackClient("xoxb-test", fetchImpl);
-  const ref = await client.postMessage({ channel: "C1", text: "hi", threadTs: "0.9" });
+  const ref = await client.postMessage({ channel: "C1", text: "hi", threadTs: "0.9", clientMsgId: "stable-id" });
   assert.deepEqual(ref, { channel: "C1", ts: "1.0" });
   assert.equal(captured!.url, "https://slack.com/api/chat.postMessage");
   assert.equal((captured!.init.headers as Record<string, string>).authorization, "Bearer xoxb-test");
@@ -73,6 +74,7 @@ test("SlackClient posts with a Bearer token", async () => {
     channel: "C1",
     text: "hi",
     thread_ts: "0.9",
+    client_msg_id: "stable-id",
   });
 });
 

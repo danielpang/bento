@@ -1,3 +1,5 @@
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import {
   WORKSPACE_ARTIFACT_DIR,
@@ -42,7 +44,7 @@ import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type Prepare
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
-import { githubConnectionFor } from "../github.js";
+import { githubConnectionFor, reviewForBranch } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
 import { linkGitHubRemotes, refreshBaseBranches } from "./repo-remote.js";
@@ -53,9 +55,16 @@ import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
-import { buildPlannerPrompt, quoteUntrusted } from "./swarm/planner-prompt.js";
+import {
+  buildPlannerPrompt,
+  buildSubPlannerPrompt,
+  quoteUntrusted,
+  type StartBranchState,
+} from "./swarm/planner-prompt.js";
 import { buildWorkerPrompt } from "./swarm/worker-prompt.js";
-import { taskTrailer } from "./swarm/branches.js";
+import { isDocumentSwarm, SECTION_DIR } from "./swarm/deliverable.js";
+import { buildFinalCheckPrompt, finalCheckFor, tasksOf } from "./swarm/final-check.js";
+import { isSafeBranchName, taskTrailer } from "./swarm/branches.js";
 import { takeNodeMessages } from "./swarm/node-messages.js";
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
 import { applyRunCharge, chargeForRun } from "./swarm/ledger.js";
@@ -313,6 +322,23 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName
         ? { startFromBranch: subject.swarm.branchName }
         : {}),
+      /**
+       * And the swarm's own branch starts from the branch a person
+       * named, when they named one.
+       *
+       * Only for the swarm's own workspace, which is where the planner
+       * works and where the merge queue lands: once the swarm's branch
+       * exists, every leaf is cut from it by the clause above, so this
+       * decides only where the swarm itself began. Naming a branch
+       * that is not there is a refusal from git at this point rather
+       * than a silent start from the default branch, which is the
+       * right way round: a swarm quietly started from main when a
+       * person asked for their feature branch would produce a pull
+       * request undoing everything on it.
+       */
+      ...(subject.kind === "swarm" && !subject.task && subject.swarm.startBranch
+        ? { startFromBranch: subject.swarm.startBranch }
+        : {}),
       // What the swarm's template says about where its agents work.
       // A card has no such promise, so it passes none.
       ...(subject.kind === "swarm" ? { workerIsolation: subject.workerIsolation } : {}),
@@ -451,15 +477,30 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * sandbox: the machine outlives the run that made it, so a card pays
    * the install on its first stage and starts warm on the rest.
    */
-  const setupFailure = await runRepositorySetup(ctx, {
-    handle,
-    repositories: repoRows.map((row) => ({
-      name: row.name,
-      setupCommand: row.setupCommand,
-      cwd: repositoryPathIn(handle.workdir, row.name),
-    })),
-    say: saySystem,
-  });
+  /*
+   * Except for a swarm whose deliverable is a document, where the
+   * setup command is skipped outright.
+   *
+   * A repository's setup command installs the toolchain its code is
+   * built with, and a leaf that writes prose builds nothing: the
+   * install is minutes per worker spent on a toolchain no agent in
+   * this swarm will invoke, and on a hosted deployment it is minutes
+   * per machine, once per section. Skipped rather than run and
+   * ignored, which is the only version of "skipped" that is worth
+   * anything.
+   */
+  const skipSetup = subject.kind === "swarm" && isDocumentSwarm(subject.swarm);
+  const setupFailure = skipSetup
+    ? null
+    : await runRepositorySetup(ctx, {
+        handle,
+        repositories: repoRows.map((row) => ({
+          name: row.name,
+          setupCommand: row.setupCommand,
+          cwd: repositoryPathIn(handle.workdir, row.name),
+        })),
+        say: saySystem,
+      });
   if (setupFailure) {
     await saySystem("Dependency setup needs attention. Starting the agent with the error details so it can diagnose and repair the environment.");
   }
@@ -1343,6 +1384,50 @@ async function buildSubjectPrompt(
       quote: quoteUntrusted,
     });
   }
+  /*
+   * A planner given one part of the plan gets its own prompt, for the
+   * reason a worker does: handed the opening one, it would read
+   * "split the goal into leaves" and start rewriting a tree somebody
+   * else is halfway through.
+   */
+  if (subject.run.role === "subplanner" && subject.task) {
+    return buildSubPlannerPrompt({
+      swarm: subject.swarm,
+      node: {
+        id: subject.task.id,
+        title: subject.task.title,
+        description: subject.task.description,
+      },
+      agent,
+      repositories: mounted,
+      templateInstructions: template?.plannerInstructions ?? null,
+      hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
+    });
+  }
+  /*
+   * The final check gets the judge's prompt, which is not the worker's
+   * with a paragraph added: a worker is told to make a change and
+   * commit it, and an agent told that will make one. The single most
+   * useful property of a check is that it changes nothing.
+   */
+  if (subject.run.role === "judge" && subject.task) {
+    /*
+     * The template is read fresh every tick, so a team that cleared
+     * its judge and its completion command between the tick that put
+     * the check on the tree and this run has left nothing to describe.
+     * The check still exists and still gates the root, so it is given
+     * an empty check rather than falling through: what it must not
+     * get is the planner's prompt, which would tell an agent whose
+     * tools are my_task, report and flag to build a plan.
+     */
+    return buildFinalCheckPrompt({
+      swarm: subject.swarm,
+      check: finalCheckFor(template) ?? { judgeProfileId: null, completionCommand: null },
+      agent,
+      repositories: mounted,
+      tasks: await tasksOf(ctx.db, subject.swarm.id),
+    });
+  }
   if (subject.run.role === "worker" && subject.task) {
     return buildWorkerPrompt({
       swarm: subject.swarm,
@@ -1360,7 +1445,111 @@ async function buildSubjectPrompt(
     agent,
     repositories: mounted,
     templateInstructions: template?.plannerInstructions ?? null,
+    deliverable: subject.swarm.deliverable,
+    sectionDir: SECTION_DIR,
+    /*
+     * And, on a swarm that started from an existing branch, what is on
+     * that branch and what is still being asked about it.
+     *
+     * Only on the planner's first turn. A later turn is woken by the
+     * wake message, which carries what has changed; repeating the
+     * review on every wake would spend tokens restating what the
+     * planner already turned into tasks, and would make a comment
+     * somebody resolved go on being planned about.
+     */
+    startBranch: await startBranchState(ctx, subject),
   });
+}
+
+/**
+ * What the swarm's starting branch holds, for the planner's first
+ * prompt, or null.
+ *
+ * Both halves read by the server rather than by the agent. The commits
+ * come out of the checkout the planner is about to work in, and the
+ * pull requests come through the organization's own GitHub connection,
+ * which is a credential that never enters a sandbox.
+ *
+ * Nothing here fails a run. A swarm that could not be told what is on
+ * its branch still has the branch, and a planner working from the code
+ * in front of it is the ordinary case for every swarm that started
+ * from the default branch.
+ */
+async function startBranchState(
+  ctx: AppContext,
+  subject: RunSubject & { kind: "swarm" },
+): Promise<StartBranchState | null> {
+  const branch = subject.swarm.startBranch;
+  if (!branch || subject.task) return null;
+  // Only the first planner turn. A later one is woken with what has
+  // changed, and a review restated every time is a review the planner
+  // plans about twice.
+  const [earlier] = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.swarmId, subject.swarm.id),
+        eq(agentRuns.role, "planner"),
+        ne(agentRuns.id, subject.run.id),
+      ),
+    )
+    .limit(1);
+  if (earlier) return null;
+
+  const repoRows = await ctx.db
+    .select({ name: repositories.name, repoUrl: repositories.repoUrl, localPath: repositories.localPath })
+    .from(repositories)
+    .where(eq(repositories.projectId, subject.swarm.projectId))
+    .orderBy(asc(repositories.position));
+
+  const commits = await branchCommits(repoRows[0]?.localPath ?? null, branch);
+  const pullRequests = await reviewForBranch(ctx, subject.organizationId, branch, repoRows).catch(() => []);
+  if (commits.length === 0 && pullRequests.length === 0) {
+    // Nothing to say beyond the branch's name, which is still worth
+    // saying: the planner has to know its tasks are not starting from
+    // the default branch.
+    return { branch, commits: [], pullRequests: [] };
+  }
+  return { branch, commits, pullRequests };
+}
+
+/** How much of a branch's history the planner is shown. */
+/**
+ * git, promisified. Only for reads: anything that commits goes
+ * through the landing helpers, which set an identity first.
+ */
+const runGit = promisify(execFileCb);
+
+const START_BRANCH_COMMITS = 20;
+
+/** The newest commits on a branch, read out of the checkout on this host. */
+async function branchCommits(
+  localPath: string | null,
+  branch: string,
+): Promise<{ sha: string; subject: string }[]> {
+  if (!localPath || !isSafeBranchName(branch)) return [];
+  try {
+    const { stdout } = await runGit(
+      "git",
+      ["-C", localPath, "log", `--max-count=${START_BRANCH_COMMITS}`, "--format=%H%x1f%s%x1e", branch, "--"],
+      { env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" }, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return stdout
+      .split("\u001e")
+      .map((record) => record.replace(/^\n/, ""))
+      .filter((record) => record.length > 0)
+      .map((record) => {
+        const [sha, subject] = record.split("\u001f");
+        return sha && subject !== undefined ? { sha, subject } : null;
+      })
+      .filter((row): row is { sha: string; subject: string } => row !== null);
+  } catch {
+    // A branch this host has never fetched, or a driver whose
+    // repository lives inside the machine. The pull request half still
+    // answers, and it is the half that matters.
+    return [];
+  }
 }
 
 /**

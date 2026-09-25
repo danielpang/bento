@@ -33,6 +33,7 @@ export function SwarmNodeDrawer({
   onRetry,
   onCancel,
   onSplit,
+  onAddTask,
   onReassign,
   onEdit,
   agents = [],
@@ -82,6 +83,16 @@ export function SwarmNodeDrawer({
   onRetry?: (taskId: string) => void;
   onCancel?: (taskId: string) => void;
   onSplit?: (taskId: string, children: { title: string }[]) => void;
+  /**
+   * Adds a task under this plan node, because a person saw something
+   * the planner did not.
+   *
+   * Only on a plan node, because a task cannot hang off another task:
+   * the leaf's own answer to "this needs one more thing" is Split.
+   * The planner is told and may object, which the form says rather
+   * than leaving a person to wonder whether it noticed.
+   */
+  onAddTask?: (parentId: string, task: { title: string; description?: string }) => void;
   onReassign?: (taskId: string, agentProfileId: string | null) => void;
   onEdit?: (taskId: string, edit: { description: string }) => void;
   /** The agents this project can put on a leaf, for Reassign. */
@@ -108,6 +119,9 @@ export function SwarmNodeDrawer({
   const [draft, setDraft] = useState(task.description);
   const [splitting, setSplitting] = useState(false);
   const [splitText, setSplitText] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [addTitle, setAddTitle] = useState("");
+  const [addDetail, setAddDetail] = useState("");
   const flags = Object.entries(task.flags);
   // The fetched list when there is one, and the plan row's otherwise.
   // A fetched empty list is an answer, not a missing one, so the
@@ -336,6 +350,14 @@ export function SwarmNodeDrawer({
             </button>
             <button
               className="btn"
+              disabled={!onAddTask || busy || task.nodeType !== "plan" || task.status === "done" || task.status === "cancelled"}
+              title="Add a task under this part of the plan. The planner is told, and can object."
+              onClick={() => setAdding((open) => !open)}
+            >
+              Add task
+            </button>
+            <button
+              className="btn"
               disabled={!onCancel || busy || task.status === "cancelled"}
               title="Withdraw this task and everything under it, and stop the agents on them."
               onClick={() => onCancel?.(task.id)}
@@ -426,6 +448,48 @@ export function SwarmNodeDrawer({
                 </button>
                 <button className="btn btn-primary" type="submit" disabled={busy || splitText.trim() === ""}>
                   Split
+                </button>
+              </div>
+            </form>
+          )}
+          {adding && onAddTask && (
+            <form
+              className="swarm-edit"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const title = addTitle.trim();
+                if (title === "") return;
+                onAddTask(task.id, { title, ...(addDetail.trim() ? { description: addDetail.trim() } : {}) });
+                setAddTitle("");
+                setAddDetail("");
+                setAdding(false);
+              }}
+            >
+              <input
+                className="input"
+                value={addTitle}
+                placeholder="What the task is"
+                aria-label="The task's title"
+                onChange={(e) => setAddTitle(e.target.value)}
+              />
+              <textarea
+                className="input"
+                rows={3}
+                value={addDetail}
+                placeholder="What finished means for it"
+                aria-label="What finished means for this task"
+                onChange={(e) => setAddDetail(e.target.value)}
+              />
+              <p className="muted">
+                It goes in ready to be worked, and an agent starts on it when the swarm has room. The planner is
+                told you added it and can cancel it if it is wrong.
+              </p>
+              <div className="actions">
+                <button className="btn btn-ghost" type="button" onClick={() => setAdding(false)}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" type="submit" disabled={busy || addTitle.trim() === ""}>
+                  Add task
                 </button>
               </div>
             </form>

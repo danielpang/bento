@@ -1,5 +1,12 @@
 import { Octokit } from "@octokit/rest";
-import { checksVia, ensurePullRequestVia, mergeStateVia, reviewThreadsVia } from "./app-client.js";
+import {
+  checksVia,
+  ensurePullRequestVia,
+  mergeStateVia,
+  openReviewThreadsVia,
+  pullRequestForBranchVia,
+  reviewThreadsVia,
+} from "./app-client.js";
 import type {
   CheckSummary,
   GitHubClient,
@@ -10,7 +17,9 @@ import type {
   PullRequestInput,
   PullRequestRef,
   PullRequestUpdateInput,
+  ReviewThread,
   ReviewThreadSummary,
+  OpenPullRequestOnBranch,
 } from "./client.js";
 import {
   createPullRequestCommentVia,
@@ -51,6 +60,14 @@ export class GitHubTokenClient implements GitHubClient, GitHubPublisher {
 
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest> {
     return ensurePullRequestVia(this.octokit, input);
+  }
+
+  openReviewThreads(ref: PullRequestRef, limit?: number): Promise<ReviewThread[]> {
+    return openReviewThreadsVia(this.octokit, ref, limit);
+  }
+
+  pullRequestForBranch(input: { owner: string; repo: string; branch: string }): Promise<OpenPullRequestOnBranch | null> {
+    return pullRequestForBranchVia(this.octokit, input);
   }
 
   getPullRequest(ref: PullRequestRef): Promise<PullRequestDetails> {
