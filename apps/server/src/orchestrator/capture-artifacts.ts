@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { stageArtifactPath, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { runArtifacts } from "@bento/db";
 import { collectExec, type SandboxHandle } from "@bento/sandbox";
@@ -77,14 +77,24 @@ export function classifyArtifact(path: string): Classified {
   }
 }
 
+/**
+ * Which rows an artifact belongs to: a card, or a swarm and the node of
+ * its plan that produced it. Exactly one, the way run_artifacts states
+ * it.
+ */
+export type ArtifactOwner =
+  | { featureId: string }
+  | { swarmId: string; swarmTaskId?: string | null };
+
 /** The store key for one artifact. Org-prefixed for lifecycle bookkeeping only. */
 export function artifactStorageKey(
   organizationId: string | null,
-  featureId: string,
+  owner: ArtifactOwner,
   runId: string,
   artifactId: string,
 ): string {
-  return `org/${organizationId ?? "local"}/feature/${featureId}/run/${runId}/${artifactId}`;
+  const scope = "featureId" in owner ? `feature/${owner.featureId}` : `swarm/${owner.swarmId}`;
+  return `org/${organizationId ?? "local"}/${scope}/run/${runId}/${artifactId}`;
 }
 
 function shellQuote(value: string): string {
@@ -93,7 +103,8 @@ function shellQuote(value: string): string {
 
 export interface CaptureArgs {
   runId: string;
-  featureId: string;
+  /** The card, or the swarm and its node. See ArtifactOwner. */
+  owner: ArtifactOwner;
   organizationId: string | null;
   stageSlug: string;
   stageName: string;
@@ -112,7 +123,9 @@ export async function captureRunArtifacts(ctx: AppContext, args: CaptureArgs): P
     console.error(`artifact capture failed for run ${args.runId}:`, err);
     ctx.analytics?.captureException(err, null, args.organizationId, {
       run_id: args.runId,
-      feature_id: args.featureId,
+      ...("featureId" in args.owner
+        ? { feature_id: args.owner.featureId }
+        : { swarm_id: args.owner.swarmId }),
       source: "artifact_capture",
     });
     await args.say(`Could not save this run's artifacts: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
@@ -203,7 +216,7 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
     const [latest] = await ctx.db
       .select({ content: runArtifacts.content, size: runArtifacts.size })
       .from(runArtifacts)
-      .where(and(eq(runArtifacts.featureId, args.featureId), eq(runArtifacts.path, candidate.display)))
+      .where(and(ownerFilter(args.owner), eq(runArtifacts.path, candidate.display)))
       .orderBy(desc(runArtifacts.createdAt))
       .limit(1);
     if (
@@ -230,7 +243,7 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
         );
         continue;
       }
-      storageKey = artifactStorageKey(args.organizationId, args.featureId, args.runId, id);
+      storageKey = artifactStorageKey(args.organizationId, args.owner, args.runId, id);
       await ctx.artifacts.put(storageKey, data, classified.mime);
     }
 
@@ -239,7 +252,10 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
     await ctx.db.insert(runArtifacts).values({
       id,
       runId: args.runId,
-      featureId: args.featureId,
+      // Which board, said outright rather than left to be read off the
+      // ids below. The owner is the one thing here that knows.
+      type: "featureId" in args.owner ? "pipeline" : "swarm",
+      ...args.owner,
       stageSlug: args.stageSlug,
       stageName: args.stageName,
       path: candidate.display,
@@ -269,4 +285,25 @@ async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
       `Kept ${kept.length} artifact${kept.length === 1 ? "" : "s"} from this run: ${named}${kept.length > 5 ? ", ..." : ""}. They are on the card under Artifacts.`,
     );
   }
+}
+
+/**
+ * "This card's artifacts", or "this leaf's", as a WHERE clause.
+ *
+ * A swarm is many agents producing files at once, and two leaves
+ * producing the same file is normal rather than a repeat: a swarm-wide
+ * filter made the second leaf's copy look like a duplicate of the
+ * first's and threw it away, so the task that produced it had nothing
+ * on it. The dedupe is therefore scoped to the task when the owner
+ * names one, and to the swarm's own runs (the planner's, which name no
+ * task) when it does not.
+ */
+function ownerFilter(owner: ArtifactOwner) {
+  if ("featureId" in owner) return eq(runArtifacts.featureId, owner.featureId);
+  return and(
+    eq(runArtifacts.swarmId, owner.swarmId),
+    owner.swarmTaskId
+      ? eq(runArtifacts.swarmTaskId, owner.swarmTaskId)
+      : isNull(runArtifacts.swarmTaskId),
+  );
 }

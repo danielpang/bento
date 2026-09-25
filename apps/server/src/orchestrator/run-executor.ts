@@ -32,6 +32,9 @@ import {
   runEvents,
   sandboxes,
   stages,
+  swarmTasks,
+  swarmTemplates,
+  swarms,
 } from "@bento/db";
 import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
@@ -44,8 +47,10 @@ import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
+import { provisionWorkspace } from "./sandbox-provision.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildStagePrompt, repositoryInstructions } from "./prompt.js";
+import { buildPlannerPrompt } from "./swarm/planner-prompt.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
@@ -57,7 +62,6 @@ import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
-import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
@@ -67,8 +71,11 @@ import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
-import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapSandbox, reapSwarmSandbox } from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
+import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
+import { describeRunSubject, type RunSubject } from "./run-subject.js";
+import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -84,49 +91,25 @@ import {
  * worker; safe to retry because terminal states are only written once.
  */
 export async function executeRun(ctx: AppContext, runId: string): Promise<void> {
-  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) throw new Error(`run ${runId} not found`);
-  if (run.status !== "queued") return; // already picked up
-
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-  const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
-  const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, run.agentProfileId));
-  if (!feature || !stage || !profile) throw new Error(`run ${runId} has dangling references`);
-  if (
-    stage.pipelineId !== feature.pipelineId
-    || stage.organizationId !== feature.organizationId
-    || profile.organizationId !== feature.organizationId
-  ) {
-    throw new Error(`run ${runId} crosses a project or organization boundary`);
-  }
-  const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
-  if (!project) throw new Error(`project ${feature.projectId} not found`);
-  if (project.organizationId !== feature.organizationId) {
-    throw new Error(`run ${runId} has a feature outside its project organization`);
-  }
-
-  const selectedRepos = await ctx.db
-    .select()
-    .from(repositories)
-    .where(eq(repositories.projectId, project.id))
-    .orderBy(asc(repositories.position));
-  if (selectedRepos.length === 0) {
+  const [found] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+  if (!found) throw new Error(`run ${runId} not found`);
+  if (found.status !== "queued") return; // already picked up
+  /**
+   * Which board this run belongs to, and everything that follows from
+   * it, resolved once. The executor is one function for both: what
+   * differs is the rows, the workspace, the prompt, the tools, the
+   * artifact target, the board events and what settlement queues, and
+   * every one of those is read off this rather than branched on here.
+   */
+  const subject = await describeRunSubject(ctx, found);
+  const { run, profile, project, repoRows } = subject;
+  // An agent needs somewhere to work. Thrown rather than failed as a
+  // run, the way it always was: the job retries, and a project with no
+  // repository is a setup problem the person fixes once.
+  if (repoRows.length === 0) {
     throw new Error(`project ${project.id} has no repositories; add at least one before running agents`);
   }
-  // Repositories added by path before their remote was read still have
-  // no URL, which a stage set to create a pull request would report as
-  // "no GitHub remote is linked". Read it from the checkout once.
-  const repoRows =
-    ctx.env.BENTO_MODE === "multi" ? selectedRepos : await linkGitHubRemotes(ctx.db, selectedRepos);
-
-  const emitBoard = (status: string) =>
-    ctx.bus.emitBoardEvent({
-      type: "run_updated",
-      projectId: feature.projectId,
-      featureId: feature.id,
-      runId,
-      status,
-    });
+  const emitBoard = (status: string) => subject.emitBoard(status);
 
   /**
    * Claimed atomically rather than checked then set. Boot recovery
@@ -196,8 +179,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
   // judge's and the rebase run's would read as messages nobody sent.
-  if (run.prompt && run.kind === "task") await sayAsUser(run.prompt);
-  if (run.kind === "rebase") {
+  if (run.prompt && run.role === "stage") await sayAsUser(run.prompt);
+  if (run.role === "rebase") {
     await saySystem(
       "Resolving merge conflicts: the agent rebases the branch onto the latest base branch, and the server force pushes it with lease protection when the run finishes.",
     );
@@ -212,13 +195,16 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       error: customProviderError ?? "This custom provider is not available for this run.",
     }, null);
     emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    // Through the subject, like every other failure here: a card's
+    // settlement is its gate, a swarm's is the reconciler, and a swarm
+    // run has no feature to name.
+    await subject.settle(ctx);
     return;
   }
 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
-  const publisher = await githubConnectionFor(ctx, feature.organizationId);
+  const publisher = await githubConnectionFor(ctx, subject.organizationId);
   /**
    * Named out here because publishing needs it again once the run ends.
    *
@@ -227,12 +213,16 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * that landed. Only for work runs: a judge reads what a stage did,
    * and a rebase run exists to fix a pull request that is still open,
    * so neither is a card being asked for something new.
+   *
+   * Only a card rotates at all. A swarm's branches belong to the merge
+   * queue, and a worker's is per task rather than per pull request, so
+   * a swarm run has no landed pull request to be moved off.
    */
-  const fallbackBranch = cardBranch(feature);
-  const { branch, replaced } =
-    run.kind === "task"
-      ? await branchForRun(ctx.db, publisher, { featureId: feature.id, branch: fallbackBranch })
-      : { branch: fallbackBranch, replaced: [] };
+  const rotation =
+    subject.kind === "pipeline" && subject.run.role === "stage"
+      ? await branchForRun(ctx.db, publisher, { featureId: subject.feature.id, branch: subject.branch })
+      : { branch: subject.branch, replaced: [] as Awaited<ReturnType<typeof branchForRun>>["replaced"] };
+  const { branch, replaced } = rotation;
   if (replaced.length > 0) {
     const numbers = replaced.map((pr) => `#${pr.number}`);
     const landed =
@@ -251,176 +241,61 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   }
   // Hoisted above provisioning because both the provision guard and the
   // MCP attach after it read this.
-  const restrictNetwork = await organizationRestrictsNetwork(ctx, feature.organizationId);
+  const restrictNetwork = await organizationRestrictsNetwork(ctx, subject.organizationId);
   try {
-    const duplicateRepos = duplicateRepositoryLocation(repoRows);
-    if (duplicateRepos) {
-      throw new Error(
-        `Repositories ${duplicateRepos[0].name} and ${duplicateRepos[1].name} use the same checkout. ` +
-          "Remove one under Settings, Repositories, then run again.",
-      );
-    }
-    prepared = ctx.driver.provider === "sprite"
-      ? repoRows.map((r) => ({ name: r.name, localPath: r.localPath, worktreePath: "" }))
-      : await ctx.worktrees.ensureAll(
-          repoRows.map((r) => ({
-            name: r.name,
-            localPath: r.localPath,
-            defaultBranch: r.defaultBranch,
-            /**
-             * From the base branch only where this card's work actually
-             * merged, which is the repositories it had a pull request
-             * in. A repository whose publish failed, or that the card
-             * never opened one in, still holds commits nobody has
-             * landed: its new branch starts where its old one stood, so
-             * that work travels with the card instead of being left on
-             * a branch the card has walked away from.
-             */
-            ...(replaced.some((pr) => pr.repoUrl === r.repoUrl)
-              ? { startFromBranch: r.defaultBranch }
-              : {}),
-          })),
-          feature.id,
-          branch,
-          { branchChanged: replaced.length > 0 },
-        );
-
-    /**
-     * A worktree's .git is a file naming the source repository's .git
-     * directory on the host, and commits write there too (objects,
-     * refs, the worktree's own state). Without these mounts git inside
-     * the container cannot even report status, so no containerised
-     * agent could ever commit: the pipeline's whole hand-off between
-     * stages silently did not exist under Docker. Mounted at the same
-     * absolute path the .git file names, writable because committing
-     * writes.
-     */
-    const repoGitMounts =
-      ctx.driver.provider === "docker"
-        ? repoRows.map((r) => ({
-            hostPath: `${r.localPath.replace(/\/$/, "")}/.git`,
-            containerPath: `${r.localPath.replace(/\/$/, "")}/.git`,
-            readOnly: false,
-          }))
-        : [];
-
-    const seedBundles = new Map<string, Buffer>();
-    // The base branch the seed actually carries, which is not the stored
-    // default branch when that name no longer exists on the remote. The
-    // sandbox must branch off the name the bundle has, not the stale one.
-    const seedBaseBranches = new Map<string, string>();
-    if (ctx.driver.provider === "sprite" && publisher) {
-      for (const row of repoRows) {
-        if (!row.repoUrl) continue;
-        const repoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-        const seed = await createRepositorySeed(
-          publisher,
-          row.repoUrl,
-          Number.isSafeInteger(repoId) ? repoId : undefined,
-          row.defaultBranch,
-        );
-        seedBundles.set(row.id, seed.bundle);
-        seedBaseBranches.set(row.id, seed.baseBranch);
-      }
-    }
-
-    /**
-     * An organization that locked its agents down gets a sandbox with
-     * no route out, or no sandbox at all. Falling back to open egress
-     * would turn a security setting into a decoration, so the run
-     * fails with the reason instead.
-     */
-    if (restrictNetwork && !ctx.driver.supportsRestrictedNetwork) {
-      throw new Error(
-        "This organization requires agents to run without network access, and this deployment has no restricted network configured. Set BENTO_SANDBOX_RESTRICTED_NETWORK, or turn the setting off under Team.",
-      );
-    }
-
-    handle = await ctx.driver.provision({
+    // The workspace, from the function both boards provision through.
+    const workspace = await provisionWorkspace(ctx, {
       projectId: project.id,
-      featureId: feature.id,
-      ...(restrictNetwork ? { network: "restricted" as const } : {}),
-      hostWorkspacePath: ctx.worktrees.workspacePath(feature.id),
-      // Drivers with no host filesystem clone these instead of mounting.
-      repositories: repoRows.map((r) => ({
-        name: r.name,
-        cloneUrl: r.repoUrl ?? undefined,
-        branch,
-        baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
-        seedBundle: seedBundles.get(r.id),
-      })),
-      // Local mode can share the user's own agent logins and git identity.
-      mounts: [...repoGitMounts, ...authMounts],
-      image: ctx.env.BENTO_SANDBOX_IMAGE,
+      organizationId: subject.organizationId,
+      workspaceKey: subject.workspaceKey,
+      branch,
+      repoRows,
+      authMounts,
+      restrictNetwork,
+      owner: subject.sandboxOwner,
+      restartedRepoUrls: replaced.map((pr) => pr.repoUrl),
       /**
-       * Drivers that install their CLIs on the way in install these and
-       * no others, which is minutes off the first stage of a new card.
-       * Resolved here rather than in the driver because it is a question
-       * about the pipeline, and the driver has no database.
+       * Install only the CLIs this run's pipeline actually uses, which
+       * is minutes off a new card's first stage.
+       *
+       * A card can be asked which agents its stages name. A swarm has
+       * no pipeline to ask, so it installs the whole set, which is what
+       * every machine did before this existed.
        */
-      agentBinaries: await pipelineAgentBinaries(ctx.db, {
-        pipelineId: feature.pipelineId,
-        runCli: profile.cli,
-      }),
-      onProgress: saySystem,
+      ...(subject.kind === "pipeline"
+        ? {
+            agentBinaries: await pipelineAgentBinaries(ctx.db, {
+              pipelineId: subject.feature.pipelineId,
+              runCli: profile.cli,
+            }),
+          }
+        : {}),
+      say: saySystem,
     });
-
-    /**
-     * An upsert, not insert-or-ignore. The machine was just provisioned,
-     * so whatever the row said before, it is real and awake now.
-     *
-     * Ignoring the conflict was how two bugs lived in one line. A card
-     * reopened after its sandbox was reaped provisions a new machine
-     * under the same name, and the ignored insert left the row saying
-     * "destroyed": the reaper filters that status out, so the new
-     * machine was never destroyed again and billed forever. And the
-     * size recorded at provision never reached an existing row, so a
-     * deployment on large sprites metered every hour at the standard
-     * rate.
-     */
-    const [sandboxRow] = await ctx.db
-      .insert(sandboxes)
-      .values({
-        projectId: project.id,
-        featureId: feature.id,
-        provider: handle.provider === "sprite" ? "sprite" : "docker",
-        externalId: handle.externalId,
-        status: "busy",
-        workdir: handle.workdir,
-        // What this machine costs, in the price list's own words. Taken
-        // from the driver at the moment it was created, so changing the
-        // deployment's default size later cannot reprice hours already
-        // spent. Absent on the local drivers, which bill nobody.
-        ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
-      })
-      .onConflictDoUpdate({
-        target: sandboxes.externalId,
-        set: {
-          featureId: feature.id,
-          status: "busy",
-          workdir: handle.workdir,
-          ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
-          lastUsedAt: new Date(),
-        },
-      })
-      .returning();
+    handle = workspace.handle;
+    prepared = workspace.prepared;
+    // A swarm records the branch and the machine it just got, so
+    // stopping it can find both without rebuilding their names.
+    if (subject.kind === "swarm" && workspace.sandboxRow) {
+      await recordSwarmWorkspace(ctx, subject, workspace.sandboxRow.id, branch);
+    }
 
     // Link the run to its sandbox so rollback can find it later. The
     // upsert always returns the row, so there is no fallback select to
     // race with anything.
-    if (sandboxRow) {
-      await ctx.db.update(agentRuns).set({ sandboxId: sandboxRow.id }).where(eq(agentRuns.id, runId));
+    if (workspace.sandboxRow) {
+      await ctx.db.update(agentRuns).set({ sandboxId: workspace.sandboxRow.id }).where(eq(agentRuns.id, runId));
     }
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
-    ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+    ctx.analytics?.captureException(err, run.startedBy, subject.organizationId, {
       run_id: runId,
-      feature_id: feature.id,
+      ...(subject.kind === "pipeline" ? { feature_id: subject.feature.id } : { swarm_id: subject.swarm.id }),
       source: "sandbox_provision",
     });
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
     emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    await subject.settle(ctx);
     return;
   }
 
@@ -429,16 +304,26 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // unattachable server is left out with a transcript note.
   const { extraArgs: mcpArgs, cardTools, env: mcpEnv } = await prepareRunMcp(ctx, {
     runId,
-    organizationId: feature.organizationId,
+    organizationId: subject.organizationId,
     actingUserId: run.startedBy,
     adapter,
     handle,
     restrictNetwork,
     mountedConfigPaths: authMounts.map((m) => m.containerPath),
-    // Every run that can have MCP at all gets Bento's own tools: they
-    // are how the agent files the parts of a card and says what its
-    // pull request should read, and neither needs a person to opt in.
-    cardTools: true,
+    // Bento's own tools: how a swarm agent acts on the plan, and how a
+    // card's agent splits work too large for one branch and says what
+    // its pull request should read. Both boards travel the same list,
+    // so one rule decides what happens when a team server claims one
+    // of these names.
+    //
+    // A card's run gets them whatever the beta flag says. Main took
+    // that gate off when the pull request tools joined the set, and
+    // neither of those needs a person to opt in.
+    ownServers: [
+      ...subject.ownMcpServers,
+      ...(subject.kind === "pipeline" ? [{ id: BENTO_SERVER_ID, slug: BENTO_SERVER_ID }] : []),
+    ],
+    ...(subject.kind === "swarm" ? { swarmId: subject.swarm.id } : {}),
     say: saySystem,
   });
 
@@ -478,7 +363,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       null,
     );
     emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    await subject.settle(ctx);
     return;
   }
 
@@ -486,12 +371,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // undone wholesale. Drivers without snapshots (Docker) rely on git.
   if (ctx.driver.snapshot) {
     try {
-      const checkpointId = await ctx.driver.snapshot(handle, `before ${stage.name}`);
+      const checkpointId = await ctx.driver.snapshot(handle, subject.snapshotLabel);
       await ctx.db.update(agentRuns).set({ checkpointId }).where(eq(agentRuns.id, runId));
     } catch (err) {
       // A missing snapshot costs rollback, not the run.
       console.error(`could not snapshot before run ${runId}:`, err);
-      ctx.analytics?.captureException(err, run.startedBy, feature.organizationId, {
+      ctx.analytics?.captureException(err, run.startedBy, subject.organizationId, {
         run_id: runId,
         source: "sandbox_snapshot",
       });
@@ -523,12 +408,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   }
 
   const { argv, live, liveChannel, workdir, toolEnv, files } = await buildRunCommand(ctx, {
-    run,
-    feature,
-    stage,
-    profile,
+    subject,
     adapter,
-    repoRows,
     prepared,
     handle,
     sendInitialPrompt: true,
@@ -570,11 +451,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * resumed process starts, where the user is about to look. Never on
    * a fresh session, which has nothing to have missed.
    */
-  if (run.cliSessionId) {
+  if (run.cliSessionId && subject.kind === "pipeline") {
     await recoverMissedMessages(ctx, {
       handle,
       adapter,
-      featureId: feature.id,
+      featureId: subject.feature.id,
       runId,
       sessionId: run.cliSessionId,
       cwd: workdir,
@@ -586,13 +467,20 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   ctx.running.set(runId, controller);
 
   let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
-  if (live && liveChannel) {
+  /**
+   * A live conversation is the card's: it parks messages on the card,
+   * asks the stage's gate whether to stay open, and delivers through
+   * the feature message route. A swarm's agents are spoken to through
+   * the swarm's own thread and its coordinator, so a swarm run is
+   * headless even on an adapter that could hold a session open.
+   */
+  if (live && liveChannel && subject.kind === "pipeline") {
     const liveHold = attachLiveConversation({
       ctx,
       runId,
-      featureId: feature.id,
-      kind: run.kind,
-      gateType: stage.gateType,
+      featureId: subject.feature.id,
+      role: run.role,
+      gateType: subject.stage.gateType,
       idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
       live,
       liveChannel,
@@ -676,15 +564,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         // running cards reads as work rather than as spinners. Only
         // spoken lines: tool starts and stops are ticker noise.
         const spoken = runOutputPreview(event);
-        if (spoken) {
-          ctx.bus.emitBoardEvent({
-            type: "run_output",
-            projectId: feature.projectId,
-            featureId: feature.id,
-            runId,
-            text: spoken,
-          });
-        }
+        if (spoken) subject.emitOutput(spoken);
       },
     });
   } catch (err) {
@@ -704,7 +584,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }
     await finishRun(ctx, runId, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    await subject.settle(ctx);
     return;
   }
   ctx.running.delete(runId);
@@ -721,10 +601,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   await settleAgentResult(ctx, {
     runId,
-    runKind: run.kind,
-    feature,
-    stage,
-    profile,
+    subject,
     repoRows,
     prepared,
     handle,
@@ -739,11 +616,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 /** The rows a run settlement needs, shared by first runs and resumes. */
 interface RunSettlement {
   runId: string;
-  /** A "rebase" run publishes on finish whatever the stage says. */
-  runKind: (typeof agentRuns.$inferSelect)["kind"];
-  feature: typeof features.$inferSelect;
-  stage: typeof stages.$inferSelect;
-  profile: typeof agentProfiles.$inferSelect;
+  /** Which board this run belongs to, and everything that follows. */
+  subject: RunSubject;
   repoRows: (typeof repositories.$inferSelect)[];
   prepared: PreparedRepository[];
   handle: SandboxHandle;
@@ -915,8 +789,9 @@ export function mergeAgentExecEnv(
  * exactly the way a normal run does.
  */
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
-  const { runId, runKind, feature, stage, profile, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } =
-    settlement;
+  const { runId, subject, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } = settlement;
+  const { profile } = subject;
+  const runRole = subject.run.role;
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
   const { exitCode } = result;
@@ -936,7 +811,12 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      * starts in its place. Bounded by construction: the retry carries
      * no session id, so it cannot fail this way again.
      */
-    const [runRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+    const [reread] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+    // The same run this call is finishing, read back for its session.
+    // The automatic retry below is the card's: a swarm's failed run is
+    // the coordinator's to decide about, and starting a replacement
+    // from here would be a second opinion about the plan.
+    const runRow = reread && subject.kind === "pipeline" ? asPipelineRun(reread) : undefined;
     const deadSession =
       Boolean(runRow?.cliSessionId) && /No conversation found with session ID/i.test(outcome.error ?? "");
     if (deadSession) {
@@ -955,11 +835,13 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       await saySystem(
         "The sandbox no longer holds this conversation, so it cannot be resumed. A fresh run with the same instructions starts now.",
       );
-      if (runRow) {
+      if (runRow && subject.kind === "pipeline") {
+        const feature = subject.feature;
         // Through the one door every run start uses. Busy means the
         // queued-message delivery in finishRun already started the
         // continuation, which is the same fresh session this would be.
         const next = await startRunIfIdle(ctx.db, {
+          type: "pipeline" as const,
           featureId: feature.id,
           stageId: runRow.stageId,
           agentProfileId: runRow.agentProfileId,
@@ -978,7 +860,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           return;
         }
       }
-      await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+      await subject.settle(ctx);
       return;
     }
     /**
@@ -1028,7 +910,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
             : outcome;
     await finishRun(ctx, runId, enriched, exitCode);
     emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    await subject.settle(ctx);
     return;
   }
 
@@ -1038,10 +920,21 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // reading the card sees the artifacts the decision is about.
   await captureRunArtifacts(ctx, {
     runId,
-    featureId: feature.id,
-    organizationId: feature.organizationId,
-    stageSlug: stage.slug,
-    stageName: stage.name,
+    organizationId: subject.organizationId,
+    // Where the files are filed. A card's artifacts hang off the card
+    // and record the stage that made them; a swarm's hang off the swarm
+    // and record the node, in the same columns. See run_artifacts.
+    ...(subject.kind === "pipeline"
+      ? {
+          owner: { featureId: subject.feature.id },
+          stageSlug: subject.stage.slug,
+          stageName: subject.stage.name,
+        }
+      : {
+          owner: { swarmId: subject.swarm.id, swarmTaskId: subject.task?.id ?? null },
+          stageSlug: subject.task ? "task" : subject.run.role,
+          stageName: subject.task?.title ?? subject.swarm.title,
+        }),
     handle,
     repositories: repoRows.map((row) => ({
       name: row.name,
@@ -1050,120 +943,133 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     say: saySystem,
   });
 
-  // The agent commits; the server pushes, but only when this stage
-  // asked for it: Create a pull request is a per stage choice, so an
-  // investigation stage that commits nothing stays off GitHub while the
-  // implementation stage publishes. Publishing before the gate is
-  // evaluated means a checks_pass or pr_comments_resolved criterion has
-  // pull requests to read on the very first evaluation rather than
-  // failing once and passing on a later sweep.
-  // A rebase run publishes whatever the stage says: the whole point of
-  // resolving conflicts is putting the rebased branch back on the pull
-  // request, and the resolve route already confirmed one exists. The
-  // wording is picked once here so the two notes below cannot drift
-  // apart and describe two different runs.
-  const mustPublish = stage.createPr || runKind === "rebase";
-  const wording =
-    runKind === "rebase"
-      ? {
-          noConnection:
-            "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish.",
-          noCommits: "The rebase left the branch with no commits beyond the base branch, so there was nothing to push.",
-        }
-      : {
-          noConnection:
-            "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
-          noCommits:
-            "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
+  /**
+   * Publishing is the card's, and only the card's.
+   *
+   * A swarm does not push a leaf's branch anywhere: its work goes onto
+   * the swarm's own branch through the merge queue, one branch at a
+   * time, and that queue is the only thing allowed to write there. A
+   * worker that pushed on its own would be racing every other worker
+   * for the same ref, which is the whole condition the queue exists to
+   * remove.
+   */
+  if (subject.kind === "pipeline") {
+    const { feature, stage } = subject;
+    // The agent commits; the server pushes, but only when this stage
+    // asked for it: Create a pull request is a per stage choice, so an
+    // investigation stage that commits nothing stays off GitHub while the
+    // implementation stage publishes. Publishing before the gate is
+    // evaluated means a checks_pass or pr_comments_resolved criterion has
+    // pull requests to read on the very first evaluation rather than
+    // failing once and passing on a later sweep.
+    // A rebase run publishes whatever the stage says: the whole point of
+    // resolving conflicts is putting the rebased branch back on the pull
+    // request, and the resolve route already confirmed one exists. The
+    // wording is picked once here so the two notes below cannot drift
+    // apart and describe two different runs.
+    const mustPublish = stage.createPr || runRole === "rebase";
+    const wording =
+      runRole === "rebase"
+        ? {
+            noConnection:
+              "The conflicts were resolved in the sandbox, but no GitHub connection is configured, so the rebased branch was not pushed. Save a GitHub token under Settings, GitHub, or install the GitHub App, then use Create PR to publish.",
+            noCommits: "The rebase left the branch with no commits beyond the base branch, so there was nothing to push.",
+          }
+        : {
+            noConnection:
+              "This stage is set to create a pull request, but no GitHub connection is configured. Save a GitHub token under Settings, GitHub, or install the GitHub App, then run again.",
+            noCommits:
+              "This stage is set to create a pull request, but the run left no commits on the branch, so there is nothing to publish yet.",
+          };
+    const publishNotes: string[] = [];
+    if (mustPublish && !publisher) {
+      publishNotes.push(wording.noConnection);
+    }
+    if (mustPublish && publisher) {
+      const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
+      const publishables = repoRows.map((row) => {
+        const preparedRepo = prepared.find((p) => p.name === row.name);
+        const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
+        return {
+          id: row.id,
+          name: row.name,
+          repoUrl: row.repoUrl,
+          githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
+          defaultBranch: row.defaultBranch,
+          ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
+          ...(ctx.driver.exportRepository
+            ? {
+                exportBundle: () =>
+                  ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
+              }
+            : {}),
         };
-  const publishNotes: string[] = [];
-  if (mustPublish && !publisher) {
-    publishNotes.push(wording.noConnection);
-  }
-  if (mustPublish && publisher) {
-    const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
-    const publishables = repoRows.map((row) => {
-      const preparedRepo = prepared.find((p) => p.name === row.name);
-      const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-      return {
-        id: row.id,
-        name: row.name,
-        repoUrl: row.repoUrl,
-        githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
-        defaultBranch: row.defaultBranch,
-        ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
-        ...(ctx.driver.exportRepository
-          ? {
-              exportBundle: () =>
-                ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
-            }
-          : {}),
-      };
-    });
-    const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
-      featureId: feature.id,
-      featureTitle: feature.title,
-      branch,
-      repositories: publishables,
-    }, { includeStageNotes });
-    const [runRow] = await ctx.db
-      .select({ startedBy: agentRuns.startedBy })
-      .from(agentRuns)
-      .where(eq(agentRuns.id, runId))
-      .limit(1);
-    const recovery = await recoverAncestryPublishFailures(
-      ctx,
-      ctx.db,
-      feature,
-      failures,
-      failures.map((f) => ({
-        name: f.name,
-        defaultBranch: publishables.find((r) => r.name === f.name)?.defaultBranch ?? "main",
-      })),
-      {
-        publisher,
+      });
+      const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
+        featureId: feature.id,
+        featureTitle: feature.title,
         branch,
         repositories: publishables,
-        includeStageNotes,
-      },
-      runRow?.startedBy ?? "system",
-    );
-    // What the agent asked the pull request to say, now that there is
-    // one to say it on. After the push and the open, so a description
-    // set during the run lands on the pull request this run created.
-    const allPublished = [...published, ...recovery.draftPublished];
-    if (allPublished.length > 0) {
-      await applyPendingPullRequestUpdates(ctx.db, publisher, {
-        featureId: feature.id,
-        branch,
-        targets: allPublished,
-        say: saySystem,
-      });
+      }, { includeStageNotes });
+      const [runRow] = await ctx.db
+        .select({ startedBy: agentRuns.startedBy })
+        .from(agentRuns)
+        .where(eq(agentRuns.id, runId))
+        .limit(1);
+      const recovery = await recoverAncestryPublishFailures(
+        ctx,
+        ctx.db,
+        feature,
+        failures,
+        failures.map((f) => ({
+          name: f.name,
+          defaultBranch: publishables.find((r) => r.name === f.name)?.defaultBranch ?? "main",
+        })),
+        {
+          publisher,
+          branch,
+          repositories: publishables,
+          includeStageNotes,
+        },
+        runRow?.startedBy ?? "system",
+      );
+      // What the agent asked the pull request to say, now that there is
+      // one to say it on. After the push and the open, so a description
+      // set during the run lands on the pull request this run created.
+      const allPublished = [...published, ...recovery.draftPublished];
+      if (allPublished.length > 0) {
+        await applyPendingPullRequestUpdates(ctx.db, publisher, {
+          featureId: feature.id,
+          branch,
+          targets: allPublished,
+          say: saySystem,
+        });
+      }
+      publishNotes.push(
+        ...published.map((pr) => `Opened pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}`),
+        ...recovery.draftPublished.map(
+          (pr) =>
+            `Opened draft pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}. The branch may have merge conflicts until it is rebased.`,
+        ),
+        ...(recovery.rebaseRun
+          ? [
+              "The branch is behind the base branch. A rebase run was started; the pull request will publish when it finishes.",
+            ]
+          : [
+              ...failures
+                .filter((f) => !recovery.draftPublished.some((p) => p.name === f.name))
+                .map((f) => `Could not publish ${f.name}: ${f.reason}`),
+              ...recovery.draftFailures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
+            ]),
+      );
+      if (published.length === 0 && failures.length === 0 && recovery.draftPublished.length === 0) {
+        publishNotes.push(wording.noCommits);
+      }
     }
-    publishNotes.push(
-      ...published.map((pr) => `Opened pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}`),
-      ...recovery.draftPublished.map(
-        (pr) =>
-          `Opened draft pull request #${pr.prNumber} in ${pr.repoUrl}: ${pr.url}. The branch may have merge conflicts until it is rebased.`,
-      ),
-      ...(recovery.rebaseRun
-        ? [
-            "The branch is behind the base branch. A rebase run was started; the pull request will publish when it finishes.",
-          ]
-        : [
-            ...failures
-              .filter((f) => !recovery.draftPublished.some((p) => p.name === f.name))
-              .map((f) => `Could not publish ${f.name}: ${f.reason}`),
-            ...recovery.draftFailures.map((f) => `Could not publish ${f.name}: ${f.reason}`),
-          ]),
-    );
-    if (published.length === 0 && failures.length === 0 && recovery.draftPublished.length === 0) {
-      publishNotes.push(wording.noCommits);
-    }
+    // Written into the transcript so the outcome is visible where the
+    // run is read, rather than only in the server's own log.
+    for (const note of publishNotes) await saySystem(note);
   }
-  // Written into the transcript so the outcome is visible where the
-  // run is read, rather than only in the server's own log.
-  for (const note of publishNotes) await saySystem(note);
 
   // Publication notes are part of the run transcript. Persist and emit
   // all of them before announcing the terminal state, otherwise an SSE
@@ -1171,8 +1077,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   await finishRun(ctx, runId, outcome, exitCode);
   emitBoard("succeeded");
 
-  // A finished run is the main trigger for re-checking the stage gate.
-  await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+  // A finished run is the main trigger for re-reading the board it
+  // belongs to: the card's gate, or the swarm's reconciler.
+  await subject.settle(ctx);
 }
 
 function runLimitReason(ctx: AppContext): string {
@@ -1202,12 +1109,8 @@ function execFailureReason(ctx: AppContext, err: unknown): string {
 async function buildRunCommand(
   ctx: AppContext,
   input: {
-    run: typeof agentRuns.$inferSelect;
-    feature: typeof features.$inferSelect;
-    stage: typeof stages.$inferSelect;
-    profile: typeof agentProfiles.$inferSelect;
+    subject: RunSubject;
     adapter: AgentAdapter;
-    repoRows: (typeof repositories.$inferSelect)[];
     prepared: PreparedRepository[];
     handle: SandboxHandle;
     sendInitialPrompt: boolean;
@@ -1237,12 +1140,8 @@ async function buildRunCommand(
   /** Files the tool reads settings from, written before it starts. */
   files: McpFile[];
 }> {
-  const { run, feature, stage, profile, adapter, repoRows, prepared, handle } = input;
-  const allStages = await ctx.db
-    .select()
-    .from(stages)
-    .where(eq(stages.pipelineId, feature.pipelineId))
-    .orderBy(asc(stages.position));
+  const { subject, adapter, prepared, handle } = input;
+  const { run, profile, repoRows } = subject;
   // Paths inside the sandbox depend on the driver: a container mounts
   // the workspace at /workspace, the local driver uses the host path.
   const mounted = prepared.map((repo) => {
@@ -1258,30 +1157,28 @@ async function buildRunCommand(
   // workspace root so every checkout is visible; the prompt lists them.
   const workdir = mounted.length === 1 ? mounted[0]!.mountPath : handle.workdir;
 
-  const stagePrompt = buildStagePrompt(
-    feature,
-    stage,
-    allStages,
-    mounted,
-    { name: profile.name, skill: profile.skill },
-    `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
-    input.cardTools ?? false,
-  );
+  /**
+   * The role's own prompt. A card's agent is told its stage and what
+   * the stages before it wrote; a swarm's planner is told the goal and
+   * that the plan is made through tools. Both are built here, from the
+   * subject, so the argv below is assembled once.
+   */
+  const rolePrompt = await buildSubjectPrompt(ctx, subject, mounted, handle, input.cardTools ?? false);
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
   // Only ordinary work compacts: judge and rebase prompts are complete
   // instructions on their own, and agentRunPrompt ignores a compacted
   // history for both, so computing one would be work thrown away.
   const compacted =
-    run.prompt && run.kind === "task" && !resume
-      ? await compactedConversation(ctx.db, feature.id, run.id)
+    subject.kind === "pipeline" && run.prompt && run.role === "stage" && !resume
+      ? await compactedConversation(ctx.db, subject.feature.id, run.id)
       : "";
   const basePrompt = agentRunPrompt({
     cli: profile.cli,
     followUp: run.prompt,
-    stagePrompt,
+    stagePrompt: rolePrompt,
     resume,
     compacted,
-    kind: run.kind,
+    role: run.role,
   });
 
   const prompt = [basePrompt, resume && run.prompt ? repositoryInstructions(mounted).join("\n") : "", input.setupWarning ?
@@ -1320,6 +1217,73 @@ async function buildRunCommand(
     toolEnv: adapter.env?.(commandInput) ?? {},
     files: adapter.files?.(commandInput) ?? [],
   };
+}
+
+/** What this run's role is told to do, before any follow-up message. */
+async function buildSubjectPrompt(
+  ctx: AppContext,
+  subject: RunSubject,
+  mounted: { name: string; mountPath: string; testCommand?: string | null }[],
+  handle: SandboxHandle,
+  /** Whether the card tools reached the sandbox; only a stage prompt mentions them. */
+  cardTools: boolean,
+): Promise<string> {
+  if (subject.kind === "pipeline") {
+    const allStages = await ctx.db
+      .select()
+      .from(stages)
+      .where(eq(stages.pipelineId, subject.feature.pipelineId))
+      .orderBy(asc(stages.position));
+    return buildStagePrompt(
+      subject.feature,
+      subject.stage,
+      allStages,
+      mounted,
+      { name: subject.profile.name, skill: subject.profile.skill },
+      `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
+      cardTools,
+    );
+  }
+  const [template] = subject.swarm.templateId
+    ? await ctx.db
+        .select()
+        .from(swarmTemplates)
+        .where(eq(swarmTemplates.id, subject.swarm.templateId))
+        .limit(1)
+    : [];
+  return buildPlannerPrompt({
+    swarm: subject.swarm,
+    agent: { name: subject.profile.name, skill: subject.profile.skill },
+    repositories: mounted,
+    templateInstructions: template?.plannerInstructions ?? null,
+  });
+}
+
+/**
+ * A swarm remembers the branch and the machine its first run got, so
+ * stopping it, landing onto it, or reaping it later does not have to
+ * rebuild either name from a slug the team may since have renamed.
+ */
+async function recordSwarmWorkspace(
+  ctx: AppContext,
+  subject: RunSubject & { kind: "swarm" },
+  sandboxId: string,
+  branch: string,
+): Promise<void> {
+  // A worker's machine and branch are the leaf's, not the swarm's.
+  if (subject.task) {
+    if (subject.task.branchName === branch) return;
+    await ctx.db
+      .update(swarmTasks)
+      .set({ branchName: branch, updatedAt: new Date() })
+      .where(eq(swarmTasks.id, subject.task.id));
+    return;
+  }
+  if (subject.swarm.branchName === branch && subject.swarm.sandboxId === sandboxId) return;
+  await ctx.db
+    .update(swarms)
+    .set({ branchName: branch, sandboxId, updatedAt: new Date() })
+    .where(eq(swarms.id, subject.swarm.id));
 }
 
 /** Whether this organization has asked for sandboxes with no egress. */
@@ -1406,7 +1370,7 @@ async function finishRun(
       await appendRunEvent(ctx, runId, event);
       // The board card should say why it went red, not just that it did.
       const [owner] = await ctx.db
-        .select({ featureId: agentRuns.featureId, projectId: features.projectId })
+        .select({ featureId: features.id, projectId: features.projectId })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))
         .where(eq(agentRuns.id, runId));
@@ -1445,7 +1409,9 @@ async function finishRun(
  */
 export async function deliverQueuedMessage(ctx: AppContext, runId: string): Promise<void> {
   const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) return;
+  // Messages are parked on a card, so a run that is not a card's has
+  // none waiting. Every terminal path calls this, including a swarm's.
+  if (!run || !isPipelineRun(run)) return;
   const claimed = await claimQueuedMessages(ctx.db, run.featureId);
   if (claimed.length === 0) return;
   const ids = claimed.map((m) => m.id);
@@ -1481,7 +1447,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * message continues, unless the card has moved stages: then the
    * pipeline agent for the stage the card is in takes over.
    */
-  const conversation = run.kind === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
+  const conversation = run.role === "judge" ? await latestConversationRun(ctx.db, run.featureId) : run;
   const source = await resolveFollowUpRun(ctx.db, feature, conversation ?? run);
 
   // The continuation acts as whoever wrote these messages, not whoever
@@ -1495,6 +1461,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   const priorStarter = (conversation ?? run).startedBy;
 
   const next = await startRunIfIdle(ctx.db, {
+    type: "pipeline" as const,
     featureId: feature.id,
     stageId: source.stageId,
     agentProfileId: source.agentProfileId,
@@ -1612,12 +1579,23 @@ export async function captureRunFinished(
   const analytics = ctx.analytics;
   if (!analytics) return;
   try {
+    /**
+     * Both boards, so both are joined and neither is required.
+     *
+     * A swarm's run has no feature, and an inner join on it dropped
+     * every one of them: no swarm run reported that it had finished,
+     * and its cost, turns and exit code were lost. The project and the
+     * organization come from whichever parent this run actually has.
+     */
     const [row] = await ctx.db
       .select({
         startedBy: agentRuns.startedBy,
+        type: agentRuns.type,
         featureId: agentRuns.featureId,
         stageId: agentRuns.stageId,
-        kind: agentRuns.kind,
+        swarmId: agentRuns.swarmId,
+        swarmTaskId: agentRuns.swarmTaskId,
+        role: agentRuns.role,
         executor: agentRuns.executor,
         costUsd: agentRuns.costUsd,
         numTurns: agentRuns.numTurns,
@@ -1625,14 +1603,17 @@ export async function captureRunFinished(
         error: agentRuns.error,
         startedAt: agentRuns.startedAt,
         endedAt: agentRuns.endedAt,
-        organizationId: features.organizationId,
-        projectId: features.projectId,
         agentProfileId: agentRuns.agentProfileId,
         harness: agentProfiles.cli,
         model: agentProfiles.model,
+        featureOrganizationId: features.organizationId,
+        featureProjectId: features.projectId,
+        swarmOrganizationId: swarms.organizationId,
+        swarmProjectId: swarms.projectId,
       })
       .from(agentRuns)
-      .innerJoin(features, eq(features.id, agentRuns.featureId))
+      .leftJoin(features, eq(features.id, agentRuns.featureId))
+      .leftJoin(swarms, eq(swarms.id, agentRuns.swarmId))
       .innerJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
       .where(eq(agentRuns.id, runId))
       .limit(1);
@@ -1640,15 +1621,18 @@ export async function captureRunFinished(
     analytics.capture({
       event: "agent run finished",
       userId: row.startedBy ?? null,
-      organizationId: row.organizationId,
+      organizationId: row.featureOrganizationId ?? row.swarmOrganizationId,
       properties: {
         status,
         success: status === "succeeded",
         run_id: runId,
+        type: row.type,
         feature_id: row.featureId,
         stage_id: row.stageId,
-        project_id: row.projectId,
-        kind: row.kind,
+        swarm_id: row.swarmId,
+        swarm_task_id: row.swarmTaskId,
+        project_id: row.featureProjectId ?? row.swarmProjectId,
+        role: row.role,
         executor: row.executor,
         // Which agent CLI ran the card and which model it was pointed
         // at, read from the profile the run was created with. The
@@ -1748,6 +1732,13 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
  * other's run.
  */
 export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
+  /**
+   * Both boards. A swarm's runs are this process's in exactly the way a
+   * card's are (the exec stream, the abort handle, the stdin channel
+   * all live in its memory), so a restart strands them the same way and
+   * leaving them out would mean a swarm run marked running forever,
+   * with its swarm waiting on a settlement that can never arrive.
+   */
   const orphans = await ctx.db
     .select()
     .from(agentRuns)
@@ -1819,7 +1810,7 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  * race a run that finished or was cancelled while recovery deliberated,
  * and the loser must change nothing.
  */
-async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureId: string }): Promise<void> {
+async function failRunAsInterrupted(ctx: AppContext, run: typeof agentRuns.$inferSelect): Promise<void> {
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
@@ -1849,20 +1840,28 @@ async function failRunAsInterrupted(ctx: AppContext, run: { id: string; featureI
   // Any stream that reconnected before recovery ran is waiting live;
   // this lets it close the way a normal finish would.
   ctx.bus.emitRunDone(run.id, "failed");
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-  if (feature) {
-    ctx.bus.emitBoardEvent({
-      type: "run_updated",
-      projectId: feature.projectId,
-      featureId: feature.id,
-      runId: run.id,
-      status: "failed",
-    });
+
+  /**
+   * The rest is the board's, and the two differ. A card announces the
+   * run on its own card, hands the messages that were waiting to the
+   * next run, tells Slack, and re-evaluates its gate. A swarm has one
+   * answer for all of it: enqueue a tick, and let the reconciler decide
+   * what an interrupted run means for the plan.
+   *
+   * The subject is read rather than reconstructed here, and a run whose
+   * references have gone (a deleted card, a deleted swarm) still ends:
+   * the status above is already written, and there is nothing left to
+   * tell.
+   */
+  const subject = await describeRunSubject(ctx, run).catch(() => null);
+  if (!subject) return;
+  subject.emitBoard("failed");
+  if (subject.kind === "pipeline") {
+    await requeueUndelivered(ctx.db, run.id);
+    await deliverQueuedMessage(ctx, run.id);
+    await queueRunFinishedSlack(ctx, run.id);
   }
-  await requeueUndelivered(ctx.db, run.id);
-  await deliverQueuedMessage(ctx, run.id);
-  await queueRunFinishedSlack(ctx, run.id);
-  await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
+  await subject.settle(ctx);
 }
 
 /**
@@ -1883,31 +1882,12 @@ async function resumeInterruptedRun(
   run: typeof agentRuns.$inferSelect,
   sandbox: typeof sandboxes.$inferSelect,
 ): Promise<void> {
-  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-  const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, run.stageId));
-  const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, run.agentProfileId));
-  if (!feature || !stage || !profile) throw new Error(`run ${run.id} has dangling references`);
-  const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
-  if (!project) throw new Error(`project ${feature.projectId} not found`);
+  const subject = await describeRunSubject(ctx, run);
+  const { profile, repoRows } = subject;
 
-  const selectedRepos = await ctx.db
-    .select()
-    .from(repositories)
-    .where(eq(repositories.projectId, project.id))
-    .orderBy(asc(repositories.position));
-  const repoRows =
-    ctx.env.BENTO_MODE === "multi" ? selectedRepos : await linkGitHubRemotes(ctx.db, selectedRepos);
-
-  const emitBoard = (status: string) =>
-    ctx.bus.emitBoardEvent({
-      type: "run_updated",
-      projectId: feature.projectId,
-      featureId: feature.id,
-      runId: run.id,
-      status,
-    });
-  const branch = cardBranch(feature);
-  const publisher = await githubConnectionFor(ctx, feature.organizationId);
+  const emitBoard = (status: string) => subject.emitBoard(status);
+  const branch = subject.branch;
+  const publisher = await githubConnectionFor(ctx, subject.organizationId);
   const adapter = getAdapter(profile.cli);
 
   const handle: SandboxHandle = {
@@ -1934,12 +1914,8 @@ async function resumeInterruptedRun(
   const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
   const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
-    run,
-    feature,
-    stage,
-    profile,
+    subject,
     adapter,
-    repoRows,
     prepared,
     handle,
     // The process consumed its prompt in its first life; re-sending it
@@ -2018,13 +1994,15 @@ async function resumeInterruptedRun(
     appendRunEvent(ctx, run.id, { type: "message", role: "system", text });
 
   let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
-  if (live && liveChannel) {
+  // The card's conversation, for the reason the first run's is: a swarm
+  // is spoken to through its own thread and its coordinator.
+  if (live && liveChannel && subject.kind === "pipeline") {
     liveSession = attachLiveConversation({
       ctx,
       runId: run.id,
-      featureId: feature.id,
-      kind: run.kind,
-      gateType: stage.gateType,
+      featureId: subject.feature.id,
+      role: run.role,
+      gateType: subject.stage.gateType,
       idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
       live,
       liveChannel,
@@ -2064,17 +2042,24 @@ async function resumeInterruptedRun(
   // run. Without the set the stream is delivered as it always was, and
   // recovery loads a set of its own, so a failure here costs it
   // nothing but a second attempt at the same query.
-  const persisted = recovery
-    ? await loadPersistedIds(ctx, recovery, feature.id).catch((err: unknown) => {
+  /*
+   * Only a card's run. Recovery reads and writes the transcript a
+   * feature owns, and a swarm's run has no feature to own one: handing
+   * it the swarm's workspace key would query cards by a key no card
+   * has. A swarm resuming simply delivers its stream unfiltered, which
+   * is what every run did before this existed.
+   */
+  const persisted = recovery && subject.kind === "pipeline"
+    ? await loadPersistedIds(ctx, recovery, subject.feature.id).catch((err: unknown) => {
         console.warn(`could not load the transcript's ids for run ${run.id}; delivering the stream unfiltered:`, err);
         return null;
       })
     : null;
-  if (recovery && run.cliSessionId) {
+  if (recovery && run.cliSessionId && subject.kind === "pipeline") {
     await recoverMissedMessages(ctx, {
       handle,
       adapter,
-      featureId: feature.id,
+      featureId: subject.feature.id,
       runId: run.id,
       sessionId: run.cliSessionId,
       cwd: workdir,
@@ -2105,15 +2090,7 @@ async function resumeInterruptedRun(
           await onTurnFinished(event.ok);
         }
         const spoken = runOutputPreview(event);
-        if (spoken) {
-          ctx.bus.emitBoardEvent({
-            type: "run_output",
-            projectId: feature.projectId,
-            featureId: feature.id,
-            runId: run.id,
-            text: spoken,
-          });
-        }
+        if (spoken) subject.emitOutput(spoken);
       },
     });
   } catch (err) {
@@ -2130,7 +2107,7 @@ async function resumeInterruptedRun(
     }
     await finishRun(ctx, run.id, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    await subject.settle(ctx);
     return;
   }
   ctx.running.delete(run.id);
@@ -2147,10 +2124,7 @@ async function resumeInterruptedRun(
 
   await settleAgentResult(ctx, {
     runId: run.id,
-    runKind: run.kind,
-    feature,
-    stage,
-    profile,
+    subject,
     repoRows,
     prepared,
     handle,
@@ -2181,8 +2155,30 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("gate.evaluate");
   await ctx.boss.createQueue("runner.reap");
   await ctx.boss.createQueue(REAP_SANDBOX_QUEUE);
+  /**
+   * The swarm reconciler's queue, keyed by swarm.
+   *
+   * "short" plus a singleton key of the swarm id is what makes a burst
+   * of events one tick: while a tick for a swarm is waiting to be
+   * picked up, another send for the same swarm creates no second job.
+   * A tick that is already running does not swallow the next one, so an
+   * event that arrives mid tick still gets read.
+   */
+  await ctx.boss.createQueue(SWARM_TICK_QUEUE, { name: SWARM_TICK_QUEUE, policy: "short" });
 
   await recoverInterruptedRuns(ctx);
+  /**
+   * Every swarm that is still working gets one tick, after recovery
+   * rather than before it: the tick reads the runs, and it should read
+   * them once the previous process's have been closed or reattached
+   * rather than while they still say they are running.
+   *
+   * This is also what starts the tick worker, through the same door
+   * every other tick uses. A deployment with no swarm in flight
+   * enqueues nothing and so registers nothing.
+   */
+  const ticked = await tickAllLiveSwarms(ctx);
+  if (ticked > 0) console.log(`queued a tick for ${ticked} live swarm(s)`);
 
   /**
    * A finished card's sandbox goes away, because it costs money for as
@@ -2191,8 +2187,13 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * Sequentially rather than in parallel: this is housekeeping, and it
    * should never compete with an agent for the provider's rate limit.
    */
-  await ctx.boss.work<{ featureId: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
-    for (const job of jobs) await reapSandbox(ctx, job.data.featureId);
+  await ctx.boss.work<{ featureId?: string; swarmId?: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
+    // One queue, both boards: a job names a card or a swarm, and which
+    // one it names is what says whose machine is being reclaimed.
+    for (const job of jobs) {
+      if (job.data.swarmId) await reapSwarmSandbox(ctx, job.data.swarmId);
+      else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
+    }
   }));
   /**
    * The sweep catches the cards that finished before any of this
@@ -2252,11 +2253,15 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       .where(
         and(
           eq(agentRuns.executor, "runner"),
+          eq(agentRuns.type, "pipeline"),
           eq(agentRuns.status, "starting"),
           lt(agentRuns.claimedAt, cutoff),
         ),
       )
-      .returning({ id: agentRuns.id, featureId: agentRuns.featureId });
+      .returning()
+      // The update already filtered to the pipeline; this is where that
+      // becomes a type, so the loop below reads the card straight off.
+      .then((rows) => rows.map(asPipelineRun));
     // Told where the user is looking: a card snapping from "starting"
     // back to "queued" with no explanation reads as a glitch.
     for (const run of stale) {
@@ -2280,6 +2285,18 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       console.warn(`requeued ${stale.length} run(s) whose runner went away`);
     }
   }));
+
+  /**
+   * The swarm reconciler's worker is not registered here.
+   *
+   * It polls at the interactive pace, and most deployments have never
+   * started a swarm: a worker every two seconds for a board nobody has
+   * opened is the cost this file spent a release removing. It is
+   * started by the first tick instead (ensureSwarmTickWorker, which
+   * every door goes through) and stopped again when the last swarm
+   * settles. The boot path below starts it when there is already
+   * something to reconcile.
+   */
 
   // Polled at the interactive pace rather than the slow default: this
   // is what moves a card once its run ends, and one worker every two
