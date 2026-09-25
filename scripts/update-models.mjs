@@ -27,7 +27,7 @@
  * Usage: pnpm models:update
  *        pnpm models:update -- --gateway-only
  */
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -150,8 +150,7 @@ import type { CatalogProvider } from "./models.js";
 export const MODEL_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(providers, null, 2)};
 `;
 
-  await writeFile(out, body);
-  console.log(`\nwrote ${path.relative(root, out)} (${(body.length / 1024).toFixed(0)} KB)`);
+  await writeIfChanged(out, body);
 }
 
 await writeGatewayCatalog();
@@ -214,7 +213,24 @@ import type { CatalogProvider } from "./models.js";
 
 export const GATEWAY_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(catalog, null, 2)};
 `;
-  await writeFile(gatewayOut, body);
   console.log(`vercel: ${models.length} language models`);
-  console.log(`wrote ${path.relative(root, gatewayOut)} (${(body.length / 1024).toFixed(0)} KB)`);
+  await writeIfChanged(gatewayOut, body);
+}
+
+/**
+ * Writes a snapshot only when its models changed. The header carries
+ * the date it was taken, so rewriting an unchanged list would still
+ * leave a diff, and the nightly workflow (models.yml) would open a pull
+ * request every night that changes nothing but the date.
+ */
+async function writeIfChanged(file, body) {
+  const withoutDate = (text) => text.replace(/^\/\/ Snapshot taken .*$/m, "");
+  const current = await readFile(file, "utf8").catch(() => "");
+  const name = path.relative(root, file);
+  if (withoutDate(current) === withoutDate(body)) {
+    console.log(`${name} is already current`);
+    return;
+  }
+  await writeFile(file, body);
+  console.log(`wrote ${name} (${(body.length / 1024).toFixed(0)} KB)`);
 }
