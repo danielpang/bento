@@ -7,7 +7,6 @@ import type { SandboxHandle } from "@bento/sandbox";
 import {
   agentProfiles,
   agentRuns,
-  ensureSwarmAgents,
   projects,
   repositories,
   runArtifacts,
@@ -35,6 +34,8 @@ import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap } from "../orchestrator/reap-sandbox.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
+import { ensureDefaultSwarmTemplate } from "../orchestrator/swarm/default-template.js";
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
@@ -120,12 +121,23 @@ const TASK_EVENTS_SHOWN = 50;
  */
 const SWARM_ARTIFACTS_SHOWN = 50;
 
+/**
+ * Saving a swarm's shape as a template. Only the name is asked for:
+ * everything else is the swarm and the template it came from, and a
+ * form that re-asked for all of it would be the create form with extra
+ * steps.
+ */
+const saveAsTemplate = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(4000).optional(),
+});
+
 const createSwarm = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(200),
   goal: z.string().max(20_000).default(""),
   templateId: z.string().uuid().nullish(),
-  maxWorkers: z.number().int().min(1).max(32).optional(),
+  maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).optional(),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
   /**
@@ -167,7 +179,7 @@ const createSwarm = z.object({
 const updateSwarm = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
-    maxWorkers: z.number().int().min(1).max(32).optional(),
+    maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).optional(),
     budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
     timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
     archived: z.boolean().optional(),
@@ -282,7 +294,7 @@ export function swarmRoutes(ctx: AppContext) {
       const membership = await getActiveOrganizationMembership(ctx, c);
       const template = body.templateId
         ? await getAccessibleSwarmTemplate(ctx, c, body.templateId)
-        : await defaultTemplate(ctx, c, project.organizationId);
+        : await ensureDefaultSwarmTemplate(ctx, c, project.organizationId);
       if (!template) return c.json({ error: "not found" }, 404);
       if (!template.plannerProfileId) {
         return c.json(
@@ -813,6 +825,90 @@ export function swarmRoutes(ctx: AppContext) {
         return c.json({ swarm: reopened.swarm, followUpTaskId: reopened.followUpTaskId, followUp: reopened.followUp }, 201);
       },
     )
+    /**
+     * This swarm's shape, saved as a template to start the next one
+     * from.
+     *
+     * A swarm copies its ceilings from the template it was made with
+     * and may then be changed: workers raised once the plan turned out
+     * wider than expected, a budget lifted, a time limit dropped. That
+     * tuning is the thing worth keeping, and today it dies with the
+     * swarm.
+     *
+     * So the new template is the old one with this swarm's current
+     * ceilings written over it. The fields a swarm has no opinion
+     * about (the agents, the instructions, where workers work, the
+     * judge, the completion command, how deep a plan may go) are
+     * carried across unchanged, because a swarm never had its own copy
+     * of them to diverge with. Copied rather than referenced, so
+     * editing either one afterwards leaves the other alone.
+     *
+     * A swarm whose template has since been deleted is refused rather
+     * than half saved: templateId is set null on delete, and a
+     * template invented out of the four fields a swarm does carry
+     * would name no agents and could not start anything.
+     */
+    .post("/:id/template", zValidator("json", saveAsTemplate), async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const body = c.req.valid("json");
+
+      if (!swarm.templateId) {
+        return c.json(
+          {
+            error:
+              "This swarm's template has been deleted, so there is nothing to save from. Create a template in Agents instead.",
+          },
+          409,
+        );
+      }
+      /*
+       * Resolved through the access helper rather than read by id: the
+       * swarm is reachable through its project, and a template is
+       * reachable through its owner or its organization. They are not
+       * the same question, and a project shared into a second team
+       * would otherwise hand that team a copy of a template nobody
+       * there may see.
+       */
+      const source = await getAccessibleSwarmTemplate(ctx, c, swarm.templateId);
+      if (!source) return c.json({ error: "not found" }, 404);
+
+      const [template] = await db(c, ctx)
+        .insert(swarmTemplates)
+        .values({
+          ownerId: actor(c),
+          /*
+           * The organization the source template was in, not the one
+           * the caller has open. A template saved from a team's swarm
+           * belongs to that team, the same way the swarm does.
+           */
+          organizationId: source.organizationId,
+          name: body.name,
+          description: body.description ?? `Saved from the swarm "${swarm.title}".`,
+          plannerProfileId: source.plannerProfileId,
+          workerProfileId: source.workerProfileId,
+          plannerInstructions: source.plannerInstructions,
+          workerInstructions: source.workerInstructions,
+          workerIsolation: source.workerIsolation,
+          judgeProfileId: source.judgeProfileId,
+          completionCommand: source.completionCommand,
+          maxPlanDepth: source.maxPlanDepth,
+          assumedCostUsd: source.assumedCostUsd,
+          longRunWarnMin: source.longRunWarnMin,
+          longRunEscalateMin: source.longRunEscalateMin,
+          documentPath: source.documentPath,
+          // And the four the swarm itself carries, as they stand now.
+          maxWorkers: swarm.maxWorkers,
+          budgetUsd: swarm.budgetUsd,
+          timeLimitMin: swarm.timeLimitMin,
+          deliverable: swarm.deliverable,
+        })
+        .returning();
+      if (!template) return c.json({ error: "something went wrong saving the template; try again" }, 500);
+      return c.json(template, 201);
+    })
     /**
      * What this swarm produced for people to read: its assembled
      * document, and anything else its agents captured.
@@ -1589,79 +1685,6 @@ async function taskCommits(
     found.push(...onBranch.map((commit) => ({ repository: repo.name, ...commit })));
   }
   return found;
-}
-
-/**
- * The template a swarm starts from when the caller named none.
- *
- * Created rather than refused, with the seeded planner and worker, for
- * the reason a new project gets a pipeline and six agents: a first
- * swarm should be one form, not a tour of two panels. It is an ordinary
- * template afterwards, editable and deletable like any other.
- */
-async function defaultTemplate(
-  ctx: AppContext,
-  c: Parameters<typeof actor>[0],
-  organizationId: string | null,
-) {
-  const owner = { ownerId: actor(c), organizationId: ctx.env.BENTO_MODE === "multi" ? organizationId : null };
-  const [existing] = await db(c, ctx)
-    .select()
-    .from(swarmTemplates)
-    .where(
-      and(
-        eq(swarmTemplates.ownerId, owner.ownerId),
-        organizationId && ctx.env.BENTO_MODE === "multi"
-          ? eq(swarmTemplates.organizationId, organizationId)
-          : sql`${swarmTemplates.organizationId} is null`,
-        eq(swarmTemplates.name, "Default"),
-      ),
-    )
-    .limit(1);
-  if (existing) return existing;
-
-  const agents = await ensureSwarmAgents(db(c, ctx), owner);
-  const [created] = await db(c, ctx)
-    .insert(swarmTemplates)
-    .values({
-      ownerId: owner.ownerId,
-      organizationId: owner.organizationId,
-      name: "Default",
-      description: "The planner and worker a swarm uses when nobody has chosen others.",
-      plannerProfileId: agents.planner,
-      workerProfileId: agents.worker,
-      /**
-       * Two at once on a local install, four on a hosted one.
-       *
-       * A hosted worker is its own machine, so four of them cost four
-       * machines and nothing of the person's laptop. A local worker is
-       * a worktree and a container on the machine somebody is also
-       * using: four agents each running the repository's test command
-       * is four builds competing for the same cores, and the install
-       * that is meant to be watched becomes the one nobody can type on.
-       *
-       * Written onto the template rather than read from the mode at
-       * spawn time, so an install that later joins a team keeps the
-       * shape its swarms already had, and so a person who wants four
-       * can simply set four. A number nobody can see and nobody can
-       * change is not a default, it is a rule.
-       */
-      maxWorkers: ctx.env.BENTO_MODE === "multi" ? 4 : 2,
-      /**
-       * And where those workers work, written down for the same
-       * reason the number is.
-       *
-       * A local install's agents share the repository it already has
-       * on disk, each in a worktree of its own; a hosted one gives
-       * each agent a machine holding its own clone. Recorded rather
-       * than read off the driver every time, so an install that later
-       * joins a team is told its swarms cannot keep their shape
-       * instead of quietly being given another one.
-       */
-      workerIsolation: ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree",
-    })
-    .returning();
-  return created ?? null;
 }
 
 /**

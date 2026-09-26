@@ -77,6 +77,16 @@ export interface SwarmActions {
   /** Returns an archived swarm to the strip without changing its work. */
   onRestore: () => void;
   onWorkers: (workers: number) => void;
+  /**
+   * Keeps this swarm's shape as a template to start the next one from.
+   *
+   * The ceilings a swarm ends up running under are the tuning nobody
+   * writes down: workers raised once the plan turned out wider than
+   * expected, a budget lifted. Saving copies the template it came from
+   * with those numbers written over it, so the next swarm starts where
+   * this one ended up rather than where it began.
+   */
+  onSaveAsTemplate: () => void;
   onAnswer: (questionId: string, text: string) => void;
 }
 
@@ -279,6 +289,22 @@ export function SwarmPage({
               </button>
             )
           )}
+          {/*
+            * Saving the shape, at any point in a swarm's life.
+            *
+            * Not only on a finished one: a swarm whose plan has just
+            * been widened is exactly when somebody knows what the
+            * ceilings should have been, and making them wait until it
+            * is done is making them remember.
+            */}
+          <button
+            className="btn"
+            disabled={busy}
+            title="Keep this swarm's ceilings as a template to start the next one from."
+            onClick={actions.onSaveAsTemplate}
+          >
+            Save as template
+          </button>
           <button
             className="btn btn-primary"
             disabled={busy || !actions.onCreatePullRequest}

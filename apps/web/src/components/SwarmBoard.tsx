@@ -1,3 +1,4 @@
+import { SaveTemplateDialog } from "./SaveTemplateDialog.js";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BentoClient, RunArtifact } from "@bento/api-client";
 import { NewSwarmDialog } from "./NewSwarmDialog.js";
@@ -274,6 +275,13 @@ export function SwarmBoard({
   const [creating, setCreating] = useState(false);
   /** Whether the reopen dialog is up for the swarm on screen. */
   const [reopening, setReopening] = useState(false);
+  /*
+   * Naming a template happens in a Modal rather than window.prompt.
+   * The desktop app is this console loaded in Electron, which does not
+   * implement prompt at all: the call throws in the renderer and the
+   * button does nothing, with no error anywhere a person can see.
+   */
+  const [savingTemplate, setSavingTemplate] = useState(false);
   /** What this swarm produced for people to read, and the one that is open. */
   const [artifacts, setArtifacts] = useState<SwarmArtifact[]>([]);
   const [openArtifact, setOpenArtifact] = useState<RunArtifact | null>(null);
@@ -367,6 +375,7 @@ export function SwarmBoard({
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
             onRestore: () => selectedId && act(() => swarmApi.restoreSwarm(selectedId)),
             onWorkers: (workers) => selectedId && act(() => swarmApi.setWorkers(selectedId, workers)),
+            onSaveAsTemplate: () => setSavingTemplate(true),
             onAnswer: (questionId, text) =>
               selectedId && act(() => swarmApi.answerQuestion(selectedId, questionId, text)),
           }}
@@ -423,6 +432,29 @@ export function SwarmBoard({
         <Suspense fallback={null}>
           <ArtifactViewer client={client} artifact={openArtifact} onClose={() => setOpenArtifact(null)} />
         </Suspense>
+      )}
+
+      {savingTemplate && detail && selectedId && (
+        <SaveTemplateDialog
+          suggested={`${detail.swarm.name} shape`}
+          busy={busy}
+          onClose={() => setSavingTemplate(false)}
+          onSave={(name) => {
+            setBusy(true);
+            void swarmApi
+              .saveSwarmAsTemplate(selectedId, name)
+              .then(() => {
+                setSavingTemplate(false);
+                // The New swarm dialog reads this list, and it is
+                // loaded once on mount, so a template saved here would
+                // not be offerable until a reload without this.
+                return swarmApi.listTemplates().then(setTemplates);
+              })
+              .then(() => setError(""))
+              .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+              .finally(() => setBusy(false));
+          }}
+        />
       )}
 
       {reopening && detail && selectedId && (

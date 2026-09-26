@@ -11,6 +11,7 @@ import { isSafeRelativePath } from "../orchestrator/swarm/deliverable.js";
 import { parseSwarmFile, swarmFile, toSwarmEntry, writeSwarmFile } from "../swarm-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
 import { upsertSwarmTemplatesFromFile } from "../upsert-swarm-templates.js";
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
 /**
@@ -56,7 +57,7 @@ const documentPath = z
   .refine((value) => isSafeRelativePath(value), "a document path is a relative .md path inside the repository");
 
 const ceilings = {
-  maxWorkers: z.number().int().min(1).max(32),
+  maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS),
   budgetUsd: z.number().min(0).max(100_000),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7),
   /**

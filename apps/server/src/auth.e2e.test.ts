@@ -1,5 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { and, eq } from "drizzle-orm";
 import {
   account,
@@ -18,6 +19,7 @@ import {
   runArtifacts,
   runMigrations,
   swarmTasks,
+  swarmTemplates,
   user,
   verification,
 } from "@bento/db";
@@ -1049,10 +1051,18 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/swarms?projectId=${project.id}`],
     ["GET", `/api/swarms/${swarm.id}`],
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ title: "Stolen" }) }],
-    ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ maxWorkers: 32 }) }],
+    // Within the worker ceiling on purpose: a body the schema refuses
+    // would answer 400 before the access check ran, and this row is
+    // here to prove the access check answers 404.
+    ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ maxWorkers: MAX_SWARM_WORKERS }) }],
     ["POST", `/api/swarms/${swarm.id}/start`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],
+    [
+      "POST",
+      `/api/swarms/${swarm.id}/template`,
+      { body: JSON.stringify({ name: "stolen" }) },
+    ],
     // Reopening adds work to somebody else's finished swarm, on the
     // branch their pull request is open on, and can raise the budget
     // their team is billed for.
@@ -1154,6 +1164,21 @@ test("every entity route refuses a foreign tenant", async () => {
     !intruderTemplates.some((row) => row.id === template.id),
     "a foreign tenant's template list must not carry the owner's",
   );
+  /*
+   * Saving somebody else's swarm as a template is theft that leaves the
+   * original untouched, so the loop above cannot see it.
+   *
+   * Asked of the table rather than of either list. The route writes the
+   * SOURCE template's organization, not the caller's, so a stolen copy
+   * would land among the owner's rows: checking the intruder's list
+   * would pass whether or not the access check was there, which is the
+   * one thing this assertion exists to decide.
+   */
+  const stolenCopies = await ctx.db
+    .select({ id: swarmTemplates.id })
+    .from(swarmTemplates)
+    .where(eq(swarmTemplates.name, "stolen"));
+  assert.equal(stolenCopies.length, 0, "no copy of the owner's swarm was written, in either tenant");
   ctx.featureFlags = flagsBefore;
 
   // The MCP server row survived, under its own name. Read through

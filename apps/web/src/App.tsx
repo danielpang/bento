@@ -1019,17 +1019,48 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * The order is the row's order, which is the order they were in
    * before the menu existed.
    */
-  const actions: NavAction[] = [
-    { id: "board", label: "Board", href: "/", current: screen === "board" },
-    { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
-    { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
-    ...(hasProjects
-      ? [
-          { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
-          { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
-        ]
-      : []),
-  ];
+  /*
+   * The swarm board's tools are not the card board's.
+   *
+   * Board, Sessions and Pipeline are all about cards: a swarm has no
+   * stage to configure, no session list of its own, and the board
+   * button would point at the board already open. So on the swarm
+   * board they are left out, and what replaces them is the thing a
+   * swarm actually runs under.
+   *
+   * Templates rather than Agents, pointing at the same panel. The
+   * templates live inside it, and dropping the only entry that reaches
+   * them would put a person back where this started: a New swarm
+   * dialog asking for a template with nowhere to make one.
+   */
+  /*
+   * And only where the swarm board is the thing actually on screen.
+   *
+   * `swarming` is true from the moment the mode is remembered, but the
+   * swarm board renders under `swarming && projectId` and the two
+   * early returns below (no project list yet, no projects at all) draw
+   * the card board's skeleton without the board toggle. Keyed on
+   * `swarming` alone, somebody whose remembered mode is swarms and
+   * whose project list fails to load got a topbar with no Board, no
+   * Sessions and no toggle: nothing but the URL bar to get out with.
+   */
+  const onSwarmBoard = swarming && projectId !== null && hasProjects;
+  const actions: NavAction[] = onSwarmBoard
+    ? [
+        { id: "templates", label: "Templates", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+        ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
+      ]
+    : [
+        { id: "board", label: "Board", href: "/", current: screen === "board" },
+        { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
+        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+        ...(hasProjects
+          ? [
+              { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
+              { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
+            ]
+          : []),
+      ];
 
   const bottom = (
     <>
