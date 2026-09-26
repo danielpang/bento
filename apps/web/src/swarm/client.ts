@@ -1,3 +1,4 @@
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
 import { buildSwarmModel } from "./layout.js";
 import { SWARM_TEMPLATES, draftSwarm, seedSwarms, summarise } from "./fixtures.js";
@@ -218,12 +219,22 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
    */
   const templates: SwarmTemplate[] = SWARM_TEMPLATES.map((row) => ({ ...row }));
 
-  /** A template row from the fields the panel edits. */
+  /*
+   * Ids come from a counter rather than the list's length, which
+   * collides the moment anything is deleted: three rows, two creates,
+   * one delete, and the next create repeats an id that is still in the
+   * list. Two rows sharing an id is a duplicate React key, and every
+   * edit and delete here finds by id, so the second row's changes land
+   * on the first.
+   */
+  let nextTemplateId = templates.length;
+
+  /** A template row from the fields the panel edits, over a base row. */
   function fixtureTemplate(
-    input: Partial<TemplateInput> & { maxBudgetUsd?: number | null },
+    base: SwarmTemplate,
+    input: Partial<TemplateInput>,
     id: string,
   ): SwarmTemplate {
-    const base = templates.find((row) => row.id === id) ?? SWARM_TEMPLATES[0]!;
     return {
       ...base,
       id,
@@ -231,7 +242,7 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       description: input.description ?? base.description,
       maxWorkers: input.maxWorkers ?? base.maxWorkers,
       workerIsolation: input.workerIsolation ?? base.workerIsolation,
-      maxBudgetUsd: input.budgetUsd !== undefined ? input.budgetUsd : (input.maxBudgetUsd ?? base.maxBudgetUsd),
+      maxBudgetUsd: input.budgetUsd !== undefined ? input.budgetUsd : base.maxBudgetUsd,
       timeLimitMin: input.timeLimitMin !== undefined ? input.timeLimitMin : base.timeLimitMin,
     };
   }
@@ -259,18 +270,29 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       return Promise.resolve(detail);
     },
     listTemplates() {
-      return Promise.resolve(templates);
+      // Copies, so a caller holding the result cannot write through it
+      // into the fixture's own state.
+      return Promise.resolve(templates.map((row) => ({ ...row })));
     },
     createTemplate(input) {
-      const created = fixtureTemplate(input, `template-${templates.length + 1}`);
+      nextTemplateId += 1;
+      // A new template is its own row, not a variant of the first
+      // fixture: only the cost shape, which the panel does not edit,
+      // has anywhere else to come from.
+      const created = fixtureTemplate(
+        { ...SWARM_TEMPLATES[0]!, maxBudgetUsd: null, timeLimitMin: null },
+        input,
+        `template-${nextTemplateId}`,
+      );
       templates.push(created);
-      return Promise.resolve(created);
+      return Promise.resolve({ ...created });
     },
     updateTemplate(templateId, input) {
-      const found = templates.find((row) => row.id === templateId);
-      if (!found) return Promise.reject(new Error("not found"));
-      Object.assign(found, fixtureTemplate({ ...found, budgetUsd: found.maxBudgetUsd, ...input }, templateId));
-      return Promise.resolve(found);
+      const at = templates.findIndex((row) => row.id === templateId);
+      if (at < 0) return Promise.reject(new Error("not found"));
+      const updated = fixtureTemplate(templates[at]!, input, templateId);
+      templates[at] = updated;
+      return Promise.resolve({ ...updated });
     },
     deleteTemplate(templateId) {
       const at = templates.findIndex((row) => row.id === templateId);
@@ -283,9 +305,10 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       // The fixture's version of what the route does: the swarm's own
       // ceilings over the template it was made with.
       const source = templates.find((row) => row.id === detail.swarm.templateId) ?? templates[0]!;
+      nextTemplateId += 1;
       const created: SwarmTemplate = {
         ...source,
-        id: `template-${templates.length + 1}`,
+        id: `template-${nextTemplateId}`,
         name,
         description: `Saved from the swarm "${detail.swarm.name}".`,
         maxWorkers: detail.swarm.workers,
@@ -293,7 +316,7 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         timeLimitMin: detail.swarm.timeLimitMin,
       };
       templates.push(created);
-      return Promise.resolve(created);
+      return Promise.resolve({ ...created });
     },
     listAgents() {
       return Promise.resolve([
@@ -531,7 +554,12 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
  * ------------------------------------------------------------------ */
 
 /** The most workers the create and update routes accept. */
-export const WORKER_CEILING = 32;
+/**
+ * The console's name for the one ceiling, re-exported rather than
+ * restated. A second literal here is how the stepper came to offer a
+ * number the route would refuse.
+ */
+export const WORKER_CEILING = MAX_SWARM_WORKERS;
 
 /** A swarm row, as JSON. Numerics arrive as strings; timestamps as ISO. */
 export interface WireSwarm {
@@ -666,7 +694,16 @@ export interface TemplateInput {
   /** Null clears the cap, which is not the same as a cap of zero. */
   budgetUsd: number | null;
   timeLimitMin: number | null;
-  workerIsolation: "sandbox" | "worktree";
+  /**
+   * Optional, and absent is the ordinary case for a new template.
+   *
+   * The create route fills it from the deployment (a machine each on a
+   * hosted install, worktrees on a local one), and a console that
+   * always stated a value took that answer away: every template made
+   * here would have said worktrees, which a hosted deployment refuses
+   * at provisioning time, long after the person pressed Save.
+   */
+  workerIsolation?: "sandbox" | "worktree";
 }
 
 export interface WireTemplate {
@@ -1171,6 +1208,21 @@ function errorText(body: string): string {
   try {
     const parsed = JSON.parse(body) as { error?: unknown };
     if (typeof parsed.error === "string" && parsed.error.trim() !== "") return parsed.error;
+    /*
+     * A body the route's validator refused, rather than one it wrote.
+     *
+     * zValidator answers with the whole ZodError, and `error` is then
+     * an object, so the line above falls through and the console used
+     * to print `{"success":false,"error":{"name":"ZodError","issues"...`
+     * at a person. The first issue is the one worth saying, named by
+     * the field it is about.
+     */
+    const issues = (parsed.error as { issues?: { path?: unknown[]; message?: string }[] } | undefined)?.issues;
+    const first = Array.isArray(issues) ? issues[0] : undefined;
+    if (first?.message) {
+      const field = Array.isArray(first.path) ? first.path.filter((part) => typeof part === "string").join(".") : "";
+      return field ? `${field}: ${first.message}` : first.message;
+    }
   } catch {
     // Not JSON. The body is the best there is.
   }

@@ -1,3 +1,4 @@
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { z } from "zod";
 import { agentEntry } from "./agent-file.js";
 import { isSafeRelativePath } from "./orchestrator/swarm/deliverable.js";
@@ -58,7 +59,7 @@ export const swarmTemplateEntry = z.object({
     .nullish(),
   /** A command that has to pass once, at the end, before the swarm is done. */
   completionCommand: z.string().max(4000).nullish(),
-  maxWorkers: z.number().int().min(1).max(32).default(4),
+  maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).default(4),
   maxPlanDepth: z.number().int().min(1).max(3).default(1),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),

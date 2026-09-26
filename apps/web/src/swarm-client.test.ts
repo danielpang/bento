@@ -173,3 +173,74 @@ test("a swarm's branch is suggested from its name, and a budget is a number or n
   assert.equal(clampWorkers(Number.NaN, 8), 1);
   assert.equal(clampWorkers(3.4, 8), 3);
 });
+
+test("a fixture template survives a create, an edit and a delete, with ids that do not repeat", async () => {
+  /**
+   * The panel finds a template by id for every edit and delete, so an
+   * id that repeats is an edit that lands on the wrong row. The old
+   * scheme numbered from the list's length, which repeats as soon as
+   * anything is deleted.
+   */
+  const api = fixtureSwarmApi(clock);
+  const seeded = await api.listTemplates();
+
+  const first = await api.createTemplate({
+    name: "Wide",
+    description: "Many workers",
+    maxWorkers: 6,
+    budgetUsd: 50,
+    timeLimitMin: null,
+  });
+  const second = await api.createTemplate({
+    name: "Narrow",
+    description: "One worker",
+    maxWorkers: 1,
+    budgetUsd: null,
+    timeLimitMin: 30,
+  });
+  assert.notEqual(first.id, second.id);
+  assert.equal(first.maxWorkers, 6);
+  assert.equal(first.maxBudgetUsd, 50);
+  assert.equal(second.timeLimitMin, 30);
+  assert.equal(second.maxBudgetUsd, null, "no cap is null rather than the first fixture's figure");
+
+  await api.deleteTemplate(seeded[0]!.id);
+  const third = await api.createTemplate({
+    name: "Third",
+    description: "",
+    maxWorkers: 2,
+    budgetUsd: null,
+    timeLimitMin: null,
+  });
+  const ids = (await api.listTemplates()).map((row) => row.id);
+  assert.equal(new Set(ids).size, ids.length, "a delete must not let the next create repeat an id");
+  assert.ok(ids.includes(third.id));
+
+  const renamed = await api.updateTemplate(second.id, { name: "Renamed" });
+  assert.equal(renamed.name, "Renamed");
+  assert.equal(renamed.maxWorkers, 1, "an edit that says only a name leaves the ceilings alone");
+  assert.equal(renamed.timeLimitMin, 30);
+});
+
+test("the list a caller holds is not the fixture's own state", async () => {
+  const api = fixtureSwarmApi(clock);
+  const rows = await api.listTemplates();
+  rows[0]!.name = "scribbled on";
+  assert.notEqual((await api.listTemplates())[0]!.name, "scribbled on");
+});
+
+test("a swarm saved as a template keeps its own ceilings over the template's", async () => {
+  const api = fixtureSwarmApi(clock);
+  const swarms = await api.listSwarms("p1");
+  const swarmId = swarms[0]!.id;
+  const detail = await api.getSwarm(swarmId);
+
+  await api.setWorkers(swarmId, 5);
+  const after = await api.getSwarm(swarmId);
+  const saved = await api.saveSwarmAsTemplate(swarmId, "From a swarm");
+
+  assert.equal(saved.name, "From a swarm");
+  assert.equal(saved.maxWorkers, after.swarm.workers, "the swarm's number, not the template's");
+  assert.match(saved.description, new RegExp(detail.swarm.name));
+  assert.ok((await api.listTemplates()).some((row) => row.id === saved.id));
+});

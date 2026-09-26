@@ -1033,7 +1033,19 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * them would put a person back where this started: a New swarm
    * dialog asking for a template with nowhere to make one.
    */
-  const actions: NavAction[] = swarming
+  /*
+   * And only where the swarm board is the thing actually on screen.
+   *
+   * `swarming` is true from the moment the mode is remembered, but the
+   * swarm board renders under `swarming && projectId` and the two
+   * early returns below (no project list yet, no projects at all) draw
+   * the card board's skeleton without the board toggle. Keyed on
+   * `swarming` alone, somebody whose remembered mode is swarms and
+   * whose project list fails to load got a topbar with no Board, no
+   * Sessions and no toggle: nothing but the URL bar to get out with.
+   */
+  const onSwarmBoard = swarming && projectId !== null && hasProjects;
+  const actions: NavAction[] = onSwarmBoard
     ? [
         { id: "templates", label: "Templates", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
         ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),

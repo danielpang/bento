@@ -1,3 +1,4 @@
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { useMemo, useState } from "react";
 import { Modal } from "./Modal.js";
 import { estimateSwarm, formatUsd, tierLabel, tierNote } from "../swarm/money.js";
@@ -26,13 +27,14 @@ import type { NewSwarmInput, SwarmTemplate } from "../swarm/types.js";
  * second dialog.
  */
 /**
- * Workers to start a swarm with when no template has said how many.
+ * Workers to start with when no template has said how many.
  *
- * One, because a dialog that cannot read a ceiling should not assume a
- * generous one: an install with no template is a new install, and the
- * cheapest wrong answer there is a single worker.
+ * One, because a dialog with no template to read is a new install, and
+ * the cheapest wrong answer there is a single worker. It is a starting
+ * value and not a limit: the field goes up to MAX_SWARM_WORKERS either
+ * way, which is the only number the route actually enforces.
  */
-const DEFAULT_WORKERS = 1;
+const STARTING_WORKERS = 1;
 
 export function NewSwarmDialog({
   projectId,
@@ -55,14 +57,18 @@ export function NewSwarmDialog({
   const [goal, setGoal] = useState("");
   const [budget, setBudget] = useState("");
   /*
-   * One worker until a template says more are allowed.
+   * What the template says to start with, or one when there is none.
    *
-   * The seed used to fall back to four while the field's max and its
-   * caption fell back to one, so a dialog with no template showed a 4
-   * that could not be typed and a note underneath saying the limit was
-   * 1. Three fallbacks, one answer.
+   * Three numbers used to disagree here: the seed fell back to four
+   * while the field's max and its caption both fell back to one, so a
+   * dialog with no template offered a 4 that could not be typed above
+   * a note saying the limit was 1. They now come from two places that
+   * mean different things: the template's number is the suggestion,
+   * and MAX_SWARM_WORKERS is the limit.
    */
-  const [workers, setWorkers] = useState(Math.min(DEFAULT_WORKERS, template?.maxWorkers ?? DEFAULT_WORKERS));
+  const [workers, setWorkers] = useState(
+    clampWorkers(template?.maxWorkers ?? STARTING_WORKERS, MAX_SWARM_WORKERS),
+  );
   /**
    * A branch that already exists, to continue.
    *
@@ -135,7 +141,7 @@ export function NewSwarmDialog({
               aria-pressed={entry.id === templateId}
               onClick={() => {
                 setTemplateId(entry.id);
-                setWorkers((current) => Math.min(current, entry.maxWorkers));
+                setWorkers(clampWorkers(entry.maxWorkers, MAX_SWARM_WORKERS));
               }}
             >
               <span className="swarm-template-name">{entry.name}</span>
@@ -223,14 +229,20 @@ export function NewSwarmDialog({
               className="input"
               type="number"
               min={1}
-              max={template?.maxWorkers ?? DEFAULT_WORKERS}
+              max={MAX_SWARM_WORKERS}
               value={workers}
-              onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), template?.maxWorkers ?? DEFAULT_WORKERS))}
+              onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), MAX_SWARM_WORKERS))}
             />
             <span className="muted">
+              {/*
+                * The template's number is where the field starts, and
+                * the route takes whatever is sent here over it, so
+                * saying "up to N on this template" would be the
+                * console stating a rule nothing enforces.
+                */}
               {template
-                ? `Up to ${template.maxWorkers} at once on this template.`
-                : "Up to one at once until a template says otherwise."}
+                ? `${template.maxWorkers} is what this template starts with. Up to ${MAX_SWARM_WORKERS} at once.`
+                : `Up to ${MAX_SWARM_WORKERS} at once.`}
             </span>
           </label>
         </div>
