@@ -25,6 +25,15 @@ import type { NewSwarmInput, SwarmTemplate } from "../swarm/types.js";
  * dollar estimate alone. That is the only difference: one hook, not a
  * second dialog.
  */
+/**
+ * Workers to start a swarm with when no template has said how many.
+ *
+ * One, because a dialog that cannot read a ceiling should not assume a
+ * generous one: an install with no template is a new install, and the
+ * cheapest wrong answer there is a single worker.
+ */
+const DEFAULT_WORKERS = 1;
+
 export function NewSwarmDialog({
   projectId,
   templates,
@@ -45,7 +54,15 @@ export function NewSwarmDialog({
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
   const [budget, setBudget] = useState("");
-  const [workers, setWorkers] = useState(template?.maxWorkers ? Math.min(4, template.maxWorkers) : 4);
+  /*
+   * One worker until a template says more are allowed.
+   *
+   * The seed used to fall back to four while the field's max and its
+   * caption fell back to one, so a dialog with no template showed a 4
+   * that could not be typed and a note underneath saying the limit was
+   * 1. Three fallbacks, one answer.
+   */
+  const [workers, setWorkers] = useState(Math.min(DEFAULT_WORKERS, template?.maxWorkers ?? DEFAULT_WORKERS));
   /**
    * A branch that already exists, to continue.
    *
@@ -77,7 +94,18 @@ export function NewSwarmDialog({
   const branchName = suggestBranch(name);
   const continuing = startBranch.trim();
   const branchRefusal = continuing && !isBranchName(continuing) ? branchNameRefusal : null;
-  const ready = name.trim() !== "" && goal.trim() !== "" && template !== null && branchRefusal === null;
+  /*
+   * A template is not required to create a swarm.
+   *
+   * The server picks the Default when the console names none, so a
+   * list that has not loaded, or an install whose templates were all
+   * deleted, is a swarm started under the default rather than a Create
+   * button that never enables. It used to require one, which on a
+   * fresh install meant a disabled button and no sentence saying why,
+   * and no way out: creating a swarm was what seeded the first
+   * template.
+   */
+  const ready = name.trim() !== "" && goal.trim() !== "" && branchRefusal === null;
 
   return (
     <Modal
@@ -195,11 +223,15 @@ export function NewSwarmDialog({
               className="input"
               type="number"
               min={1}
-              max={template?.maxWorkers ?? 1}
+              max={template?.maxWorkers ?? DEFAULT_WORKERS}
               value={workers}
-              onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), template?.maxWorkers ?? 1))}
+              onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), template?.maxWorkers ?? DEFAULT_WORKERS))}
             />
-            <span className="muted">Up to {template?.maxWorkers ?? 1} at once on this template.</span>
+            <span className="muted">
+              {template
+                ? `Up to ${template.maxWorkers} at once on this template.`
+                : "Up to one at once until a template says otherwise."}
+            </span>
           </label>
         </div>
 
@@ -252,10 +284,12 @@ export function NewSwarmDialog({
    * how every swarm begins rather than a box to tick.
    */
   function submit() {
-    if (!ready || !template) return;
+    if (!ready) return;
     onCreate({
       projectId,
-      templateId: template.id,
+      // Absent rather than invented: the server answers it with the
+      // Default, and a template id the console made up would be a 404.
+      templateId: template?.id ?? null,
       name: name.trim(),
       goal: goal.trim(),
       attachments: [],

@@ -1690,6 +1690,67 @@ test("a person can add a task, and the planner is told and can object", async ()
   assert.match(notice.text, /use cancel_task or split_task/, "and how to object");
 });
 
+test("a swarm's tuned ceilings are saved as a template, and its template's shape is carried across", async () => {
+  /**
+   * The point of saving a swarm is the tuning nobody wrote down: the
+   * workers raised when the plan turned out wider than planned, the
+   * budget lifted when it nearly ran out. So the saved template must
+   * carry what the swarm has now, not what the template it started
+   * from said, while everything a swarm has no opinion about comes
+   * across untouched.
+   */
+  const swarm = await createSwarm();
+  const [before] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  const source = (await db.select().from(swarmTemplates).where(eq(swarmTemplates.id, before!.templateId!)))[0]!;
+
+  await patch(`/api/swarms/${swarm.id}`, { maxWorkers: 7, budgetUsd: 12.5, timeLimitMin: 90 });
+
+  const res = await post(`/api/swarms/${swarm.id}/template`, { name: "Wide checkout" });
+  assert.equal(res.status, 201, await res.clone().text());
+  const saved = (await res.json()) as {
+    id: string;
+    name: string;
+    description: string;
+    maxWorkers: number;
+    budgetUsd: string | null;
+    timeLimitMin: number | null;
+    plannerProfileId: string | null;
+    workerProfileId: string | null;
+    workerIsolation: string;
+    maxPlanDepth: number;
+  };
+
+  assert.equal(saved.name, "Wide checkout");
+  assert.equal(saved.maxWorkers, 7, "the number the swarm ended up running, not the one it started with");
+  assert.equal(Number(saved.budgetUsd), 12.5, "and the budget as it stands");
+  assert.equal(saved.timeLimitMin, 90);
+  assert.match(saved.description, /Rewrite checkout/, "and says which swarm it came from");
+
+  assert.equal(saved.plannerProfileId, source.plannerProfileId, "the agents come from the template, not from nowhere");
+  assert.equal(saved.workerProfileId, source.workerProfileId);
+  assert.equal(saved.workerIsolation, source.workerIsolation, "and where its workers work");
+  assert.equal(saved.maxPlanDepth, source.maxPlanDepth);
+
+  assert.notEqual(saved.id, source.id, "a copy, so editing one does not reach the other");
+  const sourceAfter = (await db.select().from(swarmTemplates).where(eq(swarmTemplates.id, source.id)))[0]!;
+  assert.equal(sourceAfter.maxWorkers, source.maxWorkers, "and the template it came from is left as it was");
+});
+
+test("a swarm whose template was deleted is refused rather than half saved", async () => {
+  /**
+   * templateId is set null when a template is deleted, and the four
+   * fields a swarm carries name no agents. A template invented out of
+   * them would list in the picker and fail at the first run, which is
+   * the worst moment to find out.
+   */
+  const swarm = await createSwarm();
+  await db.update(swarms).set({ templateId: null }).where(eq(swarms.id, swarm.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/template`, { name: "Orphan" });
+  assert.equal(res.status, 409, await res.clone().text());
+  assert.match(((await res.json()) as { error: string }).error, /has been deleted/);
+});
+
 test("a task cannot hang off another task", async () => {
   const swarm = await createSwarm();
   const tree = await treeOf(swarm.id);

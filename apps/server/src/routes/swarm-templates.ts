@@ -11,6 +11,7 @@ import { isSafeRelativePath } from "../orchestrator/swarm/deliverable.js";
 import { parseSwarmFile, swarmFile, toSwarmEntry, writeSwarmFile } from "../swarm-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
 import { upsertSwarmTemplatesFromFile } from "../upsert-swarm-templates.js";
+import { ensureDefaultSwarmTemplate } from "../orchestrator/swarm/default-template.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
 /**
@@ -135,12 +136,36 @@ export function swarmTemplateRoutes(ctx: AppContext) {
     .get("/", async (c) => {
       const refusal = await requireSwarms(ctx, c);
       if (refusal) return c.json(refusal.body, refusal.status);
-      const rows = await db(c, ctx)
+      /*
+       * An install that has never made a swarm gets its Default here,
+       * rather than the first time somebody creates one.
+       *
+       * The console reads a swarm's ceilings off a template, and with
+       * an empty list the New swarm dialog disabled its own Create
+       * button and gave no reason. Creating a swarm was the only thing
+       * that seeded this row, so a fresh install could not make one at
+       * all. Seeded on the way in, that circle does not exist.
+       *
+       * Only when the list is empty: somebody who deleted the Default
+       * because they wrote their own is not asking for it back.
+       */
+      const seen = await db(c, ctx)
         .select()
         .from(swarmTemplates)
         .where(await visibleTemplateFilter(ctx, c))
         .orderBy(...byName);
-      return c.json(rows);
+      if (seen.length > 0) return c.json(seen);
+
+      const membership = await getActiveOrganizationMembership(ctx, c);
+      if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
+        return c.json({ error: "not found" }, 404);
+      }
+      const seeded = await ensureDefaultSwarmTemplate(
+        ctx,
+        c,
+        ctx.env.BENTO_MODE === "multi" ? (membership?.organizationId ?? null) : null,
+      );
+      return c.json(seeded ? [seeded] : []);
     })
     /**
      * Creates a template, seeding the planner and worker agents when

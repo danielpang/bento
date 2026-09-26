@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { BetaOnly } from "../beta.js";
-import { swarmApi } from "../swarm/client.js";
+import { swarmApi, type TemplateInput } from "../swarm/client.js";
 import { estimateLine, estimateSwarm, formatUsd, tierLabel, tierNote } from "../swarm/money.js";
 import type { SwarmTemplate } from "../swarm/types.js";
 
@@ -13,9 +13,14 @@ import type { SwarmTemplate } from "../swarm/types.js";
  * ceilings a swarm runs under. Somebody looking for "which model does
  * what" opens this panel, and both answers are now in it.
  *
- * Read only for now. The dialog picks from these; editing them is its
- * own task, and a panel that pretends to save would be worse than one
- * that says where the list comes from.
+ * Editable, because a read only list was one half of a console that
+ * could not be used at all: the New swarm dialog needs a template, and
+ * the only thing that made one was creating a swarm.
+ *
+ * What is editable here is the ceilings and the name. The agents, the
+ * operating instructions and the judge stay with the swarm file, which
+ * carries them between installs with the agents they name; a form that
+ * asked for all of it would be that file with worse errors.
  *
  * The cost shape is drawn for a template that has one. Nothing on the
  * server records what a tool reports its spend in yet, so today this
@@ -36,8 +41,22 @@ export function isolationWords(isolation: SwarmTemplate["workerIsolation"]): str
     : "each on a machine of its own";
 }
 
+/** What a template the person has not filled in yet starts as. */
+const BLANK: TemplateInput = {
+  name: "",
+  description: "",
+  maxWorkers: 2,
+  budgetUsd: null,
+  timeLimitMin: null,
+  workerIsolation: "worktree",
+};
+
 export function SwarmTemplatesPanel() {
   const [templates, setTemplates] = useState<SwarmTemplate[] | null>(null);
+  const [draft, setDraft] = useState<TemplateInput | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,6 +73,28 @@ export function SwarmTemplatesPanel() {
     };
   }, []);
 
+  /**
+   * One place where a write is run, so every button reports the same
+   * way. The list is replaced from what the server returned rather
+   * than patched in place: a ceiling the server clamped is the number
+   * a swarm will actually run under, and the panel showing the number
+   * that was typed would be the console disagreeing with the rows.
+   */
+  async function act(run: () => Promise<void>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await run();
+      setTemplates(await swarmApi.listTemplates());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That did not save. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const editingRow = templates?.find((row) => row.id === editing) ?? null;
+
   return (
     <BetaOnly>
       <section className="section settings-card">
@@ -63,6 +104,7 @@ export function SwarmTemplatesPanel() {
           cost shape says which tier each tool reports its spend in, so an estimate can be split
           before anything is spent.
         </p>
+        {error && <p className="error">{error}</p>}
         {templates === null && <p className="muted">Loading.</p>}
         {templates?.length === 0 && <p className="muted">None yet.</p>}
         {templates?.map((template) => (
@@ -84,6 +126,40 @@ export function SwarmTemplatesPanel() {
                 </span>
               ))}
             </span>
+            <span className="actions">
+              <button
+                className="btn btn-ghost"
+                disabled={busy}
+                onClick={() => {
+                  setDraft(null);
+                  setEditing(template.id === editing ? null : template.id);
+                }}
+              >
+                {template.id === editing ? "Close" : "Edit"}
+              </button>
+              <button
+                className="btn btn-ghost"
+                disabled={busy}
+                onClick={() => {
+                  /*
+                   * Asked before it happens, because a template a
+                   * swarm was started from is the record of what that
+                   * swarm is running under. Deleting it does not stop
+                   * the swarm, but it does leave it unable to say
+                   * where its shape came from.
+                   */
+                  if (!confirm(`Delete the template "${template.name}"? Swarms already running are not stopped.`)) {
+                    return;
+                  }
+                  void act(async () => {
+                    await swarmApi.deleteTemplate(template.id);
+                    if (editing === template.id) setEditing(null);
+                  });
+                }}
+              >
+                Delete
+              </button>
+            </span>
             <span className="muted swarm-template-estimate">
               {/* An estimate needs a cost shape. Without one this says
                   what the template limits and claims no figure. */}
@@ -95,7 +171,187 @@ export function SwarmTemplatesPanel() {
             </span>
           </div>
         ))}
+
+        {editingRow && (
+          <TemplateForm
+            key={editingRow.id}
+            title={`Editing ${editingRow.name}`}
+            value={{
+              name: editingRow.name,
+              description: editingRow.description,
+              maxWorkers: editingRow.maxWorkers,
+              budgetUsd: editingRow.maxBudgetUsd,
+              timeLimitMin: editingRow.timeLimitMin,
+              workerIsolation: editingRow.workerIsolation,
+            }}
+            busy={busy}
+            onCancel={() => setEditing(null)}
+            onSave={(input) =>
+              void act(async () => {
+                await swarmApi.updateTemplate(editingRow.id, input);
+                setEditing(null);
+              })
+            }
+          />
+        )}
+
+        {draft && (
+          <TemplateForm
+            title="New template"
+            value={draft}
+            busy={busy}
+            onCancel={() => setDraft(null)}
+            onSave={(input) =>
+              void act(async () => {
+                await swarmApi.createTemplate(input);
+                setDraft(null);
+              })
+            }
+          />
+        )}
+
+        {!draft && !editingRow && (
+          <div className="actions">
+            <button className="btn" disabled={busy} onClick={() => setDraft({ ...BLANK })}>
+              New template
+            </button>
+          </div>
+        )}
       </section>
     </BetaOnly>
   );
+}
+
+/**
+ * The fields a template's ceilings are typed into.
+ *
+ * One component for creating and for editing, because they are the
+ * same fields and a second copy is a second place for them to drift.
+ * Numbers are held as text while they are being typed: a controlled
+ * number input that coerces on every keystroke cannot be cleared, and
+ * an empty budget is a real value here (no cap) rather than zero.
+ */
+function TemplateForm({
+  title,
+  value,
+  busy,
+  onSave,
+  onCancel,
+}: {
+  title: string;
+  value: TemplateInput;
+  busy: boolean;
+  onSave: (input: TemplateInput) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(value.name);
+  const [description, setDescription] = useState(value.description);
+  const [workers, setWorkers] = useState(String(value.maxWorkers));
+  const [budget, setBudget] = useState(value.budgetUsd === null ? "" : String(value.budgetUsd));
+  const [minutes, setMinutes] = useState(value.timeLimitMin === null ? "" : String(value.timeLimitMin));
+  const [isolation, setIsolation] = useState(value.workerIsolation);
+
+  const workerCount = Number(workers);
+  // The same ceiling the routes enforce, said here so a number that
+  // would be refused is refused before the round trip.
+  const workersOk = Number.isInteger(workerCount) && workerCount >= 1 && workerCount <= 32;
+  const ready = name.trim() !== "" && workersOk && !busy;
+
+  return (
+    <div className="swarm-template-form">
+      <span className="label">{title}</span>
+      <label className="field">
+        <span className="field-heading">Name</span>
+        <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label className="field">
+        <span className="field-heading">Description</span>
+        <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
+      </label>
+      <label className="field">
+        <span className="field-heading">Workers</span>
+        <input
+          className="input"
+          type="number"
+          min={1}
+          max={32}
+          value={workers}
+          onChange={(e) => setWorkers(e.target.value)}
+        />
+        <span className="muted">
+          {workersOk ? "How many workers a swarm on this template may run at once." : "Between 1 and 32."}
+        </span>
+      </label>
+      <label className="field">
+        <span className="field-heading">Budget</span>
+        <input
+          className="input"
+          value={budget}
+          placeholder="No cap"
+          onChange={(e) => setBudget(e.target.value)}
+        />
+        <span className="muted">Left empty, a swarm on this template runs with no spending cap.</span>
+      </label>
+      <label className="field">
+        <span className="field-heading">Time limit</span>
+        <input
+          className="input"
+          value={minutes}
+          placeholder="No limit"
+          onChange={(e) => setMinutes(e.target.value)}
+        />
+        <span className="muted">In minutes. Left empty, a swarm runs until it is done or stopped.</span>
+      </label>
+      <label className="field">
+        <span className="field-heading">Where workers work</span>
+        <select
+          className="input"
+          value={isolation}
+          onChange={(e) => setIsolation(e.target.value as SwarmTemplate["workerIsolation"])}
+        >
+          <option value="worktree">In worktrees of the repository on the server</option>
+          <option value="sandbox">On a machine each, holding its own clone</option>
+        </select>
+        <span className="muted">
+          A deployment whose sandboxes hold their own clones refuses worktrees rather than quietly
+          running the other shape.
+        </span>
+      </label>
+      <div className="actions">
+        <button className="btn btn-ghost" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          className="btn btn-primary"
+          disabled={!ready}
+          onClick={() =>
+            onSave({
+              name: name.trim(),
+              description: description.trim(),
+              maxWorkers: workerCount,
+              budgetUsd: numberOrNull(budget),
+              timeLimitMin: numberOrNull(minutes),
+              workerIsolation: isolation,
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A typed figure, or null for "no cap".
+ *
+ * Empty and unreadable both mean null rather than zero: a budget of
+ * zero is a swarm that cannot start, and somebody who cleared the box
+ * was removing the cap, not setting one nothing can run under.
+ */
+function numberOrNull(text: string): number | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
