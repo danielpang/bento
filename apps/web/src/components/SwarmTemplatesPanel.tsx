@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { BetaOnly } from "../beta.js";
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { swarmApi, type TemplateInput } from "../swarm/client.js";
 import { estimateLine, estimateSwarm, formatUsd, tierLabel, tierNote } from "../swarm/money.js";
 import type { SwarmTemplate } from "../swarm/types.js";
+
+type WorkerIsolation = SwarmTemplate["workerIsolation"];
 
 /**
  * The swarm templates, listed inside the Agents panel.
@@ -41,15 +44,24 @@ export function isolationWords(isolation: SwarmTemplate["workerIsolation"]): str
     : "each on a machine of its own";
 }
 
-/** What a template the person has not filled in yet starts as. */
+/**
+ * What a template the person has not filled in yet starts as.
+ *
+ * No isolation, on purpose. The create route fills it from the
+ * deployment, and a console that always stated one would make every
+ * template here say worktrees, which a hosted install refuses when the
+ * first swarm tries to provision rather than when Save is pressed.
+ */
 const BLANK: TemplateInput = {
   name: "",
   description: "",
   maxWorkers: 2,
   budgetUsd: null,
   timeLimitMin: null,
-  workerIsolation: "worktree",
 };
+
+/** The longest name the route takes, said here so Save can refuse first. */
+const MAX_NAME = 120;
 
 export function SwarmTemplatesPanel() {
   const [templates, setTemplates] = useState<SwarmTemplate[] | null>(null);
@@ -249,20 +261,24 @@ function TemplateForm({
   const [workers, setWorkers] = useState(String(value.maxWorkers));
   const [budget, setBudget] = useState(value.budgetUsd === null ? "" : String(value.budgetUsd));
   const [minutes, setMinutes] = useState(value.timeLimitMin === null ? "" : String(value.timeLimitMin));
-  const [isolation, setIsolation] = useState(value.workerIsolation);
+  const [isolation, setIsolation] = useState<WorkerIsolation | undefined>(value.workerIsolation);
 
   const workerCount = Number(workers);
-  // The same ceiling the routes enforce, said here so a number that
-  // would be refused is refused before the round trip.
-  const workersOk = Number.isInteger(workerCount) && workerCount >= 1 && workerCount <= 32;
-  const ready = name.trim() !== "" && workersOk && !busy;
+  // The same ceilings the routes enforce, said here so a value that
+  // would be refused is refused before the round trip, and with a
+  // sentence rather than the route's raw validation error.
+  const workersOk = Number.isInteger(workerCount) && workerCount >= 1 && workerCount <= MAX_SWARM_WORKERS;
+  const budgetParsed = parseOptionalNumber(budget, { integer: false });
+  const minutesParsed = parseOptionalNumber(minutes, { integer: true });
+  const nameOk = name.trim() !== "" && name.trim().length <= MAX_NAME;
+  const ready = nameOk && workersOk && budgetParsed.ok && minutesParsed.ok && !busy;
 
   return (
     <div className="swarm-template-form">
       <span className="label">{title}</span>
       <label className="field">
         <span className="field-heading">Name</span>
-        <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+        <input className="input" value={name} maxLength={MAX_NAME} onChange={(e) => setName(e.target.value)} />
       </label>
       <label className="field">
         <span className="field-heading">Description</span>
@@ -274,12 +290,14 @@ function TemplateForm({
           className="input"
           type="number"
           min={1}
-          max={32}
+          max={MAX_SWARM_WORKERS}
           value={workers}
           onChange={(e) => setWorkers(e.target.value)}
         />
         <span className="muted">
-          {workersOk ? "How many workers a swarm on this template may run at once." : "Between 1 and 32."}
+          {workersOk
+            ? "How many workers a swarm on this template may run at once."
+            : `Between 1 and ${MAX_SWARM_WORKERS}.`}
         </span>
       </label>
       <label className="field">
@@ -290,7 +308,11 @@ function TemplateForm({
           placeholder="No cap"
           onChange={(e) => setBudget(e.target.value)}
         />
-        <span className="muted">Left empty, a swarm on this template runs with no spending cap.</span>
+        <span className={budgetParsed.ok ? "muted" : "error"}>
+          {budgetParsed.ok
+            ? "Left empty, a swarm on this template runs with no spending cap."
+            : "A number of dollars, or empty for no cap."}
+        </span>
       </label>
       <label className="field">
         <span className="field-heading">Time limit</span>
@@ -300,21 +322,28 @@ function TemplateForm({
           placeholder="No limit"
           onChange={(e) => setMinutes(e.target.value)}
         />
-        <span className="muted">In minutes. Left empty, a swarm runs until it is done or stopped.</span>
+        <span className={minutesParsed.ok ? "muted" : "error"}>
+          {minutesParsed.ok
+            ? "In minutes. Left empty, a swarm runs until it is done or stopped."
+            : "A whole number of minutes, or empty for no limit."}
+        </span>
       </label>
       <label className="field">
         <span className="field-heading">Where workers work</span>
         <select
           className="input"
-          value={isolation}
-          onChange={(e) => setIsolation(e.target.value as SwarmTemplate["workerIsolation"])}
+          value={isolation ?? ""}
+          onChange={(e) =>
+            setIsolation(e.target.value === "" ? undefined : (e.target.value as WorkerIsolation))
+          }
         >
+          <option value="">Whatever this deployment runs</option>
           <option value="worktree">In worktrees of the repository on the server</option>
           <option value="sandbox">On a machine each, holding its own clone</option>
         </select>
         <span className="muted">
           A deployment whose sandboxes hold their own clones refuses worktrees rather than quietly
-          running the other shape.
+          running the other shape, so leaving this alone is the safe answer.
         </span>
       </label>
       <div className="actions">
@@ -329,9 +358,11 @@ function TemplateForm({
               name: name.trim(),
               description: description.trim(),
               maxWorkers: workerCount,
-              budgetUsd: numberOrNull(budget),
-              timeLimitMin: numberOrNull(minutes),
-              workerIsolation: isolation,
+              budgetUsd: budgetParsed.value,
+              timeLimitMin: minutesParsed.value,
+              // Absent rather than null when nothing was chosen, so the
+              // create route's own answer is what gets written.
+              ...(isolation ? { workerIsolation: isolation } : {}),
             })
           }
         >
@@ -343,15 +374,23 @@ function TemplateForm({
 }
 
 /**
- * A typed figure, or null for "no cap".
+ * A typed figure, or null for "no cap", or a refusal.
  *
- * Empty and unreadable both mean null rather than zero: a budget of
- * zero is a swarm that cannot start, and somebody who cleared the box
- * was removing the cap, not setting one nothing can run under.
+ * Empty means null, which is no cap. Anything unreadable is a refusal
+ * rather than null, because those two used to be the same answer: a
+ * budget typed as "15O" or "$150" became a template with no spending
+ * limit at all, reported as success, and the swarms started from it ran
+ * uncapped. Zero is refused for the same reason it always was worth
+ * refusing: a swarm that cannot start is nobody's intent.
  */
-function numberOrNull(text: string): number | null {
+function parseOptionalNumber(
+  text: string,
+  { integer }: { integer: boolean },
+): { ok: true; value: number | null } | { ok: false; value: null } {
   const trimmed = text.trim();
-  if (trimmed === "") return null;
+  if (trimmed === "") return { ok: true, value: null };
   const value = Number(trimmed);
-  return Number.isFinite(value) && value >= 0 ? value : null;
+  if (!Number.isFinite(value) || value <= 0) return { ok: false, value: null };
+  if (integer && !Number.isInteger(value)) return { ok: false, value: null };
+  return { ok: true, value };
 }

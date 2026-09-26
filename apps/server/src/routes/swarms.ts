@@ -7,7 +7,6 @@ import type { SandboxHandle } from "@bento/sandbox";
 import {
   agentProfiles,
   agentRuns,
-  ensureSwarmAgents,
   projects,
   repositories,
   runArtifacts,
@@ -36,6 +35,7 @@ import { queueSwarmSandboxReap } from "../orchestrator/reap-sandbox.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { ensureDefaultSwarmTemplate } from "../orchestrator/swarm/default-template.js";
+import { MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
@@ -137,7 +137,7 @@ const createSwarm = z.object({
   title: z.string().trim().min(1).max(200),
   goal: z.string().max(20_000).default(""),
   templateId: z.string().uuid().nullish(),
-  maxWorkers: z.number().int().min(1).max(32).optional(),
+  maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).optional(),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
   /**
@@ -179,7 +179,7 @@ const createSwarm = z.object({
 const updateSwarm = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
-    maxWorkers: z.number().int().min(1).max(32).optional(),
+    maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).optional(),
     budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
     timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
     archived: z.boolean().optional(),

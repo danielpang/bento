@@ -86,7 +86,7 @@ export interface SwarmActions {
    * with those numbers written over it, so the next swarm starts where
    * this one ended up rather than where it began.
    */
-  onSaveAsTemplate: (name: string) => void;
+  onSaveAsTemplate: () => void;
   onAnswer: (questionId: string, text: string) => void;
 }
 
@@ -301,10 +301,7 @@ export function SwarmPage({
             className="btn"
             disabled={busy}
             title="Keep this swarm's ceilings as a template to start the next one from."
-            onClick={() => {
-              const name = prompt("Name for the template", `${swarm.name} shape`);
-              if (name && name.trim()) actions.onSaveAsTemplate(name.trim());
-            }}
+            onClick={actions.onSaveAsTemplate}
           >
             Save as template
           </button>
