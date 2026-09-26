@@ -367,6 +367,7 @@ export function SwarmBoard({
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
             onRestore: () => selectedId && act(() => swarmApi.restoreSwarm(selectedId)),
             onWorkers: (workers) => selectedId && act(() => swarmApi.setWorkers(selectedId, workers)),
+            onSaveAsTemplate: (name) => selectedId && act(() => swarmApi.saveSwarmAsTemplate(selectedId, name)),
             onAnswer: (questionId, text) =>
               selectedId && act(() => swarmApi.answerQuestion(selectedId, questionId, text)),
           }}

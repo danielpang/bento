@@ -1053,6 +1053,11 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/swarms/${swarm.id}/start`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],
+    [
+      "POST",
+      `/api/swarms/${swarm.id}/template`,
+      { body: JSON.stringify({ name: "stolen" }) },
+    ],
     // Reopening adds work to somebody else's finished swarm, on the
     // branch their pull request is open on, and can raise the budget
     // their team is billed for.
@@ -1153,6 +1158,13 @@ test("every entity route refuses a foreign tenant", async () => {
   assert.ok(
     !intruderTemplates.some((row) => row.id === template.id),
     "a foreign tenant's template list must not carry the owner's",
+  );
+  // Saving somebody else's swarm as a template is theft that leaves
+  // the original untouched, so the loop above cannot see it: the proof
+  // is that no template was written at all.
+  assert.ok(
+    !intruderTemplates.some((row) => (row as { name?: string }).name === "stolen"),
+    "nor a copy taken from the owner's swarm",
   );
   ctx.featureFlags = flagsBefore;
 

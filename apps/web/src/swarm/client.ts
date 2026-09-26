@@ -44,6 +44,21 @@ export interface SwarmApi {
   listSwarms(projectId: string): Promise<SwarmSummary[]>;
   getSwarm(swarmId: string): Promise<SwarmDetail>;
   listTemplates(): Promise<SwarmTemplate[]>;
+  createTemplate(input: TemplateInput): Promise<SwarmTemplate>;
+  /**
+   * Every field optional, so renaming a template does not restate its
+   * ceilings. Null clears a budget or a time limit.
+   */
+  updateTemplate(templateId: string, input: Partial<TemplateInput>): Promise<SwarmTemplate>;
+  deleteTemplate(templateId: string): Promise<void>;
+  /**
+   * This swarm's shape, kept for the next one.
+   *
+   * The server does the copying: it has the template the swarm came
+   * from, and the console has no business inventing the fields a swarm
+   * does not carry.
+   */
+  saveSwarmAsTemplate(swarmId: string, name: string): Promise<SwarmTemplate>;
   /**
    * The agents a leaf can be handed to.
    *
@@ -196,6 +211,31 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     return null;
   }
 
+  /*
+   * A copy, because the fixture client now writes to it. The exported
+   * constant is shared by every test in the file, and a create in one
+   * that leaked into the next would make the order they run in matter.
+   */
+  const templates: SwarmTemplate[] = SWARM_TEMPLATES.map((row) => ({ ...row }));
+
+  /** A template row from the fields the panel edits. */
+  function fixtureTemplate(
+    input: Partial<TemplateInput> & { maxBudgetUsd?: number | null },
+    id: string,
+  ): SwarmTemplate {
+    const base = templates.find((row) => row.id === id) ?? SWARM_TEMPLATES[0]!;
+    return {
+      ...base,
+      id,
+      name: input.name ?? base.name,
+      description: input.description ?? base.description,
+      maxWorkers: input.maxWorkers ?? base.maxWorkers,
+      workerIsolation: input.workerIsolation ?? base.workerIsolation,
+      maxBudgetUsd: input.budgetUsd !== undefined ? input.budgetUsd : (input.maxBudgetUsd ?? base.maxBudgetUsd),
+      timeLimitMin: input.timeLimitMin !== undefined ? input.timeLimitMin : base.timeLimitMin,
+    };
+  }
+
   function mutate(swarmId: string, change: (detail: SwarmDetail) => void): Promise<void> {
     const detail = find(swarmId);
     if (detail) change(detail);
@@ -219,7 +259,41 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       return Promise.resolve(detail);
     },
     listTemplates() {
-      return Promise.resolve(SWARM_TEMPLATES);
+      return Promise.resolve(templates);
+    },
+    createTemplate(input) {
+      const created = fixtureTemplate(input, `template-${templates.length + 1}`);
+      templates.push(created);
+      return Promise.resolve(created);
+    },
+    updateTemplate(templateId, input) {
+      const found = templates.find((row) => row.id === templateId);
+      if (!found) return Promise.reject(new Error("not found"));
+      Object.assign(found, fixtureTemplate({ ...found, budgetUsd: found.maxBudgetUsd, ...input }, templateId));
+      return Promise.resolve(found);
+    },
+    deleteTemplate(templateId) {
+      const at = templates.findIndex((row) => row.id === templateId);
+      if (at >= 0) templates.splice(at, 1);
+      return Promise.resolve();
+    },
+    saveSwarmAsTemplate(swarmId, name) {
+      const detail = find(swarmId);
+      if (!detail) return Promise.reject(new Error("not found"));
+      // The fixture's version of what the route does: the swarm's own
+      // ceilings over the template it was made with.
+      const source = templates.find((row) => row.id === detail.swarm.templateId) ?? templates[0]!;
+      const created: SwarmTemplate = {
+        ...source,
+        id: `template-${templates.length + 1}`,
+        name,
+        description: `Saved from the swarm "${detail.swarm.name}".`,
+        maxWorkers: detail.swarm.workers,
+        maxBudgetUsd: detail.swarm.budgetUsd,
+        timeLimitMin: detail.swarm.timeLimitMin,
+      };
+      templates.push(created);
+      return Promise.resolve(created);
     },
     listAgents() {
       return Promise.resolve([
@@ -576,6 +650,25 @@ export interface WirePullRequest {
   headSha: string | null;
 }
 
+/**
+ * What the templates panel may set on a template.
+ *
+ * A subset of the column list on purpose: the agents, the operating
+ * instructions and the judge are chosen in the Agents panel beside it
+ * and carried by the swarm file, and a form that asked for all of them
+ * would be the swarm file with worse errors. What is here is what a
+ * person changes between one swarm and the next.
+ */
+export interface TemplateInput {
+  name: string;
+  description: string;
+  maxWorkers: number;
+  /** Null clears the cap, which is not the same as a cap of zero. */
+  budgetUsd: number | null;
+  timeLimitMin: number | null;
+  workerIsolation: "sandbox" | "worktree";
+}
+
 export interface WireTemplate {
   id: string;
   name: string;
@@ -804,6 +897,25 @@ export interface EventSourceLike {
   close(): void;
 }
 
+/**
+ * A template's fields as the routes take them.
+ *
+ * Only what was actually given: the update route treats an absent
+ * field as "leave it" and a null one as "clear it", and a body that
+ * spelled out every field would turn a rename into a rewrite of the
+ * ceilings the swarm running under it is using.
+ */
+function templateBody(input: Partial<TemplateInput>): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (input.name !== undefined) body.name = input.name;
+  if (input.description !== undefined) body.description = input.description;
+  if (input.maxWorkers !== undefined) body.maxWorkers = input.maxWorkers;
+  if (input.budgetUsd !== undefined) body.budgetUsd = input.budgetUsd;
+  if (input.timeLimitMin !== undefined) body.timeLimitMin = input.timeLimitMin;
+  if (input.workerIsolation !== undefined) body.workerIsolation = input.workerIsolation;
+  return body;
+}
+
 export function httpSwarmApi(
   baseUrl = "",
   doFetch: typeof fetch = (input, init) => fetch(input, init),
@@ -838,6 +950,18 @@ export function httpSwarmApi(
     },
     async listTemplates() {
       return (await call<WireTemplate[]>("/api/swarm-templates")).map(toTemplate);
+    },
+    async createTemplate(input) {
+      return toTemplate(await post<WireTemplate>("/api/swarm-templates", templateBody(input)));
+    },
+    async updateTemplate(templateId, input) {
+      return toTemplate(await patch<WireTemplate>(`/api/swarm-templates/${templateId}`, templateBody(input)));
+    },
+    async deleteTemplate(templateId) {
+      await call<void>(`/api/swarm-templates/${templateId}`, { method: "DELETE" });
+    },
+    async saveSwarmAsTemplate(swarmId, name) {
+      return toTemplate(await post<WireTemplate>(`/api/swarms/${swarmId}/template`, { name }));
     },
     async listAgents() {
       const rows = await call<{ id: string; name: string }[]>("/api/profiles");

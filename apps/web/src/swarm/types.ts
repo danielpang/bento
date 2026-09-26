@@ -378,7 +378,13 @@ export interface SwarmTemplate {
 /** What the New swarm dialog sends. */
 export interface NewSwarmInput {
   projectId: string;
-  templateId: string;
+  /**
+   * Null when the console has no template to name, which the server
+   * answers with the Default. The dialog is not allowed to invent one:
+   * a made up id is a 404, and requiring a real one is what used to
+   * leave a fresh install unable to create a swarm at all.
+   */
+  templateId: string | null;
   name: string;
   goal: string;
   attachments: { name: string; bytes: number }[];

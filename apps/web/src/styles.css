@@ -8355,6 +8355,26 @@ a.hours-person-name:hover {
 }
 
 /*
+ * The template form, opened under the row it edits or at the end of
+ * the list for a new one. Boxed rather than inline, so a panel that is
+ * mostly a list does not read as having grown six fields.
+ */
+.swarm-template-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-raised, transparent);
+}
+
+.swarm-template-form .actions {
+  justify-content: flex-end;
+}
+
+/*
  * Narrow screens. The header stacks, the actions keep their row, and
  * the outline drops the columns that are the first to stop fitting.
  * The tree itself is left scrollable rather than reflowed: a plan is

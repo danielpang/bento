@@ -1019,17 +1019,36 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * The order is the row's order, which is the order they were in
    * before the menu existed.
    */
-  const actions: NavAction[] = [
-    { id: "board", label: "Board", href: "/", current: screen === "board" },
-    { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
-    { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
-    ...(hasProjects
-      ? [
-          { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
-          { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
-        ]
-      : []),
-  ];
+  /*
+   * The swarm board's tools are not the card board's.
+   *
+   * Board, Sessions and Pipeline are all about cards: a swarm has no
+   * stage to configure, no session list of its own, and the board
+   * button would point at the board already open. So on the swarm
+   * board they are left out, and what replaces them is the thing a
+   * swarm actually runs under.
+   *
+   * Templates rather than Agents, pointing at the same panel. The
+   * templates live inside it, and dropping the only entry that reaches
+   * them would put a person back where this started: a New swarm
+   * dialog asking for a template with nowhere to make one.
+   */
+  const actions: NavAction[] = swarming
+    ? [
+        { id: "templates", label: "Templates", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+        ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
+      ]
+    : [
+        { id: "board", label: "Board", href: "/", current: screen === "board" },
+        { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
+        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+        ...(hasProjects
+          ? [
+              { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
+              { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
+            ]
+          : []),
+      ];
 
   const bottom = (
     <>
