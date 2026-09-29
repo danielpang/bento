@@ -421,7 +421,16 @@ button {
 .workspace-toolbar a[aria-current="page"]::after {
   content: "";
   position: absolute;
-  inset: auto 14px -8px;
+  /*
+   * The tab is 36px so the row is an easy target, and the label sits
+   * in the middle of that. A line on the control's lower edge would
+   * land about a line below the word. This keeps the mark a few
+   * pixels under the label. The 14px inset matches the padding, so
+   * the bar is as wide as the word.
+   */
+  left: 14px;
+  right: 14px;
+  top: calc(50% + 1.1em);
   height: 2px;
   background: var(--brand);
 }
