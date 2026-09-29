@@ -430,7 +430,7 @@ button {
    */
   left: 14px;
   right: 14px;
-  top: calc(50% + 0.55em);
+  top: calc(50% + 1.1em);
   height: 2px;
   background: var(--brand);
 }
