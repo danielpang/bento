@@ -141,6 +141,18 @@ export function swarmTemplateRoutes(ctx: AppContext) {
         .from(swarmTemplates)
         .where(await visibleTemplateFilter(ctx, c))
         .orderBy(...byName);
+      if (rows.length === 0) {
+        const membership = await getActiveOrganizationMembership(ctx, c);
+        if (ctx.env.BENTO_MODE === "multi" && activeOrg(c) && !membership) {
+          return c.json({ error: "not found" }, 404);
+        }
+        // Make the default role profiles available to the new swarm form.
+        // Keep an empty template list empty after its last row is deleted.
+        await ensureSwarmAgents(db(c, ctx), {
+          ownerId: actor(c),
+          organizationId: ctx.env.BENTO_MODE === "multi" ? (membership?.organizationId ?? null) : null,
+        });
+      }
       return c.json(rows);
     })
     /**

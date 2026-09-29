@@ -161,6 +161,8 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
   const created = await httpSwarmApi("", doFetch).createSwarm({
     projectId: "p1",
     templateId: "tpl-1",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
     attachments: [{ name: "notes.md", bytes: 12 }],
@@ -178,11 +180,39 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
     title: "Checkout rewrite",
     goal: "Replace the checkout.",
     templateId: "tpl-1",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
     maxWorkers: 6,
     budgetUsd: 40,
   });
   assert.equal(created.swarm.status, "planning");
   assert.deepEqual(created.tasks, [], "a new swarm has no plan until its planner writes one");
+});
+
+test("retrying a failed planner reaches its run endpoint", async () => {
+  const { calls, doFetch } = fetchStub({ runId: "run-2" }, 201);
+  await httpSwarmApi("", doFetch).retryPlanner("sw-1");
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url}`), ["POST /api/swarms/sw-1/planner/retry"]);
+});
+
+test("planner guidance uses the persisted swarm thread and leaves task messages out", async () => {
+  const planner = {
+    id: "message-1", taskId: null, text: "Make the plan smaller", source: "person", status: "sent",
+    runId: "run-2", createdAt: "2026-09-04T12:00:00.000Z",
+  } as const;
+  const task = { ...planner, id: "message-2", taskId: "task-1" };
+  const notice = { ...planner, id: "message-3", source: "system" };
+  const listed = fetchStub([planner, task, notice]);
+  const rows = await httpSwarmApi("", listed.doFetch).listPlannerMessages("sw-1");
+  assert.deepEqual(rows, [planner]);
+  assert.deepEqual(listed.calls.map((call) => `${call.method} ${call.url}`), ["GET /api/swarms/sw-1/messages"]);
+
+  const sent = fetchStub({ ...planner, id: "message-4", status: "queued", runId: null }, 201);
+  const message = await httpSwarmApi("", sent.doFetch).messagePlanner("sw-1", "Make the plan smaller");
+  assert.equal(message.status, "queued");
+  assert.deepEqual(sent.calls[0], {
+    method: "POST", url: "/api/swarms/sw-1/messages", body: { text: "Make the plan smaller" },
+  });
 });
 
 test("every control the console offers reaches the route that does it", async () => {
@@ -191,6 +221,7 @@ test("every control the console offers reaches the route that does it", async ()
   await api.pauseSwarm("sw-1");
   await api.resumeSwarm("sw-1");
   await api.stopSwarm("sw-1");
+  await api.deleteSwarm("sw-1");
   await api.archiveSwarm("sw-1");
   await api.restoreSwarm("sw-1");
   await api.setWorkers("sw-1", 6);
@@ -204,6 +235,7 @@ test("every control the console offers reaches the route that does it", async ()
       // Resuming is starting: one route decides when a swarm may run.
       "POST /api/swarms/sw-1/start",
       "POST /api/swarms/sw-1/cancel",
+      "DELETE /api/swarms/sw-1",
       "PATCH /api/swarms/sw-1",
       "PATCH /api/swarms/sw-1",
       "PATCH /api/swarms/sw-1",
@@ -213,10 +245,11 @@ test("every control the console offers reaches the route that does it", async ()
       "POST /api/swarms/sw-1/tasks/task-9/done",
     ],
   );
-  assert.deepEqual(calls[3]!.body, { archived: true });
-  assert.deepEqual(calls[4]!.body, { archived: false });
-  assert.deepEqual(calls[5]!.body, { maxWorkers: 6 });
-  assert.deepEqual(calls[6]!.body, { text: "Use the new client." });
+  assert.equal(calls[3]!.body, undefined);
+  assert.deepEqual(calls[4]!.body, { archived: true });
+  assert.deepEqual(calls[5]!.body, { archived: false });
+  assert.deepEqual(calls[6]!.body, { maxWorkers: 6 });
+  assert.deepEqual(calls[7]!.body, { text: "Use the new client." });
   // A status is never patched: the lifecycle routes decide that, and
   // the route refuses a body carrying one.
   assert.ok(
@@ -280,6 +313,8 @@ test("a template carries its ceilings, and claims no cost shape it does not have
     id: "tpl-1",
     name: "Default",
     description: "The planner and worker a swarm uses.",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
     maxWorkers: 4,
     budgetUsd: "25.00",
     timeLimitMin: 120,
@@ -287,8 +322,42 @@ test("a template carries its ceilings, and claims no cost shape it does not have
   assert.equal(template.maxWorkers, 4);
   assert.equal(template.maxBudgetUsd, 25);
   assert.equal(template.timeLimitMin, 120);
+  assert.equal(template.plannerProfileId, "planner-1");
+  assert.equal(template.workerProfileId, "worker-1");
   assert.deepEqual(template.tools, [], "nothing on the server says what a tool reports in");
   assert.equal(template.typicalLeaves, 0, "so the dialog draws no estimate rather than a zero");
+});
+
+test("template saves include the planner and worker profile choices", async () => {
+  const { calls, doFetch } = fetchStub({
+    id: "tpl-1",
+    name: "Custom",
+    description: "",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
+    maxWorkers: 2,
+    budgetUsd: null,
+    timeLimitMin: null,
+  });
+  await httpSwarmApi("", doFetch).createTemplate({
+    name: "Custom",
+    description: "",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
+    maxWorkers: 2,
+    budgetUsd: null,
+    timeLimitMin: null,
+  });
+  assert.equal(calls[0]!.url, "/api/swarm-templates");
+  assert.deepEqual(calls[0]!.body, {
+    name: "Custom",
+    description: "",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
+    maxWorkers: 2,
+    budgetUsd: null,
+    timeLimitMin: null,
+  });
 });
 
 test("a swarm's status is said in the console's words, and a budget stop says so", () => {

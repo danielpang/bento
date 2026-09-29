@@ -11,7 +11,7 @@ import { ContactDialog } from "./ContactDialog.js";
 import { ProviderKeysCard } from "./Credentials.js";
 import { CustomProviderKeys } from "./CustomProviders.js";
 import { BetaOnly, useBetaTesters } from "../beta.js";
-import { ProviderMark } from "./ProviderMark.js";
+import { ProviderMark, providerLogoUrl } from "./ProviderMark.js";
 import { SecretField } from "./SecretField.js";
 import { SwarmTemplatesPanel } from "./SwarmTemplatesPanel.js";
 import { YamlFileActions, downloadYaml } from "./YamlFileActions.js";
@@ -316,7 +316,7 @@ export function AgentsPanel({
             Close
           </button>
         </div>
-        <p className="muted">Pair a coding agent with a model, then assign it to a stage.</p>
+        <p className="muted">Pair a harness with a model, then assign that agent to a board stage or swarm role.</p>
         {beta && <div className="board-filters agent-sections" role="group" aria-label="Agent settings">
           {([["agents", "Agents"], ["connections", "Connections"], ["files", "Import / export"]] as const).map(([value, label]) => <button className="board-filter" key={value} aria-pressed={section === value} onClick={() => setSection(value)}>{label}</button>)}
         </div>}
@@ -324,12 +324,16 @@ export function AgentsPanel({
 
       <div className="drawer-body">
 
+        <div hidden={beta && section !== "agents"}>
+          <SwarmTemplatesPanel knownAgents={profiles} />
+        </div>
+
         <section className="section settings-card agent-roster" hidden={beta && section !== "agents"}>
           <div className="settings-title-row">
             <h3 className="settings-title">Your agents</h3>
             <span className="surface-count">{profiles.length} configured</span>
           </div>
-          {profiles.length === 0 && <p className="muted">No agents yet. Add one to give your pipeline its first collaborator.</p>}
+          {profiles.length === 0 && <p className="muted">No agents yet. Add one for a board stage or swarm role.</p>}
           {profiles.map((profile) => (
             <div key={profile.id} className="agent-roster-row">
               <span className="agent-roster-mark"><ProviderMark cli={profile.cli} model={profile.model} /></span>
@@ -355,7 +359,7 @@ export function AgentsPanel({
                   setConfirming({
                     title: `Remove ${profile.name}?`,
                     description:
-                      "Its recorded runs and transcripts go with it, and that cannot be undone. Stages using it are left with no agent until you assign another, though cards keep their history.",
+                      "Its recorded runs and transcripts go with it, and that cannot be undone. Board stages and swarm templates using it will need another agent. Cards keep their history.",
                     confirmLabel: "Remove agent",
                     run: () => client.deleteProfile(profile.id),
                   })
@@ -368,17 +372,6 @@ export function AgentsPanel({
             </div>
           ))}
         </section>
-
-        {/* Templates pair two models rather than one, which is the
-            only thing that makes them a second list rather than a
-            second panel. Beta gated inside the component.
-
-            Filed under Agents now that the panel is sectioned: a
-            template is an agent pairing, and the other two sections
-            are about files and connections. */}
-        <div hidden={beta && section !== "agents"}>
-          <SwarmTemplatesPanel />
-        </div>
 
         <section className="section settings-card" hidden={beta && section !== "files"}>
           <h3 className="settings-title">Agents file</h3>
@@ -589,7 +582,7 @@ export function AgentsPanel({
                       onClick={() => pickProvider(option.id)}
                       aria-pressed={option.id === providerId}
                     >
-                      {option.logo && <img className="provider-logo" src={option.logo} alt="" aria-hidden="true" />}
+                      {providerLogoUrl(option) && <img className="provider-logo" src={providerLogoUrl(option)} alt="" aria-hidden="true" />}
                       <span>{option.name}</span>
                     </button>
                   ))}

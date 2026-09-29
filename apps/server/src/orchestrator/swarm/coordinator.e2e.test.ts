@@ -6,9 +6,11 @@ import {
   agentRuns,
   createDb,
   createPool,
+  runEvents,
   runMigrations,
   swarmLandings,
   swarmMessages,
+  swarmTaskEvents,
   swarmTasks,
   swarmTemplates,
   swarms,
@@ -515,6 +517,58 @@ test("workers spawn up to the ceiling, and a plan limit stops the loop on the le
   assert.equal((await readSwarm(swarm.id)).status, "blocked", "attention holds the swarm's headline");
 });
 
+test("a child leaf waits for its parent worker and both remain in the plan", async () => {
+  const swarm = await makeSwarm();
+  const root = await makeTask(swarm.id, { title: "Product", nodeType: "plan" });
+  const foundation = await makeTask(swarm.id, {
+    parentId: root.id, title: "Foundation", nodeType: "leaf", status: "working",
+  });
+  const backend = await makeTask(swarm.id, {
+    parentId: foundation.id, parentRelation: "depends_on", title: "Backend", nodeType: "leaf", status: "assigned",
+  });
+  const waiting = starter();
+  await tickSwarm(ctx, swarm.id, waiting);
+  assert.equal(waiting.calls.filter((call) => call.role === "worker").length, 0);
+  assert.equal((await read(foundation.id)).status, "working", "the child does not replace its parent's worker state");
+  assert.equal((await read(backend.id)).status, "assigned");
+
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, foundation.id));
+  const ready = starter();
+  const result = await tickSwarm(ctx, swarm.id, ready);
+  assert.equal(ready.calls.filter((call) => call.role === "worker").length, 1);
+  assert.equal(result?.workerRunIds.length, 1);
+  assert.equal((await read(foundation.id)).status, "done", "the parent keeps its own result");
+  assert.equal((await read(backend.id)).status, "working");
+  assert.equal((await read(root.id)).status, "working", "the plan still includes the unfinished descendant");
+});
+
+test("a plan phase completes from its own work while dependent work stays below it", async () => {
+  const swarm = await makeSwarm();
+  const root = await makeTask(swarm.id, { title: "Product", nodeType: "plan" });
+  const foundation = await makeTask(swarm.id, {
+    parentId: root.id, title: "L0 foundation", nodeType: "plan", status: "working",
+  });
+  const scaffold = await makeTask(swarm.id, {
+    parentId: foundation.id, title: "L0a scaffold", nodeType: "leaf", status: "working",
+  });
+  const backend = await makeTask(swarm.id, {
+    parentId: foundation.id, parentRelation: "depends_on", title: "L1 backend", nodeType: "leaf", status: "assigned",
+  });
+
+  const waiting = starter();
+  await tickSwarm(ctx, swarm.id, waiting);
+  assert.equal(waiting.calls.filter((call) => call.role === "worker").length, 0);
+  assert.equal((await read(foundation.id)).status, "working");
+  assert.equal((await read(backend.id)).status, "assigned");
+
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, scaffold.id));
+  const ready = starter();
+  await tickSwarm(ctx, swarm.id, ready);
+  assert.equal((await read(foundation.id)).status, "done", "L0's own work is complete");
+  assert.equal((await read(backend.id)).status, "working", "L1 starts after L0 completes");
+  assert.equal((await read(root.id)).status, "working", "the whole plan still includes L1");
+});
+
 /**
  * "Busy" is two different answers, and only one of them is about the
  * swarm.
@@ -875,6 +929,33 @@ test("a leaf whose worker stopped without reporting fails, rather than waiting f
   assert.equal(row.status, "failed", "nothing else in a swarm notices a worker that simply stopped");
   assert.equal(row.attention, "failed");
   assert.match(String((row.flags as { workerStopped?: string }).workerStopped), /ran out of context/);
+});
+
+test("a successful worker's final message reaches the planner when it missed report", async () => {
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "finished without report", status: "working" });
+  const run = await runOn(swarm.id, leaf.id, "succeeded");
+  await db.insert(runEvents).values({
+    runId: run.id,
+    seq: 1,
+    type: "message",
+    payload: { type: "message", role: "assistant", text: "Committed the server scaffold and verified its tests." },
+  });
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  const row = await read(leaf.id);
+  assert.equal(row.status, "working", "the planner still decides whether the work is done");
+  assert.equal(row.report, "Committed the server scaffold and verified its tests.");
+  assert.equal(row.attention, null);
+  assert.ok(result?.plannerRunId);
+  assert.match(deps.calls.find((call) => call.role === "planner")!.prompt!, /Committed the server scaffold/);
+  const [reported] = await db.select().from(swarmTaskEvents)
+    .where(and(eq(swarmTaskEvents.taskId, leaf.id), eq(swarmTaskEvents.kind, "reported")));
+  assert.equal((reported?.detail as { source?: string })?.source, "final_message");
+
+  const again = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(again?.plannerRunId, null, "a recovered report is delivered only once");
 });
 
 test("a leaf failed for a worker that stopped is news to the planner, even once", async () => {

@@ -4,11 +4,10 @@ import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
-import { SwarmCostPanel } from "./SwarmCostPanel.js";
 import { canPause, canReopen, canResume, canStart, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
-import { capUse, formatUsd, spendParts } from "../swarm/money.js";
+import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
-import { elapsedSince, formatElapsed } from "../swarm/time.js";
+import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail } from "../swarm/types.js";
 import type { SwarmView } from "../swarm/view-state.js";
@@ -54,7 +53,9 @@ export function ComputeBanner({
 export interface SwarmActions {
   onPause: () => void;
   onResume: () => void;
+  onRetryPlanner?: () => void;
   onStop: () => void;
+  onReleaseBranch?: () => void;
   /**
    * Opens a pull request for the swarm's branch.
    *
@@ -72,6 +73,8 @@ export interface SwarmActions {
    * than joined by a second set.
    */
   onReopen: () => void;
+  /** Opens the confirmation for permanently deleting this swarm. */
+  onDelete: () => void;
   /** Puts a finished swarm in the archived menu and releases its machine. */
   onArchive: () => void;
   /** Returns an archived swarm to the strip without changing its work. */
@@ -93,10 +96,8 @@ export interface SwarmActions {
 /**
  * One swarm's page: the header, and the plan under it.
  *
- * The header is the answer to "what is this doing and what is it
- * costing me", in that order: the ring is the headline, the spend
- * line is three figures rather than one, and the controls that can
- * change either sit at the end of the same row.
+ * The header names the swarm and its next action. The brief beneath
+ * it carries the goal, the spend estimate and the worker limit.
  *
  * Tree and Outline are two renderings of one model. The toggle
  * changes the shape of the page and nothing else: same selection,
@@ -115,6 +116,7 @@ export function SwarmPage({
   busy,
   artifacts = [],
   onOpenArtifact,
+  onOpenPlannerOutput,
 }: {
   detail: SwarmDetail;
   model: SwarmModel;
@@ -130,15 +132,24 @@ export function SwarmPage({
   artifacts?: SwarmArtifact[];
   /** Opens one in the viewer every other artifact in Bento opens in. */
   onOpenArtifact?: (artifact: SwarmArtifact) => void;
+  onOpenPlannerOutput?: () => void;
 }) {
   const swarm = detail.swarm;
   const live = canPause(swarm.status);
   const now = useNow(live);
-  const elapsed = swarm.endedAt
-    ? Math.max(0, new Date(swarm.endedAt).getTime() - new Date(swarm.startedAt ?? swarm.createdAt).getTime())
-    : elapsedSince(swarm.startedAt ?? swarm.createdAt, now);
-  const cap = capUse(swarm.spend, swarm.budgetUsd);
   const stopped = pausedWords(swarm.status, swarm.pausedReason);
+  const planReady = detail.tasks.length > 0;
+  const waitingForPlan = swarm.status === "planning" && !planReady;
+  const plannerFailed = waitingForPlan && detail.plannerRun?.status === "failed";
+  const primaryAction = canStart(swarm.status) && planReady
+    ? { label: "Start work", onClick: actions.onResume }
+    : canResume(swarm.status)
+      ? { label: "Resume work", onClick: actions.onResume }
+      : canReopen(swarm.status)
+        ? { label: "Add follow up", onClick: actions.onReopen }
+        : swarm.status === "running"
+          ? { label: "Pause work", onClick: actions.onPause }
+          : null;
 
   return (
     <div className="swarm-page">
@@ -160,21 +171,21 @@ export function SwarmPage({
 
       <header className="swarm-head">
         <div className="swarm-head-lead">
-          <CompletionRing fraction={model.root.completion} size={44} stroke={4} showLabel />
+          <CompletionRing fraction={model.root.completion} size={40} stroke={3.2} showLabel />
           <div className="swarm-head-copy">
             <h1 className="swarm-name">{swarm.name}</h1>
             <div className="swarm-head-chips">
               <span className="status">
-                <span className="dot" data-state={swarmTone(swarm.status)} />
-                {swarmWords(swarm.status)}
+                <span className="dot" data-state={plannerFailed || swarm.status === "failed" ? "gated" : swarmTone(swarm.status)} />
+                {plannerFailed || swarm.status === "failed" ? "stalled" : swarmWords(swarm.status)}
               </span>
               {swarm.branchName && (
                 <span className="chip chip-clip" title={swarm.branchName}>
                   {swarm.branchName}
                 </span>
               )}
-              <span className="chip" title="Since this swarm started">
-                {formatElapsed(elapsed)}
+              <span className="chip" title="Agent run time, excluding time spent waiting between runs">
+                {formatElapsed(detail.agentTimeMs ?? 0)} agent time
               </span>
               <span className="chip" title="Tasks done, out of the tasks planned">
                 {model.root.doneLeaves} of {model.root.totalLeaves} tasks
@@ -194,131 +205,58 @@ export function SwarmPage({
           </div>
         </div>
 
-        <div className="swarm-head-spend">
-          <span className="label">Spend</span>
-          {/*
-           * Three figures, apart, always. A total would put a
-           * measurement, an estimate and a guess behind one number,
-           * next to a cap people set real limits with.
-           */}
-          <ul className="swarm-tiers swarm-tiers-inline">
-            {spendParts(swarm.spend).map((part) => (
-              <li key={part.tier} title={part.note}>
-                <span className="swarm-tier-value spend-figure">{formatUsd(part.usd)}</span>
-                <span className="swarm-tier-label">{part.label}</span>
-              </li>
-            ))}
-          </ul>
-          <div className="swarm-cap" title={cap.capLine}>
-            <span className="swarm-cap-track">
-              {cap.segments.map((segment) => (
-                <span
-                  key={segment.tier}
-                  className="swarm-cap-fill"
-                  data-tier={segment.tier}
-                  style={{ width: `${segment.ratio * 100}%` }}
-                />
-              ))}
-            </span>
-            <span className="muted">{cap.capLine}</span>
-          </div>
+        <div className="swarm-head-actions">
+          {primaryAction && <button className="btn btn-primary swarm-main-action" disabled={busy} onClick={primaryAction.onClick}>{primaryAction.label}</button>}
+          {waitingForPlan && !plannerFailed && <span className="swarm-awaiting-plan">Planner at work</span>}
+          <details className="swarm-more-actions">
+            <summary className="btn" aria-label="More swarm actions">
+              <span>Actions</span>
+              <svg className="swarm-actions-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
+                <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </summary>
+            <div className="swarm-more-menu">
+              {swarm.status === "planning" && !plannerFailed && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}
+              {canStop(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onStop}>Stop swarm</button>}
+              {swarm.archivedAt ? (
+                <button className="btn" disabled={busy} onClick={actions.onRestore}>Restore</button>
+              ) : (
+                canReopen(swarm.status) && (
+                  <button className="btn" disabled={busy} onClick={actions.onArchive}>Archive</button>
+                )
+              )}
+              <button className="btn" disabled={busy} onClick={actions.onSaveAsTemplate}>
+                Save as template
+              </button>
+              {actions.onCreatePullRequest && <button className="btn" disabled={busy} onClick={actions.onCreatePullRequest}>Create PR</button>}
+              <button className="btn btn-danger-quiet" disabled={busy} onClick={actions.onDelete}>
+                Delete swarm
+              </button>
+            </div>
+          </details>
         </div>
 
-        <div className="swarm-head-actions">
-          <WorkerStepper
-            workers={swarm.workers}
-            active={swarm.workersActive}
-            max={swarm.maxWorkers}
-            disabled={busy || !canStop(swarm.status)}
-            onChange={actions.onWorkers}
-          />
-          {/*
-            * Start and Pause both, while a swarm is being planned: the
-            * plan is the planner's to finish and the work is the
-            * person's to begin, and either can be wanted first. Start
-            * is the same route as Resume (one door decides when a
-            * swarm may run), so it is the same action under the name
-            * the state calls for.
-            */}
-          {canStart(swarm.status) && (
-            <button className="btn btn-primary" disabled={busy} onClick={actions.onResume}>
-              Start
-            </button>
-          )}
-          {canResume(swarm.status) ? (
-            <button className="btn" disabled={busy} onClick={actions.onResume}>
-              Resume
-            </button>
-          ) : (
-            <button className="btn" disabled={busy || !canPause(swarm.status)} onClick={actions.onPause}>
-              Pause
-            </button>
-          )}
-          <button className="btn" disabled={busy || !canStop(swarm.status)} onClick={actions.onStop}>
-            Stop
-          </button>
-          {/*
-            * Reopen, and only on a swarm that has finished. It sits
-            * beside Stop rather than replacing it, for the reason
-            * every other control here stays visible: a button that
-            * disappears reads as a console that forgot the swarm.
-            */}
-          {canReopen(swarm.status) && (
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={actions.onReopen}
-              title="Add a follow up to this swarm, on the same branch and the same pull requests."
-            >
-              Reopen
-            </button>
-          )}
-          {swarm.archivedAt ? (
-            <button className="btn" disabled={busy} onClick={actions.onRestore}>
-              Restore
-            </button>
-          ) : (
-            canReopen(swarm.status) && (
-              <button
-                className="btn"
-                disabled={busy}
-                onClick={actions.onArchive}
-                title="Move this finished swarm to the archived menu and release its workspace."
-              >
-                Archive
-              </button>
-            )
-          )}
-          {/*
-            * Saving the shape, at any point in a swarm's life.
-            *
-            * Not only on a finished one: a swarm whose plan has just
-            * been widened is exactly when somebody knows what the
-            * ceilings should have been, and making them wait until it
-            * is done is making them remember.
-            */}
-          <button
-            className="btn"
-            disabled={busy}
-            title="Keep this swarm's ceilings as a template to start the next one from."
-            onClick={actions.onSaveAsTemplate}
-          >
-            Save as template
-          </button>
-          <button
-            className="btn btn-primary"
-            disabled={busy || !actions.onCreatePullRequest}
-            title={
-              actions.onCreatePullRequest
-                ? undefined
-                : "Opening a pull request from a swarm is not available yet. Its branch is in the repository, so it can be opened there."
-            }
-            onClick={actions.onCreatePullRequest}
-          >
-            Create PR
-          </button>
-        </div>
       </header>
+
+      <section className="swarm-brief" aria-label="Swarm goal">
+        <div className="swarm-brief-copy">
+          <span className="label">Goal</span>
+          <p>{swarm.goal}</p>
+        </div>
+        <div className="swarm-brief-side">
+          {waitingForPlan && (
+            <p className="swarm-next-step" role="status">
+              {detail.plannerRun?.status === "failed"
+                ? "Planner failed. Open its output below, then retry."
+                : "Planner is building the task tree. Review the plan here before starting work."}
+            </p>
+          )}
+          <div className="swarm-brief-metrics">
+            <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
+            <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
+          </div>
+        </div>
+      </section>
 
       {swarm.question && (
         <PlannerQuestionBanner
@@ -327,6 +265,12 @@ export function SwarmPage({
           onAnswer={(text) => actions.onAnswer(swarm.question?.id ?? "", text)}
         />
       )}
+
+      <SwarmArtifacts
+        artifacts={artifacts}
+        deliverable={swarm.deliverable}
+        onOpen={onOpenArtifact}
+      />
 
       {detail.pullRequests.length > 0 && (
         <div className="swarm-prs">
@@ -357,6 +301,7 @@ export function SwarmPage({
       )}
 
       <div className="swarm-viewbar">
+        <span className="swarm-section-title">Diagram</span>
         <div className="seg" role="group" aria-label="View">
           <button
             type="button"
@@ -377,48 +322,25 @@ export function SwarmPage({
             Outline
           </button>
         </div>
-        <span className="muted swarm-goal" title={swarm.goal}>
-          {swarm.goal}
-        </span>
       </div>
 
       {view === "tree" ? (
-        <SwarmTree model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode} />
+        <SwarmTree model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode}
+          plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
       ) : (
-        <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect} />
+        <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect}
+          plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
       )}
-
-      {/*
-       * Under the plan rather than beside it. The tree is what a person
-       * came for, and the queue is the answer to a question they only
-       * ask once something has stopped moving: whose branch is in, and
-       * what is holding the rest up. Drawn at all only once something
-       * has been accepted, so a swarm that is still planning does not
-       * carry an empty box it will never fill.
-       */}
-      {/*
-       * The panel under the plan rather than in the header: the header
-       * answers what this is costing, and this answers where it went,
-       * which is a question somebody asks second and only sometimes.
-       */}
-      {/*
-       * What the swarm produced for people to read, above the cost
-       * panel: on a document swarm it is the whole point of the swarm,
-       * and on a code swarm it is whatever its agents captured along
-       * the way. Drawn only when there is something, so an ordinary
-       * swarm carries no empty box.
-       */}
-      <SwarmArtifacts
-        artifacts={artifacts}
-        deliverable={swarm.deliverable}
-        onOpen={onOpenArtifact}
-      />
-
-      <SwarmCostPanel spend={swarm.spend} tasks={detail.tasks} budgetUsd={swarm.budgetUsd} />
 
       {detail.landings.length > 0 && (
         <MergeQueue
           landings={detail.landings}
+          summary={detail.landingSummary}
+          destination={swarm.branchName}
+          swarmDone={swarm.status === "done"}
+          checkout={detail.branchCheckout}
+          onReleaseBranch={actions.onReleaseBranch}
+          busy={busy}
           tasks={detail.tasks}
           selectedId={selectedId}
           onSelect={onSelect}
@@ -467,7 +389,7 @@ export function SwarmArtifacts({
 
   return (
     <section className="swarm-artifacts">
-      <span className="label">{deliverable === "document" ? "The document" : "What this swarm produced"}</span>
+      <span className="label">{deliverable === "document" ? "The document" : "Artifacts"}</span>
       {document && (
         <button
           type="button"
@@ -477,7 +399,7 @@ export function SwarmArtifacts({
         >
           <span className="swarm-artifact-name">{document.path}</span>
           <span className="muted">
-            Assembled from the sections in the plan, and committed on the swarm's branch.
+            Combined document, committed to the swarm branch.
           </span>
         </button>
       )}
@@ -515,40 +437,46 @@ export function WorkerStepper({
   workers,
   active,
   max,
-  disabled,
+  disabledReason,
   onChange,
 }: {
   workers: number;
   active: number;
   max: number;
-  disabled?: boolean;
+  disabledReason?: string | null;
   onChange: (workers: number) => void;
 }) {
+  const decreaseReason = disabledReason ?? (workers <= 1 ? "A swarm needs at least one worker." : null);
+  const increaseReason = disabledReason ?? (workers >= max ? `Maximum is ${max} workers.` : null);
   return (
-    <div className="swarm-workers" title={`${active} of ${workers} working, up to ${max} on this template`}>
-      <button
-        type="button"
-        className="btn btn-ghost"
-        aria-label="One fewer worker"
-        disabled={disabled || workers <= 1}
-        onClick={() => onChange(workers - 1)}
-      >
-        <StepMark direction="down" />
-      </button>
+    <div className="swarm-workers" title={`${active} of ${workers} working, maximum ${max} workers`}>
+      <span className="swarm-worker-step" title={decreaseReason ?? `Decrease to ${workers - 1} workers`}>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          aria-label="One fewer worker"
+          disabled={Boolean(decreaseReason)}
+          onClick={() => onChange(workers - 1)}
+        >
+          <StepMark direction="down" />
+        </button>
+      </span>
       <span className="swarm-workers-count">
         <span className="spend-figure">{active}</span>
         <span className="swarm-workers-of">of</span>
         <span className="spend-figure">{workers}</span>
       </span>
-      <button
-        type="button"
-        className="btn btn-ghost"
-        aria-label="One more worker"
-        disabled={disabled || workers >= max}
-        onClick={() => onChange(workers + 1)}
-      >
-        <StepMark direction="up" />
-      </button>
+      <span className="swarm-worker-step" title={increaseReason ?? `Increase to ${workers + 1} workers`}>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          aria-label="One more worker"
+          disabled={Boolean(increaseReason)}
+          onClick={() => onChange(workers + 1)}
+        >
+          <StepMark direction="up" />
+        </button>
+      </span>
     </div>
   );
 }

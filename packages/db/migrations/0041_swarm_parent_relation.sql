@@ -1,0 +1,1 @@
+ALTER TABLE "swarm_tasks" ADD COLUMN "parent_relation" text DEFAULT 'contains' NOT NULL;

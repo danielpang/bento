@@ -8,11 +8,12 @@ import {
   createPool,
   runEvents,
   runMigrations,
+  sandboxes,
   swarmTasks,
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver } from "@bento/sandbox";
+import { LocalProcessDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
@@ -29,13 +30,10 @@ import {
 /**
  * What a restart does to a swarm.
  *
- * A swarm run's moving parts (the exec stream, the abort handle, the
- * stdin channel) live in the process that started it, exactly as a
- * card's do. A deploy kills all of them while the row still says
- * running, and nothing else would ever touch it: the worker drops jobs
- * for runs already picked up, and the run door refuses the swarm as
- * busy. Without recovery the swarm waits forever on a settlement that
- * can never arrive.
+ * A deploy drops the server's stream while the row still says running.
+ * Durable sandboxes let the next server reattach and settle the same
+ * run. When a sandbox cannot return the run, recovery closes it so the
+ * swarm's reconciler can decide what to do next.
  */
 const adminUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "swarm_recovery_test";
@@ -173,6 +171,79 @@ test("a swarm run the restart stranded is closed, and its swarm is told", async 
   const board = emitted.find((event) => event.type === "swarm_task_updated");
   assert.ok(board, "the board is told too");
   assert.equal("taskId" in board! ? board.taskId : null, task!.id);
+});
+
+test("planner and worker runs reattach with only their missing Docker output", { timeout: 30_000 }, async () => {
+  for (const role of ["planner", "worker"] as const) {
+    const swarm = await makeSwarm();
+    const [task] = role === "worker"
+      ? await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "leaf" }).returning()
+      : [];
+    const [sandbox] = await db.insert(sandboxes).values({
+      projectId: PROJECT,
+      swarmId: swarm.id,
+      ...(task ? { swarmTaskId: task.id } : {}),
+      provider: "docker",
+      externalId: `swarm-reattach-${swarm.id}`,
+      status: "busy",
+      workdir: "/workspace",
+    }).returning();
+    const [run] = await db.insert(agentRuns).values({
+      type: "swarm",
+      swarmId: swarm.id,
+      ...(task ? { swarmTaskId: task.id } : {}),
+      role,
+      agentProfileId: PROFILE,
+      sandboxId: sandbox!.id,
+      prompt: "Continue the work",
+      status: "running",
+      executor: "server",
+      startedAt: new Date(),
+    }).returning();
+    await db.insert(runEvents).values({
+      runId: run!.id,
+      seq: 1,
+      type: "message",
+      payload: { type: "message", role: "assistant", text: "Before deploy.", sandboxCursor: 1 },
+    });
+
+    const attached: { key?: string; after?: number }[] = [];
+    const original = ctx.driver;
+    ctx.driver = {
+      provider: "docker",
+      supportsStdin: false,
+      async provision(): Promise<never> { throw new Error("must not provision"); },
+      exec: async function* () { yield { kind: "exit" as const, exitCode: 1 }; },
+      async attach(_handle: SandboxHandle, _argv: string[], options?: { sessionKey?: string; afterCursor?: number }) {
+        attached.push({ key: options?.sessionKey, after: options?.afterCursor });
+        return (async function* () {
+          yield { kind: "stdout" as const, data: '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"After deploy."}]}}\n', cursor: 2 };
+          yield { kind: "stdout" as const, data: '{"type":"result","subtype":"success","is_error":false,"session_id":"fake-session-1","total_cost_usd":0.01,"num_turns":1}\n', cursor: 3 };
+          yield { kind: "exit" as const, exitCode: 0, cursor: 4 };
+        })();
+      },
+      async destroy() {},
+    } as AppContext["driver"];
+    try {
+      await recoverInterruptedRuns(ctx);
+      const deadline = Date.now() + 10_000;
+      let status = "running";
+      while (Date.now() < deadline) {
+        status = (await db.select({ status: agentRuns.status }).from(agentRuns).where(eq(agentRuns.id, run!.id)))[0]!.status;
+        if (status !== "running") break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.equal(status, "succeeded", `${role} keeps its run across the deploy`);
+      assert.deepEqual(attached, [{ key: run!.id, after: 1 }]);
+      const events = (await db.select({ payload: runEvents.payload }).from(runEvents).where(eq(runEvents.runId, run!.id)))
+        .map((row) => row.payload as { text?: string; sandboxCursor?: number });
+      assert.equal(events.filter((event) => event.text === "Before deploy.").length, 1);
+      assert.equal(events.filter((event) => event.text === "After deploy.").length, 1);
+      assert.ok(events.some((event) => event.sandboxCursor === 2));
+    } finally {
+      ctx.driver = original;
+    }
+  }
 });
 
 test("a swarm run that never started goes back on the queue", async () => {

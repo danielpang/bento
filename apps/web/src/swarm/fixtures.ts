@@ -510,6 +510,8 @@ export const SWARM_TEMPLATES: SwarmTemplate[] = [
   {
     id: "tpl-code",
     name: "Code change",
+    plannerProfileId: "agent-planner",
+    workerProfileId: "agent-worker",
     description: "A planner splits the goal into leaves, each worked on its own branch and landed one at a time.",
     plannerModel: "claude-opus-4",
     workerModel: "claude-sonnet-4",
@@ -529,6 +531,8 @@ export const SWARM_TEMPLATES: SwarmTemplate[] = [
   {
     id: "tpl-doc",
     name: "Document",
+    plannerProfileId: "agent-planner",
+    workerProfileId: "agent-worker",
     description: "The same split, with the deliverable a written document rather than a branch.",
     plannerModel: "claude-opus-4",
     workerModel: "claude-haiku-4",
@@ -547,6 +551,8 @@ export const SWARM_TEMPLATES: SwarmTemplate[] = [
   {
     id: "tpl-survey",
     name: "Survey the codebase",
+    plannerProfileId: "agent-planner",
+    workerProfileId: "agent-worker",
     description: "Read only. Workers report what they found and nothing is landed.",
     plannerModel: "claude-sonnet-4",
     workerModel: "claude-haiku-4",

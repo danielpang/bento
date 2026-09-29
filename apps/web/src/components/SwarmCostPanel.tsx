@@ -181,12 +181,6 @@ export function SwarmCostPanel({
        * it, which would otherwise look like a budget that does not
        * work.
        */}
-      {cap.soft && (
-        <p className="swarm-cost-note" role="note">
-          More than a quarter of this figure was assumed rather than reported, so the cap is soft.
-          Tools that print what they cost make it exact.
-        </p>
-      )}
       {cap.notional && (
         <p className="swarm-cost-note" role="note">
           Some of these runs used your own signed in agent, so their cost is a list price your

@@ -144,12 +144,24 @@ export interface SwarmNodeDetail {
   taskId: string;
   commits: TaskCommit[];
   events: SwarmTaskEvent[];
+  runs?: SwarmTaskRun[];
+}
+
+export interface SwarmTaskRun {
+  id: string;
+  status: string;
+  queuedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  error: string | null;
 }
 
 export interface SwarmTask {
   id: string;
   /** Null at the top. The swarm itself is the root nobody stores. */
   parentId: string | null;
+  /** Whether this parent groups the task or must finish before it starts. */
+  parentRelation?: "contains" | "depends_on";
   /** Orders siblings, so the console never invents an order of its own. */
   position: number;
   title: string;
@@ -333,9 +345,26 @@ export interface SwarmPullRequest {
 export interface SwarmDetail {
   swarm: Swarm;
   tasks: SwarmTask[];
+  /** Sum of recorded agent run durations. Waiting between runs is excluded. */
+  agentTimeMs?: number;
+  /** The planner's latest attempt, shown above the plan in both views. */
+  plannerRun?: SwarmPlannerRun | null;
   landings: SwarmLanding[];
+  /** Counts include rows omitted from the short merge queue history. */
+  landingSummary?: { total: number; committed: number };
+  branchCheckout?: { mode: "worktree" | "remote"; released: boolean };
   ledger: SwarmLedgerEntry[];
   pullRequests: SwarmPullRequest[];
+}
+
+export interface SwarmPlannerRun {
+  id: string;
+  status: "queued" | "starting" | "running" | "succeeded" | "failed" | "cancelled";
+  error: string | null;
+  agent: { name: string; cli: string; model: string } | null;
+  queuedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
 }
 
 /**
@@ -351,6 +380,8 @@ export interface SwarmTemplate {
   id: string;
   name: string;
   description: string;
+  plannerProfileId?: string | null;
+  workerProfileId?: string | null;
   plannerModel: string;
   workerModel: string;
   tools: { name: string; tier: SpendTier }[];
@@ -385,6 +416,8 @@ export interface NewSwarmInput {
    * leave a fresh install unable to create a swarm at all.
    */
   templateId: string | null;
+  plannerProfileId?: string;
+  workerProfileId?: string;
   name: string;
   goal: string;
   attachments: { name: string; bytes: number }[];

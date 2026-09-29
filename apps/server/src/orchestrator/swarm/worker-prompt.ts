@@ -104,7 +104,7 @@ export function buildWorkerPrompt(input: WorkerPromptInput): string {
   const rejection = typeof task.flags?.rejection === "string" ? task.flags.rejection : null;
   if (rejection?.trim()) {
     lines.push(
-      "This task was worked before and sent back. Why the planner rejected it:",
+      "This task was worked before. Corrections requested for this attempt:",
       quoteUntrusted(rejection.trim()),
       "Address that before anything else. Your branch still holds the earlier attempt's commits.",
       "",

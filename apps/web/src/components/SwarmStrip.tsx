@@ -123,9 +123,8 @@ function SwarmTab({
       onClick={() => onSelect(swarm.id)}
       title={`${swarm.name}, ${swarmWords(swarm.status)}`}
     >
-      <CompletionRing fraction={completion} size={14} stroke={2.5} tone={selected ? "brand" : "muted"} />
+      <CompletionRing fraction={completion} size={14} stroke={2.5} tone={swarmTone(swarm.status)} />
       <span className="swarm-tab-name">{swarm.name}</span>
-      <span className="dot" data-state={swarmTone(swarm.status)} aria-hidden="true" />
       <span className="visually-hidden">{swarmWords(swarm.status)}</span>
     </button>
   );

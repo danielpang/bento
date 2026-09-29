@@ -311,20 +311,17 @@ describe("landing a worker's branch", () => {
     assert.ok(commits.length >= 1);
   });
 
-  test("a detached swarm checkout is an error, because no retry ever attaches it", async () => {
+  test("a clean detached swarm checkout at the branch head is reattached before landing", async () => {
     /**
      * `git merge --ff-only` in a detached checkout succeeds and moves
      * nothing but HEAD, so this is checked before anything is built.
      *
-     * An error rather than something to try again, and that is the
-     * whole of this test. Nothing in a swarm ever puts that checkout
-     * back onto its branch, so a landing told to retry here retries for
-     * ever: a tick, a land job and a handful of git subprocesses per
-     * pass, against a condition that cannot change on its own.
+     * Reattaching is safe here because HEAD still equals the branch and
+     * the checkout is clean. The landing must move the branch too.
      */
     await workerCommit(fx, "swarm/demo-eeee5555", TASK_A, "e.txt", "from e\n");
-    const moved = path.join(fx.root, "mover");
-    await git(fx.repo, ["worktree", "add", "--quiet", "--detach", moved, "swarm/demo"]);
+    const moved = fx.swarmWorktree;
+    await git(moved, ["checkout", "--quiet", "--detach"]);
 
     const result = await landWorkerBranch({
       repoPath: fx.repo,
@@ -335,14 +332,35 @@ describe("landing a worker's branch", () => {
       mergeMessage: "unused",
       landingId: "landing-7",
     });
+    assert.equal(result.ok, true);
+    assert.equal(
+      await git(fx.repo, ["rev-parse", "swarm/demo"]),
+      await git(moved, ["rev-parse", "HEAD"]),
+      "the branch moved with its checkout",
+    );
+    assert.equal(await git(moved, ["symbolic-ref", "--short", "HEAD"]), "swarm/demo");
+  });
+
+  test("a detached checkout with uncommitted work is not reattached", async () => {
+    await workerCommit(fx, "swarm/demo-detached", TASK_A, "detached.txt", "from detached\n");
+    const moved = fx.swarmWorktree;
+    await git(moved, ["checkout", "--quiet", "--detach"]);
+    await writeFile(path.join(moved, "uncommitted.txt"), "keep this\n");
+    const result = await landWorkerBranch({
+      repoPath: fx.repo,
+      swarmWorktree: moved,
+      swarmBranch: "swarm/demo",
+      workerBranch: "swarm/demo-detached",
+      policy: "rebase",
+      mergeMessage: "unused",
+      landingId: "landing-detached-dirty",
+    });
     assert.equal(result.ok, false);
     assert.equal(result.ok === false && result.reason, "error");
     assert.match(result.ok === false ? result.detail : "", /detached head/);
-    assert.equal(
-      await git(fx.repo, ["rev-parse", "swarm/demo"]),
-      await git(fx.swarmWorktree, ["rev-parse", "HEAD"]),
-      "the branch is where the swarm's own checkout left it",
-    );
+    assert.equal(await git(moved, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => ""), "");
+    await rm(path.join(moved, "uncommitted.txt"));
+    await git(moved, ["checkout", "--quiet", "swarm/demo"]);
   });
 
   test("a swarm checkout with uncommitted changes is an error, not a retry", async () => {

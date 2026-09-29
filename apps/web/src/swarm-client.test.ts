@@ -22,6 +22,13 @@ import type { NewSwarmInput } from "./swarm/types.js";
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const clock = () => NOW;
 
+test("planner guidance stays visible while it waits for the next turn", async () => {
+  const api = fixtureSwarmApi(clock);
+  const sent = await api.messagePlanner("sw-checkout", "Add a design review step");
+  assert.equal(sent.status, "queued");
+  assert.deepEqual(await api.listPlannerMessages("sw-checkout"), [sent]);
+});
+
 function input(over: Partial<NewSwarmInput> = {}): NewSwarmInput {
   return {
     projectId: "p1",
@@ -92,6 +99,15 @@ test("a new swarm lands at the end of the strip, planning, with the goal it was 
   assert.equal(created.swarm.budgetUsd, 40);
   // Nothing planned yet, so the ring starts empty rather than full.
   assert.equal(buildSwarmModel(created.tasks, { now: NOW }).root.completion, 0);
+});
+
+test("deleting a swarm removes it from the strip and its detail", async () => {
+  const api = fixtureSwarmApi(clock);
+  const before = await api.listSwarms("p1");
+  const id = before[0]!.id;
+  await api.deleteSwarm(id);
+  assert.equal((await api.listSwarms("p1")).length, before.length - 1);
+  await assert.rejects(() => api.getSwarm(id), /not found/);
 });
 
 test("pausing, stopping and archiving are the states the header reads back", async () => {

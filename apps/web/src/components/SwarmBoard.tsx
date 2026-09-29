@@ -2,12 +2,14 @@ import { SaveTemplateDialog } from "./SaveTemplateDialog.js";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BentoClient, RunArtifact } from "@bento/api-client";
 import { NewSwarmDialog } from "./NewSwarmDialog.js";
+import { DeleteSwarmDialog } from "./DeleteSwarmDialog.js";
 import { ReopenDialog } from "./ReopenDialog.js";
 import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
 import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
+import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./SwarmRunOutput.js";
 import { SwarmPage } from "./SwarmPage.js";
 import { BoardSkeleton } from "./Skeleton.js";
-import { swarmApi } from "../swarm/client.js";
+import { swarmApi, type SwarmAgent } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type {
@@ -80,9 +82,10 @@ export function SwarmBoard({
   const [detail, setDetail] = useState<SwarmDetail | null>(null);
   const [templates, setTemplates] = useState<SwarmTemplate[]>([]);
   /** The agents a node can be reassigned to, for the drawer's picker. */
-  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+  const [agents, setAgents] = useState<SwarmAgent[]>([]);
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
   const [expanded, setExpanded] = useState<string[]>([]);
+  const [folded, setFolded] = useState<string[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
   /**
    * The open node's commits and history.
@@ -99,6 +102,7 @@ export function SwarmBoard({
   const [node, setNode] = useState<SwarmNodeDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [taskActionError, setTaskActionError] = useState("");
   /**
    * The instant the model is built for, moved on a slow tick rather
    * than every second. It only decides which leaves have crossed the
@@ -140,20 +144,6 @@ export function SwarmBoard({
     setSelectedId(null);
     loadSwarms();
   }, [loadSwarms]);
-
-  useEffect(() => {
-    void swarmApi
-      .listTemplates()
-      .then(setTemplates)
-      .catch(() => setTemplates([]));
-    // An empty list is not an error here: the drawer then offers no
-    // reassign picker, which is the truthful answer for a console that
-    // could not read the agents.
-    void swarmApi
-      .listAgents()
-      .then(setAgents)
-      .catch(() => setAgents([]));
-  }, []);
 
   const loadNode = useCallback((swarmId: string, openTaskId: string) => {
     void swarmApi
@@ -199,8 +189,11 @@ export function SwarmBoard({
       return;
     }
     setTaskId(null);
+    setPlannerOutputOpen(false);
+    setWorkerOutput(null);
     setNode(null);
     setExpanded([]);
+    setFolded([]);
     setArtifacts([]);
     setOpenArtifact(null);
     rememberSwarmId(storage, projectId, selectedId);
@@ -273,6 +266,24 @@ export function SwarmBoard({
   }, [selectedId, taskId, loadNode]);
 
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void swarmApi.listTemplates()
+      .then(async (rows) => {
+        if (!cancelled) setTemplates(rows);
+        // Listing templates seeds default swarm profiles on a fresh install.
+        const profiles = await swarmApi.listAgents();
+        if (!cancelled) setAgents(profiles);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTemplates([]);
+          setAgents([]);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [creating]);
   /** Whether the reopen dialog is up for the swarm on screen. */
   const [reopening, setReopening] = useState(false);
   /*
@@ -285,21 +296,28 @@ export function SwarmBoard({
   /** What this swarm produced for people to read, and the one that is open. */
   const [artifacts, setArtifacts] = useState<SwarmArtifact[]>([]);
   const [openArtifact, setOpenArtifact] = useState<RunArtifact | null>(null);
+  const [plannerOutputOpen, setPlannerOutputOpen] = useState(false);
+  const [workerOutput, setWorkerOutput] = useState<{ runId: string; taskTitle: string } | null>(null);
 
   const model = useMemo(
-    () => buildModel(detail?.tasks ?? [], { expanded, now }),
-    [buildModel, detail, expanded, now],
+    () => buildModel(detail?.tasks ?? [], { expanded, folded, autoCollapseCompleted: detail?.swarm.status !== "done", now }),
+    [buildModel, detail, expanded, folded, now],
   );
 
-  function act(run: () => Promise<unknown>) {
+  function act(run: () => Promise<unknown>, forTask = false) {
     setBusy(true);
+    if (forTask) setTaskActionError("");
     void run()
       .then(() => {
         if (selectedId) loadDetail(selectedId);
         loadSwarms();
         setError("");
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        if (forTask) setTaskActionError(message);
+      })
       .finally(() => setBusy(false));
   }
 
@@ -351,12 +369,16 @@ export function SwarmBoard({
             rememberSwarmView(storage, next);
           }}
           selectedId={taskId}
-          onSelect={setTaskId}
-          onToggleNode={(id) =>
-            setExpanded((current) =>
-              current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
-            )
-          }
+          onSelect={(id) => { setTaskActionError(""); setTaskId(id); }}
+          onToggleNode={(id) => {
+            if (model.byId.get(id)?.collapsed) {
+              setFolded((current) => current.filter((entry) => entry !== id));
+              setExpanded((current) => current.includes(id) ? current : [...current, id]);
+            } else {
+              setExpanded((current) => current.filter((entry) => entry !== id));
+              setFolded((current) => current.includes(id) ? current : [...current, id]);
+            }
+          }}
           surfaces={surfaces}
           busy={busy}
           artifacts={artifacts}
@@ -367,11 +389,15 @@ export function SwarmBoard({
            * passed through rather than re-fetched.
            */
           onOpenArtifact={(artifact) => setOpenArtifact(artifact as RunArtifact)}
+          onOpenPlannerOutput={() => setPlannerOutputOpen(true)}
           actions={{
             onPause: () => selectedId && act(() => swarmApi.pauseSwarm(selectedId)),
             onResume: () => selectedId && act(() => swarmApi.resumeSwarm(selectedId)),
+            onRetryPlanner: () => selectedId && act(() => swarmApi.retryPlanner(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
+            onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
             onReopen: () => setReopening(true),
+            onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
             onRestore: () => selectedId && act(() => swarmApi.restoreSwarm(selectedId)),
             onWorkers: (workers) => selectedId && act(() => swarmApi.setWorkers(selectedId, workers)),
@@ -402,29 +428,57 @@ export function SwarmBoard({
           node={layoutNode}
           {...(node?.taskId === task.id ? { detail: node } : {})}
           busy={busy}
-          onClose={() => setTaskId(null)}
+          actionError={taskActionError}
+          onClose={() => { setTaskActionError(""); setTaskId(null); }}
           // act reloads the detail, so the rings above the node move
           // as soon as the reconciler has rolled the finish up.
-          onMarkDone={(id) => selectedId && act(() => swarmApi.markTaskDone(selectedId, id))}
+          onMarkDone={(id) => selectedId && act(() => swarmApi.markTaskDone(selectedId, id), true)}
           agents={agents}
-          onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id))}
-          onCancel={(id) => selectedId && act(() => swarmApi.cancelTask(selectedId, id))}
-          onSplit={(id, children) => selectedId && act(() => swarmApi.splitTask(selectedId, id, children))}
-          onAddTask={(parentId, task) => selectedId && act(() => swarmApi.addTask(selectedId, parentId, task))}
+          onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id), true)}
+          onRetryLanding={(id) => selectedId && act(() => swarmApi.retryLanding(selectedId, id), true)}
+          onFixForward={(id, reason) => selectedId && act(() => swarmApi.retryTask(selectedId, id, reason), true)}
+          onOpenRun={(runId) => {
+            setWorkerOutput({ runId, taskTitle: task.title });
+            setTaskId(null);
+          }}
+          onCancel={(id) => selectedId && act(() => swarmApi.cancelTask(selectedId, id), true)}
+          onSplit={(id, children) => selectedId && act(() => swarmApi.splitTask(selectedId, id, children), true)}
+          onAddTask={(parentId, task) => selectedId && act(() => swarmApi.addTask(selectedId, parentId, task), true)}
           onReassign={(id, agentProfileId) =>
-            selectedId && act(() => swarmApi.reassignTask(selectedId, id, agentProfileId))
+            selectedId && act(() => swarmApi.reassignTask(selectedId, id, agentProfileId), true)
           }
-          onEdit={(id, edit) => selectedId && act(() => swarmApi.editTask(selectedId, id, edit))}
-          onMessage={(id, text) =>
-            selectedId &&
-            act(async () => {
-              await swarmApi.messageTask(selectedId, id, text);
-              // The node's own history is what shows the message
-              // landed, so it is re-read rather than left to the next
-              // board event.
-              loadNode(selectedId, id);
-            })
-          }
+          onEdit={(id, edit) => selectedId && act(() => swarmApi.editTask(selectedId, id, edit), true)}
+          transcript={task.assignedRunId || node?.runs?.[0]?.id ? <SwarmRunOutput client={client} runId={task.assignedRunId ?? node!.runs![0]!.id} agentName="Worker agent" /> : undefined}
+        />
+      )}
+
+      {workerOutput && (
+        <SwarmWorkerOutputDrawer
+          client={client}
+          runId={workerOutput.runId}
+          taskTitle={workerOutput.taskTitle}
+          onClose={() => setWorkerOutput(null)}
+        />
+      )}
+
+      {plannerOutputOpen && selectedId && detail?.plannerRun && (
+        <SwarmRunOutputDrawer
+          client={client}
+          api={swarmApi}
+          swarmId={selectedId}
+          swarmStatus={detail.swarm.status}
+          runId={detail.plannerRun.id}
+          runStatus={detail.plannerRun.status}
+          runError={detail.plannerRun.error}
+          agentName={detail.plannerRun.agent?.name ?? "Planner agent"}
+          canRetry={detail.swarm.status === "planning" && detail.tasks.length === 0}
+          busy={busy}
+          onRetry={() => { setPlannerOutputOpen(false); act(() => swarmApi.retryPlanner(selectedId)); }}
+          onMessageSent={() => {
+            loadDetail(selectedId);
+            loadSwarms();
+          }}
+          onClose={() => setPlannerOutputOpen(false)}
         />
       )}
 
@@ -486,20 +540,33 @@ export function SwarmBoard({
         <NewSwarmDialog
           projectId={projectId}
           templates={templates}
+          agents={agents}
           surfaces={surfaces}
           busy={busy}
           onClose={() => setCreating(false)}
-          onCreate={(input: NewSwarmInput) => {
+          onCreate={async (input: NewSwarmInput) => {
             setBusy(true);
-            void swarmApi
-              .createSwarm(input)
-              .then((created) => {
-                setCreating(false);
-                loadSwarms(created.swarm.id);
-                setSelectedId(created.swarm.id);
-              })
-              .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-              .finally(() => setBusy(false));
+            try {
+              const created = await swarmApi.createSwarm(input);
+              setCreating(false);
+              loadSwarms(created.swarm.id);
+              setSelectedId(created.swarm.id);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+      )}
+
+      {deleting && (
+        <DeleteSwarmDialog
+          name={deleting.name}
+          onClose={() => setDeleting(null)}
+          onDelete={async () => {
+            await swarmApi.deleteSwarm(deleting.id);
+            setSelectedId(null);
+            setDetail(null);
+            loadSwarms();
           }}
         />
       )}

@@ -19,3 +19,6 @@
  * ceiling on what a template may allow, not what one should.
  */
 export const MAX_SWARM_WORKERS = 10;
+
+/** The goal is stored as text and sent to the planner as its opening brief. */
+export const MAX_SWARM_GOAL_CHARS = 100_000;

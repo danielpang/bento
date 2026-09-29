@@ -3,6 +3,7 @@ import {
   agentRuns,
   repositories,
   runArtifacts,
+  runEvents,
   sandboxes,
   swarmLandings,
   swarmMessages,
@@ -708,10 +709,9 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
  * about, and the swarm sits at "running" forever with nothing moving.
  * Every swarm with one flaky worker ended that way.
  *
- * So a leaf whose run is gone and whose report never arrived is failed,
- * with the reason on the row. Failing it is what puts it in front of
- * the planner, which can reject it back to assigned, split it, or give
- * up on it. Silence cannot be any of those.
+ * A successful run may end with a final message but miss the report
+ * tool. That message is still useful to the planner, so recover it as
+ * a report. A run without either is failed, with the reason on the row.
  *
  * Runs first: a leaf with no run at all has not started yet, and is
  * left to the spawn step rather than failed for never having begun.
@@ -755,6 +755,30 @@ async function settleWorkedLeaves(
     // A run row that is gone takes its leaf with it: there is nothing
     // left that could still report, so this is the same case.
     if (run && (ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) continue;
+    if (task.nodeType === "leaf" && run?.status === "succeeded") {
+      const [lastMessage] = await tx
+        .select({ payload: runEvents.payload })
+        .from(runEvents)
+        .where(and(eq(runEvents.runId, run.id), eq(runEvents.type, "message"), sql`${runEvents.payload} ->> 'role' = 'assistant'`))
+        .orderBy(desc(runEvents.seq))
+        .limit(1);
+      const text = (lastMessage?.payload as { text?: unknown } | undefined)?.text;
+      const report = typeof text === "string" ? text.trim() : "";
+      if (report) {
+        await tx.update(swarmTasks).set({ report, attention: null, endedAt: task.endedAt ?? now, updatedAt: now })
+          .where(eq(swarmTasks.id, task.id));
+        await tx.insert(swarmTaskEvents).values({
+          taskId: task.id,
+          kind: "reported",
+          runId: run.id,
+          detail: { source: "final_message", reportToolMissing: true },
+        });
+        task.report = report;
+        task.attention = null;
+        events.push({ type: "swarm_task_updated", projectId: swarm.projectId, swarmId: swarm.id, taskId: task.id, status: task.status });
+        continue;
+      }
+    }
     const reason = run?.error?.trim()
       ? `the agent working it stopped: ${run.error.trim()}`
       : task.nodeType === "plan"
@@ -870,6 +894,7 @@ async function rollUp(
   }
 
   const next = new Map<string, { status: TaskStatus; cost: Cost }>();
+  const subtreeStatus = new Map<string, TaskStatus>();
   let changedCount = 0;
 
   /** Depth first, so a node is decided only after its children are. */
@@ -878,6 +903,7 @@ async function rollUp(
     if (children.length === 0) {
       const cost = leafCost(task);
       next.set(task.id, { status: task.status, cost });
+      subtreeStatus.set(task.id, task.status);
       return cost;
     }
     /*
@@ -897,8 +923,24 @@ async function rollUp(
     const own = leafCost(task);
     let cost = own;
     for (const child of children) cost = addCost(cost, visit(child));
+    const contained = children
+      .filter((child) => child.parentRelation === "contains")
+      .map((child) => subtreeStatus.get(child.id)!);
+    const dependent = children
+      .filter((child) => child.parentRelation === "depends_on")
+      .map((child) => subtreeStatus.get(child.id)!);
+    // Only contained work decides a plan node's own status. Dependent
+    // work waits for that status to become done, then contributes to
+    // the status of the larger tree without reopening its prerequisite.
+    const status = task.nodeType === "plan" ? rollUpStatus(task.status, contained) : task.status;
+    subtreeStatus.set(
+      task.id,
+      status === "done" && dependent.length > 0
+        ? rollUpStatus(status, [status, ...dependent])
+        : status,
+    );
     next.set(task.id, {
-      status: rollUpStatus(task.status, children.map((c) => next.get(c.id)!.status)),
+      status,
       cost: own,
     });
     return cost;
@@ -1186,6 +1228,7 @@ async function deliverPlannerWake(
 
 /** The agent the planner runs as, which a swarm gets from its template. */
 async function plannerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  if (swarm.plannerProfileId) return swarm.plannerProfileId;
   if (!swarm.templateId) return null;
   const [template] = await tx
     .select({ plannerProfileId: swarmTemplates.plannerProfileId })
@@ -1196,6 +1239,7 @@ async function plannerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Pro
 }
 
 async function workerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  if (swarm.workerProfileId) return swarm.workerProfileId;
   if (!swarm.templateId) return null;
   const [template] = await tx
     .select({ workerProfileId: swarmTemplates.workerProfileId })
@@ -1259,6 +1303,22 @@ function withoutSpawnRefusal(flags: unknown): Record<string, unknown> {
   return rest;
 }
 
+/** A dependent leaf waits until every prerequisite above it has finished. */
+export function leafAncestorsDone(task: Task, byId: Map<string, Task>): boolean {
+  const seen = new Set<string>([task.id]);
+  let current = task;
+  while (current.parentId) {
+    const parentId = current.parentId;
+    if (seen.has(parentId)) return false;
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) return false;
+    if (current.parentRelation === "depends_on" && parent.status !== "done") return false;
+    current = parent;
+  }
+  return true;
+}
+
 /**
  * Puts an agent on every ready leaf the swarm still has room for.
  *
@@ -1311,8 +1371,10 @@ async function spawnWorkers(
   const delegatedRunIds = await spawnSubPlanners(tx, swarm, tasks, deps, events, now);
   runIds.push(...delegatedRunIds);
 
+  const byId = new Map(tasks.map((task) => [task.id, task]));
   const ready = tasks.filter(
-    (task) => task.nodeType === "leaf" && task.status === "assigned" && !isDocumentAssembly(task),
+    (task) => task.nodeType === "leaf" && task.status === "assigned" &&
+      !isDocumentAssembly(task) && leafAncestorsDone(task, byId),
   );
   if (ready.length === 0) return { runIds, refusal: null, cap: null };
 

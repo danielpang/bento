@@ -49,7 +49,7 @@ export async function ensureDefaultSwarmTemplate(
       ownerId: owner.ownerId,
       organizationId: owner.organizationId,
       name: "Default",
-      description: "The planner and worker a swarm uses when nobody has chosen others.",
+      description: "",
       plannerProfileId: agents.planner,
       workerProfileId: agents.worker,
       /**

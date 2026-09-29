@@ -1706,6 +1706,9 @@ export const swarms = pgTable(
     goal: text("goal").notNull().default(""),
     /** The template this was started from, kept for attribution only. */
     templateId: uuid("template_id").references(() => swarmTemplates.id, { onDelete: "set null" }),
+    /** The chosen agents for this swarm, copied from the template or selected at creation. */
+    plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
     status: text("status", {
       enum: [
         "draft",
@@ -1739,6 +1742,8 @@ export const swarms = pgTable(
     }),
     /** The single branch every task lands onto. */
     branchName: text("branch_name"),
+    /** When its local checkout was removed so the branch can be opened elsewhere. */
+    branchReleasedAt: timestamp("branch_released_at", { withTimezone: true }),
     /**
      * The swarm's own machine: where the planner runs and where the
      * merge queue does its landings. Workers get their own, recorded on
@@ -1838,6 +1843,12 @@ export const swarmTasks = pgTable(
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
     /** Null at the top of the tree. Deleting a node takes its subtree. */
     parentId: uuid("parent_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "cascade" }),
+    /**
+     * Containment rolls a child's status into its parent. A dependency
+     * still draws the child below its parent, but waits for that
+     * parent's own work to finish without changing its status.
+     */
+    parentRelation: text("parent_relation", { enum: ["contains", "depends_on"] }).notNull().default("contains"),
     position: integer("position").notNull().default(0),
     /**
      * What type of node this is in the tree. A plan node is decomposed

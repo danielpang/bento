@@ -11,6 +11,7 @@ import {
   trustedCostUsd,
   withProviderOutageAdvice,
   withTrustedCost,
+  type AgentEvent,
   type RunOutcome,
 } from "@bento/core";
 import {
@@ -623,6 +624,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         ctx.driver.exec(handle, argv, {
           cwd: workdir,
           env: execEnv,
+          sessionKey: runId,
           timeoutMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60 * 1000,
           signal: controller.signal,
           ...(liveChannel ? { stdin: liveChannel } : {}),
@@ -630,7 +632,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       // Straight to the bus, no row: the transcript gets the finished
       // message; open streams get the typing.
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
-      onEvent: async (event) => {
+      onEvent: async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         if (ctx.draining) return;
         if (!agentReported) {
@@ -651,7 +653,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           sessionRecorded = true;
           await ctx.db.update(agentRuns).set({ cliSessionId: event.sessionId }).where(eq(agentRuns.id, runId));
         }
-        await appendRunEvent(ctx, runId, withTrustedCost(profile.cli, profile.model, event));
+        await appendRunEvent(ctx, runId, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
@@ -2384,6 +2386,18 @@ async function resumeInterruptedRun(
   // attach leaves no misleading "reattached" line and no stale abort
   // handle behind.
   const controller = new AbortController();
+  // Docker's detached exec records every output line under a stable run
+  // key. Start after the last event this server committed, so a deploy
+  // neither loses lines nor duplicates Poolside output (which has no
+  // native event ids). The prior events still inform the outcome when
+  // the CLI's result was committed just before the restart.
+  const durableEvents = ctx.driver.provider === "docker"
+    ? (await ctx.db.select({ payload: runEvents.payload }).from(runEvents)
+        .where(eq(runEvents.runId, run.id)).orderBy(asc(runEvents.seq)))
+        .map((row) => row.payload as AgentEvent & { sandboxCursor?: number })
+        .filter((event) => typeof event.sandboxCursor === "number")
+    : [];
+  const afterCursor = Math.max(0, ...durableEvents.map((event) => event.sandboxCursor ?? 0));
   /**
    * Retried, because a rejection is "could not ask", not "no session":
    * boot often races the same network or platform hiccup that caused
@@ -2397,6 +2411,8 @@ async function resumeInterruptedRun(
     for (let attempt = 0; ; attempt++) {
       try {
         return await ctx.driver.attach!(handle, argv, {
+          sessionKey: run.id,
+          afterCursor,
           timeoutMs,
           signal: controller.signal,
           ...(liveChannel ? { stdin: liveChannel } : {}),
@@ -2462,6 +2478,17 @@ async function resumeInterruptedRun(
     await liveSession.onTurnFinished(ok);
   };
 
+  // A durable Docker replay starts after the last committed event. If
+  // that event completed a live turn just before the deploy, rebuild
+  // the conversation's idle/delivery state from it as well as the
+  // transcript. confirmDelivered is safe when the old process already
+  // performed it.
+  const lastCommittedResult = durableEvents.findLast((event) => event.type === "result");
+  if (lastCommittedResult?.type === "result" && liveSession) {
+    await confirmDelivered(ctx.db, run.id);
+    await onTurnFinished(lastCommittedResult.ok);
+  }
+
   /**
    * The agent did not pause for the deploy. Whatever it said between
    * the old process going quiet and this attach reached no transcript:
@@ -2485,24 +2512,23 @@ async function resumeInterruptedRun(
   // run. Without the set the stream is delivered as it always was, and
   // recovery loads a set of its own, so a failure here costs it
   // nothing but a second attempt at the same query.
-  /*
-   * Only a card's run. Recovery reads and writes the transcript a
-   * feature owns, and a swarm's run has no feature to own one: handing
-   * it the swarm's workspace key would query cards by a key no card
-   * has. A swarm resuming simply delivers its stream unfiltered, which
-   * is what every run did before this existed.
-   */
-  const persisted = recovery && subject.kind === "pipeline"
-    ? await loadPersistedIds(ctx, recovery, subject.feature.id).catch((err: unknown) => {
+  // Docker replays from its durable cursor. Sprite replays its live
+  // session and uses the CLI's native ids to close transcript gaps.
+  const persisted = recovery && ctx.driver.provider !== "docker"
+    ? await loadPersistedIds(
+        ctx, recovery,
+        subject.kind === "pipeline" ? subject.feature.id : run.id,
+        subject.kind === "pipeline" ? "feature" : "run",
+      ).catch((err: unknown) => {
         console.warn(`could not load the transcript's ids for run ${run.id}; delivering the stream unfiltered:`, err);
         return null;
       })
     : null;
-  if (recovery && run.cliSessionId && subject.kind === "pipeline") {
+  if (recovery && run.cliSessionId && ctx.driver.provider !== "docker") {
     await recoverMissedMessages(ctx, {
       handle,
       adapter,
-      featureId: subject.feature.id,
+      ...(subject.kind === "pipeline" ? { featureId: subject.feature.id } : {}),
       runId: run.id,
       sessionId: run.cliSessionId,
       cwd: workdir,
@@ -2519,15 +2545,16 @@ async function resumeInterruptedRun(
       adapter,
       argv,
       exec: () => stream,
+      initialEvents: durableEvents,
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
-      onEvent: async (event) => {
+      onEvent: async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         if (ctx.draining) return;
         // The session started in the run's first life, and that life
         // wrote the marker. An init here is the sandbox replaying it.
         if (event.type === "init") return;
         if (recovery && persisted && isPersisted(recovery, persisted, event)) return;
-        await appendRunEvent(ctx, run.id, withTrustedCost(profile.cli, profile.model, event));
+        await appendRunEvent(ctx, run.id, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);
           await onTurnFinished(event.ok);
@@ -2863,4 +2890,8 @@ function describeSandboxError(err: unknown): string {
   // The tail, because an installer's useful line is its last one and a
   // run record is not the place for a megabyte of progress bars.
   return `${base}\n${output.trim().split("\n").slice(-20).join("\n")}`;
+}
+
+function withDockerCursor(event: AgentEvent, cursor: number | undefined): AgentEvent {
+  return cursor === undefined ? event : { ...event, sandboxCursor: cursor } as unknown as AgentEvent;
 }

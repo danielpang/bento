@@ -1,19 +1,18 @@
-import { MAX_SWARM_WORKERS } from "@bento/core";
+import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { useMemo, useState } from "react";
 import { Modal } from "./Modal.js";
-import { estimateSwarm, formatUsd, tierLabel, tierNote } from "../swarm/money.js";
-import { creationNotes, type ModeSurfaces } from "../swarm/plan.js";
+import { cappedUsd, estimateSwarm, formatUsd } from "../swarm/money.js";
+import type { ModeSurfaces } from "../swarm/plan.js";
 import type { NewSwarmInput, SwarmTemplate } from "../swarm/types.js";
+import { visibleTemplateDescription } from "../swarm/template-description.js";
+import type { SwarmAgent } from "../swarm/client.js";
+import { SwarmAgentSelect } from "./SwarmAgentSelect.js";
 
 /**
  * Starting a swarm.
  *
- * The dialog is a cost decision as much as a work decision, so a
- * template's cost shape sits beside it where it has one: which model
- * plans, which model works, and which tier each tool reports in. A
- * person choosing a template is choosing how much of their bill will
- * be a measurement and how much a guess, and that is said here rather
- * than discovered on the header afterwards.
+ * The dialog asks for the goal, the agents, and the limits. It shows
+ * one estimated spend figure when the template has enough information.
  *
  * It asks for what the create route takes and nothing else. A field
  * the server has no home for is a promise the console cannot keep, so
@@ -39,6 +38,7 @@ const STARTING_WORKERS = 1;
 export function NewSwarmDialog({
   projectId,
   templates,
+  agents,
   surfaces,
   busy,
   onClose,
@@ -46,15 +46,23 @@ export function NewSwarmDialog({
 }: {
   projectId: string;
   templates: SwarmTemplate[];
+  agents: SwarmAgent[];
   surfaces: ModeSurfaces;
   busy?: boolean;
   onClose: () => void;
-  onCreate: (input: NewSwarmInput) => void;
+  onCreate: (input: NewSwarmInput) => Promise<void>;
 }) {
   const [templateId, setTemplateId] = useState(templates[0]?.id ?? "");
   const template = templates.find((entry) => entry.id === templateId) ?? templates[0] ?? null;
+  const [plannerChoice, setPlannerChoice] = useState<string | null>(null);
+  const [workerChoice, setWorkerChoice] = useState<string | null>(null);
+  const plannerProfileId = plannerChoice ?? template?.plannerProfileId ??
+    agents.find((agent) => agent.name === "Swarm Planner")?.id ?? agents[0]?.id ?? "";
+  const workerProfileId = workerChoice ?? template?.workerProfileId ??
+    agents.find((agent) => agent.name === "Swarm Worker")?.id ?? agents[1]?.id ?? agents[0]?.id ?? "";
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
+  const [error, setError] = useState("");
   const [budget, setBudget] = useState("");
   /*
    * What the template says to start with, or one when there is none.
@@ -85,15 +93,8 @@ export function NewSwarmDialog({
     () => (template ? estimateSwarm(template, leaves) : { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0}),
     [template, leaves],
   );
-  /**
-   * Whether this template says what a run of it costs.
-   *
-   * Templates carry ceilings today and no cost shape, and an estimate
-   * of nothing printed as a figure would read as a swarm that is free.
-   * So the shape and the estimate are drawn when there is one and left
-   * out when there is not.
-   */
-  const hasCostShape = (template?.tools.length ?? 0) > 0 || leaves > 0;
+  /** A template with no task count cannot support a meaningful total. */
+  const hasCostShape = leaves > 0;
 
   // The server names the branch after the swarm, so this is a preview
   // of what it will be rather than a choice.
@@ -111,7 +112,9 @@ export function NewSwarmDialog({
    * and no way out: creating a swarm was what seeded the first
    * template.
    */
-  const ready = name.trim() !== "" && goal.trim() !== "" && branchRefusal === null;
+  const goalLength = goal.trim().length;
+  const goalTooLong = goalLength > MAX_SWARM_GOAL_CHARS;
+  const ready = name.trim() !== "" && goalLength > 0 && !goalTooLong && branchRefusal === null;
 
   return (
     <Modal
@@ -132,6 +135,7 @@ export function NewSwarmDialog({
       <div className="swarm-new">
         <div className="swarm-new-templates">
           <span className="label">Template</span>
+          {templates.length === 0 && <p className="muted">No saved templates. Default limits will be used.</p>}
           {templates.map((entry) => (
             <button
               key={entry.id}
@@ -141,50 +145,35 @@ export function NewSwarmDialog({
               aria-pressed={entry.id === templateId}
               onClick={() => {
                 setTemplateId(entry.id);
+                setPlannerChoice(null);
+                setWorkerChoice(null);
                 setWorkers(clampWorkers(entry.maxWorkers, MAX_SWARM_WORKERS));
               }}
             >
               <span className="swarm-template-name">{entry.name}</span>
-              <span className="muted">{entry.description}</span>
+              {visibleTemplateDescription(entry.description) && (
+                <span className="muted">{visibleTemplateDescription(entry.description)}</span>
+              )}
             </button>
           ))}
         </div>
 
-        {template && hasCostShape && (
-          <div className="swarm-new-shape">
-            <span className="label">Cost shape</span>
-            <dl className="swarm-shape">
-              <div>
-                <dt>Planner</dt>
-                <dd>{template.plannerModel}</dd>
-              </div>
-              <div>
-                <dt>Worker</dt>
-                <dd>{template.workerModel}</dd>
-              </div>
-              <div>
-                <dt>Assumed per task</dt>
-                <dd>{formatUsd(template.assumedUsdPerLeaf)}</dd>
-              </div>
-            </dl>
-            <ul className="swarm-tools">
-              {template.tools.map((tool) => (
-                <li key={tool.name} title={tierNote(tool.tier)}>
-                  <span className="swarm-tool-name">{tool.name}</span>
-                  <span className="chip" data-tier={tool.tier}>
-                    {tierLabel(tool.tier)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <p className="muted">
-              Each tool reports its spend in one of three ways, and the swarm keeps them apart:
-              measured is the tool&apos;s own figure, estimated comes from the tokens it printed, and
-              assumed is this template&apos;s guess for a tool that reports nothing.
-            </p>
-          </div>
-        )}
-
+        <div className="field-row swarm-agent-row">
+          <SwarmAgentSelect
+            label="Planner agent"
+            value={plannerProfileId}
+            agents={agents}
+            onChange={setPlannerChoice}
+            fallback="Template planner"
+          />
+          <SwarmAgentSelect
+            label="Worker agent"
+            value={workerProfileId}
+            agents={agents}
+            onChange={setWorkerChoice}
+            fallback="Template worker"
+          />
+        </div>
         <label className="field">
           <span className="field-heading">Name</span>
           <input
@@ -204,7 +193,13 @@ export function NewSwarmDialog({
             rows={4}
             placeholder="What should be true when this is finished?"
             onChange={(e) => setGoal(e.target.value)}
+            aria-invalid={goalTooLong}
+            aria-describedby="new-swarm-goal-length"
           />
+          <span id="new-swarm-goal-length" className={goalTooLong ? "error" : "muted"}>
+            {goalLength.toLocaleString()} / {MAX_SWARM_GOAL_CHARS.toLocaleString()} characters
+            {goalTooLong ? ". Shorten the goal to create this swarm." : ""}
+          </span>
         </label>
 
         <div className="field-row">
@@ -233,17 +228,7 @@ export function NewSwarmDialog({
               value={workers}
               onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), MAX_SWARM_WORKERS))}
             />
-            <span className="muted">
-              {/*
-                * The template's number is where the field starts, and
-                * the route takes whatever is sent here over it, so
-                * saying "up to N on this template" would be the
-                * console stating a rule nothing enforces.
-                */}
-              {template
-                ? `${template.maxWorkers} is what this template starts with. Up to ${MAX_SWARM_WORKERS} at once.`
-                : `Up to ${MAX_SWARM_WORKERS} at once.`}
-            </span>
+            <span className="muted">Starts with value set here, maximum is {MAX_SWARM_WORKERS} workers</span>
           </label>
         </div>
 
@@ -257,33 +242,23 @@ export function NewSwarmDialog({
           />
           <span className="muted">
             {continuing
-              ? `The swarm's own branch is cut from ${continuing}, and its planner is told what is on it and what its pull request is still being asked about.`
-              : "Leave this empty for a new branch. Name one that already exists to carry on from it, review comments included."}
+              ? `This swarm starts from ${continuing}. The planner will see its existing work and pull request comments.`
+              : "Leave blank for a new branch, or enter an existing branch to continue its work."}
           </span>
           {branchRefusal && <span className="swarm-reopen-refusal">{branchRefusal}</span>}
         </label>
 
-        {/*
-          * The money lines, and which of them this mode has.
-          *
-          * The estimate is split the three ways the run will report
-          * in. Local mode has no plan and no agent hour pool, so it
-          * gets the estimate and nothing else: one list, decided in
-          * `creationNotes`, rather than three conditions to keep in
-          * step.
-          */}
-        <p className="muted">
-          Creating a swarm puts its planner to work. Nothing else starts until you have read the plan
-          and pressed Start.
-        </p>
+        <p className="muted">Creating a swarm starts the planner. Review its plan, then start the work.</p>
 
-        {template &&
-          hasCostShape &&
-          creationNotes(surfaces, estimate, leaves).map((note) => (
-            <p key={note.id} className={note.emphasis ? "swarm-estimate" : "muted"}>
-              {note.text}
-            </p>
-          ))}
+        {error && <p className="error error-box" role="alert">{error}</p>}
+
+        {template && hasCostShape && surfaces.dollarEstimate && (
+          <div className="swarm-create-estimate">
+            <span className="label">Estimated spend</span>
+            <strong className="spend-figure">{formatUsd(cappedUsd(estimate))}</strong>
+            <span className="muted">Based on {leaves} typical tasks. The actual plan may differ.</span>
+          </div>
+        )}
       </div>
     </Modal>
   );
@@ -297,13 +272,16 @@ export function NewSwarmDialog({
    */
   function submit() {
     if (!ready) return;
-    onCreate({
+    setError("");
+    void onCreate({
       projectId,
       // Absent rather than invented: the server answers it with the
       // Default, and a template id the console made up would be a 404.
       templateId: template?.id ?? null,
       name: name.trim(),
       goal: goal.trim(),
+      ...(plannerProfileId ? { plannerProfileId } : {}),
+      ...(workerProfileId ? { workerProfileId } : {}),
       attachments: [],
       start: continuing ? { kind: "existing-branch", name: continuing } : { kind: "new-branch", name: branchName },
       /*
@@ -316,7 +294,7 @@ export function NewSwarmDialog({
       budgetUsd: parseBudget(budget),
       workers,
       planOnly: true,
-    });
+    }).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 }
 

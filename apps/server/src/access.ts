@@ -118,6 +118,19 @@ export async function getAccessibleRun(ctx: AppContext, c: Context, runId: strin
   return feature ? { run, feature } : null;
 }
 
+/** Read-only output may belong to a card or a swarm. Both paths re-check the parent. */
+export async function getAccessibleRunOutput(ctx: AppContext, c: Context, runId: string) {
+  const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
+  if (!run) return null;
+  if (isPipelineRun(run)) {
+    const feature = await getAccessibleFeature(ctx, c, run.featureId);
+    return feature ? { run, swarm: null } : null;
+  }
+  if (run.type !== "swarm" || !run.swarmId) return null;
+  const swarm = await getAccessibleSwarm(ctx, c, run.swarmId);
+  return swarm ? { run, swarm } : null;
+}
+
 /**
  * The same, for an artifact: a swarm's artifact is not a card's.
  *

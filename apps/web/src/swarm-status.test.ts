@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  attentionNote,
   attentionWords,
   canPause,
   canResume,
   canStart,
   canStop,
+  diagramAttentionWords,
+  diagramTaskTone,
+  diagramTaskWords,
   isAttention,
   isSwarmOver,
+  pausedWords,
   swarmTone,
   swarmWords,
   taskTone,
@@ -76,6 +81,15 @@ test("every task status resolves to one of the console's five hues", () => {
   assert.equal(taskTone("cancelled"), "idle");
 });
 
+test("a failed descendant leaves its plan stalled without a duplicate failure label", () => {
+  assert.equal(diagramTaskWords("failed", "plan"), "stalled");
+  assert.equal(diagramTaskTone("failed", "plan"), "gated");
+  assert.equal(diagramTaskWords("failed", "leaf"), "failed");
+  assert.equal(diagramTaskTone("failed", "leaf"), "failed");
+  assert.equal(diagramAttentionWords("failed", "leaf", "failed"), null);
+  assert.equal(diagramAttentionWords("working", "leaf", "long_running"), "Still running");
+});
+
 test("every swarm status resolves to one of the same five, and is called something", () => {
   const statuses: SwarmStatus[] = [
     "planning",
@@ -93,7 +107,7 @@ test("every swarm status resolves to one of the same five, and is called somethi
     // No underscores reach a person: the strip prints these.
     assert.ok(!swarmWords(status).includes("_"), status);
   }
-  assert.equal(swarmWords("budget_exhausted"), "out of budget");
+  assert.equal(swarmWords("budget_exhausted"), "Budget limit reached");
   assert.equal(swarmWords("waiting"), "waiting for you");
   assert.equal(swarmTone("budget_exhausted"), "gated");
   assert.equal(swarmTone("planning"), "running");
@@ -109,8 +123,8 @@ test("attention is not a status: the same status carries either answer", () => {
   // And the hue for the status is unchanged by it.
   assert.equal(taskTone(plain.status), taskTone(yellow.status));
   assert.equal(attentionWords("none"), null);
-  assert.equal(attentionWords("long_running"), "running long");
-  assert.equal(attentionWords("escalated"), "the planner was told");
+  assert.equal(attentionWords("long_running"), "Still running");
+  assert.equal(attentionWords("escalated"), "Planner notified of long run task");
   /*
    * One sentence per reason, which is the point of carrying the
    * server's own word through. They all read "needs you" once, which
@@ -118,10 +132,17 @@ test("attention is not a status: the same status carries either answer", () => {
    * wants a resolver, a question wants an answer, and a swarm out of
    * money wants a decision about money.
    */
-  assert.equal(attentionWords("question"), "waiting on you");
-  assert.equal(attentionWords("conflict"), "conflict");
-  assert.equal(attentionWords("budget"), "out of budget");
-  assert.equal(attentionWords("plan_limit"), "waiting for agent hours");
+  assert.equal(attentionWords("question"), "Waiting for user approval");
+  assert.equal(attentionWords("conflict"), "Merge conflict");
+  assert.equal(attentionWords("budget"), "Budget limit reached");
+  assert.equal(attentionWords("plan_limit"), "Out of Bento agent hours, enable overage billing to continue");
+});
+
+test("budget and agent-hours warnings use the same copy in task drawers and swarm banners", () => {
+  assert.equal(attentionNote("budget"), pausedWords("budget_exhausted", null));
+  assert.equal(attentionNote("budget"), pausedWords("paused", "budget"));
+  assert.equal(attentionNote("plan_limit"), pausedWords("paused", "plan_limit"));
+  assert.equal(pausedWords("timed_out", null), pausedWords("paused", "time_limit"));
 });
 
 test("attention survives the switch from tree to outline", () => {

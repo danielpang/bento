@@ -8,6 +8,7 @@ import type {
   SwarmArtifact,
   SwarmDetail,
   SwarmLanding,
+  SwarmPlannerRun,
   SwarmNodeDetail,
   SwarmPullRequest,
   SwarmStatus,
@@ -67,12 +68,15 @@ export interface SwarmApi {
    * because reassigning a node is choosing from it. Names only: what
    * the drawer needs is something to put in a menu.
    */
-  listAgents(): Promise<{ id: string; name: string }[]>;
+  listAgents(): Promise<SwarmAgent[]>;
   createSwarm(input: NewSwarmInput): Promise<SwarmDetail>;
+  deleteSwarm(swarmId: string): Promise<void>;
   pauseSwarm(swarmId: string): Promise<void>;
   /** Resuming is starting: one route decides when a swarm may run. */
   resumeSwarm(swarmId: string): Promise<void>;
+  retryPlanner(swarmId: string): Promise<void>;
   stopSwarm(swarmId: string): Promise<void>;
+  releaseSwarmBranch(swarmId: string): Promise<void>;
   /**
    * Takes a finished swarm up again with a follow up.
    *
@@ -92,6 +96,9 @@ export interface SwarmApi {
   setWorkers(swarmId: string, workers: number): Promise<void>;
   /** An answer to the planner is a message to the planner. */
   answerQuestion(swarmId: string, questionId: string, text: string): Promise<void>;
+  /** The planner thread persists independently of any one agent run. */
+  listPlannerMessages(swarmId: string): Promise<SwarmPlannerMessage[]>;
+  messagePlanner(swarmId: string, text: string): Promise<SwarmPlannerMessage>;
   /**
    * Finishes a leaf because a person says it is finished.
    *
@@ -113,7 +120,8 @@ export interface SwarmApi {
    * Edit is what makes a retry worth doing, since a task that failed
    * for saying the wrong thing fails again against the same words.
    */
-  retryTask(swarmId: string, taskId: string): Promise<void>;
+  retryTask(swarmId: string, taskId: string, reason?: string): Promise<void>;
+  retryLanding(swarmId: string, taskId: string): Promise<void>;
   cancelTask(swarmId: string, taskId: string): Promise<void>;
   splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
   /**
@@ -173,6 +181,16 @@ export interface SwarmApi {
   streamSwarm(swarmId: string, onEvent: () => void, onReconnect?: () => void): () => void;
 }
 
+export interface SwarmPlannerMessage {
+  id: string;
+  taskId: string | null;
+  text: string;
+  source: "person" | "system";
+  status: "queued" | "sent" | "delivered";
+  runId: string | null;
+  createdAt: string;
+}
+
 /**
  * The fixtures answer more than the routes do, and only the tests use
  * the extra: opening a pull request is the merge queue's, and until
@@ -195,6 +213,8 @@ export interface FixtureSwarmApi extends SwarmApi {
  */
 export function fixtureSwarmApi(clock: () => number = () => Date.now()): FixtureSwarmApi {
   const byProject = new Map<string, SwarmDetail[]>();
+  const plannerMessages = new Map<string, SwarmPlannerMessage[]>();
+  let plannerMessageNumber = 0;
 
   function projectSwarms(projectId: string): SwarmDetail[] {
     const held = byProject.get(projectId);
@@ -241,6 +261,8 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       name: input.name ?? base.name,
       description: input.description ?? base.description,
       maxWorkers: input.maxWorkers ?? base.maxWorkers,
+      plannerProfileId: input.plannerProfileId !== undefined ? input.plannerProfileId : base.plannerProfileId,
+      workerProfileId: input.workerProfileId !== undefined ? input.workerProfileId : base.workerProfileId,
       workerIsolation: input.workerIsolation ?? base.workerIsolation,
       maxBudgetUsd: input.budgetUsd !== undefined ? input.budgetUsd : base.maxBudgetUsd,
       timeLimitMin: input.timeLimitMin !== undefined ? input.timeLimitMin : base.timeLimitMin,
@@ -320,8 +342,8 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     },
     listAgents() {
       return Promise.resolve([
-        { id: "agent-planner", name: "Planner" },
-        { id: "agent-worker", name: "Worker" },
+        { id: "agent-planner", name: "Swarm Planner", cli: "claude-code", model: "opus" },
+        { id: "agent-worker", name: "Swarm Worker", cli: "codex", model: "gpt-5" },
       ]);
     },
     createSwarm(input) {
@@ -329,10 +351,25 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       projectSwarms(input.projectId).push(created);
       return Promise.resolve(created);
     },
+    deleteSwarm(swarmId) {
+      for (const swarms of byProject.values()) {
+        const index = swarms.findIndex((detail) => detail.swarm.id === swarmId);
+        if (index !== -1) {
+          swarms.splice(index, 1);
+          return Promise.resolve();
+        }
+      }
+      return Promise.reject(new Error("not found"));
+    },
     pauseSwarm(swarmId) {
       return mutate(swarmId, (detail) => {
         detail.swarm.status = "paused";
         detail.swarm.pausedReason = "manual";
+      });
+    },
+    retryPlanner(swarmId) {
+      return mutate(swarmId, (detail) => {
+        if (detail.plannerRun?.status === "failed") detail.plannerRun.status = "queued";
       });
     },
     resumeSwarm(swarmId) {
@@ -345,6 +382,11 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       return mutate(swarmId, (detail) => {
         detail.swarm.status = "stopped";
         detail.swarm.endedAt = new Date(clock()).toISOString();
+      });
+    },
+    releaseSwarmBranch(swarmId) {
+      return mutate(swarmId, (detail) => {
+        detail.branchCheckout = { mode: "worktree", released: true };
       });
     },
     reopenSwarm(swarmId, input) {
@@ -406,6 +448,23 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         void text;
       });
     },
+    listPlannerMessages(swarmId) {
+      return Promise.resolve([...(plannerMessages.get(swarmId) ?? [])]);
+    },
+    messagePlanner(swarmId, text) {
+      plannerMessageNumber += 1;
+      const message: SwarmPlannerMessage = {
+        id: `planner-message-${plannerMessageNumber}`,
+        taskId: null,
+        text: text.trim(),
+        source: "person",
+        status: "queued",
+        runId: null,
+        createdAt: new Date(clock()).toISOString(),
+      };
+      plannerMessages.set(swarmId, [...(plannerMessages.get(swarmId) ?? []), message]);
+      return Promise.resolve(message);
+    },
     listArtifacts(swarmId) {
       // The fixtures capture nothing, so there is nothing to list.
       // Empty rather than invented: the panel draws only when a swarm
@@ -419,7 +478,7 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       // The fixtures carry commits on the task itself, which is where
       // they lived before the node route existed. No events: nothing
       // in the fixtures writes one.
-      return Promise.resolve({ taskId, commits: task?.commits ?? [], events: [] });
+      return Promise.resolve({ taskId, commits: task?.commits ?? [], events: [], runs: [] });
     },
     messageTask(swarmId, taskId, text) {
       void swarmId;
@@ -456,13 +515,25 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
      * fixture that tried to reproduce it would be a second set of
      * rules to keep in step.
      */
-    retryTask(swarmId, taskId) {
+    retryTask(swarmId, taskId, reason) {
       return mutate(swarmId, (detail) => {
         detail.tasks = detail.tasks.map((task) =>
           task.id === taskId
-            ? { ...task, status: "assigned", attention: "none", report: null, endedAt: null }
+            ? { ...task, status: "assigned", attention: "none", report: null, endedAt: null,
+                flags: reason ? { ...task.flags, rejection: reason } : task.flags }
             : task,
         );
+      });
+    },
+    retryLanding(swarmId, taskId) {
+      return mutate(swarmId, (detail) => {
+        detail.swarm.status = "running";
+        detail.tasks = detail.tasks.map((task) => task.id === taskId
+          ? { ...task, status: "landed", attention: "none", flags: { ...task.flags, landingError: undefined } }
+          : task);
+        detail.landings = detail.landings.map((landing) => landing.taskId === taskId && landing.status === "failed"
+          ? { ...landing, status: "queued", error: null }
+          : landing);
       });
     },
     cancelTask(swarmId, taskId) {
@@ -496,6 +567,7 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
             ...parent,
             id: `${taskId}-${index + 1}`,
             parentId: taskId,
+            parentRelation: "contains" as const,
             position: index,
             nodeType: "leaf" as const,
             status: "open" as const,
@@ -518,6 +590,7 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
             ...parent,
             id: `${parentId}-added-${detail.tasks.length}`,
             parentId,
+            parentRelation: parent.nodeType === "leaf" ? "depends_on" as const : "contains" as const,
             position: detail.tasks.filter((row) => row.parentId === parentId).length,
             nodeType: "leaf" as const,
             status: "assigned" as const,
@@ -605,6 +678,7 @@ export interface WireSwarmRow extends WireSwarm {
 export interface WireTask {
   id: string;
   parentId: string | null;
+  parentRelation?: "contains" | "depends_on";
   position: number;
   title: string;
   description: string;
@@ -644,13 +718,17 @@ export interface WireLanding {
 export interface WireDetail {
   swarm: WireSwarm;
   tasks: WireTask[];
+  agentTimeMs?: number;
   activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
+  plannerRun?: SwarmPlannerRun | null;
   /**
    * Optional, because a detail from a server that predates the merge
    * queue has none and a panel that read undefined.length would take
    * the whole page down over a field that is only ever informational.
    */
   landings?: WireLanding[];
+  landingSummary?: { total: number; committed: number };
+  branchCheckout?: { mode: "worktree" | "remote"; released: boolean };
   /** Optional for the same reason the landings are. */
   pullRequests?: WirePullRequest[];
 }
@@ -667,6 +745,7 @@ export interface WireNode {
     runId: string | null;
     detail: Record<string, unknown> | null;
   }[];
+  runs?: { id: string; status: string; queuedAt: string; startedAt: string | null; endedAt: string | null; error: string | null }[];
 }
 
 /** One pull request a finished swarm opened, as the detail sends it. */
@@ -681,15 +760,14 @@ export interface WirePullRequest {
 /**
  * What the templates panel may set on a template.
  *
- * A subset of the column list on purpose: the agents, the operating
- * instructions and the judge are chosen in the Agents panel beside it
- * and carried by the swarm file, and a form that asked for all of them
- * would be the swarm file with worse errors. What is here is what a
- * person changes between one swarm and the next.
+ * The two role assignments and the limits a person changes between
+ * swarms. Agent profiles hold the harness and model for each role.
  */
 export interface TemplateInput {
   name: string;
   description: string;
+  plannerProfileId?: string | null;
+  workerProfileId?: string | null;
   maxWorkers: number;
   /** Null clears the cap, which is not the same as a cap of zero. */
   budgetUsd: number | null;
@@ -710,10 +788,20 @@ export interface WireTemplate {
   id: string;
   name: string;
   description: string;
+  plannerProfileId?: string | null;
+  workerProfileId?: string | null;
   workerIsolation?: "sandbox" | "worktree";
   maxWorkers: number;
   budgetUsd: string | null;
   timeLimitMin: number | null;
+}
+
+/** An agent profile's harness and model, shown when assigning swarm roles. */
+export interface SwarmAgent {
+  id: string;
+  name: string;
+  cli: string;
+  model: string;
 }
 
 /**
@@ -800,6 +888,7 @@ export function toTask(row: WireTask): SwarmTask {
   return {
     id: row.id,
     parentId: row.parentId,
+    parentRelation: row.parentRelation ?? "contains",
     position: row.position,
     title: row.title,
     description: row.description,
@@ -905,6 +994,8 @@ export function toTemplate(row: WireTemplate): SwarmTemplate {
     id: row.id,
     name: row.name,
     description: row.description,
+    plannerProfileId: row.plannerProfileId ?? null,
+    workerProfileId: row.workerProfileId ?? null,
     plannerModel: "",
     workerModel: "",
     tools: [],
@@ -946,6 +1037,8 @@ function templateBody(input: Partial<TemplateInput>): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (input.name !== undefined) body.name = input.name;
   if (input.description !== undefined) body.description = input.description;
+  if (input.plannerProfileId !== undefined) body.plannerProfileId = input.plannerProfileId;
+  if (input.workerProfileId !== undefined) body.workerProfileId = input.workerProfileId;
   if (input.maxWorkers !== undefined) body.maxWorkers = input.maxWorkers;
   if (input.budgetUsd !== undefined) body.budgetUsd = input.budgetUsd;
   if (input.timeLimitMin !== undefined) body.timeLimitMin = input.timeLimitMin;
@@ -1001,8 +1094,8 @@ export function httpSwarmApi(
       return toTemplate(await post<WireTemplate>(`/api/swarms/${swarmId}/template`, { name }));
     },
     async listAgents() {
-      const rows = await call<{ id: string; name: string }[]>("/api/profiles");
-      return rows.map((row) => ({ id: row.id, name: row.name }));
+      const rows = await call<SwarmAgent[]>("/api/profiles");
+      return rows.map((row) => ({ id: row.id, name: row.name, cli: row.cli, model: row.model }));
     },
     async createSwarm(input) {
       /*
@@ -1021,6 +1114,8 @@ export function httpSwarmApi(
         projectId: input.projectId,
         title: input.name,
         goal: input.goal,
+        ...(input.plannerProfileId ? { plannerProfileId: input.plannerProfileId } : {}),
+        ...(input.workerProfileId ? { workerProfileId: input.workerProfileId } : {}),
         ...(input.templateId ? { templateId: input.templateId } : {}),
         maxWorkers: input.workers,
         ...(input.budgetUsd === null ? {} : { budgetUsd: input.budgetUsd }),
@@ -1034,8 +1129,17 @@ export function httpSwarmApi(
     async resumeSwarm(swarmId) {
       await post(`/api/swarms/${swarmId}/start`);
     },
+    async retryPlanner(swarmId) {
+      await post(`/api/swarms/${swarmId}/planner/retry`);
+    },
     async stopSwarm(swarmId) {
       await post(`/api/swarms/${swarmId}/cancel`);
+    },
+    async releaseSwarmBranch(swarmId) {
+      await post(`/api/swarms/${swarmId}/branch/release`);
+    },
+    async deleteSwarm(swarmId) {
+      await call<void>(`/api/swarms/${swarmId}`, { method: "DELETE" });
     },
     async reopenSwarm(swarmId, input) {
       // The ceilings travel only when the dialog collected them. An
@@ -1059,8 +1163,11 @@ export function httpSwarmApi(
     async markTaskDone(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/done`);
     },
-    async retryTask(swarmId, taskId) {
-      await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`);
+    async retryTask(swarmId, taskId, reason) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, reason ? { reason } : {});
+    },
+    async retryLanding(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/landing/retry`);
     },
     async cancelTask(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/cancel`);
@@ -1086,6 +1193,13 @@ export function httpSwarmApi(
     },
     async messageTask(swarmId, taskId, text) {
       await post(`/api/swarms/${swarmId}/messages`, { text, taskId });
+    },
+    async listPlannerMessages(swarmId) {
+      const rows = await call<SwarmPlannerMessage[]>(`/api/swarms/${swarmId}/messages`);
+      return rows.filter((row) => row.taskId === null && row.source === "person");
+    },
+    async messagePlanner(swarmId, text) {
+      return post<SwarmPlannerMessage>(`/api/swarms/${swarmId}/messages`, { text });
     },
     streamSwarm(swarmId, onEvent, onReconnect) {
       // No EventSource is not an error: the console still works, it
@@ -1119,7 +1233,11 @@ export function toDetail(detail: WireDetail): SwarmDetail {
   return {
     swarm: toSwarm(detail.swarm, working),
     tasks: detail.tasks.map(toTask),
+    agentTimeMs: Number(detail.agentTimeMs ?? 0),
+    plannerRun: detail.plannerRun ?? null,
     landings: (detail.landings ?? []).map(toLanding),
+    landingSummary: detail.landingSummary,
+    branchCheckout: detail.branchCheckout,
     // The ledger is not served yet. Empty, so nothing is drawn rather
     // than drawn wrong; the panel that reads it renders only when it
     // holds something.
@@ -1173,6 +1291,7 @@ export function toNode(taskId: string, node: WireNode): SwarmNodeDetail {
       runId: event.runId,
       detail: event.detail,
     })),
+    runs: (node.runs ?? []).map((run) => ({ ...run })),
   };
 }
 

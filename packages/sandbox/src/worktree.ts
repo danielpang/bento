@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -14,7 +15,7 @@ const run = promisify(execFile);
 function isStaleRegistration(err: unknown): boolean {
   const text =
     err instanceof Error ? `${err.message}${"stderr" in err ? String(err.stderr) : ""}` : String(err);
-  return /missing but already registered worktree|already used by worktree/i.test(text);
+  return /missing but (?:already registered|locked) worktree|already used by worktree/i.test(text);
 }
 
 /**
@@ -204,9 +205,19 @@ export class WorktreeManager {
     // list`: git prints resolved paths (/private/var vs /var on macOS),
     // so string comparison misses live worktrees.
     if (await isDirectory(worktreePath)) {
-      await run("git", ["-C", worktreePath, "rev-parse", "--git-dir"]);
-      if (options.moveExisting) await this.switchBranch(worktreePath, branch, startFromBranch);
-      return;
+      try {
+        await run("git", ["-C", worktreePath, "rev-parse", "--git-dir"]);
+        if (options.moveExisting) await this.switchBranch(worktreePath, branch, startFromBranch);
+        await this.lock(repoPath, worktreePath);
+        return;
+      } catch (error) {
+        // Only repair a broken link, never a failed branch switch or a
+        // lock error. An orphan can contain uncommitted agent work, so
+        // move it aside intact instead of deleting or resetting it.
+        const stillValid = await run("git", ["-C", worktreePath, "rev-parse", "--git-dir"]).then(() => true, () => false);
+        if (stillValid || !(await this.isOrphanedWorktree(repoPath, worktreePath))) throw error;
+        await rename(worktreePath, `${worktreePath}.orphan-${randomUUID()}`);
+      }
     }
 
     // Said outright rather than left to git's "cannot change to"
@@ -275,6 +286,30 @@ export class WorktreeManager {
       const start = await startPointIn(repoPath, base);
       await this.add(repoPath, ["-b", branch, worktreePath, ...(start ? [start] : [])]);
     }
+    await this.lock(repoPath, worktreePath);
+  }
+
+  private async isOrphanedWorktree(repoPath: string, worktreePath: string): Promise<boolean> {
+    const marker = await readFile(path.join(worktreePath, ".git"), "utf8").catch(() => "");
+    const gitdir = /^gitdir: (.+)\s*$/m.exec(marker)?.[1];
+    if (!gitdir) return false;
+    const source = await run("git", ["-C", repoPath, "rev-parse", "--absolute-git-dir"]).then((r) => r.stdout.trim(), () => "");
+    return Boolean(source) && path.resolve(gitdir).startsWith(`${path.resolve(source, "worktrees")}${path.sep}`);
+  }
+
+  /**
+   * A Docker workspace may live in OrbStack's Linux /var/tmp while its
+   * source .git lives on macOS. Git on macOS sees that worktree path as
+   * missing and can prune its metadata while the sandbox is working.
+   * Locking the registration keeps the two views of /var/tmp from
+   * invalidating an active checkout.
+   */
+  private async lock(repoPath: string, worktreePath: string): Promise<void> {
+    try {
+      await run("git", ["-C", repoPath, "worktree", "lock", "--reason", "Bento workspace", worktreePath]);
+    } catch (err) {
+      if (!/already locked/i.test(String(err))) throw err;
+    }
   }
 
   /**
@@ -332,6 +367,13 @@ export class WorktreeManager {
       await run("git", ["-C", repoPath, "worktree", "add", ...args]);
     } catch (err) {
       if (!isStaleRegistration(err)) throw err;
+      const { stdout } = await run("git", ["-C", repoPath, "worktree", "list", "--porcelain"]);
+      for (const record of stdout.trim().split("\n\n")) {
+        const at = /^worktree (.+)$/m.exec(record)?.[1];
+        if (at && /^locked Bento workspace$/m.test(record) && !(await isDirectory(at))) {
+          await run("git", ["-C", repoPath, "worktree", "unlock", at]);
+        }
+      }
       await run("git", ["-C", repoPath, "worktree", "prune", "--expire=now"]);
       await run("git", ["-C", repoPath, "worktree", "add", ...args]);
     }
@@ -373,6 +415,7 @@ export class WorktreeManager {
         );
       }
     }
+    await run("git", ["-C", repoPath, "worktree", "unlock", stale]).catch(() => {});
     await run("git", ["-C", repoPath, "worktree", "remove", "--force", stale]).catch(async () => {
       // remove refuses paths it cannot stat; prune clears the record.
       await run("git", ["-C", repoPath, "worktree", "prune"]);
@@ -381,6 +424,7 @@ export class WorktreeManager {
 
   async remove(repoPath: string, workspaceKey: string, repoName: string): Promise<void> {
     try {
+      await run("git", ["-C", repoPath, "worktree", "unlock", this.worktreePath(workspaceKey, repoName)]).catch(() => {});
       await run("git", [
         "-C",
         repoPath,

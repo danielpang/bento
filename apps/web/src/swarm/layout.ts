@@ -15,11 +15,11 @@ import type { NodeType, SpendTier, SwarmSpend, SwarmTask, TaskAttention, TaskSta
  */
 
 /** A node card, in pixels. Roughly a title, a ring, a status, a cost. */
-export const NODE_WIDTH = 124;
-export const NODE_HEIGHT = 80;
+export const NODE_WIDTH = 184;
+export const NODE_HEIGHT = 108;
 /** Between two neighbouring leaves, and between two rows. */
-export const COLUMN_GAP = 24;
-export const ROW_GAP = 56;
+export const COLUMN_GAP = 32;
+export const ROW_GAP = 64;
 
 /** Horizontal distance between one leaf's left edge and the next. */
 export const COLUMN_PITCH = NODE_WIDTH + COLUMN_GAP;
@@ -70,11 +70,14 @@ export interface FollowUp {
 export interface SwarmNode {
   id: string;
   parentId: string | null;
+  parentRelation: "contains" | "depends_on";
   childIds: string[];
   depth: number;
   title: string;
   nodeType: NodeType;
   status: TaskStatus;
+  /** This node has its own agent run, rather than inheriting working from children. */
+  agentActive: boolean;
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
   weight: number;
@@ -116,6 +119,7 @@ export interface SwarmEdge {
   id: string;
   parentId: string;
   childId: string;
+  relation: "contains" | "depends_on";
   /** A cubic bezier from the parent's bottom centre to the child's top. */
   path: string;
 }
@@ -146,6 +150,10 @@ export interface SwarmModel {
 export interface ModelOptions {
   /** Nodes a person opened by hand, which stay open however done they are. */
   expanded?: Iterable<string>;
+  /** Nodes a person folded by hand, even while work below them is active. */
+  folded?: Iterable<string>;
+  /** Finished swarms keep their full tree visible unless a person folds it. */
+  autoCollapseCompleted?: boolean;
   /** The instant the model is for. Passed, never read from the clock. */
   now?: number;
   /** How long a working leaf may run before it turns yellow. */
@@ -195,6 +203,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   const now = options.now ?? 0;
   const longRunMs = options.longRunMs ?? LONG_RUN_WARNING_MS;
   const expanded = new Set(options.expanded ?? []);
+  const folded = new Set(options.folded ?? []);
 
   const byId = new Map<string, SwarmNode>();
   const childIds = new Map<string, string[]>();
@@ -204,11 +213,13 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
     byId.set(task.id, {
       id: task.id,
       parentId: task.parentId,
+      parentRelation: task.parentRelation ?? "contains",
       childIds: [],
       depth: 0,
       title: task.title,
       nodeType: task.nodeType,
       status: task.status,
+      agentActive: task.status === "working" && task.assignedRunId !== null,
       attention: attentionFor(task, now, longRunMs),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
       ownCost: task.cost,
@@ -320,10 +331,13 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
        * double.
        */
       let cost = node.ownCost;
-      let doneWeight = 0;
-      let totalWeight = 0;
-      let doneLeaves = 0;
-      let totalLeaves = 0;
+      // A leaf may be a prerequisite for children and still be work of
+      // its own. Count it as well as its descendants in the rollup.
+      const ownLeaf = node.nodeType === "leaf" && !isAbandoned(node.status);
+      let doneWeight = ownLeaf && isDone(node.status) ? node.weight : 0;
+      let totalWeight = ownLeaf ? node.weight : 0;
+      let doneLeaves = ownLeaf && isDone(node.status) ? 1 : 0;
+      let totalLeaves = ownLeaf ? 1 : 0;
       let frontierPath = node.frontier;
       for (const kid of kids) {
         cost = addSpend(cost, kid.cost);
@@ -346,22 +360,23 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   /*
    * Collapse, from the top down.
    *
-   * A subtree with nothing left to do folds into one filled node; the
-   * frontier never does, because the frontier is the part somebody is
-   * watching. Opening a node by hand keeps it open, and everything
-   * under a folded node is hidden rather than removed: the outline
-   * still lists it, and the same model answers both views.
+   * A subtree with nothing left to do folds into one filled node. A
+   * person may also fold a live subtree. Opening a node by hand keeps
+   * it open, and everything under a folded node is hidden rather than
+   * removed: the outline still lists it, and the same model answers
+   * both views.
    */
   for (const node of nodes) {
     // Folded away by an ancestor already: nothing under it to decide.
     if (node.hidden) continue;
-    const foldable =
+    const complete =
+      options.autoCollapseCompleted !== false &&
       node.childIds.length > 0 &&
       node.totalLeaves > 0 &&
       node.doneLeaves === node.totalLeaves &&
       !node.frontierPath &&
       !expanded.has(node.id);
-    if (foldable) {
+    if (node.childIds.length > 0 && (folded.has(node.id) || complete)) {
       node.collapsed = true;
       hideSubtree(node, byId);
     }
@@ -410,6 +425,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
         id: `${node.id}:${child.id}`,
         parentId: node.id,
         childId: child.id,
+        relation: child.parentRelation,
         path: edgePath(node, child),
       });
     }
@@ -488,8 +504,10 @@ export interface OutlineRow {
   id: string;
   depth: number;
   title: string;
+  parentRelation: "contains" | "depends_on";
   nodeType: NodeType;
   status: TaskStatus;
+  agentActive: boolean;
   attention: TaskAttention;
   completion: number;
   cost: SwarmSpend;
@@ -516,8 +534,10 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     id: node.id,
     depth: node.depth,
     title: node.title,
+    parentRelation: node.parentRelation,
     nodeType: node.nodeType,
     status: node.status,
+    agentActive: node.agentActive,
     attention: node.attention,
     completion: node.completion,
     cost: node.cost,
@@ -595,7 +615,7 @@ export function createModelCache(): (tasks: SwarmTask[], options?: ModelOptions)
   let lastKey = "";
   let last: SwarmModel | null = null;
   return (tasks, options = {}) => {
-    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}`;
+    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}`;
     if (last && lastTasks === tasks && lastKey === key) return last;
     last = buildSwarmModel(tasks, options);
     lastTasks = tasks;

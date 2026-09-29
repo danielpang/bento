@@ -1,4 +1,4 @@
-import type { SwarmStatus, TaskAttention, TaskStatus } from "./types.js";
+import type { NodeType, SwarmStatus, TaskAttention, TaskStatus } from "./types.js";
 
 /**
  * What a status looks like, and what it is called.
@@ -17,6 +17,11 @@ import type { SwarmStatus, TaskAttention, TaskStatus } from "./types.js";
  * lose it.
  */
 export type Tone = "running" | "succeeded" | "failed" | "gated" | "idle";
+
+const BUDGET_LIMIT_LABEL = "Budget limit reached";
+const BUDGET_LIMIT_WARNING = "This swarm has reached its budget limit. Raise the limit to start more agents. Work already committed stays on the branch.";
+const TIME_LIMIT_WARNING = "This swarm reached its time limit. Work already committed stays on the branch. Raise the limit to continue.";
+const AGENT_HOURS_WARNING = "This team has used all of its agent hours. New agents will start when more hours are available.";
 
 /** A task's own status as one of the five hues. Attention is not consulted. */
 export function taskTone(status: TaskStatus): Tone {
@@ -77,7 +82,7 @@ export function swarmWords(status: SwarmStatus): string {
     case "stopped":
       return "stopped";
     case "budget_exhausted":
-      return "out of budget";
+      return BUDGET_LIMIT_LABEL;
     case "timed_out":
       return "out of time";
     case "failed":
@@ -111,6 +116,21 @@ export function taskWords(status: TaskStatus): string {
   }
 }
 
+/** A failed group can still recover when its failed descendant is retried. */
+export function diagramTaskWords(status: TaskStatus, nodeType: NodeType): string {
+  return nodeType === "plan" && status === "failed" ? "stalled" : taskWords(status);
+}
+
+export function diagramTaskTone(status: TaskStatus, nodeType: NodeType): Tone {
+  return nodeType === "plan" && status === "failed" ? "gated" : taskTone(status);
+}
+
+/** Do not print the same failure twice on a leaf. */
+export function diagramAttentionWords(status: TaskStatus, nodeType: NodeType, attention: TaskAttention): string | null {
+  const words = attentionWords(attention);
+  return words === diagramTaskWords(status, nodeType) ? null : words;
+}
+
 /**
  * The second axis, in words. Null when nothing is asking for anybody,
  * which is most of the tree most of the time.
@@ -124,19 +144,19 @@ export function taskWords(status: TaskStatus): string {
 export function attentionWords(attention: TaskAttention): string | null {
   switch (attention) {
     case "long_running":
-      return "running long";
+      return "Still running";
     case "escalated":
-      return "the planner was told";
+      return "Planner notified of long run task";
     case "question":
-      return "waiting on you";
+      return "Waiting for user approval";
     case "failed":
       return "failed";
     case "conflict":
-      return "conflict";
+      return "Merge conflict";
     case "budget":
-      return "out of budget";
+      return BUDGET_LIMIT_LABEL;
     case "plan_limit":
-      return "waiting for agent hours";
+      return "Out of Bento agent hours, enable overage billing to continue";
     default:
       return null;
   }
@@ -151,19 +171,19 @@ export function attentionWords(attention: TaskAttention): string | null {
 export function attentionNote(attention: TaskAttention): string | null {
   switch (attention) {
     case "long_running":
-      return "This has been going longer than this swarm's warning threshold. The transcript below says whether it is working or going round in circles.";
+      return "The agent has been running past the warning threshold. Check worker logs to verify.";
     case "escalated":
-      return "It went past the escalation threshold, so the planner was woken with the last of its transcript. It can wait, message the worker, split the task, or cancel it. So can you.";
+      return "This agent is taking longer than expected. The planner has been notified. Check the logs for progress.";
     case "question":
-      return "Something here needs an answer before it can go on.";
+      return "Planner is waiting for user response before continuing.";
     case "failed":
-      return "This one did not finish. Retry it, edit it and retry it, or give it to a different agent.";
+      return "The worker failed. Retry the task to start another attempt.";
     case "conflict":
-      return "Its branch could not be landed as it was. A resolver agent reconciles it, and a second conflict fails the task.";
+      return "This branch cannot be merged yet. An agent will try to resolve the conflict. If it conflicts again, the task will fail.";
     case "budget":
-      return "This swarm has spent its budget, so nothing new starts. Raise the budget to carry on; what has landed is kept.";
+      return BUDGET_LIMIT_WARNING;
     case "plan_limit":
-      return "This team has used the agent hours on its plan, so nothing new starts. It carries on by itself when the hours come back.";
+      return AGENT_HOURS_WARNING;
     default:
       return null;
   }
@@ -197,25 +217,25 @@ export function pausedWords(
   reason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null,
 ): string | null {
   if (status === "budget_exhausted") {
-    return "This swarm has spent its budget. Nothing running was stopped, and raising the budget starts it again.";
+    return BUDGET_LIMIT_WARNING;
   }
   if (status === "timed_out") {
-    return "This swarm reached its time limit. What landed is kept, and raising the limit starts it again.";
+    return TIME_LIMIT_WARNING;
   }
   if (status !== "paused") return null;
   switch (reason) {
     case "plan_limit":
-      return "This team has used the agent hours on its plan, so no new agents are starting. The swarm carries on by itself when the hours come back.";
+      return AGENT_HOURS_WARNING;
     case "budget":
-      return "This swarm has spent its budget, so no new agents are starting.";
+      return BUDGET_LIMIT_WARNING;
     case "time_limit":
-      return "This swarm reached its time limit, so no new agents are starting.";
+      return TIME_LIMIT_WARNING;
     case "attention":
       return "Something in this swarm is waiting on you.";
     case "error":
       return "This swarm stopped on an error. Its plan and everything that landed are still here.";
     default:
-      return "Paused. Agents that were working finished their turn; Resume starts the next one.";
+      return "This swarm is paused. Resume it to continue.";
   }
 }
 

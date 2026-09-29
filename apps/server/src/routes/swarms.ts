@@ -10,6 +10,7 @@ import {
   projects,
   repositories,
   runArtifacts,
+  runEvents,
   sandboxes,
   swarmLandings,
   swarmMessages,
@@ -31,13 +32,14 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
-import { queueSwarmSandboxReap } from "../orchestrator/reap-sandbox.js";
+import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { ensureDefaultSwarmTemplate } from "../orchestrator/swarm/default-template.js";
-import { MAX_SWARM_WORKERS } from "@bento/core";
+import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
+import { branchCheckoutPath, releaseSwarmBranch } from "../orchestrator/swarm/release-branch.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
 import { commitsForTask } from "../orchestrator/swarm/landing-git.js";
 import {
@@ -45,6 +47,7 @@ import {
   addedTaskNotice,
   cancelTaskTree,
   reassignLeaf,
+  reactivateSwarmForRetry,
   retryLeaf,
   retryRefusal,
   splitLeaf,
@@ -101,6 +104,23 @@ export const RUNNER_PROJECT_REFUSAL =
 const LANDINGS_SHOWN = 20;
 const LANDINGS_HISTORY = 10;
 
+/** A restart can overwrite a failure the agent already recorded. Show the agent's reason. */
+async function plannerFailureText(ctx: AppContext, c: Context, run: { id: string; error: string | null }) {
+  const results = await db(c, ctx)
+    .select({ payload: runEvents.payload })
+    .from(runEvents)
+    .where(and(eq(runEvents.runId, run.id), eq(runEvents.type, "result")))
+    .orderBy(desc(runEvents.seq))
+    .limit(20);
+  const agentError = results
+    .map(({ payload }) => {
+      const value = (payload as { error?: unknown }).error;
+      return typeof value === "string" ? value.trim() : "";
+    })
+    .find((error) => error !== "" && !/server restart|Bento restarted/i.test(error));
+  return agentError ?? run.error;
+}
+
 /**
  * How much of one node's history the drawer is sent.
  *
@@ -135,8 +155,10 @@ const saveAsTemplate = z.object({
 const createSwarm = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(200),
-  goal: z.string().max(20_000).default(""),
+  goal: z.string().max(MAX_SWARM_GOAL_CHARS).default(""),
   templateId: z.string().uuid().nullish(),
+  plannerProfileId: z.string().uuid().optional(),
+  workerProfileId: z.string().uuid().optional(),
   maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).optional(),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
@@ -296,7 +318,22 @@ export function swarmRoutes(ctx: AppContext) {
         ? await getAccessibleSwarmTemplate(ctx, c, body.templateId)
         : await ensureDefaultSwarmTemplate(ctx, c, project.organizationId);
       if (!template) return c.json({ error: "not found" }, 404);
-      if (!template.plannerProfileId) {
+      for (const profileId of [body.plannerProfileId, body.workerProfileId]) {
+        if (!profileId) continue;
+        const [profile] = await db(c, ctx)
+          .select({ ownerId: agentProfiles.ownerId, organizationId: agentProfiles.organizationId })
+          .from(agentProfiles)
+          .where(eq(agentProfiles.id, profileId))
+          .limit(1);
+        if (!profile || (project.organizationId
+          ? profile.organizationId !== project.organizationId
+          : profile.organizationId !== null || profile.ownerId !== actor(c))) {
+          return c.json({ error: "agent not found" }, 404);
+        }
+      }
+      const plannerProfileId = body.plannerProfileId ?? template.plannerProfileId;
+      const workerProfileId = body.workerProfileId ?? template.workerProfileId;
+      if (!plannerProfileId) {
         return c.json(
           { error: "This swarm template has no planner agent, so there is nobody to write the plan. Choose one under Swarm templates." },
           400,
@@ -330,6 +367,8 @@ export function swarmRoutes(ctx: AppContext) {
           title: body.title,
           goal: body.goal,
           templateId: template.id,
+          plannerProfileId,
+          workerProfileId,
           // Planning, not draft: the planner starts below, and a person
           // watching should see that rather than a swarm that looks
           // like it is waiting for them.
@@ -359,7 +398,7 @@ export function swarmRoutes(ctx: AppContext) {
           type: "swarm" as const,
           swarmId: swarm.id,
           role: "planner",
-          agentProfileId: template.plannerProfileId,
+          agentProfileId: plannerProfileId,
           // Empty, so the executor builds the planner's own opening
           // prompt: it needs the checkout paths, which do not exist
           // until the sandbox does.
@@ -421,6 +460,38 @@ export function swarmRoutes(ctx: AppContext) {
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
         .orderBy(desc(agentRuns.queuedAt));
+      const [{ agentTimeMs = 0 } = { agentTimeMs: 0 }] = await db(c, ctx)
+        .select({ agentTimeMs: sql<number>`coalesce(sum(case
+          when ${agentRuns.startedAt} is not null
+            and (${agentRuns.endedAt} is not null or ${agentRuns.status} = 'running')
+            and ${agentRuns.billable} = true
+            and (${agentRuns.error} is null or ${agentRuns.error} not like 'sandbox provisioning failed:%')
+          then greatest(0, extract(epoch from (coalesce(${agentRuns.endedAt}, now()) - ${agentRuns.startedAt})) * 1000)
+          else 0 end), 0)::double precision` })
+        .from(agentRuns)
+        .where(eq(agentRuns.swarmId, swarm.id));
+      const [plannerRun] = await db(c, ctx)
+        .select({
+          id: agentRuns.id,
+          status: agentRuns.status,
+          error: agentRuns.error,
+          agentProfileId: agentRuns.agentProfileId,
+          queuedAt: agentRuns.queuedAt,
+          startedAt: agentRuns.startedAt,
+          endedAt: agentRuns.endedAt,
+        })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner")))
+        .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
+        .limit(1);
+      const [plannerAgent] = plannerRun
+        ? await db(c, ctx)
+            .select({ name: agentProfiles.name, cli: agentProfiles.cli, model: agentProfiles.model })
+            .from(agentProfiles)
+            .where(eq(agentProfiles.id, plannerRun.agentProfileId))
+            .limit(1)
+        : [];
+      const plannerError = plannerRun?.status === "failed" ? await plannerFailureText(ctx, c, plannerRun) : plannerRun?.error ?? null;
       /**
        * The merge queue, as the panel draws it: what is waiting, what
        * is landing, and the last of what has landed.
@@ -476,6 +547,13 @@ export function swarmRoutes(ctx: AppContext) {
         .orderBy(desc(swarmLandings.endedAt), desc(swarmLandings.createdAt))
         .limit(LANDINGS_HISTORY);
       const landings = [...inQueue, ...finished];
+      const [landingSummary] = await db(c, ctx)
+        .select({
+          total: sql<number>`count(*)::integer`,
+          committed: sql<number>`count(*) filter (where ${swarmLandings.status} = 'landed')::integer`,
+        })
+        .from(swarmLandings)
+        .where(eq(swarmLandings.swarmId, swarm.id));
       /**
        * What the swarm published, for the chips on the header.
        *
@@ -494,7 +572,67 @@ export function swarmRoutes(ctx: AppContext) {
         .from(swarmPullRequests)
         .where(eq(swarmPullRequests.swarmId, swarm.id))
         .orderBy(asc(swarmPullRequests.createdAt));
-      return c.json({ swarm, tasks, activeRuns: runs, landings, pullRequests });
+      return c.json({
+        swarm,
+        tasks,
+        activeRuns: runs,
+        agentTimeMs,
+        plannerRun: plannerRun ? { ...plannerRun, error: plannerError, agent: plannerAgent ?? null } : null,
+        landings,
+        landingSummary: landingSummary ?? { total: 0, committed: 0 },
+        branchCheckout: {
+          mode: ctx.driver.provider === "sprite" ? "remote" : "worktree",
+          released: swarm.branchReleasedAt !== null,
+        },
+        pullRequests,
+      });
+    })
+    .post("/:id/branch/release", async (c) => {
+      const accessible = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!accessible) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, accessible.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      if (ctx.driver.provider === "sprite") {
+        return c.json({ error: "This deployment does not keep a local swarm worktree." }, 409);
+      }
+      const [swarm] = await db(c, ctx)
+        .select()
+        .from(swarms)
+        .where(eq(swarms.id, accessible.id))
+        .for("update");
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      if (swarm.branchReleasedAt) return c.json({ released: true });
+      if (swarm.status !== "done") {
+        return c.json({ error: "Finish the swarm before releasing its branch." }, 409);
+      }
+      if (await swarmHasActiveRun(db(c, ctx), swarm.id)) {
+        return c.json({ error: "An agent is still working. Wait for it to finish before releasing the branch." }, 409);
+      }
+      const [pending] = await db(c, ctx)
+        .select({ count: sql<number>`count(*)::integer` })
+        .from(swarmLandings)
+        .where(and(eq(swarmLandings.swarmId, swarm.id), inArray(swarmLandings.status, ["queued", "landing", "conflicted"])));
+      if (pending?.count) {
+        return c.json({ error: "The merge queue still has branches to process." }, 409);
+      }
+      const repos = await db(c, ctx)
+        .select({ name: repositories.name, localPath: repositories.localPath })
+        .from(repositories)
+        .where(eq(repositories.projectId, swarm.projectId));
+      if (!swarm.branchName || repos.length === 0) {
+        return c.json({ error: "This swarm has no local branch to release." }, 409);
+      }
+      try {
+        // The finished swarm may still have an idle container mounting
+        // this directory. Stop it before Git removes the checkout.
+        await reapSwarmSandbox(ctx, swarm.id);
+        await releaseSwarmBranch(ctx.worktrees, swarm.id, swarm.branchName, repos);
+      } catch (error) {
+        return c.json({ error: error instanceof Error ? error.message : "Could not release the branch." }, 409);
+      }
+      await db(c, ctx).update(swarms).set({ branchReleasedAt: new Date() }).where(eq(swarms.id, swarm.id));
+      saySwarmChanged(ctx, c, swarm, "done");
+      return c.json({ released: true });
     })
     .patch("/:id", zValidator("json", updateSwarm), async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
@@ -711,6 +849,57 @@ export function swarmRoutes(ctx: AppContext) {
      * same two refusals: there is no second door with its own idea of
      * when a swarm may run.
      */
+    .post("/:id/planner/retry", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      if (swarm.status !== "planning") {
+        return c.json({ error: "Only a swarm waiting for its first plan can retry the planner." }, 409);
+      }
+      const [latest] = await db(c, ctx)
+        .select({ status: agentRuns.status, agentProfileId: agentRuns.agentProfileId })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner")))
+        .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
+        .limit(1);
+      if (latest?.status !== "failed") {
+        return c.json({ error: "The planner has not failed, so there is nothing to retry." }, 409);
+      }
+      const [{ count } = { count: 0 }] = await db(c, ctx)
+        .select({ count: sql<number>`count(*)::int` })
+        .from(swarmTasks)
+        .where(eq(swarmTasks.swarmId, swarm.id));
+      if (count > 0) {
+        return c.json({ error: "This swarm already has a plan. Start it or send the planner a message." }, 409);
+      }
+      const plannerProfileId = swarm.plannerProfileId ?? latest.agentProfileId;
+      const run = await startRunIfIdle(
+        db(c, ctx),
+        {
+          type: "swarm",
+          swarmId: swarm.id,
+          role: "planner",
+          agentProfileId: plannerProfileId,
+          prompt: "",
+          executor: "server",
+          startedBy: actor(c),
+        },
+        ctx.entitlements,
+        ctx.analytics,
+        (task) => deferAfterCommit(c, async () => task()),
+      );
+      if (run === "gone") return c.json({ error: "not found" }, 404);
+      if (run === "busy" || run === SWARM_FULL) {
+        return c.json({ error: "The planner is already working. Wait for it to finish." }, 409);
+      }
+      if ("outOfCompute" in run) {
+        return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
+      }
+      deferAfterCommit(c, () => enqueueRun(ctx, run.id));
+      saySwarmChanged(ctx, c, swarm, "planning");
+      return c.json({ runId: run.id }, 201);
+    })
     .post("/:id/start", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
@@ -722,8 +911,21 @@ export function swarmRoutes(ctx: AppContext) {
         .from(swarmTasks)
         .where(and(eq(swarmTasks.swarmId, swarm.id), sql`${swarmTasks.status} <> 'cancelled'`));
       if (count === 0) {
+        const [latestPlanner] = await db(c, ctx)
+          .select({ id: agentRuns.id, status: agentRuns.status, error: agentRuns.error })
+          .from(agentRuns)
+          .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner")))
+          .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
+          .limit(1);
+        if (latestPlanner?.status === "failed") {
+          const error = await plannerFailureText(ctx, c, latestPlanner);
+          return c.json({
+            error: `The planner failed before it could make a plan. ${error ?? "Check the planner run for details."} Retry the planner.`,
+            code: "PLANNER_FAILED",
+          }, 409);
+        }
         return c.json(
-          { error: "This swarm has no plan yet, so there is nothing to start. Wait for the planner, or send it a message.", code: "NO_PLAN" },
+          { error: "This swarm has no plan yet, so there is nothing to start. Wait for the planner or check its output.", code: "NO_PLAN" },
           409,
         );
       }
@@ -808,6 +1010,22 @@ export function swarmRoutes(ctx: AppContext) {
           );
         }
 
+        if (swarm.branchReleasedAt && swarm.branchName && ctx.driver.provider !== "sprite") {
+          const repos = await db(c, ctx)
+            .select({ name: repositories.name, localPath: repositories.localPath })
+            .from(repositories)
+            .where(eq(repositories.projectId, swarm.projectId));
+          for (const repo of repos) {
+            const checkout = await branchCheckoutPath(repo.localPath, swarm.branchName);
+            if (checkout) {
+              return c.json({
+                error: `Switch ${repo.name} to another branch before reopening this swarm. ${swarm.branchName} is checked out at ${checkout}.`,
+                code: "BRANCH_IN_USE",
+              }, 409);
+            }
+          }
+        }
+
         const reopened = await db(c, ctx).transaction((tx) =>
           reopenSwarm(tx as unknown as Db, swarm, {
             instruction: body.instruction,
@@ -887,8 +1105,8 @@ export function swarmRoutes(ctx: AppContext) {
           organizationId: source.organizationId,
           name: body.name,
           description: body.description ?? `Saved from the swarm "${swarm.title}".`,
-          plannerProfileId: source.plannerProfileId,
-          workerProfileId: source.workerProfileId,
+          plannerProfileId: swarm.plannerProfileId ?? source.plannerProfileId,
+          workerProfileId: swarm.workerProfileId ?? source.workerProfileId,
           plannerInstructions: source.plannerInstructions,
           workerInstructions: source.workerInstructions,
           workerIsolation: source.workerIsolation,
@@ -1140,8 +1358,21 @@ export function swarmRoutes(ctx: AppContext) {
         .limit(TASK_EVENTS_SHOWN);
       events.reverse();
 
+      const runs = await db(c, ctx)
+        .select({
+          id: agentRuns.id,
+          status: agentRuns.status,
+          queuedAt: agentRuns.queuedAt,
+          startedAt: agentRuns.startedAt,
+          endedAt: agentRuns.endedAt,
+          error: agentRuns.error,
+        })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmTaskId, task.id), eq(agentRuns.role, "worker")))
+        .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id));
+
       const commits = await taskCommits(ctx, c, swarm, task);
-      return c.json({ task, events, commits });
+      return c.json({ task, events, runs, commits });
     })
     /**
      * Marks a leaf done, because a person says so.
@@ -1253,7 +1484,10 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
-      const finished = finishedTaskMutationRefusal(c, swarm);
+      const body = await c.req.json().catch(() => ({}));
+      const parsed = z.object({ reason: z.string().trim().min(1).max(4000).optional() }).safeParse(body);
+      if (!parsed.success) return c.json({ error: "Invalid retry request" }, 400);
+      const finished = swarm.status === "failed" ? null : finishedTaskMutationRefusal(c, swarm);
       if (finished) return finished;
 
       /*
@@ -1275,10 +1509,53 @@ export function swarmRoutes(ctx: AppContext) {
        * is the one thing the merge queue cannot sort out afterwards.
        */
       await stopRunsOnTask(ctx, c, task.id);
-      const retried = await retryLeaf(db(c, ctx), { task, actorUserId: actor(c) });
+      const retried = await retryLeaf(db(c, ctx), { task, actorUserId: actor(c), ...(parsed.data.reason ? { reason: parsed.data.reason } : {}) });
       if ("refused" in retried) return c.json({ error: retried.refused, code: "NOT_A_LEAF" }, 409);
+      if (await reactivateSwarmForRetry(db(c, ctx), swarm.id)) {
+        saySwarmChanged(ctx, c, swarm, "running");
+      }
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       return c.json(retried);
+    })
+    .post("/:id/tasks/:taskId/landing/retry", async (c) => {
+      const found = await accessibleTask(ctx, c);
+      if ("refusal" in found) return found.refusal;
+      const { swarm, task } = found;
+      if (swarm.status === "cancelled" || swarm.status === "done" || task.status !== "failed" || typeof task.flags.landingError !== "string") {
+        return c.json({ error: "This task has no failed merge queue entry to retry." }, 409);
+      }
+      const [landing] = await db(c, ctx).select().from(swarmLandings)
+        .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.taskId, task.id), eq(swarmLandings.status, "failed")))
+        .orderBy(desc(swarmLandings.createdAt)).limit(1);
+      if (!landing) return c.json({ error: "This task has no failed merge queue entry to retry." }, 409);
+      if (await swarmHasActiveRun(db(c, ctx), swarm.id)) {
+        return c.json({ error: "An agent is still working on this swarm. Retry the merge queue after it finishes." }, 409);
+      }
+
+      const now = new Date();
+      const retried = await db(c, ctx).transaction(async (tx) => {
+        const [row] = await tx.update(swarmLandings)
+          .set({ status: "queued", error: null, startedAt: null, endedAt: null, updatedAt: now })
+          .where(and(eq(swarmLandings.id, landing.id), eq(swarmLandings.status, "failed")))
+          .returning({ id: swarmLandings.id });
+        if (!row) return false;
+        await tx.update(swarmTasks)
+          .set({
+            status: "landed", attention: null, updatedAt: now,
+            flags: { ...task.flags, landingError: undefined, plannerToldAt: now.toISOString() },
+          })
+          .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "failed")));
+        await reactivateSwarmForRetry(tx as unknown as Db, swarm.id);
+        await tx.insert(swarmTaskEvents).values({
+          taskId: task.id, kind: "status_changed", fromStatus: "failed", toStatus: "landed",
+          detail: { mergeQueueRetry: landing.id },
+        });
+        return true;
+      });
+      if (!retried) return c.json({ error: "This merge queue entry is already being retried." }, 409);
+      deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm, "running");
+      return c.json({ landingId: landing.id, status: "queued" });
     })
     /**
      * Cancels a node, and everything under it.
@@ -1456,7 +1733,7 @@ export function swarmRoutes(ctx: AppContext) {
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
         .limit(1);
       if (active) {
-        return c.json({ error: "Agents are working in this swarm. Pause it and wait for them to stop, then delete." }, 409);
+        return c.json({ error: "Agents are working in this swarm. Stop it or wait for them to finish, then delete." }, 409);
       }
 
       /*

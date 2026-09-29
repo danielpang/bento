@@ -252,6 +252,7 @@ export async function reopenSwarm(
        */
       status: "running",
       pausedReason: null,
+      branchReleasedAt: null,
       reopenCount: followUp,
       // A swarm somebody is working again is not put away, whatever
       // they did with it when it finished.

@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { BetaOnly } from "../beta.js";
 import { MAX_SWARM_WORKERS } from "@bento/core";
-import { swarmApi, type TemplateInput } from "../swarm/client.js";
+import { swarmApi, type SwarmAgent, type TemplateInput } from "../swarm/client.js";
 import { estimateLine, estimateSwarm, formatUsd, tierLabel, tierNote } from "../swarm/money.js";
 import type { SwarmTemplate } from "../swarm/types.js";
+import { visibleTemplateDescription } from "../swarm/template-description.js";
+import { SwarmAgentSelect, swarmAgentLabel } from "./SwarmAgentSelect.js";
+
+const ConfirmDialog = lazy(() => import("./PromptDialog.js").then((module) => ({ default: module.ConfirmDialog })));
 
 type WorkerIsolation = SwarmTemplate["workerIsolation"];
 
@@ -20,10 +24,8 @@ type WorkerIsolation = SwarmTemplate["workerIsolation"];
  * could not be used at all: the New swarm dialog needs a template, and
  * the only thing that made one was creating a swarm.
  *
- * What is editable here is the ceilings and the name. The agents, the
- * operating instructions and the judge stay with the swarm file, which
- * carries them between installs with the agents they name; a form that
- * asked for all of it would be that file with worse errors.
+ * The planner and worker are explicit choices. Both are agent profiles
+ * with a harness and model, shared with the board's stage assignments.
  *
  * The cost shape is drawn for a template that has one. Nothing on the
  * server records what a tool reports its spend in yet, so today this
@@ -63,19 +65,28 @@ const BLANK: TemplateInput = {
 /** The longest name the route takes, said here so Save can refuse first. */
 const MAX_NAME = 120;
 
-export function SwarmTemplatesPanel() {
+export function SwarmTemplatesPanel({ knownAgents }: { knownAgents: SwarmAgent[] }) {
   const [templates, setTemplates] = useState<SwarmTemplate[] | null>(null);
+  const [agents, setAgents] = useState<SwarmAgent[]>([]);
   const [draft, setDraft] = useState<TemplateInput | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<SwarmTemplate | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAgents(knownAgents);
+  }, [knownAgents]);
 
   useEffect(() => {
     let cancelled = false;
     void swarmApi
       .listTemplates()
-      .then((rows) => {
+      .then(async (rows) => {
         if (!cancelled) setTemplates(rows);
+        // Listing templates seeds the default swarm profiles on a fresh install.
+        const profiles = await swarmApi.listAgents();
+        if (!cancelled) setAgents(profiles);
       })
       .catch(() => {
         if (!cancelled) setTemplates([]);
@@ -112,9 +123,8 @@ export function SwarmTemplatesPanel() {
       <section className="section settings-card">
         <h3 className="settings-title">Swarm templates</h3>
         <p className="muted">
-          A template is the pair of models a swarm runs with, and the ceilings it runs under. The
-          cost shape says which tier each tool reports its spend in, so an estimate can be split
-          before anything is spent.
+          Choose the planner and worker agent profiles for new swarms. Each profile defines its
+          harness and model. Profiles here can also be used on board stages.
         </p>
         {error && <p className="error">{error}</p>}
         {templates === null && <p className="muted">Loading.</p>}
@@ -124,12 +134,10 @@ export function SwarmTemplatesPanel() {
             <span className="gate-check-text">
               <span className="gate-check-name">{template.name}</span>
               <br />
-              {/* The models, when the list says which they are. A
-                  template that does not is left saying its ceilings,
-                  rather than "  plans,   works". */}
-              {template.plannerModel && template.workerModel
-                ? `${template.plannerModel} plans, ${template.workerModel} works`
-                : template.description}
+              {visibleTemplateDescription(template.description) && <>{visibleTemplateDescription(template.description)}<br /></>}
+              Planner: {agentSummary(agents, template.plannerProfileId)}
+              <br />
+              Worker: {agentSummary(agents, template.workerProfileId)}
             </span>
             <span className="swarm-template-tiers">
               {template.tools.map((tool) => (
@@ -152,22 +160,7 @@ export function SwarmTemplatesPanel() {
               <button
                 className="btn btn-ghost"
                 disabled={busy}
-                onClick={() => {
-                  /*
-                   * Asked before it happens, because a template a
-                   * swarm was started from is the record of what that
-                   * swarm is running under. Deleting it does not stop
-                   * the swarm, but it does leave it unable to say
-                   * where its shape came from.
-                   */
-                  if (!confirm(`Delete the template "${template.name}"? Swarms already running are not stopped.`)) {
-                    return;
-                  }
-                  void act(async () => {
-                    await swarmApi.deleteTemplate(template.id);
-                    if (editing === template.id) setEditing(null);
-                  });
-                }}
+                onClick={() => setConfirmingDelete(template)}
               >
                 Delete
               </button>
@@ -190,12 +183,15 @@ export function SwarmTemplatesPanel() {
             title={`Editing ${editingRow.name}`}
             value={{
               name: editingRow.name,
-              description: editingRow.description,
+              description: visibleTemplateDescription(editingRow.description),
               maxWorkers: editingRow.maxWorkers,
               budgetUsd: editingRow.maxBudgetUsd,
               timeLimitMin: editingRow.timeLimitMin,
               workerIsolation: editingRow.workerIsolation,
+              plannerProfileId: editingRow.plannerProfileId,
+              workerProfileId: editingRow.workerProfileId,
             }}
+            agents={agents}
             busy={busy}
             onCancel={() => setEditing(null)}
             onSave={(input) =>
@@ -211,6 +207,7 @@ export function SwarmTemplatesPanel() {
           <TemplateForm
             title="New template"
             value={draft}
+            agents={agents}
             busy={busy}
             onCancel={() => setDraft(null)}
             onSave={(input) =>
@@ -224,10 +221,29 @@ export function SwarmTemplatesPanel() {
 
         {!draft && !editingRow && (
           <div className="actions">
-            <button className="btn" disabled={busy} onClick={() => setDraft({ ...BLANK })}>
+            <button className="btn" disabled={busy} onClick={() => setDraft({
+              ...BLANK,
+              plannerProfileId: agents.find((agent) => agent.name === "Swarm Planner")?.id ?? agents[0]?.id ?? null,
+              workerProfileId: agents.find((agent) => agent.name === "Swarm Worker")?.id ?? agents[0]?.id ?? null,
+            })}>
               New template
             </button>
           </div>
+        )}
+        {confirmingDelete && (
+          <Suspense fallback={null}><ConfirmDialog
+            title={`Delete ${confirmingDelete.name}?`}
+            description="Swarms already running will continue. This template will no longer be available for new swarms."
+            confirmLabel="Delete template"
+            destructive
+            onClose={() => setConfirmingDelete(null)}
+            onConfirm={async () => {
+              await act(async () => {
+                await swarmApi.deleteTemplate(confirmingDelete.id);
+                if (editing === confirmingDelete.id) setEditing(null);
+              });
+            }}
+          /></Suspense>
         )}
       </section>
     </BetaOnly>
@@ -246,18 +262,22 @@ export function SwarmTemplatesPanel() {
 function TemplateForm({
   title,
   value,
+  agents,
   busy,
   onSave,
   onCancel,
 }: {
   title: string;
   value: TemplateInput;
+  agents: SwarmAgent[];
   busy: boolean;
   onSave: (input: TemplateInput) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(value.name);
   const [description, setDescription] = useState(value.description);
+  const [plannerProfileId, setPlannerProfileId] = useState(value.plannerProfileId ?? "");
+  const [workerProfileId, setWorkerProfileId] = useState(value.workerProfileId ?? "");
   const [workers, setWorkers] = useState(String(value.maxWorkers));
   const [budget, setBudget] = useState(value.budgetUsd === null ? "" : String(value.budgetUsd));
   const [minutes, setMinutes] = useState(value.timeLimitMin === null ? "" : String(value.timeLimitMin));
@@ -284,6 +304,11 @@ function TemplateForm({
         <span className="field-heading">Description</span>
         <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
       </label>
+      <div className="field-row">
+        <SwarmAgentSelect label="Planner agent" value={plannerProfileId} agents={agents} onChange={setPlannerProfileId} fallback="Use default planner" />
+        <SwarmAgentSelect label="Worker agent" value={workerProfileId} agents={agents} onChange={setWorkerProfileId} fallback="Use default worker" />
+      </div>
+      <p className="muted">Use New agent to add a harness and model pairing, then assign it here.</p>
       <label className="field">
         <span className="field-heading">Workers</span>
         <input
@@ -337,13 +362,12 @@ function TemplateForm({
             setIsolation(e.target.value === "" ? undefined : (e.target.value as WorkerIsolation))
           }
         >
-          <option value="">Whatever this deployment runs</option>
+          <option value="">Use deployment default</option>
           <option value="worktree">In worktrees of the repository on the server</option>
           <option value="sandbox">On a machine each, holding its own clone</option>
         </select>
         <span className="muted">
-          A deployment whose sandboxes hold their own clones refuses worktrees rather than quietly
-          running the other shape, so leaving this alone is the safe answer.
+          Leave this on default unless your workers need a specific environment.
         </span>
       </label>
       <div className="actions">
@@ -357,6 +381,8 @@ function TemplateForm({
             onSave({
               name: name.trim(),
               description: description.trim(),
+              plannerProfileId: plannerProfileId || null,
+              workerProfileId: workerProfileId || null,
               maxWorkers: workerCount,
               budgetUsd: budgetParsed.value,
               timeLimitMin: minutesParsed.value,
@@ -371,6 +397,12 @@ function TemplateForm({
       </div>
     </div>
   );
+}
+
+function agentSummary(agents: SwarmAgent[], id?: string | null): string {
+  if (!id) return "Default agent";
+  const agent = agents.find((entry) => entry.id === id);
+  return agent ? swarmAgentLabel(agent) : "Agent unavailable";
 }
 
 /**

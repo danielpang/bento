@@ -1,5 +1,5 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
-import { swarmTaskEvents, swarmTasks, type Db } from "@bento/db";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { swarmTaskEvents, swarmTasks, swarms, type Db } from "@bento/db";
 
 /**
  * What can be done to one node, written once.
@@ -90,9 +90,9 @@ export async function descendantIds(tx: TaskWriter, taskId: string): Promise<str
  * planner did not.
  *
  * A person and the planner edit one tree, and this is the half the
- * planner's tools already had: create_task. The rule that makes it
- * safe is the same one create_task follows, which is that a leaf can
- * only hang off a plan node, never off another leaf.
+ * planner's tools already had: create_task. A child under a worker
+ * leaf is dependent work, and the coordinator waits for the parent
+ * worker to finish before starting that child.
  *
  * Assigned rather than open, and that is the choice worth stating. A
  * person adding a task has decided it needs doing; leaving it open
@@ -105,7 +105,7 @@ export async function addLeaf(
   tx: TaskWriter,
   input: {
     swarmId: string;
-    /** The plan node to add it under, or null for a top level leaf. */
+    /** The plan group or prerequisite task, or null for a top level leaf. */
     parent: Task | null;
     title: string;
     description?: string | undefined;
@@ -114,11 +114,6 @@ export async function addLeaf(
   } & Asker,
 ): Promise<Task | SplitRefusal> {
   const now = input.now ?? new Date();
-  if (input.parent && input.parent.nodeType !== "plan") {
-    return {
-      refused: "A task cannot hang off another task. Add it under a plan node, or split that task first.",
-    };
-  }
   if (input.parent && (input.parent.status === "done" || input.parent.status === "cancelled")) {
     return {
       refused: `That part of the plan is ${input.parent.status}, so nothing more belongs under it. Add the task somewhere else, or at the top of the plan.`,
@@ -141,6 +136,7 @@ export async function addLeaf(
     .values({
       swarmId: input.swarmId,
       parentId,
+      parentRelation: input.parent?.nodeType === "leaf" ? "depends_on" : "contains",
       position: next,
       nodeType: "leaf",
       status: "assigned",
@@ -227,6 +223,14 @@ export async function splitLeaf(
   if (task.status === "done") {
     return { refused: `Task ${task.id} is already done, so splitting it would lose its work.` };
   }
+  const [dependent] = await tx
+    .select({ id: swarmTasks.id })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.parentId, task.id))
+    .limit(1);
+  if (dependent) {
+    return { refused: `Task ${task.id} already has dependent work. Move or finish that work before splitting it.` };
+  }
   if (input.children.length === 0) {
     return { refused: "A split needs at least one task to split into." };
   }
@@ -297,12 +301,28 @@ export function retryRefusal(task: Task): string | null {
   if (task.status === "cancelled") {
     return "This task was cancelled. The planner can hand the work out again.";
   }
+  if (task.status === "done" || task.status === "landed") {
+    return "This task's branch already landed. Add follow up work as a new task.";
+  }
   return null;
+}
+
+/** A deliberate retry resumes a person's pause or a failed ending. Plan limits remain in force. */
+export async function reactivateSwarmForRetry(tx: TaskWriter, swarmId: string): Promise<boolean> {
+  const [reactivated] = await tx
+    .update(swarms)
+    .set({ status: "running", pausedReason: null, updatedAt: new Date() })
+    .where(and(eq(swarms.id, swarmId), or(
+      eq(swarms.status, "failed"),
+      and(eq(swarms.status, "paused"), eq(swarms.pausedReason, "manual")),
+    )))
+    .returning({ id: swarms.id });
+  return Boolean(reactivated);
 }
 
 export async function retryLeaf(
   tx: TaskWriter,
-  input: { task: Task; now?: Date } & Asker,
+  input: { task: Task; now?: Date; reason?: string } & Asker,
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
   const now = input.now ?? new Date();
@@ -328,6 +348,7 @@ export async function retryLeaf(
          * told before is not this.
          */
         plannerToldAt: undefined,
+        ...(input.reason !== undefined ? { rejection: input.reason } : {}),
       },
       updatedAt: now,
     })
@@ -339,7 +360,7 @@ export async function retryLeaf(
     fromStatus: task.status,
     toStatus: "assigned",
     ...askedBy(input),
-    detail: { retry: Number.isFinite(retries) ? retries + 1 : 1 },
+    detail: { retry: Number.isFinite(retries) ? retries + 1 : 1, ...(input.reason ? { rejection: input.reason } : {}) },
   });
   return updated ?? task;
 }

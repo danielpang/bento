@@ -25,8 +25,8 @@ export function CompletionRing({
   fraction: number;
   size?: number;
   stroke?: number;
-  /** Brand for a live ring, muted for one nobody is watching. */
-  tone?: "brand" | "muted" | "succeeded";
+  /** The arc can show status while its length shows completion. */
+  tone?: "brand" | "muted" | "running" | "succeeded" | "failed" | "gated" | "idle";
   /** Prints the percentage in the middle. Only the header is big enough. */
   showLabel?: boolean;
   title?: string;
@@ -34,10 +34,11 @@ export function CompletionRing({
   const ring = ringGeometry(fraction, size, stroke);
   const label = formatCompletion(fraction);
   const full = clampFraction(fraction) >= 1;
+  const displayTone = full && (tone === "brand" || tone === "muted") ? "succeeded" : tone;
   return (
     <span
       className="ring"
-      data-tone={full ? "succeeded" : tone}
+      data-tone={displayTone}
       data-full={full ? "" : undefined}
       style={{ width: `${size}px`, height: `${size}px` }}
       role="img"

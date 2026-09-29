@@ -882,7 +882,7 @@ test("every entity route refuses a foreign tenant", async () => {
   );
   const swarm = (await (
     await asOwner("/api/swarms", { method: "POST", body: JSON.stringify({ projectId: project.id, title: "Mine" }) })
-  ).json()) as { id: string };
+  ).json()) as { id: string; plannerRunId: string };
   assert.ok(swarm.id, "the owner's swarm must exist for the swarm routes to be probed");
   const [swarmTask] = await ctx.db
     .insert(swarmTasks)
@@ -1028,10 +1028,12 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/runs/${run.id}/rollback`],
     ["POST", `/api/runs/${run.id}/cancel`],
     ["GET", `/api/runs/${run.id}/transcript`],
+    ["GET", `/api/runs/${swarm.plannerRunId}/transcript`],
     // The SSE stream: for a foreign tenant it must refuse before it
     // ever streams, and it now carries unpersisted draft text that no
     // RLS policy can cover, so the matrix is the only thing pinning it.
     ["GET", `/api/runs/${run.id}/events`],
+    ["GET", `/api/runs/${swarm.plannerRunId}/events`],
     ["GET", `/api/board/${project.id}/events`],
     ["GET", `/api/board/${project.id}/events`],
     ["POST", "/api/linear/mappings", { body: JSON.stringify({ linearTeamId: "team-x", projectId: project.id }) }],
@@ -1094,8 +1096,10 @@ test("every entity route refuses a foreign tenant", async () => {
     // here to prove the access check answers 404.
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ maxWorkers: MAX_SWARM_WORKERS }) }],
     ["POST", `/api/swarms/${swarm.id}/start`],
+    ["POST", `/api/swarms/${swarm.id}/planner/retry`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],
+    ["POST", `/api/swarms/${swarm.id}/branch/release`],
     [
       "POST",
       `/api/swarms/${swarm.id}/template`,
@@ -1130,6 +1134,7 @@ test("every entity route refuses a foreign tenant", async () => {
     // would rewrite a foreign tree, and a reassign would put this
     // caller's own agent, and its credentials, on somebody else's work.
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/retry`],
+    ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/landing/retry`],
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/cancel`],
     [
       "POST",

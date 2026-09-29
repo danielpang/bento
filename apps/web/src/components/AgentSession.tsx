@@ -760,7 +760,7 @@ export function MessageBubble({
 }
 
 /** One row of the conversation, whatever it carries. */
-function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) {
+export function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: boolean }) {
   if (item.kind === "message") {
     if (item.role === "user") {
       return <MessageBubble role="user" speaker="you" text={item.text} />;
@@ -833,12 +833,16 @@ export function toChatItems(
     if (event.type === "init") continue; // The run divider already says a session began.
     flush();
     if (event.type === "message") {
+      // Pool's thought record is agent output, not a Bento notice.
+      // Keep its native event role in storage while showing it in a bubble.
+      const poolThought = event.role === "system" && typeof event.raw === "object" && event.raw !== null
+        && "type" in event.raw && event.raw.type === "thought";
       items.push({
         key: `${keyPrefix}-${n}`,
         kind: "message",
-        role: event.role,
+        role: poolThought ? "assistant" : event.role,
         text: event.text,
-        speaker: event.role === "assistant" ? agentName : event.role === "user" ? "you" : "bento",
+        speaker: poolThought ? `${agentName} thinking` : event.role === "assistant" ? agentName : event.role === "user" ? "you" : "bento",
       });
       n += 1;
       continue;

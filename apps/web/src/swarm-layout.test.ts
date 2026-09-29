@@ -40,6 +40,7 @@ function node(
   return {
     id,
     parentId,
+    parentRelation: extra.parentRelation,
     position: extra.position ?? seq++,
     title: extra.title ?? id,
     description: "",
@@ -47,7 +48,7 @@ function node(
     status,
     attention: extra.attention ?? "none",
     weight: extra.weight ?? 1,
-    assignedRunId: null,
+    assignedRunId: extra.assignedRunId ?? null,
     agentProfileId: extra.agentProfileId ?? null,
     branchName: null,
     cost: extra.cost ?? spend(),
@@ -80,6 +81,32 @@ test("a parent's completion is the weighted share of its leaves that are done", 
   assert.equal(root.totalLeaves, 2);
   // The swarm's own ring is the same figure over every top level node.
   assert.equal(model.root.completion, 0.75);
+});
+
+test("a worker leaf can own dependent tasks without disappearing from progress", () => {
+  const model = buildSwarmModel([
+    node("root", null, "plan", "working"),
+    node("L0", "root", "leaf", "done"),
+    node("L1", "L0", "leaf", "open", { parentRelation: "depends_on" }),
+  ], { now: 0 });
+  assert.equal(model.byId.get("L1")?.depth, 2);
+  assert.ok(model.edges.some((edge) => edge.parentId === "L0" && edge.childId === "L1" && edge.relation === "depends_on"));
+  assert.equal(model.root.totalLeaves, 2);
+  assert.equal(model.root.doneLeaves, 1);
+  assert.equal(model.root.completion, 0.5);
+  assert.equal(model.byId.get("L0")?.collapsed, false, "unfinished descendants remain visible");
+});
+
+test("only a node with its own working agent gets the active halo in both views", () => {
+  const model = buildSwarmModel([
+    node("root", null, "plan", "working"),
+    node("active", "root", "leaf", "working", { assignedRunId: "run-1" }),
+    node("waiting", "root", "leaf", "assigned", { assignedRunId: "run-2" }),
+  ], { now: 0 });
+  assert.equal(model.byId.get("root")?.agentActive, false);
+  assert.equal(model.byId.get("active")?.agentActive, true);
+  assert.equal(model.byId.get("waiting")?.agentActive, false);
+  assert.equal(outlineRows(model).find((row) => row.id === "active")?.agentActive, true);
 });
 
 test("weight decides the share, not the count", () => {
@@ -178,6 +205,24 @@ test("a done subtree collapses to one node and hides its children", () => {
   assert.equal(outlineRows(model).length, 5);
 });
 
+test("a finished swarm keeps its full tree open until a person folds it", () => {
+  const tasks = [
+    node("root", null, "plan", "done"),
+    node("branch", "root", "plan", "done"),
+    node("a", "branch", "leaf", "done"),
+    node("b", "branch", "leaf", "done"),
+  ];
+  const cache = createModelCache();
+  const active = cache(tasks, { now: 0 });
+  assert.deepEqual(visibleNodes(active).map((n) => n.id), ["root"]);
+
+  const finished = cache(tasks, { now: 0, autoCollapseCompleted: false });
+  assert.deepEqual(visibleNodes(finished).map((n) => n.id), ["root", "branch", "a", "b"]);
+
+  const folded = cache(tasks, { now: 0, autoCollapseCompleted: false, folded: ["branch"] });
+  assert.deepEqual(visibleNodes(folded).map((n) => n.id), ["root", "branch"]);
+});
+
 test("the frontier never collapses, however done the rest of it is", () => {
   const base = [
     node("root", null, "plan", "working"),
@@ -215,6 +260,27 @@ test("opening a folded subtree by hand keeps it open", () => {
   const opened = buildSwarmModel(tasks, { now: 0, expanded: ["shipped"] });
   assert.equal(opened.byId.get("shipped")!.collapsed, false);
   assert.equal(opened.byId.get("s1")!.hidden, false);
+});
+
+test("the fold control can hide and reopen a live subtree", () => {
+  const tasks = [
+    node("root", null, "plan", "working"),
+    node("first", "root", "leaf", "assigned"),
+    node("second", "root", "leaf", "open"),
+  ];
+  const cache = createModelCache();
+  const open = cache(tasks, { now: 0 });
+  assert.equal(open.byId.get("root")!.collapsed, false);
+  assert.equal(visibleNodes(open).length, 3);
+
+  const folded = cache(tasks, { now: 0, folded: ["root"] });
+  assert.equal(folded.byId.get("root")!.collapsed, true);
+  assert.equal(folded.byId.get("root")!.frontierPath, true);
+  assert.deepEqual(visibleNodes(folded).map((item) => item.id), ["root"]);
+  assert.equal(folded.width, NODE_WIDTH);
+
+  const reopened = cache(tasks, { now: 0, expanded: ["root"] });
+  assert.deepEqual(visibleNodes(reopened).map((item) => item.id), ["root", "first", "second"]);
 });
 
 test("leaves are spaced evenly and a parent sits centred over its children", () => {
@@ -268,7 +334,7 @@ test("an edge leaves the parent's bottom centre and arrives at the child's top c
   const centre = NODE_WIDTH / 2;
   assert.equal(
     edge.path,
-    `M ${centre} ${NODE_HEIGHT} C ${centre} ${NODE_HEIGHT + 28}, ${centre} ${ROW_PITCH - 28}, ${centre} ${ROW_PITCH}`,
+    `M ${centre} ${NODE_HEIGHT} C ${centre} ${(NODE_HEIGHT + ROW_PITCH) / 2}, ${centre} ${(NODE_HEIGHT + ROW_PITCH) / 2}, ${centre} ${ROW_PITCH}`,
   );
 });
 
