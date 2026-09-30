@@ -35,7 +35,7 @@ import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
-import { driverForSandbox } from "../orchestrator/sandbox-driver.js";
+import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { childCount, parentRefusal, relatedGroup } from "../feature-tree.js";
 import { getBetaTester } from "../feature-flags.js";
 import {
@@ -348,7 +348,15 @@ async function boundedRead<T>(work: Promise<T>): Promise<T> {
  * with it: a card whose row is gone while its machine keeps running is
  * a billed sandbox no query in this product can find again.
  */
-class SandboxDestroyFailed extends Error {}
+class SandboxDestroyFailed extends Error {
+  /** A missing driver will fail the same way on every retry. */
+  readonly permanent: boolean;
+
+  constructor(message: string, permanent = false) {
+    super(message);
+    this.permanent = permanent;
+  }
+}
 
 export function featureRoutes(ctx: AppContext) {
   return new Hono()
@@ -534,6 +542,12 @@ export function featureRoutes(ctx: AppContext) {
               };
               await driver.destroy(handle);
             } catch (err) {
+              if (err instanceof SandboxDriverUnavailable) {
+                throw new SandboxDestroyFailed(
+                  `No ${err.provider} driver is configured on this server, so the sandbox cannot be destroyed from here. The card was not deleted.`,
+                  true,
+                );
+              }
               throw new SandboxDestroyFailed(err instanceof Error ? err.message : String(err));
             }
           }
@@ -583,6 +597,7 @@ export function featureRoutes(ctx: AppContext) {
         });
 
       if (outcome instanceof SandboxDestroyFailed) {
+        if (outcome.permanent) return c.json({ error: outcome.message }, 409);
         return c.json(
           { error: `the sandbox could not be destroyed (${outcome.message}). The card was not deleted; try again` },
           502,
@@ -702,6 +717,11 @@ export function featureRoutes(ctx: AppContext) {
           const files = await writeMessageAttachments(driver, { externalId: sandbox.externalId, provider: driver.provider, workdir: sandbox.workdir }, body.attachments);
           text = `${text || "Please review the attached files."}\n\nAttached files in your workspace (use your file or image-reading tools to inspect them):\n${files.map(file => JSON.stringify(file)).join("\n")}`;
         } catch (error) {
+          // A missing driver will not succeed on a retry. 503 is the
+          // transfer failure, which might.
+          if (error instanceof SandboxDriverUnavailable) {
+            return c.json({ error: "This workspace cannot receive attachments from this server." }, 409);
+          }
           return c.json({ error: error instanceof Error ? error.message : "Could not attach files." }, 503);
         }
       }

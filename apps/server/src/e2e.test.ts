@@ -4471,6 +4471,154 @@ test("a card created by mistake can be deleted, and a repeat answers 404", async
 });
 
 /**
+ * A sprite row on a server with no sprite driver cannot be deleted.
+ * The card stays, and the answer does not ask for a retry that will
+ * throw the same way.
+ */
+test("deleting a card whose driver is not configured does not ask for a retry", async () => {
+  const { project } = await setupProject("Delete missing driver");
+  const feature = await createFeature(project.id, "Sprite leftover");
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `delete-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const deleted = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+  assert.equal(deleted.status, 409);
+  const body = (await deleted.json()) as { error: string };
+  assert.match(body.error, /No sprite driver is configured on this server/);
+  assert.doesNotMatch(body.error, /try again/i);
+  assert.equal((await app.request(`/api/features/${feature.id}`)).status, 200, "the card stays");
+});
+
+/**
+ * File transfer failures are 503 because the next attempt can work.
+ * A missing driver will not, so the client gets the refusal it used
+ * to stop on.
+ */
+test("attaching a file is refused when this server has no driver for the sandbox", async () => {
+  const { project, stages } = await setupProject("Attach missing driver");
+  const feature = await createFeature(project.id, "Attach");
+  const profile = await fakeProfile("attach-missing-driver");
+  await ctx.db.insert(agentRuns).values({
+    featureId: feature.id,
+    stageId: stages[0]!.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+  });
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `attach-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const res = await app.request(`/api/features/${feature.id}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      text: "see attached",
+      attachments: [{ name: "note.txt", mime: "text/plain", data: Buffer.from("hi").toString("base64") }],
+    }),
+  });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), {
+    error: "This workspace cannot receive attachments from this server.",
+  });
+});
+
+/**
+ * Rows stored as docker are driven by local-process on this server, so
+ * the 501 names that driver. A sprite row with no sprite driver is a
+ * missing driver, not a driver that cannot restore.
+ */
+test("rollback names the driver that was asked, and a missing driver is not unsupported rollback", async () => {
+  const { project, stages } = await setupProject("Rollback driver");
+  const feature = await createFeature(project.id, "Roll local");
+  const profile = await fakeProfile("rollback-driver");
+  const [dockerBox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "docker",
+      externalId: `rollback-docker-${feature.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [localRun] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: feature.id,
+      stageId: stages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "work",
+      status: "succeeded",
+      sandboxId: dockerBox!.id,
+      checkpointId: "snap-local",
+    })
+    .returning();
+
+  const local = await app.request(`/api/runs/${localRun!.id}/rollback`, { method: "POST" });
+  assert.equal(local.status, 501);
+  const localBody = (await local.json()) as { error: string };
+  assert.match(localBody.error, /local-process sandboxes do not support rollback/);
+
+  const spriteFeature = await createFeature(project.id, "Roll sprite");
+  const [spriteBox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: spriteFeature.id,
+      provider: "sprite",
+      externalId: `rollback-sprite-${spriteFeature.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [spriteRun] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      featureId: spriteFeature.id,
+      stageId: stages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "work",
+      status: "succeeded",
+      sandboxId: spriteBox!.id,
+      checkpointId: "snap-sprite",
+    })
+    .returning();
+
+  const sprite = await app.request(`/api/runs/${spriteRun!.id}/rollback`, { method: "POST" });
+  assert.equal(sprite.status, 501);
+  const spriteBody = (await sprite.json()) as { error: string };
+  assert.match(spriteBody.error, /no sprite driver configured on this server/);
+  assert.doesNotMatch(spriteBody.error, /do not support rollback/);
+});
+
+test("tools treats a non-uuid projectId as no project and does not error", async () => {
+  const plain = await app.request("/api/profiles/tools");
+  assert.equal(plain.status, 200);
+  const plainBody = await plain.json();
+
+  const bad = await app.request("/api/profiles/tools?projectId=nope");
+  assert.equal(bad.status, 200, "a non-uuid must not become an internal error");
+  assert.deepEqual(await bad.json(), plainBody);
+
+  const unknown = await app.request("/api/profiles/tools?projectId=22222222-2222-4222-8222-222222222222");
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(await unknown.json(), plainBody, "an unknown project uses the default driver");
+});
+
+/**
  * The delete this feature exists for: a card that has actually run.
  *
  * Its sandbox is a machine somebody is billed for, so the row cannot go
@@ -6641,6 +6789,47 @@ test("a failed gate holds the card, writes the reason, and records history", asy
   const held = history.find((e) => e.kind === "status_changed" && e.toStatus === "gated");
   assert.ok(held, "the hold must appear in the history");
   assert.deepEqual((held.detail as { failedCriteria?: string[] } | null)?.failedCriteria, ["run_succeeded"]);
+});
+
+/**
+ * The command runs on the row's driver. When that driver is not
+ * configured, the card is held with a failed check. Leaving it active
+ * with no check means nothing will ask again.
+ */
+test("a command gate records a failure when the sandbox driver is not configured", async () => {
+  const { project, stages } = await setupProject("Unconfigured command gate");
+  const feature = await createFeature(project.id, "Sprite gate");
+  const stage = stages[0]!;
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "true", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `gate-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  await evaluateFeatureGate(ctx, feature.id);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "gated", "the card is held instead of staying active");
+  assert.equal(row?.currentStageId, stage.id, "the command was not run on another machine");
+  const checks = await ctx.db
+    .select({ status: gateChecks.status, criterion: gateChecks.criterion, detail: gateChecks.detail })
+    .from(gateChecks)
+    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]?.status, "failed");
+  assert.equal((checks[0]?.criterion as { type?: string } | null)?.type, "command");
+  assert.match(
+    (checks[0]?.detail as { message?: string } | null)?.message ?? "",
+    /no sprite driver configured on this server/,
+  );
 });
 
 test("a late failed gate does not drag a finished card back to gated", async () => {

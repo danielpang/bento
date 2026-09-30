@@ -4,6 +4,24 @@ import type { SandboxDriver } from "@bento/sandbox";
 import type { SandboxDrivers } from "../context.js";
 
 /**
+ * This process has no driver for the sandbox's provider.
+ *
+ * Permanent. Another attempt on this process throws the same way, so
+ * callers record the failure instead of retrying it as I/O. The
+ * message stays a plain sentence: a run that dies here shows it to
+ * the person who started the run.
+ */
+export class SandboxDriverUnavailable extends Error {
+  readonly provider: string;
+
+  constructor(provider: string) {
+    super(`no ${provider} driver configured on this server`);
+    this.name = "SandboxDriverUnavailable";
+    this.provider = provider;
+  }
+}
+
+/**
  * The driver that owns an existing sandbox row.
  *
  * A docker row on a server whose default driver is local-process uses
@@ -18,7 +36,7 @@ export function driverForSandbox(drivers: SandboxDrivers, row: { provider: strin
     return drivers.default;
   }
   const driver = drivers.get(row.provider);
-  if (!driver) throw new Error(`no ${row.provider} driver configured on this server`);
+  if (!driver) throw new SandboxDriverUnavailable(row.provider);
   return driver;
 }
 

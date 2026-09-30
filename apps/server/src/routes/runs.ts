@@ -12,7 +12,7 @@ import { markCancelled } from "../orchestrator/run-executor.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import type { SandboxDriver } from "@bento/sandbox";
-import { driverForSandbox } from "../orchestrator/sandbox-driver.js";
+import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
@@ -163,11 +163,15 @@ export function runRoutes(ctx: AppContext) {
       let driver: SandboxDriver;
       try {
         driver = sandbox ? driverForSandbox(ctx.drivers, sandbox) : ctx.drivers.default;
-      } catch {
-        return c.json({ error: `${sandbox?.provider ?? "sandbox"} sandboxes do not support rollback` }, 501);
+      } catch (err) {
+        if (!(err instanceof SandboxDriverUnavailable)) throw err;
+        // The driver was never asked to restore. "Does not support
+        // rollback" would name a capability the missing driver might
+        // have had. Name the provider that was asked.
+        return c.json({ error: err.message }, 501);
       }
       if (!driver.restore) {
-        return c.json({ error: `${sandbox?.provider ?? driver.provider} sandboxes do not support rollback` }, 501);
+        return c.json({ error: `${driver.provider} sandboxes do not support rollback` }, 501);
       }
 
       try {

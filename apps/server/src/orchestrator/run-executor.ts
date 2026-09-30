@@ -53,7 +53,7 @@ import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
-import { driverForRun, driverForSandbox } from "./sandbox-driver.js";
+import { driverForRun, driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
 import {
@@ -2962,7 +2962,12 @@ function describeSandboxError(err: unknown): string {
   // A plain Error carrying a written sentence is that sentence. The
   // "Error:" String() puts in front of it says nothing a reader wants,
   // while a driver's own subclass names who failed and is kept.
-  const base = err instanceof Error && err.name === "Error" ? err.message : String(err);
+  // A missing driver is a plain sentence too. Its name says which
+  // check failed; the run record should still show the sentence.
+  const base =
+    err instanceof SandboxDriverUnavailable || (err instanceof Error && err.name === "Error")
+      ? err.message
+      : String(err);
   if (typeof err !== "object" || err === null) return base;
   const { stderr, stdout } = err as { stderr?: unknown; stdout?: unknown };
   const output = [stderr, stdout].find((value) => typeof value === "string" && value.trim() !== "");

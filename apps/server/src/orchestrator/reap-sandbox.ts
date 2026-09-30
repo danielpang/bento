@@ -2,8 +2,9 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { agentRuns, features, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
+import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
-import { driverForSandbox } from "./sandbox-driver.js";
+import { driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
 import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
 
@@ -113,7 +114,18 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
    * with nothing pointing at them.
    */
   for (const row of rows) {
-    const driver = driverForSandbox(ctx.drivers, row);
+    let driver: SandboxDriver;
+    try {
+      driver = driverForSandbox(ctx.drivers, row);
+    } catch (err) {
+      if (!(err instanceof SandboxDriverUnavailable)) throw err;
+      // Permanent: this process cannot delete the machine, so the row
+      // stays. Marking it destroyed would hide a machine that is still
+      // billing. Later rows, and the host workspace below, still go.
+      // Retrying the job would throw the same way.
+      console.warn(`not reaping sandbox ${row.externalId} for feature ${featureId}: ${err.message}`);
+      continue;
+    }
     const handle = {
       externalId: row.externalId,
       provider: driver.provider,

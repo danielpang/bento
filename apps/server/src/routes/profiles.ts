@@ -21,14 +21,20 @@ import { upsertAgentsFromFile } from "../upsert-agents.js";
 const TOOL_CACHE_MS = 60_000;
 const toolCache = new Map<string, { at: number; value: Record<string, boolean> | null }>();
 
+/** projects.id is a uuid. Anything else must not be sent to Postgres. */
+const PROJECT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * Absent project, or a project the caller cannot access, uses the
- * default driver. An accessible project asks driverForProject, which
- * is the default until a project can name a provider.
+ * Absent project, a project id that is not a uuid, or a project the
+ * caller cannot access, uses the default driver. An accessible project
+ * asks driverForProject, which is the default until a project can name
+ * a provider. Unknown and inaccessible ids answer the same body as no
+ * parameter, so the route does not say whether a project exists.
  */
 async function toolsDriver(ctx: AppContext, c: Context): Promise<SandboxDriver> {
   const projectId = c.req.query("projectId");
-  if (!projectId || !(await canAccessProject(ctx, c, projectId))) return ctx.drivers.default;
+  if (!projectId || !PROJECT_ID.test(projectId)) return ctx.drivers.default;
+  if (!(await canAccessProject(ctx, c, projectId))) return ctx.drivers.default;
   return driverForProject(ctx.drivers);
 }
 
