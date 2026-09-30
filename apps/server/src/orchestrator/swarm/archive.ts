@@ -1,6 +1,8 @@
 import { and, eq, ne } from "drizzle-orm";
 import { sandboxes, swarms, type Db } from "@bento/db";
-import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
+import type { SandboxHandle } from "@bento/sandbox";
+import type { SandboxDrivers } from "../../context.js";
+import { driverForSandbox } from "../sandbox-driver.js";
 
 /**
  * Putting a swarm away, and taking it out again.
@@ -65,21 +67,22 @@ export async function liveSwarmSandboxes(
  */
 export async function checkpointSwarmSandboxes(
   db: ArchiveWriter,
-  driver: Pick<SandboxDriver, "provider" | "snapshot">,
+  drivers: SandboxDrivers,
   swarmId: string,
   label: string,
 ): Promise<CheckpointResult> {
-  if (!driver.snapshot) {
-    return { checkpointed: [], skipped: "this deployment's sandboxes cannot be snapshotted" };
-  }
   const rows = await liveSwarmSandboxes(db, swarmId);
   if (rows.length === 0) return { checkpointed: [], skipped: "this swarm holds no machine" };
 
   const checkpointed: { sandboxId: string; checkpointId: string }[] = [];
+  let canSnapshot = false;
   for (const row of rows) {
+    const driver = driverForSandbox(drivers, row);
+    if (!driver.snapshot) continue;
+    canSnapshot = true;
     const handle: SandboxHandle = {
       externalId: row.externalId,
-      provider: row.provider,
+      provider: driver.provider,
       workdir: row.workdir,
     };
     try {
@@ -97,6 +100,9 @@ export async function checkpointSwarmSandboxes(
         `could not checkpoint sandbox ${row.externalId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+  if (!canSnapshot) {
+    return { checkpointed: [], skipped: "this deployment's sandboxes cannot be snapshotted" };
   }
   return { checkpointed, skipped: null };
 }

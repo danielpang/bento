@@ -28,7 +28,7 @@ import {
   stages,
 } from "@bento/db";
 import { SseParser } from "@bento/core";
-import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
@@ -37,6 +37,7 @@ import { publishFeatureBranches, resolvePublishBaseSha } from "./orchestrator/pu
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -124,7 +125,7 @@ before(async () => {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -1071,6 +1072,7 @@ test("resuming a session recovers the messages the agent sent while detached", a
   const handle: SandboxHandle = { externalId: "local-recovery", provider: "local-process", workdir };
 
   const recoverArgs = {
+    driver: ctx.drivers.default,
     handle,
     adapter,
     featureId: feature.id,
@@ -1361,8 +1363,8 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
@@ -1373,7 +1375,7 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
     assert.equal(attached.length, 1, "recovery attached exactly once");
     assert.equal(attached[0]?.externalId, `bento-${feature.id}`, "the attach went to the run's own sandbox");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -1496,13 +1498,13 @@ test("a restart recovers what the agent said while no server was attached", { ti
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 
   // Other execs follow the finish (artifact capture, the export); the
@@ -1600,8 +1602,8 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     for (const run of [gone, starting]) {
@@ -1613,7 +1615,7 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     }
     assert.equal(asked, 1, "a run that had not reached running is never attached");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -1686,8 +1688,8 @@ test("a resumed live conversation hears new messages and never repeats the promp
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     // The live session registers as part of the resume; a message sent
@@ -1712,7 +1714,7 @@ test("a resumed live conversation hears new messages and never repeats the promp
     const transcript = await (await app.request(`/api/runs/${running!.id}/transcript`)).text();
     assert.match(transcript, /you> a follow-up mid resume/, "the follow-up is the user's own transcript line");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -4349,9 +4351,9 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
       return null;
     },
   };
-  const previousDriver = ctx.driver;
+  const previousDrivers = ctx.drivers;
   const previousGitHubApp = ctx.githubApp;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   ctx.githubApp = {
     forInstallation(installationId: string) {
       assert.equal(installationId, "sandbox-publish-installation");
@@ -4394,7 +4396,7 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
     assert.equal(body.failures[0]?.name, repo!.name);
     assert.match(body.failures[0]?.reason ?? "", /the sandbox is gone/);
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
     ctx.githubApp = previousGitHubApp;
   }
 });
@@ -4499,8 +4501,8 @@ test("deleting a worked card takes its runs, transcript and sandbox, and leaves 
   // This route is the first caller of driver.destroy in the product, so
   // the test watches the call rather than trusting the status code.
   const destroyed: SandboxHandle[] = [];
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async (handle: SandboxHandle) => {
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async (handle: SandboxHandle) => {
     destroyed.push(handle);
     await realDestroy(handle);
   };
@@ -4508,7 +4510,7 @@ test("deleting a worked card takes its runs, transcript and sandbox, and leaves 
     const res = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
     assert.equal(res.status, 200);
   } finally {
-    ctx.driver.destroy = realDestroy;
+    ctx.drivers.default.destroy = realDestroy;
   }
 
   assert.deepEqual(
@@ -4599,8 +4601,8 @@ test("a sandbox that will not die keeps its card", async () => {
     workdir: "/workspace",
   });
 
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async () => {
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async () => {
     throw new Error("the machine did not answer");
   };
   let body: { error: string };
@@ -4609,7 +4611,7 @@ test("a sandbox that will not die keeps its card", async () => {
     assert.equal(res.status, 502);
     body = (await res.json()) as { error: string };
   } finally {
-    ctx.driver.destroy = realDestroy;
+    ctx.drivers.default.destroy = realDestroy;
   }
   assert.match(body.error, /the machine did not answer/, "the reason reaches the person, not just the log");
   assert.match(body.error, /The card was not deleted/);
@@ -6330,16 +6332,16 @@ test("a finished card's sandbox is destroyed, and only once it is really gone", 
 
   const destroyed: string[] = [];
   let stillThere = true;
-  const previousDriver = ctx.driver;
-  ctx.driver = {
-    ...previousDriver,
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    ...previousDrivers.default,
     async destroy(handle: { externalId: string }) {
       destroyed.push(handle.externalId);
     },
     async exists() {
       return stillThere;
     },
-  } as unknown as AppContext["driver"];
+  } as SandboxDriver);
 
   try {
     // A driver that says the machine is still there must not have its
@@ -6365,7 +6367,7 @@ test("a finished card's sandbox is destroyed, and only once it is really gone", 
     // lets the sweep run over an already tidy deployment.
     await reapSandbox(ctx, feature.id);
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -6396,19 +6398,19 @@ test("a sandbox with a run still working it is not reaped, and is not forgotten 
   });
 
   let destroyCalls = 0;
-  const previousDriver = ctx.driver;
-  ctx.driver = {
-    ...previousDriver,
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    ...previousDrivers.default,
     async destroy() {
       destroyCalls += 1;
     },
-  } as unknown as AppContext["driver"];
+  } as SandboxDriver);
   try {
     await ctx.db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, run.id));
     await assert.rejects(() => reapSandbox(ctx, feature.id), /still working/);
     assert.equal(destroyCalls, 0, "the machine is not touched while an agent is on it");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
     await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, run.id));
   }
 });
@@ -7076,15 +7078,15 @@ test("Ollama Cloud without a key is missing it, and a server of your own is not"
 });
 
 test("a Docker sandbox reaches an Ollama server on this machine's loopback", async () => {
-  const driver = ctx.driver;
-  ctx.driver = { provider: "docker" } as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({ provider: "docker", workspace: "host" } as SandboxDriver);
   try {
     await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://localhost:11434" }, async () => {
       const { env } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
       assert.equal(env.OLLAMA_BASE_URL, "http://host.docker.internal:11434");
     });
   } finally {
-    ctx.driver = driver;
+    ctx.drivers = previousDrivers;
   }
 });
 

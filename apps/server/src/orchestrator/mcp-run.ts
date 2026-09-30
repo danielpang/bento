@@ -1,6 +1,6 @@
 import { and, eq, isNull, or } from "drizzle-orm";
 import { mcpCredentials, mcpServers } from "@bento/db";
-import { collectExec, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { resolveSandboxPath, writeFileCommand, type AgentAdapter, type McpRemoteServer } from "@bento/agents";
 import type { AppContext } from "../context.js";
 import { CONTAINER_HOME } from "./agent-auth.js";
@@ -39,6 +39,7 @@ export interface PrepareRunMcpInput {
   organizationId: string | null;
   /** agent_runs.started_by: whose per-user connections this run may use. */
   actingUserId: string | null;
+  driver: SandboxDriver;
   adapter: AgentAdapter;
   handle: SandboxHandle;
   restrictNetwork: boolean;
@@ -85,7 +86,7 @@ export async function prepareRunMcp(
     }
     return none;
   }
-  if (ctx.driver.provider === "local-process") {
+  if (input.driver.provider === "local-process") {
     if (await hasServers()) {
       await input.say(
         "MCP servers are not attached when agents run as a local process, because their config would overwrite your own. Use the Docker driver to attach them.",
@@ -102,7 +103,7 @@ export async function prepareRunMcp(
     return none;
   }
 
-  const gatewayBase = resolveGatewayBase(ctx);
+  const gatewayBase = resolveGatewayBase(ctx, input.driver);
   if (!gatewayBase) {
     if (await hasServers()) {
       await input.say(
@@ -144,7 +145,7 @@ export async function prepareRunMcp(
   if (servers.length === 0 && own.length === 0) {
     // Overwrite any config a previous run left in this (per-feature,
     // reused) sandbox, so a removed server does not linger.
-    await writeConfigs(ctx, input.handle, capability.renderConfig([]));
+    await writeConfigs(input.driver, input.handle, capability.renderConfig([]));
     return none;
   }
 
@@ -218,7 +219,7 @@ export async function prepareRunMcp(
   // --mcp-config that the first run never had, and the session would
   // diverge.
   if (attached.length === 0) {
-    await writeConfigs(ctx, input.handle, capability.renderConfig([]));
+    await writeConfigs(input.driver, input.handle, capability.renderConfig([]));
     return none;
   }
 
@@ -237,7 +238,7 @@ export async function prepareRunMcp(
   // If the config could not be written, the agent has no file to read, so
   // do not hand it the flags. Revoke the grant so a resume does not try
   // to reattach MCP either.
-  const written = await writeConfigs(ctx, input.handle, capability.renderConfig(attached));
+  const written = await writeConfigs(input.driver, input.handle, capability.renderConfig(attached));
   if (!written) {
     await revokeRunGrant(ctx, input.runId);
     await input.say(
@@ -322,7 +323,7 @@ async function credentialUsable(
 
 /** Writes each config file into the sandbox. Returns false if any write failed. */
 async function writeConfigs(
-  ctx: AppContext,
+  driver: SandboxDriver,
   handle: SandboxHandle,
   files: { path: string; content: string }[],
 ): Promise<boolean> {
@@ -339,7 +340,7 @@ async function writeConfigs(
     // run goes on without MCP.
     let result: { exitCode: number; stderr: string };
     try {
-      result = await collectExec(ctx.driver.exec(handle, argv, { timeoutMs: EXEC_TIMEOUT_MS }));
+      result = await collectExec(driver.exec(handle, argv, { timeoutMs: EXEC_TIMEOUT_MS }));
     } catch (err) {
       console.error(`could not write ${file.path} into the sandbox:`, err);
       return false;
@@ -359,7 +360,7 @@ async function writeConfigs(
  * honored as given. Returns null when the resolved base is one the
  * sandbox cannot reach (a sprite on a loopback base).
  */
-export function resolveGatewayBase(ctx: AppContext): string | null {
+export function resolveGatewayBase(ctx: AppContext, driver: SandboxDriver): string | null {
   const base = (ctx.env.BENTO_MCP_GATEWAY_URL ?? ctx.env.BETTER_AUTH_URL).replace(/\/$/, "");
   let host: string;
   try {
@@ -370,7 +371,7 @@ export function resolveGatewayBase(ctx: AppContext): string | null {
   const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
   if (!isLoopback) return base;
   if (ctx.env.BENTO_MCP_GATEWAY_URL) return base; // Operator said so explicitly.
-  if (ctx.driver.provider === "docker") {
+  if (driver.provider === "docker") {
     return base.replace(/\/\/(localhost|127\.0\.0\.1|\[::1\])/, "//host.docker.internal");
   }
   // A sprite (or any remote sandbox) cannot reach the server's own

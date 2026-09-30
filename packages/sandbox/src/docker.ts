@@ -24,6 +24,7 @@ export class DockerDriver implements SandboxDriver {
    */
   private restrictedNetwork: string | undefined;
   provider = "docker" as const;
+  readonly workspace = "host" as const;
   supportsStdin = true;
   private docker: Docker;
 

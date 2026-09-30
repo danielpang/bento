@@ -13,6 +13,7 @@ import {
   swarms,
 } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { cancelTaskTree, reactivateSwarmForRetry, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
@@ -1042,6 +1043,7 @@ async function writeDesign(ctx: AppContext, caller: SwarmCaller, args: Args<"wri
       sandboxTaskId: sandboxes.swarmTaskId,
       sandboxStatus: sandboxes.status,
       externalId: sandboxes.externalId,
+      provider: sandboxes.provider,
       workdir: sandboxes.workdir,
     })
     .from(agentRuns)
@@ -1069,9 +1071,10 @@ async function writeDesign(ctx: AppContext, caller: SwarmCaller, args: Args<"wri
   }
 
   try {
+    const driver = driverForSandbox(ctx.drivers, workspace);
     await commitSwarmDesignDocument({
-      driver: ctx.driver,
-      handle: { provider: ctx.driver.provider, externalId: workspace.externalId, workdir: workspace.workdir },
+      driver,
+      handle: { provider: driver.provider, externalId: workspace.externalId, workdir: workspace.workdir },
       repositoryName: repository.name,
       branch: workspace.branchName,
       content: args.content,
@@ -1124,6 +1127,23 @@ async function readDesign(ctx: AppContext, caller: SwarmCaller): Promise<string>
  */
 const READ_PLAN_INLINE_CHARS = 120_000;
 
+/** Whether this run's driver can hold a copy of the plan in the workspace. */
+async function planCopyAvailable(ctx: AppContext, runId: string): Promise<boolean> {
+  const [run] = await ctx.db
+    .select({ sandboxId: agentRuns.sandboxId })
+    .from(agentRuns)
+    .where(eq(agentRuns.id, runId))
+    .limit(1);
+  if (!run?.sandboxId) return ctx.drivers.default.supportsStdin === true;
+  const [box] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, run.sandboxId)).limit(1);
+  if (!box || box.status === "destroyed") return ctx.drivers.default.supportsStdin === true;
+  try {
+    return driverForSandbox(ctx.drivers, box).supportsStdin === true;
+  } catch {
+    return false;
+  }
+}
+
 async function readPlan(ctx: AppContext, caller: SwarmCaller, args: Args<"read_plan">): Promise<string> {
   const sources = await loadPlanSources(ctx.db, caller.swarmId);
   if (sources.length === 0) return "The person who started this swarm did not hand over a plan. There is nothing to read here; the goal is what the swarm was asked for.";
@@ -1138,8 +1158,9 @@ async function readPlan(ctx: AppContext, caller: SwarmCaller, args: Args<"read_p
    * that cannot take stdin never has a copy, and then nothing is
    * promised at all.
    */
+  const copies = await planCopyAvailable(ctx, caller.runId);
   const where = (source: (typeof sources)[number]) =>
-    ctx.driver.supportsStdin
+    copies
       ? `If it was copied into your workspace when this run started, it is in the ${PLAN_SOURCE_DIR} directory, named ${planSourceFileName(source)}; your opening prompt says which copies were made. If it is not there, this is all you have of it.`
       : "It could not be copied into this workspace, so this is all you have of it.";
   const quoted = (source: (typeof sources)[number]) => {

@@ -12,7 +12,7 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import type { ExecChunk, SandboxHandle } from "@bento/sandbox";
+import type { ExecChunk, SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 
@@ -52,6 +52,7 @@ function driverWith(content: string) {
   });
   return {
     provider: "docker" as const,
+    workspace: "host" as const,
     exec(_handle: SandboxHandle, argv: string[]) {
       const script = argv[argv.length - 1] ?? "";
       if (script.includes("find ")) return chunks(`${abs}\n`, 0);
@@ -63,7 +64,7 @@ function driverWith(content: string) {
       if (script.includes("[ -f ")) return chunks("", 3);
       return chunks("", 0);
     },
-  };
+  } as SandboxDriver;
 }
 
 before(async () => {
@@ -103,7 +104,8 @@ async function captureFor(
   runId: string,
   content: string,
 ): Promise<void> {
-  await captureRunArtifacts({ ...ctx, driver: driverWith(content) } as unknown as AppContext, {
+  await captureRunArtifacts(ctx, {
+    driver: driverWith(content),
     runId,
     owner: { swarmId, swarmTaskId: taskId },
     organizationId: null,

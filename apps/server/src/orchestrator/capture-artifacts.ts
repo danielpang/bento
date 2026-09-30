@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { stageArtifactPath, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { runArtifacts } from "@bento/db";
-import { collectExec, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 
 /**
@@ -108,6 +108,7 @@ export interface CaptureArgs {
   organizationId: string | null;
   stageSlug: string;
   stageName: string;
+  driver: SandboxDriver;
   handle: SandboxHandle;
   repositories: { name: string; mountPath: string }[];
   /** Writes a system line into the run transcript. */
@@ -134,7 +135,7 @@ export async function captureRunArtifacts(ctx: AppContext, args: CaptureArgs): P
 
 async function capture(ctx: AppContext, args: CaptureArgs): Promise<void> {
   const sh = async (script: string) =>
-    collectExec(ctx.driver.exec(args.handle, ["sh", "-c", script], { timeoutMs: EXEC_TIMEOUT_MS }));
+    collectExec(args.driver.exec(args.handle, ["sh", "-c", script], { timeoutMs: EXEC_TIMEOUT_MS }));
 
   /**
    * Candidate files, write-ups first so the cap lands on extras rather

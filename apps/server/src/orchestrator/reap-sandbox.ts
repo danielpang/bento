@@ -3,6 +3,7 @@ import path from "node:path";
 import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { agentRuns, features, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { driverForSandbox } from "./sandbox-driver.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
 import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
 
@@ -112,18 +113,19 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
    * with nothing pointing at them.
    */
   for (const row of rows) {
+    const driver = driverForSandbox(ctx.drivers, row);
     const handle = {
       externalId: row.externalId,
-      provider: row.provider,
+      provider: driver.provider,
       workdir: row.workdir,
     };
-    await ctx.driver.destroy(handle);
+    await driver.destroy(handle);
 
     // Drivers that can answer are asked. One that cannot is taken at
     // its word, which is right for the local ones: a container on
     // somebody's laptop bills nobody, so there is no leak to be
     // careful about.
-    if (ctx.driver.exists && (await ctx.driver.exists(handle))) {
+    if (driver.exists && (await driver.exists(handle))) {
       throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
     }
 
@@ -175,13 +177,14 @@ export async function reapSwarmSandbox(ctx: AppContext, swarmId: string): Promis
     );
 
   for (const row of rows) {
+    const driver = driverForSandbox(ctx.drivers, row);
     const handle = {
       externalId: row.externalId,
-      provider: row.provider,
+      provider: driver.provider,
       workdir: row.workdir,
     };
-    await ctx.driver.destroy(handle);
-    if (ctx.driver.exists && (await ctx.driver.exists(handle))) {
+    await driver.destroy(handle);
+    if (driver.exists && (await driver.exists(handle))) {
       throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
     }
     await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));
@@ -245,9 +248,14 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string)
     .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
 
   for (const row of rows) {
-    const handle = { externalId: row.externalId, provider: row.provider, workdir: row.workdir };
-    await ctx.driver.destroy(handle);
-    if (ctx.driver.exists && (await ctx.driver.exists(handle))) {
+    const driver = driverForSandbox(ctx.drivers, row);
+    const handle = {
+      externalId: row.externalId,
+      provider: driver.provider,
+      workdir: row.workdir,
+    };
+    await driver.destroy(handle);
+    if (driver.exists && (await driver.exists(handle))) {
       throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
     }
     await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));

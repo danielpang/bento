@@ -9,6 +9,7 @@ import { execTimeoutMessage, type ExecChunk, type ExecOptions, type ProvisionSpe
  */
 export class LocalProcessDriver implements SandboxDriver {
   provider = "local-process" as const;
+  readonly workspace = "host" as const;
   supportsStdin = true;
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {

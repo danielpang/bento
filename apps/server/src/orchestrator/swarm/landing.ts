@@ -9,8 +9,7 @@ import {
   type Db,
 } from "@bento/db";
 import { resolveRepositoryCommands } from "@bento/core";
-import { collectExec, repositoryPathIn } from "@bento/sandbox";
-import type { SandboxHandle } from "@bento/sandbox";
+import { collectExec, repositoryPathIn, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
@@ -31,6 +30,7 @@ import { enqueueSwarmTick } from "./coordinator.js";
 import { queueSwarmTaskSandboxReap } from "../reap-sandbox.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
+import { driverForSandbox } from "../sandbox-driver.js";
 
 /**
  * The merge queue's other half: what actually happens when a landing
@@ -180,7 +180,20 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   const policy = landingPolicyFor(task);
   const swarmWorkspace = swarmWorkspaceKey(swarm.id);
 
-  if (ctx.driver.provider !== "sprite") {
+  let landingDriver: SandboxDriver | null;
+  try {
+    landingDriver = await landingDriverFor(ctx, swarm.sandboxId);
+  } catch (err) {
+    return finish(
+      ctx,
+      landing,
+      "failed",
+      err instanceof Error ? err.message : "no driver configured on this server",
+      task,
+    );
+  }
+  const clone = (landingDriver ?? ctx.drivers.default).workspace === "clone";
+  if (!clone) {
     try {
       await ctx.worktrees.ensureAll(
         repoRows.map((repo) => ({ name: repo.name, localPath: repo.localPath, defaultBranch: repo.defaultBranch })),
@@ -194,9 +207,8 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
 
   const landed: string[] = [];
   const problems: { repo: string; outcome: LandFailure }[] = [];
-  const remoteHandles =
-    ctx.driver.provider === "sprite" ? await landingSandboxHandles(ctx, swarm.sandboxId, task.id) : null;
-  if (ctx.driver.provider === "sprite" && !remoteHandles) {
+  const remoteHandles = clone ? await landingSandboxHandles(ctx, swarm.sandboxId, task.id) : null;
+  if (clone && !remoteHandles) {
     return finish(
       ctx,
       landing,
@@ -205,7 +217,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
       task,
     );
   }
-  if (remoteHandles && (!ctx.driver.exportRepository || !ctx.driver.importRepository)) {
+  if (remoteHandles && (!landingDriver?.exportRepository || !landingDriver.importRepository)) {
     return finish(
       ctx,
       landing,
@@ -227,7 +239,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      * land read as "already an ancestor" and cost nothing.
      */
     const outcome = remoteHandles
-      ? await landSandboxBranch(ctx, {
+      ? await landSandboxBranch(landingDriver!, {
           repoName: repo.name,
           baseBranch: repo.defaultBranch,
           swarmBranch,
@@ -309,6 +321,14 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   return finish(ctx, landing, "failed", `${problem.repo}: ${problem.outcome.detail}`, task);
 }
 
+/** The driver that owns the swarm's machine, when that machine is still there. */
+async function landingDriverFor(ctx: AppContext, swarmSandboxId: string | null): Promise<SandboxDriver | null> {
+  if (!swarmSandboxId) return null;
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarmSandboxId)).limit(1);
+  if (!row || row.status === "destroyed") return null;
+  return driverForSandbox(ctx.drivers, row);
+}
+
 /** The two machines whose branches a remote landing reconciles. */
 async function landingSandboxHandles(
   ctx: AppContext,
@@ -323,8 +343,7 @@ async function landingSandboxHandles(
     !swarmSandbox ||
     swarmSandbox.status === "destroyed" ||
     !workerSandbox ||
-    swarmSandbox.provider !== ctx.driver.provider ||
-    workerSandbox.provider !== ctx.driver.provider
+    swarmSandbox.provider !== workerSandbox.provider
   ) {
     return null;
   }
@@ -348,7 +367,7 @@ async function landingSandboxHandles(
  * single compare-and-swap that changes the swarm branch.
  */
 async function landSandboxBranch(
-  ctx: AppContext,
+  driver: SandboxDriver,
   input: {
     repoName: string;
     baseBranch: string;
@@ -359,13 +378,13 @@ async function landSandboxBranch(
     workerHandle: SandboxHandle;
   },
 ): Promise<LandOutcome> {
-  const exportRepository = ctx.driver.exportRepository!;
+  const exportRepository = driver.exportRepository!;
   let swarmBundle;
   let workerBundle;
   try {
     [swarmBundle, workerBundle] = await Promise.all([
-      exportRepository.call(ctx.driver, input.swarmHandle, input.repoName, input.baseBranch, { selfContained: true }),
-      exportRepository.call(ctx.driver, input.workerHandle, input.repoName, input.baseBranch, { selfContained: true }),
+      exportRepository.call(driver, input.swarmHandle, input.repoName, input.baseBranch, { selfContained: true }),
+      exportRepository.call(driver, input.workerHandle, input.repoName, input.baseBranch, { selfContained: true }),
     ]);
   } catch (err) {
     return { ok: false, reason: "moved", detail: `could not export the sandbox branches: ${String(err)}` };
@@ -384,7 +403,7 @@ async function landSandboxBranch(
 
   let imported;
   try {
-    imported = await ctx.driver.importRepository!(
+    imported = await driver.importRepository!(
       input.swarmHandle,
       input.repoName,
       reconciled.bundle,
@@ -443,12 +462,21 @@ async function runLandingTests(
     };
   }
   const handle = { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir };
+  let driver: SandboxDriver;
+  try {
+    driver = driverForSandbox(ctx.drivers, sandbox);
+  } catch (err) {
+    return {
+      kind: "unavailable",
+      detail: `the project has a landing check, but Bento could not run it in the swarm sandbox: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 
   for (const entry of commands) {
     let result;
     try {
       result = await collectExec(
-        ctx.driver.exec(handle, ["bash", "-lc", entry.command], {
+        driver.exec(handle, ["bash", "-lc", entry.command], {
           cwd: repositoryPathIn(sandbox.workdir, entry.name),
         }),
       );

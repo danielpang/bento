@@ -22,7 +22,8 @@ import {
   stages,
   swarms,
 } from "@bento/db";
-import { WorktreeManager } from "@bento/sandbox";
+import { WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { singleDriver } from "./sandbox-driver.js";
 import pg from "pg";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { artifactStorageKey } from "./capture-artifacts.js";
@@ -83,15 +84,16 @@ before(async () => {
     pool,
     boss: { send: async () => "job" } as AppContext["boss"],
     bus: new EventBus(),
-    driver: {
+    drivers: singleDriver({
       provider: "docker",
+      workspace: "host",
       async destroy(handle: { externalId: string }) {
         destroyed.push(handle.externalId);
       },
       async exists() {
         return false;
       },
-    } as unknown as AppContext["driver"],
+    } as unknown as SandboxDriver),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),

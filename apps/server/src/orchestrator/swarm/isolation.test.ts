@@ -15,18 +15,17 @@ import { exportSwarmBranch, isolationRefusal } from "./sandbox.js";
  */
 
 test("a swarm that asserts nothing runs anywhere", () => {
-  for (const provider of ["docker", "local-process", "sprite"]) {
-    assert.equal(isolationRefusal("sandbox", provider), null, `sandbox isolation on ${provider}`);
+  for (const workspace of ["host", "clone"] as const) {
+    assert.equal(isolationRefusal("sandbox", workspace), null, `sandbox isolation on ${workspace}`);
   }
 });
 
 test("a swarm built around checkouts on the server runs where they are", () => {
-  assert.equal(isolationRefusal("worktree", "docker"), null);
-  assert.equal(isolationRefusal("worktree", "local-process"), null);
+  assert.equal(isolationRefusal("worktree", "host"), null);
 });
 
 test("and is refused, in words, where the sandbox holds its own clone", () => {
-  const refusal = isolationRefusal("worktree", "sprite");
+  const refusal = isolationRefusal("worktree", "clone");
   assert.ok(refusal, "a shape that cannot be kept is refused rather than quietly changed");
   assert.match(refusal!, /worktrees of the repository on the server/);
   assert.match(refusal!, /machines that hold their own clones/);

@@ -2,7 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import type { AgentAdapter, SessionRecovery } from "@bento/agents";
 import type { AgentEvent } from "@bento/core";
 import { agentRuns, runEvents } from "@bento/db";
-import { collectExec, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { appendRunEvent } from "./transcript.js";
 
@@ -39,6 +39,7 @@ export const MAX_RECOVERED_MESSAGES = 50;
 const READ_TIMEOUT_MS = 30_000;
 
 export interface RecoverArgs {
+  driver: SandboxDriver;
   handle: SandboxHandle;
   adapter: AgentAdapter;
   /** Card session scope. Swarm runs use their run id instead. */
@@ -81,7 +82,7 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
   if (!/^[A-Za-z0-9_.-]+$/.test(args.sessionId)) return;
 
   const read = await collectExec(
-    ctx.driver.exec(args.handle, recovery.readLogCommand(args.sessionId, args.cwd), {
+    args.driver.exec(args.handle, recovery.readLogCommand(args.sessionId, args.cwd), {
       cwd: args.cwd,
       timeoutMs: READ_TIMEOUT_MS,
     }),

@@ -3,6 +3,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { agentRuns, features, invitation, member, organization, organizationPolicies, user } from "@bento/db";
+import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor, activeOrg } from "../middleware/actor.js";
@@ -44,7 +45,7 @@ export function teamRoutes(ctx: AppContext) {
         canEdit: membership.role === "owner" || membership.role === "admin",
         // Whether the deployment can honour it at all, so the control
         // can say why it would refuse rather than failing at run time.
-        supported: ctx.driver.supportsRestrictedNetwork === true,
+        supported: restrictedNetworkSupported(ctx),
       });
     })
     .patch("/policy", zValidator("json", z.object({ restrictNetwork: z.boolean() })), async (c) => {
@@ -54,7 +55,7 @@ export function teamRoutes(ctx: AppContext) {
         return c.json({ error: "only organization owners and admins can change this" }, 403);
       }
       const { restrictNetwork } = c.req.valid("json");
-      if (restrictNetwork && !ctx.driver.supportsRestrictedNetwork) {
+      if (restrictNetwork && !restrictedNetworkSupported(ctx)) {
         return c.json(
           {
             error:
@@ -207,4 +208,19 @@ export function teamRoutes(ctx: AppContext) {
 
     return c.text(lines.join("\n"));
   });
+}
+
+/**
+ * Drivers a new sandbox in this organization would be provisioned on.
+ *
+ * Projects cannot name a provider yet, so the set is only the
+ * deployment default. Sprite does not support a restricted network.
+ * Docker does only when BENTO_SANDBOX_RESTRICTED_NETWORK is set.
+ */
+function provisionDrivers(ctx: AppContext): SandboxDriver[] {
+  return [ctx.drivers.default];
+}
+
+function restrictedNetworkSupported(ctx: AppContext): boolean {
+  return provisionDrivers(ctx).every((driver) => driver.supportsRestrictedNetwork === true);
 }

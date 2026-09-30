@@ -13,6 +13,7 @@ import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
 import { captureStageSpend } from "./stage-spend.js";
+import { driverForSandbox } from "./sandbox-driver.js";
 import { startAssignedStageAgent, stopRunsOutsideStage } from "./stage-agent.js";
 
 type Feature = typeof features.$inferSelect;
@@ -143,16 +144,19 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
       .limit(1);
     if (sandbox && sandbox.status !== "destroyed") {
       // Match the agent's working directory so "pnpm test" means the
-      // same thing in a gate as it does in a run.
+      // same thing in a gate as it does in a run. The row picks the
+      // driver; an unconfigured provider fails the evaluation rather
+      // than running the command on a different machine.
+      const driver = driverForSandbox(ctx.drivers, sandbox);
       const repoRows = await ctx.db.select().from(repositories).where(eq(repositories.projectId, feature.projectId));
       const workdir = repoRows.length === 1 ? `${sandbox.workdir}/${repoRows[0]!.name}` : sandbox.workdir;
       gateCtx.sandbox = {
         handle: {
           externalId: sandbox.externalId,
-          provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+          provider: driver.provider,
           workdir,
         },
-        exec: (handle, argv, opts) => ctx.driver.exec(handle, argv, opts),
+        exec: (handle, argv, opts) => driver.exec(handle, argv, opts),
       };
     }
   }

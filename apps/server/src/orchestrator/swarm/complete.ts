@@ -9,7 +9,7 @@ import {
   swarms,
 } from "@bento/db";
 import type { GitHubPublisher } from "@bento/github";
-import type { SandboxHandle } from "@bento/sandbox";
+import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { githubConnectionFor } from "../../github.js";
@@ -17,6 +17,7 @@ import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { publishSwarmBranches, type PublishableRepository, type PublishedPullRequest } from "../publish.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
+import { driverForSandbox } from "../sandbox-driver.js";
 
 /**
  * What happens when a swarm is finished.
@@ -196,7 +197,9 @@ export async function publishSwarmCompletion(
     .orderBy(desc(runArtifacts.createdAt))
     .limit(1);
 
-  const handle = await swarmSandboxHandle(ctx, swarm.sandboxId);
+  const located = await swarmSandbox(ctx, swarm.sandboxId);
+  const handle = located?.handle ?? null;
+  const publishDriver = located?.driver ?? null;
   const workspace = swarmWorkspaceKey(swarm.id);
 
   const body = swarmPullRequestBody({
@@ -225,8 +228,8 @@ export async function publishSwarmCompletion(
        * repository inside the machine, the bundle has to come back out
        * of the swarm's sandbox, which is what exportRepository is for.
        */
-      ...(handle && ctx.driver.exportRepository
-        ? { exportBundle: () => ctx.driver.exportRepository!(handle, row.name, row.defaultBranch) }
+      ...(handle && publishDriver?.exportRepository
+        ? { exportBundle: () => publishDriver.exportRepository!(handle, row.name, row.defaultBranch) }
         : { worktreePath: ctx.worktrees.worktreePath(workspace, row.name) }),
     };
   });
@@ -251,11 +254,17 @@ export async function publishSwarmCompletion(
 }
 
 /** The machine holding this swarm's checkouts, when one is recorded and alive. */
-async function swarmSandboxHandle(ctx: AppContext, sandboxId: string | null): Promise<SandboxHandle | null> {
+async function swarmSandbox(
+  ctx: AppContext,
+  sandboxId: string | null,
+): Promise<{ handle: SandboxHandle; driver: SandboxDriver } | null> {
   if (!sandboxId) return null;
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)).limit(1);
   if (!row || row.status === "destroyed") return null;
-  return { externalId: row.externalId, provider: row.provider, workdir: row.workdir };
+  return {
+    handle: { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
+    driver: driverForSandbox(ctx.drivers, row),
+  };
 }
 
 /**

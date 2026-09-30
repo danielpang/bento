@@ -25,6 +25,7 @@ import {
   verification,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { mkdtemp } from "node:fs/promises";
 import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -88,7 +89,7 @@ before(async () => {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -1424,13 +1425,14 @@ test("custom providers keep definitions and keys inside their organization", asy
     });
     assert.equal(started.status, 201, await started.clone().text());
     const runId = (await started.json() as { id: string }).id;
-    const previousDriver = ctx.driver;
+    const previousDrivers = ctx.drivers;
     let provisioned = false;
-    ctx.driver = {
+    ctx.drivers = singleDriver({
       provider: "local-process",
+      workspace: "host",
       provision: async () => { provisioned = true; throw new Error("a removed provider must fail before provisioning"); },
-    } as unknown as SandboxDriver;
-    try { await executeRun(ctx, runId); } finally { ctx.driver = previousDriver; }
+    } as unknown as SandboxDriver);
+    try { await executeRun(ctx, runId); } finally { ctx.drivers = previousDrivers; }
     const [finished] = await ctx.db.select({ status: agentRuns.status, error: agentRuns.error })
       .from(agentRuns).where(eq(agentRuns.id, runId));
     assert.equal(provisioned, false);

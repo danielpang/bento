@@ -34,6 +34,7 @@ import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
+import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
@@ -416,8 +417,25 @@ export function defaultMaxWorkers(ctx: AppContext): number {
  * own clone: asking for worktrees there would be refused at the first
  * run, with nothing a person could change to get past it.
  */
-export function defaultWorkerIsolation(ctx: AppContext): "sandbox" | "worktree" {
-  return ctx.env.BENTO_MODE === "multi" || ctx.driver.provider === "sprite" ? "sandbox" : "worktree";
+export function defaultWorkerIsolation(mode: "local" | "multi", workspace: "host" | "clone"): "sandbox" | "worktree" {
+  return mode === "multi" || workspace === "clone" ? "sandbox" : "worktree";
+}
+
+/** Whether this swarm's checkouts live inside the sandbox rather than on the server. */
+async function swarmCloneWorkspace(
+  ctx: AppContext,
+  c: Context,
+  swarm: { sandboxId: string | null },
+): Promise<boolean> {
+  if (swarm.sandboxId) {
+    const [row] = await db(c, ctx)
+      .select({ provider: sandboxes.provider, status: sandboxes.status })
+      .from(sandboxes)
+      .where(eq(sandboxes.id, swarm.sandboxId))
+      .limit(1);
+    if (row && row.status !== "destroyed") return driverForSandbox(ctx.drivers, row).workspace === "clone";
+  }
+  return driverForProject(ctx.drivers).workspace === "clone";
 }
 
 /**
@@ -586,7 +604,10 @@ export function swarmRoutes(ctx: AppContext) {
            * install that later joins a team is then told its swarms
            * cannot keep their shape, instead of quietly given another.
            */
-          workerIsolation: defaultWorkerIsolation(ctx),
+          workerIsolation: defaultWorkerIsolation(
+            ctx.env.BENTO_MODE === "multi" ? "multi" : "local",
+            driverForProject(ctx.drivers).workspace,
+          ),
           judgeProfileId: body.judgeProfileId ?? null,
           completionCommand: body.completionCommand ?? null,
           maxPlanDepth: body.maxPlanDepth ?? 1,
@@ -820,7 +841,7 @@ export function swarmRoutes(ctx: AppContext) {
         landings,
         landingSummary: landingSummary ?? { total: 0, committed: 0 },
         branchCheckout: {
-          mode: ctx.driver.provider === "sprite" ? "remote" : "worktree",
+          mode: (await swarmCloneWorkspace(ctx, c, swarm)) ? "remote" : "worktree",
           released: swarm.branchReleasedAt !== null,
         },
         pullRequests,
@@ -831,7 +852,7 @@ export function swarmRoutes(ctx: AppContext) {
       if (!accessible) return c.json({ error: "not found" }, 404);
       const refusal = await requireSwarms(ctx, c, accessible.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
-      if (ctx.driver.provider === "sprite") {
+      if (await swarmCloneWorkspace(ctx, c, accessible)) {
         return c.json({ error: "This deployment does not keep a local swarm worktree." }, 409);
       }
       const [swarm] = await db(c, ctx)
@@ -988,7 +1009,7 @@ export function swarmRoutes(ctx: AppContext) {
        * repository on this host does not already have.
        */
       deferAfterCommit(c, async () => {
-        await checkpointSwarmSandboxes(ctx.db, ctx.driver, swarm.id, `swarm-pause-${swarm.id}`);
+        await checkpointSwarmSandboxes(ctx.db, ctx.drivers, swarm.id, `swarm-pause-${swarm.id}`);
       });
       saySwarmChanged(ctx, c, swarm, "paused");
       return c.json(paused);
@@ -1226,7 +1247,7 @@ export function swarmRoutes(ctx: AppContext) {
       if (swarm.status === "cancelled" || (swarm.status === "done" && !unfinishedLeaf)) {
         return c.json({ error: `This swarm is ${swarm.status}, so it cannot be started.` }, 409);
       }
-      if (swarm.status === "done" && swarm.branchReleasedAt && swarm.branchName && ctx.driver.provider !== "sprite") {
+      if (swarm.status === "done" && swarm.branchReleasedAt && swarm.branchName && !(await swarmCloneWorkspace(ctx, c, swarm))) {
         const repos = await db(c, ctx)
           .select({ name: repositories.name, localPath: repositories.localPath })
           .from(repositories)
@@ -1338,7 +1359,7 @@ export function swarmRoutes(ctx: AppContext) {
           );
         }
 
-        if (swarm.branchReleasedAt && swarm.branchName && ctx.driver.provider !== "sprite") {
+        if (swarm.branchReleasedAt && swarm.branchName && !(await swarmCloneWorkspace(ctx, c, swarm))) {
           const repos = await db(c, ctx)
             .select({ name: repositories.name, localPath: repositories.localPath })
             .from(repositories)
@@ -2043,13 +2064,14 @@ export function swarmRoutes(ctx: AppContext) {
        */
       const owned = await db(c, ctx).select().from(sandboxes).where(eq(sandboxes.swarmId, swarm.id));
       for (const sandbox of owned.filter((row) => row.status !== "destroyed")) {
-        const handle: SandboxHandle = {
-          externalId: sandbox.externalId,
-          provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
-          workdir: sandbox.workdir,
-        };
         try {
-          await ctx.driver.destroy(handle);
+          const driver = driverForSandbox(ctx.drivers, sandbox);
+          const handle: SandboxHandle = {
+            externalId: sandbox.externalId,
+            provider: driver.provider,
+            workdir: sandbox.workdir,
+          };
+          await driver.destroy(handle);
         } catch (err) {
           return c.json(
             {

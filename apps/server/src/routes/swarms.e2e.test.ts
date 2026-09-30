@@ -28,7 +28,8 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { singleDriver } from "../orchestrator/sandbox-driver.js";
 import { createApp } from "../app.js";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { SecretBox } from "../secrets.js";
@@ -123,7 +124,7 @@ before(async () => {
       notifyWorker: () => {},
     } as unknown as AppContext["boss"],
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -919,11 +920,11 @@ test("deleting a swarm takes its machines with it", async () => {
   ]);
 
   const destroyed: string[] = [];
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async (handle: SandboxHandle) => void destroyed.push(handle.externalId);
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async (handle: SandboxHandle) => void destroyed.push(handle.externalId);
 
   const gone = await app.request(`/api/swarms/${swarm.id}`, { method: "DELETE" });
-  ctx.driver.destroy = realDestroy;
+  ctx.drivers.default.destroy = realDestroy;
   assert.equal(gone.status, 200, await gone.clone().text());
   assert.deepEqual(
     [...destroyed].sort(),
@@ -944,12 +945,12 @@ test("a machine that will not go stops the delete rather than being abandoned", 
     .insert(sandboxes)
     .values({ projectId, swarmId: swarm.id, provider: "docker", externalId: "bento-stuck", status: "ready" });
 
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async () => {
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async () => {
     throw new Error("fly said no");
   };
   const refused = await app.request(`/api/swarms/${swarm.id}`, { method: "DELETE" });
-  ctx.driver.destroy = realDestroy;
+  ctx.drivers.default.destroy = realDestroy;
   assert.equal(refused.status, 502);
   assert.match(((await refused.json()) as { error: string }).error, /fly said no/);
   assert.ok(await readSwarm(swarm.id), "the swarm is still there to try again from");
@@ -1369,12 +1370,12 @@ test("a swarm is created with its run settings, and they can be changed after", 
 });
 
 test("a swarm's workers go where the driver can put them", () => {
-  const shape = (mode: "local" | "multi", provider: string) =>
-    defaultWorkerIsolation({ env: { BENTO_MODE: mode }, driver: { provider } } as unknown as AppContext);
-  assert.equal(shape("local", "docker"), "worktree");
-  assert.equal(shape("local", "local-process"), "worktree");
-  assert.equal(shape("local", "sprite"), "sandbox", "a sprite holds its own clone, so worktrees would be refused");
-  assert.equal(shape("multi", "sprite"), "sandbox");
+  // Clone covers Sprite and Modal: neither has a host filesystem, so a
+  // local deployment still isolates workers inside sandboxes.
+  assert.equal(defaultWorkerIsolation("local", "host"), "worktree");
+  assert.equal(defaultWorkerIsolation("local", "clone"), "sandbox", "a clone sandbox holds its own checkout, so worktrees would be refused");
+  assert.equal(defaultWorkerIsolation("multi", "host"), "sandbox");
+  assert.equal(defaultWorkerIsolation("multi", "clone"), "sandbox");
 });
 
 /**
@@ -2037,7 +2038,7 @@ test("pausing a swarm checkpoints the machines it holds", async () => {
     },
   };
 
-  const result = await checkpointSwarmSandboxes(db, driver, swarm.id, "swarm-pause");
+  const result = await checkpointSwarmSandboxes(db, singleDriver(driver as unknown as SandboxDriver), swarm.id, "swarm-pause");
   assert.equal(result.skipped, null);
   assert.deepEqual(result.checkpointed, [{ sandboxId: box.id, checkpointId: "snap-bento-swarm-1" }]);
   assert.deepEqual(asked, [{ externalId: "bento-swarm-1", label: "swarm-pause" }]);
@@ -2050,7 +2051,12 @@ test("pausing a swarm checkpoints the machines it holds", async () => {
 test("a driver that cannot snapshot is not a failure to pause", async () => {
   const swarm = await createSwarm();
   await sandboxFor(swarm.id, "bento-swarm-2");
-  const result = await checkpointSwarmSandboxes(db, { provider: "docker" }, swarm.id, "swarm-pause");
+  const result = await checkpointSwarmSandboxes(
+    db,
+    singleDriver({ provider: "docker", workspace: "host" } as unknown as SandboxDriver),
+    swarm.id,
+    "swarm-pause",
+  );
   assert.deepEqual(result.checkpointed, []);
   assert.match(result.skipped ?? "", /cannot be snapshotted/);
 });
@@ -2063,7 +2069,7 @@ test("a snapshot that fails leaves the row alone rather than failing the pause",
     snapshot: () => Promise.reject(new Error("the provider was unreachable")),
   };
 
-  const result = await checkpointSwarmSandboxes(db, driver, swarm.id, "swarm-pause");
+  const result = await checkpointSwarmSandboxes(db, singleDriver(driver as unknown as SandboxDriver), swarm.id, "swarm-pause");
   assert.deepEqual(result.checkpointed, []);
   const [after] = await db.select().from(sandboxes).where(eq(sandboxes.id, box.id));
   assert.equal(after!.checkpointId, null);

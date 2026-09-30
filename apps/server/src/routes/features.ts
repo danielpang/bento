@@ -30,11 +30,12 @@ import {
   stages,
   user,
 } from "@bento/db";
-import type { SandboxHandle } from "@bento/sandbox";
+import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
+import { driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { childCount, parentRefusal, relatedGroup } from "../feature-tree.js";
 import { getBetaTester } from "../feature-flags.js";
 import {
@@ -524,13 +525,14 @@ export function featureRoutes(ctx: AppContext) {
            */
           const owned = await tx.select().from(sandboxes).where(eq(sandboxes.featureId, feature.id));
           for (const sandbox of owned.filter((s) => s.status !== "destroyed")) {
-            const handle: SandboxHandle = {
-              externalId: sandbox.externalId,
-              provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
-              workdir: sandbox.workdir,
-            };
             try {
-              await ctx.driver.destroy(handle);
+              const driver = driverForSandbox(ctx.drivers, sandbox);
+              const handle: SandboxHandle = {
+                externalId: sandbox.externalId,
+                provider: driver.provider,
+                workdir: sandbox.workdir,
+              };
+              await driver.destroy(handle);
             } catch (err) {
               throw new SandboxDestroyFailed(err instanceof Error ? err.message : String(err));
             }
@@ -695,9 +697,9 @@ export function featureRoutes(ctx: AppContext) {
           .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
           .orderBy(desc(sandboxes.createdAt)).limit(1);
         if (!sandbox) return c.json({ error: "This card has no available agent workspace. Start an agent before attaching files." }, 409);
-        if (sandbox.provider !== ctx.driver.provider && !(sandbox.provider === "docker" && ctx.driver.provider === "local-process")) return c.json({ error: "This workspace cannot receive attachments from this server." }, 409);
         try {
-          const files = await writeMessageAttachments(ctx.driver, { externalId: sandbox.externalId, provider: ctx.driver.provider, workdir: sandbox.workdir }, body.attachments);
+          const driver = driverForSandbox(ctx.drivers, sandbox);
+          const files = await writeMessageAttachments(driver, { externalId: sandbox.externalId, provider: driver.provider, workdir: sandbox.workdir }, body.attachments);
           text = `${text || "Please review the attached files."}\n\nAttached files in your workspace (use your file or image-reading tools to inspect them):\n${files.map(file => JSON.stringify(file)).join("\n")}`;
         } catch (error) {
           return c.json({ error: error instanceof Error ? error.message : "Could not attach files." }, 503);
@@ -1132,24 +1134,32 @@ export function featureRoutes(ctx: AppContext) {
         ctx.env.BENTO_MODE === "multi" ? selected : await linkGitHubRemotes(db(c, ctx), selected);
       const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
 
-      const exportRepository = ctx.driver.exportRepository?.bind(ctx.driver);
+      // The row picks the driver. A clone driver exports bundles from
+      // the sandbox; a host driver reads the worktrees it mounted.
+      const [sandbox] = await db(c, ctx)
+        .select()
+        .from(sandboxes)
+        .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
+        .orderBy(desc(sandboxes.createdAt))
+        .limit(1);
+      let publishDriver: SandboxDriver;
+      try {
+        publishDriver = sandbox ? driverForSandbox(ctx.drivers, sandbox) : ctx.drivers.default;
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : "no driver configured on this server" }, 409);
+      }
+      const exportRepository = publishDriver.exportRepository?.bind(publishDriver);
       let publishable: PublishableRepository[];
       if (exportRepository) {
         // The card's sandbox holds the checkouts. It outlives the run
         // that made it, so the latest row that was not destroyed is the
         // one to read; a card with none has never run anywhere.
-        const [sandbox] = await db(c, ctx)
-          .select()
-          .from(sandboxes)
-          .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
-          .orderBy(desc(sandboxes.createdAt))
-          .limit(1);
         if (!sandbox) {
           return c.json({ error: "this card has no sandbox yet; run an agent on it first, then publish" }, 409);
         }
         const handle: SandboxHandle = {
           externalId: sandbox.externalId,
-          provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+          provider: publishDriver.provider,
           workdir: sandbox.workdir,
         };
         publishable = repoRows.map((row) => {

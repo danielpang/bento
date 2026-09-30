@@ -18,7 +18,8 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
@@ -106,9 +107,9 @@ before(async () => {
     bus,
     userId: "u1",
     worktrees: new WorktreeManager(dataDir),
-    // Only the provider is read here, and only to refuse a driver that
+    // Only the workspace is read here, and only to refuse a driver that
     // keeps its checkouts inside the machine rather than on this host.
-    driver: { provider: "docker" },
+    drivers: singleDriver({ provider: "docker", workspace: "host" } as unknown as SandboxDriver),
     boss: {
       send: async (queue: string, data: unknown) => {
         queued.push({ queue, data: data as Record<string, unknown> });
@@ -418,13 +419,14 @@ test("a deployment whose driver holds the checkouts in sandboxes lands through b
     workdir: "/workspace",
   });
 
-  const original = ctx.driver;
+  const original = ctx.drivers;
   const trees = new Map([
     [`sprite-swarm-${fx.swarm.id}`, fx.swarmTree],
     [`sprite-worker-${fx.task.id}`, fx.workerTree],
   ]);
-  ctx.driver = {
+  ctx.drivers = singleDriver({
     provider: "sprite",
+    workspace: "clone",
     async exportRepository(handle, _name, baseBranch, options) {
       assert.equal(options?.selfContained, true, "remote landing snapshots must carry their own prerequisite objects");
       const tree = trees.get(handle.externalId)!;
@@ -454,7 +456,7 @@ test("a deployment whose driver holds the checkouts in sandboxes lands through b
       throw new Error("unused");
     },
     async destroy() {},
-  };
+  } as SandboxDriver);
   try {
     const result = await performLanding(ctx, landing.id);
     assert.equal(result?.status, "landed");
@@ -472,7 +474,7 @@ test("a deployment whose driver holds the checkouts in sandboxes lands through b
     assert.equal(retried?.status, "landed");
     assert.equal(await git(fx.swarmTree, ["rev-parse", "HEAD"]), after);
   } finally {
-    ctx.driver = original;
+    ctx.drivers = original;
   }
 });
 
@@ -572,7 +574,7 @@ test("a landing another job already finished does not have its outcome written o
   await db.update(swarms).set({ sandboxId: sandbox!.id }).where(eq(swarms.id, fx.swarm.id));
   await pool.query(`update repositories set test_command = 'pnpm test' where project_id = $1`, [PROJECT]);
 
-  const driver = ctx.driver as unknown as { exec?: unknown };
+  const driver = ctx.drivers.default as unknown as { exec?: unknown };
   driver.exec = () => ({
     async *[Symbol.asyncIterator]() {
       // The other job, finishing: the branch is in and the leaf is done.
@@ -623,18 +625,18 @@ test("a landing that is not at the front of the queue is not performed", async (
  * needs a sandbox, and the reasoning was that no Docker here means no
  * sandbox, so only the branch where it returns null was ever taken.
  * That was too quick: the local process driver is a sandbox as far as
- * `ctx.driver.exec` is concerned, it runs commands in the workspace's
+ * the driver's `exec` is concerned, it runs commands in the workspace's
  * worktree, and it is what the other end to end suites already use. So
  * the swarm's own checkout is the sandbox's workdir, the repository's
  * check is a real command, and both outcomes below are the command
  * really running and really failing.
  *
  * The provider is set to the driver's own name rather than left at
- * "docker": the landing refuses "sprite" and nothing else, so this is
- * the honest label for what is executing.
+ * "docker": a docker row on a local-process default resolves to that
+ * default, which is the process that actually runs the check.
  */
 async function withLocalDriver<T>(run: () => Promise<T>): Promise<T> {
-  const driver = ctx.driver as unknown as { provider: string; exec?: unknown };
+  const driver = ctx.drivers.default as unknown as { provider: string; exec?: unknown };
   const wasProvider = driver.provider;
   const local = new LocalProcessDriver();
   driver.provider = "local-process";
