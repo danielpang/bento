@@ -416,6 +416,8 @@ export interface NewSwarmInput {
   start: { kind: "new-branch"; name: string } | { kind: "existing-branch"; name: string };
   deliverable: "code" | "document";
   budgetUsd: number | null;
+  /** Minutes the swarm may run for. Null means no limit. */
+  timeLimitMin?: number | null;
   workers: number;
   /** Plan only stops after the planner, before any worker starts. */
   planOnly: boolean;

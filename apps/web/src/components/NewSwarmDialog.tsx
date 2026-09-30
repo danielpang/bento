@@ -8,8 +8,12 @@ import { SwarmAgentSelect } from "./SwarmAgentSelect.js";
 import {
   DEFAULT_RUN_SETTINGS,
   SwarmRunSettingsFields,
+  budgetHelp,
+  parseBudget,
+  parseTimeLimit,
   runSettingsSummary,
   settingsFrom,
+  timeLimitHelp,
   type RunSettingsDraft,
 } from "./SwarmSettingsFields.js";
 
@@ -58,6 +62,7 @@ export function NewSwarmDialog({
   const [goal, setGoal] = useState("");
   const [error, setError] = useState("");
   const [budget, setBudget] = useState("");
+  const [timeLimit, setTimeLimit] = useState("");
   const [workers, setWorkers] = useState(clampWorkers(surfaces.defaultSwarmWorkers, MAX_SWARM_WORKERS));
   /**
    * A branch that already exists, to continue.
@@ -79,7 +84,15 @@ export function NewSwarmDialog({
   const branchRefusal = continuing && !isBranchName(continuing) ? branchNameRefusal : null;
   const goalLength = goal.trim().length;
   const goalTooLong = goalLength > MAX_SWARM_GOAL_CHARS;
-  const ready = name.trim() !== "" && goalLength > 0 && !goalTooLong && branchRefusal === null;
+  const budgetUsd = parseBudget(budget);
+  const timeLimitMin = parseTimeLimit(timeLimit);
+  const ready =
+    name.trim() !== "" &&
+    goalLength > 0 &&
+    !goalTooLong &&
+    branchRefusal === null &&
+    budgetUsd !== undefined &&
+    timeLimitMin !== undefined;
 
   return (
     <Modal
@@ -163,9 +176,22 @@ export function NewSwarmDialog({
               inputMode="decimal"
               value={budget}
               placeholder="No cap"
+              aria-invalid={budgetUsd === undefined}
               onChange={(e) => setBudget(e.target.value)}
             />
-            <span className="muted">In dollars. Leave empty for no cap.</span>
+            <span className={budgetUsd === undefined ? "error" : "muted"}>{budgetHelp(budgetUsd)}</span>
+          </label>
+          <label className="field">
+            <span className="field-heading">Time limit</span>
+            <input
+              className="input"
+              inputMode="numeric"
+              value={timeLimit}
+              placeholder="No limit"
+              aria-invalid={timeLimitMin === undefined}
+              onChange={(e) => setTimeLimit(e.target.value)}
+            />
+            <span className={timeLimitMin === undefined ? "error" : "muted"}>{timeLimitHelp(timeLimitMin)}</span>
           </label>
         </div>
 
@@ -187,7 +213,9 @@ export function NewSwarmDialog({
 
         <details className="swarm-more-settings">
           <summary>
-            <span className="field-heading">More settings</span>
+            <span className="field-heading">
+              More settings <span className="swarm-more-marker" aria-hidden="true" />
+            </span>
             <span className="muted">{runSettingsSummary(runSettings, agents, deliverable)}</span>
           </summary>
           <SwarmRunSettingsFields
@@ -226,7 +254,8 @@ export function NewSwarmDialog({
       attachments: [],
       start: continuing ? { kind: "existing-branch", name: continuing } : { kind: "new-branch", name: branchName },
       deliverable,
-      budgetUsd: parseBudget(budget),
+      budgetUsd: budgetUsd ?? null,
+      timeLimitMin: timeLimitMin ?? null,
       workers,
       planOnly: true,
     }).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
@@ -264,14 +293,6 @@ export function suggestBranch(name: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 40);
   return slug ? `bento/${slug}` : "";
-}
-
-/** A typed budget as a number, or null for no cap. Never NaN. */
-export function parseBudget(raw: string): number | null {
-  const trimmed = raw.trim().replace(/^\$/, "");
-  if (trimmed === "") return null;
-  const value = Number(trimmed);
-  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export function clampWorkers(value: number, max: number): number {

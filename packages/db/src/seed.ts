@@ -98,7 +98,7 @@ async function ensureDefaultAgents(
  * on name, so somebody who already has a "Swarm Planner" keeps theirs.
  *
  * Returned by role rather than by name, because that is what a swarm
- * template asks for.
+ * asks for.
  */
 export async function ensureSwarmAgents(
   db: Db,

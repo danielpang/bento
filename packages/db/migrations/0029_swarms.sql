@@ -87,6 +87,8 @@ CREATE TABLE "swarms" (
 	"slug" text NOT NULL,
 	"title" text NOT NULL,
 	"goal" text DEFAULT '' NOT NULL,
+	"planner_profile_id" uuid,
+	"worker_profile_id" uuid,
 	"planner_instructions" text,
 	"worker_instructions" text,
 	"status" text DEFAULT 'draft' NOT NULL,
@@ -139,6 +141,8 @@ ALTER TABLE "swarm_tasks" ADD CONSTRAINT "swarm_tasks_parent_id_swarm_tasks_id_f
 ALTER TABLE "swarm_tasks" ADD CONSTRAINT "swarm_tasks_assigned_run_id_agent_runs_id_fk" FOREIGN KEY ("assigned_run_id") REFERENCES "public"."agent_runs"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "identity"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "swarms" ADD CONSTRAINT "swarms_planner_profile_id_agent_profiles_id_fk" FOREIGN KEY ("planner_profile_id") REFERENCES "public"."agent_profiles"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "swarms" ADD CONSTRAINT "swarms_worker_profile_id_agent_profiles_id_fk" FOREIGN KEY ("worker_profile_id") REFERENCES "public"."agent_profiles"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_sandbox_id_sandboxes_id_fk" FOREIGN KEY ("sandbox_id") REFERENCES "public"."sandboxes"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_started_by_user_id_fk" FOREIGN KEY ("started_by") REFERENCES "identity"."user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "swarm_landings_queue_idx" ON "swarm_landings" USING btree ("swarm_id","position");--> statement-breakpoint

@@ -1,5 +1,5 @@
 {
-  "id": "82a4c367-ed3d-4115-98d4-77d289e89910",
+  "id": "5a458c21-19a7-4bbe-aab4-d807b957905e",
   "prevId": "40776101-d15b-4d5b-9db5-d9697a92dcfd",
   "version": "7",
   "dialect": "postgresql",
@@ -6930,6 +6930,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "parent_relation": {
+          "name": "parent_relation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'contains'"
         },
         "position": {
           "name": "position",

@@ -714,7 +714,7 @@ test("the run settings open on the defaults, grouped and explained", () => {
     }),
   );
   assert.match(html, /What it produces/);
-  assert.match(html, /aria-checked="true"[^>]*>Code change/);
+  assert.match(html, /aria-pressed="true"[^>]*>Code change/);
   assert.match(html, /Final check/);
   // No judge is the default, and it says so rather than naming nobody.
   assert.match(html, /<option value="" selected="">None<\/option>/);
@@ -740,7 +740,7 @@ test("the settings summary says what a person changed", () => {
   );
 });
 
-test("a swarm's settings open on what it is set to now, and save only what changed", () => {
+test("a swarm's settings open on what it is set to now, and round trip unchanged", () => {
   const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
   const settings = { ...seeded.swarm.settings, judgeProfileId: "agent-worker", completionCommand: "pnpm test" };
   const draft = draftFrom(settings);

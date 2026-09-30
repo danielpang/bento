@@ -100,7 +100,7 @@ export function isolationRefusal(isolation: WorkerIsolation, provider: string): 
   if (provider !== "sprite") return null;
   return (
     "This swarm was created to run its agents in worktrees of the repository on the server, and this deployment runs agents on machines that hold their own clones. " +
-    "Start a new swarm here to give each agent its own machine, or run this one on a deployment that keeps the checkouts."
+    "A new swarm started here gives each agent its own machine. To carry on with this one, run it on a deployment that keeps the checkouts."
   );
 }
 

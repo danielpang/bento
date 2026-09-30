@@ -7160,6 +7160,18 @@
           "notNull": true,
           "default": "''"
         },
+        "planner_profile_id": {
+          "name": "planner_profile_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "worker_profile_id": {
+          "name": "worker_profile_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "planner_instructions": {
           "name": "planner_instructions",
           "type": "text",
@@ -7427,6 +7439,32 @@
           "tableTo": "agent_profiles",
           "columnsFrom": [
             "judge_profile_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "swarms_planner_profile_id_agent_profiles_id_fk": {
+          "name": "swarms_planner_profile_id_agent_profiles_id_fk",
+          "tableFrom": "swarms",
+          "tableTo": "agent_profiles",
+          "columnsFrom": [
+            "planner_profile_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "swarms_worker_profile_id_agent_profiles_id_fk": {
+          "name": "swarms_worker_profile_id_agent_profiles_id_fk",
+          "tableFrom": "swarms",
+          "tableTo": "agent_profiles",
+          "columnsFrom": [
+            "worker_profile_id"
           ],
           "columnsTo": [
             "id"

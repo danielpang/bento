@@ -39,7 +39,7 @@ import { tickSwarm } from "../orchestrator/swarm/coordinator.js";
 import { takeNodeMessages } from "../orchestrator/swarm/node-messages.js";
 import { BENTO_SWARM_SERVER_ID } from "../mcp/swarm-server.js";
 import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
-import { RUNNER_PROJECT_REFUSAL } from "./swarms.js";
+import { RUNNER_PROJECT_REFUSAL, defaultWorkerIsolation } from "./swarms.js";
 
 /**
  * The swarm routes, driven as a client drives them.
@@ -1200,6 +1200,34 @@ test("a swarm is created with its run settings, and they can be changed after", 
     body: JSON.stringify({ judgeProfileId: "00000000-0000-4000-8000-000000000001" }),
   });
   assert.equal(strangerJudge.status, 404, "an agent that is not the team's reads as not there");
+
+  // The same for the agents themselves, on the way in and afterwards.
+  const stranger = "00000000-0000-4000-8000-000000000001";
+  for (const field of ["plannerProfileId", "workerProfileId"]) {
+    const res = await app.request(`/api/swarms/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [field]: stranger }),
+    });
+    assert.equal(res.status, 404, `a stranger's ${field} reads as not there`);
+  }
+  const judgedAtCreate = await post("/api/swarms", {
+    projectId,
+    title: "Judged by a stranger",
+    goal: "Try a missing judge",
+    judgeProfileId: stranger,
+  });
+  assert.equal(judgedAtCreate.status, 404);
+  assert.equal((await readSwarm(created.id)).plannerProfileId, defaults.plannerProfileId, "and nothing was changed");
+});
+
+test("a swarm's workers go where the driver can put them", () => {
+  const shape = (mode: "local" | "multi", provider: string) =>
+    defaultWorkerIsolation({ env: { BENTO_MODE: mode }, driver: { provider } } as unknown as AppContext);
+  assert.equal(shape("local", "docker"), "worktree");
+  assert.equal(shape("local", "local-process"), "worktree");
+  assert.equal(shape("local", "sprite"), "sandbox", "a sprite holds its own clone, so worktrees would be refused");
+  assert.equal(shape("multi", "sprite"), "sandbox");
 });
 
 /**

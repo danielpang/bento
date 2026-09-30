@@ -279,6 +279,20 @@ export function defaultMaxWorkers(ctx: AppContext): number {
 }
 
 /**
+ * Where a new swarm's workers work.
+ *
+ * Worktrees of the checkout on the server wherever the driver can
+ * provide them, which is a local install on its own machine; a machine
+ * per agent otherwise. Read off the driver as well as the mode, because
+ * a local install can run its agents on sprites, and a sprite holds its
+ * own clone: asking for worktrees there would be refused at the first
+ * run, with nothing a person could change to get past it.
+ */
+export function defaultWorkerIsolation(ctx: AppContext): "sandbox" | "worktree" {
+  return ctx.env.BENTO_MODE === "multi" || ctx.driver.provider === "sprite" ? "sandbox" : "worktree";
+}
+
+/**
  * Whether this agent is one a swarm in this organization may run.
  *
  * The agent has to belong to the swarm's team, or on a local install
@@ -430,7 +444,7 @@ export function swarmRoutes(ctx: AppContext) {
            * install that later joins a team is then told its swarms
            * cannot keep their shape, instead of quietly given another.
            */
-          workerIsolation: ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree",
+          workerIsolation: defaultWorkerIsolation(ctx),
           judgeProfileId: body.judgeProfileId ?? null,
           completionCommand: body.completionCommand ?? null,
           maxPlanDepth: body.maxPlanDepth ?? 1,

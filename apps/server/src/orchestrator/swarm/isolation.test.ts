@@ -30,7 +30,7 @@ test("and is refused, in words, where the sandbox holds its own clone", () => {
   assert.ok(refusal, "a shape that cannot be kept is refused rather than quietly changed");
   assert.match(refusal!, /worktrees of the repository on the server/);
   assert.match(refusal!, /machines that hold their own clones/);
-  assert.match(refusal!, /Start a new swarm here/, "and says what to do about it");
+  assert.match(refusal!, /A new swarm started here gives each agent its own machine/, "and says what to do about it");
 });
 
 /* ---------------------------------------------------------------- */

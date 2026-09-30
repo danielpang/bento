@@ -3,7 +3,8 @@ import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import { clampWorkers, parseBudget, suggestBranch } from "./components/NewSwarmDialog.js";
+import { clampWorkers, suggestBranch } from "./components/NewSwarmDialog.js";
+import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";
 import type { NewSwarmInput } from "./swarm/types.js";
 
 /**
@@ -168,9 +169,17 @@ test("a swarm's branch is suggested from its name, and a budget is a number or n
   assert.equal(parseBudget(""), null);
   assert.equal(parseBudget("$40"), 40);
   assert.equal(parseBudget("40.50"), 40.5);
-  // A typed zero or a typo is no cap, never a swarm that cannot spend.
-  assert.equal(parseBudget("0"), null);
-  assert.equal(parseBudget("lots"), null);
+  // A typo is refused in words, never read as "no cap", which is the
+  // one reading that spends without limit. Zero is refused too.
+  assert.equal(parseBudget("0"), undefined);
+  assert.equal(parseBudget("lots"), undefined);
+  assert.equal(parseBudget("5o"), undefined);
+  assert.equal(parseBudget("100001"), undefined, "the route's own ceiling");
+  assert.equal(parseTimeLimit(""), null);
+  assert.equal(parseTimeLimit("90"), 90);
+  assert.equal(parseTimeLimit("1.5"), undefined);
+  assert.equal(parseTimeLimit("0"), undefined);
+  assert.equal(parseTimeLimit("10081"), undefined, "a week is the most the route takes");
   assert.equal(clampWorkers(12, 8), 8);
   assert.equal(clampWorkers(0, 8), 1);
   assert.equal(clampWorkers(Number.NaN, 8), 1);

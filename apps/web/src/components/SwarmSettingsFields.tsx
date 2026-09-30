@@ -112,7 +112,7 @@ export function SwarmRunSettingsFields({
       {deliverable && onDeliverable && (
         <fieldset className="swarm-settings-group">
           <legend className="field-heading">What it produces</legend>
-          <div className="board-filters" role="radiogroup" aria-label="What it produces">
+          <div className="board-filters" role="group">
             {(
               [
                 ["code", "Code change"],
@@ -123,8 +123,6 @@ export function SwarmRunSettingsFields({
                 key={value}
                 type="button"
                 className="board-filter"
-                role="radio"
-                aria-checked={deliverable === value}
                 aria-pressed={deliverable === value}
                 onClick={() => onDeliverable(value)}
               >
@@ -212,21 +210,43 @@ export function SwarmRunSettingsFields({
   );
 }
 
-/** A typed budget as a number, null for no cap, or undefined when it is not a number. */
-function parseMoney(raw: string): number | null | undefined {
+/** The ceilings the routes accept, so a form refuses what the server would. */
+export const MAX_BUDGET_USD = 100_000;
+export const MAX_TIME_LIMIT_MIN = 60 * 24 * 7;
+
+/**
+ * A typed budget: a number of dollars, null for no cap, or undefined
+ * when it is neither.
+ *
+ * One rule for both dialogs. Empty is no cap; anything else has to be
+ * an amount above zero, and a typo is refused in words rather than
+ * quietly read as "no cap", which is the one reading that can spend
+ * without limit. A cap of nothing is what pausing is for.
+ */
+export function parseBudget(raw: string): number | null | undefined {
   const trimmed = raw.trim().replace(/^\$/, "");
   if (trimmed === "") return null;
   const value = Number(trimmed);
-  return Number.isFinite(value) && value >= 0 ? value : undefined;
+  return Number.isFinite(value) && value > 0 && value <= MAX_BUDGET_USD ? value : undefined;
 }
 
-/** Typed minutes as a whole number, null for no limit, or undefined when it is not one. */
-function parseMinutes(raw: string): number | null | undefined {
+/** Typed minutes: a whole number, null for no limit, or undefined when it is neither. */
+export function parseTimeLimit(raw: string): number | null | undefined {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
   const value = Number(trimmed);
-  return Number.isInteger(value) && value >= 1 ? value : undefined;
+  return Number.isInteger(value) && value >= 1 && value <= MAX_TIME_LIMIT_MIN ? value : undefined;
 }
+
+export const budgetHelp = (value: number | null | undefined) =>
+  value === undefined
+    ? `Enter an amount up to $${MAX_BUDGET_USD.toLocaleString()}, or leave it empty for no cap.`
+    : "In dollars. Leave empty for no cap.";
+
+export const timeLimitHelp = (value: number | null | undefined) =>
+  value === undefined
+    ? `Enter whole minutes, up to ${MAX_TIME_LIMIT_MIN.toLocaleString()}, or leave it empty for no limit.`
+    : "In minutes. Leave empty for no limit.";
 
 /**
  * A swarm's settings, changed after it exists.
@@ -249,7 +269,20 @@ export function SwarmSettingsDialog({
   onClose: () => void;
   onSave: (change: SwarmSettingsChange) => Promise<void>;
 }) {
-  const initial = draftFrom(swarm.settings);
+  /*
+   * What the swarm was set to when the dialog opened, held still.
+   *
+   * Save compares against this rather than against the swarm as it is
+   * now, because the page refetches while the dialog is open: a
+   * teammate's change arriving mid edit would otherwise count as
+   * something this person changed back, and Save would undo it.
+   */
+  const [opened] = useState(() => ({
+    settings: swarm.settings,
+    budgetUsd: swarm.budgetUsd,
+    timeLimitMin: swarm.timeLimitMin,
+  }));
+  const initial = draftFrom(opened.settings);
   const [planner, setPlanner] = useState(swarm.settings.plannerProfileId ?? "");
   const [worker, setWorker] = useState(swarm.settings.workerProfileId ?? "");
   const [budget, setBudget] = useState(swarm.budgetUsd === null ? "" : String(swarm.budgetUsd));
@@ -257,9 +290,9 @@ export function SwarmSettingsDialog({
   const [draft, setDraft] = useState(initial);
   const [error, setError] = useState("");
 
-  const budgetUsd = parseMoney(budget);
-  const timeLimitMin = parseMinutes(timeLimit);
-  const ready = budgetUsd !== undefined && timeLimitMin !== undefined && planner !== "";
+  const budgetUsd = parseBudget(budget);
+  const timeLimitMin = parseTimeLimit(timeLimit);
+  const ready = budgetUsd !== undefined && timeLimitMin !== undefined && planner !== "" && worker !== "";
 
   return (
     <Modal
@@ -307,9 +340,7 @@ export function SwarmSettingsDialog({
               aria-invalid={budgetUsd === undefined}
               onChange={(event) => setBudget(event.target.value)}
             />
-            <span className={budgetUsd === undefined ? "error" : "muted"}>
-              {budgetUsd === undefined ? "Enter an amount in dollars, or leave it empty for no cap." : "Leave empty for no cap."}
-            </span>
+            <span className={budgetUsd === undefined ? "error" : "muted"}>{budgetHelp(budgetUsd)}</span>
           </label>
           <label className="field">
             <span className="field-heading">Time limit</span>
@@ -321,9 +352,7 @@ export function SwarmSettingsDialog({
               aria-invalid={timeLimitMin === undefined}
               onChange={(event) => setTimeLimit(event.target.value)}
             />
-            <span className={timeLimitMin === undefined ? "error" : "muted"}>
-              {timeLimitMin === undefined ? "Enter whole minutes, or leave it empty for no limit." : "In minutes. Leave empty for no limit."}
-            </span>
+            <span className={timeLimitMin === undefined ? "error" : "muted"}>{timeLimitHelp(timeLimitMin)}</span>
           </label>
         </div>
 
@@ -340,15 +369,15 @@ export function SwarmSettingsDialog({
     const before = settingsFrom(initial);
     const after = settingsFrom(draft);
     const change: SwarmSettingsChange = {};
-    if (planner !== (swarm.settings.plannerProfileId ?? "")) change.plannerProfileId = planner;
-    if (worker && worker !== (swarm.settings.workerProfileId ?? "")) change.workerProfileId = worker;
+    if (planner !== (opened.settings.plannerProfileId ?? "")) change.plannerProfileId = planner;
+    if (worker !== (opened.settings.workerProfileId ?? "")) change.workerProfileId = worker;
     if (after.judgeProfileId !== before.judgeProfileId) change.judgeProfileId = after.judgeProfileId;
     if (after.completionCommand !== before.completionCommand) change.completionCommand = after.completionCommand;
     if (after.maxPlanDepth !== before.maxPlanDepth) change.maxPlanDepth = after.maxPlanDepth;
     if (after.plannerInstructions !== before.plannerInstructions) change.plannerInstructions = after.plannerInstructions;
     if (after.workerInstructions !== before.workerInstructions) change.workerInstructions = after.workerInstructions;
-    if (budgetUsd !== swarm.budgetUsd) change.budgetUsd = budgetUsd ?? null;
-    if (timeLimitMin !== swarm.timeLimitMin) change.timeLimitMin = timeLimitMin ?? null;
+    if (budgetUsd !== opened.budgetUsd) change.budgetUsd = budgetUsd ?? null;
+    if (timeLimitMin !== opened.timeLimitMin) change.timeLimitMin = timeLimitMin ?? null;
     void onSave(change).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 }

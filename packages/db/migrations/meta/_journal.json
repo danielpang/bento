@@ -285,22 +285,15 @@
     {
       "idx": 40,
       "version": "7",
-      "when": 1790437440835,
-      "tag": "0040_swarm_agent_profiles",
+      "when": 1790452177954,
+      "tag": "0040_swarm_parent_relation",
       "breakpoints": true
     },
     {
       "idx": 41,
       "version": "7",
-      "when": 1790452177954,
-      "tag": "0041_swarm_parent_relation",
-      "breakpoints": true
-    },
-    {
-      "idx": 42,
-      "version": "7",
       "when": 1790540000000,
-      "tag": "0042_swarm_branch_release",
+      "tag": "0041_swarm_branch_release",
       "breakpoints": true
     }
   ]

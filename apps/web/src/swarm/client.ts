@@ -945,6 +945,7 @@ export function httpSwarmApi(
         ...input.settings,
         maxWorkers: input.workers,
         ...(input.budgetUsd === null ? {} : { budgetUsd: input.budgetUsd }),
+        ...(input.timeLimitMin ? { timeLimitMin: input.timeLimitMin } : {}),
         ...(input.start.kind === "existing-branch" ? { startBranch: input.start.name } : {}),
       });
       return { swarm: toSwarm(created), tasks: [], landings: [], ledger: [], pullRequests: [] };

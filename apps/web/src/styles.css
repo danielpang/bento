@@ -9813,12 +9813,19 @@ a.hours-person-name:hover {
 
 .swarm-more-settings > summary::-webkit-details-marker { display: none; }
 
-.swarm-more-settings > summary .field-heading::after {
-  content: " +";
-  color: var(--text-faint);
+/* The open and closed marker, drawn rather than written so it is not read aloud. */
+.swarm-more-marker {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 4px;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 120ms ease;
 }
 
-.swarm-more-settings[open] > summary .field-heading::after { content: " \2212"; }
+.swarm-more-settings[open] .swarm-more-marker { transform: translateY(1px) rotate(-135deg); }
 
 .swarm-more-settings > summary:focus-visible {
   outline: 2px solid var(--brand);

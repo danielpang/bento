@@ -530,6 +530,7 @@ export function draftSwarm(input: NewSwarmInput, now: number): SwarmDetail {
           ...input.settings,
         },
         budgetUsd: input.budgetUsd,
+        timeLimitMin: input.timeLimitMin ?? null,
         maxWorkers: input.workers,
         workers: input.workers,
         createdAt: iso(now, 0),
