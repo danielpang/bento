@@ -1141,6 +1141,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       <TopBar
         showSignOut={showSignOut}
         actions={actions}
+        showSwarmSwitcher={onSwarmBoard}
         meta={spend}
         onContact={() => setContactOpen(true)}
         picker={
@@ -1380,6 +1381,7 @@ function TopBar({
   primary,
   picker,
   boardToggle,
+  showSwarmSwitcher = false,
   search,
   meta,
   onContact,
@@ -1392,6 +1394,8 @@ function TopBar({
   picker?: React.ReactNode;
   /** Pipeline or Swarms. Beside the picker, never in the menu. */
   boardToggle?: React.ReactNode;
+  /** The swarm board mounts its live switcher here, before Configure. */
+  showSwarmSwitcher?: boolean;
   search?: React.ReactNode;
   /** The spend chip. It stays out of the menu at every width. */
   meta?: React.ReactNode;
@@ -1435,7 +1439,7 @@ function TopBar({
       {showSignOut && <SignOutButton onClick={() => signOut()} />}
     </header>
     <div className="workspace-toolbar">
-      <nav className="topbar-nav" aria-label="Board">
+      <nav className={showSwarmSwitcher ? "topbar-nav topbar-nav-swarms" : "topbar-nav"} aria-label="Board">
         {actions.filter((action) => !beta || action.href !== undefined).map((action) =>
           action.href === undefined ? (
             <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
@@ -1454,6 +1458,7 @@ function TopBar({
             </a>
           ),
         )}
+        {showSwarmSwitcher && <div id="swarm-switcher-slot" className="workspace-swarm-switcher" />}
         {beta && actions.some((action) => action.href === undefined) && <ConfigureMenu actions={actions.filter((action) => action.href === undefined)} />}
       </nav>
       <NavMenu actions={entries} />

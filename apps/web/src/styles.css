@@ -3418,6 +3418,16 @@ a.pr-row:hover .pr-external {
     display: none;
   }
 
+  .topbar-nav-swarms {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .topbar-nav-swarms > :not(.workspace-swarm-switcher) {
+    display: none;
+  }
+
   .nav-menu-trigger {
     display: inline-flex;
   }
@@ -7415,7 +7425,7 @@ a.hours-person-name:hover {
   background: var(--succeeded);
 }
 
-/* The strip, on the same rail the settings tabs use. */
+/* Swarm navigation stays compact while the diagram gets the page. */
 .swarm-board {
   display: flex;
   flex-direction: column;
@@ -7423,43 +7433,118 @@ a.hours-person-name:hover {
   flex: 1;
 }
 
-.swarm-strip {
-  padding: 0 16px;
-  --tab-scroll-fade: var(--bg);
+.workspace-swarm-switcher,
+.swarm-switcher {
+  min-width: 0;
 }
 
-.swarm-tab {
-  gap: 8px;
+.swarm-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  max-width: min(320px, 100%);
+  min-height: 36px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
 }
 
-.swarm-tab-name {
-  max-width: 180px;
+.swarm-switcher-trigger:hover,
+.swarm-switcher-trigger[data-state="open"] {
+  background: var(--panel-raised);
+  border-color: var(--line-bright);
+}
+
+.swarm-switcher-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.swarm-tab[data-archived] .swarm-tab-name {
-  color: var(--text-faint);
+.swarm-switcher-empty {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 1.5px solid var(--line-bright);
+  border-radius: 50%;
 }
 
-.swarm-tab-new,
-.swarm-tab-archived {
-  color: var(--text-faint);
+.swarm-switcher-caret {
+  width: 6px;
+  height: 6px;
+  margin: -3px 1px 0 3px;
+  flex: none;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(45deg);
 }
 
-.swarm-tab-count {
+.swarm-switcher-menu {
+  width: min(320px, calc(100vw - 24px));
+  max-width: none;
+  max-height: min(460px, var(--radix-dropdown-menu-content-available-height));
+  overflow-y: auto;
+}
+
+.swarm-switcher-menu .picker-group {
+  max-height: none;
+  overflow: visible;
+}
+
+.swarm-switcher-create {
+  min-height: 34px;
+  font-weight: 600;
+}
+
+.swarm-switcher-plus {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  flex: none;
+  border: 1px solid var(--line-bright);
+  border-radius: 5px;
+  color: var(--brand);
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.swarm-switcher-label {
+  padding: 8px 9px 4px;
   font-family: var(--mono);
   font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--text-faint);
 }
 
-.swarm-archived-item {
-  gap: 8px;
+.swarm-switcher-item {
+  min-height: 34px;
 }
 
-.swarm-restore {
+.swarm-switcher-item[data-archived] .picker-item-name {
+  color: var(--text-dim);
+}
+
+.swarm-switcher-check {
+  visibility: hidden;
   margin-left: auto;
-  font-size: 11px;
+  color: var(--brand);
+  font-size: 12px;
+}
+
+.swarm-switcher-item[aria-checked="true"] .swarm-switcher-check {
+  visibility: visible;
 }
 
 /* The page: header, then the plan. */

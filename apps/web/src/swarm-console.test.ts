@@ -100,7 +100,7 @@ function assertNoDashes(html: string, where: string) {
   assert.ok(!html.includes("–"), `en dash in ${where}`);
 }
 
-test("the strip orders swarms by creation with the newest last", () => {
+test("the swarm switcher shows the selected swarm with one completion icon", () => {
   const html = renderToStaticMarkup(
     createElement(SwarmStrip, {
       swarms: [
@@ -110,57 +110,49 @@ test("the strip orders swarms by creation with the newest last", () => {
       selectedId: "a",
       onSelect: () => {},
       onNew: () => {},
-      onRestore: () => {},
     }),
   );
-  assert.ok(html.indexOf("First") < html.indexOf("Second"));
-  // New swarm sits at the end, where the newest one is.
-  assert.ok(html.indexOf("Second") < html.indexOf("New swarm"));
-  // The selected tab has one status icon, the completion ring.
-  assert.match(html, /class="tab tab-on swarm-tab"[^>]*data-tab="a"/);
+  assert.match(html, /aria-label="Switch swarm, current: First"/);
+  assert.equal(html.match(/class="swarm-switcher-trigger"/g)?.length, 1);
   assert.match(html, /aria-label="50% done"/);
   assert.match(html, /class="ring"[^>]*data-tone="running"/);
   assert.doesNotMatch(html, /class="dot"/);
-  assertNoDashes(html, "the strip");
+  assertNoDashes(html, "the switcher");
 });
 
-test("archived swarms fold into an overflow rather than crowding the strip", () => {
+test("an archived swarm opened by a link appears in the switcher", () => {
   const html = renderToStaticMarkup(
     createElement(SwarmStrip, {
       swarms: [
         summary("live", { name: "Checkout" }),
         summary("old", { name: "Queue spike", archivedAt: "2026-03-01T00:00:00.000Z" }),
       ],
-      selectedId: "live",
-      onSelect: () => {},
-      onNew: () => {},
-      onRestore: () => {},
-    }),
-  );
-  assert.match(html, /Archived/);
-  // Folded away: the archived swarm's name is not a tab in the row.
-  assert.ok(!html.includes("Queue spike"));
-  assert.match(html, /swarm-tab-count">1</);
-});
-
-test("an archived swarm that is open keeps its place in the strip", () => {
-  const html = renderToStaticMarkup(
-    createElement(SwarmStrip, {
-      swarms: [summary("old", { name: "Queue spike", archivedAt: "2026-03-01T00:00:00.000Z" })],
       selectedId: "old",
       onSelect: () => {},
       onNew: () => {},
-      onRestore: () => {},
     }),
   );
-  assert.match(html, /data-tab="old"/);
-  assert.match(html, /data-archived/);
+  assert.match(html, /aria-label="Switch swarm, current: Queue spike"/);
+  assert.match(html, /Queue spike/);
+  assert.doesNotMatch(html, /tab-row/);
+});
+
+test("a project with no swarms still has a switcher trigger", () => {
+  const html = renderToStaticMarkup(
+    createElement(SwarmStrip, {
+      swarms: [],
+      selectedId: null,
+      onSelect: () => {},
+      onNew: () => {},
+    }),
+  );
+  assert.match(html, /aria-label="Choose a swarm"/);
 });
 
 test("a project with no swarms offers exactly one action", () => {
   const html = renderToStaticMarkup(createElement(SwarmEmpty, { onNew: () => {} }));
   assert.equal(html.match(/<button/g)?.length, 1);
-  assert.match(html, /New swarm/);
+  assert.match(html, /Create swarm/);
   assertNoDashes(html, "the empty state");
 });
 

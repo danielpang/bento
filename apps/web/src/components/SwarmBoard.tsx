@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { BentoClient, RunArtifact } from "@bento/api-client";
 import { NewSwarmDialog } from "./NewSwarmDialog.js";
 import { SwarmSettingsDialog } from "./SwarmSettingsFields.js";
@@ -41,7 +42,7 @@ const ArtifactViewer = lazy(() =>
 );
 
 /**
- * The Swarms board: the strip, the page under it, and the drawer over
+ * The Swarms board: the switcher, the page under it, and the drawer over
  * both.
  *
  * This is the only component that talks to the swarm endpoints, and
@@ -52,7 +53,7 @@ const ArtifactViewer = lazy(() =>
  * has no route. It renders as unavailable rather than as a button
  * that does nothing.
  *
- * The model is built here, once per change, and handed to the strip's
+ * The model is built here, once per change, and handed to the switcher's
  * ring, the header's ring, the tree and the outline alike. Four
  * surfaces, one set of numbers.
  */
@@ -77,6 +78,10 @@ export function SwarmBoard({
 }) {
   const storage = useMemo(() => browserStorage(), []);
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
+  const [switcherSlot, setSwitcherSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setSwitcherSlot(document.getElementById("swarm-switcher-slot"));
+  }, []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SwarmDetail | null>(null);
   /** The agents a swarm can be run as, for the dialogs and the drawer's picker. */
@@ -115,7 +120,7 @@ export function SwarmBoard({
     return () => clearInterval(id);
   }, []);
 
-  /** One cache, so the strip, the header, the tree and the outline share a build. */
+  /** One cache, so the switcher, the header, the tree and the outline share a build. */
   const buildModel = useRef(createModelCache()).current;
 
   const loadSwarms = useCallback(
@@ -318,18 +323,20 @@ export function SwarmBoard({
 
   return (
     <div className="swarm-board">
-      <SwarmStrip
-        swarms={swarms}
-        selectedId={selectedId}
-        // The open swarm's tab reads the tree this page has in hand,
-        // so the tab and the header cannot differ by a poll.
-        completionFor={(swarm) =>
-          swarm.id === selectedId && detail ? model.root.completion : swarm.completion
-        }
-        onSelect={setSelectedId}
-        onNew={() => setCreating(true)}
-        onRestore={(swarmId) => act(() => swarmApi.restoreSwarm(swarmId))}
-      />
+      {switcherSlot && createPortal(
+        <SwarmStrip
+          swarms={swarms}
+          selectedId={selectedId}
+          // The switcher reads the tree this page has in hand, so its
+          // ring and the header cannot differ by a poll.
+          completionFor={(swarm) =>
+            swarm.id === selectedId && detail ? model.root.completion : swarm.completion
+          }
+          onSelect={setSelectedId}
+          onNew={() => setCreating(true)}
+        />,
+        switcherSlot,
+      )}
 
       {error && (
         <div className="setup-prompt" role="alert">
