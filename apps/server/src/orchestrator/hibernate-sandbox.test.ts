@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hibernateShouldSkip } from "./hibernate-sandbox.js";
+import { MODAL_REPO_PREPARE_TIMEOUT_MS } from "@bento/sandbox";
+import { hibernateShouldSkip, MODAL_SWEEP_GRACE_MS } from "./hibernate-sandbox.js";
 import { modalRunHosts } from "./modal-hosts.js";
 
 test("hibernation skips anything that is not a finished modal sandbox", () => {
@@ -31,4 +32,32 @@ test("modal host collection keeps base URLs and drops secrets", () => {
     "https://models.example/v1",
   ]);
   assert.equal(hosts.some((host) => host.includes("secret-value")), false);
+  assert.equal(hosts.includes("https://api.anthropic.com"), false);
+});
+
+test("an API key with no base URL allowlists the default model host", () => {
+  const hosts = modalRunHosts({
+    gatewayUrl: "https://bento.example",
+    cloneUrls: ["https://github.com/acme/app.git"],
+    env: { ANTHROPIC_API_KEY: "secret-value" },
+  });
+  assert.ok(hosts.includes("https://api.anthropic.com"));
+  assert.equal(hosts.some((host) => host.includes("secret-value")), false);
+});
+
+test("a credential whose model host cannot be named refuses before a sandbox exists", () => {
+  assert.throws(
+    () =>
+      modalRunHosts({
+        gatewayUrl: "https://bento.example",
+        cloneUrls: ["https://github.com/acme/app.git"],
+        env: { SOME_VENDOR_API_KEY: "secret-value" },
+      }),
+    /model host for SOME_VENDOR_API_KEY could not be named/,
+  );
+});
+
+test("orphan sweep grace outlasts a two repository clone", () => {
+  assert.ok(MODAL_SWEEP_GRACE_MS > 2 * MODAL_REPO_PREPARE_TIMEOUT_MS);
+  assert.ok(MODAL_SWEEP_GRACE_MS > 16 * 60 * 1000);
 });

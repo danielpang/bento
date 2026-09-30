@@ -11,6 +11,25 @@ export interface SandboxHandle {
    * deletes it. Other drivers ignore it.
    */
   imageRef?: string;
+  /**
+   * Restricted network to apply if restore has to boot a machine.
+   * The same hosts provision would have used. Restricted with no
+   * usable host refuses, rather than opening the network.
+   */
+  network?: "open" | "restricted";
+  allowedHosts?: string[];
+  /**
+   * Set by a Modal provision. Null drops a hibernation image this
+   * start did not use. A string is the image the sandbox actually
+   * restored. Absent leaves the stored id alone, except a destroyed
+   * row, which drops it.
+   */
+  recordedImageRef?: string | null;
+  /**
+   * This provision created the sandbox. A failure after that has to
+   * destroy the machine, or a hibernated row hides it from the sweep.
+   */
+  createdSandbox?: boolean;
 }
 
 export interface ProvisionSpec {
@@ -104,6 +123,11 @@ export interface ProvisionSpec {
    * this process still holds.
    */
   imageRef?: string;
+  /**
+   * The row was hibernated and no image id survived. The next start
+   * says it is a fresh clone when no exit snapshot can be read.
+   */
+  missingSnapshot?: boolean;
   /**
    * Hosts a restricted sandbox may open: the gateway, clone remotes,
    * and model provider base URLs. The driver turns them into an

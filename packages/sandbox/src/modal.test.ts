@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -9,6 +9,7 @@ import { BENTO_EXEC_PYTHON, FrameDecoder } from "./modal-exec.js";
 import {
   MODAL_SANDBOX_TIMEOUT_MS,
   ModalDriver,
+  ModalProvisionLeak,
   modalOutboundAllowlist,
   modalSandboxSize,
   type ModalApi,
@@ -49,6 +50,8 @@ interface Fake {
   api: ModalApi;
   box: ModalBox;
   creates: ModalCreateParams[];
+  /** Image id passed to each create, in order. */
+  images: string[];
   execs: string[][];
   deleted: string[];
   toolchainCalls: number;
@@ -57,6 +60,7 @@ interface Fake {
 
 function fake(options?: { running?: boolean; exitText?: string | null; dirs?: ModalDirEntry[] }): Fake {
   const creates: ModalCreateParams[] = [];
+  const images: string[] = [];
   const execs: string[][] = [];
   const deleted: string[] = [];
   let toolchainCalls = 0;
@@ -96,7 +100,8 @@ function fake(options?: { running?: boolean; exitText?: string | null; dirs?: Mo
 
   const api: ModalApi = {
     fromName: async () => (options?.running === false ? null : box),
-    create: async (_image, params) => {
+    create: async (image, params) => {
+      images.push(image.imageId);
       creates.push(params);
       options && (options.running = true);
       return box;
@@ -117,6 +122,7 @@ function fake(options?: { running?: boolean; exitText?: string | null; dirs?: Mo
     api,
     box,
     creates,
+    images,
     execs,
     deleted,
     get toolchainCalls() {
@@ -226,7 +232,7 @@ test("provision restores a hibernated image and says when it is gone", async () 
   const gone = fake({ running: false });
   gone.api.imageFromId = async () => null;
   const goneLines: string[] = [];
-  await driver(gone.api).provision({
+  const fresh = await driver(gone.api).provision({
     ...spec,
     imageRef: "im-gone",
     onProgress: (line) => {
@@ -235,6 +241,111 @@ test("provision restores a hibernated image and says when it is gone", async () 
   });
   assert.ok(goneLines.includes("The saved workspace snapshot is gone, so this sandbox starts from a fresh clone."));
   assert.equal(gone.toolchainCalls, 1);
+  assert.equal(fresh.recordedImageRef, null);
+  assert.deepEqual(gone.images, [TOOLCHAIN.imageId]);
+});
+
+test("an exit snapshot wins over an older hibernation image", async () => {
+  const env = fake({ running: false });
+  env.api.fromName = async () => env.box;
+  env.box.poll = async () => 1;
+  env.box.experimentalGetExitSnapshot = async () => ({ imageId: "im-exit" });
+  const lines: string[] = [];
+  const handle = await driver(env.api).provision({
+    ...spec,
+    imageRef: "im-old",
+    onProgress: (line) => {
+      lines.push(line);
+    },
+  });
+  assert.deepEqual(env.images, ["im-exit"]);
+  assert.equal(handle.recordedImageRef, "im-exit");
+  assert.ok(lines.includes("Restoring the workspace from its last snapshot"));
+  assert.equal(lines.some((line) => line.includes("fresh clone")), false);
+});
+
+test("restore of a stopped sandbox uses the same allowlist as provision", async () => {
+  const hosts = ["https://gateway.example", "git@github.com:acme/app.git", "https://api.anthropic.com"];
+  const created = fake({ running: false });
+  await driver(created.api).provision({
+    ...spec,
+    network: "restricted",
+    allowedHosts: hosts,
+  });
+  const stopped = fake({ running: false });
+  await driver(stopped.api).restore(
+    {
+      externalId: "bento-feature-1",
+      provider: "modal",
+      workdir: "/workspace",
+      network: "restricted",
+      allowedHosts: hosts,
+    },
+    "im-workspace",
+  );
+  assert.deepEqual(stopped.creates[0]?.outboundDomainAllowlist, created.creates[0]?.outboundDomainAllowlist);
+  assert.deepEqual(stopped.creates[0]?.outboundDomainAllowlist, ["gateway.example", "github.com", "api.anthropic.com"]);
+  assert.equal(stopped.creates[0]?.tags.bento_feature, "feature-1");
+  assert.ok(stopped.creates[0]?.tags.bento_created);
+});
+
+test("a failed clone after create terminates the new sandbox", async () => {
+  const env = fake({ running: false });
+  let terminated = 0;
+  env.box.terminate = async () => {
+    terminated += 1;
+  };
+  env.box.exec = async () => textProc(1, "", "clone failed");
+  await assert.rejects(
+    () =>
+      driver(env.api).provision({
+        ...spec,
+        repositories: [{ name: "app", cloneUrl: "https://github.com/acme/app.git" }],
+      }),
+    /could not prepare app/,
+  );
+  assert.equal(terminated, 1);
+  assert.equal(env.creates.length, 1);
+});
+
+test("a clone failure that cannot be stopped is a provision leak", async () => {
+  const env = fake({ running: false });
+  env.box.terminate = async () => {
+    throw new Error("terminate failed");
+  };
+  env.box.exec = async () => textProc(1, "", "clone failed");
+  await assert.rejects(
+    () =>
+      driver(env.api).provision({
+        ...spec,
+        repositories: [{ name: "app", cloneUrl: "https://github.com/acme/app.git" }],
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof ModalProvisionLeak);
+      assert.match(err.message, /could not prepare app/);
+      assert.equal(err.externalId, "bento-feature-1");
+      return true;
+    },
+  );
+});
+
+test("reusing a running sandbox does not terminate it when clone fails", async () => {
+  const env = fake({ running: true });
+  let terminated = 0;
+  env.box.terminate = async () => {
+    terminated += 1;
+  };
+  env.box.exec = async () => textProc(1, "", "fetch failed");
+  await assert.rejects(
+    () =>
+      driver(env.api).provision({
+        ...spec,
+        repositories: [{ name: "app", cloneUrl: "https://github.com/acme/app.git" }],
+      }),
+    /could not prepare app/,
+  );
+  assert.equal(terminated, 0);
+  assert.equal(env.creates.length, 0);
 });
 
 test("a missing exit snapshot starts from a fresh clone and says so", async () => {
@@ -441,9 +552,72 @@ test("bento-exec records frames from byte 0 and writes exit last", async () => {
   assert.ok(exitAt > followed.stdout.indexOf("e "));
 });
 
+test("bento-exec stdin accepts a write after start has exited", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bento-exec-stdin-"));
+  const script = path.join(dir, "bento-exec");
+  await writeFile(script, BENTO_EXEC_PYTHON, { mode: 0o755 });
+  const work = path.join(dir, "run");
+  const payload = "from-a-later-process";
+  let pid = 0;
+  try {
+    const started = await run(script, [
+      "start",
+      work,
+      "--",
+      "python3",
+      "-c",
+      "import sys; sys.stdout.write(sys.stdin.read())",
+    ]);
+    assert.equal(started.code, 0, started.stderr);
+    const pidPath = path.join(work, "pid");
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        pid = Number((await readFile(pidPath, "utf8")).trim());
+        if (pid > 0) break;
+      } catch {
+        pid = 0;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(pid > 0, "daemon did not write a pid");
+    await stat(path.join(work, "stdin"));
+    const wrote = await runPython([
+      "-c",
+      "import sys; open(sys.argv[1], 'wb', buffering=0).write(sys.argv[2].encode())",
+      path.join(work, "stdin"),
+      payload,
+    ]);
+    assert.equal(wrote.code, 0, wrote.stderr);
+    const closed = await run(script, ["eof", work]);
+    assert.equal(closed.code, 0, closed.stderr);
+    const followed = await run(script, ["follow", work, "0"]);
+    assert.equal(followed.code, 0, followed.stderr);
+    const frames = new FrameDecoder().push(Buffer.from(followed.stdout));
+    assert.equal(frames[0]?.kind === "stdout" ? frames[0].data : "", payload);
+    assert.equal(frames.at(-1)?.kind === "exit" ? frames.at(-1)?.exitCode : -1, 0);
+  } finally {
+    if (pid > 0) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // The command already exited.
+        }
+      }
+    }
+  }
+});
+
 function run(script: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  return runPython([script, ...args]);
+}
+
+function runPython(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("python3", [script, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("python3", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {

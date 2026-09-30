@@ -41,6 +41,13 @@ export const MODAL_SNAPSHOT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
  */
 export const MODAL_WARM_WINDOW_MS = 5 * 60 * 1000;
 
+/**
+ * One repository clone inside provision. The row is inserted only
+ * after every clone finishes, so the orphan sweep's grace has to
+ * outlast more than one of these.
+ */
+export const MODAL_REPO_PREPARE_TIMEOUT_MS = 10 * 60 * 1000;
+
 const SNAPSHOT_TIMEOUT_MS = 240_000;
 const CREATE_NAME_RETRY_MS = [2_000, 2_000];
 const LIFETIME_NOTICE_MS = 23 * 60 * 60 * 1000;
@@ -108,6 +115,32 @@ export interface ModalApi {
    */
   toolchainImage(binaries: readonly string[]): Promise<ModalImageRef>;
   listRunning(): Promise<{ externalId: string; tags: Record<string, string> }[]>;
+}
+
+/**
+ * Provision created a sandbox and could not stop it.
+ *
+ * The run's error stays the original failure. The executor marks a
+ * hibernated row destroyed so the sweep can see the machine: that
+ * row would otherwise count as live and the orphan would bill until
+ * the 24 hour cap.
+ */
+export class ModalProvisionLeak extends Error {
+  readonly externalId: string;
+  constructor(message: string, externalId: string, cause: unknown) {
+    super(message);
+    this.name = "ModalProvisionLeak";
+    this.externalId = externalId;
+    this.cause = cause;
+  }
+}
+
+export interface ModalHibernateResult {
+  /** Image to store. Null means the next start is a fresh clone. */
+  imageId: string | null;
+  freshClone: boolean;
+  /** False when a live run took the machine and it was left running. */
+  committed: boolean;
 }
 
 export interface ModalDriverOptions {
@@ -244,29 +277,55 @@ export class ModalDriver implements SandboxDriver {
     const api = await this.api();
     const allowlist = modalOutboundAllowlist(spec);
     let box = await this.runningBox(api, name);
+    let created = false;
+    let recordedImageRef: string | null | undefined;
     if (box) {
       await say(`Reusing the Modal sandbox (${name}).`);
     } else {
-      const image = await this.imageForNewSandbox(api, spec, name, say);
-      box = await this.createNamed(api, image, {
+      const picked = await this.imageForNewSandbox(api, spec, name, say);
+      recordedImageRef = picked.recordedImageRef;
+      box = await this.createNamed(api, picked.image, {
         name,
         cpu: this.cpu,
         memoryMiB: this.memoryMiB,
         timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
         workdir: "/workspace",
-        tags: {
-          bento_feature: spec.workspaceKey,
-          bento_org: spec.organizationId ?? "",
-          bento_env: this.environment ?? "default",
-          bento_created: String(Date.now()),
-        },
+        tags: this.sandboxTags(spec.workspaceKey, spec.organizationId),
         experimentalOptions: { enable_exit_snapshot: true },
         ...(allowlist ? { outboundDomainAllowlist: allowlist } : {}),
       });
+      created = true;
     }
     this.remembered.set(name, box);
-    await this.prepareRepositories(box, spec, say);
-    return { externalId: name, provider: "modal", workdir: "/workspace" };
+    try {
+      await this.prepareRepositories(box, spec, say);
+    } catch (err) {
+      if (created) {
+        let stopped = false;
+        try {
+          await box.terminate();
+          stopped = true;
+        } catch {
+          stopped = false;
+        }
+        this.remembered.delete(name);
+        if (!stopped) {
+          throw new ModalProvisionLeak(
+            err instanceof Error ? err.message : "sandbox provisioning failed",
+            name,
+            err,
+          );
+        }
+      }
+      throw err;
+    }
+    return {
+      externalId: name,
+      provider: "modal",
+      workdir: "/workspace",
+      ...(created ? { createdSandbox: true } : {}),
+      ...(recordedImageRef !== undefined ? { recordedImageRef } : {}),
+    };
   }
 
   /**
@@ -331,8 +390,22 @@ export class ModalDriver implements SandboxDriver {
     if (!image) throw new Error("snapshot image is gone");
     let box = await this.runningBox(api, handle.externalId);
     if (!box) {
+      // The same allowlist provision would have sent. Restricted with
+      // no hosts throws here, before a sandbox exists. Tags are what
+      // the sweep matches, so a machine booted this way is not an
+      // unnamed orphan hiding behind a hibernated row.
+      const allowlist = modalOutboundAllowlist({
+        ...(handle.network ? { network: handle.network } : {}),
+        ...(handle.allowedHosts ? { allowedHosts: handle.allowedHosts } : {}),
+      });
+      const featureId = handle.externalId.startsWith("bento-")
+        ? handle.externalId.slice("bento-".length)
+        : handle.externalId;
       const base = await api.toolchainImage(AGENT_BINARIES);
-      box = await this.createNamed(api, base, this.createParams(handle.externalId, {}));
+      box = await this.createNamed(api, base, this.createParams(handle.externalId, {
+        tags: this.sandboxTags(featureId, undefined),
+        ...(allowlist ? { outboundDomainAllowlist: allowlist } : {}),
+      }));
       this.remembered.set(handle.externalId, box);
     }
     await box.mountImage(handle.workdir, image);
@@ -432,21 +505,42 @@ export class ModalDriver implements SandboxDriver {
   }
 
   /**
-   * Full filesystem image, then terminate. The row stores the image id
-   * and the next provision mounts a new sandbox from it. Returns null
-   * when the machine is already gone and no exit snapshot can be read.
+   * Snapshot, then stop, unless `finish` says a run has taken the machine.
+   *
+   * `finish` runs after the snapshot and calls `apply` to terminate.
+   * The hibernation job holds the workspace lock across `apply`, so a
+   * start that arrives during the snapshot does not lose its sandbox,
+   * and a start that arrives after the lock waits until the machine
+   * is already stopped. A missing exit snapshot is a fresh clone: the
+   * previous image id is not returned.
    */
-  async hibernate(handle: SandboxHandle): Promise<string | null> {
-    const api = await this.api();
-    const box = await this.runningBox(api, handle.externalId);
-    if (!box) return this.exitSnapshotId(handle.externalId);
-    const image = await box.snapshotFilesystem({ ttlMs: MODAL_SNAPSHOT_TTL_MS, timeoutMs: SNAPSHOT_TIMEOUT_MS });
-    await box.terminate();
-    this.remembered.delete(handle.externalId);
-    if (handle.imageRef && handle.imageRef !== image.imageId) {
-      await api.deleteImage(handle.imageRef).catch(() => {});
+  async hibernate(
+    handle: SandboxHandle,
+    options?: {
+      finish?: (apply: () => Promise<string | null>) => Promise<boolean>;
+    },
+  ): Promise<ModalHibernateResult> {
+    const prepared = await this.prepareHibernation(handle);
+    let imageId: string | null = null;
+    let applied = false;
+    const finish = options?.finish ?? (async (apply) => {
+      imageId = await apply();
+      return true;
+    });
+    const committed = await finish(async () => {
+      applied = true;
+      imageId = await this.commitHibernation(handle, prepared);
+      return imageId;
+    });
+    if (!committed && !applied && prepared.kind === "running") {
+      await (await this.api()).deleteImage(prepared.imageId).catch(() => {});
     }
-    return image.imageId;
+    const stored = committed ? imageId : null;
+    return {
+      committed,
+      imageId: stored,
+      freshClone: committed && stored === null,
+    };
   }
 
   async destroy(handle: SandboxHandle): Promise<void> {
@@ -536,20 +630,59 @@ export class ModalDriver implements SandboxDriver {
     return box;
   }
 
+  private sandboxTags(featureId: string, organizationId: string | undefined): Record<string, string> {
+    return {
+      bento_feature: featureId,
+      bento_org: organizationId ?? "",
+      bento_env: this.environment ?? "default",
+      bento_created: String(Date.now()),
+    };
+  }
+
+  /**
+   * A dead sandbox this process can still see, including one `fromName`
+   * returns whose `poll` is already an exit. A running sandbox is not
+   * dead. `fromName` usually returns nothing for a stopped machine, so
+   * the box remembered at create is the one that can answer.
+   */
+  private async deadBox(api: ModalApi, name: string): Promise<ModalBox | null> {
+    const found = (await api.fromName(name)) ?? this.remembered.get(name) ?? null;
+    if (!found) return null;
+    if ((await found.poll().catch(() => null)) === null) return null;
+    return found;
+  }
+
   private async imageForNewSandbox(
     api: ModalApi,
     spec: ProvisionSpec,
     name: string,
     say: (message: string) => Promise<void>,
-  ): Promise<ModalImageRef> {
+  ): Promise<{ image: ModalImageRef; recordedImageRef?: string | null }> {
+    // An exit snapshot is the workspace after the last stored image.
+    // It wins over that older id. A failure here is a fresh clone:
+    // restoring the older id would call it the latest workspace.
+    const exit = await this.exitSnapshot(name, say);
+    if (exit && "image" in exit) {
+      return { image: exit.image, recordedImageRef: exit.image.imageId };
+    }
+    if (exit && "unusable" in exit) {
+      return { image: await this.toolchain(api, spec), recordedImageRef: null };
+    }
     if (spec.imageRef) {
       await say("Restoring the workspace from its last snapshot");
       const saved = await api.imageFromId(spec.imageRef);
-      if (saved) return saved;
+      if (saved) return { image: saved };
       await say("The saved workspace snapshot is gone, so this sandbox starts from a fresh clone.");
+      return { image: await this.toolchain(api, spec), recordedImageRef: null };
     }
-    const exitImage = await this.exitSnapshot(name, say);
-    if (exitImage) return exitImage;
+    if (spec.missingSnapshot) {
+      await say("The previous sandbox left no usable snapshot, so this one starts from a fresh clone.");
+      return { image: await this.toolchain(api, spec), recordedImageRef: null };
+    }
+    return { image: await this.toolchain(api, spec) };
+  }
+
+  private async toolchain(api: ModalApi, spec: ProvisionSpec): Promise<ModalImageRef> {
     try {
       return await api.toolchainImage(spec.agentBinaries ?? AGENT_BINARIES);
     } catch (err) {
@@ -557,40 +690,82 @@ export class ModalDriver implements SandboxDriver {
     }
   }
 
-  private async exitSnapshot(name: string, say: (message: string) => Promise<void>): Promise<ModalImageRef | null> {
-    const remembered = this.remembered.get(name);
-    if (!remembered) return null;
-    const code = await remembered.poll().catch(() => null);
-    if (code === null) return null;
-    const tags = await remembered.getTags().catch(() => ({} as Record<string, string>));
+  private async exitSnapshot(
+    name: string,
+    say: (message: string) => Promise<void>,
+  ): Promise<{ image: ModalImageRef } | { unusable: true } | null> {
+    const api = await this.api();
+    const dead = await this.deadBox(api, name);
+    if (!dead) return null;
+    const tags = await dead.getTags().catch(() => ({} as Record<string, string>));
     const created = Number(tags.bento_created ?? 0);
     const hitLifetime = created > 0 && Date.now() - created >= LIFETIME_NOTICE_MS;
     try {
-      const image = await remembered.experimentalGetExitSnapshot();
+      const image = await dead.experimentalGetExitSnapshot();
       await say(
         hitLifetime
           ? "This Modal sandbox reached its 24 hour limit. Restoring the workspace from its exit snapshot."
           : "Restoring the workspace from its last snapshot",
       );
-      return image;
+      return { image };
     } catch {
       await say(
         hitLifetime
           ? "This Modal sandbox reached its 24 hour limit, so the next start is a fresh clone."
           : "The previous sandbox left no usable snapshot, so this one starts from a fresh clone.",
       );
-      return null;
+      return { unusable: true };
     }
   }
 
-  private async exitSnapshotId(name: string): Promise<string | null> {
-    const remembered = this.remembered.get(name);
-    if (!remembered) return null;
-    try {
-      return (await remembered.experimentalGetExitSnapshot()).imageId;
-    } catch {
-      return null;
+  private async prepareHibernation(
+    handle: SandboxHandle,
+  ): Promise<{ kind: "running"; imageId: string } | { kind: "exit"; imageId: string } | { kind: "none" }> {
+    const api = await this.api();
+    const running = await this.runningBox(api, handle.externalId);
+    if (running) {
+      const image = await running.snapshotFilesystem({ ttlMs: MODAL_SNAPSHOT_TTL_MS, timeoutMs: SNAPSHOT_TIMEOUT_MS });
+      return { kind: "running", imageId: image.imageId };
     }
+    const dead = await this.deadBox(api, handle.externalId);
+    if (!dead) return { kind: "none" };
+    try {
+      const image = await dead.experimentalGetExitSnapshot();
+      return { kind: "exit", imageId: image.imageId };
+    } catch {
+      return { kind: "none" };
+    }
+  }
+
+  /**
+   * Stop a running sandbox and return the image to store.
+   * A machine that is already gone, with no exit snapshot, stores
+   * nothing: the caller clears the previous image id.
+   */
+  private async commitHibernation(
+    handle: SandboxHandle,
+    prepared: { kind: "running"; imageId: string } | { kind: "exit"; imageId: string } | { kind: "none" },
+  ): Promise<string | null> {
+    const api = await this.api();
+    if (prepared.kind === "running") {
+      const box = (await api.fromName(handle.externalId)) ?? this.remembered.get(handle.externalId) ?? null;
+      if (box && (await box.poll().catch(() => null)) === null) await box.terminate();
+      this.remembered.delete(handle.externalId);
+      if (handle.imageRef && handle.imageRef !== prepared.imageId) {
+        await api.deleteImage(handle.imageRef).catch(() => {});
+      }
+      return prepared.imageId;
+    }
+    if (prepared.kind === "exit") {
+      this.remembered.delete(handle.externalId);
+      if (handle.imageRef && handle.imageRef !== prepared.imageId) {
+        await api.deleteImage(handle.imageRef).catch(() => {});
+      }
+      return prepared.imageId;
+    }
+    this.remembered.delete(handle.externalId);
+    if (handle.imageRef) await api.deleteImage(handle.imageRef).catch(() => {});
+    return null;
   }
 
   private async newestExecDir(box: ModalBox, argv0: string): Promise<string | null> {
@@ -743,7 +918,7 @@ export class ModalDriver implements SandboxDriver {
               : []),
             `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
           ].join("\n");
-          const result = await runShell(box, script, 10 * 60_000);
+          const result = await runShell(box, script, MODAL_REPO_PREPARE_TIMEOUT_MS);
           if (result.exitCode !== 0) {
             throw new Error(`could not prepare ${repo.name}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
           }
@@ -762,7 +937,7 @@ export class ModalDriver implements SandboxDriver {
           "fi",
           `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)})`,
         ].join("\n");
-        const result = await runShell(box, script, 10 * 60_000);
+        const result = await runShell(box, script, MODAL_REPO_PREPARE_TIMEOUT_MS);
         if (result.exitCode !== 0) {
           throw new Error(`could not prepare ${repo.name}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
         }

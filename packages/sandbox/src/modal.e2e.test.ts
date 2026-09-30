@@ -79,13 +79,13 @@ test(
       assert.equal(rest.exitCode, 0);
 
       await collectExec(driver.exec(handle, ["sh", "-c", "echo kept > /workspace/marker"], { timeoutMs: 30_000 }));
-      const imageId = await driver.hibernate(handle);
-      assert.ok(imageId);
+      const saved = await driver.hibernate(handle);
+      assert.ok(saved.imageId);
       handle = await driver.provision({
         projectId: "e2e",
         workspaceKey: featureId,
         hostWorkspacePath: "/tmp/unused",
-        imageRef: imageId,
+        imageRef: saved.imageId,
         agentBinaries: ["claude"],
       });
       const marker = await collectExec(driver.exec(handle, ["cat", "/workspace/marker"], { timeoutMs: 30_000 }));
