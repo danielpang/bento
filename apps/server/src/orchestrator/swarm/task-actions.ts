@@ -241,10 +241,10 @@ export async function retryLeaf(
 /**
  * Puts a different agent on one leaf.
  *
- * On the node rather than on the template, which is the whole point:
+ * On the node rather than on the swarm, which is the whole point:
  * the ordinary answer to a leaf a cheap worker could not finish is a
  * stronger agent on that leaf, not a stronger agent on every leaf that
- * has not started yet. Null puts it back on the template's own worker.
+ * has not started yet. Null puts it back on the swarm's own worker.
  *
  * Reassigning does not start anything. It is almost always followed by
  * a retry, and keeping the two apart means a person can reassign a leaf

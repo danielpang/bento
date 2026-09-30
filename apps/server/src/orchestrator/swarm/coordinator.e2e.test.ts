@@ -10,7 +10,6 @@ import {
   swarmLandings,
   swarmMessages,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -35,7 +34,6 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
-const TEMPLATE = "33333333-3333-3333-3333-333333333333";
 
 let pool: ReturnType<typeof createPool>;
 let db: Db;
@@ -64,11 +62,6 @@ before(async () => {
   await pool.query(
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
-  );
-  await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation)
-     values ($1,'u1',null,'T',$2,$2,2,'worktree')`,
-    [TEMPLATE, PROFILE],
   );
 
   const bus = new EventBus();
@@ -158,7 +151,9 @@ async function makeSwarm(
       slug: `s-${Math.random().toString(36).slice(2, 8)}`,
       title: "Swarm",
       goal: "do the thing",
-      templateId: TEMPLATE,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
       status: "running",
       maxWorkers: 2,
       startedBy: "u1",
@@ -711,17 +706,13 @@ test("a conflict with nobody on it has an agent put on it, every pass until one 
 
 test("a conflict nothing could ever resolve fails the leaf and lets the queue move", async () => {
   /**
-   * The other half. A swarm whose template has no worker agent has
+   * The other half. A swarm with no worker agent has
    * nothing that could be put on a conflict, this pass or any other, so
    * asking again for ever would be the same wedge one step along. The
    * leaf fails with a sentence a person can act on, which frees the
    * queue and puts the leaf in front of the planner.
    */
-  const [template] = await db
-    .insert(swarmTemplates)
-    .values({ ownerId: "u1", name: "no worker", plannerProfileId: PROFILE, maxWorkers: 2, workerIsolation: "worktree" })
-    .returning();
-  const swarm = await makeSwarm({ status: "running", templateId: template!.id });
+  const swarm = await makeSwarm({ status: "running", workerProfileId: null });
   const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it", position: 0 });
   const waiting = await makeTask(swarm.id, { title: "waiting", status: "done", position: 1 });
   const [blocked] = await db
@@ -1126,20 +1117,10 @@ test("a swarm that ran out of budget still finishes when its last worker lands",
   assert.equal(finished?.becameFinal, null, "a swarm that already reported what it spent does not report again");
 });
 
-/** A template with no worker does not hold up a leaf that has its own. */
-test("a leaf with its own agent starts even when the template names none", async () => {
-  const [bare] = await db
-    .insert(swarmTemplates)
-    .values({
-      ownerId: "u1",
-      name: "No worker",
-      plannerProfileId: PROFILE,
-      workerProfileId: null,
-      workerIsolation: "worktree",
-    })
-    .returning();
-  const swarm = await makeSwarm({ status: "running", templateId: bare!.id });
-  await makeTask(swarm.id, { title: "template's", status: "assigned", position: 0 });
+/** A swarm with no worker does not hold up a leaf that has its own. */
+test("a leaf with its own agent starts even when the swarm names no worker", async () => {
+  const swarm = await makeSwarm({ status: "running", workerProfileId: null });
+  await makeTask(swarm.id, { title: "the swarm's", status: "assigned", position: 0 });
   const chosen = await makeTask(swarm.id, {
     title: "reassigned by hand",
     status: "assigned",

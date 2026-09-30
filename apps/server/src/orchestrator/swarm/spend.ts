@@ -90,7 +90,6 @@ export async function captureSwarmSpend(
       properties: {
         swarm_id: swarm.id,
         project_id: swarm.projectId,
-        template_id: swarm.templateId,
         outcome,
         /*
          * The three the budget counts, and the fourth it does not.

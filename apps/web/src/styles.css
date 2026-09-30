@@ -8156,35 +8156,6 @@ a.hours-person-name:hover {
   gap: 14px;
 }
 
-.swarm-new-templates {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.swarm-template {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  text-align: left;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.swarm-template[data-on] {
-  border-color: var(--brand);
-}
-
-.swarm-template-name {
-  font-family: var(--sans);
-  font-weight: 600;
-}
-
 .swarm-new-shape {
   display: flex;
   flex-direction: column;
@@ -8228,27 +8199,6 @@ a.hours-person-name:hover {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--text);
-}
-
-/* Templates, listed in the Agents panel. */
-.swarm-template-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.swarm-template-tiers {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.swarm-template-estimate {
-  flex-basis: 100%;
-  font-size: 11px;
 }
 
 /*

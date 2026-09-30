@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
-import { SWARM_TEMPLATES, generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
+import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
 import { clampWorkers, parseBudget, suggestBranch } from "./components/NewSwarmDialog.js";
 import type { NewSwarmInput } from "./swarm/types.js";
@@ -25,7 +25,6 @@ const clock = () => NOW;
 function input(over: Partial<NewSwarmInput> = {}): NewSwarmInput {
   return {
     projectId: "p1",
-    templateId: "tpl-code",
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
     attachments: [],
@@ -110,7 +109,7 @@ test("pausing, stopping and archiving are the states the header reads back", asy
   assert.equal((await api.getSwarm("sw-checkout")).swarm.archivedAt, null);
 });
 
-test("the worker count is held inside the template's own ceiling", async () => {
+test("the worker count is held inside the swarm's ceiling", async () => {
   const api = fixtureSwarmApi(clock);
   await api.listSwarms("p1");
   await api.setWorkers("sw-checkout", 99);
@@ -144,18 +143,6 @@ test("the seeded fixtures include a swarm large enough to be a real plan", () =>
   assert.ok(model.root.totalLeaves > 0);
   // Generated deterministically, so two builds are the same plan.
   assert.deepEqual(generateSwarmTasks(20).map((t) => t.id), generateSwarmTasks(20).map((t) => t.id));
-});
-
-test("every template names both models and a tier for every tool", () => {
-  for (const template of SWARM_TEMPLATES) {
-    assert.ok(template.plannerModel.length > 0, template.id);
-    assert.ok(template.workerModel.length > 0, template.id);
-    assert.ok(template.tools.length > 0, template.id);
-    for (const tool of template.tools) {
-      assert.ok(["measured", "estimated", "assumed"].includes(tool.tier), `${template.id}:${tool.name}`);
-    }
-    assert.ok(template.maxWorkers >= 1, template.id);
-  }
 });
 
 test("a swarm's branch is suggested from its name, and a budget is a number or nothing", () => {

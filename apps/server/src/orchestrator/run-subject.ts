@@ -7,7 +7,6 @@ import {
   repositories,
   stages,
   swarmTasks,
-  swarmTemplates,
   swarms,
 } from "@bento/db";
 import type { AppContext } from "../context.js";
@@ -79,13 +78,12 @@ export interface SwarmSubject extends CommonSubject {
   /** The leaf this run works, for a worker or a sub planner. */
   task: typeof swarmTasks.$inferSelect | null;
   /**
-   * Where this swarm's agents work, as its template recorded it when
-   * the swarm was created.
+   * Where this swarm's agents work, as recorded when the swarm was
+   * created.
    *
    * Read here rather than at provisioning, because this is where every
    * other fact a run needs is gathered and where a row that crosses a
-   * boundary is refused. A swarm with no template makes no assertion,
-   * which is what "sandbox" means.
+   * boundary is refused.
    */
   workerIsolation: WorkerIsolation;
 }
@@ -207,18 +205,8 @@ async function swarmSubject(
    * that branch and fix the result, so a resolver given the swarm's own
    * checkout would be merging a branch into itself.
    */
-  /**
-   * The shape the swarm was created with, which the deployment either
-   * honours or refuses. A swarm with no template asserts nothing.
-   */
-  const [template] = swarm.templateId
-    ? await ctx.db
-        .select({ workerIsolation: swarmTemplates.workerIsolation })
-        .from(swarmTemplates)
-        .where(eq(swarmTemplates.id, swarm.templateId))
-        .limit(1)
-    : [];
-  const workerIsolation: WorkerIsolation = template?.workerIsolation ?? "sandbox";
+  /** The shape the swarm was created with, which the deployment either honours or refuses. */
+  const workerIsolation: WorkerIsolation = swarm.workerIsolation;
 
   const perTask = (run.role === "worker" || run.role === "subplanner" || run.role === "resolver") && task;
   const branch = perTask

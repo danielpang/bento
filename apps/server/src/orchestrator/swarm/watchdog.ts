@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { agentRuns, runEvents, swarmMessages, swarmTaskEvents, swarmTasks, swarmTemplates, swarms } from "@bento/db";
+import { agentRuns, runEvents, swarmMessages, swarmTaskEvents, swarmTasks, swarms } from "@bento/db";
 import type { AppContext } from "../../context.js";
 import { captureJobErrors } from "../../analytics.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
@@ -55,7 +55,7 @@ const TAIL_LINES = 12;
 /** Which pg-boss instances already have a watchdog. Keyed like the others. */
 const watchdogs = new WeakSet<object>();
 
-/** Thresholds, from the swarm's template, with the defaults a template carries. */
+/** When a running node turns yellow, and when the planner is woken about it. */
 interface Thresholds {
   warnMin: number;
   escalateMin: number;
@@ -161,11 +161,8 @@ export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Prom
       pausedReason: swarms.pausedReason,
       createdAt: swarms.createdAt,
       timeLimitMin: swarms.timeLimitMin,
-      warnMin: swarmTemplates.longRunWarnMin,
-      escalateMin: swarmTemplates.longRunEscalateMin,
     })
     .from(swarms)
-    .leftJoin(swarmTemplates, eq(swarmTemplates.id, swarms.templateId))
     .where(
       or(
         inArray(swarms.status, ["planning", "running", "blocked"]),
@@ -174,10 +171,7 @@ export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Prom
     );
 
   for (const swarm of live) {
-    const thresholds: Thresholds = {
-      warnMin: swarm.warnMin ?? DEFAULT_THRESHOLDS.warnMin,
-      escalateMin: swarm.escalateMin ?? DEFAULT_THRESHOLDS.escalateMin,
-    };
+    const thresholds: Thresholds = DEFAULT_THRESHOLDS;
     /*
      * A swarm waiting on a ceiling somewhere else gets a tick and
      * nothing else. Its runs are over (that is what the pause means),

@@ -9,12 +9,12 @@ import {
   runMigrations,
   swarmLandings,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
 import type { Entitlements } from "../context.js";
 import { SWARM_FULL, startRunIfIdle } from "./start-run.js";
+import { DEFAULT_ASSUMED_USD } from "./swarm/ledger.js";
 
 /**
  * The swarm half of the one door every run start goes through.
@@ -78,6 +78,7 @@ async function makeSwarm(overrides: Partial<typeof swarms.$inferInsert> = {}) {
       title: "Swarm",
       status: "running",
       maxWorkers: 2,
+      workerIsolation: "worktree",
       ...overrides,
     })
     .returning();
@@ -366,18 +367,8 @@ test("a swarm spending a borrowed subscription runs past its cap", async () => {
  * that end when the process does.
  */
 test("the workers already going count against the budget before they report", async () => {
-  const [template] = await db
-    .insert(swarmTemplates)
-    .values({
-      ownerId: "u1",
-      name: "Five dollars a leaf",
-      plannerProfileId: LOCAL_PROFILE,
-      workerProfileId: LOCAL_PROFILE,
-      workerIsolation: "worktree",
-      assumedCostUsd: "5",
-    })
-    .returning();
-  const swarm = await makeSwarm({ budgetUsd: "10", maxWorkers: 4, templateId: template!.id });
+  // Room for exactly two runs at the figure a silent run is charged.
+  const swarm = await makeSwarm({ budgetUsd: String(DEFAULT_ASSUMED_USD * 2), maxWorkers: 4 });
 
   const started: string[] = [];
   let refusedFor: string | null = null;
@@ -398,9 +389,9 @@ test("the workers already going count against the budget before they report", as
   }
 
   /*
-   * Two at five dollars each is the whole budget. A third would commit
-   * fifteen against a ten dollar cap, which is half a run over the
-   * promise, and a fourth would double it.
+   * Two at the assumed figure is the whole budget. A third would commit
+   * half again the cap, which is a run over the promise, and a fourth
+   * would double it.
    */
   assert.equal(started.length, 2, "the budget stops the third worker before it starts");
   assert.equal(refusedFor, "budget");

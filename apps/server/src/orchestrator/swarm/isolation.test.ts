@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { exportSwarmBranch, isolationRefusal } from "./sandbox.js";
 
 /**
- * The one promise a swarm's template makes that a deployment can fail
+ * The one promise a swarm makes that a deployment can fail
  * to keep.
  *
  * It is asymmetric on purpose, and the asymmetry is the whole design:
@@ -14,13 +14,13 @@ import { exportSwarmBranch, isolationRefusal } from "./sandbox.js";
  * they have.
  */
 
-test("a template that asserts nothing runs anywhere", () => {
+test("a swarm that asserts nothing runs anywhere", () => {
   for (const provider of ["docker", "local-process", "sprite"]) {
     assert.equal(isolationRefusal("sandbox", provider), null, `sandbox isolation on ${provider}`);
   }
 });
 
-test("a template built around checkouts on the server runs where they are", () => {
+test("a swarm built around checkouts on the server runs where they are", () => {
   assert.equal(isolationRefusal("worktree", "docker"), null);
   assert.equal(isolationRefusal("worktree", "local-process"), null);
 });
@@ -30,7 +30,7 @@ test("and is refused, in words, where the sandbox holds its own clone", () => {
   assert.ok(refusal, "a shape that cannot be kept is refused rather than quietly changed");
   assert.match(refusal!, /worktrees of the repository on the server/);
   assert.match(refusal!, /machines that hold their own clones/);
-  assert.match(refusal!, /Set the template's isolation/, "and says what to do about it");
+  assert.match(refusal!, /A new swarm started here gives each agent its own machine/, "and says what to do about it");
 });
 
 /* ---------------------------------------------------------------- */

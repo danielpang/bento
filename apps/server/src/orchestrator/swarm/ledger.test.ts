@@ -8,7 +8,6 @@ import {
   createPool,
   runMigrations,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -205,7 +204,6 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
-const TEMPLATE = "33333333-3333-3333-3333-333333333333";
 
 let pool: ReturnType<typeof createPool>;
 let db: Db;
@@ -228,11 +226,6 @@ before(async () => {
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
   );
-  await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation)
-     values ($1,'u1',null,'T',$2,$2,2,'worktree')`,
-    [TEMPLATE, PROFILE],
-  );
 });
 
 after(async () => {
@@ -246,7 +239,9 @@ async function makeSwarm(overrides: Partial<typeof swarms.$inferInsert> = {}) {
       projectId: PROJECT,
       slug: `s-${Math.random().toString(36).slice(2, 8)}`,
       title: "Swarm",
-      templateId: TEMPLATE,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
       status: "running",
       startedBy: "u1",
       ...overrides,
@@ -288,24 +283,6 @@ test("a swarm's own average of what it measured seeds what it assumes", async ()
   await chargedRun(swarm.id, "9.00", "assumed");
 
   assert.equal(await assumedCostFor(db, swarm), 1.5);
-});
-
-test("a template that states a figure is believed over the average", async () => {
-  const [template] = await db
-    .insert(swarmTemplates)
-    .values({
-      ownerId: "u1",
-      name: "Stated",
-      plannerProfileId: PROFILE,
-      workerProfileId: PROFILE,
-      workerIsolation: "worktree",
-      assumedCostUsd: "0.25",
-    })
-    .returning();
-  const swarm = await makeSwarm({ templateId: template!.id });
-  await chargedRun(swarm.id, "4.00", "measured");
-
-  assert.equal(await assumedCostFor(db, swarm), 0.25, "a team that says what its tools cost knows better than we do");
 });
 
 /**

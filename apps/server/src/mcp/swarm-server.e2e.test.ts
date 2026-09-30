@@ -125,6 +125,7 @@ async function agentOn(
     : await db
         .insert(swarms)
         .values({
+          workerIsolation: "worktree",
           projectId: PROJECT,
           slug: `s-${Math.random().toString(36).slice(2, 8)}`,
           title: "Swarm",

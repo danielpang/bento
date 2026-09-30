@@ -67,8 +67,8 @@ export interface PlannerPromptInput {
   agent?: { name: string; skill: string | null };
   /** Where each repository is checked out inside the sandbox. */
   repositories: { name: string; mountPath: string; testCommand?: string | null }[];
-  /** Operating instructions from the swarm's template, if it set any. */
-  templateInstructions?: string | null;
+  /** Operating instructions a person set on this swarm, if any. */
+  swarmInstructions?: string | null;
 }
 
 /**
@@ -96,8 +96,8 @@ export function buildPlannerPrompt(input: PlannerPromptInput): string {
   if (agent?.skill?.trim()) {
     lines.push("Your operating instructions, defined by your team:", agent.skill.trim(), "");
   }
-  if (input.templateInstructions?.trim()) {
-    lines.push("Instructions from this swarm's template:", input.templateInstructions.trim(), "");
+  if (input.swarmInstructions?.trim()) {
+    lines.push("Instructions for this swarm:", input.swarmInstructions.trim(), "");
   }
 
   if (repositories.length > 0) {
