@@ -15,7 +15,6 @@ import type {
   SwarmDetail,
   SwarmNodeDetail,
   SwarmSummary,
-  SwarmTemplate,
 } from "../swarm/types.js";
 import {
   boardSearch,
@@ -77,7 +76,6 @@ export function SwarmBoard({
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SwarmDetail | null>(null);
-  const [templates, setTemplates] = useState<SwarmTemplate[]>([]);
   /** The agents a node can be reassigned to, for the drawer's picker. */
   const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
@@ -141,10 +139,6 @@ export function SwarmBoard({
   }, [loadSwarms]);
 
   useEffect(() => {
-    void swarmApi
-      .listTemplates()
-      .then(setTemplates)
-      .catch(() => setTemplates([]));
     // An empty list is not an error here: the drawer then offers no
     // reassign picker, which is the truthful answer for a console that
     // could not read the agents.
@@ -453,7 +447,6 @@ export function SwarmBoard({
       {creating && (
         <NewSwarmDialog
           projectId={projectId}
-          templates={templates}
           surfaces={surfaces}
           busy={busy}
           onClose={() => setCreating(false)}

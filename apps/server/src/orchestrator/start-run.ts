@@ -243,7 +243,7 @@ async function insertSwarmRun(
    * spend as it was before either of them started.
    */
   const locked = await tx.execute(
-    sql`select organization_id, max_workers, template_id, budget_usd,
+    sql`select organization_id, max_workers, budget_usd,
                spent_measured_usd, spent_estimated_usd, spent_assumed_usd, spent_notional_usd
           from swarms where id = ${values.swarmId} for update`,
   );
@@ -251,7 +251,6 @@ async function insertSwarmRun(
   const swarm = locked.rows[0] as {
     organization_id: string | null;
     max_workers: number;
-    template_id: string | null;
     budget_usd: string | null;
     spent_measured_usd: string;
     spent_estimated_usd: string;
@@ -369,10 +368,7 @@ async function insertSwarmRun(
       .where(and(inArray(agentRuns.status, ACTIVE_RUN_STATUSES), eq(agentRuns.swarmId, values.swarmId)));
     const running = inFlight?.runs ?? 0;
     if (running > 0) {
-      committedUsd = running * (await assumedCostFor(tx as unknown as Db, {
-        id: values.swarmId,
-        templateId: swarm.template_id,
-      }));
+      committedUsd = running * (await assumedCostFor(tx as unknown as Db, { id: values.swarmId }));
     }
   }
 

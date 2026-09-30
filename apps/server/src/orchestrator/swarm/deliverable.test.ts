@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assembleDocument, documentPathFor, isSafeRelativePath, shiftHeadings } from "./deliverable.js";
+import { assembleDocument, documentPathFor, shiftHeadings } from "./deliverable.js";
 
 /**
  * Assembling a document swarm's sections into one file.
@@ -83,21 +83,6 @@ test("a hash inside a fenced block is a comment, not a heading", () => {
   assert.match(shifted, /\n# install it first\n/, "the comment is untouched");
 });
 
-test("the document's path is the template's, or the swarm's slug", () => {
+test("the document's path comes from the swarm's slug", () => {
   assert.equal(documentPathFor({ slug: "queue-migration" }), "docs/queue-migration.md");
-  assert.equal(documentPathFor({ slug: "x" }, "docs/rfc/queue.md"), "docs/rfc/queue.md");
-  // A path that climbs out of the checkout is not used, and the swarm
-  // gets its ordinary one rather than a failure.
-  assert.equal(documentPathFor({ slug: "x" }, "../../etc/passwd.md"), "docs/x.md");
-  assert.equal(documentPathFor({ slug: "x" }, "/tmp/out.md"), "docs/x.md");
-});
-
-test("a path this server will write to has to be relative, inside, and markdown", () => {
-  assert.equal(isSafeRelativePath("docs/plan.md"), true);
-  assert.equal(isSafeRelativePath("/docs/plan.md"), false);
-  assert.equal(isSafeRelativePath("../plan.md"), false);
-  assert.equal(isSafeRelativePath("docs/../../plan.md"), false);
-  assert.equal(isSafeRelativePath("docs\\plan.md"), false);
-  assert.equal(isSafeRelativePath("docs//plan.md"), false);
-  assert.equal(isSafeRelativePath("docs/plan.txt"), false, "the assembled file is markdown");
 });

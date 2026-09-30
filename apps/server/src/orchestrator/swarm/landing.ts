@@ -633,7 +633,7 @@ async function failTests(
  *
  * The resolver itself is started by the tick, not here, and that is the
  * fix to a queue that used to stop for good. A start attempted here had
- * one chance: no worker agent on the template, a team at its plan
+ * one chance: no worker agent on the swarm, a team at its plan
  * limit, or anything already running answered "no resolver", the row
  * stayed conflicted with nobody on it, and the tick skips a conflict
  * with no resolver rather than moving it. One conflict on a busy plan

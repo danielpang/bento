@@ -15,7 +15,6 @@ import {
   swarmLandings,
   swarmMessages,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -126,6 +125,7 @@ async function agentOn(
     : await db
         .insert(swarms)
         .values({
+          workerIsolation: "worktree",
           projectId: PROJECT,
           slug: `s-${Math.random().toString(36).slice(2, 8)}`,
           title: "Swarm",
@@ -680,20 +680,8 @@ test("rejecting lets the leaf's next report reach the planner again", async () =
  * Handing one part of a plan to a planner of its own.
  * ---------------------------------------------------------------- */
 
-/** A swarm whose template allows plans this many levels deep. */
+/** A swarm that allows plans this many levels deep. */
 async function swarmWithDepth(maxPlanDepth: number): Promise<string> {
-  const [template] = await db
-    .insert(swarmTemplates)
-    .values({
-      ownerId: "u1",
-      organizationId: null,
-      name: `T-${Math.random().toString(36).slice(2, 8)}`,
-      plannerProfileId: PROFILE,
-      workerProfileId: PROFILE,
-      workerIsolation: "worktree",
-      maxPlanDepth,
-    })
-    .returning();
   const [swarm] = await db
     .insert(swarms)
     .values({
@@ -701,13 +689,16 @@ async function swarmWithDepth(maxPlanDepth: number): Promise<string> {
       slug: `s-${Math.random().toString(36).slice(2, 8)}`,
       title: "Swarm",
       status: "running",
-      templateId: template!.id,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
+      maxPlanDepth,
     })
     .returning();
   return swarm!.id;
 }
 
-test("a plan node can be handed to a planner of its own, within the template's depth", async () => {
+test("a plan node can be handed to a planner of its own, within the swarm's depth", async () => {
   const swarmId = await swarmWithDepth(2);
   const { token } = await agentOn("planner", { swarmId });
   const group = await makeTask(swarmId, { nodeType: "plan", title: "Payments" });
@@ -722,7 +713,7 @@ test("a plan node can be handed to a planner of its own, within the template's d
   assert.match(again.text, /already has a planner of its own/);
 });
 
-test("a leaf cannot be handed over, and neither can a node too deep for the template", async () => {
+test("a leaf cannot be handed over, and neither can a node too deep for the swarm", async () => {
   const swarmId = await swarmWithDepth(2);
   const { token } = await agentOn("planner", { swarmId });
 
@@ -761,12 +752,12 @@ test("a node that is already decomposed cannot be handed over", async () => {
   assert.equal((await task(group.id))!.status, "open", "and nothing was marked");
 });
 
-test("a template that allows one level allows no sub planners at all", async () => {
+test("a swarm that allows one level allows no sub planners at all", async () => {
   /**
    * One level is what every swarm did before this existed: the
    * planner writes the whole tree. The refusal says so rather than
-   * reporting a number, because "the template does not allow it" is
-   * the thing the team can change.
+   * reporting a number, because "the swarm does not allow it" is the
+   * thing the team can change.
    */
   const swarmId = await swarmWithDepth(1);
   const { token } = await agentOn("planner", { swarmId });

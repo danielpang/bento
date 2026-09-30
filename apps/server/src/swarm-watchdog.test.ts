@@ -39,9 +39,8 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
-const TEMPLATE = "33333333-3333-3333-3333-333333333333";
 
-/** The template's own thresholds, which is what the watchdog reads. */
+/** The watchdog's thresholds. */
 const WARN_MIN = 20;
 const ESCALATE_MIN = 45;
 
@@ -69,13 +68,6 @@ before(async () => {
   await pool.query(
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
-  );
-  await pool.query(
-    `insert into swarm_templates
-       (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation,
-        long_run_warn_min,long_run_escalate_min)
-     values ($1,'u1',null,'T',$2,$2,2,'worktree',$3,$4)`,
-    [TEMPLATE, PROFILE, WARN_MIN, ESCALATE_MIN],
   );
 
   const bus = new EventBus();
@@ -122,7 +114,9 @@ async function makeSwarm(overrides: Partial<typeof swarms.$inferInsert> = {}) {
       slug: `s-${Math.random().toString(36).slice(2, 8)}`,
       title: "Swarm",
       goal: "do the thing",
-      templateId: TEMPLATE,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
       status: "running",
       maxWorkers: 2,
       startedBy: "u1",

@@ -50,30 +50,12 @@ ALTER TABLE "swarm_messages" ADD COLUMN "source" text DEFAULT 'person' NOT NULL;
 
 -- The fourth tier on a node, and the agent a person chose for it.
 --
--- agent_profile_id is null for every leaf the template's own worker
+-- agent_profile_id is null for every leaf the swarm's own worker
 -- runs, which is all of them until somebody reassigns one. Set null on
 -- delete, like every other run-to-agent link: deleting an agent must
 -- not take the plan with it.
 ALTER TABLE "swarm_tasks" ADD COLUMN "cost_notional_usd" numeric DEFAULT '0' NOT NULL;--> statement-breakpoint
 ALTER TABLE "swarm_tasks" ADD COLUMN "agent_profile_id" uuid;--> statement-breakpoint
-
--- What a run that reports nothing is charged, and when a node that is
--- still being worked starts asking for a person.
---
--- assumed_cost_usd is null by default and that is deliberate: null
--- means "work it out from what this swarm has actually measured", and
--- a number here is a team saying they know their own tools better than
--- an average of them does.
---
--- The two thresholds are minutes, and they are thresholds rather than a
--- timeout because a task that takes forty minutes for being large is
--- not a failure. The first turns a node yellow for a person to glance
--- at. The second spends a planner turn deciding whether to wait,
--- message, split, or cancel. The process timeout stays where it is, as
--- the backstop.
-ALTER TABLE "swarm_templates" ADD COLUMN "assumed_cost_usd" numeric;--> statement-breakpoint
-ALTER TABLE "swarm_templates" ADD COLUMN "long_run_warn_min" integer DEFAULT 20 NOT NULL;--> statement-breakpoint
-ALTER TABLE "swarm_templates" ADD COLUMN "long_run_escalate_min" integer DEFAULT 45 NOT NULL;--> statement-breakpoint
 
 -- The swarm's own fourth tier, and the latch that keeps one warning
 -- from becoming a warning per tick.

@@ -11,7 +11,6 @@ import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmArtifacts, SwarmPage } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
-import { isolationWords } from "./components/SwarmTemplatesPanel.js";
 import { modeSurfaces } from "./swarm/plan.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
@@ -537,17 +536,6 @@ test("a drawer with no handler for messages draws no composer at all", () => {
     createElement(SwarmNodeDrawer, { task, node: model.byId.get("slow")!, onClose: () => {} }),
   );
   assert.doesNotMatch(html, /Queue a message/);
-});
-
-test("a template says where its agents work, because a deployment can refuse it", () => {
-  /**
-   * The shape is recorded on the template rather than read off the
-   * driver, so it is a thing a person chose and a thing a deployment
-   * can decline. Somebody reading this panel is the person who would
-   * have to know why a swarm was refused.
-   */
-  assert.equal(isolationWords("worktree"), "each in a worktree of the repository on the server");
-  assert.equal(isolationWords("sandbox"), "each on a machine of its own");
 });
 
 function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {

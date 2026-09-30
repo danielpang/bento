@@ -5,7 +5,7 @@
 -- them is a column on a table swarms already have; no new table, so no
 -- new isolation machinery is owed here.
 
--- Whether this template's swarms produce code or a document.
+-- Whether this swarm produces code or a document.
 --
 -- A document swarm is the same tree of leaves worked by the same
 -- agents, and it differs in three places: a leaf writes a section
@@ -14,48 +14,34 @@
 -- run, because there is nothing to build and nothing to test.
 --
 -- A default that stays, unlike worker_isolation's. That column is an
--- assertion about the deployment, and a template that never made one
--- had to go on making none. This is a description of the work, 'code'
--- is what every swarm written so far actually produced, and a template
--- that says nothing about it is a template producing code.
-ALTER TABLE "swarm_templates" ADD COLUMN "deliverable" text DEFAULT 'code' NOT NULL;--> statement-breakpoint
-
--- Where a document swarm's assembled file is written, relative to the
--- first repository's root. Null means "work it out from the swarm's
--- slug", which is docs/<slug>.md.
-ALTER TABLE "swarm_templates" ADD COLUMN "document_path" text;--> statement-breakpoint
+-- assertion about the deployment. This is a description of the work,
+-- and 'code' is what every swarm written so far actually produced.
+ALTER TABLE "swarms" ADD COLUMN "deliverable" text DEFAULT 'code' NOT NULL;--> statement-breakpoint
 
 -- The agent that reads a finished swarm before it is called done, and
 -- the command that has to pass first.
 --
 -- Both optional, and both gate the same moment: the root rolling up to
--- done. A template that names neither behaves exactly as it does now,
+-- done. A swarm that names neither behaves exactly as it did before,
 -- which is why neither is backfilled with anything. Set null on
 -- delete, like every other link from a row to an agent: removing an
--- agent must not take the template with it.
-ALTER TABLE "swarm_templates" ADD COLUMN "judge_profile_id" uuid;--> statement-breakpoint
-ALTER TABLE "swarm_templates" ADD COLUMN "completion_command" text;--> statement-breakpoint
-ALTER TABLE "swarm_templates"
-  ADD CONSTRAINT "swarm_templates_judge_profile_id_agent_profiles_id_fk"
+-- agent must not take the swarm with it.
+ALTER TABLE "swarms" ADD COLUMN "judge_profile_id" uuid;--> statement-breakpoint
+ALTER TABLE "swarms" ADD COLUMN "completion_command" text;--> statement-breakpoint
+ALTER TABLE "swarms"
+  ADD CONSTRAINT "swarms_judge_profile_id_agent_profiles_id_fk"
   FOREIGN KEY ("judge_profile_id") REFERENCES "public"."agent_profiles"("id")
   ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 
 -- How deep a plan may be decomposed by an agent rather than by the one
 -- planner.
 --
--- One means what happens today: the planner writes the whole tree
--- itself. Two lets a plan node be handed to a sub planner of its own,
--- which is given that node's subtree and nothing else. It is a ceiling
--- rather than a switch, because the cost of getting it wrong is a
--- planner that plans planners.
-ALTER TABLE "swarm_templates" ADD COLUMN "max_plan_depth" integer DEFAULT 1 NOT NULL;--> statement-breakpoint
-
--- The same deliverable, copied onto the swarm at the moment it starts.
---
--- Copied rather than read back through the template for the reason the
--- ceilings are copied: a template edited in March must not change what
--- a swarm that ran in February was producing.
-ALTER TABLE "swarms" ADD COLUMN "deliverable" text DEFAULT 'code' NOT NULL;--> statement-breakpoint
+-- One means the planner writes the whole tree itself. Two lets a plan
+-- node be handed to a sub planner of its own, which is given that
+-- node's subtree and nothing else. It is a ceiling rather than a
+-- switch, because the cost of getting it wrong is a planner that plans
+-- planners.
+ALTER TABLE "swarms" ADD COLUMN "max_plan_depth" integer DEFAULT 1 NOT NULL;--> statement-breakpoint
 
 -- The branch this swarm started from, when it started from one.
 --

@@ -9,7 +9,6 @@ import {
   runArtifacts,
   stages,
   swarmTasks,
-  swarmTemplates,
   swarms,
 } from "@bento/db";
 import type { Context } from "hono";
@@ -164,25 +163,6 @@ export async function getAccessibleStage(ctx: AppContext, c: Context, stageId: s
     .where(eq(stages.id, stageId));
   if (!row) return null;
   return (await canAccessProject(ctx, c, row.projectId)) ? row : null;
-}
-
-/**
- * A swarm template, which is owner keyed rather than parented by a
- * project: the same rule canAccessProject applies, read off the
- * template's own row.
- */
-export async function getAccessibleSwarmTemplate(ctx: AppContext, c: Context, templateId: string) {
-  const [template] = await db(c, ctx).select().from(swarmTemplates).where(eq(swarmTemplates.id, templateId));
-  if (!template) return null;
-  const userId = actor(c);
-  if (ctx.env.BENTO_MODE !== "multi") return template.ownerId === userId ? template : null;
-  if (!template.organizationId) return template.ownerId === userId ? template : null;
-
-  const [membership] = await db(c, ctx)
-    .select()
-    .from(member)
-    .where(and(eq(member.userId, userId), eq(member.organizationId, template.organizationId)));
-  return membership ? template : null;
 }
 
 /** A swarm, resolved through the project it belongs to. */

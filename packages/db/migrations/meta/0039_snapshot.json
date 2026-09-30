@@ -7173,234 +7173,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.swarm_templates": {
-      "name": "swarm_templates",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "owner_id": {
-          "name": "owner_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "planner_profile_id": {
-          "name": "planner_profile_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "worker_profile_id": {
-          "name": "worker_profile_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "planner_instructions": {
-          "name": "planner_instructions",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "worker_instructions": {
-          "name": "worker_instructions",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "worker_isolation": {
-          "name": "worker_isolation",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "max_workers": {
-          "name": "max_workers",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 4
-        },
-        "budget_usd": {
-          "name": "budget_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "time_limit_min": {
-          "name": "time_limit_min",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "assumed_cost_usd": {
-          "name": "assumed_cost_usd",
-          "type": "numeric",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "long_run_warn_min": {
-          "name": "long_run_warn_min",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 20
-        },
-        "long_run_escalate_min": {
-          "name": "long_run_escalate_min",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 45
-        },
-        "deliverable": {
-          "name": "deliverable",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'code'"
-        },
-        "document_path": {
-          "name": "document_path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "judge_profile_id": {
-          "name": "judge_profile_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "completion_command": {
-          "name": "completion_command",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "max_plan_depth": {
-          "name": "max_plan_depth",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "swarm_templates_owner_id_user_id_fk": {
-          "name": "swarm_templates_owner_id_user_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "user",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "owner_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "swarm_templates_organization_id_organization_id_fk": {
-          "name": "swarm_templates_organization_id_organization_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "organization",
-          "schemaTo": "identity",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "swarm_templates_planner_profile_id_agent_profiles_id_fk": {
-          "name": "swarm_templates_planner_profile_id_agent_profiles_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "agent_profiles",
-          "columnsFrom": [
-            "planner_profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarm_templates_worker_profile_id_agent_profiles_id_fk": {
-          "name": "swarm_templates_worker_profile_id_agent_profiles_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "agent_profiles",
-          "columnsFrom": [
-            "worker_profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "swarm_templates_judge_profile_id_agent_profiles_id_fk": {
-          "name": "swarm_templates_judge_profile_id_agent_profiles_id_fk",
-          "tableFrom": "swarm_templates",
-          "tableTo": "agent_profiles",
-          "columnsFrom": [
-            "judge_profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.swarms": {
       "name": "swarms",
       "schema": "",
@@ -7443,9 +7215,27 @@
           "notNull": true,
           "default": "''"
         },
-        "template_id": {
-          "name": "template_id",
+        "planner_profile_id": {
+          "name": "planner_profile_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "worker_profile_id": {
+          "name": "worker_profile_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "planner_instructions": {
+          "name": "planner_instructions",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "worker_instructions": {
+          "name": "worker_instructions",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -7578,6 +7368,31 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "worker_isolation": {
+          "name": "worker_isolation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "judge_profile_id": {
+          "name": "judge_profile_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completion_command": {
+          "name": "completion_command",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_plan_depth": {
+          "name": "max_plan_depth",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
         }
       },
       "indexes": {
@@ -7646,19 +7461,6 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "swarms_template_id_swarm_templates_id_fk": {
-          "name": "swarms_template_id_swarm_templates_id_fk",
-          "tableFrom": "swarms",
-          "tableTo": "swarm_templates",
-          "columnsFrom": [
-            "template_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
         "swarms_sandbox_id_sandboxes_id_fk": {
           "name": "swarms_sandbox_id_sandboxes_id_fk",
           "tableFrom": "swarms",
@@ -7679,6 +7481,45 @@
           "schemaTo": "identity",
           "columnsFrom": [
             "started_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "swarms_judge_profile_id_agent_profiles_id_fk": {
+          "name": "swarms_judge_profile_id_agent_profiles_id_fk",
+          "tableFrom": "swarms",
+          "tableTo": "agent_profiles",
+          "columnsFrom": [
+            "judge_profile_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "swarms_planner_profile_id_agent_profiles_id_fk": {
+          "name": "swarms_planner_profile_id_agent_profiles_id_fk",
+          "tableFrom": "swarms",
+          "tableTo": "agent_profiles",
+          "columnsFrom": [
+            "planner_profile_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "swarms_worker_profile_id_agent_profiles_id_fk": {
+          "name": "swarms_worker_profile_id_agent_profiles_id_fk",
+          "tableFrom": "swarms",
+          "tableTo": "agent_profiles",
+          "columnsFrom": [
+            "worker_profile_id"
           ],
           "columnsTo": [
             "id"

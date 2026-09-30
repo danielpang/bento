@@ -1239,12 +1239,23 @@ export class BentoClient {
     projectId: string;
     title: string;
     goal?: string;
-    templateId?: string;
+    plannerProfileId?: string;
+    workerProfileId?: string;
     maxWorkers?: number;
     budgetUsd?: number | null;
     timeLimitMin?: number | null;
     /** A branch that already exists, to carry on from. */
     startBranch?: string;
+    /** A change to the code, or a document. Fixed once the swarm exists. */
+    deliverable?: "code" | "document";
+    /** The agent that reads the finished branch before it is done. */
+    judgeProfileId?: string | null;
+    /** A command that has to pass on the finished branch. */
+    completionCommand?: string | null;
+    /** 1: one planner writes the whole plan. More allows sub planners. */
+    maxPlanDepth?: number;
+    plannerInstructions?: string | null;
+    workerInstructions?: string | null;
   }) {
     return this.request<SwarmRow & { plannerRunId: string | null }>("/api/swarms", {
       method: "POST",

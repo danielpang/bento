@@ -37,7 +37,6 @@ import {
   stages,
   swarmLandings,
   swarmTasks,
-  swarmTemplates,
   swarms,
 } from "@bento/db";
 import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
@@ -339,7 +338,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "swarm" && !subject.task && subject.swarm.startBranch
         ? { startFromBranch: subject.swarm.startBranch }
         : {}),
-      // What the swarm's template says about where its agents work.
+      // What the swarm says about where its agents work.
       // A card has no such promise, so it passes none.
       ...(subject.kind === "swarm" ? { workerIsolation: subject.workerIsolation } : {}),
       /**
@@ -1342,13 +1341,6 @@ async function buildSubjectPrompt(
       cardTools,
     );
   }
-  const [template] = subject.swarm.templateId
-    ? await ctx.db
-        .select()
-        .from(swarmTemplates)
-        .where(eq(swarmTemplates.id, subject.swarm.templateId))
-        .limit(1)
-    : [];
   const agent = { name: subject.profile.name, skill: subject.profile.skill };
   /**
    * Which prompt a swarm run gets is its role's, not its board's.
@@ -1400,7 +1392,7 @@ async function buildSubjectPrompt(
       },
       agent,
       repositories: mounted,
-      templateInstructions: template?.plannerInstructions ?? null,
+      swarmInstructions: subject.swarm.plannerInstructions,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
     });
   }
@@ -1412,8 +1404,8 @@ async function buildSubjectPrompt(
    */
   if (subject.run.role === "judge" && subject.task) {
     /*
-     * The template is read fresh every tick, so a team that cleared
-     * its judge and its completion command between the tick that put
+     * The swarm is read fresh every run, so a person who cleared its
+     * judge and its completion command between the tick that put
      * the check on the tree and this run has left nothing to describe.
      * The check still exists and still gates the root, so it is given
      * an empty check rather than falling through: what it must not
@@ -1422,7 +1414,7 @@ async function buildSubjectPrompt(
      */
     return buildFinalCheckPrompt({
       swarm: subject.swarm,
-      check: finalCheckFor(template) ?? { judgeProfileId: null, completionCommand: null },
+      check: finalCheckFor(subject.swarm) ?? { judgeProfileId: null, completionCommand: null },
       agent,
       repositories: mounted,
       tasks: await tasksOf(ctx.db, subject.swarm.id),
@@ -1435,7 +1427,7 @@ async function buildSubjectPrompt(
       agent,
       repositories: mounted,
       branch: subject.branch,
-      templateInstructions: template?.workerInstructions ?? null,
+      swarmInstructions: subject.swarm.workerInstructions,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
       messages: await takeNodeMessages(ctx.db, subject.task.id, subject.run.id),
     });
@@ -1444,7 +1436,7 @@ async function buildSubjectPrompt(
     swarm: subject.swarm,
     agent,
     repositories: mounted,
-    templateInstructions: template?.plannerInstructions ?? null,
+    swarmInstructions: subject.swarm.plannerInstructions,
     deliverable: subject.swarm.deliverable,
     sectionDir: SECTION_DIR,
     /*

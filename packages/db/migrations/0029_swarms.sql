@@ -80,23 +80,6 @@ CREATE TABLE "swarm_tasks" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "swarm_templates" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"owner_id" text NOT NULL,
-	"organization_id" text,
-	"name" text NOT NULL,
-	"description" text DEFAULT '' NOT NULL,
-	"planner_profile_id" uuid,
-	"worker_profile_id" uuid,
-	"planner_instructions" text,
-	"worker_instructions" text,
-	"max_workers" integer DEFAULT 4 NOT NULL,
-	"budget_usd" numeric,
-	"time_limit_min" integer,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
 CREATE TABLE "swarms" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -104,7 +87,10 @@ CREATE TABLE "swarms" (
 	"slug" text NOT NULL,
 	"title" text NOT NULL,
 	"goal" text DEFAULT '' NOT NULL,
-	"template_id" uuid,
+	"planner_profile_id" uuid,
+	"worker_profile_id" uuid,
+	"planner_instructions" text,
+	"worker_instructions" text,
 	"status" text DEFAULT 'draft' NOT NULL,
 	"paused_reason" text,
 	"branch_name" text,
@@ -153,13 +139,10 @@ ALTER TABLE "swarm_tasks" ADD CONSTRAINT "swarm_tasks_swarm_id_swarms_id_fk" FOR
 ALTER TABLE "swarm_tasks" ADD CONSTRAINT "swarm_tasks_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "identity"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarm_tasks" ADD CONSTRAINT "swarm_tasks_parent_id_swarm_tasks_id_fk" FOREIGN KEY ("parent_id") REFERENCES "public"."swarm_tasks"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarm_tasks" ADD CONSTRAINT "swarm_tasks_assigned_run_id_agent_runs_id_fk" FOREIGN KEY ("assigned_run_id") REFERENCES "public"."agent_runs"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "swarm_templates" ADD CONSTRAINT "swarm_templates_owner_id_user_id_fk" FOREIGN KEY ("owner_id") REFERENCES "identity"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "swarm_templates" ADD CONSTRAINT "swarm_templates_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "identity"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "swarm_templates" ADD CONSTRAINT "swarm_templates_planner_profile_id_agent_profiles_id_fk" FOREIGN KEY ("planner_profile_id") REFERENCES "public"."agent_profiles"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "swarm_templates" ADD CONSTRAINT "swarm_templates_worker_profile_id_agent_profiles_id_fk" FOREIGN KEY ("worker_profile_id") REFERENCES "public"."agent_profiles"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "identity"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "swarms" ADD CONSTRAINT "swarms_template_id_swarm_templates_id_fk" FOREIGN KEY ("template_id") REFERENCES "public"."swarm_templates"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "swarms" ADD CONSTRAINT "swarms_planner_profile_id_agent_profiles_id_fk" FOREIGN KEY ("planner_profile_id") REFERENCES "public"."agent_profiles"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "swarms" ADD CONSTRAINT "swarms_worker_profile_id_agent_profiles_id_fk" FOREIGN KEY ("worker_profile_id") REFERENCES "public"."agent_profiles"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_sandbox_id_sandboxes_id_fk" FOREIGN KEY ("sandbox_id") REFERENCES "public"."sandboxes"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "swarms" ADD CONSTRAINT "swarms_started_by_user_id_fk" FOREIGN KEY ("started_by") REFERENCES "identity"."user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "swarm_landings_queue_idx" ON "swarm_landings" USING btree ("swarm_id","position");--> statement-breakpoint
@@ -184,11 +167,7 @@ ALTER TABLE "run_artifacts" ADD CONSTRAINT "run_artifacts_feature_or_swarm" CHEC
 
 -- Tenant isolation, none of which a new table inherits: the ENABLE, the
 -- FORCE, the policy, and the inherit trigger each have to be stated
--- here, and rls.test.ts lists all seven so forgetting one fails loudly.
---
--- swarm_templates has no parent row to inherit from. It is keyed by its
--- owner the way agent_profiles and mcp_servers are, and its routes set
--- organization_id explicitly; RLS still checks what they set.
+-- here, and rls.test.ts lists all six so forgetting one fails loudly.
 CREATE TRIGGER swarms_inherit_org BEFORE INSERT ON swarms
   FOR EACH ROW EXECUTE FUNCTION bento_inherit_org('projects', 'project_id');--> statement-breakpoint
 CREATE TRIGGER swarm_tasks_inherit_org BEFORE INSERT ON swarm_tasks
@@ -206,7 +185,7 @@ DO $$
 DECLARE
   table_name text;
   tenant_tables text[] := ARRAY[
-    'swarm_templates', 'swarms', 'swarm_tasks', 'swarm_task_events',
+    'swarms', 'swarm_tasks', 'swarm_task_events',
     'swarm_landings', 'swarm_pull_requests', 'swarm_messages'
   ];
 BEGIN
@@ -344,5 +323,5 @@ CREATE TRIGGER agent_runs_validate_tenant
 -- there is no backfill left to do and no row is left without a role.
 GRANT EXECUTE ON FUNCTION bento_inherit_org_any() TO bento_user;--> statement-breakpoint
 GRANT SELECT, INSERT, UPDATE, DELETE ON
-  swarm_templates, swarms, swarm_tasks, swarm_task_events,
+  swarms, swarm_tasks, swarm_task_events,
   swarm_landings, swarm_pull_requests, swarm_messages TO bento_user;
