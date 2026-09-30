@@ -295,8 +295,8 @@ export function SwarmPage({
  * How many workers this swarm may run at once.
  *
  * A stepper rather than a field: the number is small, bounded by the
- * template, and changed by one more or one fewer far more often than
- * it is typed. What is already working is printed beside it, because
+ * route's ceiling, and changed by one more or one fewer far more often
+ * than it is typed. What is already working is printed beside it, because
  * raising the ceiling while six workers are busy is a different
  * decision from raising it while none are.
  */
@@ -314,7 +314,7 @@ export function WorkerStepper({
   onChange: (workers: number) => void;
 }) {
   return (
-    <div className="swarm-workers" title={`${active} of ${workers} working, up to ${max} on this template`}>
+    <div className="swarm-workers" title={`${active} of ${workers} working, up to ${max}`}>
       <button
         type="button"
         className="btn btn-ghost"

@@ -19,7 +19,6 @@ import {
   swarmMessages,
   swarmTaskEvents,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -35,7 +34,7 @@ import { mintRunGrant } from "../mcp/grants.js";
 import { tickSwarm } from "../orchestrator/swarm/coordinator.js";
 import { takeNodeMessages } from "../orchestrator/swarm/node-messages.js";
 import { BENTO_SWARM_SERVER_ID } from "../mcp/swarm-server.js";
-import { RUNNER_PROJECT_REFUSAL } from "./swarms.js";
+import { RUNNER_PROJECT_REFUSAL, defaultWorkerIsolation } from "./swarms.js";
 
 /**
  * The swarm routes, driven as a client drives them.
@@ -218,17 +217,14 @@ test("creating a swarm plans it, and puts a planner to work at once", async () =
     "and it was queued for a worker",
   );
 
-  // A seeded template and its two agents came with it, editable like
-  // any other.
-  const templates = (await (await app.request("/api/swarm-templates")).json()) as {
-    name: string;
-    plannerProfileId: string | null;
-    workerProfileId: string | null;
-  }[];
-  assert.equal(templates.length, 1);
-  assert.equal(templates[0]!.name, "Default");
-  assert.ok(templates[0]!.plannerProfileId, "with a planner");
-  assert.ok(templates[0]!.workerProfileId, "and a worker");
+  // Nobody chose agents, so the install's own Swarm Planner and Swarm
+  // Worker were made and put on it, editable like any other agent.
+  const row = await readSwarm(swarm.id);
+  const profiles = (await (await app.request("/api/profiles")).json()) as { id: string; name: string }[];
+  const named = new Map(profiles.map((profile) => [profile.id, profile.name]));
+  assert.equal(named.get(row.plannerProfileId!), "Swarm Planner");
+  assert.equal(named.get(row.workerProfileId!), "Swarm Worker");
+  assert.equal(row.plannerInstructions, null, "and nothing else was asked for");
 
   // A second swarm of the same name takes a readable suffix rather
   // than a random one.
@@ -992,38 +988,69 @@ test("a node's messages are handed to one run, oldest first, and never twice", a
   assert.equal(byText.get("for the plan")!.status, "queued", "and the planner's is still the planner's");
 });
 
-test("a local install's default template runs its agents in worktrees, two at a time", async () => {
+test("a local install's swarm runs its agents in worktrees, two at a time", async () => {
   /**
-   * The shape is written onto the template rather than read off the
+   * The shape is written onto the swarm rather than read off the
    * driver every time a run starts. A container per worker is a
    * container on the machine somebody is also using, which is why a
    * local install wants worktrees and two of them; recording it is
    * what stops that shape changing under a swarm if the install later
    * joins a team.
    */
-  const swarm = await createSwarm({ title: "Shape" });
-  const [template] = await db.select().from(swarmTemplates).where(eq(swarmTemplates.id, swarm.templateId!));
-  assert.equal(template!.name, "Default");
-  assert.equal(template!.workerIsolation, "worktree");
-  assert.equal(template!.maxWorkers, 2);
+  const swarm = await readSwarm((await createSwarm({ title: "Shape" })).id);
+  assert.equal(swarm.workerIsolation, "worktree");
+  assert.equal(swarm.maxWorkers, 2);
 });
 
-test("a template states its shape, and takes the one it is given", async () => {
-  const made = await post("/api/swarm-templates", { name: "Hosted shape", workerIsolation: "sandbox" });
-  assert.equal(made.status, 201);
-  const row = (await made.json()) as { workerIsolation: string };
-  assert.equal(row.workerIsolation, "sandbox", "a caller that states one is taken at its word");
+test("a swarm is created with its instructions and agents, and they can be changed after", async () => {
+  const defaults = await readSwarm((await createSwarm({ title: "Agents" })).id);
+  const created = await createSwarm({
+    title: "Instructed",
+    plannerInstructions: "Split by package.",
+    workerInstructions: "   ",
+  });
+  const row = await readSwarm(created.id);
+  assert.equal(row.plannerInstructions, "Split by package.");
+  assert.equal(row.workerInstructions, null, "blank is none, not a heading with nothing under it");
 
-  const implied = await post("/api/swarm-templates", { name: "Local shape" });
-  assert.equal(implied.status, 201);
-  assert.equal(
-    ((await implied.json()) as { workerIsolation: string }).workerIsolation,
-    "worktree",
-    "and this deployment's own shape otherwise",
-  );
+  const patched = await app.request(`/api/swarms/${created.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workerInstructions: "Add tests.", workerProfileId: defaults.plannerProfileId }),
+  });
+  assert.equal(patched.status, 200, await patched.clone().text());
+  const after = await readSwarm(created.id);
+  assert.equal(after.workerInstructions, "Add tests.");
+  assert.equal(after.workerProfileId, defaults.plannerProfileId);
+  assert.equal(after.plannerInstructions, "Split by package.", "what was not sent is left alone");
 
-  const nonsense = await post("/api/swarm-templates", { name: "Nope", workerIsolation: "vm" });
-  assert.equal(nonsense.status, 400, "a shape nothing can run is not stored");
+  // A stranger's agent reads as not there, on the way in and afterwards.
+  const stranger = "00000000-0000-4000-8000-000000000001";
+  for (const field of ["plannerProfileId", "workerProfileId"]) {
+    const res = await app.request(`/api/swarms/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [field]: stranger }),
+    });
+    assert.equal(res.status, 404, `a stranger's ${field} reads as not there`);
+  }
+  const strangerAtCreate = await post("/api/swarms", {
+    projectId,
+    title: "Planned by a stranger",
+    goal: "Try a missing planner",
+    plannerProfileId: stranger,
+  });
+  assert.equal(strangerAtCreate.status, 404);
+  assert.equal((await readSwarm(created.id)).plannerProfileId, defaults.plannerProfileId, "and nothing was changed");
+});
+
+test("a swarm's workers go where the driver can put them", () => {
+  const shape = (mode: "local" | "multi", provider: string) =>
+    defaultWorkerIsolation({ env: { BENTO_MODE: mode }, driver: { provider } } as unknown as AppContext);
+  assert.equal(shape("local", "docker"), "worktree");
+  assert.equal(shape("local", "local-process"), "worktree");
+  assert.equal(shape("local", "sprite"), "sandbox", "a sprite holds its own clone, so worktrees would be refused");
+  assert.equal(shape("multi", "sprite"), "sandbox");
 });
 
 /**

@@ -5,7 +5,6 @@ import {
   swarmMessages,
   swarmTaskEvents,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -725,7 +724,7 @@ async function deliverPlannerWake(
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run the planner as. The messages stay queued, so this
-  // resolves itself the moment a planner agent is set on the template.
+  // resolves itself the moment a planner agent is set in the swarm's settings.
   if (!profileId) return null;
 
   const items: PlannerWakeItem[] = [
@@ -774,25 +773,14 @@ async function deliverPlannerWake(
   return started.id;
 }
 
-/** The agent the planner runs as, which a swarm gets from its template. */
-async function plannerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
-  if (!swarm.templateId) return null;
-  const [template] = await tx
-    .select({ plannerProfileId: swarmTemplates.plannerProfileId })
-    .from(swarmTemplates)
-    .where(eq(swarmTemplates.id, swarm.templateId))
-    .limit(1);
-  return template?.plannerProfileId ?? null;
+/** The agent the planner runs as, chosen when the swarm was created. */
+async function plannerProfileFor(_tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  return swarm.plannerProfileId;
 }
 
-async function workerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
-  if (!swarm.templateId) return null;
-  const [template] = await tx
-    .select({ workerProfileId: swarmTemplates.workerProfileId })
-    .from(swarmTemplates)
-    .where(eq(swarmTemplates.id, swarm.templateId))
-    .limit(1);
-  return template?.workerProfileId ?? null;
+/** The agent every leaf runs as unless a person reassigned it. */
+async function workerProfileFor(_tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  return swarm.workerProfileId;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1065,7 +1053,7 @@ async function advanceLandingQueue(
  * that never runs and a queue that never moves.
  *
  * Refusals are not all the same, and the difference is what this is
- * for. No worker agent on the template is permanent, so the leaf fails
+ * for. No worker agent on the swarm is permanent, so the leaf fails
  * with a sentence a person can act on. "Busy" and a plan limit are
  * transient: the row is left conflicted with nobody on it, and the next
  * tick asks again.
@@ -1085,7 +1073,7 @@ async function startResolver(
   const profileId = await workerProfileFor(tx, swarm);
   if (!profileId) {
     const reason =
-      "this swarm's template has no worker agent, so nothing can be put on the conflict. Set one on the template, and the planner can hand this work out again.";
+      "this swarm has no worker agent, so nothing can be put on the conflict. Choose one in the swarm's settings, and the planner can hand this work out again.";
     await tx
       .update(swarmLandings)
       .set({

@@ -35,7 +35,6 @@ import {
   stages,
   swarmLandings,
   swarmTasks,
-  swarmTemplates,
   swarms,
 } from "@bento/db";
 import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
@@ -293,7 +292,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName
         ? { startFromBranch: subject.swarm.branchName }
         : {}),
-      // What the swarm's template says about where its agents work.
+      // What the swarm says about where its agents work.
       // A card has no such promise, so it passes none.
       ...(subject.kind === "swarm" ? { workerIsolation: subject.workerIsolation } : {}),
       /**
@@ -1281,13 +1280,6 @@ async function buildSubjectPrompt(
       cardTools,
     );
   }
-  const [template] = subject.swarm.templateId
-    ? await ctx.db
-        .select()
-        .from(swarmTemplates)
-        .where(eq(swarmTemplates.id, subject.swarm.templateId))
-        .limit(1)
-    : [];
   const agent = { name: subject.profile.name, skill: subject.profile.skill };
   /**
    * Which prompt a swarm run gets is its role's, not its board's.
@@ -1330,7 +1322,7 @@ async function buildSubjectPrompt(
       agent,
       repositories: mounted,
       branch: subject.branch,
-      templateInstructions: template?.workerInstructions ?? null,
+      swarmInstructions: subject.swarm.workerInstructions,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
       messages: await takeNodeMessages(ctx.db, subject.task.id, subject.run.id),
     });
@@ -1339,7 +1331,7 @@ async function buildSubjectPrompt(
     swarm: subject.swarm,
     agent,
     repositories: mounted,
-    templateInstructions: template?.plannerInstructions ?? null,
+    swarmInstructions: subject.swarm.plannerInstructions,
   });
 }
 

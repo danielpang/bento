@@ -44,7 +44,6 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
-const TEMPLATE = "33333333-3333-3333-3333-333333333333";
 
 const exec = promisify(execFile);
 const IDENTITY = {
@@ -84,11 +83,6 @@ before(async () => {
   await pool.query(
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
-  );
-  await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation)
-     values ($1,'u1',null,'T',$2,$2,2,'worktree')`,
-    [TEMPLATE, PROFILE],
   );
 
   dataDir = await mkdtemp(path.join(tmpdir(), "bento-landing-e2e-"));
@@ -152,7 +146,7 @@ beforeEach(async () => {
 async function swarmWithLeaf(slug: string) {
   const [swarm] = await db
     .insert(swarms)
-    .values({ projectId: PROJECT, slug, title: "S", templateId: TEMPLATE, status: "running", branchName: `swarm/${slug}` })
+    .values({ projectId: PROJECT, slug, title: "S", plannerProfileId: PROFILE, workerProfileId: PROFILE, workerIsolation: "worktree", status: "running", branchName: `swarm/${slug}` })
     .returning();
   await git(repoPath, ["branch", `swarm/${slug}`, "main"]);
   const swarmTree = ctx.worktrees.worktreePath(swarmWorkspaceKey(swarm!.id), "app");

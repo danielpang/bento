@@ -125,5 +125,5 @@ test("everything else is the same console in both modes", () => {
   const differences = (Object.keys(hosted) as (keyof typeof hosted)[]).filter(
     (key) => local[key] !== hosted[key],
   );
-  assert.deepEqual(differences.sort(), ["agentHoursLine", "outOfComputeBanner", "planFooter"]);
+  assert.deepEqual(differences.sort(), ["agentHoursLine", "defaultSwarmWorkers", "outOfComputeBanner", "planFooter"]);
 });

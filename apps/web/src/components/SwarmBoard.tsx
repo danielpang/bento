@@ -7,7 +7,7 @@ import { BoardSkeleton } from "./Skeleton.js";
 import { swarmApi } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
-import type { NewSwarmInput, SwarmDetail, SwarmNodeDetail, SwarmSummary, SwarmTemplate } from "../swarm/types.js";
+import type { NewSwarmInput, SwarmDetail, SwarmNodeDetail, SwarmSummary } from "../swarm/types.js";
 import {
   boardSearch,
   browserStorage,
@@ -45,7 +45,6 @@ export function SwarmBoard({
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SwarmDetail | null>(null);
-  const [templates, setTemplates] = useState<SwarmTemplate[]>([]);
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
   const [expanded, setExpanded] = useState<string[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
@@ -105,13 +104,6 @@ export function SwarmBoard({
     setSelectedId(null);
     loadSwarms();
   }, [loadSwarms]);
-
-  useEffect(() => {
-    void swarmApi
-      .listTemplates()
-      .then(setTemplates)
-      .catch(() => setTemplates([]));
-  }, []);
 
   const loadNode = useCallback((swarmId: string, openTaskId: string) => {
     void swarmApi
@@ -321,7 +313,6 @@ export function SwarmBoard({
       {creating && (
         <NewSwarmDialog
           projectId={projectId}
-          templates={templates}
           surfaces={surfaces}
           busy={busy}
           onClose={() => setCreating(false)}

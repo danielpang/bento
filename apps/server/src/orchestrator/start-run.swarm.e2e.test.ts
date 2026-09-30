@@ -14,6 +14,7 @@ import {
 } from "@bento/db";
 import type { Entitlements } from "../context.js";
 import { SWARM_FULL, startRunIfIdle } from "./start-run.js";
+import { DEFAULT_ASSUMED_USD } from "./swarm/ledger.js";
 
 /**
  * The swarm half of the one door every run start goes through.
@@ -77,6 +78,7 @@ async function makeSwarm(overrides: Partial<typeof swarms.$inferInsert> = {}) {
       title: "Swarm",
       status: "running",
       maxWorkers: 2,
+      workerIsolation: "worktree",
       ...overrides,
     })
     .returning();

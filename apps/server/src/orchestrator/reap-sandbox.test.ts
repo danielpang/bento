@@ -207,6 +207,7 @@ async function seedSwarm(opts: {
   const [swarm] = await ctx.db
     .insert(swarms)
     .values({
+      workerIsolation: "worktree",
       projectId: project!.id,
       slug: `s-${randomUUID().slice(0, 8)}`,
       title: opts.title,

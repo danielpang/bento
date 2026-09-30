@@ -552,7 +552,7 @@ export const agentRuns = pgTable(
    *
    * Not the same question as `role`, and not derivable from it: a judge
    * run exists on both boards. A card names a judge agent for its gate,
-   * and a swarm template names one too, so `role = 'judge'` cannot say
+   * and a swarm names one too, so `role = 'judge'` cannot say
    * which board asked. The two are axes: this is which board, and
    * `role` is the capacity within it.
    *
@@ -1463,69 +1463,6 @@ export const githubInstallations = pgTable("github_installations", {
  */
 
 /**
- * A reusable swarm setup: who plans, who works, and the ceilings the
- * swarm starts with.
- *
- * Owner-keyed like agent_profiles rather than parented by a project, so
- * one team's way of running a swarm is not re-entered per project.
- * There is no parent row to inherit an organization from, so the routes
- * set organizationId explicitly, which is the agent_profiles and
- * mcp_servers precedent.
- */
-export const swarmTemplates = pgTable("swarm_templates", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  /** The creator. Kept for attribution; access is decided by the org. */
-  ownerId: text("owner_id")
-    .notNull()
-    .references(() => user.id),
-  organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  description: text("description").notNull().default(""),
-  /** Who decomposes the goal, and who works the leaves. */
-  plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
-  workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
-  /**
-   * Operating instructions handed to those agents on top of their own
-   * profile skill: how to split this kind of goal, and what a finished
-   * leaf has to have done.
-   */
-  plannerInstructions: text("planner_instructions"),
-  workerInstructions: text("worker_instructions"),
-  /**
-   * Where this template's agents work: each on a machine that holds
-   * its own clone, or all of them in worktrees of the project's
-   * checkout on the server.
-   *
-   * Recorded rather than inferred from the deployment, which is the
-   * whole point of it being here. A local install runs its swarms in
-   * worktrees because a container per worker is a container on the
-   * machine somebody is also using; a hosted one gives each worker a
-   * machine. Read off the driver, that shape would change under a
-   * swarm the moment the install joined a team, and the person who
-   * chose it would never be told.
-   *
-   * "worktree" is an assertion the deployment has to be able to keep.
-   * A driver whose sandboxes hold their own clones cannot, and says so
-   * rather than quietly provisioning the other shape. "sandbox" makes
-   * no assertion: the driver decides, which is what every template
-   * written before this column was doing.
-   *
-   * No default, deliberately. The value a template does not state is
-   * the one that loses a local install its shape, and this repository
-   * has been bitten by exactly that: agent_runs.type and
-   * run_artifacts.type both add a default for the backfill and drop it
-   * in the same migration, so that every insert from then on says what
-   * it is.
-   */
-  workerIsolation: text("worker_isolation", { enum: ["sandbox", "worktree"] }).notNull(),
-  /** Starting ceilings. A swarm copies them and may then be changed. */
-  maxWorkers: integer("max_workers").notNull().default(4),
-  budgetUsd: numeric("budget_usd"),
-  timeLimitMin: integer("time_limit_min"),
-  ...timestamps,
-});
-
-/**
  * One goal being worked by a swarm of agents.
  *
  * The ceilings are on the swarm rather than on the plan, because they
@@ -1555,8 +1492,38 @@ export const swarms = pgTable(
     title: text("title").notNull(),
     /** What the swarm was asked to do, as the person wrote it. */
     goal: text("goal").notNull().default(""),
-    /** The template this was started from, kept for attribution only. */
-    templateId: uuid("template_id").references(() => swarmTemplates.id, { onDelete: "set null" }),
+    /** Who decomposes the goal, and who works the leaves. Chosen at creation. */
+    plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    /**
+     * Where this swarm's agents work: each on a machine that holds its
+     * own clone, or all of them in worktrees of the project's checkout
+     * on the server.
+     *
+     * Recorded when the swarm is created rather than read off the
+     * deployment on every run. A local install works in worktrees
+     * because a container per worker is a container on the machine
+     * somebody is also using; a hosted one gives each worker a machine.
+     * Read off the driver, that shape would change under a running swarm
+     * the moment the install joined a team, and nobody would be told.
+     *
+     * "worktree" is an assertion the deployment has to be able to keep.
+     * A driver whose sandboxes hold their own clones cannot, and says so
+     * rather than quietly provisioning the other shape. "sandbox" makes
+     * no assertion: the driver decides.
+     *
+     * No default, deliberately: every insert says which it is, the way
+     * agent_runs.type and run_artifacts.type do.
+     */
+    workerIsolation: text("worker_isolation", { enum: ["sandbox", "worktree"] }).notNull(),
+    /**
+     * Operating instructions handed to the planner and the workers on
+     * top of their own profile skill: how to split this goal, and what
+     * a finished leaf has to have done. Read fresh on every run, so an
+     * edit reaches the next turn.
+     */
+    plannerInstructions: text("planner_instructions"),
+    workerInstructions: text("worker_instructions"),
     status: text("status", {
       enum: ["draft", "planning", "running", "paused", "blocked", "done", "failed", "cancelled"],
     })
@@ -1579,7 +1546,7 @@ export const swarms = pgTable(
      * sandboxes with the leaf they belong to.
      */
     sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
-    /** Ceilings, copied from the template at start. Null means none. */
+    /** Ceilings, set at creation and changeable after. Null means none. */
     budgetUsd: numeric("budget_usd"),
     maxWorkers: integer("max_workers").notNull().default(4),
     timeLimitMin: integer("time_limit_min"),

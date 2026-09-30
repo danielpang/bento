@@ -120,7 +120,7 @@ test("a card's run reports what it cost, with its card and its stage", async () 
 test("a swarm's run reports too, with the swarm and the leaf it worked", async () => {
   const [swarm] = await db
     .insert(swarms)
-    .values({ projectId: PROJECT, slug: "s1", title: "Swarm", status: "running" })
+    .values({ workerIsolation: "worktree", projectId: PROJECT, slug: "s1", title: "Swarm", status: "running" })
     .returning();
   const [task] = await db.insert(swarmTasks).values({ swarmId: swarm!.id, title: "Leaf" }).returning();
   const [run] = await db

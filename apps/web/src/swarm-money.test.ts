@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   capUse,
   estimateLine,
-  estimateSwarm,
   formatUsd,
   nodeSpendChip,
   nodeSpendLine,
@@ -120,15 +119,9 @@ test("dollars print the way every other figure in the console does", () => {
   assert.equal(formatUsd(Number.NaN), "$0.00");
 });
 
-test("an estimate is the template's per task figures, kept in their tiers", () => {
-  const template = {
-    perLeaf: { measuredUsd: 0.5, estimatedUsd: 0.1, assumedUsd: 0.2 },
-    typicalLeaves: 10,
-  };
-  assert.deepEqual(estimateSwarm(template), { measuredUsd: 5, estimatedUsd: 1, assumedUsd: 2 });
-  assert.deepEqual(estimateSwarm(template, 2), { measuredUsd: 1, estimatedUsd: 0.2, assumedUsd: 0.4 });
-  const line = estimateLine(estimateSwarm(template, 2), 2);
+test("an estimate line keeps its tiers apart and says what it counts", () => {
+  const line = estimateLine({ measuredUsd: 1, estimatedUsd: 0.2, assumedUsd: 0.4 }, 2);
   assert.equal(line, "About $1.00 measured, $0.20 estimated, $0.40 assumed over 2 tasks.");
   assert.ok(!line.includes("$1.60"));
-  assert.match(estimateLine(estimateSwarm(template, 1), 1), /over 1 task\./);
+  assert.match(estimateLine({ measuredUsd: 0.5, estimatedUsd: 0, assumedUsd: 0 }, 1), /over 1 task\./);
 });
