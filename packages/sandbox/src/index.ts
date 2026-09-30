@@ -3,6 +3,20 @@ export { DockerDriver } from "./docker.js";
 export { LocalProcessDriver } from "./local-process.js";
 export { SpriteDriver, type SpriteDriverOptions, type SpriteLookupRetry } from "./sprite.js";
 export {
+  ModalDriver,
+  MODAL_APP_NAME,
+  MODAL_SANDBOX_TIMEOUT_MS,
+  MODAL_WARM_WINDOW_MS,
+  modalOutboundAllowlist,
+  modalSandboxName,
+  modalSandboxSize,
+  persistedSandboxProvider,
+  toolchainDockerfile,
+  toolchainImageName,
+  type ModalApi,
+  type ModalDriverOptions,
+} from "./modal.js";
+export {
   WorktreeManager,
   repositoryPathIn,
   type RepositorySpec,

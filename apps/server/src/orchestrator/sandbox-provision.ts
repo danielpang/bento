@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
-import type { PreparedRepository, SandboxDriver, SandboxHandle } from "@bento/sandbox";
+import { persistedSandboxProvider, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
@@ -102,6 +102,12 @@ export interface ProvisionWorkspaceInput {
    * checkouts are on this host, where the name is enough.
    */
   startFromBundles?: Map<string, { branch: string; data: Buffer }>;
+  /**
+   * Hosts a restricted Modal sandbox may open. Other drivers ignore it.
+   * The caller names them from the gateway, the clone URLs, and the
+   * agent's base URLs, because those are not known in here.
+   */
+  allowedHosts?: string[];
   /** Progress lines, which go into the transcript of whatever asked. */
   say: (text: string) => Promise<void>;
   /**
@@ -218,10 +224,14 @@ export async function provisionWorkspace(
     );
   }
 
+  const restoreImage = driver.provider === "modal" ? await hibernatedImage(ctx, input.owner) : undefined;
   const handle = await driver.provision({
     projectId: input.projectId,
     workspaceKey,
+    ...(input.organizationId ? { organizationId: input.organizationId } : {}),
+    ...(restoreImage ? { imageRef: restoreImage } : {}),
     ...(input.restrictNetwork ? { network: "restricted" as const } : {}),
+    ...(input.allowedHosts ? { allowedHosts: input.allowedHosts } : {}),
     hostWorkspacePath: ctx.worktrees.workspacePath(workspaceKey),
     // Drivers with no host filesystem clone these instead of mounting.
     repositories: repoRows.map((r) => ({
@@ -256,7 +266,7 @@ export async function provisionWorkspace(
     .values({
       projectId: input.projectId,
       ...input.owner,
-      provider: handle.provider === "sprite" ? "sprite" : "docker",
+      provider: persistedSandboxProvider(handle.provider),
       externalId: handle.externalId,
       status: "busy",
       workdir: handle.workdir,
@@ -274,11 +284,41 @@ export async function provisionWorkspace(
         workdir: handle.workdir,
         ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
         lastUsedAt: new Date(),
+        // A destroyed row still owns the unique external id. Reusing
+        // that name for a new machine has to record the new provider
+        // and drop the old hibernation image. Any other status keeps
+        // the provider the row was created with.
+        provider: sql`CASE WHEN ${sandboxes.status} = 'destroyed' THEN ${persistedSandboxProvider(handle.provider)} ELSE ${sandboxes.provider} END`,
+        imageRef: sql`CASE WHEN ${sandboxes.status} = 'destroyed' THEN NULL ELSE ${sandboxes.imageRef} END`,
       },
     })
     .returning();
 
   return { handle, prepared, sandboxRow };
+}
+
+/**
+ * The image a hibernated machine of this workspace still has.
+ *
+ * A card looks up its feature. A swarm looks up its own machine, or
+ * the worker's, so a later run restores that checkout instead of
+ * cloning again. A row that is merely busy is a live machine and is
+ * not restored from here.
+ */
+async function hibernatedImage(
+  ctx: AppContext,
+  owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null },
+): Promise<string | undefined> {
+  const where =
+    "featureId" in owner
+      ? and(eq(sandboxes.featureId, owner.featureId), eq(sandboxes.status, "hibernated"))
+      : and(
+          eq(sandboxes.swarmId, owner.swarmId),
+          owner.swarmTaskId ? eq(sandboxes.swarmTaskId, owner.swarmTaskId) : isNull(sandboxes.swarmTaskId),
+          eq(sandboxes.status, "hibernated"),
+        );
+  const [row] = await ctx.db.select({ imageRef: sandboxes.imageRef }).from(sandboxes).where(where).limit(1);
+  return row?.imageRef ?? undefined;
 }
 
 /** The repositories a project spans, in the order the board shows them. */

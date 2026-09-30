@@ -4,6 +4,7 @@ import { GitHubApp } from "@bento/github";
 import {
   DockerDriver,
   LocalProcessDriver,
+  ModalDriver,
   SpriteDriver,
   WorktreeManager,
   type SandboxDriver,
@@ -203,7 +204,8 @@ export function reportSpriteLookupRetry(analytics: Analytics | null | undefined,
  * `default` is today's switch on BENTO_SANDBOX_DRIVER. `get` returns a
  * driver only when this server actually built one. `selectable` is the
  * remote providers a project could choose: sprite when that driver was
- * built. Docker and local-process are how a process runs, not choices.
+ * built, modal when both Modal token vars are set. Docker and
+ * local-process are how a process runs, not choices.
  */
 export interface SandboxDrivers {
   readonly default: SandboxDriver;
@@ -215,9 +217,9 @@ export function createDrivers(
   env: Env,
   hooks?: { onSpriteLookupRetry?: (info: SpriteLookupRetry) => void },
 ): SandboxDrivers {
-  // Built whenever the token is set, even when the default is something
-  // else, so a sprite row can still be reaped and reattached on a
-  // server that also runs another driver. No Modal driver here.
+  // Built whenever the credentials are set, even when the default is
+  // something else, so an existing row can still be reaped and
+  // reattached on a server that also runs another driver.
   const sprite = env.SPRITES_TOKEN
     ? new SpriteDriver({
         token: env.SPRITES_TOKEN,
@@ -225,6 +227,16 @@ export function createDrivers(
         ...(hooks?.onSpriteLookupRetry ? { onLookupRetry: hooks.onSpriteLookupRetry } : {}),
       })
     : undefined;
+  const modal =
+    env.MODAL_TOKEN_ID && env.MODAL_TOKEN_SECRET
+      ? new ModalDriver({
+          tokenId: env.MODAL_TOKEN_ID,
+          tokenSecret: env.MODAL_TOKEN_SECRET,
+          ...(env.MODAL_ENVIRONMENT ? { environment: env.MODAL_ENVIRONMENT } : {}),
+          cpu: env.MODAL_SANDBOX_CPU,
+          memoryMiB: env.MODAL_SANDBOX_MEMORY_MIB,
+        })
+      : undefined;
 
   let fallback: SandboxDriver;
   switch (env.BENTO_SANDBOX_DRIVER) {
@@ -243,11 +255,16 @@ export function createDrivers(
   const registered = new Map<string, SandboxDriver>();
   registered.set(fallback.provider, fallback);
   if (sprite) registered.set(sprite.provider, sprite);
+  if (modal) registered.set(modal.provider, modal);
+
+  const selectable: string[] = [];
+  if (sprite) selectable.push("sprite");
+  if (modal) selectable.push("modal");
 
   return {
     default: fallback,
     get: (provider) => registered.get(provider),
-    selectable: () => (sprite ? ["sprite"] : []),
+    selectable: () => selectable,
   };
 }
 

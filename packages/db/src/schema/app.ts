@@ -51,6 +51,12 @@ export const projects = pgTable("projects", {
    */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /**
+   * Remote sandbox provider this project asked for. Null means the
+   * deployment default. Stored and returned with the project. No route
+   * accepts a value for it yet.
+   */
+  sandboxProvider: text("sandbox_provider", { enum: ["sprite", "modal", "docker"] }),
+  /**
    * Whether an issue arriving from Linear enters this project's first
    * stage instead of waiting in the backlog. Per project, because one
    * team's intake is triaged by a person and another's is meant to be
@@ -428,7 +434,7 @@ export const sandboxes = pgTable("sandboxes", {
    */
   swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "set null" }),
   swarmTaskId: uuid("swarm_task_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "set null" }),
-  provider: text("provider", { enum: ["docker", "sprite"] }).notNull(),
+  provider: text("provider", { enum: ["docker", "sprite", "modal"] }).notNull(),
   externalId: text("external_id").notNull(),
   status: text("status", {
     enum: ["provisioning", "ready", "busy", "hibernated", "destroyed"],

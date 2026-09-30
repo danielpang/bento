@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createDb, createPool } from "@bento/db";
 import { createApp } from "../app.js";
 import { createDrivers, type AppContext } from "../context.js";
@@ -46,6 +47,48 @@ test("an unconfigured provider throws and does not fall through to the default",
     () => driverForSandbox(drivers, { provider: "modal" }),
     /no modal driver configured on this server/,
   );
+});
+
+test("a sprite row stays on sprite when modal is also registered, and a project still uses the default", () => {
+  const drivers = driversFor({
+    BENTO_SANDBOX_DRIVER: "docker",
+    SPRITES_TOKEN: "test-token",
+    MODAL_TOKEN_ID: "id",
+    MODAL_TOKEN_SECRET: "secret",
+  });
+  assert.equal(driverForSandbox(drivers, { provider: "sprite" }), drivers.get("sprite"));
+  assert.equal(driverForSandbox(drivers, { provider: "modal" }), drivers.get("modal"));
+  assert.notEqual(driverForSandbox(drivers, { provider: "modal" }), drivers.default);
+  assert.equal(driverForProject(drivers), drivers.default);
+  assert.equal(driverForProject(drivers).provider, "docker");
+  assert.deepEqual(drivers.selectable(), ["sprite", "modal"]);
+});
+
+test("modal is selectable only when both token vars are set", () => {
+  assert.equal(driversFor({ BENTO_SANDBOX_DRIVER: "docker", MODAL_TOKEN_ID: "id" }).get("modal"), undefined);
+  assert.equal(driversFor({ BENTO_SANDBOX_DRIVER: "docker", MODAL_TOKEN_SECRET: "secret" }).get("modal"), undefined);
+  const both = driversFor({
+    BENTO_SANDBOX_DRIVER: "docker",
+    MODAL_TOKEN_ID: "id",
+    MODAL_TOKEN_SECRET: "secret",
+    MODAL_ENVIRONMENT: "bento-development",
+    MODAL_SANDBOX_CPU: "1",
+    MODAL_SANDBOX_MEMORY_MIB: "2048",
+  });
+  assert.equal(both.default.provider, "docker");
+  assert.equal(both.get("modal")?.provider, "modal");
+  assert.equal(both.get("modal")?.sandboxSize, "modal-small");
+  assert.deepEqual(both.selectable(), ["modal"]);
+  assert.equal(driverForProject(both).provider, "docker");
+});
+
+test("migration 0029 adds a nullable project sandbox provider", () => {
+  const sql = readFileSync(new URL("../../../../packages/db/migrations/0029_project_sandbox_provider.sql", import.meta.url), "utf8");
+  assert.match(sql, /ADD COLUMN sandbox_provider text/);
+  assert.match(sql, /CHECK \(sandbox_provider IN \('sprite', 'modal', 'docker'\)\)/);
+  assert.doesNotMatch(sql, /NOT NULL/);
+  const journal = readFileSync(new URL("../../../../packages/db/migrations/meta/_journal.json", import.meta.url), "utf8");
+  assert.match(journal, /"tag": "0029_project_sandbox_provider"/);
 });
 
 test("driverForProject returns the default even when sprite is also registered", () => {

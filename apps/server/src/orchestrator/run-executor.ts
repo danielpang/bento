@@ -40,7 +40,7 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, LineChannel, persistedSandboxProvider, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
@@ -82,7 +82,9 @@ import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
-import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
+import { modalRunHosts } from "./modal-hosts.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
@@ -302,7 +304,18 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, subject.organizationId);
   try {
+    const allowedHosts =
+      restrictNetwork && driver.provider === "modal"
+        ? modalRunHosts({
+            gatewayUrl: ctx.env.BENTO_MCP_GATEWAY_URL ?? ctx.env.BETTER_AUTH_URL,
+            cloneUrls: repoRows.map((row) => row.repoUrl),
+            env: { ...agentEnv, ...(customProvider?.env ?? {}) },
+            ...(customProvider?.selection?.baseUrl ? { customBaseUrl: customProvider.selection.baseUrl } : {}),
+          })
+        : undefined;
     // The workspace, from the function both boards provision through.
+    // Modal restore, the restricted-host list, and the sandboxes row
+    // live in that function, so a swarm and a card take the same path.
     const workspace = await provisionWorkspace(ctx, {
       driver,
       projectId: project.id,
@@ -314,6 +327,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       restrictNetwork,
       owner: subject.sandboxOwner,
       restartedRepoUrls: replaced.map((pr) => pr.repoUrl),
+      ...(allowedHosts ? { allowedHosts } : {}),
       /**
        * Install only the CLIs this run's pipeline actually uses, which
        * is minutes off a new card's first stage.
@@ -2156,6 +2170,12 @@ async function announceRunFinished(
     });
   }
   await captureRunFinished(ctx, runId, status);
+  try {
+    await scheduleModalHibernation(ctx, runId);
+  } catch (err) {
+    console.warn(`could not schedule hibernation for run ${runId}:`, err);
+    ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "sandbox_hibernate" });
+  }
 }
 
 /** A run the user stopped. Terminal, but not a failure. */
@@ -2722,6 +2742,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * this one's.
    */
   await ctx.boss.createQueue(SWARM_LAND_QUEUE, { name: SWARM_LAND_QUEUE, policy: "short" });
+  await ctx.boss.createQueue(HIBERNATE_SANDBOX_QUEUE);
+  await ctx.boss.createQueue(MODAL_SWEEP_QUEUE);
 
   await recoverInterruptedRuns(ctx);
   /**
@@ -2771,6 +2793,21 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
     }
   }));
+  await ctx.boss.work<{ sandboxId: string }>(
+    HIBERNATE_SANDBOX_QUEUE,
+    { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
+    captureJobErrors(ctx.analytics, HIBERNATE_SANDBOX_QUEUE, async (jobs) => {
+      for (const job of jobs) await hibernateSandbox(ctx, job.data.sandboxId);
+    }),
+  );
+  await ctx.boss.schedule(MODAL_SWEEP_QUEUE, "0 9 * * *");
+  await ctx.boss.work(
+    MODAL_SWEEP_QUEUE,
+    { pollingIntervalSeconds: QUEUE_POLL_SECONDS },
+    captureJobErrors(ctx.analytics, MODAL_SWEEP_QUEUE, async () => {
+      await sweepOrphanModalSandboxes(ctx);
+    }),
+  );
   /**
    * The sweep catches the cards that finished before any of this
    * existed, and anything the queue gave up on. Deliberately not
