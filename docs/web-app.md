@@ -69,7 +69,7 @@ docker compose up --build
 
 Open [http://localhost:4400](http://localhost:4400). No Node or pnpm required on the host.
 
-`BENTO_REPOS`: required when checkouts are outside the compose working directory. Claude token may be set in **Agents** instead. Commit author: **Settings, GitHub**.
+`BENTO_REPOS`: an absolute host directory containing the repositories you want to add. Compose mounts only its working directory by default, so starting Bento from a separate worktree does not make sibling repositories available to the server. To add `~/projects/OpenBot`, for example, put `BENTO_REPOS=/Users/you/projects` in `.env`. If the server is already running, apply the new mount with `docker compose up -d --no-build --no-deps --force-recreate server`. Claude token may be set in **Agents** instead. Commit author: **Settings, GitHub**.
 
 Migrations and sandbox image build complete before the server starts. Migrations are idempotent (advisory lock).
 

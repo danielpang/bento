@@ -5640,6 +5640,17 @@ test("a checkout path that resolves to nothing is refused at once", { timeout: 6
       body: JSON.stringify({ name: "Relative", localPath: "projects/app" }),
     });
     assert.equal(relative.status, 400, "a relative path is refused");
+
+    const hostOnlyPath = path.join(elsewhere, "not-mounted");
+    const hostOnly = await app.request("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Not mounted", localPath: hostOnlyPath }),
+    });
+    assert.equal(hostOnly.status, 400, "an inaccessible checkout is refused");
+    const hostOnlyError = (await hostOnly.json() as { error: string }).error;
+    assert.match(hostOnlyError, /BENTO_REPOS/, "the error names the Compose mount setting");
+    assert.match(hostOnlyError, /recreate the server container/, "the error says how to apply the mount");
   } finally {
     mock.restoreAll();
   }
