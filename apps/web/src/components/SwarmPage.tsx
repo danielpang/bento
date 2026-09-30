@@ -80,16 +80,8 @@ export interface SwarmActions {
   /** Returns an archived swarm to the strip without changing its work. */
   onRestore: () => void;
   onWorkers: (workers: number) => void;
-  /**
-   * Keeps this swarm's shape as a template to start the next one from.
-   *
-   * The ceilings a swarm ends up running under are the tuning nobody
-   * writes down: workers raised once the plan turned out wider than
-   * expected, a budget lifted. Saving copies the template it came from
-   * with those numbers written over it, so the next swarm starts where
-   * this one ended up rather than where it began.
-   */
-  onSaveAsTemplate: () => void;
+  /** Opens the swarm's settings: its agents, ceilings, final check and instructions. */
+  onSettings: () => void;
   onAnswer: (questionId: string, text: string) => void;
 }
 
@@ -208,6 +200,7 @@ export function SwarmPage({
         <div className="swarm-head-actions">
           {primaryAction && <button className="btn btn-primary swarm-main-action" disabled={busy} onClick={primaryAction.onClick}>{primaryAction.label}</button>}
           {waitingForPlan && !plannerFailed && <span className="swarm-awaiting-plan">Planner at work</span>}
+          <button className="btn" disabled={busy} onClick={actions.onSettings}>Settings</button>
           <details className="swarm-more-actions">
             <summary className="btn" aria-label="More swarm actions">
               <span>Actions</span>
@@ -225,9 +218,6 @@ export function SwarmPage({
                   <button className="btn" disabled={busy} onClick={actions.onArchive}>Archive</button>
                 )
               )}
-              <button className="btn" disabled={busy} onClick={actions.onSaveAsTemplate}>
-                Save as template
-              </button>
               {actions.onCreatePullRequest && <button className="btn" disabled={busy} onClick={actions.onCreatePullRequest}>Create PR</button>}
               <button className="btn btn-danger-quiet" disabled={busy} onClick={actions.onDelete}>
                 Delete swarm
@@ -427,11 +417,11 @@ export function SwarmArtifacts({
 /**
  * How many workers this swarm may run at once.
  *
- * A stepper rather than a field: the number is small, bounded by the
- * template, and changed by one more or one fewer far more often than
- * it is typed. What is already working is printed beside it, because
- * raising the ceiling while six workers are busy is a different
- * decision from raising it while none are.
+ * A stepper rather than a field: the number is small, bounded by
+ * MAX_SWARM_WORKERS, and changed by one more or one fewer far more
+ * often than it is typed. What is already working is printed beside
+ * it, because raising the ceiling while six workers are busy is a
+ * different decision from raising it while none are.
  */
 export function WorkerStepper({
   workers,

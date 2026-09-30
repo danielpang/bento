@@ -10,7 +10,6 @@ import {
   swarmMessages,
   swarmTaskEvents,
   swarmTasks,
-  swarmTemplates,
   swarms,
 } from "@bento/db";
 import type { AppContext } from "../context.js";
@@ -242,7 +241,7 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   },
   delegate: {
     description:
-      "Hands one plan node to a planner of its own, which decomposes that node and nothing else. Use it when a part of the goal is large enough to need its own plan and you would rather not hold all of it yourself. Refused when this swarm's template does not allow plans that deep.",
+      "Hands one plan node to a planner of its own, which decomposes that node and nothing else. Use it when a part of the goal is large enough to need its own plan and you would rather not hold all of it yourself. Refused when this swarm's settings do not allow plans that deep.",
     roles: ["planner", "subplanner"],
     inputSchema: {
       type: "object",
@@ -750,9 +749,9 @@ async function assign(
  * itself would be a second door past startRunIfIdle.
  *
  * Refused for a leaf, for a node that already has children, and for a
- * node deeper than this swarm's template allows. The depth is the
+ * node deeper than this swarm allows. The depth is the
  * point of the ceiling: what it bounds is a planner that plans
- * planners, and a refusal that says which template setting stopped it
+ * planners, and a refusal that says which setting stopped it
  * is one a team can act on.
  */
 async function delegate(
@@ -797,15 +796,15 @@ async function delegate(
   const depth = await depthOf(ctx, task.id);
   /*
    * The swarm's own planner is level one, so a planner on a node at
-   * depth d is level d + 2. A template that allows one level allows
+   * depth d is level d + 2. A swarm that allows one level allows
    * no sub planners at all, which is what every swarm did before this
    * existed.
    */
   if (depth + 2 > allowed) {
     throw new ToolRefusal(
       allowed <= 1
-        ? "this swarm's template does not allow sub planners, so decompose this node yourself."
-        : `this swarm's template allows plans ${allowed} levels deep, and a planner on ${task.id} would be level ${depth + 2}. Decompose it yourself.`,
+        ? "this swarm does not allow sub planners, so decompose this node yourself."
+        : `this swarm allows plans ${allowed} levels deep, and a planner on ${task.id} would be level ${depth + 2}. Decompose it yourself.`,
     );
   }
 
@@ -825,12 +824,11 @@ async function delegate(
   return `Task ${task.id} is handed to a planner of its own. It starts when the swarm has room, and it may only touch that node and what it puts under it.`;
 }
 
-/** How deep this swarm's template lets a plan be decomposed by an agent. */
+/** How deep this swarm lets a plan be decomposed by an agent. */
 async function delegationDepth(ctx: AppContext, swarmId: string): Promise<number> {
   const [row] = await ctx.db
-    .select({ maxPlanDepth: swarmTemplates.maxPlanDepth })
+    .select({ maxPlanDepth: swarms.maxPlanDepth })
     .from(swarms)
-    .leftJoin(swarmTemplates, eq(swarmTemplates.id, swarms.templateId))
     .where(eq(swarms.id, swarmId))
     .limit(1);
   return row?.maxPlanDepth ?? 1;

@@ -5,7 +5,7 @@ import type {
   SwarmSpend,
   SwarmSummary,
   SwarmTask,
-  SwarmTemplate,
+  SwarmSettings,
   TaskStatus,
 } from "./types.js";
 
@@ -14,10 +14,9 @@ import type {
  *
  * The routes are not built. Everything the console renders comes
  * through `client.ts`, and this is what answers it today: a project's
- * strip, four swarms with real trees, the templates the dialog picks
- * from, and enough mutation to drive the whole console by hand. When
- * the endpoints land, `client.ts` points at them and this file is the
- * only thing that goes.
+ * strip, four swarms with real trees, and enough mutation to drive
+ * the whole console by hand. When the endpoints land, `client.ts`
+ * points at them and this file is the only thing that goes.
  *
  * Written as a function of `now` rather than of the clock, so a test
  * asking for the same instant gets the same tree, while the browser
@@ -70,7 +69,7 @@ function task(seed: TaskSeed, position: number, now: number): SwarmTask {
     weight: seed.weight ?? 1,
     assignedRunId:
       seed.status === "working" || seed.status === "assigned" ? `run-${seed.id}` : null,
-    // The template's own worker, which is every leaf until somebody
+    // The swarm's own worker, which is every leaf until somebody
     // reassigns one from the drawer.
     agentProfileId: null,
     branchName: seed.branchName ?? (seed.nodeType === "leaf" ? `bento/${seed.id}` : null),
@@ -308,7 +307,7 @@ function swarmShell(overrides: Partial<Swarm> & Pick<Swarm, "id" | "name" | "sta
     pausedReason: null,
     branchName: `bento/${overrides.id}`,
     deliverable: "code",
-    templateId: "tpl-code",
+    settings: { ...DEFAULT_SETTINGS },
     budgetUsd: 40,
     maxWorkers: 8,
     workers: 4,
@@ -454,7 +453,6 @@ export function seedSwarms(projectId: string, now: number): SwarmDetail[] {
           deliverable: "document",
           workers: 2,
           budgetUsd: 10,
-          templateId: "tpl-doc",
         },
         now,
       ),
@@ -501,76 +499,20 @@ export function summarise(detail: SwarmDetail, completion: number): SwarmSummary
   };
 }
 
-/**
- * The templates the New swarm dialog offers, with the cost shape
- * beside each: which model plans, which model works, and which tier
- * every tool reports in.
- */
-export const SWARM_TEMPLATES: SwarmTemplate[] = [
-  {
-    id: "tpl-code",
-    name: "Code change",
-    plannerProfileId: "agent-planner",
-    workerProfileId: "agent-worker",
-    description: "A planner splits the goal into leaves, each worked on its own branch and landed one at a time.",
-    plannerModel: "claude-opus-4",
-    workerModel: "claude-sonnet-4",
-    tools: [
-      { name: "claude-code", tier: "measured" },
-      { name: "codex", tier: "estimated" },
-      { name: "gemini-cli", tier: "assumed" },
-    ],
-    assumedUsdPerLeaf: 0.2,
-    perLeaf: { measuredUsd: 0.55, estimatedUsd: 0.12, assumedUsd: 0.2 , notionalUsd: 0},
-    maxWorkers: 12,
-    workerIsolation: "sandbox",
-    maxBudgetUsd: 200,
-    timeLimitMin: 240,
-    typicalLeaves: 12,
-  },
-  {
-    id: "tpl-doc",
-    name: "Document",
-    plannerProfileId: "agent-planner",
-    workerProfileId: "agent-worker",
-    description: "The same split, with the deliverable a written document rather than a branch.",
-    plannerModel: "claude-opus-4",
-    workerModel: "claude-haiku-4",
-    tools: [
-      { name: "claude-code", tier: "measured" },
-      { name: "writer", tier: "assumed" },
-    ],
-    assumedUsdPerLeaf: 0.1,
-    perLeaf: { measuredUsd: 0.18, estimatedUsd: 0, assumedUsd: 0.1 , notionalUsd: 0},
-    maxWorkers: 6,
-    workerIsolation: "sandbox",
-    maxBudgetUsd: 50,
-    timeLimitMin: 120,
-    typicalLeaves: 8,
-  },
-  {
-    id: "tpl-survey",
-    name: "Survey the codebase",
-    plannerProfileId: "agent-planner",
-    workerProfileId: "agent-worker",
-    description: "Read only. Workers report what they found and nothing is landed.",
-    plannerModel: "claude-sonnet-4",
-    workerModel: "claude-haiku-4",
-    tools: [{ name: "claude-code", tier: "measured" }],
-    assumedUsdPerLeaf: 0,
-    perLeaf: { measuredUsd: 0.09, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0},
-    maxWorkers: 16,
-    workerIsolation: "sandbox",
-    maxBudgetUsd: 25,
-    timeLimitMin: 60,
-    typicalLeaves: 20,
-  },
-];
+/** How a fixture swarm is run: the defaults, on the fixture agents. */
+export const DEFAULT_SETTINGS: SwarmSettings = {
+  plannerProfileId: "agent-planner",
+  workerProfileId: "agent-worker",
+  judgeProfileId: null,
+  completionCommand: null,
+  maxPlanDepth: 1,
+  plannerInstructions: null,
+  workerInstructions: null,
+};
 
 /** A swarm as it exists the moment it is created: a goal, and nothing planned yet. */
 export function draftSwarm(input: NewSwarmInput, now: number): SwarmDetail {
   const id = `sw-${Math.random().toString(36).slice(2, 8)}`;
-  const template = SWARM_TEMPLATES.find((entry) => entry.id === input.templateId) ?? SWARM_TEMPLATES[0]!;
   return {
     swarm: swarmShell(
       {
@@ -581,9 +523,14 @@ export function draftSwarm(input: NewSwarmInput, now: number): SwarmDetail {
         goal: input.goal,
         branchName: input.start.name,
         deliverable: input.deliverable,
-        templateId: template.id,
+        settings: {
+          ...DEFAULT_SETTINGS,
+          ...(input.plannerProfileId ? { plannerProfileId: input.plannerProfileId } : {}),
+          ...(input.workerProfileId ? { workerProfileId: input.workerProfileId } : {}),
+          ...input.settings,
+        },
         budgetUsd: input.budgetUsd,
-        maxWorkers: template.maxWorkers,
+        maxWorkers: input.workers,
         workers: input.workers,
         createdAt: iso(now, 0),
         startedAt: iso(now, 0),

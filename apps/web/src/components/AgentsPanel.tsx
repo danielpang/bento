@@ -13,7 +13,6 @@ import { CustomProviderKeys } from "./CustomProviders.js";
 import { BetaOnly, useBetaTesters } from "../beta.js";
 import { ProviderMark, providerLogoUrl } from "./ProviderMark.js";
 import { SecretField } from "./SecretField.js";
-import { SwarmTemplatesPanel } from "./SwarmTemplatesPanel.js";
 import { YamlFileActions, downloadYaml } from "./YamlFileActions.js";
 import {
   MODEL_GUIDANCE,
@@ -324,10 +323,6 @@ export function AgentsPanel({
 
       <div className="drawer-body">
 
-        <div hidden={beta && section !== "agents"}>
-          <SwarmTemplatesPanel knownAgents={profiles} />
-        </div>
-
         <section className="section settings-card agent-roster" hidden={beta && section !== "agents"}>
           <div className="settings-title-row">
             <h3 className="settings-title">Your agents</h3>
@@ -359,7 +354,7 @@ export function AgentsPanel({
                   setConfirming({
                     title: `Remove ${profile.name}?`,
                     description:
-                      "Its recorded runs and transcripts go with it, and that cannot be undone. Board stages and swarm templates using it will need another agent. Cards keep their history.",
+                      "Its recorded runs and transcripts go with it, and that cannot be undone. Board stages and swarms using it will need another agent. Cards keep their history.",
                     confirmLabel: "Remove agent",
                     run: () => client.deleteProfile(profile.id),
                   })

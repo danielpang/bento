@@ -2,9 +2,8 @@
  * The most workers a swarm may run at once, anywhere.
  *
  * One constant, because this number used to be written out in six
- * places: three zod schemas on the server, the swarm file's parser,
- * and the console's own copy, which the New swarm dialog and the
- * templates form each read differently. Six copies of a limit is five
+ * places, and the New swarm dialog and the server each read their own
+ * copy differently. Six copies of a limit is five
  * chances for the form to offer a number the route refuses, which is
  * the shape of every bug this file exists to stop.
  *
@@ -14,11 +13,17 @@
  * widening the funnel: past a point the extra agents finish and queue,
  * and what they cost is spent waiting. Ten is the number a person can
  * still read a board of.
- *
- * A template may of course allow fewer, and most do. This is the
- * ceiling on what a template may allow, not what one should.
  */
 export const MAX_SWARM_WORKERS = 10;
 
 /** The goal is stored as text and sent to the planner as its opening brief. */
 export const MAX_SWARM_GOAL_CHARS = 100_000;
+
+/**
+ * How deep a plan may be decomposed by agents other than the one
+ * planner. One means the planner writes the whole tree; each level
+ * past it lets a node be handed to a sub planner. Three, because a
+ * planner that plans planners that plan planners is already more
+ * coordination than one merge queue can use.
+ */
+export const MAX_PLAN_DEPTH = 3;

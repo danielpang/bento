@@ -8620,35 +8620,6 @@ a.hours-person-name:hover {
   gap: 14px;
 }
 
-.swarm-new-templates {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.swarm-template {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  text-align: left;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.swarm-template[data-on] {
-  border-color: var(--brand);
-}
-
-.swarm-template-name {
-  font-family: var(--sans);
-  font-weight: 600;
-}
-
 .swarm-new-shape {
   display: flex;
   flex-direction: column;
@@ -8692,47 +8663,6 @@ a.hours-person-name:hover {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--text);
-}
-
-/* Templates, listed in the Agents panel. */
-.swarm-template-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.swarm-template-tiers {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.swarm-template-estimate {
-  flex-basis: 100%;
-  font-size: 11px;
-}
-
-/*
- * The template form, opened under the row it edits or at the end of
- * the list for a new one. Boxed rather than inline, so a panel that is
- * mostly a list does not read as having grown six fields.
- */
-.swarm-template-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  margin-top: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-raised, transparent);
-}
-
-.swarm-template-form .actions {
-  justify-content: flex-end;
 }
 
 /*
@@ -9854,26 +9784,6 @@ a.hours-person-name:hover {
 
 .swarm-new { gap: 19px; }
 
-.swarm-new-templates {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 8px;
-}
-
-.swarm-new-templates > .label,
-.swarm-new-templates > .muted { grid-column: 1 / -1; }
-
-.swarm-template {
-  min-height: 72px;
-  padding: 12px 14px;
-  border-radius: 9px;
-  background: var(--panel);
-}
-
-.swarm-template[data-on] {
-  background: color-mix(in srgb, var(--brand) 8%, var(--panel));
-}
-
 .swarm-agent-row {
   flex-direction: column;
   gap: 12px;
@@ -9881,23 +9791,75 @@ a.hours-person-name:hover {
 
 .swarm-agent-row > .field { width: 100%; flex: none; }
 
-.swarm-create-estimate {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 5px 14px;
-  padding: 14px 16px;
+/*
+ * More settings, in the New swarm dialog. Closed, it is one row that
+ * says what the swarm will do; open, the groups under it read top to
+ * bottom with a sentence under each heading.
+ */
+.swarm-more-settings {
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--panel);
 }
 
-.swarm-create-estimate strong {
-  font-size: 19px;
-  font-weight: 650;
+.swarm-more-settings > summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
 }
 
-.swarm-create-estimate .muted { width: 100%; }
+.swarm-more-settings > summary::-webkit-details-marker { display: none; }
+
+.swarm-more-settings > summary .field-heading::after {
+  content: " +";
+  color: var(--text-faint);
+}
+
+.swarm-more-settings[open] > summary .field-heading::after { content: " \2212"; }
+
+.swarm-more-settings > summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.swarm-more-settings > .swarm-settings-fields {
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.swarm-settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.swarm-settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 0 0;
+  border: 0;
+}
+
+.swarm-settings-group > legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+}
+
+.swarm-settings-group .field-row {
+  flex-wrap: wrap;
+}
+
+.swarm-settings-group .field-row > .field {
+  flex: 1 1 220px;
+  min-width: 0;
+}
 
 .swarm-output-link:focus-visible,
 .swarm-more-actions > summary:focus-visible {

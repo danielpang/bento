@@ -1239,7 +1239,8 @@ export class BentoClient {
     projectId: string;
     title: string;
     goal?: string;
-    templateId?: string;
+    plannerProfileId?: string;
+    workerProfileId?: string;
     maxWorkers?: number;
     budgetUsd?: number | null;
     timeLimitMin?: number | null;

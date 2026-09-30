@@ -40,7 +40,6 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
-const TEMPLATE = "33333333-3333-3333-3333-333333333333";
 
 const exec = promisify(execFile);
 const IDENTITY = {
@@ -78,11 +77,6 @@ before(async () => {
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
   );
-  await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation,deliverable)
-     values ($1,'u1',null,'T',$2,$2,2,'worktree','document')`,
-    [TEMPLATE, PROFILE],
-  );
 
   dataDir = await mkdtemp(path.join(tmpdir(), "bento-document-e2e-"));
   repoPath = path.join(dataDir, "source");
@@ -114,7 +108,9 @@ async function documentSwarm(slug: string) {
       slug,
       title: "Migrating off the legacy queue",
       goal: "Write the case for moving, and what moving involves.",
-      templateId: TEMPLATE,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
       status: "done",
       branchName: `swarm/${slug}`,
       deliverable: "document",

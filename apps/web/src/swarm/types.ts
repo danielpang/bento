@@ -72,7 +72,7 @@ export type TaskAttention =
  * Money, always three figures.
  *
  * Measured is what a tool reported. Estimated is what the console
- * worked out from tokens at a published rate. Assumed is a template's
+ * worked out from tokens at a published rate. Assumed is a swarm's
  * own guess for a tool that reports nothing at all. They are carried
  * apart and printed apart, and nothing here adds them: a single total
  * would be three different kinds of confidence wearing one number.
@@ -174,7 +174,7 @@ export interface SwarmTask {
   assignedRunId: string | null;
   branchName: string | null;
   /**
-   * The agent a person chose for this leaf, or null for the template's
+   * The agent a person chose for this leaf, or null for the swarm's
    * own worker. What the drawer's Reassign writes, and what the next
    * spawn on this leaf reads.
    */
@@ -221,7 +221,7 @@ export interface Swarm {
   /** The single branch every leaf lands onto. */
   branchName: string | null;
   deliverable: "code" | "document";
-  templateId: string | null;
+  settings: SwarmSettings;
   /** The cap. Null means this swarm has none. */
   budgetUsd: number | null;
   maxWorkers: number;
@@ -368,56 +368,48 @@ export interface SwarmPlannerRun {
 }
 
 /**
- * A template, and the cost shape the dialog prints beside it.
+ * How a swarm is run, beyond its goal and its ceilings.
  *
- * `tools` is what makes the shape honest: a tool that reports its own
- * spend lands in the measured tier, one that prints tokens lands in
- * estimated, and one that prints nothing lands in assumed. The number
- * a person sees before they press Create is the sum of what a run
- * would cost, split the same three ways it will be reported in.
+ * Every one of these has a default a person never has to touch: the
+ * install's own Swarm Planner and Swarm Worker, no judge, no command,
+ * one planner writing the whole plan, and no extra instructions. They
+ * live on the swarm, set when it is created and changed in its
+ * settings.
  */
-export interface SwarmTemplate {
-  id: string;
-  name: string;
-  description: string;
-  plannerProfileId?: string | null;
-  workerProfileId?: string | null;
-  plannerModel: string;
-  workerModel: string;
-  tools: { name: string; tier: SpendTier }[];
-  /** Per worker leaf, for the tools that report nothing. */
-  assumedUsdPerLeaf: number;
-  /** What the template expects a leaf to cost, by tier. */
-  perLeaf: SwarmSpend;
-  maxWorkers: number;
-  /**
-   * Where this template's agents work: a machine each, holding its own
-   * clone, or worktrees of the repository already on the server.
-   *
-   * Recorded on the template rather than read off the deployment, so a
-   * swarm made on a local install keeps its shape if that install
-   * later joins a team, and is refused rather than quietly reshaped if
-   * the deployment cannot run it that way.
-   */
-  workerIsolation: "sandbox" | "worktree";
-  maxBudgetUsd: number | null;
-  timeLimitMin: number | null;
-  /** Leaves this template's planner typically produces, for the estimate. */
-  typicalLeaves: number;
+export interface SwarmSettings {
+  plannerProfileId: string | null;
+  workerProfileId: string | null;
+  /** The agent that reads the finished branch before the swarm is done. */
+  judgeProfileId: string | null;
+  /** A command that has to pass on the finished branch, such as the test suite. */
+  completionCommand: string | null;
+  /** 1: the planner writes the whole plan. More lets it hand parts to sub planners. */
+  maxPlanDepth: number;
+  plannerInstructions: string | null;
+  workerInstructions: string | null;
 }
+
+/** The settings a person can change after the swarm exists. */
+export type SwarmSettingsChange = Partial<{
+  plannerProfileId: string;
+  workerProfileId: string;
+  judgeProfileId: string | null;
+  completionCommand: string | null;
+  maxPlanDepth: number;
+  plannerInstructions: string | null;
+  workerInstructions: string | null;
+  budgetUsd: number | null;
+  timeLimitMin: number | null;
+}>;
 
 /** What the New swarm dialog sends. */
 export interface NewSwarmInput {
   projectId: string;
-  /**
-   * Null when the console has no template to name, which the server
-   * answers with the Default. The dialog is not allowed to invent one:
-   * a made up id is a 404, and requiring a real one is what used to
-   * leave a fresh install unable to create a swarm at all.
-   */
-  templateId: string | null;
+  /** Absent means the install's own Swarm Planner and Swarm Worker. */
   plannerProfileId?: string;
   workerProfileId?: string;
+  /** The rest of how it is run. Absent fields take the defaults. */
+  settings?: Partial<Omit<SwarmSettings, "plannerProfileId" | "workerProfileId">>;
   name: string;
   goal: string;
   attachments: { name: string; bytes: number }[];

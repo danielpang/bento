@@ -17,7 +17,6 @@ import {
   repositories,
   runMigrations,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -73,8 +72,8 @@ let db: Db;
 let projectId: string;
 /** The project of the organization whose plan has no swarms at all. */
 let refusedProjectId: string;
-/** The team's own swarm template, with the team's own agents on it. */
-let templateId: string;
+/** The team's own agents, which every swarm here runs as. */
+let agents: { plannerProfileId: string; workerProfileId: string };
 
 /** What the stub was asked, in order, so a missing question is visible. */
 let asked: string[];
@@ -212,11 +211,10 @@ before(async () => {
   refusedProjectId = refused!.id;
 
   /*
-   * The team's agents and its template carry the team, the way a
-   * hosted deployment's do. It is not decoration: the run tenant
-   * trigger refuses a run whose swarm and whose agent belong to
-   * different organizations, so a template of nobody's on a project of
-   * somebody's would not start a single agent.
+   * The team's agents carry the team, the way a hosted deployment's
+   * do. It is not decoration: the run tenant trigger refuses a run
+   * whose swarm and whose agent belong to different organizations, so
+   * an agent of nobody's on a project of somebody's would not start.
    */
   const [planner] = await db
     .insert(agentProfiles)
@@ -226,19 +224,7 @@ before(async () => {
     .insert(agentProfiles)
     .values({ ownerId: userId, organizationId: ORG, name: "Team worker", cli: "fake", model: "fake-1" })
     .returning();
-  const [template] = await db
-    .insert(swarmTemplates)
-    .values({
-      ownerId: userId,
-      organizationId: ORG,
-      name: "Team template",
-      plannerProfileId: planner!.id,
-      workerProfileId: worker!.id,
-      workerIsolation: "worktree",
-      maxWorkers: 4,
-    })
-    .returning();
-  templateId = template!.id;
+  agents = { plannerProfileId: planner!.id, workerProfileId: worker!.id };
 });
 
 after(async () => {
@@ -266,7 +252,9 @@ async function createSwarm(project = projectId) {
     projectId: project,
     title: "Rewrite checkout",
     goal: "make it work",
-    templateId,
+    ...agents,
+    // Room for every leaf, so the only ceiling a spawn can meet is the plan's.
+    maxWorkers: 4,
   });
 }
 
@@ -295,7 +283,7 @@ test("a zero-budget swarm is refused before a row is written", async () => {
     projectId,
     title: "No spend",
     goal: "wait for a budget",
-    templateId,
+    ...agents,
     budgetUsd: 0,
   });
   assert.equal(res.status, 402, await res.clone().text());

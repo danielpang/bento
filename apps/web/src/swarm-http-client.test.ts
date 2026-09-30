@@ -5,7 +5,7 @@ import {
   swarmApi,
   toDetail,
   toSummary,
-  toTemplate,
+  toSwarm,
   type WireDetail,
   type WireSwarm,
   type WireSwarmRow,
@@ -56,7 +56,13 @@ const wireSwarm = (over: Partial<WireSwarm> = {}): WireSwarm => ({
   status: "running",
   pausedReason: null,
   branchName: "swarm/checkout",
-  templateId: "tpl-1",
+  plannerProfileId: "planner-1",
+  workerProfileId: "worker-1",
+  judgeProfileId: null,
+  completionCommand: null,
+  maxPlanDepth: 1,
+  plannerInstructions: null,
+  workerInstructions: null,
   budgetUsd: "40.00",
   maxWorkers: 4,
   timeLimitMin: null,
@@ -160,9 +166,9 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
   const { calls, doFetch } = fetchStub(wireSwarm({ status: "planning" }));
   const created = await httpSwarmApi("", doFetch).createSwarm({
     projectId: "p1",
-    templateId: "tpl-1",
     plannerProfileId: "planner-1",
     workerProfileId: "worker-1",
+    settings: { judgeProfileId: "judge-1", completionCommand: "pnpm test" },
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
     attachments: [{ name: "notes.md", bytes: 12 }],
@@ -179,9 +185,11 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
     projectId: "p1",
     title: "Checkout rewrite",
     goal: "Replace the checkout.",
-    templateId: "tpl-1",
     plannerProfileId: "planner-1",
     workerProfileId: "worker-1",
+    deliverable: "code",
+    judgeProfileId: "judge-1",
+    completionCommand: "pnpm test",
     maxWorkers: 6,
     budgetUsd: 40,
   });
@@ -308,56 +316,29 @@ test("a refusal reaches the person in the server's own words", async () => {
   );
 });
 
-test("a template carries its ceilings, and claims no cost shape it does not have", () => {
-  const template = toTemplate({
-    id: "tpl-1",
-    name: "Default",
-    description: "The planner and worker a swarm uses.",
-    plannerProfileId: "planner-1",
-    workerProfileId: "worker-1",
-    maxWorkers: 4,
-    budgetUsd: "25.00",
-    timeLimitMin: 120,
-  });
-  assert.equal(template.maxWorkers, 4);
-  assert.equal(template.maxBudgetUsd, 25);
-  assert.equal(template.timeLimitMin, 120);
-  assert.equal(template.plannerProfileId, "planner-1");
-  assert.equal(template.workerProfileId, "worker-1");
-  assert.deepEqual(template.tools, [], "nothing on the server says what a tool reports in");
-  assert.equal(template.typicalLeaves, 0, "so the dialog draws no estimate rather than a zero");
+test("a swarm's settings come across from its row, and read as the defaults when absent", () => {
+  const set = toSwarm(wireSwarm({ judgeProfileId: "judge-1", maxPlanDepth: 2 })).settings;
+  assert.equal(set.judgeProfileId, "judge-1");
+  assert.equal(set.maxPlanDepth, 2);
+  assert.equal(set.plannerProfileId, "planner-1");
+
+  const { judgeProfileId: _j, maxPlanDepth: _d, completionCommand: _c, ...older } = wireSwarm();
+  const defaults = toSwarm(older as WireSwarm).settings;
+  assert.equal(defaults.judgeProfileId, null, "a server without the columns ran no final check");
+  assert.equal(defaults.maxPlanDepth, 1);
+  assert.equal(defaults.completionCommand, null);
 });
 
-test("template saves include the planner and worker profile choices", async () => {
-  const { calls, doFetch } = fetchStub({
-    id: "tpl-1",
-    name: "Custom",
-    description: "",
-    plannerProfileId: "planner-1",
-    workerProfileId: "worker-1",
-    maxWorkers: 2,
-    budgetUsd: null,
-    timeLimitMin: null,
-  });
-  await httpSwarmApi("", doFetch).createTemplate({
-    name: "Custom",
-    description: "",
-    plannerProfileId: "planner-1",
-    workerProfileId: "worker-1",
-    maxWorkers: 2,
-    budgetUsd: null,
-    timeLimitMin: null,
-  });
-  assert.equal(calls[0]!.url, "/api/swarm-templates");
-  assert.deepEqual(calls[0]!.body, {
-    name: "Custom",
-    description: "",
-    plannerProfileId: "planner-1",
-    workerProfileId: "worker-1",
-    maxWorkers: 2,
-    budgetUsd: null,
-    timeLimitMin: null,
-  });
+test("changing settings sends only what changed, with null to clear", async () => {
+  const { calls, doFetch } = fetchStub(wireSwarm());
+  await httpSwarmApi("", doFetch).updateSettings("sw-1", { judgeProfileId: null, maxPlanDepth: 2, completionCommand: undefined });
+  assert.equal(calls[0]!.method, "PATCH");
+  assert.equal(calls[0]!.url, "/api/swarms/sw-1");
+  assert.deepEqual(calls[0]!.body, { judgeProfileId: null, maxPlanDepth: 2 });
+
+  const quiet = fetchStub(wireSwarm());
+  await httpSwarmApi("", quiet.doFetch).updateSettings("sw-1", {});
+  assert.equal(quiet.calls.length, 0, "nothing changed, so nothing is sent");
 });
 
 test("a swarm's status is said in the console's words, and a budget stop says so", () => {

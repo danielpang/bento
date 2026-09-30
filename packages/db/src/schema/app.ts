@@ -567,7 +567,7 @@ export const agentRuns = pgTable(
    *
    * Not the same question as `role`, and not derivable from it: a judge
    * run exists on both boards. A card names a judge agent for its gate,
-   * and a swarm template names one too, so `role = 'judge'` cannot say
+   * and a swarm names one too, so `role = 'judge'` cannot say
    * which board asked. The two are axes: this is which board, and
    * `role` is the capacity within it.
    *
@@ -1537,144 +1537,6 @@ export const githubInstallations = pgTable("github_installations", {
  */
 
 /**
- * A reusable swarm setup: who plans, who works, and the ceilings the
- * swarm starts with.
- *
- * Owner-keyed like agent_profiles rather than parented by a project, so
- * one team's way of running a swarm is not re-entered per project.
- * There is no parent row to inherit an organization from, so the routes
- * set organizationId explicitly, which is the agent_profiles and
- * mcp_servers precedent.
- */
-export const swarmTemplates = pgTable("swarm_templates", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  /** The creator. Kept for attribution; access is decided by the org. */
-  ownerId: text("owner_id")
-    .notNull()
-    .references(() => user.id),
-  organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  description: text("description").notNull().default(""),
-  /** Who decomposes the goal, and who works the leaves. */
-  plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
-  workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
-  /**
-   * Operating instructions handed to those agents on top of their own
-   * profile skill: how to split this kind of goal, and what a finished
-   * leaf has to have done.
-   */
-  plannerInstructions: text("planner_instructions"),
-  workerInstructions: text("worker_instructions"),
-  /**
-   * Where this template's agents work: each on a machine that holds
-   * its own clone, or all of them in worktrees of the project's
-   * checkout on the server.
-   *
-   * Recorded rather than inferred from the deployment, which is the
-   * whole point of it being here. A local install runs its swarms in
-   * worktrees because a container per worker is a container on the
-   * machine somebody is also using; a hosted one gives each worker a
-   * machine. Read off the driver, that shape would change under a
-   * swarm the moment the install joined a team, and the person who
-   * chose it would never be told.
-   *
-   * "worktree" is an assertion the deployment has to be able to keep.
-   * A driver whose sandboxes hold their own clones cannot, and says so
-   * rather than quietly provisioning the other shape. "sandbox" makes
-   * no assertion: the driver decides, which is what every template
-   * written before this column was doing.
-   *
-   * No default, deliberately. The value a template does not state is
-   * the one that loses a local install its shape, and this repository
-   * has been bitten by exactly that: agent_runs.type and
-   * run_artifacts.type both add a default for the backfill and drop it
-   * in the same migration, so that every insert from then on says what
-   * it is.
-   */
-  workerIsolation: text("worker_isolation", { enum: ["sandbox", "worktree"] }).notNull(),
-  /** Starting ceilings. A swarm copies them and may then be changed. */
-  maxWorkers: integer("max_workers").notNull().default(4),
-  budgetUsd: numeric("budget_usd"),
-  timeLimitMin: integer("time_limit_min"),
-  /**
-   * What a run that reports nothing is charged to the ledger.
-   *
-   * Null means "work it out": the swarm's own rolling average of the
-   * runs it has measured or estimated so far, and a fixed default
-   * before it has any. A template that states a figure is a team
-   * saying they know their own tools better than an average does.
-   */
-  assumedCostUsd: numeric("assumed_cost_usd"),
-  /**
-   * When a node that is still being worked turns yellow, and when the
-   * planner is woken about it.
-   *
-   * Two thresholds rather than a timeout: a task that takes forty
-   * minutes because it is large is not a failure, and a limit that
-   * stops it throws away the work at the worst moment. The first is
-   * information for a person, the second is a turn the planner spends
-   * deciding whether to wait, message, split, or cancel.
-   */
-  longRunWarnMin: integer("long_run_warn_min").notNull().default(20),
-  longRunEscalateMin: integer("long_run_escalate_min").notNull().default(45),
-  /**
-   * What this template's swarms produce: a change to the code, or a
-   * document.
-   *
-   * The same tree of leaves worked by the same agents either way. What
-   * changes is three things: a leaf writes a section rather than a
-   * change, the planner assembles those sections into one file at the
-   * end, and a repository's setup and test commands are skipped,
-   * because there is nothing to build and nothing to test.
-   *
-   * A default here, unlike workerIsolation's. That one is an assertion
-   * about the deployment, and a template that made none had to go on
-   * making none. This is a description of the work, and "code" is what
-   * every swarm written before this column actually produced.
-   */
-  deliverable: text("deliverable", { enum: ["code", "document"] })
-    .notNull()
-    .default("code"),
-  /**
-   * Where a document swarm writes its assembled file, relative to the
-   * first repository's root. Null means docs/<slug>.md, worked out from
-   * the swarm rather than written down once per template.
-   */
-  documentPath: text("document_path"),
-  /**
-   * The agent that reads a finished swarm before it is called done.
-   *
-   * Null is the ordinary case, and a swarm is done when its tree is. An
-   * agent here is a team saying a swarm's own account of itself is not
-   * enough: the judge reads the branch and either passes it or sends it
-   * back with a reason, which becomes a leaf like any other.
-   */
-  judgeProfileId: uuid("judge_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
-  /**
-   * A command that has to pass before that same moment, run once in the
-   * swarm's own checkout.
-   *
-   * Separate from a repository's test command, which every leaf runs
-   * against its own branch. This one is about the whole change, at the
-   * end: what a person would run themselves before calling a swarm
-   * finished.
-   */
-  completionCommand: text("completion_command"),
-  /**
-   * How deep a plan may be decomposed by an agent other than the one
-   * planner.
-   *
-   * One is what happens today: the planner writes the whole tree. Two
-   * lets a plan node be handed to a sub planner, which is given that
-   * node's subtree and nothing else. A ceiling rather than a switch,
-   * because the cost of getting it wrong is a planner that plans
-   * planners.
-   */
-  maxPlanDepth: integer("max_plan_depth").notNull().default(1),
-  ...timestamps,
-});
-
-/**
  * One goal being worked by a swarm of agents.
  *
  * The ceilings are on the swarm rather than on the plan, because they
@@ -1704,11 +1566,67 @@ export const swarms = pgTable(
     title: text("title").notNull(),
     /** What the swarm was asked to do, as the person wrote it. */
     goal: text("goal").notNull().default(""),
-    /** The template this was started from, kept for attribution only. */
-    templateId: uuid("template_id").references(() => swarmTemplates.id, { onDelete: "set null" }),
-    /** The chosen agents for this swarm, copied from the template or selected at creation. */
+    /** Who decomposes the goal, and who works the leaves. Chosen at creation. */
     plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
     workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    /**
+     * Where this swarm's agents work: each on a machine that holds its
+     * own clone, or all of them in worktrees of the project's checkout
+     * on the server.
+     *
+     * Recorded when the swarm is created rather than read off the
+     * deployment on every run. A local install works in worktrees
+     * because a container per worker is a container on the machine
+     * somebody is also using; a hosted one gives each worker a machine.
+     * Read off the driver, that shape would change under a running swarm
+     * the moment the install joined a team, and nobody would be told.
+     *
+     * "worktree" is an assertion the deployment has to be able to keep.
+     * A driver whose sandboxes hold their own clones cannot, and says so
+     * rather than quietly provisioning the other shape. "sandbox" makes
+     * no assertion: the driver decides.
+     *
+     * No default, deliberately: every insert says which it is, the way
+     * agent_runs.type and run_artifacts.type do.
+     */
+    workerIsolation: text("worker_isolation", { enum: ["sandbox", "worktree"] }).notNull(),
+    /**
+     * Operating instructions handed to the planner and the workers on
+     * top of their own profile skill: how to split this goal, and what
+     * a finished leaf has to have done. Read fresh on every run, so an
+     * edit reaches the next turn.
+     */
+    plannerInstructions: text("planner_instructions"),
+    workerInstructions: text("worker_instructions"),
+    /**
+     * The agent that reads a finished swarm before it is called done.
+     *
+     * Null is the ordinary case, and a swarm is done when its tree is.
+     * An agent here says the swarm's own account of itself is not
+     * enough: the judge reads the branch and either passes it or sends
+     * it back with a reason, which becomes a leaf like any other.
+     */
+    judgeProfileId: uuid("judge_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    /**
+     * A command that has to pass before that same moment, run once in
+     * the swarm's own checkout.
+     *
+     * Separate from a repository's test command, which every leaf runs
+     * against its own branch. This one is about the whole change, at
+     * the end: what a person would run themselves before calling the
+     * swarm finished.
+     */
+    completionCommand: text("completion_command"),
+    /**
+     * How deep a plan may be decomposed by an agent other than the one
+     * planner.
+     *
+     * One: the planner writes the whole tree. Two lets a plan node be
+     * handed to a sub planner, which is given that node's subtree and
+     * nothing else. A ceiling rather than a switch, because the cost of
+     * getting it wrong is a planner that plans planners.
+     */
+    maxPlanDepth: integer("max_plan_depth").notNull().default(1),
     status: text("status", {
       enum: [
         "draft",
@@ -1750,16 +1668,18 @@ export const swarms = pgTable(
      * sandboxes with the leaf they belong to.
      */
     sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
-    /** Ceilings, copied from the template at start. Null means none. */
+    /** Ceilings, set at creation and changeable after. Null means none. */
     budgetUsd: numeric("budget_usd"),
     maxWorkers: integer("max_workers").notNull().default(4),
     timeLimitMin: integer("time_limit_min"),
     /**
-     * What this swarm produces, copied from its template when it starts.
+     * What this swarm produces: a change to the code, or a document.
      *
-     * Copied rather than read back through the template, for the reason
-     * the ceilings are copied: a template edited in March must not
-     * change what a swarm that ran in February was producing.
+     * The same tree of leaves worked by the same agents either way. A
+     * document swarm's leaves write sections rather than changes, the
+     * planner assembles them into one file (docs/<slug>.md) at the end,
+     * and a repository's setup and test commands are skipped, because
+     * there is nothing to build and nothing to test.
      */
     deliverable: text("deliverable", { enum: ["code", "document"] })
       .notNull()
@@ -1937,11 +1857,11 @@ export const swarmTasks = pgTable(
     /**
      * The agent to put on this leaf, when a person chose one for it.
      *
-     * Null is the ordinary case: the swarm's template names the worker
-     * and every leaf uses it. Reassigning a leaf that a cheap worker
-     * could not finish to a stronger one writes the choice here, on
-     * the node it was made about, rather than changing the template
-     * and with it every leaf that has not started yet.
+     * Null is the ordinary case: the swarm names the worker and every
+     * leaf uses it. Reassigning a leaf that a cheap worker could not
+     * finish to a stronger one writes the choice here, on the node it
+     * was made about, rather than changing the swarm's worker and with
+     * it every leaf that has not started yet.
      */
     agentProfileId: uuid("agent_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
     startedAt: timestamp("started_at", { withTimezone: true }),

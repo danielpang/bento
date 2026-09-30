@@ -83,7 +83,7 @@ test("a rejected leaf's next worker is told why, before anything else", () => {
     repositories: [],
     branch: "swarm/checkout-1e7c2b4a",
   });
-  assert.match(prompt, /sent back/);
+  assert.match(prompt, /Corrections requested for this attempt/);
   assert.match(prompt, /the empty cart case is missing/);
   assert.match(prompt, /Address that before anything else/);
 });

@@ -9,7 +9,6 @@ import {
   swarmMessages,
   swarmTaskEvents,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -22,7 +21,7 @@ import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle, type NewRun, type OutO
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
 import { enqueueSwarmPublish } from "./complete.js";
-import { ensureFinalCheck, isFinalCheck, templateOf } from "./final-check.js";
+import { ensureFinalCheck, isFinalCheck } from "./final-check.js";
 import {
   assembleSwarmDocumentInSandbox,
   DOCUMENT_ASSEMBLY_FLAG,
@@ -406,8 +405,7 @@ async function runTick(
   const assembly = await ensureDocumentAssembly(tx, swarm, changed.tasks, events, now);
   if (assembly.created) changed.tasks.push(assembly.created);
 
-  const template = await templateOf(tx, swarm);
-  const check = await ensureFinalCheck(tx, swarm, changed.tasks, template, now);
+  const check = await ensureFinalCheck(tx, swarm, changed.tasks, now);
   if (check.created) {
     changed.tasks.push(check.created);
     events.push({
@@ -580,7 +578,7 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
   try {
     if (!swarm.branchName) throw new Error("the swarm has no branch to assemble the document on");
     if (!swarm.sandboxId) throw new Error("the swarm workspace is not available");
-    const [[sandbox], [repository], [template], [design]] = await Promise.all([
+    const [[sandbox], [repository], [design]] = await Promise.all([
       ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1),
       ctx.db
         .select({ name: repositories.name })
@@ -588,13 +586,6 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
         .where(eq(repositories.projectId, swarm.projectId))
         .orderBy(asc(repositories.position))
         .limit(1),
-      swarm.templateId
-        ? ctx.db
-            .select({ documentPath: swarmTemplates.documentPath })
-            .from(swarmTemplates)
-            .where(eq(swarmTemplates.id, swarm.templateId))
-            .limit(1)
-        : Promise.resolve([]),
       ctx.db
         .select({ content: runArtifacts.content })
         .from(runArtifacts)
@@ -610,7 +601,6 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
       handle: { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir },
       repositoryName: repository.name,
       branch: swarm.branchName,
-      templatePath: template?.documentPath ?? null,
       preamble: design?.content ?? null,
     });
     if (!assembled) throw new Error("the finished plan had no sections to assemble");
@@ -1173,7 +1163,7 @@ async function deliverPlannerWake(
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run the planner as. The messages stay queued, so this
-  // resolves itself the moment a planner agent is set on the template.
+  // resolves itself the moment a planner agent is set in the swarm's settings.
   if (!profileId) return null;
 
   const items: PlannerWakeItem[] = [
@@ -1226,27 +1216,14 @@ async function deliverPlannerWake(
   return started.id;
 }
 
-/** The agent the planner runs as, which a swarm gets from its template. */
-async function plannerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
-  if (swarm.plannerProfileId) return swarm.plannerProfileId;
-  if (!swarm.templateId) return null;
-  const [template] = await tx
-    .select({ plannerProfileId: swarmTemplates.plannerProfileId })
-    .from(swarmTemplates)
-    .where(eq(swarmTemplates.id, swarm.templateId))
-    .limit(1);
-  return template?.plannerProfileId ?? null;
+/** The agent the planner runs as, chosen when the swarm was created. */
+async function plannerProfileFor(_tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  return swarm.plannerProfileId;
 }
 
-async function workerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
-  if (swarm.workerProfileId) return swarm.workerProfileId;
-  if (!swarm.templateId) return null;
-  const [template] = await tx
-    .select({ workerProfileId: swarmTemplates.workerProfileId })
-    .from(swarmTemplates)
-    .where(eq(swarmTemplates.id, swarm.templateId))
-    .limit(1);
-  return template?.workerProfileId ?? null;
+/** The agent every leaf runs as unless a person reassigned it. */
+async function workerProfileFor(_tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  return swarm.workerProfileId;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1363,7 +1340,7 @@ async function spawnWorkers(
    * on the next tick rather than a tick after every other leaf has
    * finished.
    *
-   * The depth ceiling is the template's, and it is checked at the tool
+   * The depth ceiling is the swarm's, and it is checked at the tool
    * that marks the node rather than here as well: this step starts
    * what was marked, and two opinions about how deep a plan may go is
    * how they come to differ.
@@ -1378,23 +1355,23 @@ async function spawnWorkers(
   );
   if (ready.length === 0) return { runIds, refusal: null, cap: null };
 
-  const templateWorker = await workerProfileFor(tx, swarm);
+  const swarmWorker = await workerProfileFor(tx, swarm);
 
   for (const task of ready) {
     /*
-     * The agent a person chose for this leaf, or the template's.
+     * The agent a person chose for this leaf, or the swarm's.
      *
      * Reassigning a leaf that a cheap worker could not finish writes
      * the choice on the node, so it survives a retry and does not
      * change the agent every other leaf gets.
      */
-    const profileId = task.agentProfileId ?? templateWorker;
+    const profileId = task.agentProfileId ?? swarmWorker;
     /*
      * Nothing to run this one as. The leaf keeps its place in the
-     * queue and starts the moment a worker agent is set on the
-     * template, and its siblings are still this tick's to start: a
-     * leaf somebody reassigned by hand has an agent of its own, and a
-     * template with none must not hold it up.
+     * queue and starts the moment a worker agent is set in the
+     * swarm's settings, and its siblings are still this tick's to
+     * start: a leaf somebody reassigned by hand has an agent of its
+     * own, and a swarm with no worker must not hold it up.
      */
     if (!profileId) continue;
     const started = await deps.startRun(tx, {
@@ -1537,7 +1514,7 @@ async function spawnWorkers(
  * scope here beyond starting the run with that task on it.
  *
  * It runs as the swarm's own planner agent, not the worker's. What is
- * being asked for is a plan, and a template that pairs a strong
+ * being asked for is a plan, and a swarm that pairs a strong
  * planner with a cheap worker means exactly that.
  *
  * A refusal is quiet. The node keeps its place and starts when the
@@ -1557,7 +1534,7 @@ async function spawnSubPlanners(
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run a planner as. The node keeps its place, and starts
-  // the moment a planner agent is set on the template.
+  // the moment a planner agent is set in the swarm's settings.
   if (!profileId) return [];
 
   const runIds: string[] = [];
@@ -1758,7 +1735,7 @@ async function advanceLandingQueue(
  * that never runs and a queue that never moves.
  *
  * Refusals are not all the same, and the difference is what this is
- * for. No worker agent on the template is permanent, so the leaf fails
+ * for. No worker agent on the swarm is permanent, so the leaf fails
  * with a sentence a person can act on. "Busy" and a plan limit are
  * transient: the row is left conflicted with nobody on it, and the next
  * tick asks again.
@@ -1778,7 +1755,7 @@ async function startResolver(
   const profileId = await workerProfileFor(tx, swarm);
   if (!profileId) {
     const reason =
-      "this swarm's template has no worker agent, so nothing can be put on the conflict. Set one on the template, and the planner can hand this work out again.";
+      "this swarm has no worker agent, so nothing can be put on the conflict. Choose one in the swarm's settings, and the planner can hand this work out again.";
     await tx
       .update(swarmLandings)
       .set({

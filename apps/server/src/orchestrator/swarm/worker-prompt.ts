@@ -36,8 +36,8 @@ export interface WorkerPromptInput {
   repositories: { name: string; mountPath: string; testCommand?: string | null }[];
   /** The branch this worker commits on, which is already checked out. */
   branch: string;
-  /** Operating instructions from the swarm's template, if it set any. */
-  templateInstructions?: string | null;
+  /** Operating instructions a person set on this swarm, if any. */
+  swarmInstructions?: string | null;
   /** Whether the swarm has a design note for this worker to read. */
   hasDesign?: boolean;
   /**
@@ -126,8 +126,8 @@ export function buildWorkerPrompt(input: WorkerPromptInput): string {
   if (agent?.skill?.trim()) {
     lines.push("Your operating instructions, defined by your team:", agent.skill.trim(), "");
   }
-  if (input.templateInstructions?.trim()) {
-    lines.push("Instructions from this swarm's template:", input.templateInstructions.trim(), "");
+  if (input.swarmInstructions?.trim()) {
+    lines.push("Instructions for this swarm:", input.swarmInstructions.trim(), "");
   }
 
   if (repositories.length > 0) {

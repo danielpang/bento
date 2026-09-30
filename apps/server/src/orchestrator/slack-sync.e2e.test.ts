@@ -444,6 +444,7 @@ test("a swarm gets one Slack thread with landings, questions, completion, and an
   const [swarm] = await ctx.db
     .insert(swarms)
     .values({
+      workerIsolation: "worktree",
       projectId,
       slug: `slack-${Math.random().toString(36).slice(2, 8)}`,
       title: "Audit checkout",

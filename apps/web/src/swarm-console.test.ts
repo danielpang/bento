@@ -13,7 +13,13 @@ import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
 import { SwarmArtifacts, SwarmPage, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
-import { isolationWords } from "./components/SwarmTemplatesPanel.js";
+import {
+  DEFAULT_RUN_SETTINGS,
+  SwarmRunSettingsFields,
+  draftFrom,
+  runSettingsSummary,
+  settingsFrom,
+} from "./components/SwarmSettingsFields.js";
 import { modeSurfaces } from "./swarm/plan.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
@@ -474,7 +480,7 @@ test("a pull request the console would not link to is drawn without a link", () 
         onArchive: () => {},
         onRestore: () => {},
         onWorkers: () => {},
-        onSaveAsTemplate: () => {},
+        onSettings: () => {},
         onAnswer: () => {},
       },
     }),
@@ -692,15 +698,68 @@ test("a drawer with no handler for messages draws no composer at all", () => {
   assert.doesNotMatch(html, /Queue a message/);
 });
 
-test("a template says where its agents work, because a deployment can refuse it", () => {
-  /**
-   * The shape is recorded on the template rather than read off the
-   * driver, so it is a thing a person chose and a thing a deployment
-   * can decline. Somebody reading this panel is the person who would
-   * have to know why a swarm was refused.
-   */
-  assert.equal(isolationWords("worktree"), "each in a worktree of the repository on the server");
-  assert.equal(isolationWords("sandbox"), "each on a machine of its own");
+const AGENTS = [
+  { id: "agent-planner", name: "Swarm Planner", cli: "claude-code", model: "opus" },
+  { id: "agent-worker", name: "Swarm Worker", cli: "codex", model: "gpt-5" },
+];
+
+test("the run settings open on the defaults, grouped and explained", () => {
+  const html = renderToStaticMarkup(
+    createElement(SwarmRunSettingsFields, {
+      draft: DEFAULT_RUN_SETTINGS,
+      onChange: () => {},
+      agents: AGENTS,
+      deliverable: "code",
+      onDeliverable: () => {},
+    }),
+  );
+  assert.match(html, /What it produces/);
+  assert.match(html, /aria-checked="true"[^>]*>Code change/);
+  assert.match(html, /Final check/);
+  // No judge is the default, and it says so rather than naming nobody.
+  assert.match(html, /<option value="" selected="">None<\/option>/);
+  assert.match(html, /<option value="1" selected="">The planner writes the whole plan/);
+  assert.match(html, /Optional\. Added to every prompt/);
+  assert.doesNotMatch(html, /[\u2013\u2014]/, "no dash reaches a reader");
+  assert.doesNotMatch(html, /[Tt]emplate/, "and nothing asks for a template");
+});
+
+test("a new swarm starts with the workers the server would pick", () => {
+  assert.equal(modeSurfaces("local").defaultSwarmWorkers, 2);
+  assert.equal(modeSurfaces("multi").defaultSwarmWorkers, 4);
+});
+
+test("the settings summary says what a person changed", () => {
+  assert.equal(
+    runSettingsSummary({ ...DEFAULT_RUN_SETTINGS, judgeProfileId: "agent-worker" }, AGENTS, "document"),
+    "Writes a document, final check by Swarm Worker, one planner.",
+  );
+  assert.equal(
+    runSettingsSummary({ ...DEFAULT_RUN_SETTINGS, completionCommand: "pnpm test", maxPlanDepth: 2 }, AGENTS),
+    "Final check runs pnpm test, sub planners allowed.",
+  );
+});
+
+test("a swarm's settings open on what it is set to now, and save only what changed", () => {
+  const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
+  const settings = { ...seeded.swarm.settings, judgeProfileId: "agent-worker", completionCommand: "pnpm test" };
+  const draft = draftFrom(settings);
+  const html = renderToStaticMarkup(
+    createElement(SwarmRunSettingsFields, { draft, onChange: () => {}, agents: AGENTS }),
+  );
+  assert.match(html, /value="pnpm test"/);
+  assert.match(html, /<option value="agent-worker" selected="">Swarm Worker/);
+  assert.doesNotMatch(html, /What it produces/, "fixed once the swarm exists");
+  // A round trip through the form is the same settings, so Save with
+  // nothing touched sends nothing.
+  assert.deepEqual(settingsFrom(draft), {
+    judgeProfileId: "agent-worker",
+    completionCommand: "pnpm test",
+    maxPlanDepth: 1,
+    plannerInstructions: null,
+    workerInstructions: null,
+  });
+  assert.equal(settingsFrom({ ...draft, completionCommand: "   " }).completionCommand, null, "blank is none");
 });
 
 function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
@@ -726,7 +785,7 @@ function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
         onArchive: () => {},
         onRestore: () => {},
         onWorkers: () => {},
-        onSaveAsTemplate: () => {},
+        onSettings: () => {},
         onAnswer: () => {},
       },
     }),

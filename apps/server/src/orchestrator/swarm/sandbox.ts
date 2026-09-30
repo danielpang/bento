@@ -68,7 +68,7 @@ export function swarmBranchName(slug: string): string {
 }
 
 /**
- * Where a swarm's agents work, as its template records it.
+ * Where a swarm's agents work, as recorded when it was created.
  *
  * "worktree" is a git worktree of the project's checkout on this
  * server: cheap, and what a local install wants, because a container
@@ -78,13 +78,13 @@ export function swarmBranchName(slug: string): string {
 export type WorkerIsolation = "sandbox" | "worktree";
 
 /**
- * Why this deployment cannot run a swarm shaped the way its template
- * says, or null when it can.
+ * Why this deployment cannot run a swarm shaped the way it was
+ * created, or null when it can.
  *
  * Only one direction can fail, and the asymmetry is the point.
  * "worktree" is a promise about where the code is, and a driver whose
  * sandboxes clone the repository inside themselves cannot keep it: the
- * worktrees this template's swarms are built around would not exist,
+ * worktrees the swarm is built around would not exist,
  * and the merge queue, which moves branches in checkouts on this
  * server, would have nothing to move. "sandbox" promises nothing, so
  * every driver satisfies it, including the ones that give an agent a
@@ -99,8 +99,8 @@ export function isolationRefusal(isolation: WorkerIsolation, provider: string): 
   if (isolation !== "worktree") return null;
   if (provider !== "sprite") return null;
   return (
-    "This swarm's template runs its agents in worktrees of the repository on the server, and this deployment runs agents on machines that hold their own clones. " +
-    "Set the template's isolation to a sandbox per agent, or run this swarm on a deployment that keeps the checkouts."
+    "This swarm was created to run its agents in worktrees of the repository on the server, and this deployment runs agents on machines that hold their own clones. " +
+    "Start a new swarm here to give each agent its own machine, or run this one on a deployment that keeps the checkouts."
   );
 }
 

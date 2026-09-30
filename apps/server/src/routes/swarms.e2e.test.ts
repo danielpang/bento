@@ -7,7 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
 import { asc, eq } from "drizzle-orm";
-import { MAX_SWARM_GOAL_CHARS } from "@bento/core";
+import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -23,7 +23,6 @@ import {
   swarmMessages,
   swarmTaskEvents,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -209,26 +208,6 @@ const tasksOf = async (swarmId: string) =>
 
 /* ---------------------------------------------------------------- */
 
-test("listing templates gives a fresh install visible planner and worker agents", async () => {
-  const res = await app.request("/api/swarm-templates");
-  assert.equal(res.status, 200);
-  const templates = (await res.json()) as unknown[];
-  assert.equal(templates.length, 0);
-  const profiles = (await (await app.request("/api/profiles")).json()) as { name: string; cli: string; model: string }[];
-  assert.ok(profiles.find((profile) => profile.name === "Swarm Planner")?.model);
-  assert.ok(profiles.find((profile) => profile.name === "Swarm Worker")?.cli);
-});
-
-test("deleting the last swarm template keeps the list empty", async () => {
-  const created = await post("/api/swarm-templates", { name: "Temporary" });
-  assert.equal(created.status, 201, await created.clone().text());
-  const template = (await created.json()) as { id: string };
-  const deleted = await app.request(`/api/swarm-templates/${template.id}`, { method: "DELETE" });
-  assert.equal(deleted.status, 200, await deleted.clone().text());
-  const listed = (await (await app.request("/api/swarm-templates")).json()) as { id: string }[];
-  assert.deepEqual(listed, []);
-});
-
 test("creating a swarm plans it, and puts a planner to work at once", async () => {
   const swarm = await createSwarm();
   assert.equal(swarm.status, "planning");
@@ -246,17 +225,16 @@ test("creating a swarm plans it, and puts a planner to work at once", async () =
     "and it was queued for a worker",
   );
 
-  // A seeded template and its two agents came with it, editable like
-  // any other.
-  const templates = (await (await app.request("/api/swarm-templates")).json()) as {
-    name: string;
-    plannerProfileId: string | null;
-    workerProfileId: string | null;
-  }[];
-  assert.equal(templates.length, 1);
-  assert.equal(templates[0]!.name, "Default");
-  assert.ok(templates[0]!.plannerProfileId, "with a planner");
-  assert.ok(templates[0]!.workerProfileId, "and a worker");
+  // Nobody chose agents, so the install's own Swarm Planner and Swarm
+  // Worker were made and put on it, editable like any other agent.
+  const row = await readSwarm(swarm.id);
+  const profiles = (await (await app.request("/api/profiles")).json()) as { id: string; name: string }[];
+  const named = new Map(profiles.map((profile) => [profile.id, profile.name]));
+  assert.equal(named.get(row.plannerProfileId!), "Swarm Planner");
+  assert.equal(named.get(row.workerProfileId!), "Swarm Worker");
+  assert.equal(row.judgeProfileId, null, "and nothing else was asked for");
+  assert.equal(row.completionCommand, null);
+  assert.equal(row.maxPlanDepth, 1);
 
   // A second swarm of the same name takes a readable suffix rather
   // than a random one.
@@ -327,11 +305,8 @@ test("a swarm planner exposes read-only output through the run transcript and st
 });
 
 test("a new swarm keeps its chosen planner and worker profiles", async () => {
-  const templates = (await (await app.request("/api/swarm-templates")).json()) as {
-    plannerProfileId: string;
-    workerProfileId: string;
-  }[];
-  const source = templates[0]!;
+  const first = await readSwarm((await createSwarm({ title: "Defaults" })).id);
+  const source = { plannerProfileId: first.plannerProfileId!, workerProfileId: first.workerProfileId! };
   const swarm = await createSwarm({
     plannerProfileId: source.workerProfileId,
     workerProfileId: source.plannerProfileId,
@@ -1166,38 +1141,65 @@ test("a node's messages are handed to one run, oldest first, and never twice", a
   assert.equal(byText.get("for the plan")!.status, "queued", "and the planner's is still the planner's");
 });
 
-test("a local install's default template runs its agents in worktrees, two at a time", async () => {
+test("a local install's swarm runs its agents in worktrees, two at a time", async () => {
   /**
-   * The shape is written onto the template rather than read off the
+   * The shape is written onto the swarm rather than read off the
    * driver every time a run starts. A container per worker is a
    * container on the machine somebody is also using, which is why a
    * local install wants worktrees and two of them; recording it is
    * what stops that shape changing under a swarm if the install later
    * joins a team.
    */
-  const swarm = await createSwarm({ title: "Shape" });
-  const [template] = await db.select().from(swarmTemplates).where(eq(swarmTemplates.id, swarm.templateId!));
-  assert.equal(template!.name, "Default");
-  assert.equal(template!.workerIsolation, "worktree");
-  assert.equal(template!.maxWorkers, 2);
+  const swarm = await readSwarm((await createSwarm({ title: "Shape" })).id);
+  assert.equal(swarm.workerIsolation, "worktree");
+  assert.equal(swarm.maxWorkers, 2);
 });
 
-test("a template states its shape, and takes the one it is given", async () => {
-  const made = await post("/api/swarm-templates", { name: "Hosted shape", workerIsolation: "sandbox" });
-  assert.equal(made.status, 201);
-  const row = (await made.json()) as { workerIsolation: string };
-  assert.equal(row.workerIsolation, "sandbox", "a caller that states one is taken at its word");
+test("a swarm is created with its run settings, and they can be changed after", async () => {
+  const defaults = await readSwarm((await createSwarm({ title: "Agents" })).id);
+  const created = await createSwarm({
+    title: "Checked",
+    judgeProfileId: defaults.workerProfileId,
+    completionCommand: "  pnpm test  ",
+    maxPlanDepth: 2,
+    plannerInstructions: "Split by package.",
+    workerInstructions: "   ",
+    deliverable: "document",
+  });
+  const row = await readSwarm(created.id);
+  assert.equal(row.judgeProfileId, defaults.workerProfileId);
+  assert.equal(row.completionCommand, "pnpm test", "trimmed");
+  assert.equal(row.maxPlanDepth, 2);
+  assert.equal(row.plannerInstructions, "Split by package.");
+  assert.equal(row.workerInstructions, null, "blank is none, not a heading with nothing under it");
+  assert.equal(row.deliverable, "document");
 
-  const implied = await post("/api/swarm-templates", { name: "Local shape" });
-  assert.equal(implied.status, 201);
-  assert.equal(
-    ((await implied.json()) as { workerIsolation: string }).workerIsolation,
-    "worktree",
-    "and this deployment's own shape otherwise",
-  );
+  const patched = await app.request(`/api/swarms/${created.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ judgeProfileId: null, completionCommand: "", maxPlanDepth: 1, workerInstructions: "Add tests." }),
+  });
+  assert.equal(patched.status, 200, await patched.clone().text());
+  const after = await readSwarm(created.id);
+  assert.equal(after.judgeProfileId, null);
+  assert.equal(after.completionCommand, null);
+  assert.equal(after.maxPlanDepth, 1);
+  assert.equal(after.workerInstructions, "Add tests.");
+  assert.equal(after.plannerInstructions, "Split by package.", "what was not sent is left alone");
 
-  const nonsense = await post("/api/swarm-templates", { name: "Nope", workerIsolation: "vm" });
-  assert.equal(nonsense.status, 400, "a shape nothing can run is not stored");
+  const tooDeep = await app.request(`/api/swarms/${created.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ maxPlanDepth: MAX_PLAN_DEPTH + 1 }),
+  });
+  assert.equal(tooDeep.status, 400);
+
+  const strangerJudge = await app.request(`/api/swarms/${created.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ judgeProfileId: "00000000-0000-4000-8000-000000000001" }),
+  });
+  assert.equal(strangerJudge.status, 404, "an agent that is not the team's reads as not there");
 });
 
 /**
@@ -1545,7 +1547,7 @@ test("a leaf being worked is not split out from under its agent", async () => {
 
 /**
  * Reassigning writes the agent on the node, so the next spawn uses it
- * and every other leaf keeps the template's own worker.
+ * and every other leaf keeps the swarm's own worker.
  */
 test("reassigning a leaf puts a different agent on that leaf alone", async () => {
   const swarm = await createSwarm();
@@ -1568,7 +1570,7 @@ test("reassigning a leaf puts a different agent on that leaf alone", async () =>
 
   const back = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/reassign`, { agentProfileId: null });
   assert.equal(back.status, 200);
-  assert.equal((await readTask(tree.first.id)).agentProfileId, null, "and it can be put back on the template's own");
+  assert.equal((await readTask(tree.first.id)).agentProfileId, null, "and it can be put back on the swarm's own");
 });
 
 /** An agent id nobody can reach is not an agent this swarm can run. */
@@ -1970,67 +1972,6 @@ test("a person can add a task, and the planner is told and can object", async ()
   assert.match(notice.text, new RegExp(created.id));
   assert.match(notice.text, /Add the retry/, "with what the person wrote, quoted inside it");
   assert.match(notice.text, /use cancel_task or split_task/, "and how to object");
-});
-
-test("a swarm's tuned ceilings are saved as a template, and its template's shape is carried across", async () => {
-  /**
-   * The point of saving a swarm is the tuning nobody wrote down: the
-   * workers raised when the plan turned out wider than planned, the
-   * budget lifted when it nearly ran out. So the saved template must
-   * carry what the swarm has now, not what the template it started
-   * from said, while everything a swarm has no opinion about comes
-   * across untouched.
-   */
-  const swarm = await createSwarm();
-  const [before] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
-  const source = (await db.select().from(swarmTemplates).where(eq(swarmTemplates.id, before!.templateId!)))[0]!;
-
-  await patch(`/api/swarms/${swarm.id}`, { maxWorkers: 7, budgetUsd: 12.5, timeLimitMin: 90 });
-
-  const res = await post(`/api/swarms/${swarm.id}/template`, { name: "Wide checkout" });
-  assert.equal(res.status, 201, await res.clone().text());
-  const saved = (await res.json()) as {
-    id: string;
-    name: string;
-    description: string;
-    maxWorkers: number;
-    budgetUsd: string | null;
-    timeLimitMin: number | null;
-    plannerProfileId: string | null;
-    workerProfileId: string | null;
-    workerIsolation: string;
-    maxPlanDepth: number;
-  };
-
-  assert.equal(saved.name, "Wide checkout");
-  assert.equal(saved.maxWorkers, 7, "the number the swarm ended up running, not the one it started with");
-  assert.equal(Number(saved.budgetUsd), 12.5, "and the budget as it stands");
-  assert.equal(saved.timeLimitMin, 90);
-  assert.match(saved.description, /Rewrite checkout/, "and says which swarm it came from");
-
-  assert.equal(saved.plannerProfileId, source.plannerProfileId, "the agents come from the template, not from nowhere");
-  assert.equal(saved.workerProfileId, source.workerProfileId);
-  assert.equal(saved.workerIsolation, source.workerIsolation, "and where its workers work");
-  assert.equal(saved.maxPlanDepth, source.maxPlanDepth);
-
-  assert.notEqual(saved.id, source.id, "a copy, so editing one does not reach the other");
-  const sourceAfter = (await db.select().from(swarmTemplates).where(eq(swarmTemplates.id, source.id)))[0]!;
-  assert.equal(sourceAfter.maxWorkers, source.maxWorkers, "and the template it came from is left as it was");
-});
-
-test("a swarm whose template was deleted is refused rather than half saved", async () => {
-  /**
-   * templateId is set null when a template is deleted, and the four
-   * fields a swarm carries name no agents. A template invented out of
-   * them would list in the picker and fail at the first run, which is
-   * the worst moment to find out.
-   */
-  const swarm = await createSwarm();
-  await db.update(swarms).set({ templateId: null }).where(eq(swarms.id, swarm.id));
-
-  const res = await post(`/api/swarms/${swarm.id}/template`, { name: "Orphan" });
-  assert.equal(res.status, 409, await res.clone().text());
-  assert.match(((await res.json()) as { error: string }).error, /has been deleted/);
 });
 
 test("a task added below a worker leaf waits for that leaf", async () => {

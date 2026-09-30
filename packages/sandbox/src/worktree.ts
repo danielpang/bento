@@ -187,6 +187,10 @@ export class WorktreeManager {
       }
 
       try {
+        // Unlocked first: ensure locks every workspace it makes, and a
+        // single --force does not remove a locked worktree, so without
+        // this a repository dropped from the project stayed mounted.
+        await run("git", ["-C", mainRepo, "worktree", "unlock", candidate]).catch(() => {});
         await run("git", ["-C", mainRepo, "worktree", "remove", "--force", candidate]);
       } catch {
         // Not a worktree of that repository, so not one of ours to take.

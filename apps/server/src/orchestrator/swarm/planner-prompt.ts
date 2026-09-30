@@ -67,8 +67,8 @@ export interface PlannerPromptInput {
   agent?: { name: string; skill: string | null };
   /** Where each repository is checked out inside the sandbox. */
   repositories: { name: string; mountPath: string; testCommand?: string | null }[];
-  /** Operating instructions from the swarm's template, if it set any. */
-  templateInstructions?: string | null;
+  /** Operating instructions a person set on this swarm, if any. */
+  swarmInstructions?: string | null;
   /**
    * What is already on the branch this swarm started from, when it
    * started from one.
@@ -138,8 +138,8 @@ export function buildPlannerPrompt(input: PlannerPromptInput): string {
   if (agent?.skill?.trim()) {
     lines.push("Your operating instructions, defined by your team:", agent.skill.trim(), "");
   }
-  if (input.templateInstructions?.trim()) {
-    lines.push("Instructions from this swarm's template:", input.templateInstructions.trim(), "");
+  if (input.swarmInstructions?.trim()) {
+    lines.push("Instructions for this swarm:", input.swarmInstructions.trim(), "");
   }
 
   if (repositories.length > 0) {
@@ -294,7 +294,7 @@ export function buildSubPlannerPrompt(input: {
   node: { id: string; title: string; description: string };
   agent?: { name: string; skill: string | null };
   repositories: { name: string; mountPath: string; testCommand?: string | null }[];
-  templateInstructions?: string | null;
+  swarmInstructions?: string | null;
   /** Whether the swarm has a design note to read before planning. */
   hasDesign?: boolean;
 }): string {
@@ -316,8 +316,8 @@ export function buildSubPlannerPrompt(input: {
   if (agent?.skill?.trim()) {
     lines.push("Your operating instructions, defined by your team:", agent.skill.trim(), "");
   }
-  if (input.templateInstructions?.trim()) {
-    lines.push("Instructions from this swarm's template:", input.templateInstructions.trim(), "");
+  if (input.swarmInstructions?.trim()) {
+    lines.push("Instructions for this swarm:", input.swarmInstructions.trim(), "");
   }
 
   if (repositories.length > 0) {

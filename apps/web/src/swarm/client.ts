@@ -1,7 +1,7 @@
 import { MAX_SWARM_WORKERS } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
 import { buildSwarmModel } from "./layout.js";
-import { SWARM_TEMPLATES, draftSwarm, seedSwarms, summarise } from "./fixtures.js";
+import { draftSwarm, seedSwarms, summarise } from "./fixtures.js";
 import type {
   NewSwarmInput,
   Swarm,
@@ -14,7 +14,7 @@ import type {
   SwarmStatus,
   SwarmSummary,
   SwarmTask,
-  SwarmTemplate,
+  SwarmSettingsChange,
   TaskAttention,
 } from "./types.js";
 
@@ -30,7 +30,6 @@ import type {
  *   PATCH  /api/swarms/:id
  *   POST   /api/swarms/:id/start | /pause | /cancel
  *   POST   /api/swarms/:id/messages
- *   GET    /api/swarm-templates
  *
  * Anything the console could once do that has no route behind it is
  * not in this interface. A method that quietly resolved would be a
@@ -45,22 +44,6 @@ import type {
 export interface SwarmApi {
   listSwarms(projectId: string): Promise<SwarmSummary[]>;
   getSwarm(swarmId: string): Promise<SwarmDetail>;
-  listTemplates(): Promise<SwarmTemplate[]>;
-  createTemplate(input: TemplateInput): Promise<SwarmTemplate>;
-  /**
-   * Every field optional, so renaming a template does not restate its
-   * ceilings. Null clears a budget or a time limit.
-   */
-  updateTemplate(templateId: string, input: Partial<TemplateInput>): Promise<SwarmTemplate>;
-  deleteTemplate(templateId: string): Promise<void>;
-  /**
-   * This swarm's shape, kept for the next one.
-   *
-   * The server does the copying: it has the template the swarm came
-   * from, and the console has no business inventing the fields a swarm
-   * does not carry.
-   */
-  saveSwarmAsTemplate(swarmId: string, name: string): Promise<SwarmTemplate>;
   /**
    * The agents a leaf can be handed to.
    *
@@ -94,6 +77,12 @@ export interface SwarmApi {
   archiveSwarm(swarmId: string): Promise<void>;
   restoreSwarm(swarmId: string): Promise<void>;
   setWorkers(swarmId: string, workers: number): Promise<void>;
+  /**
+   * Changes how the swarm is run: its agents, its final check, how deep
+   * a plan may go, its instructions, and its ceilings. Only the fields
+   * given are sent; null clears one.
+   */
+  updateSettings(swarmId: string, change: SwarmSettingsChange): Promise<void>;
   /** An answer to the planner is a message to the planner. */
   answerQuestion(swarmId: string, questionId: string, text: string): Promise<void>;
   /** The planner thread persists independently of any one agent run. */
@@ -116,7 +105,7 @@ export interface SwarmApi {
    * which is why nothing here starts an agent directly. Cancel takes
    * the subtree and stops whatever is on it. Split turns a leaf into
    * the tasks it should have been. Reassign writes a different agent
-   * on this leaf alone, and null puts it back on the template's own.
+   * on this leaf alone, and null puts it back on the swarm's own.
    * Edit is what makes a retry worth doing, since a task that failed
    * for saying the wrong thing fails again against the same words.
    */
@@ -232,43 +221,6 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     return null;
   }
 
-  /*
-   * A copy, because the fixture client now writes to it. The exported
-   * constant is shared by every test in the file, and a create in one
-   * that leaked into the next would make the order they run in matter.
-   */
-  const templates: SwarmTemplate[] = SWARM_TEMPLATES.map((row) => ({ ...row }));
-
-  /*
-   * Ids come from a counter rather than the list's length, which
-   * collides the moment anything is deleted: three rows, two creates,
-   * one delete, and the next create repeats an id that is still in the
-   * list. Two rows sharing an id is a duplicate React key, and every
-   * edit and delete here finds by id, so the second row's changes land
-   * on the first.
-   */
-  let nextTemplateId = templates.length;
-
-  /** A template row from the fields the panel edits, over a base row. */
-  function fixtureTemplate(
-    base: SwarmTemplate,
-    input: Partial<TemplateInput>,
-    id: string,
-  ): SwarmTemplate {
-    return {
-      ...base,
-      id,
-      name: input.name ?? base.name,
-      description: input.description ?? base.description,
-      maxWorkers: input.maxWorkers ?? base.maxWorkers,
-      plannerProfileId: input.plannerProfileId !== undefined ? input.plannerProfileId : base.plannerProfileId,
-      workerProfileId: input.workerProfileId !== undefined ? input.workerProfileId : base.workerProfileId,
-      workerIsolation: input.workerIsolation ?? base.workerIsolation,
-      maxBudgetUsd: input.budgetUsd !== undefined ? input.budgetUsd : base.maxBudgetUsd,
-      timeLimitMin: input.timeLimitMin !== undefined ? input.timeLimitMin : base.timeLimitMin,
-    };
-  }
-
   function mutate(swarmId: string, change: (detail: SwarmDetail) => void): Promise<void> {
     const detail = find(swarmId);
     if (detail) change(detail);
@@ -290,55 +242,6 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       if (!detail) return Promise.reject(new Error("not found"));
       detail.swarm.lastOpenedAt = new Date(clock()).toISOString();
       return Promise.resolve(detail);
-    },
-    listTemplates() {
-      // Copies, so a caller holding the result cannot write through it
-      // into the fixture's own state.
-      return Promise.resolve(templates.map((row) => ({ ...row })));
-    },
-    createTemplate(input) {
-      nextTemplateId += 1;
-      // A new template is its own row, not a variant of the first
-      // fixture: only the cost shape, which the panel does not edit,
-      // has anywhere else to come from.
-      const created = fixtureTemplate(
-        { ...SWARM_TEMPLATES[0]!, maxBudgetUsd: null, timeLimitMin: null },
-        input,
-        `template-${nextTemplateId}`,
-      );
-      templates.push(created);
-      return Promise.resolve({ ...created });
-    },
-    updateTemplate(templateId, input) {
-      const at = templates.findIndex((row) => row.id === templateId);
-      if (at < 0) return Promise.reject(new Error("not found"));
-      const updated = fixtureTemplate(templates[at]!, input, templateId);
-      templates[at] = updated;
-      return Promise.resolve({ ...updated });
-    },
-    deleteTemplate(templateId) {
-      const at = templates.findIndex((row) => row.id === templateId);
-      if (at >= 0) templates.splice(at, 1);
-      return Promise.resolve();
-    },
-    saveSwarmAsTemplate(swarmId, name) {
-      const detail = find(swarmId);
-      if (!detail) return Promise.reject(new Error("not found"));
-      // The fixture's version of what the route does: the swarm's own
-      // ceilings over the template it was made with.
-      const source = templates.find((row) => row.id === detail.swarm.templateId) ?? templates[0]!;
-      nextTemplateId += 1;
-      const created: SwarmTemplate = {
-        ...source,
-        id: `template-${nextTemplateId}`,
-        name,
-        description: `Saved from the swarm "${detail.swarm.name}".`,
-        maxWorkers: detail.swarm.workers,
-        maxBudgetUsd: detail.swarm.budgetUsd,
-        timeLimitMin: detail.swarm.timeLimitMin,
-      };
-      templates.push(created);
-      return Promise.resolve({ ...created });
     },
     listAgents() {
       return Promise.resolve([
@@ -436,6 +339,14 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     setWorkers(swarmId, workers) {
       return mutate(swarmId, (detail) => {
         detail.swarm.workers = Math.max(1, Math.min(detail.swarm.maxWorkers, Math.round(workers)));
+      });
+    },
+    updateSettings(swarmId, change) {
+      return mutate(swarmId, (detail) => {
+        const { budgetUsd, timeLimitMin, ...settings } = change;
+        detail.swarm.settings = { ...detail.swarm.settings, ...settings };
+        if (budgetUsd !== undefined) detail.swarm.budgetUsd = budgetUsd;
+        if (timeLimitMin !== undefined) detail.swarm.timeLimitMin = timeLimitMin;
       });
     },
     answerQuestion(swarmId, questionId, text) {
@@ -644,7 +555,18 @@ export interface WireSwarm {
   status: string;
   pausedReason: Swarm["pausedReason"];
   branchName: string | null;
-  templateId: string | null;
+  /*
+   * How it is run. Optional for the reason the notional tier is: a
+   * server older than these columns does not send them, and absent
+   * reads as the defaults, which is what that server was doing.
+   */
+  plannerProfileId?: string | null;
+  workerProfileId?: string | null;
+  judgeProfileId?: string | null;
+  completionCommand?: string | null;
+  maxPlanDepth?: number;
+  plannerInstructions?: string | null;
+  workerInstructions?: string | null;
   budgetUsd: string | null;
   maxWorkers: number;
   timeLimitMin: number | null;
@@ -755,45 +677,6 @@ export interface WirePullRequest {
   number: number;
   url: string;
   headSha: string | null;
-}
-
-/**
- * What the templates panel may set on a template.
- *
- * The two role assignments and the limits a person changes between
- * swarms. Agent profiles hold the harness and model for each role.
- */
-export interface TemplateInput {
-  name: string;
-  description: string;
-  plannerProfileId?: string | null;
-  workerProfileId?: string | null;
-  maxWorkers: number;
-  /** Null clears the cap, which is not the same as a cap of zero. */
-  budgetUsd: number | null;
-  timeLimitMin: number | null;
-  /**
-   * Optional, and absent is the ordinary case for a new template.
-   *
-   * The create route fills it from the deployment (a machine each on a
-   * hosted install, worktrees on a local one), and a console that
-   * always stated a value took that answer away: every template made
-   * here would have said worktrees, which a hosted deployment refuses
-   * at provisioning time, long after the person pressed Save.
-   */
-  workerIsolation?: "sandbox" | "worktree";
-}
-
-export interface WireTemplate {
-  id: string;
-  name: string;
-  description: string;
-  plannerProfileId?: string | null;
-  workerProfileId?: string | null;
-  workerIsolation?: "sandbox" | "worktree";
-  maxWorkers: number;
-  budgetUsd: string | null;
-  timeLimitMin: number | null;
 }
 
 /** An agent profile's harness and model, shown when assigning swarm roles. */
@@ -939,7 +822,15 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     pausedReason: row.pausedReason,
     branchName: row.branchName,
     deliverable: row.deliverable ?? "code",
-    templateId: row.templateId,
+    settings: {
+      plannerProfileId: row.plannerProfileId ?? null,
+      workerProfileId: row.workerProfileId ?? null,
+      judgeProfileId: row.judgeProfileId ?? null,
+      completionCommand: row.completionCommand ?? null,
+      maxPlanDepth: row.maxPlanDepth ?? 1,
+      plannerInstructions: row.plannerInstructions ?? null,
+      workerInstructions: row.workerInstructions ?? null,
+    },
     budgetUsd: row.budgetUsd === null ? null : Number(row.budgetUsd),
     maxWorkers: WORKER_CEILING,
     workers: row.maxWorkers,
@@ -982,36 +873,6 @@ export function toSummary(row: WireSwarmRow): SwarmSummary {
 }
 
 /**
- * A template, with the ceilings it sets.
- *
- * The cost shape is empty: the route names the agents by id, and what
- * a tool reports its spend in is not recorded anywhere yet. The dialog
- * and the templates panel draw those parts only when a template has
- * them, so an estimate is absent rather than a confident zero.
- */
-export function toTemplate(row: WireTemplate): SwarmTemplate {
-  return {
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    plannerProfileId: row.plannerProfileId ?? null,
-    workerProfileId: row.workerProfileId ?? null,
-    plannerModel: "",
-    workerModel: "",
-    tools: [],
-    assumedUsdPerLeaf: 0,
-    perLeaf: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 },
-    maxWorkers: row.maxWorkers,
-    // A server that predates the column says nothing, which reads the
-    // same way a template that asserts nothing does.
-    workerIsolation: row.workerIsolation ?? "sandbox",
-    maxBudgetUsd: row.budgetUsd === null ? null : Number(row.budgetUsd),
-    timeLimitMin: row.timeLimitMin,
-    typicalLeaves: 0,
-  };
-}
-
-/**
  * The console against the real routes. Same credentials and the same
  * failure shape as every other call the console makes.
  *
@@ -1023,27 +884,6 @@ export function toTemplate(row: WireTemplate): SwarmTemplate {
 export interface EventSourceLike {
   addEventListener(type: string, listener: () => void): void;
   close(): void;
-}
-
-/**
- * A template's fields as the routes take them.
- *
- * Only what was actually given: the update route treats an absent
- * field as "leave it" and a null one as "clear it", and a body that
- * spelled out every field would turn a rename into a rewrite of the
- * ceilings the swarm running under it is using.
- */
-function templateBody(input: Partial<TemplateInput>): Record<string, unknown> {
-  const body: Record<string, unknown> = {};
-  if (input.name !== undefined) body.name = input.name;
-  if (input.description !== undefined) body.description = input.description;
-  if (input.plannerProfileId !== undefined) body.plannerProfileId = input.plannerProfileId;
-  if (input.workerProfileId !== undefined) body.workerProfileId = input.workerProfileId;
-  if (input.maxWorkers !== undefined) body.maxWorkers = input.maxWorkers;
-  if (input.budgetUsd !== undefined) body.budgetUsd = input.budgetUsd;
-  if (input.timeLimitMin !== undefined) body.timeLimitMin = input.timeLimitMin;
-  if (input.workerIsolation !== undefined) body.workerIsolation = input.workerIsolation;
-  return body;
 }
 
 export function httpSwarmApi(
@@ -1078,21 +918,6 @@ export function httpSwarmApi(
       const detail = await call<WireDetail>(`/api/swarms/${swarmId}`);
       return toDetail(detail);
     },
-    async listTemplates() {
-      return (await call<WireTemplate[]>("/api/swarm-templates")).map(toTemplate);
-    },
-    async createTemplate(input) {
-      return toTemplate(await post<WireTemplate>("/api/swarm-templates", templateBody(input)));
-    },
-    async updateTemplate(templateId, input) {
-      return toTemplate(await patch<WireTemplate>(`/api/swarm-templates/${templateId}`, templateBody(input)));
-    },
-    async deleteTemplate(templateId) {
-      await call<void>(`/api/swarm-templates/${templateId}`, { method: "DELETE" });
-    },
-    async saveSwarmAsTemplate(swarmId, name) {
-      return toTemplate(await post<WireTemplate>(`/api/swarms/${swarmId}/template`, { name }));
-    },
     async listAgents() {
       const rows = await call<SwarmAgent[]>("/api/profiles");
       return rows.map((row) => ({ id: row.id, name: row.name, cli: row.cli, model: row.model }));
@@ -1116,7 +941,8 @@ export function httpSwarmApi(
         goal: input.goal,
         ...(input.plannerProfileId ? { plannerProfileId: input.plannerProfileId } : {}),
         ...(input.workerProfileId ? { workerProfileId: input.workerProfileId } : {}),
-        ...(input.templateId ? { templateId: input.templateId } : {}),
+        deliverable: input.deliverable,
+        ...input.settings,
         maxWorkers: input.workers,
         ...(input.budgetUsd === null ? {} : { budgetUsd: input.budgetUsd }),
         ...(input.start.kind === "existing-branch" ? { startBranch: input.start.name } : {}),
@@ -1159,6 +985,12 @@ export function httpSwarmApi(
     },
     async setWorkers(swarmId, workers) {
       await patch(`/api/swarms/${swarmId}`, { maxWorkers: workers });
+    },
+    async updateSettings(swarmId, change) {
+      // Only what changed: an absent field is "leave it" on the route,
+      // and null is "clear it".
+      const body = Object.fromEntries(Object.entries(change).filter(([, value]) => value !== undefined));
+      if (Object.keys(body).length > 0) await patch(`/api/swarms/${swarmId}`, body);
     },
     async markTaskDone(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/done`);

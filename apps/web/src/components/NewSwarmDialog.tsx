@@ -1,43 +1,35 @@
 import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Modal } from "./Modal.js";
-import { cappedUsd, estimateSwarm, formatUsd } from "../swarm/money.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
-import type { NewSwarmInput, SwarmTemplate } from "../swarm/types.js";
-import { visibleTemplateDescription } from "../swarm/template-description.js";
+import type { NewSwarmInput } from "../swarm/types.js";
 import type { SwarmAgent } from "../swarm/client.js";
 import { SwarmAgentSelect } from "./SwarmAgentSelect.js";
+import {
+  DEFAULT_RUN_SETTINGS,
+  SwarmRunSettingsFields,
+  runSettingsSummary,
+  settingsFrom,
+  type RunSettingsDraft,
+} from "./SwarmSettingsFields.js";
 
 /**
  * Starting a swarm.
  *
- * The dialog asks for the goal, the agents, and the limits. It shows
- * one estimated spend figure when the template has enough information.
+ * The dialog asks for the goal, the agents, and the limits, each
+ * already filled with what most swarms want, so a name and a goal are
+ * enough to press Create. Everything else about how the swarm is run
+ * waits behind More settings, with one line saying what it is set to,
+ * and can be changed later in the swarm's own settings.
  *
  * It asks for what the create route takes and nothing else. A field
  * the server has no home for is a promise the console cannot keep, so
  * the branch is a preview of the one the server will name rather than
  * a choice, and there is no plan only box: a swarm always plans first
  * and waits for Start.
- *
- * Local mode drops the plan footer and the agent hours line, because
- * it has neither a plan nor an organization to bill, and shows the
- * dollar estimate alone. That is the only difference: one hook, not a
- * second dialog.
  */
-/**
- * Workers to start with when no template has said how many.
- *
- * One, because a dialog with no template to read is a new install, and
- * the cheapest wrong answer there is a single worker. It is a starting
- * value and not a limit: the field goes up to MAX_SWARM_WORKERS either
- * way, which is the only number the route actually enforces.
- */
-const STARTING_WORKERS = 1;
-
 export function NewSwarmDialog({
   projectId,
-  templates,
   agents,
   surfaces,
   busy,
@@ -45,38 +37,28 @@ export function NewSwarmDialog({
   onCreate,
 }: {
   projectId: string;
-  templates: SwarmTemplate[];
   agents: SwarmAgent[];
   surfaces: ModeSurfaces;
   busy?: boolean;
   onClose: () => void;
   onCreate: (input: NewSwarmInput) => Promise<void>;
 }) {
-  const [templateId, setTemplateId] = useState(templates[0]?.id ?? "");
-  const template = templates.find((entry) => entry.id === templateId) ?? templates[0] ?? null;
+  /*
+   * The install's own Swarm Planner and Swarm Worker when they exist,
+   * and otherwise the empty choice, which the server answers by making
+   * them. Never "the first agent in the list": that is whichever one
+   * somebody happened to create first, and a person who did not look
+   * would get it as their planner.
+   */
   const [plannerChoice, setPlannerChoice] = useState<string | null>(null);
   const [workerChoice, setWorkerChoice] = useState<string | null>(null);
-  const plannerProfileId = plannerChoice ?? template?.plannerProfileId ??
-    agents.find((agent) => agent.name === "Swarm Planner")?.id ?? agents[0]?.id ?? "";
-  const workerProfileId = workerChoice ?? template?.workerProfileId ??
-    agents.find((agent) => agent.name === "Swarm Worker")?.id ?? agents[1]?.id ?? agents[0]?.id ?? "";
+  const plannerProfileId = plannerChoice ?? agents.find((agent) => agent.name === "Swarm Planner")?.id ?? "";
+  const workerProfileId = workerChoice ?? agents.find((agent) => agent.name === "Swarm Worker")?.id ?? "";
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
   const [error, setError] = useState("");
   const [budget, setBudget] = useState("");
-  /*
-   * What the template says to start with, or one when there is none.
-   *
-   * Three numbers used to disagree here: the seed fell back to four
-   * while the field's max and its caption both fell back to one, so a
-   * dialog with no template offered a 4 that could not be typed above
-   * a note saying the limit was 1. They now come from two places that
-   * mean different things: the template's number is the suggestion,
-   * and MAX_SWARM_WORKERS is the limit.
-   */
-  const [workers, setWorkers] = useState(
-    clampWorkers(template?.maxWorkers ?? STARTING_WORKERS, MAX_SWARM_WORKERS),
-  );
+  const [workers, setWorkers] = useState(clampWorkers(surfaces.defaultSwarmWorkers, MAX_SWARM_WORKERS));
   /**
    * A branch that already exists, to continue.
    *
@@ -87,31 +69,14 @@ export function NewSwarmDialog({
    * asked about.
    */
   const [startBranch, setStartBranch] = useState("");
-
-  const leaves = template?.typicalLeaves ?? 0;
-  const estimate = useMemo(
-    () => (template ? estimateSwarm(template, leaves) : { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0}),
-    [template, leaves],
-  );
-  /** A template with no task count cannot support a meaningful total. */
-  const hasCostShape = leaves > 0;
+  const [deliverable, setDeliverable] = useState<"code" | "document">("code");
+  const [runSettings, setRunSettings] = useState<RunSettingsDraft>(DEFAULT_RUN_SETTINGS);
 
   // The server names the branch after the swarm, so this is a preview
   // of what it will be rather than a choice.
   const branchName = suggestBranch(name);
   const continuing = startBranch.trim();
   const branchRefusal = continuing && !isBranchName(continuing) ? branchNameRefusal : null;
-  /*
-   * A template is not required to create a swarm.
-   *
-   * The server picks the Default when the console names none, so a
-   * list that has not loaded, or an install whose templates were all
-   * deleted, is a swarm started under the default rather than a Create
-   * button that never enables. It used to require one, which on a
-   * fresh install meant a disabled button and no sentence saying why,
-   * and no way out: creating a swarm was what seeded the first
-   * template.
-   */
   const goalLength = goal.trim().length;
   const goalTooLong = goalLength > MAX_SWARM_GOAL_CHARS;
   const ready = name.trim() !== "" && goalLength > 0 && !goalTooLong && branchRefusal === null;
@@ -133,47 +98,6 @@ export function NewSwarmDialog({
       }
     >
       <div className="swarm-new">
-        <div className="swarm-new-templates">
-          <span className="label">Template</span>
-          {templates.length === 0 && <p className="muted">No saved templates. Default limits will be used.</p>}
-          {templates.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              className="swarm-template"
-              data-on={entry.id === templateId ? "" : undefined}
-              aria-pressed={entry.id === templateId}
-              onClick={() => {
-                setTemplateId(entry.id);
-                setPlannerChoice(null);
-                setWorkerChoice(null);
-                setWorkers(clampWorkers(entry.maxWorkers, MAX_SWARM_WORKERS));
-              }}
-            >
-              <span className="swarm-template-name">{entry.name}</span>
-              {visibleTemplateDescription(entry.description) && (
-                <span className="muted">{visibleTemplateDescription(entry.description)}</span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        <div className="field-row swarm-agent-row">
-          <SwarmAgentSelect
-            label="Planner agent"
-            value={plannerProfileId}
-            agents={agents}
-            onChange={setPlannerChoice}
-            fallback="Template planner"
-          />
-          <SwarmAgentSelect
-            label="Worker agent"
-            value={workerProfileId}
-            agents={agents}
-            onChange={setWorkerChoice}
-            fallback="Template worker"
-          />
-        </div>
         <label className="field">
           <span className="field-heading">Name</span>
           <input
@@ -202,24 +126,26 @@ export function NewSwarmDialog({
           </span>
         </label>
 
+        <div className="field-row swarm-agent-row">
+          <SwarmAgentSelect
+            label="Planner agent"
+            value={plannerProfileId}
+            agents={agents}
+            onChange={setPlannerChoice}
+            fallback="Swarm Planner (created for you)"
+          />
+          <SwarmAgentSelect
+            label="Worker agent"
+            value={workerProfileId}
+            agents={agents}
+            onChange={setWorkerChoice}
+            fallback="Swarm Worker (created for you)"
+          />
+        </div>
+
         <div className="field-row">
           <label className="field">
-            <span className="field-heading">Budget</span>
-            <input
-              className="input"
-              inputMode="decimal"
-              value={budget}
-              placeholder={template?.maxBudgetUsd === null || template === null ? "No cap" : String(template.maxBudgetUsd)}
-              onChange={(e) => setBudget(e.target.value)}
-            />
-            <span className="muted">
-              {template?.maxBudgetUsd === null || template === null
-                ? "This template sets no maximum."
-                : `Up to ${formatUsd(template.maxBudgetUsd)} on this template.`}
-            </span>
-          </label>
-          <label className="field">
-            <span className="field-heading">Workers</span>
+            <span className="field-heading">Workers at once</span>
             <input
               className="input"
               type="number"
@@ -228,7 +154,18 @@ export function NewSwarmDialog({
               value={workers}
               onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), MAX_SWARM_WORKERS))}
             />
-            <span className="muted">Starts with value set here, maximum is {MAX_SWARM_WORKERS} workers</span>
+            <span className="muted">Up to {MAX_SWARM_WORKERS}. You can change this while it runs.</span>
+          </label>
+          <label className="field">
+            <span className="field-heading">Budget</span>
+            <input
+              className="input"
+              inputMode="decimal"
+              value={budget}
+              placeholder="No cap"
+              onChange={(e) => setBudget(e.target.value)}
+            />
+            <span className="muted">In dollars. Leave empty for no cap.</span>
           </label>
         </div>
 
@@ -248,17 +185,23 @@ export function NewSwarmDialog({
           {branchRefusal && <span className="swarm-reopen-refusal">{branchRefusal}</span>}
         </label>
 
+        <details className="swarm-more-settings">
+          <summary>
+            <span className="field-heading">More settings</span>
+            <span className="muted">{runSettingsSummary(runSettings, agents, deliverable)}</span>
+          </summary>
+          <SwarmRunSettingsFields
+            draft={runSettings}
+            onChange={setRunSettings}
+            agents={agents}
+            deliverable={deliverable}
+            onDeliverable={setDeliverable}
+          />
+        </details>
+
         <p className="muted">Creating a swarm starts the planner. Review its plan, then start the work.</p>
 
         {error && <p className="error error-box" role="alert">{error}</p>}
-
-        {template && hasCostShape && surfaces.dollarEstimate && (
-          <div className="swarm-create-estimate">
-            <span className="label">Estimated spend</span>
-            <strong className="spend-figure">{formatUsd(cappedUsd(estimate))}</strong>
-            <span className="muted">Based on {leaves} typical tasks. The actual plan may differ.</span>
-          </div>
-        )}
       </div>
     </Modal>
   );
@@ -275,22 +218,14 @@ export function NewSwarmDialog({
     setError("");
     void onCreate({
       projectId,
-      // Absent rather than invented: the server answers it with the
-      // Default, and a template id the console made up would be a 404.
-      templateId: template?.id ?? null,
       name: name.trim(),
       goal: goal.trim(),
       ...(plannerProfileId ? { plannerProfileId } : {}),
       ...(workerProfileId ? { workerProfileId } : {}),
+      settings: settingsFrom(runSettings),
       attachments: [],
       start: continuing ? { kind: "existing-branch", name: continuing } : { kind: "new-branch", name: branchName },
-      /*
-       * The template decides this, and the server copies it onto the
-       * swarm. Sent as "code" here because the dialog does not ask:
-       * a field the console states and the server ignores is worse
-       * than one it does not offer.
-       */
-      deliverable: "code",
+      deliverable,
       budgetUsd: parseBudget(budget),
       workers,
       planOnly: true,

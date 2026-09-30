@@ -1,11 +1,11 @@
 import { and, asc, eq, sql } from "drizzle-orm";
-import { swarmTaskEvents, swarmTasks, swarmTemplates, swarms, type Db } from "@bento/db";
+import { swarmTaskEvents, swarmTasks, swarms, type Db } from "@bento/db";
 import { quoteUntrusted } from "./planner-prompt.js";
 
 /**
  * The last thing a swarm does before it is finished.
  *
- * A template can name two of them: an agent that reads the whole
+ * A swarm can name two of them: an agent that reads the whole
  * change, and a command that has to pass. Both answer a question no
  * leaf can, because every leaf only ever saw its own part: is this,
  * all of it together, actually the thing that was asked for.
@@ -44,42 +44,30 @@ export const FINAL_CHECK_FLAG = "finalCheck";
 export const FINAL_CHECK_TITLE = "Final check";
 
 type Task = typeof swarmTasks.$inferSelect;
-type Template = typeof swarmTemplates.$inferSelect;
+type Swarm = typeof swarms.$inferSelect;
 
 /** Whether a node is the final check rather than ordinary work. */
 export function isFinalCheck(task: Pick<Task, "flags">): boolean {
   return task.flags?.[FINAL_CHECK_FLAG] === true;
 }
 
-/** What a template asks of a finished swarm, or null when it asks nothing. */
+/** What a swarm asks of itself once finished, or null when it asks nothing. */
 export interface FinalCheck {
   judgeProfileId: string | null;
   completionCommand: string | null;
 }
 
-export function finalCheckFor(template: Pick<Template, "judgeProfileId" | "completionCommand"> | undefined): FinalCheck | null {
-  if (!template) return null;
-  const command = template.completionCommand?.trim() || null;
-  if (!template.judgeProfileId && !command) return null;
-  return { judgeProfileId: template.judgeProfileId, completionCommand: command };
-}
-
 /**
- * The template this swarm runs under, or undefined.
- *
- * Read fresh rather than copied onto the swarm, unlike the ceilings
- * and the deliverable. Those are what a swarm is running under and
- * must not change beneath it; this is a question asked once, at the
- * end, and a team that added a judge last week means it to apply to
- * the swarm finishing today.
+ * Read off the swarm fresh on every tick rather than fixed when it
+ * started, unlike the deliverable. That is what a swarm is producing
+ * and must not change beneath it; this is a question asked once, at
+ * the end, and a judge somebody added this morning is meant to apply
+ * to the swarm finishing this afternoon.
  */
-export async function templateOf(
-  tx: Pick<Db, "select">,
-  swarm: Pick<typeof swarms.$inferSelect, "templateId">,
-): Promise<Template | undefined> {
-  if (!swarm.templateId) return undefined;
-  const [row] = await tx.select().from(swarmTemplates).where(eq(swarmTemplates.id, swarm.templateId)).limit(1);
-  return row;
+export function finalCheckFor(swarm: Pick<Swarm, "judgeProfileId" | "completionCommand">): FinalCheck | null {
+  const command = swarm.completionCommand?.trim() || null;
+  if (!swarm.judgeProfileId && !command) return null;
+  return { judgeProfileId: swarm.judgeProfileId, completionCommand: command };
 }
 
 /**
@@ -113,12 +101,11 @@ export interface FinalCheckResult {
  */
 export async function ensureFinalCheck(
   tx: Pick<Db, "select" | "insert">,
-  swarm: typeof swarms.$inferSelect,
+  swarm: Swarm,
   tasks: Task[],
-  template: Template | undefined,
   now: Date,
 ): Promise<FinalCheckResult> {
-  const wanted = finalCheckFor(template);
+  const wanted = finalCheckFor(swarm);
   if (!wanted) return { created: null };
   if (!treeIsDone(tasks)) return { created: null };
 
@@ -146,8 +133,8 @@ export async function ensureFinalCheck(
       title: FINAL_CHECK_TITLE,
       description: finalCheckDescription(wanted),
       /*
-       * The judge, when the template names one. Null falls back to the
-       * template's worker, which is right for a template that asks only
+       * The judge, when the swarm names one. Null falls back to the
+       * swarm's worker, which is right for a swarm that asks only
        * for a command: what is wanted then is somebody to run it and
        * say what happened, not a second opinion.
        */

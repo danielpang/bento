@@ -118,7 +118,7 @@ async function captureFor(
 async function swarmWithTwoLeaves() {
   const [swarm] = await db
     .insert(swarms)
-    .values({ projectId: PROJECT, slug: `s-${Math.random().toString(36).slice(2, 8)}`, title: "S", status: "running" })
+    .values({ workerIsolation: "worktree", projectId: PROJECT, slug: `s-${Math.random().toString(36).slice(2, 8)}`, title: "S", status: "running" })
     .returning();
   const [first] = await db.insert(swarmTasks).values({ swarmId: swarm!.id, title: "first" }).returning();
   const [second] = await db.insert(swarmTasks).values({ swarmId: swarm!.id, title: "second" }).returning();

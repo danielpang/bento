@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
-import { agentProfiles, agentRuns, swarmTasks, swarmTemplates, swarms, type Db } from "@bento/db";
+import { agentProfiles, agentRuns, swarmTasks, swarms, type Db } from "@bento/db";
 import { modelPrice, routesToOllama, type ModelPrice } from "@bento/core";
 
 /**
@@ -33,8 +33,8 @@ export type CostTier = "measured" | "estimated" | "assumed" | "notional";
 
 /**
  * What a run that reports nothing is charged when there is nothing
- * else to go on: no figure on the template, and no run in this swarm
- * that was ever measured or estimated.
+ * else to go on: no run in this swarm that was ever measured or
+ * estimated.
  *
  * A number rather than zero, because zero is the one answer that is
  * certainly wrong: a run happened, and a swarm whose every tool is
@@ -141,33 +141,19 @@ function tokenCount(value: number | undefined): number | null {
 /**
  * What a silent run costs in this swarm.
  *
- * Three answers, in order. The template's own figure, because a team
- * that states one knows their tools better than an average does. Then
- * this swarm's rolling average of the runs it actually measured or
- * estimated, which is the honest stand in: it is what this swarm's own
- * agents have been costing. Then the fixed default, for the swarm whose
- * first run is the silent one.
+ * Two answers, in order. This swarm's rolling average of the runs it
+ * actually measured or estimated, which is the honest stand in: it is
+ * what this swarm's own agents have been costing. Then the fixed
+ * default, for the swarm whose first run is the silent one.
  *
  * The average is over this swarm alone rather than the deployment,
- * because a swarm is one template, one pair of models and one goal, and
+ * because a swarm is one pair of models and one goal, and
  * a cheap swarm must not inherit an expensive one's history.
  */
 export async function assumedCostFor(
   db: Pick<Db, "select">,
-  swarm: { id: string; templateId: string | null },
+  swarm: { id: string },
 ): Promise<number> {
-  if (swarm.templateId) {
-    const [template] = await db
-      .select({ assumedCostUsd: swarmTemplates.assumedCostUsd })
-      .from(swarmTemplates)
-      .where(eq(swarmTemplates.id, swarm.templateId))
-      .limit(1);
-    const stated = template?.assumedCostUsd === null || template?.assumedCostUsd === undefined
-      ? null
-      : Number(template.assumedCostUsd);
-    if (stated !== null && Number.isFinite(stated) && stated >= 0) return stated;
-  }
-
   const [averaged] = await db
     .select({ average: sql<string | null>`avg(${agentRuns.costUsd})` })
     .from(agentRuns)
@@ -241,7 +227,7 @@ export async function chargeForRun(
   }
 
   const [swarm] = await db
-    .select({ id: swarms.id, templateId: swarms.templateId })
+    .select({ id: swarms.id })
     .from(swarms)
     .where(eq(swarms.id, run.swarmId!))
     .limit(1);
@@ -361,7 +347,7 @@ export function budgetRefusal(
   const cap = Number(swarm.budgetUsd);
   /*
    * Zero is a real cap, not the absence of one. Treating it as
-   * unlimited let a template that deliberately allowed no additional
+   * unlimited let a swarm that deliberately allowed no additional
    * spend start agents. An invalid or negative value is failed closed
    * too: routes reject it, but a malformed imported row must not turn
    * into an unlimited budget.

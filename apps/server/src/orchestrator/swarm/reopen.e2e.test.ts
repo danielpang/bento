@@ -53,7 +53,6 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
-const TEMPLATE = "33333333-3333-3333-3333-333333333333";
 
 const exec = promisify(execFile);
 const IDENTITY = {
@@ -143,11 +142,6 @@ before(async () => {
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
   );
-  await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers,worker_isolation)
-     values ($1,'u1',null,'T',$2,$2,2,'worktree')`,
-    [TEMPLATE, PROFILE],
-  );
 
   dataDir = await mkdtemp(path.join(tmpdir(), "bento-reopen-e2e-"));
   remotePath = path.join(dataDir, "remote.git");
@@ -210,7 +204,9 @@ async function finishedSwarm(slug: string) {
       slug,
       title: "Rewrite the checkout",
       goal: "Replace the checkout with the hosted card field.",
-      templateId: TEMPLATE,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
       status: "done",
       branchName: `swarm/${slug}`,
       budgetUsd: "20",

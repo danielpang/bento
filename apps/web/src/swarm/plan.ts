@@ -90,6 +90,13 @@ export interface ModeSurfaces {
   agentHoursLine: boolean;
   outOfComputeBanner: boolean;
   dollarEstimate: boolean;
+  /**
+   * Workers a new swarm starts with: two on a local install, where each
+   * one is a build on the machine somebody is typing on, and four on a
+   * hosted one, where each is its own machine. The server's default is
+   * the same pair, so a swarm created without the dialog matches.
+   */
+  defaultSwarmWorkers: number;
 }
 
 export function modeSurfaces(mode: BentoMode): ModeSurfaces {
@@ -98,6 +105,7 @@ export function modeSurfaces(mode: BentoMode): ModeSurfaces {
     agentHoursLine: mode === "multi",
     outOfComputeBanner: mode === "multi",
     dollarEstimate: true,
+    defaultSwarmWorkers: mode === "multi" ? 4 : 2,
   };
 }
 

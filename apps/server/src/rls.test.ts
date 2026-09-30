@@ -46,7 +46,6 @@ const TENANT_TABLES = [
   "mcp_servers",
   "mcp_credentials",
   "mcp_run_grants",
-  "swarm_templates",
   "swarms",
   "swarm_tasks",
   "swarm_task_events",
@@ -650,7 +649,6 @@ test("the tenant role cannot write MCP run grants", async () => {
  */
 const SWARM = {
   project: "00000001-0000-0000-0000-000000000000",
-  template: "60000001-0000-0000-0000-000000000000",
   swarm: "61000001-0000-0000-0000-000000000000",
   task: "62000001-0000-0000-0000-000000000000",
   profile: "63000001-0000-0000-0000-000000000000",
@@ -659,11 +657,6 @@ const SWARM = {
 
 test("a swarm and everything under it belongs to one organization", async () => {
   await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,worker_isolation)
-     values ($1,'u1','org-a','Ship a feature','sandbox')`,
-    [SWARM.template],
-  );
-  await pool.query(
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model)
      values ($1,'u1','org-a','Swarm worker','fake','fake-1')`,
     [SWARM.profile],
@@ -671,9 +664,9 @@ test("a swarm and everything under it belongs to one organization", async () => 
   // Only the swarm names its organization. Everything below it is
   // inserted without one, so the triggers have to derive it.
   await pool.query(
-    `insert into swarms (id,project_id,organization_id,slug,title,template_id)
-     values ($1,$2,'org-a','ship','Ship it',$3)`,
-    [SWARM.swarm, SWARM.project, SWARM.template],
+    `insert into swarms (id,project_id,organization_id,slug,title,worker_isolation)
+     values ($1,$2,'org-a','ship','Ship it','sandbox')`,
+    [SWARM.swarm, SWARM.project],
   );
   const task = await pool.query(
     `insert into swarm_tasks (id,swarm_id,title) values ($1,$2,'Write the parser')
@@ -716,7 +709,6 @@ test("another organization reads nothing of a swarm", async () => {
   // Runs after the seeding test, so every one of these tables has rows
   // to withhold. The policy is the only thing between them and org-b.
   const tables = [
-    "swarm_templates",
     "swarms",
     "swarm_tasks",
     "swarm_task_events",
@@ -935,7 +927,7 @@ test("a swarm run cannot reference another tenant's swarm, task or agent", async
   const taskB = "62000002-0000-0000-0000-000000000000";
   const profileB = "63000002-0000-0000-0000-000000000000";
   await pool.query(
-    `insert into swarms (id,project_id,organization_id,slug,title) values ($1,$2,'org-b','ship','Ship it too')`,
+    `insert into swarms (id,project_id,organization_id,slug,title,worker_isolation) values ($1,$2,'org-b','ship','Ship it too','sandbox')`,
     [swarmB, projectB],
   );
   await pool.query(`insert into swarm_tasks (id,swarm_id,title) values ($1,$2,'Theirs')`, [taskB, swarmB]);
@@ -992,7 +984,7 @@ test("a swarm run passes the tenant check in local mode", async () => {
     [project],
   );
   await pool.query(
-    `insert into swarms (id,project_id,slug,title) values ($1,$2,'local','Local swarm')`,
+    `insert into swarms (id,project_id,slug,title,worker_isolation) values ($1,$2,'local','Local swarm','worktree')`,
     [swarm, project],
   );
   const localSwarm = await pool.query("select organization_id from swarms where id = $1", [swarm]);

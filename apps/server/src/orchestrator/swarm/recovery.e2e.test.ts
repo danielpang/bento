@@ -123,6 +123,7 @@ async function makeSwarm(status: (typeof swarms.$inferSelect)["status"] = "runni
   const [swarm] = await db
     .insert(swarms)
     .values({
+      workerIsolation: "worktree",
       projectId: PROJECT,
       slug: `s-${Math.random().toString(36).slice(2, 8)}`,
       title: "Swarm",

@@ -1,7 +1,7 @@
-import { SaveTemplateDialog } from "./SaveTemplateDialog.js";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BentoClient, RunArtifact } from "@bento/api-client";
 import { NewSwarmDialog } from "./NewSwarmDialog.js";
+import { SwarmSettingsDialog } from "./SwarmSettingsFields.js";
 import { DeleteSwarmDialog } from "./DeleteSwarmDialog.js";
 import { ReopenDialog } from "./ReopenDialog.js";
 import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
@@ -18,7 +18,6 @@ import type {
   SwarmDetail,
   SwarmNodeDetail,
   SwarmSummary,
-  SwarmTemplate,
 } from "../swarm/types.js";
 import {
   boardSearch,
@@ -80,8 +79,7 @@ export function SwarmBoard({
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SwarmDetail | null>(null);
-  const [templates, setTemplates] = useState<SwarmTemplate[]>([]);
-  /** The agents a node can be reassigned to, for the drawer's picker. */
+  /** The agents a swarm can be run as, for the dialogs and the drawer's picker. */
   const [agents, setAgents] = useState<SwarmAgent[]>([]);
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
   const [expanded, setExpanded] = useState<string[]>([]);
@@ -266,33 +264,25 @@ export function SwarmBoard({
   }, [selectedId, taskId, loadNode]);
 
   const [creating, setCreating] = useState(false);
+  /** Whether the settings dialog is up for the swarm on screen. */
+  const [editingSettings, setEditingSettings] = useState(false);
   const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void swarmApi.listTemplates()
-      .then(async (rows) => {
-        if (!cancelled) setTemplates(rows);
-        // Listing templates seeds default swarm profiles on a fresh install.
-        const profiles = await swarmApi.listAgents();
+    // Read again whenever a dialog opens, because creating a swarm is
+    // what makes the install's Swarm Planner and Swarm Worker, and the
+    // next dialog should offer them by name.
+    void swarmApi.listAgents()
+      .then((profiles) => {
         if (!cancelled) setAgents(profiles);
       })
       .catch(() => {
-        if (!cancelled) {
-          setTemplates([]);
-          setAgents([]);
-        }
+        if (!cancelled) setAgents([]);
       });
     return () => { cancelled = true; };
-  }, [creating]);
+  }, [creating, editingSettings]);
   /** Whether the reopen dialog is up for the swarm on screen. */
   const [reopening, setReopening] = useState(false);
-  /*
-   * Naming a template happens in a Modal rather than window.prompt.
-   * The desktop app is this console loaded in Electron, which does not
-   * implement prompt at all: the call throws in the renderer and the
-   * button does nothing, with no error anywhere a person can see.
-   */
-  const [savingTemplate, setSavingTemplate] = useState(false);
   /** What this swarm produced for people to read, and the one that is open. */
   const [artifacts, setArtifacts] = useState<SwarmArtifact[]>([]);
   const [openArtifact, setOpenArtifact] = useState<RunArtifact | null>(null);
@@ -401,7 +391,7 @@ export function SwarmBoard({
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
             onRestore: () => selectedId && act(() => swarmApi.restoreSwarm(selectedId)),
             onWorkers: (workers) => selectedId && act(() => swarmApi.setWorkers(selectedId, workers)),
-            onSaveAsTemplate: () => setSavingTemplate(true),
+            onSettings: () => setEditingSettings(true),
             onAnswer: (questionId, text) =>
               selectedId && act(() => swarmApi.answerQuestion(selectedId, questionId, text)),
           }}
@@ -488,25 +478,22 @@ export function SwarmBoard({
         </Suspense>
       )}
 
-      {savingTemplate && detail && selectedId && (
-        <SaveTemplateDialog
-          suggested={`${detail.swarm.name} shape`}
+      {editingSettings && detail && selectedId && (
+        <SwarmSettingsDialog
+          swarm={detail.swarm}
+          agents={agents}
           busy={busy}
-          onClose={() => setSavingTemplate(false)}
-          onSave={(name) => {
+          onClose={() => setEditingSettings(false)}
+          onSave={async (change) => {
             setBusy(true);
-            void swarmApi
-              .saveSwarmAsTemplate(selectedId, name)
-              .then(() => {
-                setSavingTemplate(false);
-                // The New swarm dialog reads this list, and it is
-                // loaded once on mount, so a template saved here would
-                // not be offerable until a reload without this.
-                return swarmApi.listTemplates().then(setTemplates);
-              })
-              .then(() => setError(""))
-              .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-              .finally(() => setBusy(false));
+            try {
+              await swarmApi.updateSettings(selectedId, change);
+              setEditingSettings(false);
+              loadDetail(selectedId);
+              setError("");
+            } finally {
+              setBusy(false);
+            }
           }}
         />
       )}
@@ -539,7 +526,6 @@ export function SwarmBoard({
       {creating && (
         <NewSwarmDialog
           projectId={projectId}
-          templates={templates}
           agents={agents}
           surfaces={surfaces}
           busy={busy}

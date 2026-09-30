@@ -1025,13 +1025,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * Board, Sessions and Pipeline are all about cards: a swarm has no
    * stage to configure, no session list of its own, and the board
    * button would point at the board already open. So on the swarm
-   * board they are left out, and what replaces them is the thing a
-   * swarm actually runs under.
-   *
-   * Templates rather than Agents, pointing at the same panel. The
-   * templates live inside it, and dropping the only entry that reaches
-   * them would put a person back where this started: a New swarm
-   * dialog asking for a template with nowhere to make one.
+   * board they are left out. A swarm's agents and how it is run are
+   * chosen in the New swarm dialog and changed in its own settings.
    */
   /*
    * And only where the swarm board is the thing actually on screen.
@@ -1047,7 +1042,6 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const onSwarmBoard = swarming && projectId !== null && hasProjects;
   const actions: NavAction[] = onSwarmBoard
     ? [
-        { id: "templates", label: "Templates", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
         ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
       ]
     : [

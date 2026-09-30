@@ -52,7 +52,7 @@ export interface ProvisionWorkspaceInput {
    */
   agentBinaries?: readonly AgentBinary[];
   /**
-   * What the caller's template promised about where its agents work,
+   * What the caller promised about where its agents work,
    * when the caller has one.
    *
    * A card has none: a stage's checkout is wherever the driver puts
@@ -136,7 +136,7 @@ export async function provisionWorkspace(
    * The shape the caller promised, before anything is created.
    *
    * Above the duplicate check rather than below it because this is the
-   * cheapest refusal there is: a template that asserts checkouts on
+   * cheapest refusal there is: a swarm that asserts checkouts on
    * this server, on a driver whose sandboxes hold their own clones, is
    * a swarm that cannot land a single branch. Better to say that than
    * to provision the machine and find out at the merge queue.

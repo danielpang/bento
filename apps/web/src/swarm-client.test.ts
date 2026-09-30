@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
-import { SWARM_TEMPLATES, generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
+import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
 import { clampWorkers, parseBudget, suggestBranch } from "./components/NewSwarmDialog.js";
 import type { NewSwarmInput } from "./swarm/types.js";
@@ -32,7 +32,6 @@ test("planner guidance stays visible while it waits for the next turn", async ()
 function input(over: Partial<NewSwarmInput> = {}): NewSwarmInput {
   return {
     projectId: "p1",
-    templateId: "tpl-code",
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
     attachments: [],
@@ -126,7 +125,7 @@ test("pausing, stopping and archiving are the states the header reads back", asy
   assert.equal((await api.getSwarm("sw-checkout")).swarm.archivedAt, null);
 });
 
-test("the worker count is held inside the template's own ceiling", async () => {
+test("the worker count is held inside the swarm's ceiling", async () => {
   const api = fixtureSwarmApi(clock);
   await api.listSwarms("p1");
   await api.setWorkers("sw-checkout", 99);
@@ -162,18 +161,6 @@ test("the seeded fixtures include a swarm large enough to be a real plan", () =>
   assert.deepEqual(generateSwarmTasks(20).map((t) => t.id), generateSwarmTasks(20).map((t) => t.id));
 });
 
-test("every template names both models and a tier for every tool", () => {
-  for (const template of SWARM_TEMPLATES) {
-    assert.ok(template.plannerModel.length > 0, template.id);
-    assert.ok(template.workerModel.length > 0, template.id);
-    assert.ok(template.tools.length > 0, template.id);
-    for (const tool of template.tools) {
-      assert.ok(["measured", "estimated", "assumed"].includes(tool.tier), `${template.id}:${tool.name}`);
-    }
-    assert.ok(template.maxWorkers >= 1, template.id);
-  }
-});
-
 test("a swarm's branch is suggested from its name, and a budget is a number or nothing", () => {
   assert.equal(suggestBranch("Checkout rewrite"), "bento/checkout-rewrite");
   assert.equal(suggestBranch("  Fix the API!  "), "bento/fix-the-api");
@@ -190,73 +177,30 @@ test("a swarm's branch is suggested from its name, and a budget is a number or n
   assert.equal(clampWorkers(3.4, 8), 3);
 });
 
-test("a fixture template survives a create, an edit and a delete, with ids that do not repeat", async () => {
-  /**
-   * The panel finds a template by id for every edit and delete, so an
-   * id that repeats is an edit that lands on the wrong row. The old
-   * scheme numbered from the list's length, which repeats as soon as
-   * anything is deleted.
-   */
+test("a new swarm carries the settings it was created with, and the defaults for the rest", async () => {
   const api = fixtureSwarmApi(clock);
-  const seeded = await api.listTemplates();
+  const plain = await api.createSwarm(input());
+  assert.equal(plain.swarm.settings.judgeProfileId, null);
+  assert.equal(plain.swarm.settings.maxPlanDepth, 1);
+  assert.equal(plain.swarm.settings.plannerProfileId, "agent-planner", "the install's own planner");
 
-  const first = await api.createTemplate({
-    name: "Wide",
-    description: "Many workers",
-    maxWorkers: 6,
-    budgetUsd: 50,
-    timeLimitMin: null,
-  });
-  const second = await api.createTemplate({
-    name: "Narrow",
-    description: "One worker",
-    maxWorkers: 1,
-    budgetUsd: null,
-    timeLimitMin: 30,
-  });
-  assert.notEqual(first.id, second.id);
-  assert.equal(first.maxWorkers, 6);
-  assert.equal(first.maxBudgetUsd, 50);
-  assert.equal(second.timeLimitMin, 30);
-  assert.equal(second.maxBudgetUsd, null, "no cap is null rather than the first fixture's figure");
-
-  await api.deleteTemplate(seeded[0]!.id);
-  const third = await api.createTemplate({
-    name: "Third",
-    description: "",
-    maxWorkers: 2,
-    budgetUsd: null,
-    timeLimitMin: null,
-  });
-  const ids = (await api.listTemplates()).map((row) => row.id);
-  assert.equal(new Set(ids).size, ids.length, "a delete must not let the next create repeat an id");
-  assert.ok(ids.includes(third.id));
-
-  const renamed = await api.updateTemplate(second.id, { name: "Renamed" });
-  assert.equal(renamed.name, "Renamed");
-  assert.equal(renamed.maxWorkers, 1, "an edit that says only a name leaves the ceilings alone");
-  assert.equal(renamed.timeLimitMin, 30);
+  const checked = await api.createSwarm(
+    input({ workerProfileId: "agent-planner", settings: { completionCommand: "pnpm test", maxPlanDepth: 2 } }),
+  );
+  assert.equal(checked.swarm.settings.workerProfileId, "agent-planner");
+  assert.equal(checked.swarm.settings.completionCommand, "pnpm test");
+  assert.equal(checked.swarm.settings.maxPlanDepth, 2);
 });
 
-test("the list a caller holds is not the fixture's own state", async () => {
+test("changing a swarm's settings changes what was given and nothing else", async () => {
   const api = fixtureSwarmApi(clock);
-  const rows = await api.listTemplates();
-  rows[0]!.name = "scribbled on";
-  assert.notEqual((await api.listTemplates())[0]!.name, "scribbled on");
-});
+  const swarmId = (await api.listSwarms("p1"))[0]!.id;
+  const before = (await api.getSwarm(swarmId)).swarm;
 
-test("a swarm saved as a template keeps its own ceilings over the template's", async () => {
-  const api = fixtureSwarmApi(clock);
-  const swarms = await api.listSwarms("p1");
-  const swarmId = swarms[0]!.id;
-  const detail = await api.getSwarm(swarmId);
-
-  await api.setWorkers(swarmId, 5);
-  const after = await api.getSwarm(swarmId);
-  const saved = await api.saveSwarmAsTemplate(swarmId, "From a swarm");
-
-  assert.equal(saved.name, "From a swarm");
-  assert.equal(saved.maxWorkers, after.swarm.workers, "the swarm's number, not the template's");
-  assert.match(saved.description, new RegExp(detail.swarm.name));
-  assert.ok((await api.listTemplates()).some((row) => row.id === saved.id));
+  await api.updateSettings(swarmId, { judgeProfileId: "agent-worker", budgetUsd: null });
+  const after = (await api.getSwarm(swarmId)).swarm;
+  assert.equal(after.settings.judgeProfileId, "agent-worker");
+  assert.equal(after.budgetUsd, null, "null clears the cap");
+  assert.equal(after.settings.workerProfileId, before.settings.workerProfileId, "and the rest is left alone");
+  assert.equal(after.timeLimitMin, before.timeLimitMin);
 });

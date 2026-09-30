@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { swarmTasks, swarms, swarmTemplates } from "@bento/db";
+import type { swarmTasks, swarms } from "@bento/db";
 import {
   buildFinalCheckPrompt,
   finalCheckDescription,
@@ -16,7 +16,7 @@ import {
  *
  * What is held here is the arithmetic and the words, which is all of
  * it that can be wrong without a database: when a tree counts as
- * finished, what a template is actually asking for, and what the agent
+ * finished, what a swarm is actually asking for, and what the agent
  * doing the looking is told. Putting the node on the tree is the
  * coordinator's, and its own test drives it.
  */
@@ -32,18 +32,17 @@ function task(over: Partial<Task> & Pick<Task, "id" | "status">): Task {
   } as Task;
 }
 
-const template = (over: Partial<typeof swarmTemplates.$inferSelect> = {}) =>
-  ({ judgeProfileId: null, completionCommand: null, ...over }) as typeof swarmTemplates.$inferSelect;
+const settings = (over: Partial<typeof swarms.$inferSelect> = {}) =>
+  ({ judgeProfileId: null, completionCommand: null, ...over }) as typeof swarms.$inferSelect;
 
-test("a template asks for a final check only when it names one", () => {
-  assert.equal(finalCheckFor(undefined), null, "a swarm with no template asks for nothing");
-  assert.equal(finalCheckFor(template()), null);
-  assert.equal(finalCheckFor(template({ completionCommand: "   " })), null, "whitespace is not a command");
+test("a swarm asks for a final check only when it names one", () => {
+  assert.equal(finalCheckFor(settings()), null, "a swarm with neither asks for nothing");
+  assert.equal(finalCheckFor(settings({ completionCommand: "   " })), null, "whitespace is not a command");
 
-  const judged = finalCheckFor(template({ judgeProfileId: "agent-1" }));
+  const judged = finalCheckFor(settings({ judgeProfileId: "agent-1" }));
   assert.deepEqual(judged, { judgeProfileId: "agent-1", completionCommand: null });
 
-  const both = finalCheckFor(template({ judgeProfileId: "agent-1", completionCommand: "pnpm test" }));
+  const both = finalCheckFor(settings({ judgeProfileId: "agent-1", completionCommand: "pnpm test" }));
   assert.deepEqual(both, { judgeProfileId: "agent-1", completionCommand: "pnpm test" });
 });
 

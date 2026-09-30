@@ -7,6 +7,7 @@ import type { SandboxHandle } from "@bento/sandbox";
 import {
   agentProfiles,
   agentRuns,
+  ensureSwarmAgents,
   projects,
   repositories,
   runArtifacts,
@@ -17,14 +18,12 @@ import {
   swarmPullRequests,
   swarmTaskEvents,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
 import {
   canAccessProject,
   getAccessibleSwarm,
-  getAccessibleSwarmTemplate,
   getActiveOrganizationMembership,
   visibleProjectFilter,
 } from "../access.js";
@@ -35,8 +34,7 @@ import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
-import { ensureDefaultSwarmTemplate } from "../orchestrator/swarm/default-template.js";
-import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
+import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { branchCheckoutPath, releaseSwarmBranch } from "../orchestrator/swarm/release-branch.js";
@@ -142,26 +140,42 @@ const TASK_EVENTS_SHOWN = 50;
 const SWARM_ARTIFACTS_SHOWN = 50;
 
 /**
- * Saving a swarm's shape as a template. Only the name is asked for:
- * everything else is the swarm and the template it came from, and a
- * form that re-asked for all of it would be the create form with extra
- * steps.
+ * A piece of free text a person may leave empty. Trimmed, and empty
+ * stored as null, so "no instructions" and "   " are the same row and
+ * a prompt is never handed a heading with nothing under it.
  */
-const saveAsTemplate = z.object({
-  name: z.string().trim().min(1).max(120),
-  description: z.string().max(4000).optional(),
-});
+const optionalText = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .transform((value) => value.trim() || null)
+    .nullable();
+
+/**
+ * How the swarm is run, beyond its agents and ceilings. Every one is
+ * optional and defaults to what a swarm does when nobody says: no
+ * judge, no completion command, one planner, no extra instructions.
+ */
+const swarmSettings = {
+  judgeProfileId: z.string().uuid().nullable().optional(),
+  completionCommand: optionalText(4000).optional(),
+  maxPlanDepth: z.number().int().min(1).max(MAX_PLAN_DEPTH).optional(),
+  plannerInstructions: optionalText(20_000).optional(),
+  workerInstructions: optionalText(20_000).optional(),
+};
 
 const createSwarm = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(200),
   goal: z.string().max(MAX_SWARM_GOAL_CHARS).default(""),
-  templateId: z.string().uuid().nullish(),
   plannerProfileId: z.string().uuid().optional(),
   workerProfileId: z.string().uuid().optional(),
   maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).optional(),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
+  /** A change to the code, or a document. Fixed once the swarm exists. */
+  deliverable: z.enum(["code", "document"]).default("code"),
+  ...swarmSettings,
   /**
    * A branch that already exists, to start from.
    *
@@ -183,7 +197,7 @@ const createSwarm = z.object({
 
 /**
  * What a person may change about a swarm: what it is called, its
- * ceilings, and whether it is put away.
+ * ceilings, how it is run, and whether it is put away.
  *
  * The goal is deliberately absent. It is the immutable request the
  * swarm was created from, and changing it in place would rewrite the
@@ -204,6 +218,14 @@ const updateSwarm = z
     maxWorkers: z.number().int().min(1).max(MAX_SWARM_WORKERS).optional(),
     budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
     timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
+    /**
+     * The agents, which a person changes when one was deleted or was
+     * not up to the work. Not nullable: a swarm with no planner has
+     * nobody to plan with, so clearing one is not a setting.
+     */
+    plannerProfileId: z.string().uuid().optional(),
+    workerProfileId: z.string().uuid().optional(),
+    ...swarmSettings,
     archived: z.boolean().optional(),
   })
   .strict()
@@ -240,6 +262,45 @@ function saySwarmChanged(
       ...(status ? { status } : {}),
     });
   });
+}
+
+/**
+ * Workers a swarm starts with when the person creating it did not say.
+ *
+ * Two on a local install, four on a hosted one. A hosted worker is its
+ * own machine, so four of them cost four machines and nothing of the
+ * person's laptop. A local worker is a worktree and a container on the
+ * machine somebody is also using: four agents each running the
+ * repository's test command is four builds competing for the same
+ * cores. A starting value and not a limit; MAX_SWARM_WORKERS is that.
+ */
+export function defaultMaxWorkers(ctx: AppContext): number {
+  return ctx.env.BENTO_MODE === "multi" ? 4 : 2;
+}
+
+/**
+ * Whether this agent is one a swarm in this organization may run.
+ *
+ * The agent has to belong to the swarm's team, or on a local install
+ * to the caller, the same rule the agent routes apply. Answered as a
+ * yes or no so every caller can refuse with the same 404: an agent id
+ * from another team reads as not there.
+ */
+async function canUseProfile(
+  ctx: AppContext,
+  c: Context,
+  organizationId: string | null,
+  profileId: string,
+): Promise<boolean> {
+  const [profile] = await db(c, ctx)
+    .select({ ownerId: agentProfiles.ownerId, organizationId: agentProfiles.organizationId })
+    .from(agentProfiles)
+    .where(eq(agentProfiles.id, profileId))
+    .limit(1);
+  if (!profile) return false;
+  return organizationId
+    ? profile.organizationId === organizationId
+    : profile.organizationId === null && profile.ownerId === actor(c);
 }
 
 export function swarmRoutes(ctx: AppContext) {
@@ -314,41 +375,34 @@ export function swarmRoutes(ctx: AppContext) {
       }
 
       const membership = await getActiveOrganizationMembership(ctx, c);
-      const template = body.templateId
-        ? await getAccessibleSwarmTemplate(ctx, c, body.templateId)
-        : await ensureDefaultSwarmTemplate(ctx, c, project.organizationId);
-      if (!template) return c.json({ error: "not found" }, 404);
-      for (const profileId of [body.plannerProfileId, body.workerProfileId]) {
-        if (!profileId) continue;
-        const [profile] = await db(c, ctx)
-          .select({ ownerId: agentProfiles.ownerId, organizationId: agentProfiles.organizationId })
-          .from(agentProfiles)
-          .where(eq(agentProfiles.id, profileId))
-          .limit(1);
-        if (!profile || (project.organizationId
-          ? profile.organizationId !== project.organizationId
-          : profile.organizationId !== null || profile.ownerId !== actor(c))) {
-          return c.json({ error: "agent not found" }, 404);
-        }
-      }
-      const plannerProfileId = body.plannerProfileId ?? template.plannerProfileId;
-      const workerProfileId = body.workerProfileId ?? template.workerProfileId;
-      if (!plannerProfileId) {
-        return c.json(
-          { error: "This swarm template has no planner agent, so there is nobody to write the plan. Choose one under Swarm templates." },
-          400,
-        );
-      }
       if (ctx.env.BENTO_MODE === "multi" && project.organizationId && !membership) {
         return c.json({ error: "not found" }, 404);
       }
+      for (const profileId of [body.plannerProfileId, body.workerProfileId, body.judgeProfileId]) {
+        if (profileId && !(await canUseProfile(ctx, c, project.organizationId, profileId))) {
+          return c.json({ error: "agent not found" }, 404);
+        }
+      }
+      /*
+       * The agents a person did not choose are the install's own
+       * Swarm Planner and Swarm Worker, made the first time anybody
+       * needs them. Asked only when one is missing, so a swarm with
+       * both chosen writes nothing it did not ask for.
+       */
+      const defaults =
+        body.plannerProfileId && body.workerProfileId
+          ? null
+          : await ensureSwarmAgents(db(c, ctx), {
+              ownerId: actor(c),
+              organizationId: ctx.env.BENTO_MODE === "multi" ? project.organizationId : null,
+            });
+      const plannerProfileId = body.plannerProfileId ?? defaults?.planner ?? null;
+      const workerProfileId = body.workerProfileId ?? defaults?.worker ?? null;
+      if (!plannerProfileId) {
+        return c.json({ error: "Choose a planner agent for this swarm." }, 400);
+      }
 
-      const budgetUsd =
-        body.budgetUsd === undefined
-          ? template.budgetUsd
-          : body.budgetUsd === null
-            ? null
-            : String(body.budgetUsd);
+      const budgetUsd = body.budgetUsd === undefined || body.budgetUsd === null ? null : String(body.budgetUsd);
       const budget = budgetRefusal({
         budgetUsd,
         spentMeasuredUsd: "0",
@@ -366,27 +420,32 @@ export function swarmRoutes(ctx: AppContext) {
           slug,
           title: body.title,
           goal: body.goal,
-          templateId: template.id,
           plannerProfileId,
           workerProfileId,
+          /*
+           * Where the workers work, written down now rather than read
+           * off the deployment on every run: a local install's agents
+           * share the checkout on disk, each in a worktree; a hosted
+           * one gives each agent a machine holding its own clone. An
+           * install that later joins a team is then told its swarms
+           * cannot keep their shape, instead of quietly given another.
+           */
+          workerIsolation: ctx.env.BENTO_MODE === "multi" ? "sandbox" : "worktree",
+          judgeProfileId: body.judgeProfileId ?? null,
+          completionCommand: body.completionCommand ?? null,
+          maxPlanDepth: body.maxPlanDepth ?? 1,
+          plannerInstructions: body.plannerInstructions ?? null,
+          workerInstructions: body.workerInstructions ?? null,
           // Planning, not draft: the planner starts below, and a person
           // watching should see that rather than a swarm that looks
           // like it is waiting for them.
           status: "planning",
           branchName: swarmBranchName(slug),
-          /*
-           * What this swarm produces, and where it starts from.
-           *
-           * The deliverable is copied off the template rather than read
-           * back through it later, for the reason the ceilings are
-           * copied: a template edited next month must not change what
-           * a swarm that ran today was producing.
-           */
-          deliverable: template.deliverable,
+          deliverable: body.deliverable,
           startBranch: body.startBranch ?? null,
-          maxWorkers: body.maxWorkers ?? template.maxWorkers,
+          maxWorkers: body.maxWorkers ?? defaultMaxWorkers(ctx),
           budgetUsd,
-          timeLimitMin: body.timeLimitMin === undefined ? template.timeLimitMin : body.timeLimitMin ?? null,
+          timeLimitMin: body.timeLimitMin ?? null,
           startedBy: actor(c),
         })
         .returning();
@@ -640,6 +699,11 @@ export function swarmRoutes(ctx: AppContext) {
       const refusal = await requireSwarms(ctx, c, swarm.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
       const body = c.req.valid("json");
+      for (const profileId of [body.plannerProfileId, body.workerProfileId, body.judgeProfileId]) {
+        if (profileId && !(await canUseProfile(ctx, c, swarm.organizationId, profileId))) {
+          return c.json({ error: "agent not found" }, 404);
+        }
+      }
 
       const { budgetUsd, archived, ...rest } = body;
       const [updated] = await db(c, ctx)
@@ -670,8 +734,22 @@ export function swarmRoutes(ctx: AppContext) {
        * and a planner that was told once about the old one would never
        * be told about this one.
        */
+      /*
+       * The run settings are read fresh on every tick, so a judge or a
+       * completion command set on a swarm that is already waiting on
+       * its last leaf is asked about on the next one rather than after
+       * whatever happens to wake the swarm next. A new worker is the
+       * same: leaves that were waiting for one can start now.
+       */
       const ceilingMoved =
-        rest.maxWorkers !== undefined || budgetUsd !== undefined || rest.timeLimitMin !== undefined;
+        rest.maxWorkers !== undefined ||
+        budgetUsd !== undefined ||
+        rest.timeLimitMin !== undefined ||
+        rest.judgeProfileId !== undefined ||
+        rest.plannerProfileId !== undefined ||
+        rest.workerProfileId !== undefined ||
+        rest.completionCommand !== undefined ||
+        rest.maxPlanDepth !== undefined;
       if (budgetUsd !== undefined) {
         await db(c, ctx).update(swarms).set({ budgetWarnedAt: null }).where(eq(swarms.id, swarm.id));
       }
@@ -1043,90 +1121,6 @@ export function swarmRoutes(ctx: AppContext) {
         return c.json({ swarm: reopened.swarm, followUpTaskId: reopened.followUpTaskId, followUp: reopened.followUp }, 201);
       },
     )
-    /**
-     * This swarm's shape, saved as a template to start the next one
-     * from.
-     *
-     * A swarm copies its ceilings from the template it was made with
-     * and may then be changed: workers raised once the plan turned out
-     * wider than expected, a budget lifted, a time limit dropped. That
-     * tuning is the thing worth keeping, and today it dies with the
-     * swarm.
-     *
-     * So the new template is the old one with this swarm's current
-     * ceilings written over it. The fields a swarm has no opinion
-     * about (the agents, the instructions, where workers work, the
-     * judge, the completion command, how deep a plan may go) are
-     * carried across unchanged, because a swarm never had its own copy
-     * of them to diverge with. Copied rather than referenced, so
-     * editing either one afterwards leaves the other alone.
-     *
-     * A swarm whose template has since been deleted is refused rather
-     * than half saved: templateId is set null on delete, and a
-     * template invented out of the four fields a swarm does carry
-     * would name no agents and could not start anything.
-     */
-    .post("/:id/template", zValidator("json", saveAsTemplate), async (c) => {
-      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
-      if (!swarm) return c.json({ error: "not found" }, 404);
-      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
-      if (refusal) return c.json(refusal.body, refusal.status);
-      const body = c.req.valid("json");
-
-      if (!swarm.templateId) {
-        return c.json(
-          {
-            error:
-              "This swarm's template has been deleted, so there is nothing to save from. Create a template in Agents instead.",
-          },
-          409,
-        );
-      }
-      /*
-       * Resolved through the access helper rather than read by id: the
-       * swarm is reachable through its project, and a template is
-       * reachable through its owner or its organization. They are not
-       * the same question, and a project shared into a second team
-       * would otherwise hand that team a copy of a template nobody
-       * there may see.
-       */
-      const source = await getAccessibleSwarmTemplate(ctx, c, swarm.templateId);
-      if (!source) return c.json({ error: "not found" }, 404);
-
-      const [template] = await db(c, ctx)
-        .insert(swarmTemplates)
-        .values({
-          ownerId: actor(c),
-          /*
-           * The organization the source template was in, not the one
-           * the caller has open. A template saved from a team's swarm
-           * belongs to that team, the same way the swarm does.
-           */
-          organizationId: source.organizationId,
-          name: body.name,
-          description: body.description ?? `Saved from the swarm "${swarm.title}".`,
-          plannerProfileId: swarm.plannerProfileId ?? source.plannerProfileId,
-          workerProfileId: swarm.workerProfileId ?? source.workerProfileId,
-          plannerInstructions: source.plannerInstructions,
-          workerInstructions: source.workerInstructions,
-          workerIsolation: source.workerIsolation,
-          judgeProfileId: source.judgeProfileId,
-          completionCommand: source.completionCommand,
-          maxPlanDepth: source.maxPlanDepth,
-          assumedCostUsd: source.assumedCostUsd,
-          longRunWarnMin: source.longRunWarnMin,
-          longRunEscalateMin: source.longRunEscalateMin,
-          documentPath: source.documentPath,
-          // And the four the swarm itself carries, as they stand now.
-          maxWorkers: swarm.maxWorkers,
-          budgetUsd: swarm.budgetUsd,
-          timeLimitMin: swarm.timeLimitMin,
-          deliverable: swarm.deliverable,
-        })
-        .returning();
-      if (!template) return c.json({ error: "something went wrong saving the template; try again" }, 500);
-      return c.json(template, 201);
-    })
     /**
      * What this swarm produced for people to read: its assembled
      * document, and anything else its agents captured.
@@ -1622,10 +1616,10 @@ export function swarmRoutes(ctx: AppContext) {
     /**
      * Puts a different agent on one leaf.
      *
-     * On the leaf rather than on the template, because the answer to
+     * On the leaf rather than on the swarm, because the answer to
      * one task a cheap worker could not finish is a stronger agent on
      * that task, not a stronger agent on every task that has not
-     * started yet. Null puts it back on the template's own worker.
+     * started yet. Null puts it back on the swarm's own worker.
      *
      * The agent has to be one this caller can reach, which is the same
      * check every other route that names an agent makes: an id from

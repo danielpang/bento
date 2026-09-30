@@ -65,42 +65,19 @@ export function isDocumentSwarm(swarm: Pick<typeof swarms.$inferSelect, "deliver
 }
 
 /**
- * The file the assembled document is written to.
+ * The file the assembled document is written to: `docs/<slug>.md`.
  *
- * The template's own path when it set one, and `docs/<slug>.md`
- * otherwise. Worked out from the slug rather than the title, because
- * the slug is already the thing that is safe in a branch name and a
- * URL, and a title is a sentence somebody typed.
+ * Worked out from the slug rather than the title, because the slug is
+ * already the thing that is safe in a branch name and a URL, and a
+ * title is a sentence somebody typed.
  */
-export function documentPathFor(
-  swarm: Pick<typeof swarms.$inferSelect, "slug">,
-  templatePath?: string | null,
-): string {
-  const named = templatePath?.trim();
-  if (named && isSafeRelativePath(named)) return named;
+export function documentPathFor(swarm: Pick<typeof swarms.$inferSelect, "slug">): string {
   return `docs/${swarm.slug}.md`;
 }
 
 /** The file one leaf writes its section into. */
 export function sectionPathFor(task: Pick<typeof swarmTasks.$inferSelect, "id">): string {
   return `${SECTION_DIR}/${task.id}.md`;
-}
-
-/**
- * A path an agent or a template named, checked before anything is
- * written to it.
- *
- * Inside the repository and nowhere else: no absolute path, nothing
- * that climbs out with "..", no backslashes, nothing hidden. A
- * template is written by a person on the team rather than by an agent,
- * so this is not the tenant boundary; it is the same care every other
- * path this server builds out of a stored string gets.
- */
-export function isSafeRelativePath(value: string): boolean {
-  if (value.startsWith("/") || value.includes("\\") || value.includes("\0")) return false;
-  const parts = value.split("/");
-  if (parts.some((part) => part === "" || part === "." || part === "..")) return false;
-  return value.endsWith(".md");
 }
 
 /** One section, as the assembled document reads it. */
@@ -235,8 +212,6 @@ export async function assembleSwarmDocument(
     swarm: typeof swarms.$inferSelect;
     /** The checkout the merge queue has been landing into. */
     worktreePath: string;
-    /** The template's document path, when it named one. */
-    templatePath?: string | null;
     /** The planner's design note, which becomes the preamble. */
     preamble?: string | null;
     /** The run to file the artifact under, when the caller has one. */
@@ -261,7 +236,7 @@ export async function assembleSwarmDocument(
     sections,
   });
 
-  const relative = documentPathFor(input.swarm, input.templatePath);
+  const relative = documentPathFor(input.swarm);
   const absolute = path.join(input.worktreePath, relative);
   await mkdir(path.dirname(absolute), { recursive: true });
   const existing = await readFile(absolute, "utf8").catch(() => null);
@@ -309,7 +284,6 @@ export async function assembleSwarmDocumentInSandbox(
     handle: SandboxHandle;
     repositoryName: string;
     branch: string;
-    templatePath?: string | null;
     preamble?: string | null;
     runId?: string | null;
   },
@@ -336,7 +310,7 @@ export async function assembleSwarmDocumentInSandbox(
     preamble: input.preamble ?? null,
     sections,
   });
-  const relative = documentPathFor(input.swarm, input.templatePath);
+  const relative = documentPathFor(input.swarm);
   const current = await checkedSandbox(input.driver, input.handle, ["git", "symbolic-ref", "--short", "HEAD"], cwd);
   if (current.stdout.trim() !== input.branch) {
     throw new Error(`the swarm checkout is on ${current.stdout.trim() || "no branch"}, not ${input.branch}`);
