@@ -1,10 +1,11 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import type { SandboxHandle } from "@bento/sandbox";
 import {
+  agentProfiles,
   agentRuns,
   ensureSwarmAgents,
   projects,
@@ -12,13 +13,11 @@ import {
   swarmLandings,
   swarmMessages,
   swarmTasks,
-  swarmTemplates,
   swarms,
 } from "@bento/db";
 import {
   canAccessProject,
   getAccessibleSwarm,
-  getAccessibleSwarmTemplate,
   getActiveOrganizationMembership,
   visibleProjectFilter,
 } from "../access.js";
@@ -59,19 +58,42 @@ import { enqueueRun } from "../orchestrator/queue.js";
 export const RUNNER_PROJECT_REFUSAL =
   "Swarms need Bento to hold the sandboxes, because the merge queue lands one branch onto another inside them. This project runs its agents on your own machines, so it cannot run a swarm. Use a card, or move the project to server-run agents.";
 
+/**
+ * A piece of free text a person may leave empty. Trimmed, and empty
+ * stored as null, so "no instructions" and "   " are the same row and
+ * a prompt is never handed a heading with nothing under it.
+ */
+const optionalText = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .transform((value) => value.trim() || null)
+    .nullable();
+
+/**
+ * How the swarm is run, beyond its agents and ceilings. Optional, and
+ * absent is no extra instructions.
+ */
+const swarmSettings = {
+  plannerInstructions: optionalText(20_000).optional(),
+  workerInstructions: optionalText(20_000).optional(),
+};
+
 const createSwarm = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(200),
   goal: z.string().max(20_000).default(""),
-  templateId: z.string().uuid().nullish(),
+  plannerProfileId: z.string().uuid().optional(),
+  workerProfileId: z.string().uuid().optional(),
   maxWorkers: z.number().int().min(1).max(32).optional(),
   budgetUsd: z.number().min(0).max(100_000).nullish(),
   timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullish(),
+  ...swarmSettings,
 });
 
 /**
  * What a person may change about a swarm: what it is called, its
- * ceilings, and whether it is put away.
+ * ceilings, how it is run, and whether it is put away.
  *
  * The goal is deliberately absent. It is the immutable request the
  * swarm was created from, and changing it in place would rewrite the
@@ -92,10 +114,58 @@ const updateSwarm = z
     maxWorkers: z.number().int().min(1).max(32).optional(),
     budgetUsd: z.number().min(0).max(100_000).nullable().optional(),
     timeLimitMin: z.number().int().min(1).max(60 * 24 * 7).nullable().optional(),
+    /**
+     * The agents, which a person changes when one was deleted or was
+     * not up to the work. Not nullable: a swarm with no planner has
+     * nobody to plan with, so clearing one is not a setting.
+     */
+    plannerProfileId: z.string().uuid().optional(),
+    workerProfileId: z.string().uuid().optional(),
+    ...swarmSettings,
     archived: z.boolean().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, { message: "nothing to change" });
+
+
+/**
+ * Workers a swarm starts with when the person creating it did not say.
+ *
+ * Two on a local install, four on a hosted one. A hosted worker is its
+ * own machine, so four of them cost four machines and nothing of the
+ * person's laptop. A local worker is a worktree and a container on the
+ * machine somebody is also using: four agents each running the
+ * repository's test command is four builds competing for the same
+ * cores. A starting value and not a limit.
+ */
+export function defaultMaxWorkers(ctx: AppContext): number {
+  return ctx.env.BENTO_MODE === "multi" ? 4 : 2;
+}
+
+/**
+ * Whether this agent is one a swarm in this organization may run.
+ *
+ * The agent has to belong to the swarm's team, or on a local install
+ * to the caller, the same rule the agent routes apply. Answered as a
+ * yes or no so every caller can refuse with the same 404: an agent id
+ * from another team reads as not there.
+ */
+async function canUseProfile(
+  ctx: AppContext,
+  c: Context,
+  organizationId: string | null,
+  profileId: string,
+): Promise<boolean> {
+  const [profile] = await db(c, ctx)
+    .select({ ownerId: agentProfiles.ownerId, organizationId: agentProfiles.organizationId })
+    .from(agentProfiles)
+    .where(eq(agentProfiles.id, profileId))
+    .limit(1);
+  if (!profile) return false;
+  return organizationId
+    ? profile.organizationId === organizationId
+    : profile.organizationId === null && profile.ownerId === actor(c);
+}
 
 export function swarmRoutes(ctx: AppContext) {
   return new Hono()
@@ -169,18 +239,31 @@ export function swarmRoutes(ctx: AppContext) {
       }
 
       const membership = await getActiveOrganizationMembership(ctx, c);
-      const template = body.templateId
-        ? await getAccessibleSwarmTemplate(ctx, c, body.templateId)
-        : await defaultTemplate(ctx, c, project.organizationId);
-      if (!template) return c.json({ error: "not found" }, 404);
-      if (!template.plannerProfileId) {
-        return c.json(
-          { error: "This swarm template has no planner agent, so there is nobody to write the plan. Choose one under Swarm templates." },
-          400,
-        );
-      }
       if (ctx.env.BENTO_MODE === "multi" && project.organizationId && !membership) {
         return c.json({ error: "not found" }, 404);
+      }
+      for (const profileId of [body.plannerProfileId, body.workerProfileId]) {
+        if (profileId && !(await canUseProfile(ctx, c, project.organizationId, profileId))) {
+          return c.json({ error: "agent not found" }, 404);
+        }
+      }
+      /*
+       * The agents a person did not choose are the install's own
+       * Swarm Planner and Swarm Worker, made the first time anybody
+       * needs them. Asked only when one is missing, so a swarm with
+       * both chosen writes nothing it did not ask for.
+       */
+      const defaults =
+        body.plannerProfileId && body.workerProfileId
+          ? null
+          : await ensureSwarmAgents(db(c, ctx), {
+              ownerId: actor(c),
+              organizationId: ctx.env.BENTO_MODE === "multi" ? project.organizationId : null,
+            });
+      const plannerProfileId = body.plannerProfileId ?? defaults?.planner ?? null;
+      const workerProfileId = body.workerProfileId ?? defaults?.worker ?? null;
+      if (!plannerProfileId) {
+        return c.json({ error: "Choose a planner agent for this swarm." }, 400);
       }
 
       const slug = await uniqueSlug(ctx, c, project.id, body.title);
@@ -191,20 +274,18 @@ export function swarmRoutes(ctx: AppContext) {
           slug,
           title: body.title,
           goal: body.goal,
-          templateId: template.id,
+          plannerProfileId,
+          workerProfileId,
+          plannerInstructions: body.plannerInstructions ?? null,
+          workerInstructions: body.workerInstructions ?? null,
           // Planning, not draft: the planner starts below, and a person
           // watching should see that rather than a swarm that looks
           // like it is waiting for them.
           status: "planning",
           branchName: swarmBranchName(slug),
-          maxWorkers: body.maxWorkers ?? template.maxWorkers,
-          budgetUsd:
-            body.budgetUsd === undefined
-              ? template.budgetUsd
-              : body.budgetUsd === null
-                ? null
-                : String(body.budgetUsd),
-          timeLimitMin: body.timeLimitMin === undefined ? template.timeLimitMin : body.timeLimitMin ?? null,
+          maxWorkers: body.maxWorkers ?? defaultMaxWorkers(ctx),
+          budgetUsd: body.budgetUsd === undefined || body.budgetUsd === null ? null : String(body.budgetUsd),
+          timeLimitMin: body.timeLimitMin ?? null,
           startedBy: actor(c),
         })
         .returning();
@@ -216,7 +297,7 @@ export function swarmRoutes(ctx: AppContext) {
           type: "swarm" as const,
           swarmId: swarm.id,
           role: "planner",
-          agentProfileId: template.plannerProfileId,
+          agentProfileId: plannerProfileId,
           // Empty, so the executor builds the planner's own opening
           // prompt: it needs the checkout paths, which do not exist
           // until the sandbox does.
@@ -285,6 +366,11 @@ export function swarmRoutes(ctx: AppContext) {
       const refusal = await requireSwarms(ctx, c, swarm.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
       const body = c.req.valid("json");
+      for (const profileId of [body.plannerProfileId, body.workerProfileId]) {
+        if (profileId && !(await canUseProfile(ctx, c, swarm.organizationId, profileId))) {
+          return c.json({ error: "agent not found" }, 404);
+        }
+      }
 
       const { budgetUsd, archived, ...rest } = body;
       const [updated] = await db(c, ctx)
@@ -756,50 +842,6 @@ export function swarmRoutes(ctx: AppContext) {
         }
       });
     });
-}
-
-/**
- * The template a swarm starts from when the caller named none.
- *
- * Created rather than refused, with the seeded planner and worker, for
- * the reason a new project gets a pipeline and six agents: a first
- * swarm should be one form, not a tour of two panels. It is an ordinary
- * template afterwards, editable and deletable like any other.
- */
-async function defaultTemplate(
-  ctx: AppContext,
-  c: Parameters<typeof actor>[0],
-  organizationId: string | null,
-) {
-  const owner = { ownerId: actor(c), organizationId: ctx.env.BENTO_MODE === "multi" ? organizationId : null };
-  const [existing] = await db(c, ctx)
-    .select()
-    .from(swarmTemplates)
-    .where(
-      and(
-        eq(swarmTemplates.ownerId, owner.ownerId),
-        organizationId && ctx.env.BENTO_MODE === "multi"
-          ? eq(swarmTemplates.organizationId, organizationId)
-          : sql`${swarmTemplates.organizationId} is null`,
-        eq(swarmTemplates.name, "Default"),
-      ),
-    )
-    .limit(1);
-  if (existing) return existing;
-
-  const agents = await ensureSwarmAgents(db(c, ctx), owner);
-  const [created] = await db(c, ctx)
-    .insert(swarmTemplates)
-    .values({
-      ownerId: owner.ownerId,
-      organizationId: owner.organizationId,
-      name: "Default",
-      description: "The planner and worker a swarm uses when nobody has chosen others.",
-      plannerProfileId: agents.planner,
-      workerProfileId: agents.worker,
-    })
-    .returning();
-  return created ?? null;
 }
 
 /**

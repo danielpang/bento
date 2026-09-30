@@ -1,5 +1,5 @@
 import { buildSwarmModel } from "./layout.js";
-import { SWARM_TEMPLATES, draftSwarm, seedSwarms, summarise } from "./fixtures.js";
+import { draftSwarm, seedSwarms, summarise } from "./fixtures.js";
 import type {
   NewSwarmInput,
   Swarm,
@@ -8,7 +8,6 @@ import type {
   SwarmStatus,
   SwarmSummary,
   SwarmTask,
-  SwarmTemplate,
   TaskAttention,
 } from "./types.js";
 
@@ -24,7 +23,6 @@ import type {
  *   PATCH  /api/swarms/:id
  *   POST   /api/swarms/:id/start | /pause | /cancel
  *   POST   /api/swarms/:id/messages
- *   GET    /api/swarm-templates
  *
  * Anything the console could once do that has no route behind it is
  * not in this interface. A method that quietly resolved would be a
@@ -39,7 +37,6 @@ import type {
 export interface SwarmApi {
   listSwarms(projectId: string): Promise<SwarmSummary[]>;
   getSwarm(swarmId: string): Promise<SwarmDetail>;
-  listTemplates(): Promise<SwarmTemplate[]>;
   createSwarm(input: NewSwarmInput): Promise<SwarmDetail>;
   pauseSwarm(swarmId: string): Promise<void>;
   /** Resuming is starting: one route decides when a swarm may run. */
@@ -138,9 +135,6 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       detail.swarm.lastOpenedAt = new Date(clock()).toISOString();
       return Promise.resolve(detail);
     },
-    listTemplates() {
-      return Promise.resolve(SWARM_TEMPLATES);
-    },
     createSwarm(input) {
       const created = draftSwarm(input, clock());
       projectSwarms(input.projectId).push(created);
@@ -236,7 +230,6 @@ export interface WireSwarm {
   status: string;
   pausedReason: Swarm["pausedReason"];
   branchName: string | null;
-  templateId: string | null;
   budgetUsd: string | null;
   maxWorkers: number;
   timeLimitMin: number | null;
@@ -277,15 +270,6 @@ export interface WireDetail {
   swarm: WireSwarm;
   tasks: WireTask[];
   activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
-}
-
-export interface WireTemplate {
-  id: string;
-  name: string;
-  description: string;
-  maxWorkers: number;
-  budgetUsd: string | null;
-  timeLimitMin: number | null;
 }
 
 const number = (value: string | null): number => (value === null ? 0 : Number(value));
@@ -397,7 +381,6 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     // Every swarm on this branch produces code. Nothing on the server
     // records a second kind yet.
     deliverable: "code",
-    templateId: row.templateId,
     budgetUsd: row.budgetUsd === null ? null : Number(row.budgetUsd),
     maxWorkers: WORKER_CEILING,
     workers: row.maxWorkers,
@@ -433,31 +416,6 @@ export function toSummary(row: WireSwarmRow): SwarmSummary {
     archivedAt: row.archivedAt,
     lastOpenedAt: row.lastOpenedAt,
     completion: row.counts.tasks === 0 ? 0 : row.counts.done / row.counts.tasks,
-  };
-}
-
-/**
- * A template, with the ceilings it sets.
- *
- * The cost shape is empty: the route names the agents by id, and what
- * a tool reports its spend in is not recorded anywhere yet. The dialog
- * and the templates panel draw those parts only when a template has
- * them, so an estimate is absent rather than a confident zero.
- */
-export function toTemplate(row: WireTemplate): SwarmTemplate {
-  return {
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    plannerModel: "",
-    workerModel: "",
-    tools: [],
-    assumedUsdPerLeaf: 0,
-    perLeaf: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 },
-    maxWorkers: row.maxWorkers,
-    maxBudgetUsd: row.budgetUsd === null ? null : Number(row.budgetUsd),
-    timeLimitMin: row.timeLimitMin,
-    typicalLeaves: 0,
   };
 }
 
@@ -507,9 +465,6 @@ export function httpSwarmApi(
       const detail = await call<WireDetail>(`/api/swarms/${swarmId}`);
       return toDetail(detail);
     },
-    async listTemplates() {
-      return (await call<WireTemplate[]>("/api/swarm-templates")).map(toTemplate);
-    },
     async createSwarm(input) {
       /*
        * What the route takes, and nothing else. The dialog collects a
@@ -522,7 +477,6 @@ export function httpSwarmApi(
         projectId: input.projectId,
         title: input.name,
         goal: input.goal,
-        ...(input.templateId ? { templateId: input.templateId } : {}),
         maxWorkers: input.workers,
         ...(input.budgetUsd === null ? {} : { budgetUsd: input.budgetUsd }),
       });

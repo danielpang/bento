@@ -552,7 +552,7 @@ export const agentRuns = pgTable(
    *
    * Not the same question as `role`, and not derivable from it: a judge
    * run exists on both boards. A card names a judge agent for its gate,
-   * and a swarm template names one too, so `role = 'judge'` cannot say
+   * and a swarm names one too, so `role = 'judge'` cannot say
    * which board asked. The two are axes: this is which board, and
    * `role` is the capacity within it.
    *
@@ -1463,42 +1463,6 @@ export const githubInstallations = pgTable("github_installations", {
  */
 
 /**
- * A reusable swarm setup: who plans, who works, and the ceilings the
- * swarm starts with.
- *
- * Owner-keyed like agent_profiles rather than parented by a project, so
- * one team's way of running a swarm is not re-entered per project.
- * There is no parent row to inherit an organization from, so the routes
- * set organizationId explicitly, which is the agent_profiles and
- * mcp_servers precedent.
- */
-export const swarmTemplates = pgTable("swarm_templates", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  /** The creator. Kept for attribution; access is decided by the org. */
-  ownerId: text("owner_id")
-    .notNull()
-    .references(() => user.id),
-  organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
-  name: text("name").notNull(),
-  description: text("description").notNull().default(""),
-  /** Who decomposes the goal, and who works the leaves. */
-  plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
-  workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
-  /**
-   * Operating instructions handed to those agents on top of their own
-   * profile skill: how to split this kind of goal, and what a finished
-   * leaf has to have done.
-   */
-  plannerInstructions: text("planner_instructions"),
-  workerInstructions: text("worker_instructions"),
-  /** Starting ceilings. A swarm copies them and may then be changed. */
-  maxWorkers: integer("max_workers").notNull().default(4),
-  budgetUsd: numeric("budget_usd"),
-  timeLimitMin: integer("time_limit_min"),
-  ...timestamps,
-});
-
-/**
  * One goal being worked by a swarm of agents.
  *
  * The ceilings are on the swarm rather than on the plan, because they
@@ -1528,8 +1492,17 @@ export const swarms = pgTable(
     title: text("title").notNull(),
     /** What the swarm was asked to do, as the person wrote it. */
     goal: text("goal").notNull().default(""),
-    /** The template this was started from, kept for attribution only. */
-    templateId: uuid("template_id").references(() => swarmTemplates.id, { onDelete: "set null" }),
+    /** Who decomposes the goal, and who works the leaves. Chosen at creation. */
+    plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    /**
+     * Operating instructions handed to the planner and the workers on
+     * top of their own profile skill: how to split this goal, and what
+     * a finished leaf has to have done. Read fresh on every run, so an
+     * edit reaches the next turn.
+     */
+    plannerInstructions: text("planner_instructions"),
+    workerInstructions: text("worker_instructions"),
     status: text("status", {
       enum: ["draft", "planning", "running", "paused", "blocked", "done", "failed", "cancelled"],
     })
@@ -1552,7 +1525,7 @@ export const swarms = pgTable(
      * sandboxes with the leaf they belong to.
      */
     sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
-    /** Ceilings, copied from the template at start. Null means none. */
+    /** Ceilings, set at creation and changeable after. Null means none. */
     budgetUsd: numeric("budget_usd"),
     maxWorkers: integer("max_workers").notNull().default(4),
     timeLimitMin: integer("time_limit_min"),

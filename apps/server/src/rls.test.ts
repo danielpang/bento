@@ -46,7 +46,6 @@ const TENANT_TABLES = [
   "mcp_servers",
   "mcp_credentials",
   "mcp_run_grants",
-  "swarm_templates",
   "swarms",
   "swarm_tasks",
   "swarm_task_events",
@@ -650,7 +649,6 @@ test("the tenant role cannot write MCP run grants", async () => {
  */
 const SWARM = {
   project: "00000001-0000-0000-0000-000000000000",
-  template: "60000001-0000-0000-0000-000000000000",
   swarm: "61000001-0000-0000-0000-000000000000",
   task: "62000001-0000-0000-0000-000000000000",
   profile: "63000001-0000-0000-0000-000000000000",
@@ -659,11 +657,6 @@ const SWARM = {
 
 test("a swarm and everything under it belongs to one organization", async () => {
   await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name)
-     values ($1,'u1','org-a','Ship a feature')`,
-    [SWARM.template],
-  );
-  await pool.query(
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model)
      values ($1,'u1','org-a','Swarm worker','fake','fake-1')`,
     [SWARM.profile],
@@ -671,9 +664,9 @@ test("a swarm and everything under it belongs to one organization", async () => 
   // Only the swarm names its organization. Everything below it is
   // inserted without one, so the triggers have to derive it.
   await pool.query(
-    `insert into swarms (id,project_id,organization_id,slug,title,template_id)
-     values ($1,$2,'org-a','ship','Ship it',$3)`,
-    [SWARM.swarm, SWARM.project, SWARM.template],
+    `insert into swarms (id,project_id,organization_id,slug,title)
+     values ($1,$2,'org-a','ship','Ship it')`,
+    [SWARM.swarm, SWARM.project],
   );
   const task = await pool.query(
     `insert into swarm_tasks (id,swarm_id,title) values ($1,$2,'Write the parser')
@@ -716,7 +709,6 @@ test("another organization reads nothing of a swarm", async () => {
   // Runs after the seeding test, so every one of these tables has rows
   // to withhold. The policy is the only thing between them and org-b.
   const tables = [
-    "swarm_templates",
     "swarms",
     "swarm_tasks",
     "swarm_task_events",

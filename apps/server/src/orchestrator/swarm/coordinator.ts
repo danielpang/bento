@@ -5,7 +5,6 @@ import {
   swarmMessages,
   swarmTaskEvents,
   swarmTasks,
-  swarmTemplates,
   swarms,
   type Db,
 } from "@bento/db";
@@ -520,7 +519,7 @@ async function deliverPlannerWake(
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run the planner as. The messages stay queued, so this
-  // resolves itself the moment a planner agent is set on the template.
+  // resolves itself the moment a planner agent is set in the swarm's settings.
   if (!profileId) return null;
 
   const items: PlannerWakeItem[] = [
@@ -569,25 +568,14 @@ async function deliverPlannerWake(
   return started.id;
 }
 
-/** The agent the planner runs as, which a swarm gets from its template. */
-async function plannerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
-  if (!swarm.templateId) return null;
-  const [template] = await tx
-    .select({ plannerProfileId: swarmTemplates.plannerProfileId })
-    .from(swarmTemplates)
-    .where(eq(swarmTemplates.id, swarm.templateId))
-    .limit(1);
-  return template?.plannerProfileId ?? null;
+/** The agent the planner runs as, chosen when the swarm was created. */
+async function plannerProfileFor(_tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  return swarm.plannerProfileId;
 }
 
-async function workerProfileFor(tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
-  if (!swarm.templateId) return null;
-  const [template] = await tx
-    .select({ workerProfileId: swarmTemplates.workerProfileId })
-    .from(swarmTemplates)
-    .where(eq(swarmTemplates.id, swarm.templateId))
-    .limit(1);
-  return template?.workerProfileId ?? null;
+/** The agent every leaf runs as unless a person reassigned it. */
+async function workerProfileFor(_tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
+  return swarm.workerProfileId;
 }
 
 /* ------------------------------------------------------------------ *

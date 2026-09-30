@@ -56,7 +56,6 @@ export { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
 export { SwarmOutline } from "./SwarmOutline.js";
 export { SwarmPage, WorkerStepper } from "./SwarmPage.js";
 export { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
-export { SwarmTemplatesPanel } from "./SwarmTemplatesPanel.js";
 export { SwarmTree } from "./SwarmTree.js";
 export { TeamSettings } from "./TeamSettings.js";
 export { ToastHost, useToast } from "./Toasts.js";

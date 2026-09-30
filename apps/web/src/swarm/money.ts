@@ -1,4 +1,4 @@
-import type { SpendTier, SwarmSpend, SwarmTemplate } from "./types.js";
+import type { SpendTier, SwarmSpend } from "./types.js";
 import { SPEND_TIERS } from "./layout.js";
 
 /**
@@ -6,8 +6,8 @@ import { SPEND_TIERS } from "./layout.js";
  *
  * Three figures, never one. A tool that reports its own cost is
  * measured; a tool that prints tokens is estimated from a published
- * rate; a tool that prints nothing at all is assumed from the
- * template's own figure. Adding them would produce a number whose
+ * rate; a tool that prints nothing at all is assumed from what this
+ * swarm's other runs have cost. Adding them would produce a number whose
  * accuracy nobody could state, printed next to a budget people set
  * real limits with, so nothing in this module returns a total and
  * every line it writes keeps the three apart.
@@ -33,7 +33,7 @@ const LABELS: Record<SpendTier, string> = {
 const NOTES: Record<SpendTier, string> = {
   measured: "Reported by the tool itself.",
   estimated: "Worked out from the tokens this tool printed, at its published rate.",
-  assumed: "The template's own figure, because this tool reports no cost at all.",
+  assumed: "A stand in figure, because this tool reports no cost at all.",
 };
 
 export function tierLabel(tier: SpendTier): string {
@@ -138,26 +138,6 @@ export function capUse(spend: SwarmSpend, capUsd: number | null): CapUse {
     capUsd,
     capLine: capUsd === null ? "no cap set" : `against a ${formatUsd(capUsd)} cap`,
     spent: capUsd !== null && capUsd > 0 && spend.measuredUsd >= capUsd,
-  };
-}
-
-/**
- * What the New swarm dialog prints before anybody presses Create.
- *
- * Split the three ways the run will report in, from the template's own
- * per leaf figures: a person choosing a template is choosing how much
- * of their bill will be a measurement and how much a guess, and one
- * blended number would hide exactly that.
- */
-export function estimateSwarm(
-  template: Pick<SwarmTemplate, "perLeaf" | "typicalLeaves">,
-  leaves = template.typicalLeaves,
-): SwarmSpend {
-  const count = Math.max(0, Math.round(leaves));
-  return {
-    measuredUsd: template.perLeaf.measuredUsd * count,
-    estimatedUsd: template.perLeaf.estimatedUsd * count,
-    assumedUsd: template.perLeaf.assumedUsd * count,
   };
 }
 

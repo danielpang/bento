@@ -53,7 +53,7 @@ export type TaskAttention = "none" | "long_running" | "escalated";
  * Money, always three figures.
  *
  * Measured is what a tool reported. Estimated is what the console
- * worked out from tokens at a published rate. Assumed is a template's
+ * worked out from tokens at a published rate. Assumed is a swarm's
  * own guess for a tool that reports nothing at all. They are carried
  * apart and printed apart, and nothing here adds them: a single total
  * would be three different kinds of confidence wearing one number.
@@ -119,7 +119,6 @@ export interface Swarm {
   /** The single branch every leaf lands onto. */
   branchName: string | null;
   deliverable: "code" | "document";
-  templateId: string | null;
   /** The cap. Null means this swarm has none. */
   budgetUsd: number | null;
   maxWorkers: number;
@@ -198,37 +197,9 @@ export interface SwarmDetail {
   pullRequests: SwarmPullRequest[];
 }
 
-/**
- * A template, and the cost shape the dialog prints beside it.
- *
- * `tools` is what makes the shape honest: a tool that reports its own
- * spend lands in the measured tier, one that prints tokens lands in
- * estimated, and one that prints nothing lands in assumed. The number
- * a person sees before they press Create is the sum of what a run
- * would cost, split the same three ways it will be reported in.
- */
-export interface SwarmTemplate {
-  id: string;
-  name: string;
-  description: string;
-  plannerModel: string;
-  workerModel: string;
-  tools: { name: string; tier: SpendTier }[];
-  /** Per worker leaf, for the tools that report nothing. */
-  assumedUsdPerLeaf: number;
-  /** What the template expects a leaf to cost, by tier. */
-  perLeaf: SwarmSpend;
-  maxWorkers: number;
-  maxBudgetUsd: number | null;
-  timeLimitMin: number | null;
-  /** Leaves this template's planner typically produces, for the estimate. */
-  typicalLeaves: number;
-}
-
 /** What the New swarm dialog sends. */
 export interface NewSwarmInput {
   projectId: string;
-  templateId: string;
   name: string;
   goal: string;
   attachments: { name: string; bytes: number }[];

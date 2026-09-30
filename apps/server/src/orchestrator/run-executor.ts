@@ -33,7 +33,6 @@ import {
   sandboxes,
   stages,
   swarmTasks,
-  swarmTemplates,
   swarms,
 } from "@bento/db";
 import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
@@ -1244,18 +1243,11 @@ async function buildSubjectPrompt(
       cardTools,
     );
   }
-  const [template] = subject.swarm.templateId
-    ? await ctx.db
-        .select()
-        .from(swarmTemplates)
-        .where(eq(swarmTemplates.id, subject.swarm.templateId))
-        .limit(1)
-    : [];
   return buildPlannerPrompt({
     swarm: subject.swarm,
     agent: { name: subject.profile.name, skill: subject.profile.skill },
     repositories: mounted,
-    templateInstructions: template?.plannerInstructions ?? null,
+    swarmInstructions: subject.swarm.plannerInstructions,
   });
 }
 

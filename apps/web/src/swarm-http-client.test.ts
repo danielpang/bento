@@ -5,7 +5,6 @@ import {
   swarmApi,
   toDetail,
   toSummary,
-  toTemplate,
   type WireDetail,
   type WireSwarm,
   type WireSwarmRow,
@@ -56,7 +55,6 @@ const wireSwarm = (over: Partial<WireSwarm> = {}): WireSwarm => ({
   status: "running",
   pausedReason: null,
   branchName: "swarm/checkout",
-  templateId: "tpl-1",
   budgetUsd: "40.00",
   maxWorkers: 4,
   timeLimitMin: null,
@@ -160,7 +158,6 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
   const { calls, doFetch } = fetchStub(wireSwarm({ status: "planning" }));
   const created = await httpSwarmApi("", doFetch).createSwarm({
     projectId: "p1",
-    templateId: "tpl-1",
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
     attachments: [{ name: "notes.md", bytes: 12 }],
@@ -177,7 +174,6 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
     projectId: "p1",
     title: "Checkout rewrite",
     goal: "Replace the checkout.",
-    templateId: "tpl-1",
     maxWorkers: 6,
     budgetUsd: 40,
   });
@@ -273,22 +269,6 @@ test("a refusal reaches the person in the server's own words", async () => {
     /This swarm has no plan yet/,
     "the error is the sentence the server wrote, not its JSON",
   );
-});
-
-test("a template carries its ceilings, and claims no cost shape it does not have", () => {
-  const template = toTemplate({
-    id: "tpl-1",
-    name: "Default",
-    description: "The planner and worker a swarm uses.",
-    maxWorkers: 4,
-    budgetUsd: "25.00",
-    timeLimitMin: 120,
-  });
-  assert.equal(template.maxWorkers, 4);
-  assert.equal(template.maxBudgetUsd, 25);
-  assert.equal(template.timeLimitMin, 120);
-  assert.deepEqual(template.tools, [], "nothing on the server says what a tool reports in");
-  assert.equal(template.typicalLeaves, 0, "so the dialog draws no estimate rather than a zero");
 });
 
 test("a swarm's status is said in the console's words, and a budget stop says so", () => {

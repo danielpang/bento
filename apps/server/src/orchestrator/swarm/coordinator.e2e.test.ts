@@ -33,7 +33,6 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
-const TEMPLATE = "33333333-3333-3333-3333-333333333333";
 
 let pool: ReturnType<typeof createPool>;
 let db: Db;
@@ -62,11 +61,6 @@ before(async () => {
   await pool.query(
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],
-  );
-  await pool.query(
-    `insert into swarm_templates (id,owner_id,organization_id,name,planner_profile_id,worker_profile_id,max_workers)
-     values ($1,'u1',null,'T',$2,$2,2)`,
-    [TEMPLATE, PROFILE],
   );
 
   const bus = new EventBus();
@@ -145,7 +139,8 @@ async function makeSwarm(
       slug: `s-${Math.random().toString(36).slice(2, 8)}`,
       title: "Swarm",
       goal: "do the thing",
-      templateId: TEMPLATE,
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
       status: "running",
       maxWorkers: 2,
       startedBy: "u1",

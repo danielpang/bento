@@ -211,17 +211,14 @@ test("creating a swarm plans it, and puts a planner to work at once", async () =
     "and it was queued for a worker",
   );
 
-  // A seeded template and its two agents came with it, editable like
-  // any other.
-  const templates = (await (await app.request("/api/swarm-templates")).json()) as {
-    name: string;
-    plannerProfileId: string | null;
-    workerProfileId: string | null;
-  }[];
-  assert.equal(templates.length, 1);
-  assert.equal(templates[0]!.name, "Default");
-  assert.ok(templates[0]!.plannerProfileId, "with a planner");
-  assert.ok(templates[0]!.workerProfileId, "and a worker");
+  // Nobody chose agents, so the install's own Swarm Planner and Swarm
+  // Worker were made and put on it, editable like any other agent.
+  const row = await readSwarm(swarm.id);
+  const profiles = (await (await app.request("/api/profiles")).json()) as { id: string; name: string }[];
+  const named = new Map(profiles.map((profile) => [profile.id, profile.name]));
+  assert.equal(named.get(row.plannerProfileId!), "Swarm Planner");
+  assert.equal(named.get(row.workerProfileId!), "Swarm Worker");
+  assert.equal(row.plannerInstructions, null, "and nothing else was asked for");
 
   // A second swarm of the same name takes a readable suffix rather
   // than a random one.
@@ -833,4 +830,46 @@ test("stopping a swarm hands its own machine to the reaper", async () => {
     [{ swarmId: swarm.id }],
     "the machine is queued rather than destroyed inline, the way a finished card's is",
   );
+});
+
+test("a swarm is created with its instructions and agents, and they can be changed after", async () => {
+  const defaults = await readSwarm((await createSwarm({ title: "Agents" })).id);
+  const created = await createSwarm({
+    title: "Instructed",
+    plannerInstructions: "Split by package.",
+    workerInstructions: "   ",
+  });
+  const row = await readSwarm(created.id);
+  assert.equal(row.plannerInstructions, "Split by package.");
+  assert.equal(row.workerInstructions, null, "blank is none, not a heading with nothing under it");
+
+  const patched = await app.request(`/api/swarms/${created.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workerInstructions: "Add tests.", workerProfileId: defaults.plannerProfileId }),
+  });
+  assert.equal(patched.status, 200, await patched.clone().text());
+  const after = await readSwarm(created.id);
+  assert.equal(after.workerInstructions, "Add tests.");
+  assert.equal(after.workerProfileId, defaults.plannerProfileId);
+  assert.equal(after.plannerInstructions, "Split by package.", "what was not sent is left alone");
+
+  // A stranger's agent reads as not there, on the way in and afterwards.
+  const stranger = "00000000-0000-4000-8000-000000000001";
+  for (const field of ["plannerProfileId", "workerProfileId"]) {
+    const res = await app.request(`/api/swarms/${created.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [field]: stranger }),
+    });
+    assert.equal(res.status, 404, `a stranger's ${field} reads as not there`);
+  }
+  const strangerAtCreate = await post("/api/swarms", {
+    projectId,
+    title: "Planned by a stranger",
+    goal: "Try a missing planner",
+    plannerProfileId: stranger,
+  });
+  assert.equal(strangerAtCreate.status, 404);
+  assert.equal((await readSwarm(created.id)).plannerProfileId, defaults.plannerProfileId, "and nothing was changed");
 });
