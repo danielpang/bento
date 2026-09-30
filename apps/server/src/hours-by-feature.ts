@@ -6,7 +6,9 @@
  * Billing meters finished (and still-running) sandbox time, not token
  * spend. A run that started last period and ended in this one only
  * counts the overlap, so the card breakdown can sit next to the period
- * meter without inventing hours from outside it.
+ * meter without inventing hours from outside it. A run with no start
+ * counts as zero: it never left the queue. Whether a run that did
+ * start counts is its billable flag.
  */
 export function runHoursInPeriod(
   startedAt: Date | null,
@@ -28,12 +30,19 @@ export type RunSlice = {
   title: string;
   startedAt: Date | null;
   endedAt: Date | null;
+  /**
+   * False when the run is excluded from the hours limit. Missing means
+   * billable, so a caller that has not loaded the column still counts
+   * the run.
+   */
+  billable?: boolean;
 };
 
 /**
- * Hours by card for a billing month. Every run on a feature is summed.
- * Cards that spent nothing in the window are omitted: this is a
- * ranking of spenders, not a board.
+ * Hours by card for a billing month. Every billable run on a feature
+ * is summed. Cards that spent nothing in the window are omitted: this
+ * is a ranking of spenders, not a board. A run with billable false is
+ * omitted even though it has a start time.
  */
 export function hoursByFeature(
   runs: RunSlice[],
@@ -43,6 +52,7 @@ export function hoursByFeature(
 ): { featureId: string; title: string; agentHours: number }[] {
   const totals = new Map<string, { title: string; hours: number }>();
   for (const run of runs) {
+    if (run.billable === false) continue;
     const hours = runHoursInPeriod(run.startedAt, run.endedAt, periodStart, periodEnd, now);
     if (hours <= 0) continue;
     const current = totals.get(run.featureId);

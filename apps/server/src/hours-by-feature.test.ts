@@ -83,3 +83,44 @@ test("hours by feature sums runs on the same card and drops empty ones", () => {
   assert.equal(byId.b?.agentHours, 0.5);
   assert.equal(byId.c, undefined);
 });
+
+test("hours follow the billable flag, and a start time is not what decides", () => {
+  const rows = hoursByFeature(
+    [
+      {
+        featureId: "a",
+        title: "Rate limit",
+        startedAt: new Date("2026-09-10T12:00:00.000Z"),
+        endedAt: new Date("2026-09-10T14:00:00.000Z"),
+        billable: false,
+      },
+      {
+        featureId: "a",
+        title: "Rate limit",
+        startedAt: new Date("2026-09-11T00:00:00.000Z"),
+        endedAt: new Date("2026-09-11T01:00:00.000Z"),
+        billable: true,
+      },
+    ],
+    start,
+    end,
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.agentHours, 1);
+});
+
+test("a run with no billable flag still counts its hours", () => {
+  const rows = hoursByFeature(
+    [
+      {
+        featureId: "a",
+        title: "Rate limit",
+        startedAt: new Date("2026-09-10T12:00:00.000Z"),
+        endedAt: new Date("2026-09-10T14:00:00.000Z"),
+      },
+    ],
+    start,
+    end,
+  );
+  assert.equal(rows[0]?.agentHours, 2);
+});

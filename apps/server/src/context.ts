@@ -71,6 +71,11 @@ export interface Entitlements {
    * Never awaited on the caller's path and never allowed to fail one:
    * the run is over either way, and a metering error must not turn a
    * finished run into a failed one.
+   *
+   * Not called when the run is marked not billable: Fly or the sprite
+   * driver could not create the machine, so those runs are not agent
+   * hours. Time after the agent started stays billable and is still
+   * announced.
    */
   onRunFinished?(runId: string): Promise<void>;
   /**
