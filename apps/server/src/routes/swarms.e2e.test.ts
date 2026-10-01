@@ -359,6 +359,10 @@ test("work starts only once there is a plan to work", async () => {
   assert.equal((await readSwarm(swarm.id)).status, "planning", "and the swarm did not move");
 
   await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });
+  const planning = await post(`/api/swarms/${swarm.id}/start`);
+  assert.equal(planning.status, 409, "a partial tree cannot be approved while the planner is working");
+  assert.match((await planning.json()).error, /planner is still working/i);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
   queued.length = 0;
   const started = await post(`/api/swarms/${swarm.id}/start`);
   assert.equal(started.status, 200);
@@ -367,11 +371,115 @@ test("work starts only once there is a plan to work", async () => {
     queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
     "and the reconciler was told, so a worker can be put on the plan",
   );
+  const [later] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Later task" }).returning();
+  queued.length = 0;
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200, "a running swarm can approve new open work");
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === later!.id)?.status, "assigned");
+  assert.ok(queued.some((job) => job.queue === "swarm.tick"), "the newly approved work wakes the coordinator");
 
   // A cancelled node is not a plan.
   const other = await createSwarm({ title: "Other" });
   await db.insert(swarmTasks).values({ swarmId: other.id, title: "withdrawn", status: "cancelled" });
   assert.equal((await post(`/api/swarms/${other.id}/start`)).status, 409);
+});
+
+test("resuming an interrupted planner's saved tree starts ready leaves in dependency order", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "failed", error: "server stopped" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  await db.update(swarms).set({ status: "paused", pausedReason: "manual" }).where(eq(swarms.id, swarm.id));
+  const [plan] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, nodeType: "plan", title: "Implementation", position: 0,
+  }).returning();
+  const [first] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: plan!.id, title: "Foundation", position: 0,
+  }).returning();
+  const [second] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: first!.id, parentRelation: "depends_on", title: "UI", position: 0,
+  }).returning();
+  const [waiting] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: plan!.id, title: "Needs an answer", attention: "question", position: 1,
+  }).returning();
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
+  const assigned = await tasksOf(swarm.id);
+  assert.equal(assigned.find((task) => task.id === plan!.id)?.status, "open", "the plan node is not a worker task");
+  assert.equal(assigned.find((task) => task.id === first!.id)?.status, "assigned");
+  assert.equal(assigned.find((task) => task.id === second!.id)?.status, "assigned");
+  assert.equal(assigned.find((task) => task.id === waiting!.id)?.status, "open", "a question still needs an answer");
+
+  const firstTick = await tickSwarm(ctx, swarm.id);
+  assert.equal(firstTick?.workerRunIds.length, 1, "the ready task starts without another planner message");
+  const [firstRun] = await db.select().from(agentRuns).where(eq(agentRuns.id, firstTick!.workerRunIds[0]!));
+  assert.equal(firstRun?.swarmTaskId, first!.id);
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === second!.id)?.status, "assigned");
+
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, first!.id));
+  const secondTick = await tickSwarm(ctx, swarm.id);
+  assert.equal(secondTick?.workerRunIds.length, 1, "the dependent leaf starts after its prerequisite finishes");
+  const [secondRun] = await db.select().from(agentRuns).where(eq(agentRuns.id, secondTick!.workerRunIds[0]!));
+  assert.equal(secondRun?.swarmTaskId, second!.id);
+});
+
+test("approving a plan starts its first worker even if the planner made it depend on an empty group", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  await db.update(swarms).set({ status: "running" }).where(eq(swarms.id, swarm.id));
+  const [group] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, title: "Auth", nodeType: "plan", status: "open",
+  }).returning();
+  const [first] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: group!.id, parentRelation: "depends_on",
+    title: "Server bootstrap", status: "assigned",
+  }).returning();
+  const [later] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: first!.id, parentRelation: "depends_on",
+    title: "Client auth", status: "open",
+  }).returning();
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
+  const approved = await tasksOf(swarm.id);
+  assert.equal(approved.find((task) => task.id === first!.id)?.parentRelation, "contains");
+  assert.equal(approved.find((task) => task.id === later!.id)?.parentRelation, "depends_on");
+  assert.equal(approved.find((task) => task.id === later!.id)?.status, "assigned");
+  const tick = await tickSwarm(ctx, swarm.id);
+  assert.equal(tick?.workerRunIds.length, 1, "the first worker starts from the corrected plan");
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, tick!.workerRunIds[0]!));
+  assert.equal(run?.swarmTaskId, first!.id);
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === later!.id)?.status, "assigned",
+    "the later task still waits for its real prerequisite");
+});
+
+test("stopping a planner preserves its plan and lets a message start the next turn", async () => {
+  const swarm = await createSwarm();
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Saved work" }).returning();
+
+  const stopped = await post(`/api/swarms/${swarm.id}/planner/stop`);
+  assert.equal(stopped.status, 200, await stopped.clone().text());
+  const [firstRun] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(firstRun?.status, "cancelled");
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+  assert.equal((await readSwarm(swarm.id)).status, "planning", "stopping a turn does not stop the swarm");
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/messages`, { text: "Continue with the saved plan" })).status, 201);
+  const tick = await tickSwarm(ctx, swarm.id);
+  assert.ok(tick?.plannerRunId, "the guidance starts a fresh planner turn");
+  assert.notEqual(tick?.plannerRunId, swarm.plannerRunId);
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+});
+
+test("planner messages leave task assignment to the planner", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  await db.update(swarms).set({ status: "running" }).where(eq(swarms.id, swarm.id));
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Saved work" }).returning();
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/messages`, { text: "Give me an update" })).status, 201);
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+  assert.equal((await post(`/api/swarms/${swarm.id}/messages`, { text: "continue" })).status, 201);
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+  const tick = await tickSwarm(ctx, swarm.id);
+  assert.equal(tick?.workerRunIds.length, 0);
+  assert.ok(tick?.plannerRunId, "the planner gets the messages and decides how to act");
 });
 
 test("the swarm reads back with its plan, and the strip reads back with its numbers", async () => {
@@ -533,16 +641,21 @@ test("the merge queue is still visible on a swarm with more landings than the ca
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {
   const swarm = await createSwarm();
   await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
+  assert.equal((await readSwarm(swarm.id)).status, "running");
   assert.equal((await post(`/api/swarms/${swarm.id}/pause`)).status, 200);
   const paused = await readSwarm(swarm.id);
   assert.equal(paused.status, "paused");
   assert.equal(paused.pausedReason, "manual", "so the board knows which sentence to print");
 
+  const [newLeaf] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Second page" }).returning();
   queued.length = 0;
   assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
   const resumed = await readSwarm(swarm.id);
   assert.equal(resumed.status, "running");
   assert.equal(resumed.pausedReason, null);
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === newLeaf!.id)?.status, "assigned");
   assert.ok(queued.some((job) => job.queue === "swarm.tick"), "leaves waiting for a slot are looked at again");
 
   // The ceilings a person sets, and a budget cleared rather than zeroed.
@@ -1744,6 +1857,7 @@ test("a swarm somebody moved says so on the bus, so every other viewer hears it"
 
   try {
     await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Leaf" });
+    await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
     await post(`/api/swarms/${swarm.id}/start`);
     await post(`/api/swarms/${swarm.id}/pause`);
     await app.request(`/api/swarms/${swarm.id}`, {
@@ -1755,7 +1869,7 @@ test("a swarm somebody moved says so on the bus, so every other viewer hears it"
 
     assert.deepEqual(
       heard.map((event) => event.status ?? event.type),
-      ["running", "paused", "swarm_updated", "cancelled"],
+      ["assigned", "running", "paused", "swarm_updated", "cancelled"],
       "every door that moves a swarm says so",
     );
   } finally {

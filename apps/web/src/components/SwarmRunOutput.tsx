@@ -127,7 +127,7 @@ function PlannerMessageRow({ message }: { message: SwarmPlannerMessage }) {
   );
 }
 
-export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId, runStatus, runError, agentName, onMessageSent, onRetry, canRetry, busy, onClose }: {
+export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId, runStatus, runError, agentName, onMessageSent, onRetry, onStop, canRetry, busy, onClose }: {
   client: BentoClient;
   api: Pick<SwarmApi, "listPlannerMessages" | "messagePlanner">;
   swarmId: string;
@@ -138,6 +138,7 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
   agentName: string;
   onMessageSent: () => void;
   onRetry?: () => void;
+  onStop?: () => void;
   canRetry?: boolean;
   busy?: boolean;
   onClose: () => void;
@@ -149,6 +150,7 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
   const [messageError, setMessageError] = useState("");
   const failure = plannerFailure(runError ?? null);
   const canMessage = swarmStatus !== "done" && !(runStatus === "failed" && failure.beforeAgent);
+  const plannerActive = ["queued", "starting", "running"].includes(runStatus);
 
   useEffect(() => {
     let cancelled = false;
@@ -216,6 +218,7 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
           />
           <div className="swarm-planner-compose-bottom">
             <span className="muted">{helper}</span>
+            {plannerActive && onStop && <button className="btn" type="button" disabled={busy} onClick={onStop}>Stop planner</button>}
             <button className="btn btn-primary" type="submit" disabled={sending || text.trim() === ""}>{sending ? "Sending..." : "Send"}</button>
           </div>
         </form>

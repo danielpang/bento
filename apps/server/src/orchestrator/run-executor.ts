@@ -1438,6 +1438,14 @@ async function buildSubjectPrompt(
     swarm: subject.swarm,
     agent,
     repositories: mounted,
+    savedTasks: (await tasksOf(ctx.db, subject.swarm.id)).map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      nodeType: task.nodeType,
+      parentId: task.parentId,
+      parentRelation: task.parentRelation,
+    })),
     swarmInstructions: subject.swarm.plannerInstructions,
     deliverable: subject.swarm.deliverable,
     sectionDir: SECTION_DIR,
@@ -1686,15 +1694,8 @@ async function finishRun(
        */
       ...(outcome.sessionId !== undefined ? { cliSessionId: outcome.sessionId } : {}),
       /**
-       * The ledger's figure when it has one, and the tool's own when it
-       * does not.
-       *
-       * They agree for a measured run, which is most of them. Where
-       * they differ is the case the ledger exists for: a run that
-       * printed tokens and no price, or nothing at all, has a figure
-       * only because the ledger worked one out, and writing the tool's
-       * silence here instead would leave the swarm's spend saying that
-       * an agent that ran for an hour cost nothing.
+       * A reported price or an estimate priced from reported tokens.
+       * If the agent reported neither, null means unknown cost.
        */
       costUsd: unbilled
         ? null
@@ -2086,12 +2087,8 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
    * same way a run that ended by itself has it written: before the
    * compare and set, so the tier and the figure land with the status.
    *
-   * A stopped run reports nothing, so for a swarm run this is the
-   * assumed tier, which is precisely what that tier is for. The agent
-   * ran, tokens were spent, and zero is the one answer that is
-   * certainly wrong. Leaving it out meant every run a person retried
-   * or cancelled was charged to nobody, and a budget that cannot see
-   * what it spent is a budget that cannot refuse.
+   * A stopped run with no usable cost data stays unreported. We do not
+   * invent a dollar charge for the time it ran.
    *
    * A card's run is unaffected: chargeForRun tiers one only when it
    * actually reported, so the Spend page's totals keep meaning what

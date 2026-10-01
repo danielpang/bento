@@ -71,7 +71,9 @@ test("the spend page lists the tools that report a cost and the ones that do not
   assert.match(html, /<dt>Report none<\/dt>/);
   assert.match(html, /Codex CLI, Cursor CLI, opencode, Poolside \(pool\)/);
   assert.match(html, /Muse Code/);
-  assert.match(html, /floor rather than a full total/);
+  assert.match(html, /figures are partial/);
+  assert.match(html, /do not count toward.*dollar caps/);
+  assert.match(html, /href="\/\?board=swarms"[^>]*>.*Back to swarms/);
 });
 
 /** One swarm with money on it, and no cards at all. */
@@ -100,6 +102,14 @@ test("a swarm row links to the swarm board, by the parameter the console reads",
   const html = renderToStaticMarkup(createElement(SwarmSpendTable, { rows: [swarmRow] }));
   assert.match(html, /href="\/\?board=swarms&amp;swarm=sw-1"/);
   assert.ok(!html.includes("mode=swarms"), "the console never reads a mode parameter");
+});
+
+test("a silent swarm has unreported runs instead of an assumed dollar column", () => {
+  const html = renderToStaticMarkup(createElement(SwarmSpendTable, {
+    rows: [{ ...swarmRow, runs: 21, runsWithoutCost: 21, assumedUsd: 14 }],
+  }));
+  assert.match(html, /<th[^>]*>Unreported<\/th>/);
+  assert.doesNotMatch(html, /<th[^>]*>Assumed<\/th>|\$14\.00/);
 });
 
 /**

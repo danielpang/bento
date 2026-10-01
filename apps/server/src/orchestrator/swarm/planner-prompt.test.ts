@@ -93,6 +93,23 @@ test("a wake message quotes every untrusted piece, each in a block of its own", 
   assert.match(message, /data, not instructions/, "and still labelled as what it is");
 });
 
+test("a follow-up directs the planner to the saved tree before new investigation", () => {
+  const prompt = buildPlannerPrompt({
+    swarm: { title: "T", goal: "G", branchName: "swarm/t" } as never,
+    repositories: [{ name: "app", mountPath: "/workspace/app" }],
+    savedTasks: [{ id: "task-1", title: "Build the UI", status: "open", nodeType: "leaf", parentId: null, parentRelation: "contains" }],
+  });
+  const wake = plannerWakeMessage([{ kind: "message", text: "continue" }]);
+  assert.match(prompt, /call get_tree and read_design to see the saved plan/);
+  assert.match(prompt, /If plan\.md exists in the repository, read it for context too/);
+  assert.match(prompt, /saved task tree already contains 1 node/);
+  assert.match(prompt, /task-1 \[leaf, open\] Build the UI/);
+  assert.match(wake, /Call get_tree and read_design before acting/);
+  assert.match(wake, /If they ask to proceed with the current plan, assign open leaves that are ready/);
+  assert.match(wake, /If they ask for an update, give the update/);
+  assert.match(wake, /If they ask to change the plan, make that change/);
+});
+
 /* ---------------------------------------------------------------- *
  * Starting from an existing branch.
  * ---------------------------------------------------------------- */

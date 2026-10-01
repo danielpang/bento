@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { agentRuns, swarmLandings, type Db } from "@bento/db";
 import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
-import { assumedCostFor, budgetRefusal } from "./swarm/ledger.js";
+import { budgetRefusal } from "./swarm/ledger.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
 /**
@@ -348,30 +348,10 @@ async function insertSwarmRun(
    * the margin, and stopping it at a cap would be refusing a swarm
    * over a list price somebody had already paid.
    *
-   * It is a cap on starting, never on running. The cost of a run is
-   * not known until it ends, so a budget can be passed by at most the
-   * run that was already going when it was reached, and no agent is
-   * ever killed for money.
+   * It is a cap on starting, never on running. Concurrent agents may
+   * take reported spend past the cap before any one of them finishes.
+   * No agent is killed for money.
    */
-  /*
-   * What the agents already going will cost, counted at the figure a
-   * run that reports nothing is charged.
-   *
-   * Only worth the two queries when there is a cap to check it
-   * against, so a swarm with no budget pays for none of this.
-   */
-  let committedUsd = 0;
-  if (swarm.budget_usd !== null) {
-    const [inFlight] = await tx
-      .select({ runs: sql<number>`count(*)::int` })
-      .from(agentRuns)
-      .where(and(inArray(agentRuns.status, ACTIVE_RUN_STATUSES), eq(agentRuns.swarmId, values.swarmId)));
-    const running = inFlight?.runs ?? 0;
-    if (running > 0) {
-      committedUsd = running * (await assumedCostFor(tx as unknown as Db, { id: values.swarmId }));
-    }
-  }
-
   const budget = budgetRefusal(
     {
       budgetUsd: swarm.budget_usd,
@@ -380,7 +360,6 @@ async function insertSwarmRun(
       spentAssumedUsd: swarm.spent_assumed_usd,
       spentNotionalUsd: swarm.spent_notional_usd,
     },
-    committedUsd,
   );
   if (budget) return { outOfCompute: budget, cap: "budget" };
 

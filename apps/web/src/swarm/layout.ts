@@ -629,4 +629,4 @@ export function createModelCache(): (tasks: SwarmTask[], options?: ModelOptions)
  * Every tier, in the order they are always printed: most trustworthy
  * first, and the one the budget does not count last.
  */
-export const SPEND_TIERS: SpendTier[] = ["measured", "estimated", "assumed", "notional"];
+export const SPEND_TIERS: SpendTier[] = ["measured", "estimated", "notional"];

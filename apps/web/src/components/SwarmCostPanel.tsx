@@ -10,11 +10,9 @@ import type { SpendTier, SwarmSpend, SwarmTask } from "../swarm/types.js";
  * opens when the total is not the question: where the money went, and
  * how much of the number is real.
  *
- * Nothing here ever adds the tiers together. A measurement, an
- * arithmetic estimate, a stand in figure and a list price a
- * subscription had already paid for are four different kinds of
- * confidence, and one number carrying all four next to a cap people set
- * real limits with is the thing this whole design exists to avoid.
+ * Nothing here adds reported prices, token priced estimates, and
+ * subscription list prices into one misleading total. Silent runs have
+ * no dollar amount.
  */
 
 /** The roles a swarm's money goes to, in the order they are printed. */
@@ -109,11 +107,8 @@ export function spendOverTime(tasks: SwarmTask[]): number[] {
      *
      * A cumulative line has to accumulate something, so the one figure
      * it may accumulate is the one that means something on its own:
-     * the three tiers somebody is actually billed for, which is what
-     * the budget is compared against. The fourth is a list price a
-     * subscription had already paid for, and running it into this
-     * total put four kinds of confidence behind one number and then
-     * read that number out as what the swarm ended at.
+     * reported prices and estimates from reported tokens. The
+     * subscription list price and legacy synthetic cost are excluded.
      */
     running += cappedUsd(task.cost);
     points.push(running);
@@ -173,13 +168,8 @@ export function SwarmCostPanel({
       {/*
        * The two things a total cannot say for itself.
        *
-       * A cap enforced against mostly assumed figures is a cap
-       * enforced against a guess, and somebody who set a budget
-       * deserves to know that while the swarm is running rather than
-       * afterwards. And a swarm spending a subscription is not
-       * spending money at all, so its cap warns instead of stopping
-       * it, which would otherwise look like a budget that does not
-       * work.
+     * A swarm spending a subscription has no marginal charge, so its
+     * cap warns instead of stopping it.
        */}
       {cap.notional && (
         <p className="swarm-cost-note" role="note">

@@ -448,7 +448,7 @@ test("a Sprite provider failure before the agent starts is neither charged nor a
  * and a budget that cannot see what it spent is a budget that cannot
  * refuse.
  */
-test("a run somebody stopped is charged for what it spent", async () => {
+test("a stopped run with no reported cost stays unreported", async () => {
   const created = await createSwarm();
   const swarm = (await created.json()) as { id: string; plannerRunId: string };
 
@@ -456,25 +456,16 @@ test("a run somebody stopped is charged for what it spent", async () => {
 
   const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
   assert.equal(run!.status, "cancelled");
-  /*
-   * The assumed tier, which is exactly what it is for: a run that was
-   * stopped printed no cost and no tokens, and zero is the one answer
-   * that is certainly wrong, because the agent ran.
-   */
-  assert.equal(run!.costTier, "assumed", "a stopped run reports nothing, so its figure is a stand in");
-  assert.ok(Number(run!.costUsd) > 0, "and it is not free");
+  assert.equal(run!.costTier, null);
+  assert.equal(run!.costUsd, null, "unknown cost is distinct from a measured zero");
 
   const [charged] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
-  assert.equal(
-    Number(charged!.spentAssumedUsd),
-    Number(run!.costUsd),
-    "and the swarm's own ledger is what the budget reads",
-  );
+  assert.equal(Number(charged!.spentAssumedUsd), 0);
 
   // Once, like the announcement: the same compare and set guards both.
   await markCancelled(ctx, swarm.plannerRunId);
   const [again] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
-  assert.equal(Number(again!.spentAssumedUsd), Number(run!.costUsd), "a second stop charges nothing again");
+  assert.equal(Number(again!.spentAssumedUsd), 0, "a second stop does not add a charge");
 });
 
 /**

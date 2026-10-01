@@ -84,6 +84,7 @@ export function SwarmBoard({
   }, []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SwarmDetail | null>(null);
+  const detailRequest = useRef(0);
   /** The agents a swarm can be run as, for the dialogs and the drawer's picker. */
   const [agents, setAgents] = useState<SwarmAgent[]>([]);
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
@@ -125,7 +126,7 @@ export function SwarmBoard({
 
   const loadSwarms = useCallback(
     (prefer?: string) => {
-      void swarmApi
+      return swarmApi
         .listSwarms(projectId)
         .then((rows) => {
           setSwarms(rows);
@@ -160,13 +161,17 @@ export function SwarmBoard({
   }, []);
 
   const loadDetail = useCallback((swarmId: string) => {
-    void swarmApi
+    const request = ++detailRequest.current;
+    return swarmApi
       .getSwarm(swarmId)
       .then((next) => {
+        if (request !== detailRequest.current) return;
         setDetail(next);
         setError("");
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+      .catch((err: unknown) => {
+        if (request === detailRequest.current) setError(err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   /**
@@ -187,6 +192,7 @@ export function SwarmBoard({
 
   useEffect(() => {
     if (!selectedId) {
+      detailRequest.current += 1;
       setDetail(null);
       setArtifacts([]);
       return;
@@ -303,10 +309,12 @@ export function SwarmBoard({
     setBusy(true);
     if (forTask) setTaskActionError("");
     void run()
-      .then(() => {
-        if (selectedId) loadDetail(selectedId);
-        loadSwarms();
+      .then(async () => {
         setError("");
+        await Promise.all([
+          selectedId ? loadDetail(selectedId) : Promise.resolve(),
+          loadSwarms(),
+        ]);
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -468,9 +476,10 @@ export function SwarmBoard({
           runStatus={detail.plannerRun.status}
           runError={detail.plannerRun.error}
           agentName={detail.plannerRun.agent?.name ?? "Planner agent"}
-          canRetry={detail.swarm.status === "planning" && detail.tasks.length === 0}
+          canRetry={detail.swarm.status === "planning" && !detail.tasks.some((task) => task.nodeType === "leaf" && task.status !== "cancelled")}
           busy={busy}
           onRetry={() => { setPlannerOutputOpen(false); act(() => swarmApi.retryPlanner(selectedId)); }}
+          onStop={() => act(() => swarmApi.stopPlanner(selectedId))}
           onMessageSent={() => {
             loadDetail(selectedId);
             loadSwarms();

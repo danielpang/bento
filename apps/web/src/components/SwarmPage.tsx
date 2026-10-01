@@ -4,7 +4,7 @@ import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
-import { canPause, canReopen, canResume, canStart, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
+import { canPause, canReopen, canResume, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
 import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
@@ -130,11 +130,19 @@ export function SwarmPage({
   const live = canPause(swarm.status);
   const now = useNow(live);
   const stopped = pausedWords(swarm.status, swarm.pausedReason);
-  const planReady = detail.tasks.length > 0;
+  const planReady = detail.tasks.some((task) => task.nodeType === "leaf" && task.status !== "cancelled");
+  const openLeaves = detail.tasks.filter((task) => task.nodeType === "leaf" && task.status === "open" && task.attention === "none");
+  const plannerActive = detail.plannerRun != null && ["queued", "starting", "running"].includes(detail.plannerRun.status);
+  // A planner can finish a later turn after the swarm has entered
+  // running. Open leaves still need a person's approval in that state.
+  const planNeedsApproval = !plannerActive && (
+    (swarm.status === "planning" && planReady) ||
+    (openLeaves.length > 0 && (swarm.status === "running" || swarm.status === "waiting"))
+  );
   const waitingForPlan = swarm.status === "planning" && !planReady;
   const plannerFailed = waitingForPlan && detail.plannerRun?.status === "failed";
-  const primaryAction = canStart(swarm.status) && planReady
-    ? { label: "Start work", onClick: actions.onResume }
+  const primaryAction = planNeedsApproval
+    ? { label: "Approve plan", onClick: actions.onResume }
     : canResume(swarm.status)
       ? { label: "Resume work", onClick: actions.onResume }
       : canReopen(swarm.status)
@@ -199,7 +207,7 @@ export function SwarmPage({
 
         <div className="swarm-head-actions">
           {primaryAction && <button className="btn btn-primary swarm-main-action" disabled={busy} onClick={primaryAction.onClick}>{primaryAction.label}</button>}
-          {waitingForPlan && !plannerFailed && <span className="swarm-awaiting-plan">Planner at work</span>}
+          {waitingForPlan && plannerActive && <span className="swarm-awaiting-plan">Planner at work</span>}
           <button className="btn" disabled={busy} onClick={actions.onSettings}>Settings</button>
           <details className="swarm-more-actions">
             <summary className="btn" aria-label="More swarm actions">
@@ -209,7 +217,10 @@ export function SwarmPage({
               </svg>
             </summary>
             <div className="swarm-more-menu">
-              {swarm.status === "planning" && !plannerFailed && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}
+              {swarm.status === "planning" && plannerActive && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}
+              {planNeedsApproval && (swarm.status === "running" || swarm.status === "waiting") && (
+                <button className="btn" disabled={busy} onClick={actions.onPause}>Pause work</button>
+              )}
               {canStop(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onStop}>Stop swarm</button>}
               {swarm.archivedAt ? (
                 <button className="btn" disabled={busy} onClick={actions.onRestore}>Restore</button>
@@ -238,8 +249,13 @@ export function SwarmPage({
             <p className="swarm-next-step" role="status">
               {detail.plannerRun?.status === "failed"
                 ? "Planner failed. Open its output below, then retry."
-                : "Planner is building the task tree. Review the plan here before starting work."}
+                : plannerActive
+                  ? "Planner is building the task tree. Review the plan here before starting work."
+                  : "The plan is not ready. Message the planner to finish it."}
             </p>
+          )}
+          {planNeedsApproval && (
+            <p className="swarm-next-step" role="status">Review the diagram, then approve the plan to start ready workers.</p>
           )}
           <div className="swarm-brief-metrics">
             <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>

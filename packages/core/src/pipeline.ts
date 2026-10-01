@@ -208,6 +208,7 @@ export const SWARM_AGENTS: SwarmAgentDefinition[] = [
       "",
       "A good leaf is a change one agent can make, test, and land on its own branch without waiting for another leaf. Two leaves that have to edit the same lines are one leaf; a leaf nobody could finish in a sitting is a group to split further.",
       "Say what finished means for each leaf, in the leaf's own description. An agent that has to guess what you wanted will guess.",
+      "On a follow-up, read the saved task tree and design note before investigating again. If plan.md exists, read it for context too. When asked to proceed with the current plan, use its existing leaves and assign open work that is ready. Do not recreate the plan or duplicate tasks. If the person asks for a status update or a change to the plan, answer that request first.",
       "When a report comes back, judge the work rather than the write-up. Reject with a specific reason when it is wrong, and split what turned out bigger than you thought. Ask a person when the decision is theirs, and say plainly when the goal cannot be done as written.",
     ].join("\n"),
   },

@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
@@ -262,6 +262,90 @@ function saySwarmChanged(
       ...(status ? { status } : {}),
     });
   });
+}
+
+/** Releases saved work when a person starts or resumes a swarm. */
+async function releaseOpenSwarmLeaves(
+  ctx: AppContext,
+  c: Context,
+  swarm: Pick<typeof swarms.$inferSelect, "id" | "projectId">,
+): Promise<void> {
+  const released = await db(c, ctx)
+    .update(swarmTasks)
+    .set({ status: "assigned", updatedAt: new Date() })
+    .where(and(eq(swarmTasks.swarmId, swarm.id), eq(swarmTasks.nodeType, "leaf"), eq(swarmTasks.status, "open"), isNull(swarmTasks.attention)))
+    .returning({ id: swarmTasks.id });
+  if (released.length === 0) return;
+  await db(c, ctx).insert(swarmTaskEvents).values(released.map(({ id }) => ({
+    taskId: id,
+    kind: "status_changed" as const,
+    fromStatus: "open",
+    toStatus: "assigned",
+    actorUserId: actor(c),
+  })));
+  for (const task of released) {
+    deferAfterCommit(c, async () => {
+      ctx.bus.emitBoardEvent({
+        type: "swarm_task_updated",
+        projectId: swarm.projectId,
+        swarmId: swarm.id,
+        taskId: task.id,
+        status: "assigned",
+      });
+    });
+  }
+}
+
+/** An empty plan group has no work that a dependent child can wait for. */
+async function repairEmptyPlanDependencies(
+  ctx: AppContext,
+  c: Context,
+  swarm: Pick<typeof swarms.$inferSelect, "id" | "projectId">,
+): Promise<void> {
+  const tasks = await db(c, ctx)
+    .select({
+      id: swarmTasks.id,
+      parentId: swarmTasks.parentId,
+      parentRelation: swarmTasks.parentRelation,
+      nodeType: swarmTasks.nodeType,
+      status: swarmTasks.status,
+      assignedRunId: swarmTasks.assignedRunId,
+    })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.swarmId, swarm.id));
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const groupsWithWork = new Set(tasks
+    .filter((task) => task.parentId && task.parentRelation === "contains" && task.status !== "cancelled")
+    .map((task) => task.parentId!));
+  const stranded = tasks.filter((task) => {
+    if (!task.parentId || task.parentRelation !== "depends_on" || task.status === "cancelled") return false;
+    const parent = byId.get(task.parentId);
+    return parent?.nodeType === "plan" && parent.status === "open" && !parent.assignedRunId &&
+      !groupsWithWork.has(parent.id);
+  });
+  if (stranded.length === 0) return;
+
+  await db(c, ctx)
+    .update(swarmTasks)
+    .set({ parentRelation: "contains", updatedAt: new Date() })
+    .where(inArray(swarmTasks.id, stranded.map((task) => task.id)));
+  await db(c, ctx).insert(swarmTaskEvents).values(stranded.map((task) => ({
+    taskId: task.id,
+    kind: "note" as const,
+    actorUserId: actor(c),
+    detail: { reason: "An empty plan group cannot be a prerequisite. This task is now part of that group." },
+  })));
+  for (const task of stranded) {
+    deferAfterCommit(c, async () => {
+      ctx.bus.emitBoardEvent({
+        type: "swarm_task_updated",
+        projectId: swarm.projectId,
+        swarmId: swarm.id,
+        taskId: task.id,
+        status: task.status,
+      });
+    });
+  }
 }
 
 /**
@@ -992,6 +1076,26 @@ export function swarmRoutes(ctx: AppContext) {
       saySwarmChanged(ctx, c, swarm, "planning");
       return c.json({ runId: run.id }, 201);
     })
+    .post("/:id/planner/stop", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+
+      const [run] = await db(c, ctx)
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner"), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1);
+      if (!run) return c.json({ error: "The planner is not running." }, 409);
+
+      ctx.running.get(run.id)?.abort();
+      await markCancelled(ctx, run.id);
+      deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm);
+      return c.json({ runId: run.id, status: "cancelled" });
+    })
     .post("/:id/start", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
@@ -1001,7 +1105,7 @@ export function swarmRoutes(ctx: AppContext) {
       const [{ count } = { count: 0 }] = await db(c, ctx)
         .select({ count: sql<number>`count(*)::int` })
         .from(swarmTasks)
-        .where(and(eq(swarmTasks.swarmId, swarm.id), sql`${swarmTasks.status} <> 'cancelled'`));
+        .where(and(eq(swarmTasks.swarmId, swarm.id), eq(swarmTasks.nodeType, "leaf"), sql`${swarmTasks.status} <> 'cancelled'`));
       if (count === 0) {
         const [latestPlanner] = await db(c, ctx)
           .select({ id: agentRuns.id, status: agentRuns.status, error: agentRuns.error })
@@ -1024,10 +1128,29 @@ export function swarmRoutes(ctx: AppContext) {
       if (swarm.status === "cancelled" || swarm.status === "done") {
         return c.json({ error: `This swarm is ${swarm.status}, so it cannot be started.` }, 409);
       }
+      const [activePlanner] = await db(c, ctx)
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner"), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+        .limit(1);
+      if (activePlanner) {
+        return c.json({ error: "The planner is still working. Wait for it to finish or stop it before approving the plan." }, 409);
+      }
 
+      // Start and Resume are an explicit decision to work the saved plan.
+      // A planner can put the first task below an empty plan group as
+      // depends_on. That cannot start, since the group's status comes
+      // from contained work. Treat those children as the group's work.
+      await repairEmptyPlanDependencies(ctx, c, swarm);
+      // A planner interrupted after creating the tree can leave every
+      // leaf open, which the coordinator deliberately does not spawn.
+      // Assign all open leaves now; its dependency check will hold each
+      // descendant until its prerequisite has finished.
+      await releaseOpenSwarmLeaves(ctx, c, swarm);
+      const now = new Date();
       const [started] = await db(c, ctx)
         .update(swarms)
-        .set({ status: "running", pausedReason: null, updatedAt: new Date() })
+        .set({ status: "running", pausedReason: null, updatedAt: now })
         .where(eq(swarms.id, swarm.id))
         .returning();
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));

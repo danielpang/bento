@@ -24,7 +24,7 @@ import { modeSurfaces } from "./swarm/plan.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import type { SwarmLanding, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
+import type { SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
 import { readFileSync, readdirSync } from "node:fs";
 
 /**
@@ -194,6 +194,7 @@ test("the planner and its failure appear in both views before the plan exists", 
   const outline = renderToStaticMarkup(createElement(SwarmOutline, {
     model: empty, plannerRun, selectedId: null, onSelect: () => {}, onRetryPlanner: () => {}, onOpenPlannerOutput: () => {}, canRetryPlanner: true, now: 0,
   }));
+  assert.doesNotMatch(tree, /Diagram line meanings|Tree view controls/, "empty plans have no lines or nodes to explain");
   for (const html of [tree, outline]) {
     assert.match(html, /Planner agent/);
     assert.match(html, /Swarm Planner/);
@@ -665,6 +666,15 @@ test("the planner conversation has guidance input and worker output stays read-o
   assert.match(planner, /Message the planner/);
   assert.match(planner, /Your message starts another planner turn/);
   assert.match(planner, /<textarea[^>]*maxLength="20000"/);
+
+  const activePlanner = renderToStaticMarkup(createElement(SwarmRunOutputDrawer, {
+    client,
+    api: { listPlannerMessages: async () => [], messagePlanner: async () => { throw new Error("unused"); } },
+    swarmId: "sw-1", swarmStatus: "planning", runId: "run-2", runStatus: "running",
+    agentName: "Planner agent", onMessageSent: () => {}, onStop: () => {}, onClose: () => {},
+  }));
+  assert.match(activePlanner, /Stop planner/);
+  assert.doesNotMatch(planner, /Stop planner/, "a finished planner has no running turn to stop");
 });
 
 test("a checkout failure offers retry and keeps its error in technical details", () => {
@@ -754,9 +764,21 @@ test("a swarm's settings open on what it is set to now, and round trip unchanged
   assert.equal(settingsFrom({ ...draft, completionCommand: "   " }).completionCommand, null, "blank is none");
 });
 
-function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
+function pageHtml(mode: "local" | "multi", status?: SwarmStatus, options: {
+  plannerStatus?: SwarmPlannerRun["status"];
+  approveAllLeaves?: boolean;
+} = {}) {
   const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
-  const detail = { ...seeded, agentTimeMs: 7_260_000, ...(status ? { swarm: { ...seeded.swarm, status } } : {}) };
+  const detail = {
+    ...seeded,
+    agentTimeMs: 7_260_000,
+    ...(status ? { swarm: { ...seeded.swarm, status } } : {}),
+    ...(options.approveAllLeaves ? { tasks: seeded.tasks.map((task) => task.nodeType === "leaf" && task.status === "open" ? { ...task, status: "assigned" as const } : task) } : {}),
+    ...(options.plannerStatus ? { plannerRun: {
+      id: "planner-1", status: options.plannerStatus, error: null, agent: null,
+      queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: null,
+    } } : {}),
+  };
   return renderToStaticMarkup(
     createElement(SwarmPage, {
       detail,
@@ -793,7 +815,8 @@ test("the header carries the ring, branch, agent time and controls", () => {
   assert.match(html, /2h 1m agent time/);
   assert.doesNotMatch(html, /Swarm workspace|Since this swarm started/);
   assert.match(html, />4 of 11 tasks</);
-  assert.match(html, />Pause work<\/button>/);
+  assert.match(html, />Approve plan<\/button>/);
+  assert.match(html, /approve the plan to start ready workers/);
   assert.match(html, />Stop swarm<\/button>/);
   assert.match(html, />Delete swarm<\/button>/);
   assert.match(html, />Create PR<\/button>/);
@@ -827,7 +850,8 @@ test("a finished swarm can be archived from its own page", () => {
 
 test("the swarm workspace shows one spend estimate", () => {
   const html = pageHtml("multi");
-  assert.match(html, /Spend estimate<\/span><strong class="spend-figure">\$5\.70<\/strong>/);
+  assert.match(html, /Spend estimate<\/span><strong class="spend-figure">\$5\.45<\/strong>/);
+  assert.ok(!html.includes("$5.70"), "legacy assumed costs do not reach the displayed estimate");
   assert.match(html, /\$40\.00 budget/);
   assert.ok(!html.includes("Spend by role"));
   assert.ok(!html.includes("More than a quarter"));
@@ -843,18 +867,21 @@ test("the swarm workspace shows one spend estimate", () => {
  * and re-planned, and never started. Pause stays beside it, because
  * pausing a planner mid plan is still a thing somebody wants.
  */
-test("a swarm that has been planned offers Start work and keeps Pause planner under Actions", () => {
-  const html = pageHtml("multi", "planning");
-  assert.match(html, />Start work<\/button>/);
-  assert.match(html, />Pause planner<\/button>/);
+test("a finished planner exposes plan approval even when the swarm already says running", () => {
+  const html = pageHtml("multi", "planning", { plannerStatus: "succeeded" });
+  assert.match(html, />Approve plan<\/button>/);
+  assert.doesNotMatch(html, />Pause planner<\/button>/);
   assertNoDashes(html, "the header of a planning swarm");
 
-  // Running, paused and finished swarms are unchanged: Start belongs
-  // to the one state that has a plan and no permission to run it.
-  assert.equal(pageHtml("multi").includes(">Start work</button>"), false);
-  assert.equal(pageHtml("multi", "paused").includes(">Start work</button>"), false);
+  assert.match(pageHtml("multi", "running", { plannerStatus: "succeeded" }), />Approve plan<\/button>/);
+  assert.match(pageHtml("multi", "running", { plannerStatus: "succeeded" }), />Pause work<\/button>/,
+    "pause remains available from Actions while approval is the main action");
+  assert.match(pageHtml("multi", "running", { approveAllLeaves: true }), />Pause work<\/button>/);
+  const stillPlanning = pageHtml("multi", "planning", { plannerStatus: "running" });
+  assert.doesNotMatch(stillPlanning, />Approve plan<\/button>/);
+  assert.match(stillPlanning, />Pause planner<\/button>/);
   assert.match(pageHtml("multi", "paused"), />Resume work<\/button>/);
-  assert.equal(pageHtml("multi", "done").includes(">Start work</button>"), false);
+  assert.doesNotMatch(pageHtml("multi", "done"), />Approve plan<\/button>/);
 });
 
 test("a planner question is a banner with the reply in it", () => {

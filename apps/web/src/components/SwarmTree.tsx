@@ -67,16 +67,27 @@ export function SwarmTree({
   const roots = nodes.filter((node) => node.parentId === null);
   const contentWidth = width + pad * 2;
   const stageRef = useRef<HTMLDivElement>(null);
-  const positioned = useRef(false);
+  const autoCenter = useRef(true);
   const drag = useRef<{ pointerId: number; clientX: number; clientY: number; x: number; y: number } | null>(null);
   const [view, setView] = useState<Viewport>({ x: 0, y: 16, scale: 1 });
   const [dragging, setDragging] = useState(false);
 
   useLayoutEffect(() => {
     const stage = stageRef.current;
-    if (!stage || positioned.current) return;
-    setView({ x: (stage.clientWidth - contentWidth) / 2, y: 16, scale: 1 });
-    positioned.current = true;
+    if (!stage) return;
+    // The diagram can widen after its first render. Keep the planner
+    // centered until the person pans or zooms it by hand.
+    const center = () => {
+      if (!autoCenter.current || stage.clientWidth === 0) return;
+      setView((current) => {
+        const x = (stage.clientWidth - contentWidth * current.scale) / 2;
+        return current.x === x ? current : { ...current, x };
+      });
+    };
+    center();
+    const observer = new ResizeObserver(center);
+    observer.observe(stage);
+    return () => observer.disconnect();
   }, [contentWidth]);
 
   useEffect(() => {
@@ -85,6 +96,7 @@ export function SwarmTree({
     const onWheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
+      autoCenter.current = false;
       const rect = stage.getBoundingClientRect();
       setView((current) => zoomAt(
         current,
@@ -100,15 +112,18 @@ export function SwarmTree({
   const zoomBy = (factor: number) => {
     const stage = stageRef.current;
     if (!stage) return;
+    autoCenter.current = false;
     setView((current) => zoomAt(current, current.scale * factor, stage.clientWidth / 2, stage.clientHeight / 2));
   };
   const resetView = () => {
     const stage = stageRef.current;
     if (!stage) return;
+    autoCenter.current = true;
     setView({ x: (stage.clientWidth - contentWidth) / 2, y: 16, scale: 1 });
   };
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || (event.target as Element).closest("button, a")) return;
+    autoCenter.current = false;
     drag.current = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, x: view.x, y: view.y };
     event.currentTarget.setPointerCapture(event.pointerId);
     setDragging(true);
@@ -140,17 +155,17 @@ export function SwarmTree({
       onPointerUp={onPointerEnd}
       onPointerCancel={onPointerEnd}
     >
-      <div className="swarm-edge-legend" aria-label="Diagram line meanings">
+      {nodes.length > 0 && <div className="swarm-edge-legend" aria-label="Diagram line meanings">
         <span className="swarm-edge-legend-item"><i className="swarm-edge-legend-line" aria-hidden="true" />Child task</span>
         <span className="swarm-edge-legend-item"><i className="swarm-edge-legend-line" data-live="" aria-hidden="true" />Active or needs attention</span>
         <span className="swarm-edge-legend-item"><i className="swarm-edge-legend-line" data-relation="depends_on" aria-hidden="true" />Depends on task above</span>
-      </div>
-      <div className="swarm-viewport-controls" role="group" aria-label="Tree view controls">
+      </div>}
+      {nodes.length > 0 && <div className="swarm-viewport-controls" role="group" aria-label="Tree view controls">
         <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1 / 1.2)}>−</button>
         <span aria-live="off">{Math.round(view.scale * 100)}%</span>
         <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => zoomBy(1.2)}>+</button>
         <button type="button" className="swarm-viewport-reset" onClick={resetView}>Reset view</button>
-      </div>
+      </div>}
       <div className="swarm-tree-content" style={{ width: `${contentWidth}px`, transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>
         {plannerRun && (
           <>

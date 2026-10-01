@@ -122,11 +122,14 @@ function SpendIntro({ usage }: { usage: ProjectUsage | null }) {
   const swarmRuns = (usage?.bySwarm ?? []).reduce((total, row) => total + row.runs, 0);
   return (
     <header className="spend-intro">
+      <a className="spend-back" href="/?board=swarms" aria-label="Back to swarms">
+        <span aria-hidden="true">←</span> Back to swarms
+      </a>
       <h1 className="spend-title">Spend</h1>
       <p className="spend-lede">
-        Bento records the figure an agent CLI prints. It does not price tokens itself. A run that
-        fails before finishing reports nothing either. Any figure here is a floor rather than a full
-        total.
+        Bento records costs reported by agent tools. For swarms, it can also price reported tokens
+        using model rates. Runs without usable cost data remain unreported and do not count toward
+        dollar caps, so these figures are partial.
       </p>
       {usage && <p className="spend-total">{spendHeadline(usage, swarmRuns)}</p>}
       <dl className="spend-coverage">
@@ -205,10 +208,8 @@ function SpendTable({
  *
  * A swarm is one goal worked by many agents, and its runs are not
  * forty unrelated rows: nobody wants to read forty lines to find out
- * what one swarm cost. The tiers stay apart here for the same reason
- * they stay apart everywhere else, and the column that matters most is
- * the assumed one, because that is the part of the number nobody
- * measured.
+ * what one swarm cost. Runs that report no usable cost are counted as
+ * unreported rather than assigned a synthetic price.
  *
  * Absent rather than empty when there are no swarms: a heading over
  * nothing is a feature advertising itself on a page about money.
@@ -219,9 +220,8 @@ export function SwarmSpendTable({ rows }: { rows: SwarmSpendRow[] }) {
     <section className="spend-swarms">
       <h2 className="spend-title">Swarms</h2>
       <p className="spend-lede">
-        One row per swarm, not one per agent. Each figure is split by how well it is known: what the
-        tools reported, what was priced from the tokens they printed, what had to be assumed for
-        tools that report nothing, and what a subscription had already paid for.
+        One row per swarm. Measured costs come from the agent, estimated costs use reported tokens,
+        and unreported runs have no dollar amount. Notional costs are subscription list prices.
       </p>
       <table className="spend-table">
         <thead>
@@ -234,10 +234,10 @@ export function SwarmSpendTable({ rows }: { rows: SwarmSpendRow[] }) {
               Estimated
             </th>
             <th scope="col" className="spend-col">
-              Assumed
+              Notional
             </th>
             <th scope="col" className="spend-col">
-              Notional
+              Unreported
             </th>
             <th scope="col" className="spend-col">
               Runs
@@ -257,15 +257,13 @@ export function SwarmSpendTable({ rows }: { rows: SwarmSpendRow[] }) {
               </td>
               <td className="spend-col spend-tier-cell">{dollars(row.measuredUsd)}</td>
               <td className="spend-col spend-tier-cell">{dollars(row.estimatedUsd)}</td>
-              <td className="spend-col spend-tier-cell" title="Nobody measured this part.">
-                {dollars(row.assumedUsd)}
-              </td>
               <td
                 className="spend-col spend-tier-cell"
                 title="A list price for work a subscription had already paid for. It counts against no budget."
               >
                 {dollars(row.notionalUsd)}
               </td>
+              <td className="spend-col">{row.runsWithoutCost}</td>
               <td className="spend-col">{row.runs}</td>
             </tr>
           ))}

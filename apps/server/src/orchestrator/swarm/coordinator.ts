@@ -31,7 +31,7 @@ import {
 } from "./deliverable.js";
 import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
-import { assumedCostFor, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
+import { observedAverageRunCost, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
 import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog } from "./watchdog.js";
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
@@ -1036,7 +1036,7 @@ async function rollUp(
 async function warnLowBudget(tx: Tx, swarm: typeof swarms.$inferSelect, now: Date): Promise<void> {
   if (swarm.budgetWarnedAt) return;
   if (swarm.status === "cancelled" || swarm.status === "done" || swarm.status === "draft") return;
-  const perRun = await assumedCostFor(tx as unknown as Db, swarm);
+  const perRun = await observedAverageRunCost(tx as unknown as Db, swarm);
   if (!budgetIsLow(swarm, perRun)) return;
 
   const cap = Number(swarm.budgetUsd);

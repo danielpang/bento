@@ -69,13 +69,9 @@ export type TaskAttention =
   | "plan_limit";
 
 /**
- * Money, always three figures.
- *
- * Measured is what a tool reported. Estimated is what the console
- * worked out from tokens at a published rate. Assumed is a swarm's
- * own guess for a tool that reports nothing at all. They are carried
- * apart and printed apart, and nothing here adds them: a single total
- * would be three different kinds of confidence wearing one number.
+ * Measured is what a tool reported. Estimated is priced from reported
+ * tokens. The assumed field is retained for older wire data, and the
+ * console never treats it as spend.
  */
 export interface SwarmSpend {
   measuredUsd: number;

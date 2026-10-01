@@ -191,7 +191,7 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   },
   create_task: {
     description:
-      "Adds one node to the plan. Give parentId and parentRelation='depends_on' when this work must wait for the parent. Use 'contains' for a plan group. A leaf is work an agent does; a plan node groups work.",
+      "Adds one node to the plan. Use 'contains' for work inside a plan group. Use parentRelation='depends_on' only when the parent has work that can finish first. An empty plan group cannot be a prerequisite. A leaf is work an agent does; a plan node groups work.",
     roles: ["planner", "subplanner"],
     inputSchema: {
       type: "object",

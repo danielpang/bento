@@ -314,11 +314,11 @@ test("a planner's charge reaches the swarm even though it hangs off no node", as
     pricePerMtok: null,
   });
   await applyRunCharge(db, { swarmId: swarm.id, swarmTaskId: leaf.id }, {
-    tier: "assumed",
+    tier: "estimated",
     usd: 0.5,
-    inputTokens: null,
-    outputTokens: null,
-    pricePerMtok: null,
+    inputTokens: 100_000,
+    outputTokens: 0,
+    pricePerMtok: { input: 5, output: 5 },
   });
   assert.ok(planner);
 
@@ -326,9 +326,9 @@ test("a planner's charge reaches the swarm even though it hangs off no node", as
 
   const after = await readSwarm(swarm.id);
   assert.equal(Number(after.spentMeasuredUsd), 2.5, "the planner's turn is on the swarm, and no tick erases it");
-  assert.equal(Number(after.spentAssumedUsd), 0.5);
+  assert.equal(Number(after.spentEstimatedUsd), 0.5);
   const worked = await read(leaf.id);
-  assert.equal(Number(worked.costAssumedUsd), 0.5, "and the leaf carries its own");
+  assert.equal(Number(worked.costEstimatedUsd), 0.5, "and the leaf carries its own");
 });
 
 test("a tick applied twice changes nothing the second time", async () => {
@@ -1154,6 +1154,16 @@ test("a swarm somebody paused by hand is left alone", async () => {
 test("the planner is warned once when less than one run's worth of budget is left", async () => {
   const swarm = await makeSwarm({ status: "running", budgetUsd: "10", spentMeasuredUsd: "9.80" });
   await makeTask(swarm.id, { title: "leaf", status: "open" });
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "",
+    status: "succeeded",
+    costUsd: "0.50",
+    costTier: "measured",
+  });
 
   const first = await tickSwarm(ctx, swarm.id, starter());
   assert.ok(first?.plannerRunId, "the warning is delivered as a planner turn");

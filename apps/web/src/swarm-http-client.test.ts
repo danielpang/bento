@@ -203,6 +203,12 @@ test("retrying a failed planner reaches its run endpoint", async () => {
   assert.deepEqual(calls.map((call) => `${call.method} ${call.url}`), ["POST /api/swarms/sw-1/planner/retry"]);
 });
 
+test("stopping a planner leaves the swarm itself running", async () => {
+  const { calls, doFetch } = fetchStub({ runId: "run-1", status: "cancelled" });
+  await httpSwarmApi("", doFetch).stopPlanner("sw-1");
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url}`), ["POST /api/swarms/sw-1/planner/stop"]);
+});
+
 test("planner guidance uses the persisted swarm thread and leaves task messages out", async () => {
   const planner = {
     id: "message-1", taskId: null, text: "Make the plan smaller", source: "person", status: "sent",

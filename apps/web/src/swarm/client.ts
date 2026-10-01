@@ -29,6 +29,7 @@ import type {
  *   GET    /api/swarms/:id
  *   PATCH  /api/swarms/:id
  *   POST   /api/swarms/:id/start | /pause | /cancel
+ *   POST   /api/swarms/:id/planner/stop
  *   POST   /api/swarms/:id/messages
  *
  * Anything the console could once do that has no route behind it is
@@ -58,6 +59,7 @@ export interface SwarmApi {
   /** Resuming is starting: one route decides when a swarm may run. */
   resumeSwarm(swarmId: string): Promise<void>;
   retryPlanner(swarmId: string): Promise<void>;
+  stopPlanner(swarmId: string): Promise<void>;
   stopSwarm(swarmId: string): Promise<void>;
   releaseSwarmBranch(swarmId: string): Promise<void>;
   /**
@@ -273,6 +275,13 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     retryPlanner(swarmId) {
       return mutate(swarmId, (detail) => {
         if (detail.plannerRun?.status === "failed") detail.plannerRun.status = "queued";
+      });
+    },
+    stopPlanner(swarmId) {
+      return mutate(swarmId, (detail) => {
+        if (detail.plannerRun && ["queued", "starting", "running"].includes(detail.plannerRun.status)) {
+          detail.plannerRun.status = "cancelled";
+        }
       });
     },
     resumeSwarm(swarmId) {
@@ -958,6 +967,9 @@ export function httpSwarmApi(
     },
     async retryPlanner(swarmId) {
       await post(`/api/swarms/${swarmId}/planner/retry`);
+    },
+    async stopPlanner(swarmId) {
+      await post(`/api/swarms/${swarmId}/planner/stop`);
     },
     async stopSwarm(swarmId) {
       await post(`/api/swarms/${swarmId}/cancel`);
