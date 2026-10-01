@@ -1,11 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createDb, createPool } from "@bento/db";
+import { randomUUID } from "node:crypto";
+import {
+  createDb,
+  createPool,
+  features,
+  pipelines,
+  projects,
+  runMigrations,
+  sandboxes,
+  swarms,
+} from "@bento/db";
+import pg from "pg";
 import { createApp } from "../app.js";
-import { createDrivers, type AppContext } from "../context.js";
+import { createDrivers, ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
-import { driverForProject, driverForSandbox } from "./sandbox-driver.js";
+import { FeatureFlags } from "../feature-flags.js";
+import { driverForProject, driverForProvision, driverForSandbox, driverForSwarmProvision } from "./sandbox-driver.js";
 
 /**
  * Registry resolution. Constructors do not open a socket: DockerDriver
@@ -13,6 +25,15 @@ import { driverForProject, driverForSandbox } from "./sandbox-driver.js";
  */
 function driversFor(overrides: NodeJS.ProcessEnv) {
   return createDrivers(loadEnv(overrides));
+}
+
+/** A project with no setting, or one that names the default, never asks the flag. */
+function projectDriver(drivers: ReturnType<typeof driversFor>, sandboxProvider: string | null = null) {
+  return driverForProject(
+    { drivers, env: { BENTO_MODE: "local" } } as AppContext,
+    { sandboxProvider, ownerId: "owner" },
+    null,
+  );
 }
 
 test("a sprite row resolves to sprite when the default is docker and both are registered", () => {
@@ -49,7 +70,7 @@ test("an unconfigured provider throws and does not fall through to the default",
   );
 });
 
-test("a sprite row stays on sprite when modal is also registered, and a project still uses the default", () => {
+test("a sprite row stays on sprite when modal is also registered, and a project with no setting uses the default", async () => {
   const drivers = driversFor({
     BENTO_SANDBOX_DRIVER: "docker",
     SPRITES_TOKEN: "test-token",
@@ -59,12 +80,13 @@ test("a sprite row stays on sprite when modal is also registered, and a project 
   assert.equal(driverForSandbox(drivers, { provider: "sprite" }), drivers.get("sprite"));
   assert.equal(driverForSandbox(drivers, { provider: "modal" }), drivers.get("modal"));
   assert.notEqual(driverForSandbox(drivers, { provider: "modal" }), drivers.default);
-  assert.equal(driverForProject(drivers), drivers.default);
-  assert.equal(driverForProject(drivers).provider, "docker");
+  assert.equal(await projectDriver(drivers), drivers.default);
+  assert.equal((await projectDriver(drivers)).provider, "docker");
+  assert.equal(await projectDriver(drivers, "docker"), drivers.default);
   assert.deepEqual(drivers.selectable(), ["sprite", "modal"]);
 });
 
-test("modal is selectable only when both token vars are set", () => {
+test("modal is selectable only when both token vars are set", async () => {
   assert.equal(driversFor({ BENTO_SANDBOX_DRIVER: "docker", MODAL_TOKEN_ID: "id" }).get("modal"), undefined);
   assert.equal(driversFor({ BENTO_SANDBOX_DRIVER: "docker", MODAL_TOKEN_SECRET: "secret" }).get("modal"), undefined);
   const both = driversFor({
@@ -79,7 +101,7 @@ test("modal is selectable only when both token vars are set", () => {
   assert.equal(both.get("modal")?.provider, "modal");
   assert.equal(both.get("modal")?.sandboxSize, "modal-small");
   assert.deepEqual(both.selectable(), ["modal"]);
-  assert.equal(driverForProject(both).provider, "docker");
+  assert.equal((await projectDriver(both)).provider, "docker");
 });
 
 test("migration 0044 adds a nullable project sandbox provider", () => {
@@ -91,10 +113,11 @@ test("migration 0044 adds a nullable project sandbox provider", () => {
   assert.match(journal, /"tag": "0044_project_sandbox_provider"/);
 });
 
-test("driverForProject returns the default even when sprite is also registered", () => {
+test("driverForProject returns the default even when sprite is also registered", async () => {
   const drivers = driversFor({ BENTO_SANDBOX_DRIVER: "docker", SPRITES_TOKEN: "test-token" });
-  assert.equal(driverForProject(drivers), drivers.default);
-  assert.equal(driverForProject(drivers).provider, "docker");
+  assert.equal(await projectDriver(drivers), drivers.default);
+  assert.equal((await projectDriver(drivers)).provider, "docker");
+  assert.equal(await projectDriver(drivers, "docker"), drivers.default);
   assert.ok(drivers.get("sprite"));
 });
 
@@ -137,6 +160,159 @@ test("a hosted sprite config reports driver sprite from health", async () => {
     const body = (await res.json()) as { driver: string; selectableSandboxProviders: string[] };
     assert.equal(body.driver, "sprite");
     assert.deepEqual(body.selectableSandboxProviders, ["sprite"]);
+  } finally {
+    await pool.end();
+  }
+});
+
+test("driverForProject ignores a stored modal when beta is off, and a hibernated modal row still resolves to Modal", async () => {
+  const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
+  const testDbName = "sandbox_driver_provider_test";
+  const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+  const admin = new pg.Client({ connectionString: baseUrl });
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`);
+  await admin.query(`CREATE DATABASE ${testDbName}`);
+  await admin.end();
+  await runMigrations(testUrl);
+
+  const pool = createPool(testUrl);
+  const db = createDb(pool);
+  try {
+    const ownerId = await ensureLocalUser(db);
+    const drivers = driversFor({
+      BENTO_SANDBOX_DRIVER: "docker",
+      MODAL_TOKEN_ID: "id",
+      MODAL_TOKEN_SECRET: "secret",
+    });
+    const ctx = {
+      db,
+      drivers,
+      env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "docker" }),
+      featureFlags: new FeatureFlags(null, false),
+    } as AppContext;
+
+    const featureId = randomUUID();
+    const [project] = await db
+      .insert(projects)
+      .values({ ownerId, name: "Modal when beta is off", sandboxProvider: "modal" })
+      .returning();
+    assert.equal(await driverForProject(ctx, project!, null), drivers.default);
+    assert.equal((await driverForProject(ctx, project!, ownerId)).provider, "docker");
+
+    const [pipeline] = await db
+      .insert(pipelines)
+      .values({ projectId: project!.id, name: "Default", isDefault: true })
+      .returning();
+    await db.insert(features).values({
+      id: featureId,
+      projectId: project!.id,
+      pipelineId: pipeline!.id,
+      title: "Hibernated",
+    });
+    assert.equal((await driverForProvision(db, ctx, featureId, null)).provider, "docker");
+
+    await db.insert(sandboxes).values({
+      projectId: project!.id,
+      featureId,
+      provider: "modal",
+      externalId: `bento-${featureId}`,
+      status: "hibernated",
+      workdir: "/workspace",
+    });
+    const resolved = await driverForProvision(db, ctx, featureId, null);
+    assert.equal(resolved, drivers.get("modal"));
+    assert.equal(resolved.provider, "modal");
+  } finally {
+    await pool.end();
+  }
+});
+
+test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sprite", async () => {
+  const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
+  const testDbName = "sandbox_driver_swarm_test";
+  const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+  const admin = new pg.Client({ connectionString: baseUrl });
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`);
+  await admin.query(`CREATE DATABASE ${testDbName}`);
+  await admin.end();
+  await runMigrations(testUrl);
+
+  const pool = createPool(testUrl);
+  const db = createDb(pool);
+  try {
+    const ownerId = await ensureLocalUser(db);
+    const drivers = driversFor({
+      BENTO_SANDBOX_DRIVER: "docker",
+      SPRITES_TOKEN: "test-token",
+      MODAL_TOKEN_ID: "id",
+      MODAL_TOKEN_SECRET: "secret",
+    });
+    const betaOn = {
+      db,
+      drivers,
+      env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "docker" }),
+      featureFlags: new FeatureFlags(null, true),
+    } as AppContext;
+    const betaOff = { ...betaOn, featureFlags: new FeatureFlags(null, false) } as AppContext;
+
+    const [project] = await db
+      .insert(projects)
+      .values({ ownerId, name: "Modal swarm", sandboxProvider: "modal" })
+      .returning();
+    const [swarm] = await db
+      .insert(swarms)
+      .values({
+        projectId: project!.id,
+        slug: "modal-swarm",
+        title: "Modal swarm",
+        goal: "run on modal",
+        workerIsolation: "sandbox",
+      })
+      .returning();
+
+    const fresh = await driverForSwarmProvision(db, betaOn, swarm!, null, ownerId);
+    assert.equal(fresh, drivers.get("modal"));
+    assert.notEqual(fresh, drivers.default);
+    assert.equal(fresh.provider, "modal");
+
+    const ignored = await driverForSwarmProvision(db, betaOff, swarm!, null, ownerId);
+    assert.equal(ignored, drivers.default);
+    assert.equal(ignored.provider, "docker");
+
+    const [spriteSwarm] = await db
+      .insert(swarms)
+      .values({
+        projectId: project!.id,
+        slug: "sprite-swarm",
+        title: "Sprite swarm",
+        goal: "stay on sprite",
+        workerIsolation: "sandbox",
+      })
+      .returning();
+    const [spriteRow] = await db
+      .insert(sandboxes)
+      .values({
+        projectId: project!.id,
+        swarmId: spriteSwarm!.id,
+        provider: "sprite",
+        externalId: `bento-swarm-${spriteSwarm!.id}`,
+        status: "ready",
+        workdir: "/workspace",
+      })
+      .returning();
+    const kept = await driverForSwarmProvision(
+      db,
+      betaOn,
+      { ...spriteSwarm!, sandboxId: spriteRow!.id },
+      null,
+      ownerId,
+    );
+    assert.equal(kept, drivers.get("sprite"));
+    assert.equal(kept.provider, "sprite");
+    assert.notEqual(kept, drivers.default);
+    assert.notEqual(kept, drivers.get("modal"));
   } finally {
     await pool.end();
   }

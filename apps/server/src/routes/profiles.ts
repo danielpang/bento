@@ -3,7 +3,7 @@ import { and, asc, count, eq, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { MODEL_GUIDANCE, agentCli, checkAgentPairing, providerForProfile } from "@bento/core";
-import { agentProfiles, agentRuns, stages } from "@bento/db";
+import { agentProfiles, agentRuns, projects, stages } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import { canAccessProject, getActiveOrganizationMembership } from "../access.js";
 import { driverForProject } from "../orchestrator/sandbox-driver.js";
@@ -27,15 +27,21 @@ const PROJECT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 /**
  * Absent project, a project id that is not a uuid, or a project the
  * caller cannot access, uses the default driver. An accessible project
- * asks driverForProject, which is the default until a project can name
- * a provider. Unknown and inaccessible ids answer the same body as no
- * parameter, so the route does not say whether a project exists.
+ * asks driverForProject, so a Modal project is probed with Modal.
+ * Unknown and inaccessible ids answer the same body as no parameter,
+ * so the route does not say whether a project exists.
  */
 async function toolsDriver(ctx: AppContext, c: Context): Promise<SandboxDriver> {
   const projectId = c.req.query("projectId");
   if (!projectId || !PROJECT_ID.test(projectId)) return ctx.drivers.default;
   if (!(await canAccessProject(ctx, c, projectId))) return ctx.drivers.default;
-  return driverForProject(ctx.drivers);
+  const [project] = await db(c, ctx)
+    .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  if (!project) return ctx.drivers.default;
+  return driverForProject(ctx, project, actor(c));
 }
 
 async function toolAvailability(

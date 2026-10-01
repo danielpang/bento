@@ -2,7 +2,7 @@ import { and, asc, eq, gt, isNotNull, isNull, lt, ne, or } from "drizzle-orm";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { agentRuns, features, invitation, member, organization, organizationPolicies, sandboxes, user, type Db } from "@bento/db";
+import { agentRuns, features, invitation, member, organization, organizationPolicies, projects, sandboxes, user, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
 import type { SandboxDriver } from "@bento/sandbox";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
@@ -47,7 +47,7 @@ export function teamRoutes(ctx: AppContext) {
         // Whether every driver a sandbox in this organization would
         // run on can honour a restricted network, so the control can
         // say why it would refuse rather than failing at run time.
-        supported: await restrictedNetworkSupported(ctx, db(c, ctx), membership.organizationId),
+        supported: (await restrictedNetworkRefusal(ctx, db(c, ctx), membership.organizationId)) === null,
       });
     })
     .patch("/policy", zValidator("json", z.object({ restrictNetwork: z.boolean() })), async (c) => {
@@ -57,11 +57,9 @@ export function teamRoutes(ctx: AppContext) {
         return c.json({ error: "only organization owners and admins can change this" }, 403);
       }
       const { restrictNetwork } = c.req.valid("json");
-      if (restrictNetwork && !(await restrictedNetworkSupported(ctx, db(c, ctx), membership.organizationId))) {
-        const error = ctx.drivers.default.supportsRestrictedNetwork === true
-          ? "This team has a sandbox this deployment cannot lock down, so the lock cannot be turned on."
-          : "This deployment has no restricted network configured, so agents cannot be locked down yet. Set BENTO_SANDBOX_RESTRICTED_NETWORK on the server first.";
-        return c.json({ error }, 409);
+      if (restrictNetwork) {
+        const error = await restrictedNetworkRefusal(ctx, db(c, ctx), membership.organizationId);
+        if (error) return c.json({ error }, 409);
       }
       await db(c, ctx)
         .insert(organizationPolicies)
@@ -209,19 +207,29 @@ export function teamRoutes(ctx: AppContext) {
   });
 }
 
+const DEPLOYMENT_LOCK_ERROR =
+  "This deployment has no restricted network configured, so agents cannot be locked down yet. Set BENTO_SANDBOX_RESTRICTED_NETWORK on the server first.";
+const SANDBOX_LOCK_ERROR =
+  "This team has a sandbox this deployment cannot lock down, so the lock cannot be turned on.";
+const PROJECT_LOCK_ERROR =
+  "This team has a project set to a sandbox provider that cannot lock its network, so the lock cannot be turned on.";
+
 /**
- * Whether every driver a sandbox in this organization would run on
- * can lock its network.
+ * Why this organization cannot turn a restricted network on, or null
+ * when every driver it would use can lock one.
  *
- * The deployment default, plus the driver each live sandbox row would
- * keep. A card that already has a machine stays on that machine, so a
- * lock the default can honour does not hold when that machine's driver
- * cannot. An unconfigured provider cannot either. Destroyed rows are
- * not provisioned again, so they do not count. This does not open
- * egress: a run whose driver cannot lock the network still fails.
+ * The deployment default, each live sandbox row, and each project's
+ * stored provider. A null project setting means the default. A card
+ * that already has a machine stays on that machine, so a lock the
+ * default can honour does not hold when that machine's driver cannot.
+ * An unconfigured sandbox provider cannot either. Destroyed rows are
+ * not provisioned again, so they do not count. A project set to a
+ * driver that is not built here falls through to the default, which
+ * was already checked. This does not open egress: a run whose driver
+ * cannot lock the network still fails.
  */
-async function restrictedNetworkSupported(ctx: AppContext, handle: Db, organizationId: string): Promise<boolean> {
-  if (ctx.drivers.default.supportsRestrictedNetwork !== true) return false;
+async function restrictedNetworkRefusal(ctx: AppContext, handle: Db, organizationId: string): Promise<string | null> {
+  if (ctx.drivers.default.supportsRestrictedNetwork !== true) return DEPLOYMENT_LOCK_ERROR;
   const rows = await handle
     .select({ provider: sandboxes.provider })
     .from(sandboxes)
@@ -234,10 +242,25 @@ async function restrictedNetworkSupported(ctx: AppContext, handle: Db, organizat
     try {
       driver = driverForSandbox(ctx.drivers, row);
     } catch (err) {
-      if (err instanceof SandboxDriverUnavailable) return false;
+      if (err instanceof SandboxDriverUnavailable) return SANDBOX_LOCK_ERROR;
       throw err;
     }
-    if (driver.supportsRestrictedNetwork !== true) return false;
+    if (driver.supportsRestrictedNetwork !== true) return SANDBOX_LOCK_ERROR;
   }
-  return true;
+
+  const settings = await handle
+    .select({ sandboxProvider: projects.sandboxProvider })
+    .from(projects)
+    .where(eq(projects.organizationId, organizationId));
+  const seenProviders = new Set<string | null>();
+  for (const row of settings) {
+    const wanted = row.sandboxProvider;
+    if (seenProviders.has(wanted)) continue;
+    seenProviders.add(wanted);
+    // Null, and a setting that names the default, are the default driver.
+    if (!wanted || wanted === ctx.drivers.default.provider) continue;
+    const driver = ctx.drivers.get(wanted) ?? ctx.drivers.default;
+    if (driver.supportsRestrictedNetwork !== true) return PROJECT_LOCK_ERROR;
+  }
+  return null;
 }

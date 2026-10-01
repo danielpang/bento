@@ -159,10 +159,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   emitBoard("starting");
 
   // A live sandbox keeps the driver that created it. A card or swarm
-  // with none uses the deployment default until a project can name one.
+  // with none follows the project's provider, which is the deployment
+  // default until a beta tester sets one.
   let driver: SandboxDriver;
   try {
-    driver = await driverForRun(ctx.db, ctx.drivers, subject);
+    driver = await driverForRun(ctx.db, ctx, subject, run.startedBy);
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
