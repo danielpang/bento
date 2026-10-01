@@ -232,7 +232,7 @@ async function setupProject(name: string) {
     }),
   );
   await unassignStages(project.id);
-  const pipeline = await json<{ stages: { id: string; name: string; position: number }[] }>(
+  const pipeline = await json<{ stages: { id: string; name: string; slug: string; position: number }[] }>(
     await app.request(`/api/projects/${project.id}/pipeline`),
   );
   return { project, stages: pipeline.stages };
@@ -2900,7 +2900,7 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
   const pipeline = await json<{ stages: { id: string; name: string; position: number }[] }>(
     await app.request(`/api/projects/${project.id}/pipeline`),
   );
-  assert.equal(pipeline.stages.length, 6);
+  assert.equal(pipeline.stages.length, 3);
 
   // Feature enters the first stage
   const feature = await json<{ id: string }>(
@@ -4960,7 +4960,7 @@ test("stages can be reordered, and a partial order is refused", { timeout: 60_00
 
   // Last to first, the move somebody makes when a review step turns out
   // to belong at the start.
-  const moved = [original[5]!.id, ...original.slice(0, 5).map((s) => s.id)];
+  const moved = [original.at(-1)!.id, ...original.slice(0, -1).map((s) => s.id)];
   const ok = await app.request("/api/stages/reorder", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -4972,20 +4972,20 @@ test("stages can be reordered, and a partial order is refused", { timeout: 60_00
     await app.request(`/api/projects/${project.id}/pipeline`),
   );
   assert.deepEqual(after.stages.map((s) => s.id), moved, "the pipeline reads back in the new order");
-  assert.deepEqual(after.stages.map((s) => s.position), [0, 1, 2, 3, 4, 5], "positions stay contiguous");
+  assert.deepEqual(after.stages.map((s) => s.position), moved.map((_, i) => i), "positions stay contiguous");
 
   // A list missing a stage would leave that stage holding a position
   // this request is handing to somebody else.
   const partial = await app.request("/api/stages/reorder", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ pipelineId: pipeline.id, stageIds: moved.slice(0, 3) }),
+    body: JSON.stringify({ pipelineId: pipeline.id, stageIds: moved.slice(0, -1) }),
   });
   assert.equal(partial.status, 400);
   const repeated = await app.request("/api/stages/reorder", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ pipelineId: pipeline.id, stageIds: [...moved.slice(0, 5), moved[0]!] }),
+    body: JSON.stringify({ pipelineId: pipeline.id, stageIds: [...moved.slice(0, -1), moved[0]!] }),
   });
   assert.equal(repeated.status, 400, "the same stage twice is not an order");
 
@@ -5004,7 +5004,7 @@ test("stages can be reordered, and a partial order is refused", { timeout: 60_00
 test("a pipeline exports to YAML and imports into another project", { timeout: 90_000 }, async () => {
   const source = await setupProject("Exporter");
   const agent = await fakeProfile("Pipeline Reviewer");
-  await patchStage(source.stages[4]!.id, {
+  await patchStage(source.stages.find((s) => s.slug === "code-review")!.id, {
     defaultAgentProfileId: agent.id,
     gateType: "auto",
     gateCriteria: [{ type: "checks_pass" }],
@@ -5040,7 +5040,7 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
   });
   assert.equal(applied.status, 200);
   const result = (await applied.json()) as { stages: number; agents: number; skippedRepositories: string[] };
-  assert.equal(result.stages, 6);
+  assert.equal(result.stages, source.stages.length);
   assert.equal(result.agents, 1);
   assert.deepEqual(result.skippedRepositories, []);
 
@@ -5154,8 +5154,8 @@ agents:
 });
 
 /**
- * A new project arrives ready to run. Six empty lanes and no agents was
- * six job titles to invent before anything could move.
+ * A new project arrives ready to run. Empty lanes and no agents meant
+ * job titles to invent before anything could move.
  */
 test("a new project comes with an agent on every stage", { timeout: 60_000 }, async () => {
   const project = await json<{ id: string }>(
@@ -5168,14 +5168,20 @@ test("a new project comes with an agent on every stage", { timeout: 60_000 }, as
   const pipeline = await json<{ stages: { name: string; defaultAgentProfileId: string | null }[] }>(
     await app.request(`/api/projects/${project.id}/pipeline`),
   );
-  assert.equal(pipeline.stages.length, 6);
+  assert.equal(pipeline.stages.length, 3);
   for (const stage of pipeline.stages) {
     assert.ok(stage.defaultAgentProfileId, `${stage.name} should arrive with an agent`);
   }
 
+  // The agents for stages the default pipeline leaves out are still
+  // there, ready for a team that adds the stage back.
+  const before = await json<{ id: string; name: string }[]>(await app.request("/api/profiles"));
+  for (const name of ["Product Manager", "Product Designer", "QA Engineer"]) {
+    assert.ok(before.some((profile) => profile.name === name), `${name} should be seeded`);
+  }
+
   // A second project reuses them rather than making a second set of the
-  // same six names.
-  const before = await json<{ id: string }[]>(await app.request("/api/profiles"));
+  // same names.
   const second = await json<{ id: string }>(
     await app.request("/api/projects", {
       method: "POST",

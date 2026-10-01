@@ -471,7 +471,7 @@ export function projectRoutes(ctx: AppContext) {
       }
 
       // With the owner, so the pipeline arrives with an agent on every
-      // stage: a board that cannot run anything until six agents are
+      // stage: a board that cannot run anything until its agents are
       // invented is not a starting point.
       await seedDefaultPipeline(db(c, ctx), project.id, {
         ownerId: actor(c),

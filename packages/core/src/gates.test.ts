@@ -15,8 +15,8 @@ test("rejects unknown criterion types", () => {
   assert.throws(() => gateCriteria.parse([{ type: "nope" }]));
 });
 
-test("default pipeline has six valid stages", () => {
-  assert.equal(DEFAULT_STAGES.length, 6);
+test("default pipeline has three valid stages", () => {
+  assert.equal(DEFAULT_STAGES.length, 3);
   for (const stage of DEFAULT_STAGES) {
     gateCriteria.parse(stage.gateCriteria);
   }

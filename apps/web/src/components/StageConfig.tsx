@@ -152,7 +152,7 @@ export function StageConfig({
         <div className="drawer-title-row">
           <h2 className="drawer-title">Pipeline</h2>
           {/* Same reasoning as the Agents panel: the way to add one
-              belongs where it can be seen, not below six stage cards
+              belongs where it can be seen, not below every stage card
               and a file section. */}
           <button
             className="btn btn-primary"
