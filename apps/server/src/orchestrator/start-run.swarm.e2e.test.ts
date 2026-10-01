@@ -14,7 +14,6 @@ import {
 } from "@bento/db";
 import type { Entitlements } from "../context.js";
 import { SWARM_FULL, startRunIfIdle } from "./start-run.js";
-import { DEFAULT_ASSUMED_USD } from "./swarm/ledger.js";
 
 /**
  * The swarm half of the one door every run start goes through.
@@ -309,7 +308,7 @@ test("a swarm outside any organization has no plan to ask", async () => {
  * has a person who typed a number into the creation dialog.
  */
 test("a swarm that has spent its budget starts nothing else", async () => {
-  const swarm = await makeSwarm({ budgetUsd: "10", spentMeasuredUsd: "6", spentAssumedUsd: "4" });
+  const swarm = await makeSwarm({ budgetUsd: "10", spentMeasuredUsd: "6", spentEstimatedUsd: "4" });
 
   const answer = await start({ swarmId: swarm.id, role: "planner", agentProfileId: LOCAL_PROFILE });
   assert.ok(typeof answer === "object" && "outOfCompute" in answer, "the cap refused it");
@@ -353,25 +352,14 @@ test("a swarm spending a borrowed subscription runs past its cap", async () => {
 /**
  * What the cap promises once more than one agent is running.
  *
- * A run's cost is not recorded until it ends, so spend alone says
- * nothing about the four workers currently spending it. Checking spend
- * and nothing else, every worker up to max_workers starts while the
- * figure is still zero, and a $10 swarm commits $20 of work before the
- * first charge lands. The promise is that a budget is exceeded by at
- * most one run, so the runs already going have to be counted at the
- * figure a run that reports nothing is charged.
- *
- * Deliberately not a reservation ledger. Counting the in flight runs
- * under the same lock is enough, and a column reserving money would
- * need releasing on every path a run can end by, including the ones
- * that end when the process does.
+ * It is a cap on starting, and it reads only what has been charged.
+ * A run with no reported cost has no figure to hold against the budget,
+ * so the workers already going are not counted, and concurrent agents
+ * may take spend past the cap before any one of them finishes.
  */
-test("the workers already going count against the budget before they report", async () => {
-  // Room for exactly two runs at the figure a silent run is charged.
-  const swarm = await makeSwarm({ budgetUsd: String(DEFAULT_ASSUMED_USD * 2), maxWorkers: 4 });
+test("the workers already going do not count against the budget, only what they charged", async () => {
+  const swarm = await makeSwarm({ budgetUsd: "1", maxWorkers: 5 });
 
-  const started: string[] = [];
-  let refusedFor: string | null = null;
   for (let i = 0; i < 4; i += 1) {
     const task = await makeTask(swarm.id, `leaf ${i}`);
     const answer = await start({
@@ -380,19 +368,18 @@ test("the workers already going count against the budget before they report", as
       swarmTaskId: task.id,
       agentProfileId: LOCAL_PROFILE,
     });
-    if (isRun(answer)) {
-      started.push(answer.id);
-      continue;
-    }
-    if (typeof answer === "object" && "outOfCompute" in answer) refusedFor = answer.cap ?? null;
-    break;
+    assert.ok(isRun(answer), `worker ${i} starts while nothing has been charged`);
   }
 
-  /*
-   * Two at the assumed figure is the whole budget. A third would commit
-   * half again the cap, which is a run over the promise, and a fourth
-   * would double it.
-   */
-  assert.equal(started.length, 2, "the budget stops the third worker before it starts");
-  assert.equal(refusedFor, "budget");
+  // Once the charges land at the cap, the next start is refused.
+  await db.update(swarms).set({ spentMeasuredUsd: "1" }).where(eq(swarms.id, swarm.id));
+  const task = await makeTask(swarm.id, "one more");
+  const answer = await start({
+    swarmId: swarm.id,
+    role: "worker",
+    swarmTaskId: task.id,
+    agentProfileId: LOCAL_PROFILE,
+  });
+  assert.ok(typeof answer === "object" && "outOfCompute" in answer);
+  assert.equal(answer.cap, "budget");
 });
