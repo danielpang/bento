@@ -220,6 +220,146 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
 });
 
 /**
+ * A swarm's worker, on the driver that clones inside the machine.
+ *
+ * The swarm's branch is not on any remote: the merge queue lands onto
+ * it inside the planner's machine and nothing pushes until the swarm
+ * is finished. A worker seeded from the remote alone would therefore
+ * be cut from the repository's default branch and would hold none of
+ * what the leaves before it landed, which is a branch that conflicts
+ * with every one of them at the queue.
+ *
+ * Verified here as a script rather than against a machine, because
+ * there is no Fly in this environment. What a real sprite does with
+ * the script is what the nightly sandbox workflow is for, and this
+ * change touches sprite.ts, which that workflow watches.
+ */
+test("a worker sprite is cut from the swarm branch it was handed, not from the default branch", async () => {
+  const writes: { path: string; data: Buffer }[] = [];
+  const scripts: string[] = [];
+  const removed: string[] = [];
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, data: Buffer) {
+          writes.push({ path, data });
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+        async readdir() {
+          return [{ name: "api", isDirectory: () => true }];
+        },
+        async exists() {
+          return true;
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "swarm-1-aaaaaaaa",
+    hostWorkspacePath: "/unused",
+    repositories: [{
+      name: "api",
+      cloneUrl: "https://github.com/acme/api.git",
+      branch: "swarm/checkout-aaaaaaaa",
+      baseBranch: "main",
+      seedBundle: Buffer.from("base history"),
+      startBundle: { branch: "swarm/checkout", data: Buffer.from("what the swarm landed") },
+    }],
+  });
+
+  // Both bundles travel, and both are taken off the machine again.
+  assert.deepEqual(
+    writes.map((write) => write.path),
+    ["/tmp/bento-seed-api.bundle", "/tmp/bento-start-api.bundle"],
+  );
+  assert.deepEqual(writes[1]?.data, Buffer.from("what the swarm landed"));
+  assert.ok(removed.includes("/tmp/bento-start-api.bundle"), "the swarm's commits do not stay in /tmp");
+
+  const commands = scripts.join("\n");
+  // The swarm's branch becomes a real ref, forced, because a machine
+  // provisioned twice finds the old head on it.
+  assert.match(commands, /git fetch '\/tmp\/bento-start-api\.bundle' \+HEAD:refs\/heads\/swarm\/checkout/);
+  // And the worker's branch is cut from it.
+  assert.match(commands, /git checkout -b 'swarm\/checkout-aaaaaaaa' 'swarm\/checkout'/);
+  assert.doesNotMatch(
+    commands,
+    /git checkout -b 'swarm\/checkout-aaaaaaaa' 'origin\/main'/,
+    "starting at the repository default is the bug this closes",
+  );
+  // The order matters: the incremental bundle's prerequisite is a
+  // commit the seed brings in.
+  assert.ok(
+    commands.indexOf("bento-seed-api.bundle") < commands.indexOf("bento-start-api.bundle"),
+    "the seed is fetched before the branch built on it",
+  );
+});
+
+test("a worker with no branch handed to it is still cut from the base branch", async () => {
+  const scripts: string[] = [];
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      void file;
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile() {},
+        async rm() {},
+        async readdir() {
+          return [{ name: "api", isDirectory: () => true }];
+        },
+        async exists() {
+          return true;
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+    repositories: [{
+      name: "api",
+      cloneUrl: "https://github.com/acme/api.git",
+      branch: "bento/card",
+      baseBranch: "main",
+      seedBundle: Buffer.from("base history"),
+    }],
+  });
+
+  const commands = scripts.join("\n");
+  assert.match(commands, /git checkout -b 'bento\/card' 'origin\/main'/);
+  assert.doesNotMatch(commands, /bento-start-api\.bundle/, "no second bundle, no second fetch");
+});
+
+/**
  * The workspace sweep between runs must leave Bento's own artifacts
  * directory alone, and it once could not: the SDK's exists() only maps
  * a structured ENOENT to false, and the sprites API answers a missing
@@ -2219,8 +2359,10 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
 
 test("Sprite repository export returns committed objects without credentials", async () => {
   const bundle = Buffer.from("bundle bytes");
+  let script = "";
   const sprite = {
-    spawn() {
+    spawn(_file: string, args: string[]) {
+      script = args[1] ?? "";
       const child = fakeChild();
       queueMicrotask(() => {
         child.stdout.write(`base-sha\nhead-sha\n${bundle.toString("base64")}\n`);
@@ -2241,6 +2383,96 @@ test("Sprite repository export returns committed objects without credentials", a
   assert.equal(exported?.baseSha, "base-sha");
   assert.equal(exported?.headSha, "head-sha");
   assert.deepEqual(exported?.data, bundle);
+
+  await driver.exportRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    "main",
+    { selfContained: true },
+  );
+  assert.match(script, /git bundle create "\$tmp" HEAD/);
+  assert.doesNotMatch(script, /git bundle create "\$tmp" HEAD "\^\$base_sha"/);
+  assert.doesNotMatch(script, /base_sha.*head_sha.*exit 3/);
+});
+
+test("Sprite repository import uploads a bundle and fast-forwards with a compare-and-swap", async () => {
+  const writes: { path: string; data: Buffer }[] = [];
+  const removed: string[] = [];
+  const scripts: string[] = [];
+  const oldHead = "1".repeat(40);
+  const newHead = "2".repeat(40);
+  const data = Buffer.from("trusted landing bundle");
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      assert.equal(args[0], "-lc");
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.write(`${newHead}\n`);
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, contents: Buffer) {
+          writes.push({ path, data: contents });
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  const outcome = await driver.importRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    { baseSha: oldHead, headSha: newHead, data },
+    { branch: "swarm/demo", expectedHeadSha: oldHead },
+  );
+
+  assert.deepEqual(outcome, { ok: true, headSha: newHead });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0]!.data, data);
+  assert.deepEqual(removed, [writes[0]!.path]);
+  assert.match(scripts[0]!, /symbolic-ref --quiet --short HEAD/);
+  assert.match(scripts[0]!, /git diff --quiet/);
+  assert.match(scripts[0]!, /git merge --ff-only/);
+  assert.doesNotMatch(scripts[0]!, /reset|force/);
+});
+
+test("Sprite repository import classifies a moved head as retryable", async () => {
+  const sprite = {
+    spawn() {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stderr.write("the swarm branch moved from old to new\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 12);
+      });
+      return child;
+    },
+    filesystem() {
+      return { async writeFile() {}, async rm() {} };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+  const outcome = await driver.importRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    { baseSha: "1".repeat(40), headSha: "2".repeat(40), data: Buffer.from("bundle") },
+    { branch: "swarm/demo", expectedHeadSha: "1".repeat(40) },
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.ok === false && outcome.reason, "moved");
 });
 
 /**

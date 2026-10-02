@@ -1496,6 +1496,27 @@ export const swarms = pgTable(
     plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
     workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
     /**
+     * Where this swarm's agents work: each on a machine that holds its
+     * own clone, or all of them in worktrees of the project's checkout
+     * on the server.
+     *
+     * Recorded when the swarm is created rather than read off the
+     * deployment on every run. A local install works in worktrees
+     * because a container per worker is a container on the machine
+     * somebody is also using; a hosted one gives each worker a machine.
+     * Read off the driver, that shape would change under a running swarm
+     * the moment the install joined a team, and nobody would be told.
+     *
+     * "worktree" is an assertion the deployment has to be able to keep.
+     * A driver whose sandboxes hold their own clones cannot, and says so
+     * rather than quietly provisioning the other shape. "sandbox" makes
+     * no assertion: the driver decides.
+     *
+     * No default, deliberately: every insert says which it is, the way
+     * agent_runs.type and run_artifacts.type do.
+     */
+    workerIsolation: text("worker_isolation", { enum: ["sandbox", "worktree"] }).notNull(),
+    /**
      * Operating instructions handed to the planner and the workers on
      * top of their own profile skill: how to split this goal, and what
      * a finished leaf has to have done. Read fresh on every run, so an

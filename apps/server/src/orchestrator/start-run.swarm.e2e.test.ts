@@ -78,6 +78,7 @@ async function makeSwarm(overrides: Partial<typeof swarms.$inferInsert> = {}) {
       title: "Swarm",
       status: "running",
       maxWorkers: 2,
+      workerIsolation: "worktree",
       ...overrides,
     })
     .returning();
