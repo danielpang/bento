@@ -1125,8 +1125,39 @@ export function swarmRoutes(ctx: AppContext) {
           409,
         );
       }
-      if (swarm.status === "cancelled" || swarm.status === "done") {
+      // Older coordinator versions could mark a swarm done while a
+      // dependent leaf was still open. Let a person approve that saved
+      // work through the normal start path instead of asking them to
+      // create a duplicate follow up task.
+      const [unfinishedLeaf] = swarm.status === "done"
+        ? await db(c, ctx)
+          .select({ id: swarmTasks.id })
+          .from(swarmTasks)
+          .where(and(
+            eq(swarmTasks.swarmId, swarm.id),
+            eq(swarmTasks.nodeType, "leaf"),
+            eq(swarmTasks.status, "open"),
+            isNull(swarmTasks.attention),
+          ))
+          .limit(1)
+        : [];
+      if (swarm.status === "cancelled" || (swarm.status === "done" && !unfinishedLeaf)) {
         return c.json({ error: `This swarm is ${swarm.status}, so it cannot be started.` }, 409);
+      }
+      if (swarm.status === "done" && swarm.branchReleasedAt && swarm.branchName && ctx.driver.provider !== "sprite") {
+        const repos = await db(c, ctx)
+          .select({ name: repositories.name, localPath: repositories.localPath })
+          .from(repositories)
+          .where(eq(repositories.projectId, swarm.projectId));
+        for (const repo of repos) {
+          const checkout = await branchCheckoutPath(repo.localPath, swarm.branchName);
+          if (checkout) {
+            return c.json({
+              error: `Switch ${repo.name} to another branch before approving this work. ${swarm.branchName} is checked out at ${checkout}.`,
+              code: "BRANCH_IN_USE",
+            }, 409);
+          }
+        }
       }
       const [activePlanner] = await db(c, ctx)
         .select({ id: agentRuns.id })
@@ -1150,7 +1181,7 @@ export function swarmRoutes(ctx: AppContext) {
       const now = new Date();
       const [started] = await db(c, ctx)
         .update(swarms)
-        .set({ status: "running", pausedReason: null, updatedAt: now })
+        .set({ status: "running", pausedReason: null, branchReleasedAt: null, updatedAt: now })
         .where(eq(swarms.id, swarm.id))
         .returning();
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));

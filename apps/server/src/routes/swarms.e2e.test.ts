@@ -383,6 +383,37 @@ test("work starts only once there is a plan to work", async () => {
   assert.equal((await post(`/api/swarms/${other.id}/start`)).status, 409);
 });
 
+test("a swarm marked done with an open dependent check can approve that saved check", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  const [phase] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, title: "SSO fixes", nodeType: "plan", status: "done",
+  }).returning();
+  await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: phase!.id, parentRelation: "contains",
+    title: "Runtime fixes", status: "done",
+  });
+  const [check] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: phase!.id, parentRelation: "depends_on",
+    title: "Verify SSO", status: "open",
+  }).returning();
+  await db.update(swarms).set({ status: "done", branchReleasedAt: new Date() }).where(eq(swarms.id, swarm.id));
+
+  queued.length = 0;
+  const started = await post(`/api/swarms/${swarm.id}/start`);
+  assert.equal(started.status, 200);
+  const resumed = await readSwarm(swarm.id);
+  assert.equal(resumed.status, "running");
+  assert.equal(resumed.branchReleasedAt, null, "the released branch is reserved for the worker again");
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === check!.id)?.status, "assigned");
+  assert.ok(queued.some((job) => job.queue === "swarm.tick"), "the check can now get a worker");
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, check!.id));
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 409,
+    "a genuinely finished swarm still requires a follow up");
+});
+
 test("resuming an interrupted planner's saved tree starts ready leaves in dependency order", async () => {
   const swarm = await createSwarm();
   await db.update(agentRuns).set({ status: "failed", error: "server stopped" }).where(eq(agentRuns.id, swarm.plannerRunId));

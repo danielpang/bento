@@ -564,6 +564,24 @@ test("a plan phase completes from its own work while dependent work stays below 
   assert.equal((await read(root.id)).status, "working", "the whole plan still includes L1");
 });
 
+test("a finished plan node does not finish the swarm while a dependent check is still open", async () => {
+  const swarm = await makeSwarm();
+  const phase = await makeTask(swarm.id, { title: "SSO fixes", nodeType: "plan", status: "working" });
+  await makeTask(swarm.id, {
+    parentId: phase.id, parentRelation: "contains", title: "Runtime fix", nodeType: "leaf", status: "done",
+  });
+  const check = await makeTask(swarm.id, {
+    parentId: phase.id, parentRelation: "depends_on", title: "Verify SSO", nodeType: "leaf", status: "open",
+  });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal((await read(phase.id)).status, "done", "the prerequisite is complete");
+  assert.equal((await read(check.id)).status, "open", "approval is still needed for the check");
+  assert.equal(result?.status, "running", "the unfinished dependent holds up completion");
+  assert.equal(result?.becameDone, false);
+  assert.equal((await readSwarm(swarm.id)).status, "running");
+});
+
 /**
  * "Busy" is two different answers, and only one of them is about the
  * swarm.

@@ -134,10 +134,11 @@ export function SwarmPage({
   const openLeaves = detail.tasks.filter((task) => task.nodeType === "leaf" && task.status === "open" && task.attention === "none");
   const plannerActive = detail.plannerRun != null && ["queued", "starting", "running"].includes(detail.plannerRun.status);
   // A planner can finish a later turn after the swarm has entered
-  // running. Open leaves still need a person's approval in that state.
+  // running. Older swarms may even say done while a dependent leaf
+  // remains open. Both need the saved work approved here.
   const planNeedsApproval = !plannerActive && (
     (swarm.status === "planning" && planReady) ||
-    (openLeaves.length > 0 && (swarm.status === "running" || swarm.status === "waiting"))
+    (openLeaves.length > 0 && (swarm.status === "running" || swarm.status === "waiting" || swarm.status === "done"))
   );
   const waitingForPlan = swarm.status === "planning" && !planReady;
   const plannerFailed = waitingForPlan && detail.plannerRun?.status === "failed";

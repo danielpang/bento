@@ -843,7 +843,7 @@ test("a failed swarm is called stalled in its title", () => {
 });
 
 test("a finished swarm can be archived from its own page", () => {
-  const html = pageHtml("multi", "done");
+  const html = pageHtml("multi", "done", { approveAllLeaves: true });
   assert.match(html, />Add follow up<\/button>/);
   assert.match(html, />Archive<\/button>/);
 });
@@ -881,7 +881,9 @@ test("a finished planner exposes plan approval even when the swarm already says 
   assert.doesNotMatch(stillPlanning, />Approve plan<\/button>/);
   assert.match(stillPlanning, />Pause planner<\/button>/);
   assert.match(pageHtml("multi", "paused"), />Resume work<\/button>/);
-  assert.doesNotMatch(pageHtml("multi", "done"), />Approve plan<\/button>/);
+  assert.match(pageHtml("multi", "done"), />Approve plan<\/button>/,
+    "an older swarm marked done with an open dependent leaf can continue its saved plan");
+  assert.doesNotMatch(pageHtml("multi", "done", { approveAllLeaves: true }), />Approve plan<\/button>/);
 });
 
 test("a planner question is a banner with the reply in it", () => {

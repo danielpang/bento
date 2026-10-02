@@ -421,7 +421,7 @@ async function runTick(
   const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
   const spawned = await spawnWorkers(tx, swarm, changed.tasks, deps, events, now);
   const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now);
-  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events, spawned);
+  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, changed.subtreeStatus, events, spawned);
 
   return {
     changedTasks: changed.changedCount,
@@ -859,6 +859,8 @@ export function rollUpStatus(current: TaskStatus, children: TaskStatus[]): TaskS
 interface RolledTasks {
   tasks: Task[];
   changedCount: number;
+  /** Includes dependent descendants without changing a prerequisite's own status. */
+  subtreeStatus: ReadonlyMap<string, TaskStatus>;
 }
 
 /**
@@ -1005,7 +1007,7 @@ async function rollUp(
    * answer the other question, which is what each piece of work cost,
    * and this step keeps rolling those.
    */
-  return { tasks: updated, changedCount };
+  return { tasks: updated, changedCount, subtreeStatus };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1902,6 +1904,7 @@ async function recomputeSwarmStatus(
   tx: Tx,
   swarm: typeof swarms.$inferSelect,
   tasks: Task[],
+  subtreeStatus: ReadonlyMap<string, TaskStatus>,
   events: BoardEvent[],
   spawn: SpawnResult,
 ): Promise<(typeof swarms.$inferSelect)["status"]> {
@@ -1942,7 +1945,13 @@ async function recomputeSwarmStatus(
     }
   }
 
-  const roots = tasks.filter((task) => task.parentId === null).map((task) => task.status);
+  // A prerequisite can be done while work that depends on it is still
+  // open. Its stored status must stay done so the dependent can start,
+  // but the whole swarm cannot finish until that descendant does.
+  // Tasks created after rollUp (such as the automatic final check) use
+  // their own status until the next tick.
+  const roots = tasks.filter((task) => task.parentId === null)
+    .map((task) => subtreeStatus.get(task.id) ?? task.status);
   const attention = tasks.some((task) => task.attention !== null && task.status !== "cancelled");
   const rolled = swarmStatusFrom(swarm.status, roots, swarm.pausedReason);
   // A leaf waiting on a person holds the whole swarm's headline, even
