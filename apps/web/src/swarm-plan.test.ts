@@ -94,7 +94,7 @@ test("a plan without swarms offers the upgrade only to whoever could take it", (
 });
 
 test("local mode drops the plan footer, drops the agent hours line, and keeps the estimate", () => {
-  const estimate = { measuredUsd: 5, estimatedUsd: 1, assumedUsd: 2 };
+  const estimate = { measuredUsd: 5, estimatedUsd: 1, assumedUsd: 2 , notionalUsd: 0};
   const local = creationNotes(modeSurfaces("local"), estimate, 10);
   const hosted = creationNotes(modeSurfaces("multi"), estimate, 10);
 

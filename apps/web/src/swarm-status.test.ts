@@ -39,8 +39,9 @@ function leaf(status: TaskStatus, extra: Partial<SwarmTask> = {}): SwarmTask {
     attention: extra.attention ?? "none",
     weight: 1,
     assignedRunId: null,
+    agentProfileId: extra.agentProfileId ?? null,
     branchName: null,
-    cost: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 },
+    cost: { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0},
     flags: {},
     report: null,
     acceptanceCriteria: [],
@@ -108,7 +109,18 @@ test("attention is not a status: the same status carries either answer", () => {
   assert.equal(taskTone(plain.status), taskTone(yellow.status));
   assert.equal(attentionWords("none"), null);
   assert.equal(attentionWords("long_running"), "running long");
-  assert.equal(attentionWords("escalated"), "needs you");
+  assert.equal(attentionWords("escalated"), "the planner was told");
+  /*
+   * One sentence per reason, which is the point of carrying the
+   * server's own word through. They all read "needs you" once, which
+   * is true of every one of them and useful about none: a conflict
+   * wants a resolver, a question wants an answer, and a swarm out of
+   * money wants a decision about money.
+   */
+  assert.equal(attentionWords("question"), "waiting on you");
+  assert.equal(attentionWords("conflict"), "conflict");
+  assert.equal(attentionWords("budget"), "out of budget");
+  assert.equal(attentionWords("plan_limit"), "waiting for agent hours");
 });
 
 test("attention survives the switch from tree to outline", () => {

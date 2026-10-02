@@ -4,7 +4,8 @@ import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
-import { canPause, canResume, canStart, canStop, swarmTone, swarmWords } from "../swarm/status.js";
+import { SwarmCostPanel } from "./SwarmCostPanel.js";
+import { canPause, canResume, canStart, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
 import { capUse, formatUsd, spendParts } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { elapsedSince, formatElapsed } from "../swarm/time.js";
@@ -31,9 +32,22 @@ function useNow(live: boolean): number {
  * describing something that is not there. Its own component so the
  * absence is a thing a test can hold, rather than a condition buried
  * in a header.
+ *
+ * Shown when this swarm is actually stopped on the plan, rather than
+ * on every swarm page a hosted team opens. The same banner the board
+ * already uses, in the place a person is looking when their swarm
+ * stops moving: it is the one message that says who can fix it, which
+ * on a team is usually not the person watching.
  */
-export function ComputeBanner({ surfaces }: { surfaces: ModeSurfaces }) {
+export function ComputeBanner({
+  surfaces,
+  pausedReason,
+}: {
+  surfaces: ModeSurfaces;
+  pausedReason?: SwarmDetail["swarm"]["pausedReason"];
+}) {
   if (!surfaces.outOfComputeBanner) return null;
+  if (pausedReason !== undefined && pausedReason !== "plan_limit") return null;
   return <OutOfCompute />;
 }
 
@@ -95,10 +109,25 @@ export function SwarmPage({
     ? Math.max(0, new Date(swarm.endedAt).getTime() - new Date(swarm.startedAt ?? swarm.createdAt).getTime())
     : elapsedSince(swarm.startedAt ?? swarm.createdAt, now);
   const cap = capUse(swarm.spend, swarm.budgetUsd);
+  const stopped = pausedWords(swarm.status, swarm.pausedReason);
 
   return (
     <div className="swarm-page">
-      <ComputeBanner surfaces={surfaces} />
+      <ComputeBanner surfaces={surfaces} pausedReason={swarm.pausedReason} />
+
+      {/*
+       * Why this swarm is not starting anything, in a sentence.
+       *
+       * Four different things leave a swarm sitting still, and the
+       * status word is the same for two of them. What a person needs
+       * is which one and what it takes to move it, so the header says
+       * it rather than leaving them to guess from a greyed out button.
+       */}
+      {stopped && (
+        <p className="swarm-paused" role="status">
+          {stopped}
+        </p>
+      )}
 
       <header className="swarm-head">
         <div className="swarm-head-lead">
@@ -279,6 +308,13 @@ export function SwarmPage({
        * has been accepted, so a swarm that is still planning does not
        * carry an empty box it will never fill.
        */}
+      {/*
+       * The panel under the plan rather than in the header: the header
+       * answers what this is costing, and this answers where it went,
+       * which is a question somebody asks second and only sometimes.
+       */}
+      <SwarmCostPanel spend={swarm.spend} tasks={detail.tasks} budgetUsd={swarm.budgetUsd} />
+
       {detail.landings.length > 0 && (
         <MergeQueue
           landings={detail.landings}

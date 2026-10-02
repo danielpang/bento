@@ -82,6 +82,7 @@ export interface Entitlements {
    * the run is over either way, and a metering error must not turn a
    * finished run into a failed one.
    */
+  /** Called exactly once for a billable run. Pre-agent provider failures are excluded. */
   onRunFinished?(runId: string): Promise<void>;
   /**
    * Told after the headcount changed: a member joined or left, or an

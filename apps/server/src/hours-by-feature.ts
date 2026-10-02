@@ -28,6 +28,7 @@ export type RunSlice = {
   title: string;
   startedAt: Date | null;
   endedAt: Date | null;
+  billable?: boolean;
 };
 
 /**
@@ -43,6 +44,7 @@ export function hoursByFeature(
 ): { featureId: string; title: string; agentHours: number }[] {
   const totals = new Map<string, { title: string; hours: number }>();
   for (const run of runs) {
+    if (run.billable === false) continue;
     const hours = runHoursInPeriod(run.startedAt, run.endedAt, periodStart, periodEnd, now);
     if (hours <= 0) continue;
     const current = totals.get(run.featureId);

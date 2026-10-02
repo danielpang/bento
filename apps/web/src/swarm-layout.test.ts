@@ -26,7 +26,7 @@ import type { SwarmSpend, SwarmTask, TaskStatus } from "./swarm/types.js";
  */
 
 function spend(measured = 0, estimated = 0, assumed = 0): SwarmSpend {
-  return { measuredUsd: measured, estimatedUsd: estimated, assumedUsd: assumed };
+  return { measuredUsd: measured, estimatedUsd: estimated, assumedUsd: assumed , notionalUsd: 0};
 }
 
 let seq = 0;
@@ -48,6 +48,7 @@ function node(
     attention: extra.attention ?? "none",
     weight: extra.weight ?? 1,
     assignedRunId: null,
+    agentProfileId: extra.agentProfileId ?? null,
     branchName: null,
     cost: extra.cost ?? spend(),
     flags: {},
@@ -133,10 +134,10 @@ test("costs roll up through the tree and stay in their own tiers", () => {
     ],
     { now: 0 },
   );
-  assert.deepEqual(model.byId.get("mid")!.cost, { measuredUsd: 1, estimatedUsd: 0.25, assumedUsd: 0.4 });
-  assert.deepEqual(model.root.cost, { measuredUsd: 1.5, estimatedUsd: 0.25, assumedUsd: 0.4 });
+  assert.deepEqual(model.byId.get("mid")!.cost, { measuredUsd: 1, estimatedUsd: 0.25, assumedUsd: 0.4 , notionalUsd: 0});
+  assert.deepEqual(model.root.cost, { measuredUsd: 1.5, estimatedUsd: 0.25, assumedUsd: 0.4 , notionalUsd: 0});
   // A leaf keeps its own figures; only a parent's are rolled.
-  assert.deepEqual(model.byId.get("a")!.cost, { measuredUsd: 1, estimatedUsd: 0.25, assumedUsd: 0 });
+  assert.deepEqual(model.byId.get("a")!.cost, { measuredUsd: 1, estimatedUsd: 0.25, assumedUsd: 0 , notionalUsd: 0});
 });
 
 test("the tree and the outline read the same figures for the same fixture", () => {

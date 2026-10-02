@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Markdown } from "./Markdown.js";
 import { CompletionRing } from "./CompletionRing.js";
 import { useDismissable } from "./ui.js";
-import { attentionWords, isAttention, taskTone, taskWords } from "../swarm/status.js";
+import { attentionNote, attentionWords, isAttention, taskTone, taskWords } from "../swarm/status.js";
 import { formatCompletion, type SwarmNode } from "../swarm/layout.js";
 import { spendParts, formatUsd } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
@@ -30,6 +30,12 @@ export function SwarmNodeDrawer({
   onClose,
   onMarkDone,
   onMessage,
+  onRetry,
+  onCancel,
+  onSplit,
+  onReassign,
+  onEdit,
+  agents = [],
   transcript,
   busy,
 }: {
@@ -66,6 +72,21 @@ export function SwarmNodeDrawer({
    */
   onMessage?: (taskId: string, text: string) => void;
   /**
+   * The node controls.
+   *
+   * Each one optional, because a caller with no swarm selected has
+   * nowhere to send it, and a button wired to nothing is worse than no
+   * button: the drawer draws what it cannot do as unavailable rather
+   * than as something that quietly fails.
+   */
+  onRetry?: (taskId: string) => void;
+  onCancel?: (taskId: string) => void;
+  onSplit?: (taskId: string, children: { title: string }[]) => void;
+  onReassign?: (taskId: string, agentProfileId: string | null) => void;
+  onEdit?: (taskId: string, edit: { description: string }) => void;
+  /** The agents this project can put on a leaf, for Reassign. */
+  agents?: { id: string; name: string }[];
+  /**
    * The worker's conversation.
    *
    * The console already has one of these: `AgentSession`, the same
@@ -81,6 +102,12 @@ export function SwarmNodeDrawer({
   const [confirming, setConfirming] = useState(false);
   const attention = isAttention(task.attention);
   const note = attentionWords(task.attention);
+  const longNote = attentionNote(task.attention);
+  const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(task.description);
+  const [splitting, setSplitting] = useState(false);
+  const [splitText, setSplitText] = useState("");
   const flags = Object.entries(task.flags);
   // The fetched list when there is one, and the plan row's otherwise.
   // A fetched empty list is an answer, not a missing one, so the
@@ -135,6 +162,18 @@ export function SwarmNodeDrawer({
       </header>
 
       <div className="drawer-body drawer-body-sectioned">
+        {/*
+         * Why this node is yellow, in a sentence with what to do about
+         * it. The chip above has room for two words; this is the part
+         * somebody who clicked a yellow node actually came for, and
+         * without it every reason reads the same.
+         */}
+        {attention && longNote && (
+          <p className="swarm-attention-note" role="status">
+            {longNote}
+          </p>
+        )}
+
         <section className="section">
           <span className="label">Description</span>
           {task.description ? (
@@ -262,7 +301,135 @@ export function SwarmNodeDrawer({
             >
               Mark done
             </button>
+            {/*
+             * Retry is the one people reach for most, so it says how
+             * many times this has been tried: the third attempt is a
+             * different decision from the first, and a button that
+             * hides that invites a fourth.
+             */}
+            <button
+              className="btn"
+              disabled={!onRetry || busy || task.nodeType !== "leaf" || task.status === "cancelled"}
+              title="Put this task back in the queue. The agent on it stops, and its report is cleared."
+              onClick={() => onRetry?.(task.id)}
+            >
+              {retries > 0 ? `Retry (${retries} so far)` : "Retry"}
+            </button>
+            <button
+              className="btn"
+              disabled={!onEdit || busy}
+              title="Correct what this task says. A task that failed for saying the wrong thing fails again against the same words."
+              onClick={() => {
+                setDraft(task.description);
+                setEditing((open) => !open);
+              }}
+            >
+              Edit
+            </button>
+            <button
+              className="btn"
+              disabled={!onSplit || busy || task.nodeType !== "leaf" || task.status === "done"}
+              title="Turn this into the tasks it should have been. Its children are what gets worked."
+              onClick={() => setSplitting((open) => !open)}
+            >
+              Split
+            </button>
+            <button
+              className="btn"
+              disabled={!onCancel || busy || task.status === "cancelled"}
+              title="Withdraw this task and everything under it, and stop the agents on them."
+              onClick={() => onCancel?.(task.id)}
+            >
+              Cancel
+            </button>
           </div>
+
+          {/*
+           * Reassign is a picker rather than a button, because the
+           * question is which agent. On the node alone: the answer to
+           * one task a cheap worker could not finish is a stronger
+           * agent on that task, not on every task still to come.
+           */}
+          {onReassign && task.nodeType === "leaf" && agents.length > 0 && (
+            <label className="swarm-reassign">
+              <span className="meta-label">Agent</span>
+              <select
+                className="input"
+                value={task.agentProfileId ?? ""}
+                disabled={busy}
+                onChange={(e) => onReassign(task.id, e.target.value === "" ? null : e.target.value)}
+              >
+                <option value="">This swarm&apos;s own worker</option>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          {editing && onEdit && (
+            <form
+              className="swarm-edit"
+              onSubmit={(e) => {
+                e.preventDefault();
+                onEdit(task.id, { description: draft });
+                setEditing(false);
+              }}
+            >
+              <textarea
+                className="input"
+                rows={4}
+                value={draft}
+                aria-label="What this task is"
+                onChange={(e) => setDraft(e.target.value)}
+              />
+              <div className="actions">
+                <button className="btn btn-ghost" type="button" onClick={() => setEditing(false)}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" type="submit" disabled={busy}>
+                  Save
+                </button>
+              </div>
+            </form>
+          )}
+
+          {splitting && onSplit && (
+            <form
+              className="swarm-edit"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const children = splitText
+                  .split("\n")
+                  .map((line) => line.trim())
+                  .filter((line) => line !== "")
+                  .map((title) => ({ title }));
+                if (children.length === 0) return;
+                onSplit(task.id, children);
+                setSplitText("");
+                setSplitting(false);
+              }}
+            >
+              <textarea
+                className="input"
+                rows={4}
+                value={splitText}
+                placeholder="One task per line"
+                aria-label="The tasks to split this into"
+                onChange={(e) => setSplitText(e.target.value)}
+              />
+              <div className="actions">
+                <button className="btn btn-ghost" type="button" onClick={() => setSplitting(false)}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" type="submit" disabled={busy || splitText.trim() === ""}>
+                  Split
+                </button>
+              </div>
+            </form>
+          )}
           {task.nodeType !== "leaf" && (
             <p className="muted">A plan node is finished by its own tasks finishing.</p>
           )}
