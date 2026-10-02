@@ -82,7 +82,9 @@ test("deferred work runs after the tenant transaction commits", async () => {
   assert.equal(seenAfter, 1, "deferred work must run late enough to see the committed row");
 });
 
-test("a deferred task that throws does not take the response with it", async () => {
+test("a deferred task that throws does not take the response with it", async (t) => {
+  const logged: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { logged.push(args); });
   const app = new Hono();
   app.use(async (c, next) => {
     c.set(ACTOR_KEY, "u1");
@@ -104,4 +106,7 @@ test("a deferred task that throws does not take the response with it", async () 
   const res = await app.request("/boom", { method: "POST" });
   assert.equal(res.status, 200);
   assert.equal(second, true, "one failed task must not cancel the rest");
+  assert.equal(logged.length, 1, "the failed task is still logged once");
+  assert.match(String(logged[0]?.[0]), /deferred task failed:/);
+  assert.match(String(logged[0]?.[1]), /queue is down/);
 });

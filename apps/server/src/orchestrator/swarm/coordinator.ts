@@ -421,7 +421,7 @@ async function runTick(
   const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
   const spawned = await spawnWorkers(tx, swarm, changed.tasks, deps, events, now);
   const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now);
-  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, changed.subtreeStatus, events, spawned);
+  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events, spawned);
 
   return {
     changedTasks: changed.changedCount,
@@ -856,11 +856,50 @@ export function rollUpStatus(current: TaskStatus, children: TaskStatus[]): TaskS
   return "working";
 }
 
+function statusWithDependents(
+  task: Task,
+  children: Task[],
+  subtreeStatus: ReadonlyMap<string, TaskStatus>,
+): { own: TaskStatus; subtree: TaskStatus } {
+  const contained = children
+    .filter((child) => child.parentRelation === "contains")
+    .map((child) => subtreeStatus.get(child.id)!);
+  const dependent = children
+    .filter((child) => child.parentRelation === "depends_on")
+    .map((child) => subtreeStatus.get(child.id)!);
+  // A prerequisite stays done so its dependent can start. The larger
+  // tree still includes that dependent when deciding whether to finish.
+  const own = task.nodeType === "plan" ? rollUpStatus(task.status, contained) : task.status;
+  return {
+    own,
+    subtree: own === "done" && dependent.length > 0
+      ? rollUpStatus(own, [own, ...dependent])
+      : own,
+  };
+}
+
+/** Read current task statuses after spawning, including dependent work. */
+function currentRootStatuses(tasks: Task[]): TaskStatus[] {
+  const byParent = new Map<string | null, Task[]>();
+  for (const task of tasks) {
+    const siblings = byParent.get(task.parentId) ?? [];
+    siblings.push(task);
+    byParent.set(task.parentId, siblings);
+  }
+  const subtreeStatus = new Map<string, TaskStatus>();
+  const visit = (task: Task): TaskStatus => {
+    const children = byParent.get(task.id) ?? [];
+    for (const child of children) visit(child);
+    const status = statusWithDependents(task, children, subtreeStatus).subtree;
+    subtreeStatus.set(task.id, status);
+    return status;
+  };
+  return (byParent.get(null) ?? []).map(visit);
+}
+
 interface RolledTasks {
   tasks: Task[];
   changedCount: number;
-  /** Includes dependent descendants without changing a prerequisite's own status. */
-  subtreeStatus: ReadonlyMap<string, TaskStatus>;
 }
 
 /**
@@ -915,24 +954,10 @@ async function rollUp(
     const own = leafCost(task);
     let cost = own;
     for (const child of children) cost = addCost(cost, visit(child));
-    const contained = children
-      .filter((child) => child.parentRelation === "contains")
-      .map((child) => subtreeStatus.get(child.id)!);
-    const dependent = children
-      .filter((child) => child.parentRelation === "depends_on")
-      .map((child) => subtreeStatus.get(child.id)!);
-    // Only contained work decides a plan node's own status. Dependent
-    // work waits for that status to become done, then contributes to
-    // the status of the larger tree without reopening its prerequisite.
-    const status = task.nodeType === "plan" ? rollUpStatus(task.status, contained) : task.status;
-    subtreeStatus.set(
-      task.id,
-      status === "done" && dependent.length > 0
-        ? rollUpStatus(status, [status, ...dependent])
-        : status,
-    );
+    const status = statusWithDependents(task, children, subtreeStatus);
+    subtreeStatus.set(task.id, status.subtree);
     next.set(task.id, {
-      status,
+      status: status.own,
       cost: own,
     });
     return cost;
@@ -1007,7 +1032,7 @@ async function rollUp(
    * answer the other question, which is what each piece of work cost,
    * and this step keeps rolling those.
    */
-  return { tasks: updated, changedCount, subtreeStatus };
+  return { tasks: updated, changedCount };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1904,7 +1929,6 @@ async function recomputeSwarmStatus(
   tx: Tx,
   swarm: typeof swarms.$inferSelect,
   tasks: Task[],
-  subtreeStatus: ReadonlyMap<string, TaskStatus>,
   events: BoardEvent[],
   spawn: SpawnResult,
 ): Promise<(typeof swarms.$inferSelect)["status"]> {
@@ -1945,15 +1969,11 @@ async function recomputeSwarmStatus(
     }
   }
 
-  // A prerequisite can be done while work that depends on it is still
-  // open. Its stored status must stay done so the dependent can start,
-  // but the whole swarm cannot finish until that descendant does.
-  // Tasks created after rollUp (such as the automatic final check) use
-  // their own status until the next tick. The subtree status is read
-  // only for a done root: it was taken before this tick's spawn, so for
-  // any other root it can still say assigned for a leaf now working.
-  const roots = tasks.filter((task) => task.parentId === null)
-    .map((task) => (task.status === "done" ? subtreeStatus.get(task.id) ?? task.status : task.status));
+  // Spawning just changed assigned leaves to working, and the landing
+  // queue may have changed more rows. Read this tree now rather than
+  // using rollUp's earlier snapshot: failed siblings must not make an
+  // active swarm read as failed, and dependents must still hold up done.
+  const roots = currentRootStatuses(tasks);
   const attention = tasks.some((task) => task.attention !== null && task.status !== "cancelled");
   const rolled = swarmStatusFrom(swarm.status, roots, swarm.pausedReason);
   // A leaf waiting on a person holds the whole swarm's headline, even
