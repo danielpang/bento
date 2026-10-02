@@ -1,6 +1,7 @@
 import type { swarmTasks, swarms } from "@bento/db";
 import { repositoryInstructions } from "../prompt.js";
 import { commitPolicyLines } from "./branches.js";
+import { isDocumentSwarm, sectionPathFor } from "./deliverable.js";
 import { quoteUntrusted } from "./planner-prompt.js";
 
 /**
@@ -53,6 +54,32 @@ export interface WorkerPromptInput {
    * they typed in is one an agent's output can reach in other ways.
    */
   messages?: { text: string }[];
+}
+
+/**
+ * What a leaf of a document swarm is told to write, and where.
+ *
+ * One file, named after the node, under one directory. Named after the
+ * node rather than after the section, because the server assembles the
+ * document by walking the plan and looking for each node's file: a
+ * name an agent chose would be a name the assembly has to guess.
+ *
+ * The heading levels are left to the assembly rather than dictated
+ * here. A leaf writing at a fixed depth would be wrong the moment the
+ * planner split its parent, and the assembly already moves a section's
+ * headings under the place the plan gave it.
+ */
+export function documentSectionLines(task: Task, mountPath: string | null): string[] {
+  const file = sectionPathFor(task);
+  return [
+    "This swarm's deliverable is a document, not a change to the code. Your task is one section of it.",
+    mountPath
+      ? `Write your section as markdown at ${mountPath}/${file}, and commit that file. Do not write it anywhere else, and do not edit another section's file.`
+      : `Write your section as markdown at ${file}, and commit that file. Do not write it anywhere else, and do not edit another section's file.`,
+    "Write the section itself, not an introduction to the document: Bento assembles every section into one file at the end, under the plan's own headings, and gives it the title and the planner's overview. Your headings inside the section are yours to choose and are moved down to sit under the one the plan gave you.",
+    "Read whatever you need of the repository to get it right. Change nothing in it. There is no build to run and no test command here, and a leaf that edits code is a leaf whose branch conflicts with every other section for no reason.",
+    "",
+  ];
 }
 
 export function buildWorkerPrompt(input: WorkerPromptInput): string {
@@ -112,7 +139,22 @@ export function buildWorkerPrompt(input: WorkerPromptInput): string {
       "",
     );
   }
-  lines.push(...repositoryInstructions(repositories));
+
+  /*
+   * A document swarm's leaf writes a section, so it gets its own
+   * instructions and not the repository's.
+   *
+   * The repository instructions say to install a toolchain and run the
+   * project's tests, and neither applies to a leaf that changed no
+   * code: the install is minutes spent on nothing, and the test
+   * command would either pass vacuously or fail over somebody else's
+   * change and fail this leaf with it.
+   */
+  if (isDocumentSwarm(swarm)) {
+    lines.push(...documentSectionLines(task, repositories[0]?.mountPath ?? null));
+  } else {
+    lines.push(...repositoryInstructions(repositories));
+  }
 
   lines.push(...commitPolicyLines(branch, task.id), "");
 

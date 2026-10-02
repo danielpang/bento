@@ -85,6 +85,112 @@ export async function descendantIds(tx: TaskWriter, taskId: string): Promise<str
   return found;
 }
 
+/**
+ * Adds one leaf to the plan, because a person saw something the
+ * planner did not.
+ *
+ * A person and the planner edit one tree, and this is the half the
+ * planner's tools already had: create_task. The rule that makes it
+ * safe is the same one create_task follows, which is that a leaf can
+ * only hang off a plan node, never off another leaf.
+ *
+ * Assigned rather than open, and that is the choice worth stating. A
+ * person adding a task has decided it needs doing; leaving it open
+ * would mean it sat there until the planner happened to assign it,
+ * which is the planner overruling a person by inaction. The planner
+ * is told instead, and can cancel it if it is wrong: objecting is a
+ * decision somebody can see, and silence is not.
+ */
+export async function addLeaf(
+  tx: TaskWriter,
+  input: {
+    swarmId: string;
+    /** The plan node to add it under, or null for a top level leaf. */
+    parent: Task | null;
+    title: string;
+    description?: string | undefined;
+    weight?: number | undefined;
+    now?: Date;
+  } & Asker,
+): Promise<Task | SplitRefusal> {
+  const now = input.now ?? new Date();
+  if (input.parent && input.parent.nodeType !== "plan") {
+    return {
+      refused: "A task cannot hang off another task. Add it under a plan node, or split that task first.",
+    };
+  }
+  if (input.parent && (input.parent.status === "done" || input.parent.status === "cancelled")) {
+    return {
+      refused: `That part of the plan is ${input.parent.status}, so nothing more belongs under it. Add the task somewhere else, or at the top of the plan.`,
+    };
+  }
+
+  const parentId = input.parent?.id ?? null;
+  const [{ next } = { next: 0 }] = await tx
+    .select({ next: sql<number>`coalesce(max(${swarmTasks.position}), -1) + 1` })
+    .from(swarmTasks)
+    .where(
+      and(
+        eq(swarmTasks.swarmId, input.swarmId),
+        parentId ? eq(swarmTasks.parentId, parentId) : sql`${swarmTasks.parentId} is null`,
+      ),
+    );
+
+  const [created] = await tx
+    .insert(swarmTasks)
+    .values({
+      swarmId: input.swarmId,
+      parentId,
+      position: next,
+      nodeType: "leaf",
+      status: "assigned",
+      title: input.title,
+      description: input.description ?? "",
+      weight: input.weight ?? 1,
+      updatedAt: now,
+    })
+    .returning();
+  if (!created) throw new Error("adding a task inserted no row");
+
+  await tx.insert(swarmTaskEvents).values({
+    taskId: created.id,
+    kind: "created",
+    toStatus: created.status,
+    ...askedBy(input),
+    detail: { addedByHand: true },
+  });
+  return created;
+}
+
+/**
+ * What the planner is told when a person adds a task.
+ *
+ * Bento's own sentence about a row it holds, with the person's words
+ * quoted inside it: the title and description are input, and a task
+ * somebody typed is exactly as much an instruction to the planner as
+ * a worker's report is, which is none.
+ *
+ * It says the planner may object, and says how. A notice that only
+ * announced the task would leave a planner that disagrees with no
+ * move except to work it.
+ */
+export function addedTaskNotice(input: {
+  taskId: string;
+  title: string;
+  description: string;
+  parentId: string | null;
+  quote: (text: string) => string;
+}): string {
+  return [
+    input.parentId
+      ? `Somebody on the team added a task to the plan, ${input.taskId}, under ${input.parentId}. It is assigned, so an agent starts on it when the swarm has room.`
+      : `Somebody on the team added a task to the plan, ${input.taskId}, at the top level. It is assigned, so an agent starts on it when the swarm has room.`,
+    "What they wrote:",
+    input.quote([input.title, "", input.description || "(no description)"].join("\n")),
+    "Take it as part of the plan. If it is wrong, duplicates something already in the tree, or belongs somewhere else, say so and use cancel_task or split_task rather than working it: objecting is a decision somebody can see, and working the wrong task quietly is not.",
+  ].join("\n\n");
+}
+
 /** Why a split was refused, in words the asker can act on. */
 export type SplitRefusal = { refused: string };
 

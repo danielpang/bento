@@ -1381,6 +1381,7 @@ export function projectRoutes(ctx: AppContext) {
           .where(eq(repositories.id, target.id));
       }
 
+
       return c.json({
         stages: file.pipeline.stages.length,
         agents: file.agents.length,

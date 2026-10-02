@@ -257,3 +257,21 @@ export function canStart(status: SwarmStatus): boolean {
 export function canStop(status: SwarmStatus): boolean {
   return !isSwarmOver(status);
 }
+
+/**
+ * Whether Reopen is offered.
+ *
+ * Every ending, and only an ending. A reopen adds work to a swarm that
+ * has finished and published, on the branch its pull request is open
+ * on; offering it on a swarm that is still running would be a second
+ * way of doing what sending the planner a message already does, with
+ * a follow up node nobody asked for as the side effect.
+ *
+ * The two ceilings are here as well as in canResume, and the two
+ * controls mean different things: Resume asks a swarm to carry on with
+ * the plan it already has, and Reopen adds something to it. A swarm
+ * that ran out of money can want either.
+ */
+export function canReopen(status: SwarmStatus): boolean {
+  return isSwarmOver(status) || status === "budget_exhausted" || status === "timed_out";
+}

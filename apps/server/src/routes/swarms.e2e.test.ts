@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
+import { MAX_PLAN_DEPTH } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -16,6 +17,7 @@ import {
   runMigrations,
   sandboxes,
   repositories,
+  runArtifacts,
   swarmLandings,
   swarmMessages,
   swarmTaskEvents,
@@ -35,6 +37,7 @@ import { mintRunGrant } from "../mcp/grants.js";
 import { tickSwarm } from "../orchestrator/swarm/coordinator.js";
 import { takeNodeMessages } from "../orchestrator/swarm/node-messages.js";
 import { BENTO_SWARM_SERVER_ID } from "../mcp/swarm-server.js";
+import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
 import { RUNNER_PROJECT_REFUSAL, defaultWorkerIsolation } from "./swarms.js";
 
 /**
@@ -108,8 +111,11 @@ before(async () => {
       },
       // The tick door starts the reconciler's worker before it queues
       // the job, so a deployment with no swarms registers none.
+      createQueue: async () => {},
       work: async () => "worker",
       offWork: async () => {},
+      schedule: async () => {},
+      unschedule: async () => {},
       notifyWorker: () => {},
     } as unknown as AppContext["boss"],
     bus: new EventBus(),
@@ -225,7 +231,9 @@ test("creating a swarm plans it, and puts a planner to work at once", async () =
   const named = new Map(profiles.map((profile) => [profile.id, profile.name]));
   assert.equal(named.get(row.plannerProfileId!), "Swarm Planner");
   assert.equal(named.get(row.workerProfileId!), "Swarm Worker");
-  assert.equal(row.plannerInstructions, null, "and nothing else was asked for");
+  assert.equal(row.judgeProfileId, null, "and nothing else was asked for");
+  assert.equal(row.completionCommand, null);
+  assert.equal(row.maxPlanDepth, 1);
 
   // A second swarm of the same name takes a readable suffix rather
   // than a random one.
@@ -1003,29 +1011,53 @@ test("a local install's swarm runs its agents in worktrees, two at a time", asyn
   assert.equal(swarm.maxWorkers, 2);
 });
 
-test("a swarm is created with its instructions and agents, and they can be changed after", async () => {
+test("a swarm is created with its run settings, and they can be changed after", async () => {
   const defaults = await readSwarm((await createSwarm({ title: "Agents" })).id);
   const created = await createSwarm({
-    title: "Instructed",
+    title: "Checked",
+    judgeProfileId: defaults.workerProfileId,
+    completionCommand: "  pnpm test  ",
+    maxPlanDepth: 2,
     plannerInstructions: "Split by package.",
     workerInstructions: "   ",
+    deliverable: "document",
   });
   const row = await readSwarm(created.id);
+  assert.equal(row.judgeProfileId, defaults.workerProfileId);
+  assert.equal(row.completionCommand, "pnpm test", "trimmed");
+  assert.equal(row.maxPlanDepth, 2);
   assert.equal(row.plannerInstructions, "Split by package.");
   assert.equal(row.workerInstructions, null, "blank is none, not a heading with nothing under it");
+  assert.equal(row.deliverable, "document");
 
   const patched = await app.request(`/api/swarms/${created.id}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ workerInstructions: "Add tests.", workerProfileId: defaults.plannerProfileId }),
+    body: JSON.stringify({ judgeProfileId: null, completionCommand: "", maxPlanDepth: 1, workerInstructions: "Add tests." }),
   });
   assert.equal(patched.status, 200, await patched.clone().text());
   const after = await readSwarm(created.id);
+  assert.equal(after.judgeProfileId, null);
+  assert.equal(after.completionCommand, null);
+  assert.equal(after.maxPlanDepth, 1);
   assert.equal(after.workerInstructions, "Add tests.");
-  assert.equal(after.workerProfileId, defaults.plannerProfileId);
   assert.equal(after.plannerInstructions, "Split by package.", "what was not sent is left alone");
 
-  // A stranger's agent reads as not there, on the way in and afterwards.
+  const tooDeep = await app.request(`/api/swarms/${created.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ maxPlanDepth: MAX_PLAN_DEPTH + 1 }),
+  });
+  assert.equal(tooDeep.status, 400);
+
+  const strangerJudge = await app.request(`/api/swarms/${created.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ judgeProfileId: "00000000-0000-4000-8000-000000000001" }),
+  });
+  assert.equal(strangerJudge.status, 404, "an agent that is not the team's reads as not there");
+
+  // The same for the agents themselves, on the way in and afterwards.
   const stranger = "00000000-0000-4000-8000-000000000001";
   for (const field of ["plannerProfileId", "workerProfileId"]) {
     const res = await app.request(`/api/swarms/${created.id}`, {
@@ -1035,13 +1067,13 @@ test("a swarm is created with its instructions and agents, and they can be chang
     });
     assert.equal(res.status, 404, `a stranger's ${field} reads as not there`);
   }
-  const strangerAtCreate = await post("/api/swarms", {
+  const judgedAtCreate = await post("/api/swarms", {
     projectId,
-    title: "Planned by a stranger",
-    goal: "Try a missing planner",
-    plannerProfileId: stranger,
+    title: "Judged by a stranger",
+    goal: "Try a missing judge",
+    judgeProfileId: stranger,
   });
-  assert.equal(strangerAtCreate.status, 404);
+  assert.equal(judgedAtCreate.status, 404);
   assert.equal((await readSwarm(created.id)).plannerProfileId, defaults.plannerProfileId, "and nothing was changed");
 });
 
@@ -1431,5 +1463,336 @@ test("a person who is not a beta tester is not told the swarms exist", async () 
     assert.deepEqual(body.bySwarm, [], "and the swarms are not on it at all");
   } finally {
     ctx.featureFlags = flags;
+  }
+});
+
+test("a swarm somebody moved says so on the bus, so every other viewer hears it", async () => {
+  /**
+   * The routes wrote their rows and said nothing.
+   *
+   * The console masked it, because it refetches after its own action,
+   * so it looked right as long as it was the only viewer. A second
+   * tab, a teammate watching the same swarm, and `bento swarm watch`
+   * in a terminal all heard nothing at all: stopping a swarm from one
+   * window left it reading as running on every other screen until some
+   * unrelated tick happened to fire. Found by running the terminal
+   * against a live server, which is the only place it shows.
+   */
+  const swarm = await createSwarm();
+  const heard: { type: string; status?: string }[] = [];
+  const stop = ctx.bus.onBoardEvent(projectId, (event) => {
+    if ("swarmId" in event && event.swarmId === swarm.id) heard.push({ type: event.type, ...("status" in event ? { status: event.status } : {}) });
+  });
+
+  try {
+    await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Leaf" });
+    await post(`/api/swarms/${swarm.id}/start`);
+    await post(`/api/swarms/${swarm.id}/pause`);
+    await app.request(`/api/swarms/${swarm.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ maxWorkers: 3 }),
+    });
+    await post(`/api/swarms/${swarm.id}/cancel`);
+
+    assert.deepEqual(
+      heard.map((event) => event.status ?? event.type),
+      ["running", "paused", "swarm_updated", "cancelled"],
+      "every door that moves a swarm says so",
+    );
+  } finally {
+    stop();
+  }
+});
+
+test("reopening a finished swarm adds a follow up subtree and says so on the bus", async () => {
+  const swarm = await createSwarm();
+  await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Leaf", status: "done" });
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  // The planner this swarm was created with has settled by the time a
+  // real swarm is done, and the reopen route refuses while one has not.
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+
+  const heard: string[] = [];
+  const stop = ctx.bus.onBoardEvent(projectId, (event) => {
+    if ("swarmId" in event && event.swarmId === swarm.id && event.type === "swarm_updated") {
+      heard.push(event.status ?? "");
+    }
+  });
+
+  try {
+    const res = await post(`/api/swarms/${swarm.id}/reopen`, {
+      instruction: "Address the review comments.",
+      budgetUsd: 50,
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { followUpTaskId: string; followUp: number };
+    assert.equal(body.followUp, 1);
+
+    const [node] = await db.select().from(swarmTasks).where(eq(swarmTasks.id, body.followUpTaskId));
+    assert.equal(node!.parentId, null);
+    assert.equal(node!.nodeType, "plan");
+    assert.equal(node!.followUpInstruction, "Address the review comments.");
+
+    const [row] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+    assert.equal(row!.status, "running");
+    assert.equal(row!.reopenCount, 1);
+    assert.equal(row!.budgetUsd, "50");
+    assert.deepEqual(heard, ["running"]);
+  } finally {
+    stop();
+  }
+});
+
+test("a swarm that is still running is not reopened", async () => {
+  const swarm = await createSwarm();
+  const res = await post(`/api/swarms/${swarm.id}/reopen`, { instruction: "more" });
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as { code: string };
+  assert.equal(body.code, "NOT_FINISHED");
+  assert.equal((await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).length, 0);
+});
+
+test("a swarm's artifacts are listed by the swarm, and served by the artifact routes", async () => {
+  const swarm = await createSwarm();
+  const [run] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      role: "planner",
+      swarmId: swarm.id,
+      agentProfileId: (await db.select().from(agentProfiles).limit(1))[0]!.id,
+      prompt: "plan it",
+      status: "succeeded",
+    })
+    .returning();
+  const [artifact] = await db
+    .insert(runArtifacts)
+    .values({
+      runId: run!.id,
+      type: "swarm",
+      swarmId: swarm.id,
+      stageSlug: "document",
+      stageName: "Document",
+      path: "docs/plan.md",
+      kind: "markdown",
+      mime: "text/markdown",
+      size: 5,
+      content: "# Hi\n",
+    })
+    .returning();
+
+  const listed = (await (await app.request(`/api/swarms/${swarm.id}/artifacts`)).json()) as {
+    id: string;
+    path: string;
+    kind: string;
+  }[];
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.path, "docs/plan.md");
+  assert.equal(listed[0]!.kind, "markdown");
+
+  // And the bytes come from the artifact routes, under the rules that
+  // keep agent output from ever running as the console.
+  const content = await app.request(`/api/artifacts/${artifact!.id}/content`);
+  assert.equal(content.status, 200);
+  assert.equal(content.headers.get("content-security-policy"), "sandbox");
+  assert.equal(content.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(await content.text(), "# Hi\n");
+});
+
+/* ---------------------------------------------------------------- *
+ * Putting a swarm away, and taking it out again.
+ * ---------------------------------------------------------------- */
+
+/** A machine this swarm holds, as the executor records one. */
+async function sandboxFor(swarmId: string, externalId = "bento-swarm-1") {
+  const [row] = await db
+    .insert(sandboxes)
+    .values({ projectId, swarmId, provider: "docker", externalId, status: "ready" })
+    .returning();
+  return row!;
+}
+
+test("pausing a swarm checkpoints the machines it holds", async () => {
+  /**
+   * A paused swarm is one nobody is working in and everybody is still
+   * paying for. The machine stays, because a person means to come
+   * back to it, and the point of the checkpoint is that coming back
+   * starts from where it stopped rather than from a fresh clone.
+   */
+  const swarm = await createSwarm();
+  const box = await sandboxFor(swarm.id);
+  const asked: { externalId: string; label: string }[] = [];
+  const driver = {
+    provider: "docker" as const,
+    snapshot: async (handle: { externalId: string }, label: string) => {
+      asked.push({ externalId: handle.externalId, label });
+      return `snap-${handle.externalId}`;
+    },
+  };
+
+  const result = await checkpointSwarmSandboxes(db, driver, swarm.id, "swarm-pause");
+  assert.equal(result.skipped, null);
+  assert.deepEqual(result.checkpointed, [{ sandboxId: box.id, checkpointId: "snap-bento-swarm-1" }]);
+  assert.deepEqual(asked, [{ externalId: "bento-swarm-1", label: "swarm-pause" }]);
+
+  const [after] = await db.select().from(sandboxes).where(eq(sandboxes.id, box.id));
+  assert.equal(after!.checkpointId, "snap-bento-swarm-1");
+  assert.equal(after!.status, "hibernated", "and the row says nothing is working in it");
+});
+
+test("a driver that cannot snapshot is not a failure to pause", async () => {
+  const swarm = await createSwarm();
+  await sandboxFor(swarm.id, "bento-swarm-2");
+  const result = await checkpointSwarmSandboxes(db, { provider: "docker" }, swarm.id, "swarm-pause");
+  assert.deepEqual(result.checkpointed, []);
+  assert.match(result.skipped ?? "", /cannot be snapshotted/);
+});
+
+test("a snapshot that fails leaves the row alone rather than failing the pause", async () => {
+  const swarm = await createSwarm();
+  const box = await sandboxFor(swarm.id, "bento-swarm-3");
+  const driver = {
+    provider: "docker" as const,
+    snapshot: () => Promise.reject(new Error("the provider was unreachable")),
+  };
+
+  const result = await checkpointSwarmSandboxes(db, driver, swarm.id, "swarm-pause");
+  assert.deepEqual(result.checkpointed, []);
+  const [after] = await db.select().from(sandboxes).where(eq(sandboxes.id, box.id));
+  assert.equal(after!.checkpointId, null);
+  assert.equal(after!.status, "ready", "the machine is still there and still what it was");
+});
+
+test("archiving a finished swarm reaps its machine, and archiving a live one does not", async () => {
+  /**
+   * Putting a swarm away is a person saying they are finished with it,
+   * and a machine kept for a swarm nobody will open again is pure
+   * cost. But somebody tidying their strip while a swarm still runs is
+   * not saying that, and destroying a machine an agent is working in
+   * would leave a branch nobody chose.
+   */
+  const live = await createSwarm();
+  assert.equal(archiveReapsSandboxes({ status: "running" }), false);
+  assert.equal(archiveReapsSandboxes({ status: "planning" }), false);
+  assert.equal(archiveReapsSandboxes({ status: "paused" }), false);
+  for (const status of ["done", "failed", "cancelled", "budget_exhausted", "timed_out"] as const) {
+    assert.equal(archiveReapsSandboxes({ status }), true, `${status} is finished with`);
+  }
+
+  await sandboxFor(live.id, "bento-swarm-4");
+  queued.length = 0;
+  await patch(`/api/swarms/${live.id}`, { archived: true });
+  assert.equal(
+    queued.filter((job) => job.queue === "sandbox.reap").length,
+    0,
+    "a swarm that is still planning keeps its machine",
+  );
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, live.id));
+  queued.length = 0;
+  await patch(`/api/swarms/${live.id}`, { archived: true });
+  const reaps = queued.filter((job) => job.queue === "sandbox.reap");
+  assert.equal(reaps.length, 1, "a finished one does not");
+  assert.deepEqual(reaps[0]!.data, { swarmId: live.id });
+
+  // And restoring it simply takes it out again: the next run
+  // provisions a machine the way the first one appeared.
+  queued.length = 0;
+  await patch(`/api/swarms/${live.id}`, { archived: false });
+  const [restored] = await db.select().from(swarms).where(eq(swarms.id, live.id));
+  assert.equal(restored!.archivedAt, null);
+  assert.equal(queued.filter((job) => job.queue === "sandbox.reap").length, 0);
+});
+
+/* ---------------------------------------------------------------- *
+ * Adding a task by hand.
+ * ---------------------------------------------------------------- */
+
+test("a person can add a task, and the planner is told and can object", async () => {
+  /**
+   * The tree is an agent's to fill in and a person's to correct. A
+   * task added by hand goes in ready to be worked, because somebody
+   * who adds one has decided it needs doing and leaving it open would
+   * be the planner overruling them by inaction. What keeps that
+   * honest is the notice: the planner hears about it and can cancel
+   * it, which is a decision somebody can see.
+   */
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks`, {
+    parentId: tree.plan.id,
+    title: "Add the retry",
+    description: "The upload path has no retry, and the planner did not split one out.",
+  });
+  assert.equal(res.status, 201, await res.clone().text());
+  const created = (await res.json()) as { id: string; parentId: string; status: string; nodeType: string };
+  assert.equal(created.parentId, tree.plan.id);
+  assert.equal(created.nodeType, "leaf");
+  assert.equal(created.status, "assigned", "ready to be worked, not waiting on the planner");
+
+  const messages = await db
+    .select()
+    .from(swarmMessages)
+    .where(eq(swarmMessages.swarmId, swarm.id))
+    .orderBy(asc(swarmMessages.createdAt));
+  const notice = messages.at(-1)!;
+  assert.equal(notice.source, "system", "Bento's own sentence about a row it holds");
+  assert.match(notice.text, new RegExp(created.id));
+  assert.match(notice.text, /Add the retry/, "with what the person wrote, quoted inside it");
+  assert.match(notice.text, /use cancel_task or split_task/, "and how to object");
+});
+
+test("a task cannot hang off another task", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks`, { parentId: tree.first.id, title: "Under a leaf" });
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as { error: string; code: string };
+  assert.equal(body.code, "CANNOT_ADD");
+  assert.match(body.error, /cannot hang off another task/);
+});
+
+test("a task added at the top of the plan needs no parent, and a foreign node is not there", async () => {
+  const swarm = await createSwarm();
+  const top = await post(`/api/swarms/${swarm.id}/tasks`, { title: "At the top" });
+  assert.equal(top.status, 201);
+  assert.equal(((await top.json()) as { parentId: string | null }).parentId, null);
+
+  // A node from another swarm reads as not there rather than as one
+  // this caller may add work under.
+  const other = await createSwarm({ title: "Another" });
+  const otherTree = await treeOf(other.id);
+  const foreign = await post(`/api/swarms/${swarm.id}/tasks`, {
+    parentId: otherTree.plan.id,
+    title: "Injected",
+  });
+  assert.equal(foreign.status, 404);
+});
+
+test("nothing is added to a swarm somebody stopped", async () => {
+  const swarm = await createSwarm();
+  await post(`/api/swarms/${swarm.id}/cancel`);
+  const res = await post(`/api/swarms/${swarm.id}/tasks`, { title: "Too late" });
+  assert.equal(res.status, 409);
+  assert.equal(((await res.json()) as { code: string }).code, "SWARM_STOPPED");
+});
+
+test("finished work cannot be changed without reopening the swarm", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+
+  for (const [path, body] of [
+    [`/api/swarms/${swarm.id}/tasks`, { title: "Too late" }],
+    [`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, undefined],
+    [`/api/swarms/${swarm.id}/tasks/${tree.first.id}/cancel`, undefined],
+    [`/api/swarms/${swarm.id}/tasks/${tree.first.id}/split`, { children: [{ title: "Too late" }] }],
+  ] as const) {
+    const response = await post(path, body);
+    assert.equal(response.status, 409, path);
+    assert.equal(((await response.json()) as { code: string }).code, "SWARM_FINISHED", path);
   }
 });
