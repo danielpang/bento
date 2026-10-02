@@ -195,7 +195,25 @@ export async function landWorkerBranch(request: LandRequest): Promise<LandOutcom
    * is only a compare and swap on the branch while the checkout is
    * what holds the branch.
    */
-  const checkedOut = await git(request.swarmWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
+  let checkedOut = await git(request.swarmWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
+  if (!checkedOut) {
+    // A detached checkout can be reattached without changing any work
+    // only when it is clean and points at the branch we are about to
+    // move. A detached commit or local changes need a person to decide
+    // what to keep; checking out the branch there would conceal work.
+    try {
+      const [head, dirty] = await Promise.all([
+        git(request.swarmWorktree, ["rev-parse", "HEAD"]),
+        git(request.swarmWorktree, ["status", "--porcelain"]),
+      ]);
+      if (head === base && !dirty) {
+        await git(request.swarmWorktree, ["checkout", "--quiet", swarmBranch]);
+        checkedOut = await git(request.swarmWorktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+      }
+    } catch {
+      // The error below still names the state that prevented landing.
+    }
+  }
   if (checkedOut !== swarmBranch) {
     /**
      * An error rather than something to retry. Nothing in a swarm ever

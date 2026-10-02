@@ -1019,17 +1019,42 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * The order is the row's order, which is the order they were in
    * before the menu existed.
    */
-  const actions: NavAction[] = [
-    { id: "board", label: "Board", href: "/", current: screen === "board" },
-    { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
-    { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
-    ...(hasProjects
-      ? [
-          { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
-          { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
-        ]
-      : []),
-  ];
+  /*
+   * The swarm board's tools are not the card board's.
+   *
+   * Board, Sessions and Pipeline are all about cards: a swarm has no
+   * stage to configure, no session list of its own, and the board
+   * button would point at the board already open. So on the swarm
+   * board they are left out. A swarm's agents and how it is run are
+   * chosen in the New swarm dialog and changed in its own settings.
+   */
+  /*
+   * And only where the swarm board is the thing actually on screen.
+   *
+   * `swarming` is true from the moment the mode is remembered, but the
+   * swarm board renders under `swarming && projectId` and the two
+   * early returns below (no project list yet, no projects at all) draw
+   * the card board's skeleton without the board toggle. Keyed on
+   * `swarming` alone, somebody whose remembered mode is swarms and
+   * whose project list fails to load got a topbar with no Board, no
+   * Sessions and no toggle: nothing but the URL bar to get out with.
+   */
+  const onSwarmBoard = swarming && projectId !== null && hasProjects;
+  const actions: NavAction[] = onSwarmBoard
+    ? [
+        ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
+      ]
+    : [
+        { id: "board", label: "Board", href: "/", current: screen === "board" },
+        { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
+        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+        ...(hasProjects
+          ? [
+              { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
+              { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
+            ]
+          : []),
+      ];
 
   const bottom = (
     <>
@@ -1116,6 +1141,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       <TopBar
         showSignOut={showSignOut}
         actions={actions}
+        showSwarmSwitcher={onSwarmBoard}
         meta={spend}
         onContact={() => setContactOpen(true)}
         picker={
@@ -1355,6 +1381,7 @@ function TopBar({
   primary,
   picker,
   boardToggle,
+  showSwarmSwitcher = false,
   search,
   meta,
   onContact,
@@ -1367,6 +1394,8 @@ function TopBar({
   picker?: React.ReactNode;
   /** Pipeline or Swarms. Beside the picker, never in the menu. */
   boardToggle?: React.ReactNode;
+  /** The swarm board mounts its live switcher here, before Configure. */
+  showSwarmSwitcher?: boolean;
   search?: React.ReactNode;
   /** The spend chip. It stays out of the menu at every width. */
   meta?: React.ReactNode;
@@ -1410,7 +1439,7 @@ function TopBar({
       {showSignOut && <SignOutButton onClick={() => signOut()} />}
     </header>
     <div className="workspace-toolbar">
-      <nav className="topbar-nav" aria-label="Board">
+      <nav className={showSwarmSwitcher ? "topbar-nav topbar-nav-swarms" : "topbar-nav"} aria-label="Board">
         {actions.filter((action) => !beta || action.href !== undefined).map((action) =>
           action.href === undefined ? (
             <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
@@ -1429,6 +1458,7 @@ function TopBar({
             </a>
           ),
         )}
+        {showSwarmSwitcher && <div id="swarm-switcher-slot" className="workspace-swarm-switcher" />}
         {beta && actions.some((action) => action.href === undefined) && <ConfigureMenu actions={actions.filter((action) => action.href === undefined)} />}
       </nav>
       <NavMenu actions={entries} />

@@ -281,6 +281,20 @@
       "when": 1790168711560,
       "tag": "0039_swarm_slack_threads",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1790452177954,
+      "tag": "0040_swarm_parent_relation",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1790540000000,
+      "tag": "0041_swarm_branch_release",
+      "breakpoints": true
     }
   ]
 }

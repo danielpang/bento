@@ -106,7 +106,7 @@ test("local mode drops the plan footer, drops the agent hours line, and keeps th
 
   // The estimate itself is the same line in both, and still three figures.
   assert.equal(local[0]!.text, hosted[0]!.text);
-  assert.equal(local[0]!.text, "About $5.00 measured, $1.00 estimated, $2.00 assumed over 10 tasks.");
+  assert.equal(local[0]!.text, "About $5.00 measured, $1.00 estimated over 10 tasks.");
 });
 
 test("the swarm header never carries the out of compute banner in local mode", () => {

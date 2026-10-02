@@ -1,13 +1,13 @@
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
 import { asc, eq } from "drizzle-orm";
-import { MAX_PLAN_DEPTH } from "@bento/core";
+import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -18,6 +18,7 @@ import {
   sandboxes,
   repositories,
   runArtifacts,
+  runEvents,
   swarmLandings,
   swarmMessages,
   swarmTaskEvents,
@@ -241,6 +242,104 @@ test("creating a swarm plans it, and puts a planner to work at once", async () =
   assert.equal(second.slug, "rewrite-checkout-2");
 });
 
+test("a failed planner is visible and can be retried once", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns)
+    .set({ status: "failed", error: "Base branch main was not found." })
+    .where(eq(agentRuns.id, swarm.plannerRunId));
+
+  const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
+    plannerRun: { id: string; status: string; error: string; agent: { name: string; model: string } };
+  };
+  assert.equal(detail.plannerRun.id, swarm.plannerRunId);
+  assert.equal(detail.plannerRun.status, "failed");
+  assert.match(detail.plannerRun.error, /Base branch main/);
+  assert.ok(detail.plannerRun.agent.name);
+  assert.ok(detail.plannerRun.agent.model);
+
+  const start = await post(`/api/swarms/${swarm.id}/start`);
+  assert.equal(start.status, 409);
+  assert.equal((await start.json()).code, "PLANNER_FAILED");
+
+  const retried = await post(`/api/swarms/${swarm.id}/planner/retry`);
+  assert.equal(retried.status, 201, await retried.clone().text());
+  const { runId } = (await retried.json()) as { runId: string };
+  assert.notEqual(runId, swarm.plannerRunId);
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, runId));
+  assert.equal(run!.status, "queued");
+  assert.equal(run!.role, "planner");
+  assert.equal((await post(`/api/swarms/${swarm.id}/planner/retry`)).status, 409);
+});
+
+test("a planner failure keeps the agent's error after a restart", async () => {
+  const swarm = await createSwarm();
+  await db.insert(runEvents).values([
+    { runId: swarm.plannerRunId, seq: 1, type: "result", payload: { type: "result", ok: false, error: "Out of usage credits." } },
+    { runId: swarm.plannerRunId, seq: 2, type: "result", payload: { type: "result", ok: false, error: "Bento restarted while this run was working." } },
+  ]);
+  await db.update(agentRuns).set({ status: "failed", error: "interrupted by a server restart" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as { plannerRun: { error: string } };
+  assert.equal(detail.plannerRun.error, "Out of usage credits.");
+  const start = await post(`/api/swarms/${swarm.id}/start`);
+  assert.match((await start.json()).error, /Out of usage credits/);
+});
+
+test("a swarm planner exposes read-only output through the run transcript and stream", async () => {
+  const swarm = await createSwarm();
+  await db.insert(runEvents).values({
+    runId: swarm.plannerRunId,
+    seq: 1,
+    type: "message",
+    payload: { type: "message", role: "assistant", text: "I am outlining the work." },
+  });
+  await db.update(agentRuns).set({ status: "failed", error: "Test failure" }).where(eq(agentRuns.id, swarm.plannerRunId));
+
+  const transcript = await app.request(`/api/runs/${swarm.plannerRunId}/transcript`);
+  assert.equal(transcript.status, 200);
+  assert.match(await transcript.text(), /I am outlining the work/);
+
+  const events = await app.request(`/api/runs/${swarm.plannerRunId}/events`);
+  assert.equal(events.status, 200);
+  assert.match(await events.text(), /I am outlining the work/);
+  assert.equal((await app.request(`/api/runs/${swarm.plannerRunId}`)).status, 404, "card run actions still reject swarm runs");
+});
+
+test("a new swarm keeps its chosen planner and worker profiles", async () => {
+  const first = await readSwarm((await createSwarm({ title: "Defaults" })).id);
+  const source = { plannerProfileId: first.plannerProfileId!, workerProfileId: first.workerProfileId! };
+  const swarm = await createSwarm({
+    plannerProfileId: source.workerProfileId,
+    workerProfileId: source.plannerProfileId,
+  });
+  const [row] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  assert.equal(row!.plannerProfileId, source.workerProfileId);
+  assert.equal(row!.workerProfileId, source.plannerProfileId);
+  assert.equal(run!.agentProfileId, source.workerProfileId, "the chosen planner starts the first run");
+
+  const invalid = await post("/api/swarms", {
+    projectId,
+    title: "Unknown profile",
+    goal: "Try a missing agent",
+    plannerProfileId: "00000000-0000-4000-8000-000000000001",
+  });
+  assert.equal(invalid.status, 404);
+});
+
+test("a long swarm goal is stored in full, up to the published limit", async () => {
+  const goal = "# Brief\n\n" + "A".repeat(MAX_SWARM_GOAL_CHARS - "# Brief\n\n".length);
+  const swarm = await createSwarm({ goal });
+  assert.equal((await readSwarm(swarm.id)).goal, goal);
+
+  const oversized = await post("/api/swarms", {
+    projectId,
+    title: "Too long",
+    goal: goal + "B",
+  });
+  assert.equal(oversized.status, 400);
+  assert.equal((await db.select().from(swarms)).length, 1, "an oversized goal creates no swarm");
+});
+
 test("a project whose agents run on the team's own machines cannot run a swarm", async () => {
   await db.update(projects).set({ executor: "runner" }).where(eq(projects.id, projectId));
   const res = await post("/api/swarms", { projectId, title: "Nope" });
@@ -260,6 +359,10 @@ test("work starts only once there is a plan to work", async () => {
   assert.equal((await readSwarm(swarm.id)).status, "planning", "and the swarm did not move");
 
   await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });
+  const planning = await post(`/api/swarms/${swarm.id}/start`);
+  assert.equal(planning.status, 409, "a partial tree cannot be approved while the planner is working");
+  assert.match((await planning.json()).error, /planner is still working/i);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
   queued.length = 0;
   const started = await post(`/api/swarms/${swarm.id}/start`);
   assert.equal(started.status, 200);
@@ -268,11 +371,146 @@ test("work starts only once there is a plan to work", async () => {
     queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
     "and the reconciler was told, so a worker can be put on the plan",
   );
+  const [later] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Later task" }).returning();
+  queued.length = 0;
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200, "a running swarm can approve new open work");
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === later!.id)?.status, "assigned");
+  assert.ok(queued.some((job) => job.queue === "swarm.tick"), "the newly approved work wakes the coordinator");
 
   // A cancelled node is not a plan.
   const other = await createSwarm({ title: "Other" });
   await db.insert(swarmTasks).values({ swarmId: other.id, title: "withdrawn", status: "cancelled" });
   assert.equal((await post(`/api/swarms/${other.id}/start`)).status, 409);
+});
+
+test("a swarm marked done with an open dependent check can approve that saved check", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  const [phase] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, title: "SSO fixes", nodeType: "plan", status: "done",
+  }).returning();
+  await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: phase!.id, parentRelation: "contains",
+    title: "Runtime fixes", status: "done",
+  });
+  const [check] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: phase!.id, parentRelation: "depends_on",
+    title: "Verify SSO", status: "open",
+  }).returning();
+  await db.update(swarms).set({ status: "done", branchReleasedAt: new Date() }).where(eq(swarms.id, swarm.id));
+
+  queued.length = 0;
+  const started = await post(`/api/swarms/${swarm.id}/start`);
+  assert.equal(started.status, 200);
+  const resumed = await readSwarm(swarm.id);
+  assert.equal(resumed.status, "running");
+  assert.equal(resumed.branchReleasedAt, null, "the released branch is reserved for the worker again");
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === check!.id)?.status, "assigned");
+  assert.ok(queued.some((job) => job.queue === "swarm.tick"), "the check can now get a worker");
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, check!.id));
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 409,
+    "a genuinely finished swarm still requires a follow up");
+});
+
+test("resuming an interrupted planner's saved tree starts ready leaves in dependency order", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "failed", error: "server stopped" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  await db.update(swarms).set({ status: "paused", pausedReason: "manual" }).where(eq(swarms.id, swarm.id));
+  const [plan] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, nodeType: "plan", title: "Implementation", position: 0,
+  }).returning();
+  const [first] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: plan!.id, title: "Foundation", position: 0,
+  }).returning();
+  const [second] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: first!.id, parentRelation: "depends_on", title: "UI", position: 0,
+  }).returning();
+  const [waiting] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: plan!.id, title: "Needs an answer", attention: "question", position: 1,
+  }).returning();
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
+  const assigned = await tasksOf(swarm.id);
+  assert.equal(assigned.find((task) => task.id === plan!.id)?.status, "open", "the plan node is not a worker task");
+  assert.equal(assigned.find((task) => task.id === first!.id)?.status, "assigned");
+  assert.equal(assigned.find((task) => task.id === second!.id)?.status, "assigned");
+  assert.equal(assigned.find((task) => task.id === waiting!.id)?.status, "open", "a question still needs an answer");
+
+  const firstTick = await tickSwarm(ctx, swarm.id);
+  assert.equal(firstTick?.workerRunIds.length, 1, "the ready task starts without another planner message");
+  const [firstRun] = await db.select().from(agentRuns).where(eq(agentRuns.id, firstTick!.workerRunIds[0]!));
+  assert.equal(firstRun?.swarmTaskId, first!.id);
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === second!.id)?.status, "assigned");
+
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, first!.id));
+  const secondTick = await tickSwarm(ctx, swarm.id);
+  assert.equal(secondTick?.workerRunIds.length, 1, "the dependent leaf starts after its prerequisite finishes");
+  const [secondRun] = await db.select().from(agentRuns).where(eq(agentRuns.id, secondTick!.workerRunIds[0]!));
+  assert.equal(secondRun?.swarmTaskId, second!.id);
+});
+
+test("approving a plan starts its first worker even if the planner made it depend on an empty group", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  await db.update(swarms).set({ status: "running" }).where(eq(swarms.id, swarm.id));
+  const [group] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, title: "Auth", nodeType: "plan", status: "open",
+  }).returning();
+  const [first] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: group!.id, parentRelation: "depends_on",
+    title: "Server bootstrap", status: "assigned",
+  }).returning();
+  const [later] = await db.insert(swarmTasks).values({
+    swarmId: swarm.id, parentId: first!.id, parentRelation: "depends_on",
+    title: "Client auth", status: "open",
+  }).returning();
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
+  const approved = await tasksOf(swarm.id);
+  assert.equal(approved.find((task) => task.id === first!.id)?.parentRelation, "contains");
+  assert.equal(approved.find((task) => task.id === later!.id)?.parentRelation, "depends_on");
+  assert.equal(approved.find((task) => task.id === later!.id)?.status, "assigned");
+  const tick = await tickSwarm(ctx, swarm.id);
+  assert.equal(tick?.workerRunIds.length, 1, "the first worker starts from the corrected plan");
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, tick!.workerRunIds[0]!));
+  assert.equal(run?.swarmTaskId, first!.id);
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === later!.id)?.status, "assigned",
+    "the later task still waits for its real prerequisite");
+});
+
+test("stopping a planner preserves its plan and lets a message start the next turn", async () => {
+  const swarm = await createSwarm();
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Saved work" }).returning();
+
+  const stopped = await post(`/api/swarms/${swarm.id}/planner/stop`);
+  assert.equal(stopped.status, 200, await stopped.clone().text());
+  const [firstRun] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(firstRun?.status, "cancelled");
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+  assert.equal((await readSwarm(swarm.id)).status, "planning", "stopping a turn does not stop the swarm");
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/messages`, { text: "Continue with the saved plan" })).status, 201);
+  const tick = await tickSwarm(ctx, swarm.id);
+  assert.ok(tick?.plannerRunId, "the guidance starts a fresh planner turn");
+  assert.notEqual(tick?.plannerRunId, swarm.plannerRunId);
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+});
+
+test("planner messages leave task assignment to the planner", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  await db.update(swarms).set({ status: "running" }).where(eq(swarms.id, swarm.id));
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Saved work" }).returning();
+
+  assert.equal((await post(`/api/swarms/${swarm.id}/messages`, { text: "Give me an update" })).status, 201);
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+  assert.equal((await post(`/api/swarms/${swarm.id}/messages`, { text: "continue" })).status, 201);
+  assert.equal((await tasksOf(swarm.id)).find((row) => row.id === task!.id)?.status, "open");
+  const tick = await tickSwarm(ctx, swarm.id);
+  assert.equal(tick?.workerRunIds.length, 0);
+  assert.ok(tick?.plannerRunId, "the planner gets the messages and decides how to act");
 });
 
 test("the swarm reads back with its plan, and the strip reads back with its numbers", async () => {
@@ -346,6 +584,51 @@ test("the detail carries the merge queue, the queue first and in its own order",
   assert.equal(detail.landings[2]!.branchName, "swarm/s-1");
 });
 
+test("a finished swarm releases only a clean worktree and keeps its branch", async () => {
+  await withRepository(async () => {
+    const swarm = await createSwarm({ title: "Release checkout" });
+    const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Finished work", status: "done" }).returning();
+    const [landing] = await db.insert(swarmLandings).values({ swarmId: swarm.id, taskId: task!.id, status: "queued", branchName: `${swarm.branchName}-worker` }).returning();
+    assert.equal((await post(`/api/swarms/${swarm.id}/branch/release`)).status, 409, "an unfinished swarm keeps its branch");
+    await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+    assert.equal((await post(`/api/swarms/${swarm.id}/branch/release`)).status, 409, "an active agent keeps its checkout");
+    await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+    assert.equal((await post(`/api/swarms/${swarm.id}/branch/release`)).status, 409, "a pending landing keeps the checkout");
+    await db.update(swarmLandings).set({ status: "landed" }).where(eq(swarmLandings.id, landing!.id));
+    const [prepared] = await ctx.worktrees.ensureAll([{ name: "app", localPath: repoDir, defaultBranch: "main" }], `swarm-${swarm.id}`, swarm.branchName);
+    const worktree = prepared!.worktreePath;
+
+    const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
+      landingSummary: { total: number; committed: number };
+      branchCheckout: { released: boolean };
+    };
+    assert.deepEqual(detail.landingSummary, { total: 1, committed: 1 });
+    assert.equal(detail.branchCheckout.released, false);
+
+    const dirtyFile = path.join(worktree, "local-notes.txt");
+    await writeFile(dirtyFile, "keep this\n");
+    const dirty = await post(`/api/swarms/${swarm.id}/branch/release`);
+    assert.equal(dirty.status, 409);
+    assert.match((await dirty.json()).error, /uncommitted files/);
+    await rm(dirtyFile);
+
+    const released = await post(`/api/swarms/${swarm.id}/branch/release`);
+    assert.equal(released.status, 200, await released.clone().text());
+    assert.equal((await run("git", ["-C", repoDir, "worktree", "list", "--porcelain"])).stdout.includes(worktree), false);
+    assert.equal((await run("git", ["-C", repoDir, "rev-parse", "--verify", `refs/heads/${swarm.branchName}`])).stdout.trim().length, 40);
+    assert.equal((await post(`/api/swarms/${swarm.id}/branch/release`)).status, 200, "releasing again is safe");
+
+    await run("git", ["-C", repoDir, "switch", swarm.branchName]);
+    const blocked = await post(`/api/swarms/${swarm.id}/reopen`, { instruction: "One more change" });
+    assert.equal(blocked.status, 409);
+    assert.equal((await blocked.json()).code, "BRANCH_IN_USE");
+    await run("git", ["-C", repoDir, "switch", "main"]);
+    const reopened = await post(`/api/swarms/${swarm.id}/reopen`, { instruction: "One more change" });
+    assert.equal(reopened.status, 201, await reopened.clone().text());
+    assert.equal((await readSwarm(swarm.id)).branchReleasedAt, null);
+  });
+});
+
 test("the merge queue is still visible on a swarm with more landings than the cap", async () => {
   /**
    * A long swarm, which is the shape that made this blind.
@@ -389,16 +672,21 @@ test("the merge queue is still visible on a swarm with more landings than the ca
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {
   const swarm = await createSwarm();
   await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Cart page" });
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
+  assert.equal((await readSwarm(swarm.id)).status, "running");
   assert.equal((await post(`/api/swarms/${swarm.id}/pause`)).status, 200);
   const paused = await readSwarm(swarm.id);
   assert.equal(paused.status, "paused");
   assert.equal(paused.pausedReason, "manual", "so the board knows which sentence to print");
 
+  const [newLeaf] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Second page" }).returning();
   queued.length = 0;
   assert.equal((await post(`/api/swarms/${swarm.id}/start`)).status, 200);
   const resumed = await readSwarm(swarm.id);
   assert.equal(resumed.status, "running");
   assert.equal(resumed.pausedReason, null);
+  assert.equal((await tasksOf(swarm.id)).find((task) => task.id === newLeaf!.id)?.status, "assigned");
   assert.ok(queued.some((job) => job.queue === "swarm.tick"), "leaves waiting for a slot are looked at again");
 
   // The ceilings a person sets, and a budget cleared rather than zeroed.
@@ -1187,6 +1475,111 @@ test("retrying a leaf puts it back in the queue and clears the attempt that fail
   );
 });
 
+test("fix forward keeps earlier worker runs on the task and gives the next attempt a reason", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const profile = (await db.select().from(agentProfiles).limit(1))[0]!;
+  const [first, second] = await db.insert(agentRuns).values([
+    { type: "swarm", swarmId: swarm.id, swarmTaskId: tree.first.id, role: "worker", agentProfileId: profile.id,
+      prompt: "", status: "failed", queuedAt: new Date("2026-01-01T00:00:00.000Z"), error: "stopped" },
+    { type: "swarm", swarmId: swarm.id, swarmTaskId: tree.first.id, role: "worker", agentProfileId: profile.id,
+      prompt: "", status: "succeeded", queuedAt: new Date("2026-01-02T00:00:00.000Z") },
+  ]).returning();
+  await db.update(swarmTasks).set({ status: "failed", attention: "failed", assignedRunId: second!.id })
+    .where(eq(swarmTasks.id, tree.first.id));
+
+  const reason = "Add the missing test and keep the existing code.";
+  const retried = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { reason });
+  assert.equal(retried.status, 200, await retried.clone().text());
+  const task = await readTask(tree.first.id);
+  assert.equal(task.status, "assigned");
+  assert.equal((task.flags as { rejection?: string }).rejection, reason);
+  const detail = await app.request(`/api/swarms/${swarm.id}/tasks/${tree.first.id}`);
+  assert.equal(detail.status, 200);
+  const body = (await detail.json()) as { runs: { id: string; status: string }[] };
+  assert.deepEqual(body.runs.map((run) => run.id), [second!.id, first!.id], "both attempts remain on one task");
+  assert.deepEqual(body.runs.map((run) => run.status), ["succeeded", "failed"]);
+});
+
+test("retrying a failed leaf resumes its failed swarm and queues a worker tick", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarms).set({ status: "failed" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({ status: "failed", attention: "failed", report: "stopped" })
+    .where(eq(swarmTasks.id, tree.first.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal((await readTask(tree.first.id)).status, "assigned");
+  const [resumed] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));
+  assert.equal(resumed!.status, "running");
+  assert.ok(queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id));
+  const tick = await tickSwarm(ctx, swarm.id);
+  assert.equal(tick?.workerRunIds.length, 1, "the resumed swarm starts the retried worker");
+  assert.equal((await readTask(tree.first.id)).status, "working");
+});
+
+test("retrying a failed merge queue entry keeps the worker's accepted work", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await db.update(swarms).set({ status: "failed" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({
+    status: "failed", attention: "failed", report: "Implemented and committed",
+    flags: { accepted: true, landingError: "detached head", plannerToldAt: undefined },
+  }).where(eq(swarmTasks.id, tree.first.id));
+  const [landing] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/rewrite-checkout-first",
+    status: "failed", error: "detached head", position: 0, attempt: 1, endedAt: new Date(),
+  }).returning();
+  queued.length = 0;
+
+  const response = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/landing/retry`);
+  assert.equal(response.status, 200, await response.clone().text());
+  const task = await readTask(tree.first.id);
+  assert.equal(task.status, "landed");
+  assert.equal(task.report, "Implemented and committed");
+  assert.equal((task.flags as { landingError?: string }).landingError, undefined);
+  const [after] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(after!.status, "queued");
+  assert.equal(after!.error, null);
+  assert.equal((await db.select().from(swarms).where(eq(swarms.id, swarm.id)))[0]!.status, "running");
+  assert.ok(queued.some((job) => job.queue === "swarm.tick"));
+  assert.equal(queued.some((job) => job.queue === "run.execute"), false, "the worker is not run again");
+});
+
+test("retrying a failed worker also resumes a manually paused swarm", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarms).set({ status: "paused", pausedReason: "manual" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({ status: "failed", attention: "failed", report: "stopped" })
+    .where(eq(swarmTasks.id, tree.first.id));
+
+  const retried = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(retried.status, 200, await retried.clone().text());
+  assert.equal((await readTask(tree.first.id)).status, "assigned");
+  const resumed = await readSwarm(swarm.id);
+  assert.equal(resumed.status, "running");
+  assert.equal(resumed.pausedReason, null);
+  assert.ok(queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id));
+  const afterRetry = await tickSwarm(ctx, swarm.id);
+  assert.equal(afterRetry?.workerRunIds.length, 1);
+  assert.equal((await readTask(tree.first.id)).status, "working");
+});
+
+test("retrying a worker cannot bypass a plan limit pause", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarms).set({ status: "paused", pausedReason: "plan_limit" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({ status: "failed", attention: "failed" }).where(eq(swarmTasks.id, tree.first.id));
+
+  const retried = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(retried.status, 200, await retried.clone().text());
+  assert.equal((await readTask(tree.first.id)).status, "assigned");
+  assert.equal((await readSwarm(swarm.id)).status, "paused");
+  assert.equal((await readSwarm(swarm.id)).pausedReason, "plan_limit");
+});
+
 /** Retrying replaces the agent, so the one that is there stops first. */
 test("retrying a leaf that still has an agent on it stops that agent", async () => {
   const swarm = await createSwarm();
@@ -1222,6 +1615,15 @@ test("a plan node is not a person's to retry", async () => {
   const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.plan.id}/retry`);
   assert.equal(res.status, 409);
   assert.equal((await res.json()).code, "NOT_A_LEAF");
+});
+
+test("a landed leaf cannot be retried into a branch already merged", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarmTasks).set({ status: "done", report: "landed" }).where(eq(swarmTasks.id, tree.first.id));
+  const response = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(response.status, 409);
+  assert.equal((await readTask(tree.first.id)).status, "done");
 });
 
 /**
@@ -1486,6 +1888,7 @@ test("a swarm somebody moved says so on the bus, so every other viewer hears it"
 
   try {
     await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Leaf" });
+    await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, swarm.plannerRunId));
     await post(`/api/swarms/${swarm.id}/start`);
     await post(`/api/swarms/${swarm.id}/pause`);
     await app.request(`/api/swarms/${swarm.id}`, {
@@ -1497,7 +1900,7 @@ test("a swarm somebody moved says so on the bus, so every other viewer hears it"
 
     assert.deepEqual(
       heard.map((event) => event.status ?? event.type),
-      ["running", "paused", "swarm_updated", "cancelled"],
+      ["assigned", "running", "paused", "swarm_updated", "cancelled"],
       "every door that moves a swarm says so",
     );
   } finally {
@@ -1744,15 +2147,16 @@ test("a person can add a task, and the planner is told and can object", async ()
   assert.match(notice.text, /use cancel_task or split_task/, "and how to object");
 });
 
-test("a task cannot hang off another task", async () => {
+test("a task added below a worker leaf waits for that leaf", async () => {
   const swarm = await createSwarm();
   const tree = await treeOf(swarm.id);
 
   const res = await post(`/api/swarms/${swarm.id}/tasks`, { parentId: tree.first.id, title: "Under a leaf" });
-  assert.equal(res.status, 409);
-  const body = (await res.json()) as { error: string; code: string };
-  assert.equal(body.code, "CANNOT_ADD");
-  assert.match(body.error, /cannot hang off another task/);
+  assert.equal(res.status, 201, await res.clone().text());
+  const body = (await res.json()) as { id: string; parentId: string; parentRelation: string };
+  assert.equal(body.parentId, tree.first.id);
+  assert.equal(body.parentRelation, "depends_on");
+  assert.equal((await readTask(body.id)).parentRelation, "depends_on");
 });
 
 test("a task added at the top of the plan needs no parent, and a foreign node is not there", async () => {

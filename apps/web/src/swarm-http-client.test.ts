@@ -5,6 +5,7 @@ import {
   swarmApi,
   toDetail,
   toSummary,
+  toSwarm,
   type WireDetail,
   type WireSwarm,
   type WireSwarmRow,
@@ -55,6 +56,13 @@ const wireSwarm = (over: Partial<WireSwarm> = {}): WireSwarm => ({
   status: "running",
   pausedReason: null,
   branchName: "swarm/checkout",
+  plannerProfileId: "planner-1",
+  workerProfileId: "worker-1",
+  judgeProfileId: null,
+  completionCommand: null,
+  maxPlanDepth: 1,
+  plannerInstructions: null,
+  workerInstructions: null,
   budgetUsd: "40.00",
   maxWorkers: 4,
   timeLimitMin: null,
@@ -158,6 +166,9 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
   const { calls, doFetch } = fetchStub(wireSwarm({ status: "planning" }));
   const created = await httpSwarmApi("", doFetch).createSwarm({
     projectId: "p1",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
+    settings: { judgeProfileId: "judge-1", completionCommand: "pnpm test" },
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
     attachments: [{ name: "notes.md", bytes: 12 }],
@@ -174,11 +185,48 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
     projectId: "p1",
     title: "Checkout rewrite",
     goal: "Replace the checkout.",
+    plannerProfileId: "planner-1",
+    workerProfileId: "worker-1",
+    deliverable: "code",
+    judgeProfileId: "judge-1",
+    completionCommand: "pnpm test",
     maxWorkers: 6,
     budgetUsd: 40,
   });
   assert.equal(created.swarm.status, "planning");
   assert.deepEqual(created.tasks, [], "a new swarm has no plan until its planner writes one");
+});
+
+test("retrying a failed planner reaches its run endpoint", async () => {
+  const { calls, doFetch } = fetchStub({ runId: "run-2" }, 201);
+  await httpSwarmApi("", doFetch).retryPlanner("sw-1");
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url}`), ["POST /api/swarms/sw-1/planner/retry"]);
+});
+
+test("stopping a planner leaves the swarm itself running", async () => {
+  const { calls, doFetch } = fetchStub({ runId: "run-1", status: "cancelled" });
+  await httpSwarmApi("", doFetch).stopPlanner("sw-1");
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url}`), ["POST /api/swarms/sw-1/planner/stop"]);
+});
+
+test("planner guidance uses the persisted swarm thread and leaves task messages out", async () => {
+  const planner = {
+    id: "message-1", taskId: null, text: "Make the plan smaller", source: "person", status: "sent",
+    runId: "run-2", createdAt: "2026-09-04T12:00:00.000Z",
+  } as const;
+  const task = { ...planner, id: "message-2", taskId: "task-1" };
+  const notice = { ...planner, id: "message-3", source: "system" };
+  const listed = fetchStub([planner, task, notice]);
+  const rows = await httpSwarmApi("", listed.doFetch).listPlannerMessages("sw-1");
+  assert.deepEqual(rows, [planner]);
+  assert.deepEqual(listed.calls.map((call) => `${call.method} ${call.url}`), ["GET /api/swarms/sw-1/messages"]);
+
+  const sent = fetchStub({ ...planner, id: "message-4", status: "queued", runId: null }, 201);
+  const message = await httpSwarmApi("", sent.doFetch).messagePlanner("sw-1", "Make the plan smaller");
+  assert.equal(message.status, "queued");
+  assert.deepEqual(sent.calls[0], {
+    method: "POST", url: "/api/swarms/sw-1/messages", body: { text: "Make the plan smaller" },
+  });
 });
 
 test("every control the console offers reaches the route that does it", async () => {
@@ -187,6 +235,7 @@ test("every control the console offers reaches the route that does it", async ()
   await api.pauseSwarm("sw-1");
   await api.resumeSwarm("sw-1");
   await api.stopSwarm("sw-1");
+  await api.deleteSwarm("sw-1");
   await api.archiveSwarm("sw-1");
   await api.restoreSwarm("sw-1");
   await api.setWorkers("sw-1", 6);
@@ -200,6 +249,7 @@ test("every control the console offers reaches the route that does it", async ()
       // Resuming is starting: one route decides when a swarm may run.
       "POST /api/swarms/sw-1/start",
       "POST /api/swarms/sw-1/cancel",
+      "DELETE /api/swarms/sw-1",
       "PATCH /api/swarms/sw-1",
       "PATCH /api/swarms/sw-1",
       "PATCH /api/swarms/sw-1",
@@ -209,10 +259,11 @@ test("every control the console offers reaches the route that does it", async ()
       "POST /api/swarms/sw-1/tasks/task-9/done",
     ],
   );
-  assert.deepEqual(calls[3]!.body, { archived: true });
-  assert.deepEqual(calls[4]!.body, { archived: false });
-  assert.deepEqual(calls[5]!.body, { maxWorkers: 6 });
-  assert.deepEqual(calls[6]!.body, { text: "Use the new client." });
+  assert.equal(calls[3]!.body, undefined);
+  assert.deepEqual(calls[4]!.body, { archived: true });
+  assert.deepEqual(calls[5]!.body, { archived: false });
+  assert.deepEqual(calls[6]!.body, { maxWorkers: 6 });
+  assert.deepEqual(calls[7]!.body, { text: "Use the new client." });
   // A status is never patched: the lifecycle routes decide that, and
   // the route refuses a body carrying one.
   assert.ok(
@@ -269,6 +320,31 @@ test("a refusal reaches the person in the server's own words", async () => {
     /This swarm has no plan yet/,
     "the error is the sentence the server wrote, not its JSON",
   );
+});
+
+test("a swarm's settings come across from its row, and read as the defaults when absent", () => {
+  const set = toSwarm(wireSwarm({ judgeProfileId: "judge-1", maxPlanDepth: 2 })).settings;
+  assert.equal(set.judgeProfileId, "judge-1");
+  assert.equal(set.maxPlanDepth, 2);
+  assert.equal(set.plannerProfileId, "planner-1");
+
+  const { judgeProfileId: _j, maxPlanDepth: _d, completionCommand: _c, ...older } = wireSwarm();
+  const defaults = toSwarm(older as WireSwarm).settings;
+  assert.equal(defaults.judgeProfileId, null, "a server without the columns ran no final check");
+  assert.equal(defaults.maxPlanDepth, 1);
+  assert.equal(defaults.completionCommand, null);
+});
+
+test("changing settings sends only what changed, with null to clear", async () => {
+  const { calls, doFetch } = fetchStub(wireSwarm());
+  await httpSwarmApi("", doFetch).updateSettings("sw-1", { judgeProfileId: null, maxPlanDepth: 2, completionCommand: undefined });
+  assert.equal(calls[0]!.method, "PATCH");
+  assert.equal(calls[0]!.url, "/api/swarms/sw-1");
+  assert.deepEqual(calls[0]!.body, { judgeProfileId: null, maxPlanDepth: 2 });
+
+  const quiet = fetchStub(wireSwarm());
+  await httpSwarmApi("", quiet.doFetch).updateSettings("sw-1", {});
+  assert.equal(quiet.calls.length, 0, "nothing changed, so nothing is sent");
 });
 
 test("a swarm's status is said in the console's words, and a budget stop says so", () => {

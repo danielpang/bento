@@ -8,6 +8,7 @@ import { opencodeAdapter } from "./opencode.js";
 import { codexAdapter } from "./codex.js";
 import { antigravityAdapter } from "./antigravity.js";
 import { piAdapter } from "./pi.js";
+import { poolAdapter } from "./pool.js";
 import { resolveSandboxPath, sandboxPathExpression, writeFileCommand, type McpRemoteServer } from "./adapter.js";
 
 const servers: McpRemoteServer[] = [
@@ -100,6 +101,16 @@ test("fx names the grant through bearer_token_env, never a literal Authorization
   assert.deepEqual(fxAdapter.mcp!.env?.(servers), { BENTO_MCP_GRANT: "bmg_token" });
 });
 
+test("pool writes the transport and HTTP headers in its settings.yaml format", () => {
+  const file = poolAdapter.mcp!.renderConfig(servers)[0]!;
+  assert.equal(file.path, "~/.config/poolside/settings.yaml");
+  assert.match(file.content, /mcp_servers:\n  "docs":\n    transport:\n      type: http/);
+  assert.match(file.content, /url: "https:\/\/bento\.test\/api\/mcp-gateway\/abc"/);
+  assert.match(file.content, /headers:\n        - "Authorization: Bearer bmg_token"/);
+  assert.match(file.content, /"issues":\n    transport:\n      type: sse/);
+  assert.equal(poolAdapter.mcp!.renderConfig([])[0]!.content, "mcp_servers: {}\n");
+});
+
 test("an empty server set still renders a config, so a removed server is cleared", () => {
   for (const adapter of [claudeCodeAdapter, cursorAdapter, opencodeAdapter, museAdapter, fxAdapter]) {
     const files = adapter.mcp!.renderConfig([]);
@@ -142,7 +153,7 @@ test("every harness file path is home-relative or absolute, never root's home sp
     models: [{ id: "vendor/model-a", name: "Model A" }],
   };
   const input = { prompt: "do it", model: "team-models/vendor/model-a", cwd: "/workspace", customProvider };
-  const adapters = [cursorAdapter, codexAdapter, opencodeAdapter, fxAdapter, museAdapter, claudeCodeAdapter, antigravityAdapter, piAdapter];
+  const adapters = [cursorAdapter, codexAdapter, opencodeAdapter, fxAdapter, museAdapter, claudeCodeAdapter, antigravityAdapter, piAdapter, poolAdapter];
   for (const adapter of adapters) {
     const files = [...(adapter.mcp?.renderConfig(servers) ?? []), ...(adapter.files?.(input) ?? [])];
     assert.ok(files.length > 0, `${adapter.cli} writes nothing, so this test would not check it`);

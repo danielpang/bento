@@ -180,6 +180,18 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   const policy = landingPolicyFor(task);
   const swarmWorkspace = swarmWorkspaceKey(swarm.id);
 
+  if (ctx.driver.provider !== "sprite") {
+    try {
+      await ctx.worktrees.ensureAll(
+        repoRows.map((repo) => ({ name: repo.name, localPath: repo.localPath, defaultBranch: repo.defaultBranch })),
+        swarmWorkspace,
+        swarmBranch,
+      );
+    } catch (error) {
+      return finish(ctx, landing, "failed", `the swarm checkout could not be prepared: ${String(error)}`, task);
+    }
+  }
+
   const landed: string[] = [];
   const problems: { repo: string; outcome: LandFailure }[] = [];
   const remoteHandles =

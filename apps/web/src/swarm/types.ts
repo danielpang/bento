@@ -69,13 +69,9 @@ export type TaskAttention =
   | "plan_limit";
 
 /**
- * Money, always three figures.
- *
- * Measured is what a tool reported. Estimated is what the console
- * worked out from tokens at a published rate. Assumed is a swarm's
- * own guess for a tool that reports nothing at all. They are carried
- * apart and printed apart, and nothing here adds them: a single total
- * would be three different kinds of confidence wearing one number.
+ * Measured is what a tool reported. Estimated is priced from reported
+ * tokens. The assumed field is retained for older wire data, and the
+ * console never treats it as spend.
  */
 export interface SwarmSpend {
   measuredUsd: number;
@@ -144,12 +140,24 @@ export interface SwarmNodeDetail {
   taskId: string;
   commits: TaskCommit[];
   events: SwarmTaskEvent[];
+  runs?: SwarmTaskRun[];
+}
+
+export interface SwarmTaskRun {
+  id: string;
+  status: string;
+  queuedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  error: string | null;
 }
 
 export interface SwarmTask {
   id: string;
   /** Null at the top. The swarm itself is the root nobody stores. */
   parentId: string | null;
+  /** Whether this parent groups the task or must finish before it starts. */
+  parentRelation?: "contains" | "depends_on";
   /** Orders siblings, so the console never invents an order of its own. */
   position: number;
   title: string;
@@ -209,6 +217,7 @@ export interface Swarm {
   /** The single branch every leaf lands onto. */
   branchName: string | null;
   deliverable: "code" | "document";
+  settings: SwarmSettings;
   /** The cap. Null means this swarm has none. */
   budgetUsd: number | null;
   maxWorkers: number;
@@ -332,20 +341,79 @@ export interface SwarmPullRequest {
 export interface SwarmDetail {
   swarm: Swarm;
   tasks: SwarmTask[];
+  /** Sum of recorded agent run durations. Waiting between runs is excluded. */
+  agentTimeMs?: number;
+  /** The planner's latest attempt, shown above the plan in both views. */
+  plannerRun?: SwarmPlannerRun | null;
   landings: SwarmLanding[];
+  /** Counts include rows omitted from the short merge queue history. */
+  landingSummary?: { total: number; committed: number };
+  branchCheckout?: { mode: "worktree" | "remote"; released: boolean };
   ledger: SwarmLedgerEntry[];
   pullRequests: SwarmPullRequest[];
 }
 
+export interface SwarmPlannerRun {
+  id: string;
+  status: "queued" | "starting" | "running" | "succeeded" | "failed" | "cancelled";
+  error: string | null;
+  agent: { name: string; cli: string; model: string } | null;
+  queuedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+/**
+ * How a swarm is run, beyond its goal and its ceilings.
+ *
+ * Every one of these has a default a person never has to touch: the
+ * install's own Swarm Planner and Swarm Worker, no judge, no command,
+ * one planner writing the whole plan, and no extra instructions. They
+ * live on the swarm, set when it is created and changed in its
+ * settings.
+ */
+export interface SwarmSettings {
+  plannerProfileId: string | null;
+  workerProfileId: string | null;
+  /** The agent that reads the finished branch before the swarm is done. */
+  judgeProfileId: string | null;
+  /** A command that has to pass on the finished branch, such as the test suite. */
+  completionCommand: string | null;
+  /** 1: the planner writes the whole plan. More lets it hand parts to sub planners. */
+  maxPlanDepth: number;
+  plannerInstructions: string | null;
+  workerInstructions: string | null;
+}
+
+/** The settings a person can change after the swarm exists. */
+export type SwarmSettingsChange = Partial<{
+  plannerProfileId: string;
+  workerProfileId: string;
+  judgeProfileId: string | null;
+  completionCommand: string | null;
+  maxPlanDepth: number;
+  plannerInstructions: string | null;
+  workerInstructions: string | null;
+  budgetUsd: number | null;
+  timeLimitMin: number | null;
+}>;
+
 /** What the New swarm dialog sends. */
 export interface NewSwarmInput {
   projectId: string;
+  /** Absent means the install's own Swarm Planner and Swarm Worker. */
+  plannerProfileId?: string;
+  workerProfileId?: string;
+  /** The rest of how it is run. Absent fields take the defaults. */
+  settings?: Partial<Omit<SwarmSettings, "plannerProfileId" | "workerProfileId">>;
   name: string;
   goal: string;
   attachments: { name: string; bytes: number }[];
   start: { kind: "new-branch"; name: string } | { kind: "existing-branch"; name: string };
   deliverable: "code" | "document";
   budgetUsd: number | null;
+  /** Minutes the swarm may run for. Null means no limit. */
+  timeLimitMin?: number | null;
   workers: number;
   /** Plan only stops after the planner, before any worker starts. */
   planOnly: boolean;

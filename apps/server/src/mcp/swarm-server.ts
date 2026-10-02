@@ -13,7 +13,7 @@ import {
   swarms,
 } from "@bento/db";
 import type { AppContext } from "../context.js";
-import { cancelTaskTree, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import { cancelTaskTree, reactivateSwarmForRetry, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
@@ -126,6 +126,7 @@ const shapes = {
   create_task: z
     .object({
       parentId: uuidArg.nullish(),
+      parentRelation: z.enum(["contains", "depends_on"]).optional(),
       title,
       description,
       nodeType: z.enum(["plan", "leaf"]).default("leaf"),
@@ -141,7 +142,7 @@ const shapes = {
         .max(50),
     })
     .strip(),
-  assign: z.object({ taskId: uuidArg }).strip(),
+  assign: z.object({ taskId: uuidArg, reason: z.string().min(1).max(4000).optional() }).strip(),
   delegate: z.object({ taskId: uuidArg }).strip(),
   cancel_task: z.object({ taskId: uuidArg, reason: z.string().max(2000).default("") }).strip(),
   accept: z.object({ taskId: uuidArg, note: z.string().max(4000).default("") }).strip(),
@@ -190,12 +191,13 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   },
   create_task: {
     description:
-      "Adds one node to the plan. Give parentId to put it under a plan node, or leave it out for a top level node. A leaf is work an agent does; a plan node is decomposed further.",
+      "Adds one node to the plan. Use 'contains' for work inside a plan group. Use parentRelation='depends_on' only when the parent has work that can finish first. An empty plan group cannot be a prerequisite. A leaf is work an agent does; a plan node groups work.",
     roles: ["planner", "subplanner"],
     inputSchema: {
       type: "object",
       properties: {
-        parentId: str("The plan node to add it under. Omit for a top level node."),
+        parentId: str("The plan group or prerequisite task to add it under. Omit for a top level node."),
+        parentRelation: { type: "string", enum: ["contains", "depends_on"], description: "How this node relates to its parent. A dependency waits for the parent's work to finish. A child of a leaf defaults to depends_on." },
         title: str("One line, plain text."),
         description: str("What finished means for this task."),
         nodeType: {
@@ -233,9 +235,9 @@ const TOOLS: Record<ToolName, ToolSpec> = {
   },
   assign: {
     description:
-      "Assigns a leaf to be worked. An agent is put on it when the swarm has room. Leaves you have not assigned are not started.",
+      "Assigns a leaf to be worked. On a failed leaf, give a reason to fix forward on the same task and branch. Earlier runs stay in the task history.",
     roles: ["planner", "subplanner"],
-    inputSchema: { type: "object", properties: { taskId: str("The leaf to assign.") }, required: ["taskId"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { taskId: str("The leaf to assign."), reason: str("What the next attempt must fix, when retrying a failed leaf.") }, required: ["taskId"], additionalProperties: false },
   },
   delegate: {
     description:
@@ -604,6 +606,7 @@ async function getTree(ctx: AppContext, caller: SwarmCaller): Promise<string> {
     // A sub planner's root is the top of what it was given. Do not
     // leak the id of a parent it cannot otherwise see.
     parentId: task.parentId && visibleIds.has(task.parentId) ? task.parentId : null,
+    parentRelation: task.parentId && visibleIds.has(task.parentId) ? task.parentRelation : "contains",
     nodeType: task.nodeType,
     title: task.title,
     description: task.description,
@@ -626,18 +629,26 @@ async function createTask(
   events: BoardEvent[],
 ): Promise<string> {
   let parentId: string | null = args.parentId ?? null;
+  let parentRelation = args.parentRelation ?? "contains";
   if (parentId) {
     const parent = await requireTask(ctx, caller, parentId);
-    if (parent.nodeType !== "plan") {
-      throw new ToolRefusal(
-        `task ${parent.id} is a leaf, so it cannot hold children. Use split_task to turn it into a plan node.`,
-      );
+    if (parent.status === "cancelled") {
+      throw new ToolRefusal(`task ${parent.id} was cancelled, so it cannot hold new work.`);
+    }
+    parentRelation = args.parentRelation ?? (parent.nodeType === "leaf" ? "depends_on" : "contains");
+    if (parent.nodeType === "leaf" && parentRelation === "contains") {
+      throw new ToolRefusal(`task ${parent.id} is worker owned. Set parentRelation to depends_on for work after it.`);
     }
     parentId = parent.id;
   } else if (caller.role === "subplanner" && caller.taskId) {
     // A sub planner was given one group. A node with no parent would be
     // a new top level branch of somebody else's plan.
+    if (parentRelation === "depends_on") {
+      throw new ToolRefusal("A dependent task needs an explicit parentId.");
+    }
     parentId = caller.taskId;
+  } else if (parentRelation === "depends_on") {
+    throw new ToolRefusal("A dependent task needs a parentId.");
   }
 
   const [created] = await ctx.db
@@ -645,6 +656,7 @@ async function createTask(
     .values({
       swarmId: caller.swarmId,
       parentId,
+      parentRelation,
       position: await nextPosition(ctx, caller.swarmId, parentId),
       nodeType: args.nodeType,
       title: args.title,
@@ -702,21 +714,29 @@ async function assign(
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
   if (task.nodeType !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node. Assign its leaves instead.`);
-  if (task.status === "working" || task.status === "landed") {
+  if (task.status === "working" || task.status === "landed" || task.status === "done") {
     throw new ToolRefusal(`task ${task.id} is already being worked.`);
   }
   if (task.status === "assigned") return `Task ${task.id} was already assigned.`;
-  await ctx.db
-    .update(swarmTasks)
-    .set({ status: "assigned", attention: null, updatedAt: new Date() })
-    .where(eq(swarmTasks.id, task.id));
-  await ctx.db.insert(swarmTaskEvents).values({
-    taskId: task.id,
-    kind: "status_changed",
-    fromStatus: task.status,
-    toStatus: "assigned",
-    runId: caller.runId,
-  });
+  if (task.status === "failed") {
+    const retried = await retryLeaf(ctx.db, { task, runId: caller.runId, ...(args.reason ? { reason: args.reason } : {}) });
+    if ("refused" in retried) throw new ToolRefusal(retried.refused);
+    if (await reactivateSwarmForRetry(ctx.db, caller.swarmId)) {
+      events.push({ type: "swarm_updated", projectId: caller.projectId, swarmId: caller.swarmId, status: "running" });
+    }
+  } else {
+    await ctx.db
+      .update(swarmTasks)
+      .set({ status: "assigned", attention: null, updatedAt: new Date() })
+      .where(eq(swarmTasks.id, task.id));
+    await ctx.db.insert(swarmTaskEvents).values({
+      taskId: task.id,
+      kind: "status_changed",
+      fromStatus: task.status,
+      toStatus: "assigned",
+      runId: caller.runId,
+    });
+  }
   events.push(taskEvent(caller, task.id, "assigned"));
   return `Task ${task.id} is assigned. An agent starts on it when the swarm has room.`;
 }
@@ -916,39 +936,13 @@ async function reject(
 ): Promise<string> {
   const task = await requireTask(ctx, caller, args.taskId);
   if (task.nodeType !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node; there is nothing to reject.`);
+  if (task.status === "done" || task.status === "landed" || task.flags.accepted === true) {
+    throw new ToolRefusal(`task ${task.id} was already accepted and landed. Its completed work cannot be sent back.`);
+  }
   if (!task.report) throw new ToolRefusal(`task ${task.id} has not reported yet, so there is nothing to reject.`);
 
-  await ctx.db
-    .update(swarmTasks)
-    .set({
-      status: "assigned",
-      attention: null,
-      report: null,
-      endedAt: null,
-      /**
-       * The reason is what the next agent on this leaf is told, so it
-       * is kept on the row rather than only in the event log.
-       *
-       * plannerToldAt goes, and that is not bookkeeping. It is the mark
-       * that says this leaf's news has reached the planner, and it is
-       * set once per leaf rather than once per report. Left standing,
-       * the second attempt's report would be filtered out of every
-       * future wake as something the planner had already heard, and a
-       * rejected leaf could be worked again and again without its
-       * planner ever being told it had come back.
-       */
-      flags: { ...task.flags, rejection: args.reason, plannerToldAt: undefined },
-      updatedAt: new Date(),
-    })
-    .where(eq(swarmTasks.id, task.id));
-  await ctx.db.insert(swarmTaskEvents).values({
-    taskId: task.id,
-    kind: "status_changed",
-    fromStatus: task.status,
-    toStatus: "assigned",
-    runId: caller.runId,
-    detail: { rejection: args.reason },
-  });
+  const retried = await retryLeaf(ctx.db, { task, runId: caller.runId, reason: args.reason });
+  if ("refused" in retried) throw new ToolRefusal(retried.refused);
   events.push(taskEvent(caller, task.id, "assigned"));
   return `Sent ${task.id} back to be worked again. The next agent on it is told your reason.`;
 }
@@ -1179,7 +1173,7 @@ async function myTask(ctx: AppContext, caller: SwarmCaller): Promise<string> {
   ];
   if (task.branchName) lines.push("", `Your branch: ${task.branchName}`);
   if (rejection?.trim()) {
-    lines.push("", "This task was worked before and sent back. The planner's reason:", quoteUntrusted(rejection.trim()));
+    lines.push("", "This task was worked before. Corrections requested for this attempt:", quoteUntrusted(rejection.trim()));
   }
   return lines.join("\n");
 }

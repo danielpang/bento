@@ -57,6 +57,29 @@ export const poolAdapter: AgentAdapter = {
   // Poolside Platform, which the env hook fills in below.
   optionalEnv: ["POOLSIDE_STANDALONE_BASE_URL"],
 
+  mcp: {
+    renderConfig(servers) {
+      // pool mcp add writes this shape to settings.yaml. Write the whole
+      // server map each run so a reused sandbox cannot retain an old grant.
+      const lines = ["mcp_servers:"];
+      if (servers.length === 0) lines[0] = "mcp_servers: {}";
+      for (const server of servers) {
+        lines.push(
+          `  ${JSON.stringify(server.slug)}:`,
+          "    transport:",
+          `      type: ${server.transport}`,
+          `      url: ${JSON.stringify(server.url)}`,
+        );
+        const headers = Object.entries(server.headers);
+        if (headers.length > 0) {
+          lines.push("      headers:");
+          for (const [name, value] of headers) lines.push(`        - ${JSON.stringify(`${name}: ${value}`)}`);
+        }
+      }
+      return [{ path: "~/.config/poolside/settings.yaml", content: `${lines.join("\n")}\n` }];
+    },
+  },
+
   env(input: BuildCommandInput): Record<string, string> {
     return {
       POOLSIDE_STANDALONE_BASE_URL: POOLSIDE_BASE_URL,

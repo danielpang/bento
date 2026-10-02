@@ -100,9 +100,9 @@ export interface ProvisionSpec {
 }
 
 export type ExecChunk =
-  | { kind: "stdout"; data: string }
-  | { kind: "stderr"; data: string }
-  | { kind: "exit"; exitCode: number };
+  | { kind: "stdout"; data: string; cursor?: number }
+  | { kind: "stderr"; data: string; cursor?: number }
+  | { kind: "exit"; exitCode: number; cursor?: number };
 
 /**
  * What every driver writes to stderr when it stops an exec at
@@ -132,6 +132,10 @@ export interface ExecOptions {
    * drivers that report supportsStdin honor this.
    */
   stdin?: AsyncIterable<string>;
+  /** A stable run id enables Docker's durable output and reattachment. */
+  sessionKey?: string;
+  /** Last output record committed to the transcript. Only used by attach. */
+  afterCursor?: number;
 }
 
 /**
@@ -238,13 +242,13 @@ export interface SandboxDriver {
   /**
    * Picks up a command a previous process started with exec and left
    * running in the sandbox, so a server restart does not have to end
-   * the runs it was carrying. Only argv's first word is used, to find
-   * the running session; cwd and env in opts are ignored because the
-   * live process already carries them. Resolves null when the sandbox
-   * answers but no such command runs, which is conclusive: the process
-   * ended while nobody was attached. A rejection means the question
-   * could not be answered and may be retried. Only drivers whose
-   * sandboxes outlive the server process implement this.
+   * the runs it was carrying. Sprite finds the running session by
+   * argv's first word. Docker finds its durable record by sessionKey.
+   * cwd and env in opts are ignored because the live process already
+   * carries them. Resolves null when the sandbox answers but cannot
+   * find that session or record. A rejection means the question could
+   * not be answered and may be retried. Only drivers whose sandboxes
+   * outlive the server process implement this.
    */
   attach?(
     handle: SandboxHandle,

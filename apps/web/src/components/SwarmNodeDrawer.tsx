@@ -1,11 +1,13 @@
-import { useState, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
+import * as Tabs from "@radix-ui/react-tabs";
 import { Markdown } from "./Markdown.js";
 import { CompletionRing } from "./CompletionRing.js";
 import { useDismissable } from "./ui.js";
-import { attentionNote, attentionWords, isAttention, taskTone, taskWords } from "../swarm/status.js";
+import { attentionNote, diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
 import { formatCompletion, type SwarmNode } from "../swarm/layout.js";
-import { spendParts, formatUsd } from "../swarm/money.js";
+import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
+import { MERGE_QUEUE_FAILURE } from "../swarm/failures.js";
 import type { SwarmNodeDetail, SwarmTask, SwarmTaskEvent } from "../swarm/types.js";
 
 /**
@@ -29,8 +31,10 @@ export function SwarmNodeDrawer({
   repositoriesNamed = 1,
   onClose,
   onMarkDone,
-  onMessage,
   onRetry,
+  onRetryLanding,
+  onFixForward,
+  onOpenRun,
   onCancel,
   onSplit,
   onAddTask,
@@ -39,6 +43,7 @@ export function SwarmNodeDrawer({
   agents = [],
   transcript,
   busy,
+  actionError,
 }: {
   task: SwarmTask;
   /** The rolled up figures for this node, from the shared model. */
@@ -59,123 +64,141 @@ export function SwarmNodeDrawer({
    * Marks a leaf done by hand.
    *
    * Still optional, because a caller that has no swarm selected has
-   * nothing to send it to. A drawer given no handler draws the button
-   * disabled with the reason under it, rather than wired to something
-   * that would look like it worked and do nothing.
+   * nothing to send it to. A drawer given no handler omits the action.
    */
   onMarkDone?: (taskId: string) => void;
-  /**
-   * Sends a message to the agent on this node.
-   *
-   * Optional for the reason marking done is: a caller with no swarm
-   * selected has nowhere to send it, and a composer wired to nothing
-   * is worse than no composer.
-   */
-  onMessage?: (taskId: string, text: string) => void;
   /**
    * The node controls.
    *
    * Each one optional, because a caller with no swarm selected has
    * nowhere to send it, and a button wired to nothing is worse than no
-   * button: the drawer draws what it cannot do as unavailable rather
-   * than as something that quietly fails.
+   * button: the drawer omits actions that have no handler.
    */
   onRetry?: (taskId: string) => void;
+  onRetryLanding?: (taskId: string) => void;
+  onFixForward?: (taskId: string, reason: string) => void;
+  onOpenRun?: (runId: string) => void;
   onCancel?: (taskId: string) => void;
   onSplit?: (taskId: string, children: { title: string }[]) => void;
   /**
-   * Adds a task under this plan node, because a person saw something
-   * the planner did not.
-   *
-   * Only on a plan node, because a task cannot hang off another task:
-   * the leaf's own answer to "this needs one more thing" is Split.
-   * The planner is told and may object, which the form says rather
-   * than leaving a person to wonder whether it noticed.
+   * Adds work below this node. Under a worker leaf, it starts after
+   * that leaf finishes. The planner is told and may object.
    */
   onAddTask?: (parentId: string, task: { title: string; description?: string }) => void;
   onReassign?: (taskId: string, agentProfileId: string | null) => void;
   onEdit?: (taskId: string, edit: { description: string }) => void;
   /** The agents this project can put on a leaf, for Reassign. */
   agents?: { id: string; name: string }[];
-  /**
-   * The worker's conversation.
-   *
-   * The console already has one of these: `AgentSession`, the same
-   * transcript and composer the card drawer and the session page
-   * render. It is passed in rather than built again here, and stays
-   * empty until runs are keyed by swarm task and the run routes
-   * answer for them.
-   */
+  /** Read-only output from the worker run assigned to this task. */
   transcript?: ReactNode;
   busy?: boolean;
+  actionError?: string;
 }) {
   const panel = useDismissable<HTMLElement>(onClose);
   const [confirming, setConfirming] = useState(false);
+  const [tab, setTab] = useState("overview");
+  const mergeQueueFailure = task.nodeType === "leaf" && typeof task.flags.landingError === "string";
   const attention = isAttention(task.attention);
-  const note = attentionWords(task.attention);
-  const longNote = attentionNote(task.attention);
+  const note = task.nodeType === "plan" && task.status === "failed" ? null
+    : diagramAttentionWords(task.status, task.nodeType, task.attention);
+  const longNote = mergeQueueFailure ? null : task.nodeType === "plan" && task.status === "failed"
+    ? "A task below this plan failed. Open it to fix or retry it."
+    : attentionNote(task.attention);
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.description);
+  const [fixingForward, setFixingForward] = useState(false);
+  const [fixReason, setFixReason] = useState(typeof task.flags.rejection === "string" ? task.flags.rejection : "");
   const [splitting, setSplitting] = useState(false);
   const [splitText, setSplitText] = useState("");
   const [adding, setAdding] = useState(false);
   const [addTitle, setAddTitle] = useState("");
   const [addDetail, setAddDetail] = useState("");
-  const flags = Object.entries(task.flags);
+  const flags = Object.entries(task.flags).filter(([key]) => key !== "landingError");
   // The fetched list when there is one, and the plan row's otherwise.
   // A fetched empty list is an answer, not a missing one, so the
   // fallback is on the detail being absent rather than on it being
   // empty.
   const commits = detail ? detail.commits : task.commits;
   const events = detail?.events ?? [];
+  const runs = detail?.runs ?? [];
+  const canFixForward = !!onFixForward && task.nodeType === "leaf" && task.status === "failed" && !mergeQueueFailure;
+  const canMarkDone = !!onMarkDone && task.nodeType === "leaf" && task.status !== "done";
+  const canRetry = !!onRetry && task.nodeType === "leaf" && !mergeQueueFailure && !["cancelled", "done", "landed"].includes(task.status);
+  const canRetryLanding = !!onRetryLanding && mergeQueueFailure;
+  const canEdit = !!onEdit;
+  const canSplit = !!onSplit && task.nodeType === "leaf" && task.status !== "done";
+  const canAdd = !!onAddTask && task.status !== "done" && task.status !== "cancelled";
+  const canCancel = !!onCancel && task.status !== "cancelled";
+  const workerActive = task.nodeType === "leaf" && task.status === "working";
+  const primaryAction = canRetryLanding ? "landing"
+    : canFixForward ? "fix"
+    : (task.status === "failed" || (task.status === "assigned" && task.assignedRunId)) && canRetry ? "retry"
+    : workerActive ? null : canAdd && task.nodeType === "plan" ? "add" : canEdit ? "edit" : canRetry ? "retry" : null;
+  const hasMoreActions = canMarkDone || (canRetry && primaryAction !== "retry") ||
+    (canEdit && primaryAction !== "edit") || canSplit || (canAdd && primaryAction !== "add") ||
+    canCancel || (!!onReassign && task.nodeType === "leaf" && agents.length > 0);
+  const nextStep = mergeQueueFailure ? MERGE_QUEUE_FAILURE
+    : primaryAction === "fix" ? "Tell the worker what to change."
+    : primaryAction === "retry" ? (task.status === "assigned" ? "Start a new worker attempt." : null)
+    : workerActive ? "The worker is running. Open Worker logs to follow its progress."
+      : primaryAction === "add" ? "Add a task to this plan."
+        : primaryAction === "edit" ? "Edit the task description."
+          : hasMoreActions ? "Open More actions for other options." : "No action is available for this node.";
+
+  function toggleEdit() {
+    setDraft(task.description);
+    setEditing((open) => !open);
+  }
+
+  function runPrimaryAction() {
+    if (primaryAction === "landing") onRetryLanding?.(task.id);
+    else if (primaryAction === "fix") setFixingForward((open) => !open);
+    else if (primaryAction === "retry") onRetry?.(task.id);
+    else if (primaryAction === "add") setAdding((open) => !open);
+    else if (primaryAction === "edit") toggleEdit();
+  }
 
   return (
-    <aside className="drawer" role="dialog" aria-label={task.title} ref={panel}>
+    <Tabs.Root value={tab} onValueChange={setTab} asChild>
+    <aside className="drawer feature-drawer swarm-node-drawer" role="dialog" aria-label={task.title} ref={panel} data-tab={tab}>
       <header className="drawer-head">
-        <div className="drawer-title-row">
-          <h2 className="drawer-title">{task.title}</h2>
-          <button className="btn btn-ghost" onClick={onClose} aria-label="Close">
-            Close
+        <div className="feature-topline">
+          <span className="feature-kicker">{task.nodeType === "leaf" ? "Swarm task" : "Plan node"}</span>
+          <span className="status swarm-node-header-status">
+            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType)} />
+            {diagramTaskWords(task.status, task.nodeType)}
+          </span>
+          <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            <span aria-hidden="true">×</span>
           </button>
         </div>
-        <div className="drawer-meta">
-          <div className="meta-item">
-            <span className="meta-label">Progress</span>
-            <span className="swarm-drawer-progress">
-              <CompletionRing fraction={node.completion} size={18} stroke={3} />
-              {formatCompletion(node.completion)}
-            </span>
+        <h2 className="drawer-title">{task.title}</h2>
+        {task.branchName && (
+          <div className="feature-branch">
+            <span className="meta-label">Branch</span>
+            <code title={task.branchName}>{task.branchName}</code>
           </div>
-          <div className="meta-item">
-            <span className="meta-label">Status</span>
-            <span className="status">
-              <span className="dot" data-state={taskTone(task.status)} />
-              {taskWords(task.status)}
-            </span>
-          </div>
-          {attention && note && (
-            <div className="meta-item">
-              <span className="meta-label">Attention</span>
-              <span className="chip swarm-attention-chip">{note}</span>
-            </div>
-          )}
-          <div className="meta-item">
-            <span className="meta-label">Elapsed</span>
-            <span className="chip">{formatElapsed(node.elapsedMs)}</span>
-          </div>
-          {task.branchName && (
-            <div className="meta-item meta-item-wide">
-              <span className="meta-label">Branch</span>
-              <span className="chip chip-clip" title={task.branchName}>
-                {task.branchName}
-              </span>
-            </div>
-          )}
+        )}
+        <div className="swarm-node-summary">
+          <span className="swarm-drawer-progress">
+            <CompletionRing fraction={node.completion} size={18} stroke={3} />
+            {formatCompletion(node.completion)}
+          </span>
+          <span className="swarm-node-summary-divider" aria-hidden="true" />
+          <span>{formatElapsed(node.elapsedMs)} elapsed</span>
+          {attention && note && <span className="swarm-node-attention">{note}</span>}
         </div>
       </header>
 
-      <div className="drawer-body drawer-body-sectioned">
+      <Tabs.List className="feature-tabs swarm-node-tabs" aria-label="Swarm task details">
+        <Tabs.Trigger value="overview">Actions and description</Tabs.Trigger>
+        {task.nodeType === "leaf" && <Tabs.Trigger value="output">Worker logs</Tabs.Trigger>}
+        <Tabs.Trigger value="commits">Commits</Tabs.Trigger>
+        <Tabs.Trigger value="history">History</Tabs.Trigger>
+      </Tabs.List>
+      <div className="drawer-body feature-drawer-body swarm-node-body">
+        <Tabs.Content value="overview" forceMount hidden={tab !== "overview"} className="feature-pane swarm-node-pane">
         {/*
          * Why this node is yellow, in a sentence with what to do about
          * it. The chip above has room for two words; this is the part
@@ -188,207 +211,88 @@ export function SwarmNodeDrawer({
           </p>
         )}
 
-        <section className="section">
-          <span className="label">Description</span>
-          {task.description ? (
-            <p className="swarm-text">{task.description}</p>
-          ) : (
-            <p className="muted">The planner left this one to its title.</p>
-          )}
-        </section>
-
-        <section className="section">
-          <span className="label">Acceptance criteria</span>
-          {task.acceptanceCriteria.length > 0 ? (
-            <ul className="swarm-criteria">
-              {task.acceptanceCriteria.map((line, index) => (
-                <li key={index}>{line}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="muted">None set. The worker is judged on the description alone.</p>
-          )}
-        </section>
-
-        <section className="section">
-          <span className="label">Spend</span>
-          {/* Three figures, three confidences, never one total. */}
-          <ul className="swarm-tiers">
-            {spendParts(node.cost).map((part) => (
-              <li key={part.tier} title={part.note}>
-                <span className="swarm-tier-label">{part.label}</span>
-                <span className="swarm-tier-value spend-figure">{formatUsd(part.usd)}</span>
-              </li>
-            ))}
-          </ul>
-          {node.childIds.length > 0 && (
-            <p className="muted">Rolled up from every task under this one.</p>
-          )}
-        </section>
-
-        {task.report && (
-          <section className="section">
-            <span className="label">Report</span>
-            <Markdown text={task.report} />
-          </section>
-        )}
-
-        {flags.length > 0 && (
-          <section className="section">
-            <span className="label">Flags</span>
-            <ul className="swarm-flags">
-              {flags.map(([key, value]) => (
-                <li key={key}>
-                  <span className="swarm-flag-key">{key}</span>
-                  <span className="swarm-flag-value">{describeFlag(value)}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        <section className="section">
-          <span className="label">Commits</span>
-          {commits.length > 0 ? (
-            <ul className="swarm-commits">
-              {commits.map((commit) => (
-                <li key={`${commit.repository ?? ""}${commit.sha}`}>
-                  <span className="chip swarm-sha">{commit.sha.slice(0, 7)}</span>
-                  {/* Named only when a project spans more than one, so
-                      the ordinary case is not a column of the same word. */}
-                  {commit.repository && repositoriesNamed > 1 && (
-                    <span className="chip chip-clip">{commit.repository}</span>
-                  )}
-                  <span className="swarm-commit-message">{commit.message}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="muted">
-              No commits carry this task&apos;s trailer yet. They appear here once its agent has
-              committed, and stay after the branch lands.
-            </p>
-          )}
-        </section>
-
-        {events.length > 0 && (
-          <section className="section">
-            <span className="label">History</span>
-            {/*
-             * What has happened to this node, resolver runs included: a
-             * conflict puts a second agent on a leaf, and this is the
-             * only place on the node that says so. Every value here is
-             * rendered as text, because a `detail` is written by the
-             * coordinator and by agents alike.
-             */}
-            <ul className="swarm-events">
-              {events.map((event) => (
-                <li key={event.id}>
-                  <span className="chip">{eventWords(event)}</span>
-                  <span className="swarm-event-note">{eventNote(event)}</span>
-                  <span className="muted swarm-event-at">{new Date(event.at).toLocaleString()}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        <section className="section">
-          <span className="label">Worker</span>
-          {transcript ?? (
-            <p className="muted">
-              No worker has been on this task yet. The conversation appears here once one starts.
-            </p>
-          )}
-          {onMessage && <WorkerComposer task={task} busy={busy} onSend={(text) => onMessage(task.id, text)} />}
-        </section>
-
-        <section className="section">
-          <span className="label">Actions</span>
-          <div className="actions">
-            {/* The confirmation is not ceremony: marking done moves
-                every ring above it, up to the one on the tab. */}
-            <button
-              className="btn"
-              disabled={!onMarkDone || busy || task.status === "done" || task.nodeType !== "leaf"}
-              onClick={() => setConfirming(true)}
-            >
-              Mark done
-            </button>
-            {/*
-             * Retry is the one people reach for most, so it says how
-             * many times this has been tried: the third attempt is a
-             * different decision from the first, and a button that
-             * hides that invites a fourth.
-             */}
-            <button
-              className="btn"
-              disabled={!onRetry || busy || task.nodeType !== "leaf" || task.status === "cancelled"}
-              title="Put this task back in the queue. The agent on it stops, and its report is cleared."
-              onClick={() => onRetry?.(task.id)}
-            >
-              {retries > 0 ? `Retry (${retries} so far)` : "Retry"}
-            </button>
-            <button
-              className="btn"
-              disabled={!onEdit || busy}
-              title="Correct what this task says. A task that failed for saying the wrong thing fails again against the same words."
-              onClick={() => {
-                setDraft(task.description);
-                setEditing((open) => !open);
-              }}
-            >
-              Edit
-            </button>
-            <button
-              className="btn"
-              disabled={!onSplit || busy || task.nodeType !== "leaf" || task.status === "done"}
-              title="Turn this into the tasks it should have been. Its children are what gets worked."
-              onClick={() => setSplitting((open) => !open)}
-            >
-              Split
-            </button>
-            <button
-              className="btn"
-              disabled={!onAddTask || busy || task.nodeType !== "plan" || task.status === "done" || task.status === "cancelled"}
-              title="Add a task under this part of the plan. The planner is told, and can object."
-              onClick={() => setAdding((open) => !open)}
-            >
-              Add task
-            </button>
-            <button
-              className="btn"
-              disabled={!onCancel || busy || task.status === "cancelled"}
-              title="Withdraw this task and everything under it, and stop the agents on them."
-              onClick={() => onCancel?.(task.id)}
-            >
-              Cancel
-            </button>
+        <section className="section swarm-node-actions">
+          <div className="feature-section-heading">
+            <h3>{workerActive ? "Current activity" : "Next step"}</h3>
+            {nextStep && <span>{nextStep}</span>}
           </div>
-
-          {/*
-           * Reassign is a picker rather than a button, because the
-           * question is which agent. On the node alone: the answer to
-           * one task a cheap worker could not finish is a stronger
-           * agent on that task, not on every task still to come.
-           */}
-          {onReassign && task.nodeType === "leaf" && agents.length > 0 && (
-            <label className="swarm-reassign">
-              <span className="meta-label">Agent</span>
-              <select
-                className="input"
-                value={task.agentProfileId ?? ""}
-                disabled={busy}
-                onChange={(e) => onReassign(task.id, e.target.value === "" ? null : e.target.value)}
-              >
-                <option value="">This swarm&apos;s own worker</option>
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+          {actionError && <p className="error-box" role="alert">{actionError}</p>}
+          {primaryAction && (
+            <div className="action-grid">
+              <button className="btn btn-primary" type="button" disabled={busy} onClick={runPrimaryAction}>
+                {primaryAction === "landing" ? "Retry merge queue"
+                  : primaryAction === "fix" ? "Fix forward"
+                  : primaryAction === "retry" ? (busy ? "Retrying worker…" : retries > 0 ? `Retry worker (${retries} so far)` : "Retry worker")
+                  : primaryAction === "add" ? "Add task" : "Edit task"}
+              </button>
+            </div>
+          )}
+          {fixingForward && onFixForward && (
+            <form className="swarm-edit" onSubmit={(event) => {
+              event.preventDefault();
+              const reason = fixReason.trim();
+              if (!reason) return;
+              onFixForward(task.id, reason);
+              setFixingForward(false);
+            }}>
+              <label htmlFor="swarm-fix-reason">What should the worker fix?</label>
+              <textarea id="swarm-fix-reason" className="input" rows={4} maxLength={4000} value={fixReason}
+                onChange={(event) => setFixReason(event.target.value)} />
+              <div className="actions">
+                <button className="btn btn-ghost" type="button" onClick={() => setFixingForward(false)}>Cancel</button>
+                <button className="btn btn-primary" type="submit" disabled={busy || !fixReason.trim()}>Start next attempt</button>
+              </div>
+            </form>
+          )}
+          <p className="swarm-node-cost-line">
+            <span>Spend estimate</span>
+            <strong>{formatUsd(cappedUsd(node.cost))}</strong>
+            {node.childIds.length > 0 && <span className="muted">Includes tasks below</span>}
+          </p>
+          {hasMoreActions && (
+            <details className="feature-more-actions">
+              <summary>More actions</summary>
+              <div className="action-grid">
+                {canMarkDone && (
+                  <button className="btn" type="button" disabled={busy} onClick={() => setConfirming(true)}>Mark done</button>
+                )}
+                {canRetry && primaryAction !== "retry" && (
+                  <button className="btn" type="button" disabled={busy} title="Put this task back in the queue. The agent on it stops, and its report is cleared." onClick={() => onRetry?.(task.id)}>
+                    {retries > 0 ? `Retry (${retries} so far)` : "Retry"}
+                  </button>
+                )}
+                {canEdit && primaryAction !== "edit" && (
+                  <button className="btn" type="button" disabled={busy} onClick={toggleEdit}>Edit task</button>
+                )}
+                {canSplit && (
+                  <button className="btn" type="button" disabled={busy} title="Split this task into smaller tasks." onClick={() => setSplitting((open) => !open)}>Split task</button>
+                )}
+                {canAdd && primaryAction !== "add" && (
+                  <button className="btn" type="button" disabled={busy} onClick={() => setAdding((open) => !open)}>{task.nodeType === "leaf" ? "Add dependent task" : "Add task"}</button>
+                )}
+              </div>
+              {onReassign && task.nodeType === "leaf" && agents.length > 0 && (
+                <label className="swarm-reassign">
+                  <span className="meta-label">Worker agent</span>
+                  <select
+                    className="input"
+                    value={task.agentProfileId ?? ""}
+                    disabled={busy}
+                    onChange={(e) => onReassign(task.id, e.target.value === "" ? null : e.target.value)}
+                  >
+                    <option value="">This swarm&apos;s own worker</option>
+                    {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                  </select>
+                </label>
+              )}
+              {canCancel && (
+                <div className="danger-row">
+                  <button className="btn btn-ghost btn-danger-quiet" type="button" disabled={busy} title="Withdraw this task and everything under it, and stop the agents on them." onClick={() => onCancel?.(task.id)}>Cancel task</button>
+                </div>
+              )}
+              {task.nodeType !== "leaf" && <p className="muted">A plan node is finished by its own tasks finishing.</p>}
+              {canMarkDone && <p className="muted">Marking this done stops its worker and counts it as finished.</p>}
+            </details>
           )}
 
           {editing && onEdit && (
@@ -481,8 +385,9 @@ export function SwarmNodeDrawer({
                 onChange={(e) => setAddDetail(e.target.value)}
               />
               <p className="muted">
-                It goes in ready to be worked, and an agent starts on it when the swarm has room. The planner is
-                told you added it and can cancel it if it is wrong.
+                {task.nodeType === "leaf"
+                  ? "A worker starts after this task finishes. The planner will be notified."
+                  : "A worker starts when one is available. The planner will be notified."}
               </p>
               <div className="actions">
                 <button className="btn btn-ghost" type="button" onClick={() => setAdding(false)}>
@@ -494,19 +399,164 @@ export function SwarmNodeDrawer({
               </div>
             </form>
           )}
-          {task.nodeType !== "leaf" && (
-            <p className="muted">A plan node is finished by its own tasks finishing.</p>
+        </section>
+
+        <section className="section">
+          <span className="label">Description</span>
+          {task.description ? (
+            <p className="swarm-text">{task.description}</p>
+          ) : (
+            <p className="muted">The planner left this one to its title.</p>
           )}
-          {onMarkDone === undefined && task.nodeType === "leaf" && (
-            <p className="muted">Finishing a task by hand is not available here.</p>
+        </section>
+
+        <section className="section">
+          <span className="label">Acceptance criteria</span>
+          {task.acceptanceCriteria.length > 0 ? (
+            <ul className="swarm-criteria">
+              {task.acceptanceCriteria.map((line, index) => (
+                <li key={index}>{line}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">None set. The worker is judged on the description alone.</p>
           )}
-          {onMarkDone !== undefined && task.nodeType === "leaf" && task.status !== "done" && (
+        </section>
+
+        {task.report && (
+          <section className="section">
+            <span className="label">Report</span>
+            <Markdown text={task.report} />
+          </section>
+        )}
+
+        {flags.length > 0 && (
+          <section className="section">
+            <span className="label">Flags</span>
+            <ul className="swarm-flags">
+              {flags.map(([key, value]) => (
+                <li key={key}>
+                  <span className="swarm-flag-key">{key}</span>
+                  <span className="swarm-flag-value">{describeFlag(value)}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        </Tabs.Content>
+
+        {task.nodeType === "leaf" && (
+          <Tabs.Content value="output" forceMount hidden={tab !== "output"} className="feature-pane swarm-node-pane swarm-output-pane">
+            <section className="section">
+              <span className="label">Worker logs</span>
+              {mergeQueueFailure && (
+                <div className="swarm-failure-detail" role="status">
+                  <strong>{MERGE_QUEUE_FAILURE}</strong>
+                  <p>The worker finished its attempt. Its branch could not be landed on the swarm branch.</p>
+                  <details><summary>Technical details</summary><pre>{String(task.flags.landingError)}</pre></details>
+                </div>
+              )}
+              {transcript ?? <p className="muted">Worker logs will appear here when this task starts.</p>}
+            </section>
+          </Tabs.Content>
+        )}
+
+        <Tabs.Content value="commits" forceMount hidden={tab !== "commits"} className="feature-pane swarm-node-pane">
+
+        <section className="section">
+          <span className="label">Commits</span>
+          {commits.length > 0 ? (
+            <ul className="swarm-commits">
+              {commits.map((commit) => (
+                <li key={`${commit.repository ?? ""}${commit.sha}`}>
+                  <span className="chip swarm-sha">{commit.sha.slice(0, 7)}</span>
+                  {/* Named only when a project spans more than one, so
+                      the ordinary case is not a column of the same word. */}
+                  {commit.repository && repositoriesNamed > 1 && (
+                    <span className="chip chip-clip">{commit.repository}</span>
+                  )}
+                  <span className="swarm-commit-message">{commit.message}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
             <p className="muted">
-              A leaf is normally done when its worker reports and the planner accepts it. Finishing
-              it here says so on their behalf, and stops any agent still working it.
+              No commits carry this task&apos;s trailer yet. They appear here once its agent has
+              committed, and stay after the branch lands.
             </p>
           )}
         </section>
+
+        </Tabs.Content>
+
+        <Tabs.Content value="history" forceMount hidden={tab !== "history"} className="feature-pane swarm-node-pane">
+
+        {runs.length > 0 && (
+          <section className="section">
+            <span className="label">Worker attempts</span>
+            <ol className="swarm-attempts">
+              {runs.map((run, index) => (
+                <li key={run.id} className="swarm-attempt">
+                  <div className="swarm-attempt-main">
+                    <strong>Attempt {runs.length - index}</strong>
+                    <span className="status"><span className="dot" data-state={run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running"} />{run.status}</span>
+                    <time dateTime={run.queuedAt}>{new Date(run.queuedAt).toLocaleString()}</time>
+                  </div>
+                  {run.error && <p className="swarm-attempt-error">{run.error}</p>}
+                  {onOpenRun && <button className="swarm-output-link" type="button" onClick={() => onOpenRun(run.id)}>View output</button>}
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+
+        {events.length > 0 && (
+          <section className="section">
+            <span className="label">History</span>
+            {/*
+             * What has happened to this node, resolver runs included: a
+             * conflict puts a second agent on a leaf, and this is the
+             * only place on the node that says so. Every value here is
+             * rendered as text, because a `detail` is written by the
+             * coordinator and by agents alike.
+             */}
+            <ul className="swarm-events">
+              {events.map((event, index) => {
+                const at = new Date(event.at);
+                const previous = index > 0 ? new Date(events[index - 1]!.at) : null;
+                const day = at.toDateString();
+                const note = eventNote(event);
+                return (
+                  <Fragment key={event.id}>
+                    {day !== previous?.toDateString() && (
+                      <li className="swarm-event-day">{at.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}</li>
+                    )}
+                    <li className="swarm-event" data-kind={event.kind} data-state={event.toStatus ?? undefined}>
+                      <span className="swarm-event-marker" aria-hidden="true" />
+                      <div className="swarm-event-content">
+                        <div className="swarm-event-main">
+                          <strong>{eventWords(event)}</strong>
+                          <time dateTime={event.at} title={at.toLocaleString()}>{at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</time>
+                        </div>
+                        {(note || event.runId) && (
+                          <div className="swarm-event-detail">
+                            {note && <span className="swarm-event-note" title={note}>{note}</span>}
+                            {event.runId && <code>run {event.runId.slice(0, 8)}</code>}
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  </Fragment>
+                );
+              })}
+            </ul>
+          </section>
+        )}
+
+        {runs.length === 0 && events.length === 0 && <p className="muted">No history yet.</p>}
+        </Tabs.Content>
+
       </div>
 
       {confirming && (
@@ -532,91 +582,7 @@ export function SwarmNodeDrawer({
         </div>
       )}
     </aside>
-  );
-}
-
-/**
- * The box for saying something to the agent on one node.
- *
- * The card composer's rule is that the box says whether the words go
- * now or wait, because a person who does not know cannot tell a
- * message that was read from one that was not. A swarm's worker is the
- * furthest end of that scale: it is headless, it holds no live
- * session, and nothing can reach it between the moment it starts and
- * the moment it reports. So what this box promises is the honest
- * thing, which is that the message is given to the next agent put on
- * this task.
- *
- * A finished task gets no box at all. There is no next agent, and a
- * composer over a done node is exactly the control that looks like it
- * worked and did nothing.
- */
-export function WorkerComposer({
-  task,
-  busy,
-  onSend,
-}: {
-  task: SwarmTask;
-  busy?: boolean;
-  onSend: (text: string) => void;
-}) {
-  const [text, setText] = useState("");
-  if (task.status === "done" || task.status === "cancelled") {
-    return (
-      <p className="muted">
-        This task is finished, so no agent is coming to read a message. Send one from a task that is
-        still open.
-      </p>
-    );
-  }
-  const send = () => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    setText("");
-    onSend(trimmed);
-  };
-  return (
-    <div className="swarm-composer">
-      <form
-        className="composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          send();
-        }}
-      >
-        <textarea
-          className="input composer-input"
-          rows={1}
-          value={text}
-          disabled={busy}
-          placeholder="Queue a message..."
-          aria-label="Queue a message for this task"
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            // Enter sends and Shift+Enter is the newline, as in the
-            // card composer, so the two boxes behave the same way.
-            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              send();
-            }
-          }}
-        />
-        <button
-          className="btn btn-primary composer-send"
-          type="submit"
-          disabled={busy || !text.trim()}
-          aria-label="Queue a message for this task"
-        >
-          Send
-        </button>
-      </form>
-      <p className="muted composer-hint">
-        {task.status === "working"
-          ? "An agent is working this task and cannot hear mid turn. Your message is given to the next agent put on it, which is the one that can act on it."
-          : "Your message is given to the agent that picks this task up."}
-      </p>
-    </div>
+    </Tabs.Root>
   );
 }
 
@@ -624,10 +590,12 @@ export function WorkerComposer({
 export function eventWords(event: SwarmTaskEvent): string {
   switch (event.kind) {
     case "created":
-      return "Created";
+      return "Task created";
     case "assigned":
-      return "Assigned";
+      return "Worker started";
     case "status_changed":
+      if (event.toStatus === "assigned") return "Queued for worker";
+      if (event.toStatus === "failed") return "Worker failed";
       return event.toStatus ? `Now ${event.toStatus}` : "Status changed";
     case "attention_raised":
       // The one an agent other than this node's worker produces: a
@@ -643,11 +611,10 @@ export function eventWords(event: SwarmTaskEvent): string {
 }
 
 /**
- * The sentence under one event's heading.
+ * The note under one event's heading.
  *
  * Agent written and coordinator written values alike, so it is text.
- * A run id is printed when there is one, because a resolver run is
- * otherwise invisible on the node it served.
+ * A run id is printed separately so repeated attempts are easy to scan.
  */
 export function eventNote(event: SwarmTaskEvent): string {
   const detail = event.detail ?? {};
@@ -661,9 +628,8 @@ export function eventNote(event: SwarmTaskEvent): string {
           : typeof detail.landingFailed === "string"
             ? detail.landingFailed
             : "";
-  const run = event.runId ? `run ${event.runId.slice(0, 8)}` : "";
   const firstLine = said.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
-  return [firstLine, run].filter((part) => part !== "").join(" · ");
+  return firstLine;
 }
 
 /**

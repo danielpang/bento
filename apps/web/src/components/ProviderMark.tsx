@@ -1,5 +1,10 @@
 import { providerForProfile } from "@bento/core";
 
+/** Poolside publishes this mark in its own n8n node; the catalog has no embedded logo. */
+export function providerLogoUrl(provider: { id: string; logo: string }): string {
+  return provider.logo || (provider.id === "poolside" ? "/poolside.png" : "");
+}
+
 /**
  * The logo of the provider an agent runs against.
  *
@@ -19,11 +24,13 @@ export function ProviderMark({
   decorative?: boolean;
 }) {
   const provider = providerForProfile(cli, model);
-  if (!provider?.logo) return null;
+  if (!provider) return null;
+  const logo = providerLogoUrl(provider);
+  if (!logo) return null;
   return (
     <img
       className="provider-logo"
-      src={provider.logo}
+      src={logo}
       alt={decorative ? "" : provider.name}
       aria-hidden={decorative || undefined}
       title={provider.name}

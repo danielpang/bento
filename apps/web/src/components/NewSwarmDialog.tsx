@@ -1,15 +1,30 @@
+import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { useState } from "react";
 import { Modal } from "./Modal.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { NewSwarmInput } from "../swarm/types.js";
+import type { SwarmAgent } from "../swarm/client.js";
+import { SwarmAgentSelect } from "./SwarmAgentSelect.js";
+import {
+  DEFAULT_RUN_SETTINGS,
+  SwarmRunSettingsFields,
+  budgetHelp,
+  parseBudget,
+  parseTimeLimit,
+  runSettingsSummary,
+  settingsFrom,
+  timeLimitHelp,
+  type RunSettingsDraft,
+} from "./SwarmSettingsFields.js";
 
 /**
  * Starting a swarm.
  *
- * A name and a goal are all it needs: the swarm runs as the install's
- * own Swarm Planner and Swarm Worker, which the server makes the first
- * time anybody asks, and starts with the workers this kind of install
- * can afford.
+ * The dialog asks for the goal, the agents, and the limits, each
+ * already filled with what most swarms want, so a name and a goal are
+ * enough to press Create. Everything else about how the swarm is run
+ * waits behind More settings, with one line saying what it is set to,
+ * and can be changed later in the swarm's own settings.
  *
  * It asks for what the create route takes and nothing else. A field
  * the server has no home for is a promise the console cannot keep, so
@@ -19,21 +34,36 @@ import type { NewSwarmInput } from "../swarm/types.js";
  */
 export function NewSwarmDialog({
   projectId,
+  agents,
   surfaces,
   busy,
   onClose,
   onCreate,
 }: {
   projectId: string;
+  agents: SwarmAgent[];
   surfaces: ModeSurfaces;
   busy?: boolean;
   onClose: () => void;
-  onCreate: (input: NewSwarmInput) => void;
+  onCreate: (input: NewSwarmInput) => Promise<void>;
 }) {
+  /*
+   * The install's own Swarm Planner and Swarm Worker when they exist,
+   * and otherwise the empty choice, which the server answers by making
+   * them. Never "the first agent in the list": that is whichever one
+   * somebody happened to create first, and a person who did not look
+   * would get it as their planner.
+   */
+  const [plannerChoice, setPlannerChoice] = useState<string | null>(null);
+  const [workerChoice, setWorkerChoice] = useState<string | null>(null);
+  const plannerProfileId = plannerChoice ?? agents.find((agent) => agent.name === "Swarm Planner")?.id ?? "";
+  const workerProfileId = workerChoice ?? agents.find((agent) => agent.name === "Swarm Worker")?.id ?? "";
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
+  const [error, setError] = useState("");
   const [budget, setBudget] = useState("");
-  const [workers, setWorkers] = useState(surfaces.defaultSwarmWorkers);
+  const [timeLimit, setTimeLimit] = useState("");
+  const [workers, setWorkers] = useState(clampWorkers(surfaces.defaultSwarmWorkers, MAX_SWARM_WORKERS));
   /**
    * A branch that already exists, to continue.
    *
@@ -44,13 +74,25 @@ export function NewSwarmDialog({
    * asked about.
    */
   const [startBranch, setStartBranch] = useState("");
+  const [deliverable, setDeliverable] = useState<"code" | "document">("code");
+  const [runSettings, setRunSettings] = useState<RunSettingsDraft>(DEFAULT_RUN_SETTINGS);
 
   // The server names the branch after the swarm, so this is a preview
   // of what it will be rather than a choice.
   const branchName = suggestBranch(name);
   const continuing = startBranch.trim();
   const branchRefusal = continuing && !isBranchName(continuing) ? branchNameRefusal : null;
-  const ready = name.trim() !== "" && goal.trim() !== "" && branchRefusal === null;
+  const goalLength = goal.trim().length;
+  const goalTooLong = goalLength > MAX_SWARM_GOAL_CHARS;
+  const budgetUsd = parseBudget(budget);
+  const timeLimitMin = parseTimeLimit(timeLimit);
+  const ready =
+    name.trim() !== "" &&
+    goalLength > 0 &&
+    !goalTooLong &&
+    branchRefusal === null &&
+    budgetUsd !== undefined &&
+    timeLimitMin !== undefined;
 
   return (
     <Modal
@@ -88,10 +130,45 @@ export function NewSwarmDialog({
             rows={4}
             placeholder="What should be true when this is finished?"
             onChange={(e) => setGoal(e.target.value)}
+            aria-invalid={goalTooLong}
+            aria-describedby="new-swarm-goal-length"
           />
+          <span id="new-swarm-goal-length" className={goalTooLong ? "error" : "muted"}>
+            {goalLength.toLocaleString()} / {MAX_SWARM_GOAL_CHARS.toLocaleString()} characters
+            {goalTooLong ? ". Shorten the goal to create this swarm." : ""}
+          </span>
         </label>
 
+        <div className="field-row swarm-agent-row">
+          <SwarmAgentSelect
+            label="Planner agent"
+            value={plannerProfileId}
+            agents={agents}
+            onChange={setPlannerChoice}
+            fallback="Swarm Planner (created for you)"
+          />
+          <SwarmAgentSelect
+            label="Worker agent"
+            value={workerProfileId}
+            agents={agents}
+            onChange={setWorkerChoice}
+            fallback="Swarm Worker (created for you)"
+          />
+        </div>
+
         <div className="field-row">
+          <label className="field">
+            <span className="field-heading">Workers at once</span>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={MAX_SWARM_WORKERS}
+              value={workers}
+              onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), MAX_SWARM_WORKERS))}
+            />
+            <span className="muted">Up to {MAX_SWARM_WORKERS}. You can change this while it runs.</span>
+          </label>
           <label className="field">
             <span className="field-heading">Budget</span>
             <input
@@ -99,21 +176,22 @@ export function NewSwarmDialog({
               inputMode="decimal"
               value={budget}
               placeholder="No cap"
+              aria-invalid={budgetUsd === undefined}
               onChange={(e) => setBudget(e.target.value)}
             />
-            <span className="muted">In dollars. Leave empty for no cap.</span>
+            <span className={budgetUsd === undefined ? "error" : "muted"}>{budgetHelp(budgetUsd)}</span>
           </label>
           <label className="field">
-            <span className="field-heading">Workers</span>
+            <span className="field-heading">Time limit</span>
             <input
               className="input"
-              type="number"
-              min={1}
-              max={MAX_WORKERS}
-              value={workers}
-              onChange={(e) => setWorkers(clampWorkers(Number(e.target.value), MAX_WORKERS))}
+              inputMode="numeric"
+              value={timeLimit}
+              placeholder="No limit"
+              aria-invalid={timeLimitMin === undefined}
+              onChange={(e) => setTimeLimit(e.target.value)}
             />
-            <span className="muted">How many work at once. You can change this while it runs.</span>
+            <span className={timeLimitMin === undefined ? "error" : "muted"}>{timeLimitHelp(timeLimitMin)}</span>
           </label>
         </div>
 
@@ -127,16 +205,31 @@ export function NewSwarmDialog({
           />
           <span className="muted">
             {continuing
-              ? `The swarm's own branch is cut from ${continuing}, and its planner is told what is on it and what its pull request is still being asked about.`
-              : "Leave this empty for a new branch. Name one that already exists to carry on from it, review comments included."}
+              ? `This swarm starts from ${continuing}. The planner will see its existing work and pull request comments.`
+              : "Leave blank for a new branch, or enter an existing branch to continue its work."}
           </span>
           {branchRefusal && <span className="swarm-reopen-refusal">{branchRefusal}</span>}
         </label>
 
-        <p className="muted">
-          Creating a swarm puts its planner to work. Nothing else starts until you have read the plan
-          and pressed Start.
-        </p>
+        <details className="swarm-more-settings">
+          <summary>
+            <span className="field-heading">
+              More settings <span className="swarm-more-marker" aria-hidden="true" />
+            </span>
+            <span className="muted">{runSettingsSummary(runSettings, agents, deliverable)}</span>
+          </summary>
+          <SwarmRunSettingsFields
+            draft={runSettings}
+            onChange={setRunSettings}
+            agents={agents}
+            deliverable={deliverable}
+            onDeliverable={setDeliverable}
+          />
+        </details>
+
+        <p className="muted">Creating a swarm starts the planner. Review its plan, then start the work.</p>
+
+        {error && <p className="error error-box" role="alert">{error}</p>}
       </div>
     </Modal>
   );
@@ -150,22 +243,24 @@ export function NewSwarmDialog({
    */
   function submit() {
     if (!ready) return;
-    onCreate({
+    setError("");
+    void onCreate({
       projectId,
       name: name.trim(),
       goal: goal.trim(),
+      ...(plannerProfileId ? { plannerProfileId } : {}),
+      ...(workerProfileId ? { workerProfileId } : {}),
+      settings: settingsFrom(runSettings),
       attachments: [],
       start: continuing ? { kind: "existing-branch", name: continuing } : { kind: "new-branch", name: branchName },
-      deliverable: "code",
-      budgetUsd: parseBudget(budget),
+      deliverable,
+      budgetUsd: budgetUsd ?? null,
+      timeLimitMin: timeLimitMin ?? null,
       workers,
       planOnly: true,
-    });
+    }).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
 }
-
-/** The most workers the create route takes. */
-const MAX_WORKERS = 32;
 
 /** What the dialog says about a branch name git would refuse. */
 export const branchNameRefusal =
@@ -198,14 +293,6 @@ export function suggestBranch(name: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 40);
   return slug ? `bento/${slug}` : "";
-}
-
-/** A typed budget as a number, or null for no cap. Never NaN. */
-export function parseBudget(raw: string): number | null {
-  const trimmed = raw.trim().replace(/^\$/, "");
-  if (trimmed === "") return null;
-  const value = Number(trimmed);
-  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export function clampWorkers(value: number, max: number): number {

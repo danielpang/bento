@@ -21,7 +21,7 @@ test(
     const driver = new DockerDriver(docker, "none");
     const handle = await driver.provision({
       projectId: "exec-test",
-      featureId: `exec-test-${randomUUID()}`,
+      workspaceKey: `exec-test-${randomUUID()}`,
       hostWorkspacePath: directory,
       network: "restricted",
     });
@@ -103,6 +103,70 @@ wait
           (await collectExec(driver.exec(handle, ["test", "!", "-e", "/workspace/unwanted"]))).exitCode,
           0,
         );
+      });
+      await t.test("a detached agent keeps working and a new driver reads only missing output", async () => {
+        const key = randomUUID();
+        let cursor = 0;
+        for await (const chunk of driver.exec(handle, ["sh", "-c", "printf 'before\\n'; sleep 1; printf 'after\\n'"], {
+          sessionKey: key,
+        })) {
+          if (chunk.kind === "stdout") {
+            assert.equal(chunk.data, "before\n");
+            cursor = chunk.cursor ?? 0;
+            break;
+          }
+        }
+        assert.ok(cursor > 0);
+        const replacement = new DockerDriver(docker, "none");
+        const attached = await replacement.attach(handle, ["sh"], { sessionKey: key, afterCursor: cursor });
+        assert.ok(attached);
+        const resumed = await collectExec(attached);
+        assert.equal(resumed.stdout, "after\n");
+        assert.equal(resumed.exitCode, 0);
+      });
+      await t.test("the replacement server can write to the surviving agent stdin", async () => {
+        const key = randomUUID();
+        const originalInput = new LineChannel();
+        originalInput.write("first");
+        for await (const chunk of driver.exec(handle, ["sh", "-c", "read a; echo got:$a; read b; echo got:$b"], {
+          sessionKey: key,
+          stdin: originalInput,
+        })) {
+          if (chunk.kind === "stdout") {
+            assert.equal(chunk.data, "got:first\n");
+            break;
+          }
+        }
+        const replacementInput = new LineChannel();
+        replacementInput.write("second");
+        replacementInput.end();
+        const replacement = new DockerDriver(docker, "none");
+        const attached = await replacement.attach(handle, ["sh"], { sessionKey: key, afterCursor: 1, stdin: replacementInput });
+        assert.ok(attached);
+        const resumed = await collectExec(attached);
+        assert.equal(resumed.stdout, "got:second\n");
+        assert.equal(resumed.exitCode, 0);
+        originalInput.end();
+      });
+      await t.test("cancelling a durable run stops its process", async () => {
+        const controller = new AbortController();
+        const key = randomUUID();
+        const chunks: string[] = [];
+        for await (const chunk of driver.exec(handle, ["sh", "-c", "echo started:$$; sleep 300"], {
+          sessionKey: key,
+          signal: controller.signal,
+        })) {
+          if (chunk.kind === "stdout") {
+            chunks.push(chunk.data);
+            controller.abort();
+          }
+          if (chunk.kind === "exit") assert.equal(chunk.exitCode, -1);
+        }
+        const pid = /started:(\d+)/.exec(chunks.join(""))?.[1];
+        assert.ok(pid);
+        const status = await collectExec(driver.exec(handle, ["ps", "-eo", "pid,stat"]));
+        const line = status.stdout.split("\n").find((entry) => entry.trim().split(/\s+/)[0] === pid);
+        assert.ok(!line || line.trim().split(/\s+/)[1]!.startsWith("Z"), `process still running: ${line}`);
       });
     } finally {
       await driver.destroy(handle);

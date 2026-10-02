@@ -13,17 +13,14 @@ import type { AppContext } from "../../context.js";
  *
  * Two breakdowns rather than one total, because the two questions a
  * swarm actually raises are which role the money went to and how much
- * of the number is real. The first is the product's whole cost thesis:
+ * of the number is reported. The first is the product's cost thesis:
  * a frontier planner with cheap workers is supposed to spend most of
  * its money on workers, and nothing anywhere else can say whether that
- * is what happened. The second is the honesty: a swarm whose spend is
- * mostly assumed has a total that is mostly a guess, and a dashboard
- * that added the tiers together would report the guess as a
- * measurement.
+ * is what happened. The second keeps reported prices, token priced
+ * estimates, and subscription list prices separate.
  *
- * A floor rather than a bill, like the stage event: the assumed tier
- * stands in for tools that report nothing, and the notional tier is a
- * list price a subscription had already paid for.
+ * A floor rather than a bill, like the stage event: silent tools are
+ * unreported, and the notional tier is a subscription list price.
  */
 export const AGENT_SWARM_SPEND_EVENT = "agent swarm spend";
 
@@ -92,13 +89,10 @@ export async function captureSwarmSpend(
         project_id: swarm.projectId,
         outcome,
         /*
-         * The three the budget counts, and the fourth it does not.
-         * Kept apart here for the same reason they are kept apart
-         * everywhere else: a sum of them would be one number standing
-         * for a measurement, an estimate, a guess and a list price
-         * somebody had already paid.
+         * Reported prices and token priced estimates count toward the
+         * budget. Notional list prices and legacy synthetic costs do not.
          */
-        cost_usd: Number(swarm.spentMeasuredUsd) + Number(swarm.spentEstimatedUsd) + Number(swarm.spentAssumedUsd),
+        cost_usd: Number(swarm.spentMeasuredUsd) + Number(swarm.spentEstimatedUsd),
         measured_usd: Number(swarm.spentMeasuredUsd),
         estimated_usd: Number(swarm.spentEstimatedUsd),
         assumed_usd: Number(swarm.spentAssumedUsd),

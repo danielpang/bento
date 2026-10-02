@@ -409,6 +409,54 @@ test("the planner builds the plan, and the tree says what it built", async () =>
   assert.match(twice.text, /was already assigned/);
 });
 
+test("a planner can put dependent work below a worker leaf", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  await call(token, "create_task", { title: "L0 foundation" });
+  const [foundation] = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarmId));
+  const child = await call(token, "create_task", {
+    parentId: foundation!.id,
+    title: "L1 backend",
+    description: "Start after L0 has finished.",
+  });
+  assert.match(child.text, /Created leaf node/);
+  const [backend] = await db.select().from(swarmTasks).where(eq(swarmTasks.title, "L1 backend"));
+  assert.equal(backend?.parentId, foundation?.id);
+  assert.equal(backend?.parentRelation, "depends_on");
+  assert.equal(foundation?.nodeType, "leaf", "the prerequisite is still worker owned");
+  const tree = JSON.parse((await call(token, "get_tree")).text) as { id: string; parentId: string | null }[];
+  assert.equal(tree.find((task) => task.id === backend?.id)?.parentId, foundation?.id);
+});
+
+test("a planner can make a task depend on a plan phase", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  await call(token, "create_task", { title: "L0 phase", nodeType: "plan" });
+  const [phase] = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarmId));
+  await call(token, "create_task", {
+    parentId: phase!.id,
+    parentRelation: "depends_on",
+    title: "L1 after L0",
+  });
+  const [dependent] = await db.select().from(swarmTasks).where(eq(swarmTasks.title, "L1 after L0"));
+  assert.equal(dependent?.parentId, phase?.id);
+  assert.equal(dependent?.parentRelation, "depends_on");
+});
+
+test("the planner can reassign a failed leaf and resume its failed swarm", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  const leaf = await makeTask(swarmId, { status: "failed", report: "old attempt" });
+  await db.update(swarms).set({ status: "failed" }).where(eq(swarms.id, swarmId));
+
+  const assigned = await call(token, "assign", { taskId: leaf.id });
+  assert.match(assigned.text, /is assigned/);
+  const after = await task(leaf.id);
+  assert.equal(after!.status, "assigned");
+  assert.equal(after!.report, null);
+  assert.equal(after!.assignedRunId, null);
+  assert.equal((after!.flags as { retries?: number }).retries, 1);
+  const [swarm] = await db.select().from(swarms).where(eq(swarms.id, swarmId));
+  assert.equal(swarm!.status, "running");
+});
+
 test("accepting queues the branch once, and rejecting sends the leaf back with the reason", async () => {
   const { token, swarmId } = await agentOn("planner");
   const leaf = await makeTask(swarmId, { status: "working", branchName: "swarm/s/1" });
@@ -441,11 +489,40 @@ test("accepting queues the branch once, and rejecting sends the leaf back with t
   const back = await task(second.id);
   assert.equal(back!.status, "assigned", "it goes back into the queue rather than being lost");
   assert.equal(back!.report, null, "and its old report no longer stands");
+  assert.equal(back!.assignedRunId, null, "the old attempt stays in history instead of remaining the current run");
+  assert.equal((back!.flags as { retries?: number }).retries, 1);
   assert.equal(
     (back!.flags as { rejection?: string }).rejection,
     "the empty cart case is missing",
     "the reason is on the row, because the next agent on this leaf is told it",
   );
+});
+
+test("a planner fixes a failed leaf forward on the same task", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  const leaf = await makeTask(swarmId, { status: "failed", report: null, flags: { workerStopped: "no report" } });
+  const assigned = await call(token, "assign", {
+    taskId: leaf.id,
+    reason: "Keep the existing scaffold and add the missing SQLite load test.",
+  });
+  assert.match(assigned.text, /is assigned/);
+  const [updated] = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarmId));
+  assert.equal(updated!.id, leaf.id, "the planner did not create a sibling retry task");
+  assert.equal(updated!.status, "assigned");
+  assert.equal((updated!.flags as { retries?: number }).retries, 1);
+  assert.equal((updated!.flags as { rejection?: string }).rejection, "Keep the existing scaffold and add the missing SQLite load test.");
+});
+
+test("a stale planner cannot reject a leaf after its branch landed", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  const leaf = await makeTask(swarmId, { status: "done", report: "completed", flags: { accepted: true } });
+  const response = await call(token, "reject", { taskId: leaf.id, reason: "try again" });
+  assert.ok(response.isError);
+  assert.match(response.text, /already accepted and landed/);
+  assert.equal((await task(leaf.id))!.status, "done");
+  const reassigned = await call(token, "assign", { taskId: leaf.id, reason: "try again" });
+  assert.ok(reassigned.isError);
+  assert.equal((await task(leaf.id))!.status, "done");
 });
 
 test("cancelling takes the subtree with it", async () => {

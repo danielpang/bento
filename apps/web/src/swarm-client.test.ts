@@ -3,7 +3,8 @@ import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import { clampWorkers, parseBudget, suggestBranch } from "./components/NewSwarmDialog.js";
+import { clampWorkers, suggestBranch } from "./components/NewSwarmDialog.js";
+import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";
 import type { NewSwarmInput } from "./swarm/types.js";
 
 /**
@@ -21,6 +22,13 @@ import type { NewSwarmInput } from "./swarm/types.js";
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const clock = () => NOW;
+
+test("planner guidance stays visible while it waits for the next turn", async () => {
+  const api = fixtureSwarmApi(clock);
+  const sent = await api.messagePlanner("sw-checkout", "Add a design review step");
+  assert.equal(sent.status, "queued");
+  assert.deepEqual(await api.listPlannerMessages("sw-checkout"), [sent]);
+});
 
 function input(over: Partial<NewSwarmInput> = {}): NewSwarmInput {
   return {
@@ -93,6 +101,15 @@ test("a new swarm lands at the end of the strip, planning, with the goal it was 
   assert.equal(buildSwarmModel(created.tasks, { now: NOW }).root.completion, 0);
 });
 
+test("deleting a swarm removes it from the strip and its detail", async () => {
+  const api = fixtureSwarmApi(clock);
+  const before = await api.listSwarms("p1");
+  const id = before[0]!.id;
+  await api.deleteSwarm(id);
+  assert.equal((await api.listSwarms("p1")).length, before.length - 1);
+  await assert.rejects(() => api.getSwarm(id), /not found/);
+});
+
 test("pausing, stopping and archiving are the states the header reads back", async () => {
   const api = fixtureSwarmApi(clock);
   await api.listSwarms("p1");
@@ -152,11 +169,47 @@ test("a swarm's branch is suggested from its name, and a budget is a number or n
   assert.equal(parseBudget(""), null);
   assert.equal(parseBudget("$40"), 40);
   assert.equal(parseBudget("40.50"), 40.5);
-  // A typed zero or a typo is no cap, never a swarm that cannot spend.
-  assert.equal(parseBudget("0"), null);
-  assert.equal(parseBudget("lots"), null);
+  // A typo is refused in words, never read as "no cap", which is the
+  // one reading that spends without limit. Zero is refused too.
+  assert.equal(parseBudget("0"), undefined);
+  assert.equal(parseBudget("lots"), undefined);
+  assert.equal(parseBudget("5o"), undefined);
+  assert.equal(parseBudget("100001"), undefined, "the route's own ceiling");
+  assert.equal(parseTimeLimit(""), null);
+  assert.equal(parseTimeLimit("90"), 90);
+  assert.equal(parseTimeLimit("1.5"), undefined);
+  assert.equal(parseTimeLimit("0"), undefined);
+  assert.equal(parseTimeLimit("10081"), undefined, "a week is the most the route takes");
   assert.equal(clampWorkers(12, 8), 8);
   assert.equal(clampWorkers(0, 8), 1);
   assert.equal(clampWorkers(Number.NaN, 8), 1);
   assert.equal(clampWorkers(3.4, 8), 3);
+});
+
+test("a new swarm carries the settings it was created with, and the defaults for the rest", async () => {
+  const api = fixtureSwarmApi(clock);
+  const plain = await api.createSwarm(input());
+  assert.equal(plain.swarm.settings.judgeProfileId, null);
+  assert.equal(plain.swarm.settings.maxPlanDepth, 1);
+  assert.equal(plain.swarm.settings.plannerProfileId, "agent-planner", "the install's own planner");
+
+  const checked = await api.createSwarm(
+    input({ workerProfileId: "agent-planner", settings: { completionCommand: "pnpm test", maxPlanDepth: 2 } }),
+  );
+  assert.equal(checked.swarm.settings.workerProfileId, "agent-planner");
+  assert.equal(checked.swarm.settings.completionCommand, "pnpm test");
+  assert.equal(checked.swarm.settings.maxPlanDepth, 2);
+});
+
+test("changing a swarm's settings changes what was given and nothing else", async () => {
+  const api = fixtureSwarmApi(clock);
+  const swarmId = (await api.listSwarms("p1"))[0]!.id;
+  const before = (await api.getSwarm(swarmId)).swarm;
+
+  await api.updateSettings(swarmId, { judgeProfileId: "agent-worker", budgetUsd: null });
+  const after = (await api.getSwarm(swarmId)).swarm;
+  assert.equal(after.settings.judgeProfileId, "agent-worker");
+  assert.equal(after.budgetUsd, null, "null clears the cap");
+  assert.equal(after.settings.workerProfileId, before.settings.workerProfileId, "and the rest is left alone");
+  assert.equal(after.timeLimitMin, before.timeLimitMin);
 });

@@ -4,13 +4,10 @@ import { SPEND_TIERS } from "./layout.js";
 /**
  * What a swarm has spent, and how well that is known.
  *
- * Three figures, never one. A tool that reports its own cost is
- * measured; a tool that prints tokens is estimated from a published
- * rate; a tool that prints nothing at all is assumed from what this
- * swarm's other runs have cost. Adding them would produce a number whose
- * accuracy nobody could state, printed next to a budget people set
- * real limits with, so nothing in this module returns a total and
- * every line it writes keeps the three apart.
+ * A tool that reports its own cost is measured; a tool that prints
+ * tokens is estimated from a published rate. A tool that reports
+ * neither has an unknown cost. The legacy assumed field remains on
+ * the wire but is never displayed or counted against a budget.
  *
  * The stacked bar is the one place they sit together, and even there
  * they are three segments with three figures beside them.
@@ -34,7 +31,7 @@ const LABELS: Record<SpendTier, string> = {
 const NOTES: Record<SpendTier, string> = {
   measured: "Reported by the tool itself.",
   estimated: "Worked out from the tokens this tool printed, at its published rate.",
-  assumed: "This swarm's average run so far, because this tool reports no cost at all.",
+  assumed: "Legacy synthetic cost. No new runs receive this tier.",
   notional: "A list price for work a subscription had already paid for. The budget does not count it.",
 };
 
@@ -66,13 +63,14 @@ export function usdFor(spend: SwarmSpend, tier: SpendTier): number {
 /**
  * What the budget actually counts.
  *
- * The three tiers somebody is billed for, and not the fourth. Written
+ * The two priced tiers, excluding legacy synthetic costs and subscription
+ * list prices. Written
  * here and used everywhere a figure is compared with the cap, because
  * the moment two places work it out one of them will forget which tier
  * is which.
  */
 export function cappedUsd(spend: SwarmSpend): number {
-  return spend.measuredUsd + spend.estimatedUsd + spend.assumedUsd;
+  return spend.measuredUsd + spend.estimatedUsd;
 }
 
 /**
@@ -86,25 +84,6 @@ export function cappedUsd(spend: SwarmSpend): number {
  */
 export function isNotional(spend: SwarmSpend): boolean {
   return spend.notionalUsd > 0;
-}
-
-/**
- * How much of what a swarm has spent is a figure nobody measured.
- *
- * Past a quarter, the cap is soft and the product says so: a budget
- * enforced against mostly assumed figures is a budget enforced against
- * a guess, and somebody who set $40 deserves to know that before the
- * swarm stops rather than after.
- */
-export const SOFT_CAP_SHARE = 0.25;
-
-export function assumedShare(spend: SwarmSpend): number {
-  const counted = cappedUsd(spend);
-  return counted <= 0 ? 0 : spend.assumedUsd / counted;
-}
-
-export function capIsSoft(spend: SwarmSpend): boolean {
-  return assumedShare(spend) > SOFT_CAP_SHARE;
 }
 
 /** Dollars as every figure in the console prints them. */
@@ -127,9 +106,8 @@ export function spendLine(spend: SwarmSpend): string {
 /**
  * The same line for a node, which usually has only one tier on it.
  * Tiers at zero are dropped here and only here: a leaf card is 124px
- * wide, and "$0.00 estimated, $0.00 assumed" is the two thirds of it
- * that says nothing. A node that has spent nothing at all still
- * prints one figure rather than an empty slot.
+ * wide, and zero valued tiers add no information. A node with no
+ * reported spend still prints one figure rather than an empty slot.
  */
 export function nodeSpendLine(spend: SwarmSpend): string {
   const spent = spendParts(spend).filter((part) => part.usd > 0);
@@ -164,17 +142,12 @@ export interface CapUse {
   /**
    * True when what the budget counts has reached the cap.
    *
-   * All three billed tiers, which is what the server enforces: a swarm
-   * whose tools print nothing would otherwise run forever against any
-   * budget, because nothing it ever spent would be measured. The
-   * notional tier is left out here for the same reason it is left out
-   * there, and the panel says when a cap is soft.
+   * Reported prices and estimates from reported tokens, matching the
+   * server. Silent tools remain unreported.
    */
   spent: boolean;
   /** Whether a cap this swarm passed would warn rather than stop it. */
   notional: boolean;
-  /** Whether more than a quarter of the counted spend was assumed. */
-  soft: boolean;
 }
 
 /**
@@ -193,7 +166,6 @@ export function capUse(spend: SwarmSpend, capUsd: number | null): CapUse {
     capLine: capUsd === null ? "no cap set" : `against a ${formatUsd(capUsd)} cap`,
     spent: capUsd !== null && capUsd > 0 && cappedUsd(spend) >= capUsd,
     notional: isNotional(spend),
-    soft: capIsSoft(spend),
   };
 }
 
@@ -210,9 +182,7 @@ export function estimateLine(spend: SwarmSpend, leaves: number): string {
    * Spend prints every tier including the zeros, because a zero there
    * is information: nothing has been measured yet. A forecast is the
    * other way round. A plan whose tools all report their cost has
-   * no assumed figure to predict, and "$0.00 assumed" in a dialog
-   * somebody reads before pressing Create is a line about a thing that
-   * is not going to happen.
+   * no estimated figure to predict, so zero valued tiers are omitted.
    */
   return `About ${nodeSpendLine(spend)} over ${tasks}.`;
 }

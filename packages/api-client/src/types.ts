@@ -229,12 +229,9 @@ export interface ProjectUsage {
 /**
  * One swarm's spend, split the way it is recorded.
  *
- * Four figures and no total, for the reason the swarm board keeps them
- * apart: measured is what the tools printed, estimated is priced from
- * the tokens they printed, assumed stands in for tools that print
- * nothing, and notional is a list price a subscription had already
- * paid for. Adding them would put four kinds of confidence behind one
- * number on the page where somebody is deciding whether to believe it.
+ * Measured is what tools printed, estimated is priced from reported
+ * tokens, and notional is a subscription list price. The assumed field
+ * remains for wire compatibility and is zero for current data.
  */
 export interface SwarmSpendRow {
   swarmId: string;

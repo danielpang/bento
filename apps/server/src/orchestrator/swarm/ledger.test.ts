@@ -13,10 +13,9 @@ import {
 } from "@bento/db";
 import {
   applyRunCharge,
-  assumedCostFor,
+  observedAverageRunCost,
   budgetIsLow,
   budgetRefusal,
-  DEFAULT_ASSUMED_USD,
   enforcedSpend,
   resolveCharge,
   spendOf,
@@ -32,13 +31,13 @@ import {
  * function of the arguments.
  */
 
-const NO_AUTH_SHARING = { sharedAgentAuth: false, assumedUsd: 0.5 };
+const NO_AUTH_SHARING = { sharedAgentAuth: false };
 
 /** A rate card, in dollars per million tokens, as models.dev quotes them. */
 const SONNET = { input: 3, output: 15 };
 
 test("a tool that printed a price is measured, at the figure it printed", () => {
-  const charge = resolveCharge({ reported: { costUsd: 1.23 }, ...NO_AUTH_SHARING });
+  const charge = resolveCharge({ reported: { costUsd: 1.23 }, ...NO_AUTH_SHARING })!;
   assert.equal(charge.tier, "measured");
   assert.equal(charge.usd, 1.23);
   assert.equal(charge.pricePerMtok, null, "a measured figure was not worked out from a rate");
@@ -48,7 +47,7 @@ test("a free run that was actually measured is measured, not assumed", () => {
   // Zero is a figure. A tool that printed 0.00 has told us something,
   // and filing it as assumed would charge the swarm for a run the tool
   // says was free.
-  const charge = resolveCharge({ reported: { costUsd: 0 }, ...NO_AUTH_SHARING });
+  const charge = resolveCharge({ reported: { costUsd: 0 }, ...NO_AUTH_SHARING })!;
   assert.equal(charge.tier, "measured");
   assert.equal(charge.usd, 0);
 });
@@ -58,7 +57,7 @@ test("a tool that printed tokens is estimated, at the catalog's rate", () => {
     reported: { inputTokens: 1_000_000, outputTokens: 200_000 },
     price: SONNET,
     ...NO_AUTH_SHARING,
-  });
+  })!;
   assert.equal(charge.tier, "estimated");
   // 1M in at $3, 200k out at $15.
   assert.equal(charge.usd, 3 + 3);
@@ -67,21 +66,16 @@ test("a tool that printed tokens is estimated, at the catalog's rate", () => {
   assert.deepEqual(charge.pricePerMtok, SONNET, "the rate is kept with the figure it produced");
 });
 
-test("tokens with no price in the catalog fall to assumed rather than being invented", () => {
+test("tokens with no catalog price do not become a dollar charge", () => {
   const charge = resolveCharge({
     reported: { inputTokens: 900_000, outputTokens: 100_000 },
     ...NO_AUTH_SHARING,
   });
-  assert.equal(charge.tier, "assumed", "a rate nobody published is not a rate");
-  assert.equal(charge.usd, 0.5);
-  assert.equal(charge.inputTokens, 900_000, "the counts are still recorded: they are facts");
-  assert.equal(charge.pricePerMtok, null);
+  assert.equal(charge, null);
 });
 
-test("a tool that printed nothing at all is assumed, at the swarm's own figure", () => {
-  const charge = resolveCharge({ reported: {}, sharedAgentAuth: false, assumedUsd: 1.75 });
-  assert.equal(charge.tier, "assumed");
-  assert.equal(charge.usd, 1.75);
+test("a tool that printed nothing has no dollar charge", () => {
+  assert.equal(resolveCharge({ reported: {}, sharedAgentAuth: false }), null);
 });
 
 /**
@@ -89,8 +83,8 @@ test("a tool that printed nothing at all is assumed, at the swarm's own figure",
  * nothing. Whatever produced the figure, a subscription had already
  * paid for the work.
  */
-test("a run on a borrowed login is notional, whichever way its figure was produced", () => {
-  const printed = resolveCharge({ reported: { costUsd: 2 }, sharedAgentAuth: true, assumedUsd: 0.5 });
+test("a run on a borrowed login with reported usage is notional", () => {
+  const printed = resolveCharge({ reported: { costUsd: 2 }, sharedAgentAuth: true })!;
   assert.equal(printed.tier, "notional");
   assert.equal(printed.usd, 2, "the figure is still recorded; only what it means changes");
 
@@ -98,13 +92,11 @@ test("a run on a borrowed login is notional, whichever way its figure was produc
     reported: { inputTokens: 1_000_000, outputTokens: 0 },
     price: SONNET,
     sharedAgentAuth: true,
-    assumedUsd: 0.5,
-  });
+  })!;
   assert.equal(counted.tier, "notional");
   assert.equal(counted.usd, 3);
 
-  const silent = resolveCharge({ reported: {}, sharedAgentAuth: true, assumedUsd: 0.5 });
-  assert.equal(silent.tier, "notional");
+  assert.equal(resolveCharge({ reported: {}, sharedAgentAuth: true }), null);
 });
 
 test("counts that are not counts are not multiplied", () => {
@@ -113,9 +105,7 @@ test("counts that are not counts are not multiplied", () => {
     price: SONNET,
     ...NO_AUTH_SHARING,
   });
-  assert.equal(charge.tier, "assumed");
-  assert.equal(charge.inputTokens, null);
-  assert.equal(charge.outputTokens, null);
+  assert.equal(charge, null);
 });
 
 /* ---------------------------------------------------------------- *
@@ -130,10 +120,10 @@ const spent = (measured: string, estimated = "0", assumed = "0", notional = "0")
   spentNotionalUsd: notional,
 });
 
-test("all three real tiers count against the cap", () => {
-  assert.equal(enforcedSpend(spendOf(spent("4", "3", "2", "100"))), 9);
+test("only reported and token priced spend count against the cap", () => {
+  assert.equal(enforcedSpend(spendOf(spent("4", "3", "2", "100"))), 7);
   assert.equal(budgetRefusal(spent("4", "3", "2", "100")), null, "nine of ten, so there is room for one more run");
-  const refusal = budgetRefusal(spent("4", "4", "2"));
+  const refusal = budgetRefusal(spent("4", "6", "2"));
   assert.ok(refusal, "ten of ten is spent");
   assert.match(refusal, /Raise the budget/, "and the sentence says what to do about it");
 });
@@ -186,10 +176,6 @@ test("the planner is warned when what is left is less than one more run", () => 
   assert.equal(budgetIsLow(spent("9.80"), 0.5), true, "twenty cents left, half a dollar a run");
   assert.equal(budgetIsLow(spent("5.00"), 0.5), false, "five dollars is ten more runs");
   assert.equal(budgetIsLow(spent("10.00"), 0.5), false, "spent is not low, it is gone: that is the refusal's job");
-});
-
-test("the default assumed figure is a number, because zero is the one answer that is wrong", () => {
-  assert.ok(DEFAULT_ASSUMED_USD > 0);
 });
 
 /* ---------------------------------------------------------------- *
@@ -264,16 +250,16 @@ async function chargedRun(swarmId: string, costUsd: string, costTier: "measured"
   });
 }
 
-test("the first silent run in a swarm is charged the fixed default", async () => {
+test("a swarm with no priced runs has no observed cost average", async () => {
   const swarm = await makeSwarm();
-  assert.equal(await assumedCostFor(db, swarm), DEFAULT_ASSUMED_USD);
+  assert.equal(await observedAverageRunCost(db, swarm), 0);
 });
 
 /**
  * The case the tier exists for: a swarm that has measured some of its
  * runs knows what its own agents cost, and that beats a constant.
  */
-test("a swarm's own average of what it measured seeds what it assumes", async () => {
+test("observed run average excludes legacy assumed charges", async () => {
   const swarm = await makeSwarm();
   await chargedRun(swarm.id, "1.00", "measured");
   await chargedRun(swarm.id, "2.00", "estimated");
@@ -282,7 +268,7 @@ test("a swarm's own average of what it measured seeds what it assumes", async ()
   // own, further from the measurements with every silent run.
   await chargedRun(swarm.id, "9.00", "assumed");
 
-  assert.equal(await assumedCostFor(db, swarm), 1.5);
+  assert.equal(await observedAverageRunCost(db, swarm), 1.5);
 });
 
 /**

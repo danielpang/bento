@@ -5,45 +5,25 @@ import { modelPrice, routesToOllama, type ModelPrice } from "@bento/core";
 /**
  * What a run cost, and how much that figure is worth.
  *
- * Bento has always recorded spend and never enforced it. A swarm is the
- * first place a cap has to hold, because it is the first place one
- * click starts twenty agents, and the difficulty is that only some
- * tools say what they cost. Adding a measurement, an arithmetic
- * estimate and a guess into one number would produce a figure whose
- * accuracy nobody could state, printed beside a budget people set real
- * limits with. So this module produces four figures and never a total,
- * and every reader carries them apart.
+ * Only reported prices and estimates from reported tokens count toward
+ * a swarm's dollar cap. A silent tool has unknown cost, so its run has
+ * no dollar charge. Subscription list prices are recorded separately.
  *
  *   measured   the tool printed a price (Claude Code, pi)
  *   estimated  the tool printed tokens, priced from the model catalog
- *   assumed    the tool printed nothing, so a figure stands in
  *   notional   a printed price a subscription had already paid for
  *
- * The first three are the budget's. The fourth is not, and that is the
- * whole point of it: when a local install lends a run the operator's
- * logged in agent session, the tool still prints its list price, but
+ * The first two count against a budget. Notional does not: when a local
+ * install lends a run the operator's logged in agent session, the tool
+ * still prints its list price, but
  * the subscription has already paid for the work and the marginal cost
  * of the run is zero. Filing that as measured would put the least true
  * number in the most trusted tier and then stop a swarm that is costing
  * nothing.
  */
 
-/** How well a figure is known. The column's own vocabulary. */
-export type CostTier = "measured" | "estimated" | "assumed" | "notional";
-
-/**
- * What a run that reports nothing is charged when there is nothing
- * else to go on: no run in this swarm that was ever measured or
- * estimated.
- *
- * A number rather than zero, because zero is the one answer that is
- * certainly wrong: a run happened, and a swarm whose every tool is
- * silent would otherwise run forever against any budget.
- */
-export const DEFAULT_ASSUMED_USD = 0.5;
-
-/** The three tiers a budget counts. Notional is recorded and never capped. */
-export const ENFORCED_TIERS = ["measured", "estimated", "assumed"] as const;
+/** The tiers a new run may record. The database retains a legacy assumed value. */
+export type CostTier = "measured" | "estimated" | "notional";
 
 /** What the tool said, in the two shapes tools say it in. */
 export interface ReportedUsage {
@@ -58,8 +38,6 @@ export interface ChargeInput {
   price?: ModelPrice | undefined;
   /** Whether this run borrowed a login instead of spending a key. */
   sharedAgentAuth: boolean;
-  /** What a silent run costs here. See assumedCostFor. */
-  assumedUsd: number;
 }
 
 /** One run's charge, as the columns record it. */
@@ -78,15 +56,15 @@ const PER_MTOK = 1_000_000;
  * Resolves one run's charge.
  *
  * In order, because the order is the confidence: a figure the tool
- * printed beats one worked out from its tokens, which beats one that
- * had to be assumed. Shared agent auth is asked last and changes only
+ * printed beats one worked out from its tokens. If neither is available,
+ * the cost is unknown. Shared agent auth changes only
  * the tier, never the figure: what was spent is still recorded, it is
  * simply recorded as a list price somebody had already paid.
  *
  * Pure, and takes everything it needs, so the arithmetic can be tested
  * without a database, a sandbox, or a catalog.
  */
-export function resolveCharge(input: ChargeInput): RunCharge {
+export function resolveCharge(input: ChargeInput): RunCharge | null {
   const notional = input.sharedAgentAuth;
   const reportedCost = input.reported.costUsd;
   if (typeof reportedCost === "number" && Number.isFinite(reportedCost) && reportedCost >= 0) {
@@ -105,9 +83,8 @@ export function resolveCharge(input: ChargeInput): RunCharge {
   /*
    * Both halves of the answer, or neither. A price with no counts
    * prices nothing, and counts with no price would have to be
-   * multiplied by a rate somebody invented. Either way the run falls
-   * to the assumed tier, which says exactly that: this figure is a
-   * stand in.
+   * multiplied by a rate somebody invented. Either way its cost stays
+   * unreported.
    */
   if (price && (inputTokens !== null || outputTokens !== null)) {
     const usd = ((inputTokens ?? 0) * price.input + (outputTokens ?? 0) * price.output) / PER_MTOK;
@@ -123,13 +100,7 @@ export function resolveCharge(input: ChargeInput): RunCharge {
     };
   }
 
-  return {
-    tier: notional ? "notional" : "assumed",
-    usd: Math.max(0, input.assumedUsd),
-    inputTokens,
-    outputTokens,
-    pricePerMtok: null,
-  };
+  return null;
 }
 
 /** A count Bento will multiply, or null. Negatives and NaN are not counts. */
@@ -139,18 +110,12 @@ function tokenCount(value: number | undefined): number | null {
 }
 
 /**
- * What a silent run costs in this swarm.
+ * The average of runs that reported a usable cost in this swarm.
  *
- * Two answers, in order. This swarm's rolling average of the runs it
- * actually measured or estimated, which is the honest stand in: it is
- * what this swarm's own agents have been costing. Then the fixed
- * default, for the swarm whose first run is the silent one.
- *
- * The average is over this swarm alone rather than the deployment,
- * because a swarm is one pair of models and one goal, and
- * a cheap swarm must not inherit an expensive one's history.
+ * Used only to warn the planner when the remaining budget is below an
+ * observed run's average. It is never recorded as a silent run's cost.
  */
-export async function assumedCostFor(
+export async function observedAverageRunCost(
   db: Pick<Db, "select">,
   swarm: { id: string },
 ): Promise<number> {
@@ -166,24 +131,20 @@ export async function assumedCostFor(
     );
   const average = averaged?.average === null || averaged?.average === undefined ? null : Number(averaged.average);
   if (average !== null && Number.isFinite(average) && average > 0) return average;
-  return DEFAULT_ASSUMED_USD;
+  return 0;
 }
 
 /**
  * The charge for one run that is ending, read from its own rows.
  *
  * Everything the resolution needs that is not in the outcome comes off
- * the run: which agent it ran as (for the model, and so for the price),
- * which swarm it belongs to (for the assumed figure), and whether it
- * borrowed a login. Nothing is passed down from the executor, so a
+ * the run: which agent it ran as (for the model and price), and whether
+ * it borrowed a login. Nothing is passed down from the executor, so a
  * second caller cannot get a different answer by forgetting an
  * argument.
  *
- * Null for a pipeline run that reported nothing at all, and that is
- * deliberate: the card board's spend has always been "what the tools
- * printed", stated as a floor, and inventing an assumed figure there
- * would change every total on the Spend page into a number nobody
- * asked for. A card's run is tiered only when it actually reported.
+ * Null when no usable cost was reported or can be priced from tokens.
+ * Pipeline runs keep their existing rule of requiring a reported cost.
  */
 export async function chargeForRun(
   db: Pick<Db, "select">,
@@ -194,8 +155,6 @@ export async function chargeForRun(
     .select({
       id: agentRuns.id,
       type: agentRuns.type,
-      swarmId: agentRuns.swarmId,
-      swarmTaskId: agentRuns.swarmTaskId,
       sharedAgentAuth: agentRuns.sharedAgentAuth,
       cli: agentProfiles.cli,
       model: agentProfiles.model,
@@ -213,28 +172,14 @@ export async function chargeForRun(
    * costs whether the agent runs or not, no provider invoices anybody,
    * and the figure a tool prints for an Ollama run is a Claude price
    * for work Claude never did, which trustedCostUsd already refuses to
-   * record. Charging it the assumed figure instead would be the same
-   * invention wearing a different word, and it would stop a swarm that
-   * is spending nothing.
+   * record. A local model with no provider bill remains unreported.
    */
   if (routesToOllama(run.cli, run.model)) return null;
 
   const price = modelPrice(run.cli, run.model);
   const hasFigure = typeof reported.costUsd === "number" && Number.isFinite(reported.costUsd);
-  if (run.type !== "swarm") {
-    if (!hasFigure) return null;
-    return resolveCharge({ reported, price, sharedAgentAuth: run.sharedAgentAuth, assumedUsd: 0 });
-  }
-
-  const [swarm] = await db
-    .select({ id: swarms.id })
-    .from(swarms)
-    .where(eq(swarms.id, run.swarmId!))
-    .limit(1);
-  // The swarm went while its run was ending. Nothing to charge it to.
-  if (!swarm) return null;
-  const assumedUsd = await assumedCostFor(db, swarm);
-  return resolveCharge({ reported, price, sharedAgentAuth: run.sharedAgentAuth, assumedUsd });
+  if (run.type !== "swarm" && !hasFigure) return null;
+  return resolveCharge({ reported, price, sharedAgentAuth: run.sharedAgentAuth });
 }
 
 /**
@@ -270,7 +215,6 @@ export async function applyRunCharge(
     .set({
       ...(charge.tier === "measured" ? { spentMeasuredUsd: sql`${swarms.spentMeasuredUsd} + ${amount}` } : {}),
       ...(charge.tier === "estimated" ? { spentEstimatedUsd: sql`${swarms.spentEstimatedUsd} + ${amount}` } : {}),
-      ...(charge.tier === "assumed" ? { spentAssumedUsd: sql`${swarms.spentAssumedUsd} + ${amount}` } : {}),
       ...(charge.tier === "notional" ? { spentNotionalUsd: sql`${swarms.spentNotionalUsd} + ${amount}` } : {}),
       updatedAt: now,
     })
@@ -281,7 +225,6 @@ export async function applyRunCharge(
     .set({
       ...(charge.tier === "measured" ? { costMeasuredUsd: sql`${swarmTasks.costMeasuredUsd} + ${amount}` } : {}),
       ...(charge.tier === "estimated" ? { costEstimatedUsd: sql`${swarmTasks.costEstimatedUsd} + ${amount}` } : {}),
-      ...(charge.tier === "assumed" ? { costAssumedUsd: sql`${swarmTasks.costAssumedUsd} + ${amount}` } : {}),
       ...(charge.tier === "notional" ? { costNotionalUsd: sql`${swarmTasks.costNotionalUsd} + ${amount}` } : {}),
       updatedAt: now,
     })
@@ -311,12 +254,11 @@ export function spendOf(swarm: {
 }
 
 /**
- * What the budget counts: the three tiers somebody is actually billed
- * for. Notional is left out here and nowhere else, which is the one
- * place that rule is written down.
+ * What the budget counts: reported prices and estimates from reported
+ * tokens. Legacy assumed charges and subscription list prices are excluded.
  */
 export function enforcedSpend(spend: SwarmSpend): number {
-  return spend.measured + spend.estimated + spend.assumed;
+  return spend.measured + spend.estimated;
 }
 
 /**
@@ -324,24 +266,15 @@ export function enforcedSpend(spend: SwarmSpend): number {
  * has not.
  *
  * "One more run" is the whole shape of the promise a budget can keep.
- * A run's cost is not known until it ends, so a cap can be exceeded by
- * at most the run that was already going when it was reached, and an
- * agent is never killed for money: an agent stopped mid edit leaves a
- * branch nobody chose, and the time it spent is spent either way.
+ * A run's cost is not known until it ends, so concurrent runs can take
+ * reported spend past the cap. An agent is never killed for money.
  *
- * Which is why `committedUsd` exists. A swarm runs several agents at
- * once, and none of them has recorded anything yet, so spend alone
- * says nothing about the work already in flight: four workers on a ten
- * dollar swarm all started while the figure was still zero and
- * committed twenty dollars between them. The runs already going are
- * counted at the figure a run that reports nothing is charged, which
- * is the same figure they will be charged if they report nothing, and
- * the promise holds again at any number of workers.
+ * Silent tools cannot provide a reliable dollar cap. Their runs stay
+ * unreported, while agent hours and the configured worker limit still
+ * bound how much work may run at once.
  */
 export function budgetRefusal(
   swarm: { budgetUsd: string | null; spentMeasuredUsd: string; spentEstimatedUsd: string; spentAssumedUsd: string; spentNotionalUsd: string },
-  /** What the runs already going will cost, at their assumed figure. */
-  committedUsd = 0,
 ): string | null {
   if (swarm.budgetUsd === null) return null;
   const cap = Number(swarm.budgetUsd);
@@ -356,17 +289,8 @@ export function budgetRefusal(
     return "This swarm has an invalid budget. Set a valid budget to let it carry on; what has landed is kept.";
   }
   const spent = enforcedSpend(spendOf(swarm));
-  const committed = Number.isFinite(committedUsd) && committedUsd > 0 ? committedUsd : 0;
-  if (spent + committed < cap) return null;
-  /*
-   * The sentence names what was actually spent, not the reservation.
-   * A person reading "spent $10.00 of $10.00" over a swarm whose
-   * ledger says $0.00 would reasonably think the cap was broken.
-   */
-  const note =
-    committed > 0
-      ? `This swarm has committed its ${money(cap)} budget (${money(spent)} spent, ${money(committed)} with agents still working).`
-      : `This swarm has spent its ${money(cap)} budget (${money(spent)} so far).`;
+  if (spent < cap) return null;
+  const note = `This swarm has spent its ${money(cap)} budget (${money(spent)} so far).`;
   return `${note} Raise the budget to let it carry on; what has landed is kept.`;
 }
 

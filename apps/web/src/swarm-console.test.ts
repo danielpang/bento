@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { BentoClient } from "@bento/api-client";
 import { BetaTestersScope } from "./beta.js";
 import { BoardModeToggle } from "./components/BoardModeToggle.js";
 import { MergeQueue } from "./components/MergeQueue.js";
@@ -9,13 +10,21 @@ import { SwarmEmpty, SwarmStrip } from "./components/SwarmStrip.js";
 import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
-import { SwarmArtifacts, SwarmPage } from "./components/SwarmPage.js";
+import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
+import { SwarmArtifacts, SwarmPage, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
+import {
+  DEFAULT_RUN_SETTINGS,
+  SwarmRunSettingsFields,
+  draftFrom,
+  runSettingsSummary,
+  settingsFrom,
+} from "./components/SwarmSettingsFields.js";
 import { modeSurfaces } from "./swarm/plan.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import type { SwarmLanding, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
+import type { SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
 import { readFileSync, readdirSync } from "node:fs";
 
 /**
@@ -91,7 +100,7 @@ function assertNoDashes(html: string, where: string) {
   assert.ok(!html.includes("–"), `en dash in ${where}`);
 }
 
-test("the strip orders swarms by creation with the newest last", () => {
+test("the swarm switcher shows the selected swarm with one completion icon", () => {
   const html = renderToStaticMarkup(
     createElement(SwarmStrip, {
       swarms: [
@@ -101,56 +110,49 @@ test("the strip orders swarms by creation with the newest last", () => {
       selectedId: "a",
       onSelect: () => {},
       onNew: () => {},
-      onRestore: () => {},
     }),
   );
-  assert.ok(html.indexOf("First") < html.indexOf("Second"));
-  // New swarm sits at the end, where the newest one is.
-  assert.ok(html.indexOf("Second") < html.indexOf("New swarm"));
-  // The selected tab is the marked one, and carries a ring and a dot.
-  assert.match(html, /class="tab tab-on swarm-tab"[^>]*data-tab="a"/);
+  assert.match(html, /aria-label="Switch swarm, current: First"/);
+  assert.equal(html.match(/class="swarm-switcher-trigger"/g)?.length, 1);
   assert.match(html, /aria-label="50% done"/);
-  assert.match(html, /class="dot" data-state="running"/);
-  assertNoDashes(html, "the strip");
+  assert.match(html, /class="ring"[^>]*data-tone="running"/);
+  assert.doesNotMatch(html, /class="dot"/);
+  assertNoDashes(html, "the switcher");
 });
 
-test("archived swarms fold into an overflow rather than crowding the strip", () => {
+test("an archived swarm opened by a link appears in the switcher", () => {
   const html = renderToStaticMarkup(
     createElement(SwarmStrip, {
       swarms: [
         summary("live", { name: "Checkout" }),
         summary("old", { name: "Queue spike", archivedAt: "2026-03-01T00:00:00.000Z" }),
       ],
-      selectedId: "live",
-      onSelect: () => {},
-      onNew: () => {},
-      onRestore: () => {},
-    }),
-  );
-  assert.match(html, /Archived/);
-  // Folded away: the archived swarm's name is not a tab in the row.
-  assert.ok(!html.includes("Queue spike"));
-  assert.match(html, /swarm-tab-count">1</);
-});
-
-test("an archived swarm that is open keeps its place in the strip", () => {
-  const html = renderToStaticMarkup(
-    createElement(SwarmStrip, {
-      swarms: [summary("old", { name: "Queue spike", archivedAt: "2026-03-01T00:00:00.000Z" })],
       selectedId: "old",
       onSelect: () => {},
       onNew: () => {},
-      onRestore: () => {},
     }),
   );
-  assert.match(html, /data-tab="old"/);
-  assert.match(html, /data-archived/);
+  assert.match(html, /aria-label="Switch swarm, current: Queue spike"/);
+  assert.match(html, /Queue spike/);
+  assert.doesNotMatch(html, /tab-row/);
+});
+
+test("a project with no swarms still has a switcher trigger", () => {
+  const html = renderToStaticMarkup(
+    createElement(SwarmStrip, {
+      swarms: [],
+      selectedId: null,
+      onSelect: () => {},
+      onNew: () => {},
+    }),
+  );
+  assert.match(html, /aria-label="Choose a swarm"/);
 });
 
 test("a project with no swarms offers exactly one action", () => {
   const html = renderToStaticMarkup(createElement(SwarmEmpty, { onNew: () => {} }));
   assert.equal(html.match(/<button/g)?.length, 1);
-  assert.match(html, /New swarm/);
+  assert.match(html, /Create swarm/);
   assertNoDashes(html, "the empty state");
 });
 
@@ -167,12 +169,39 @@ test("the tree draws a card per visible node, at the position the model gave it"
   // Positions come from the layout, in pixels, inset by the stage's
   // own padding: two leaves a pitch apart, the parent centred over
   // them, and each row a pitch below the last.
-  assert.match(html, /left:24px;top:160px/);
-  assert.match(html, /left:172px;top:160px/);
-  assert.match(html, /left:98px;top:24px/);
+  assert.match(html, /left:24px;top:196px/);
+  assert.match(html, /left:240px;top:196px/);
+  assert.match(html, /left:132px;top:24px/);
   // One edge per drawn parent and child, as a bezier.
   assert.equal(html.match(/<path d="M /g)?.length, 2);
   assertNoDashes(html, "the tree");
+});
+
+test("the planner and its failure appear in both views before the plan exists", () => {
+  const empty = buildSwarmModel([]);
+  const plannerRun = {
+    id: "run-1",
+    status: "failed" as const,
+    error: "Base branch main was not found.",
+    agent: { name: "Swarm Planner", cli: "claude-code", model: "opus" },
+    queuedAt: "2026-09-26T12:00:00.000Z",
+    startedAt: null,
+    endedAt: "2026-09-26T12:00:02.000Z",
+  };
+  const tree = renderToStaticMarkup(createElement(SwarmTree, {
+    model: empty, plannerRun, selectedId: null, onSelect: () => {}, onToggle: () => {}, onRetryPlanner: () => {}, onOpenPlannerOutput: () => {}, canRetryPlanner: true, now: 0,
+  }));
+  const outline = renderToStaticMarkup(createElement(SwarmOutline, {
+    model: empty, plannerRun, selectedId: null, onSelect: () => {}, onRetryPlanner: () => {}, onOpenPlannerOutput: () => {}, canRetryPlanner: true, now: 0,
+  }));
+  assert.doesNotMatch(tree, /Diagram line meanings|Tree view controls/, "empty plans have no lines or nodes to explain");
+  for (const html of [tree, outline]) {
+    assert.match(html, /Planner agent/);
+    assert.match(html, /Swarm Planner/);
+    assert.match(html, /The planner stopped before finishing the plan/);
+    assert.match(html, /Open details/);
+    assert.doesNotMatch(html, /Base branch main was not found|Message planner/);
+  }
 });
 
 test("the outline lists every node, including the ones the tree folded", () => {
@@ -181,9 +210,10 @@ test("the outline lists every node, including the ones the tree folded", () => {
   );
   assert.match(html, /Line item totals/);
   assert.equal(html.match(/class="swarm-row"/g)?.length, 4);
-  // Indent is the depth, so the shape survives the flattening.
-  assert.match(html, /padding-left:26px/);
-  assert.match(html, /padding-left:44px/);
+  // Indent and child arrows preserve the shape of the tree.
+  assert.match(html, /padding-left:36px/);
+  assert.match(html, /padding-left:60px/);
+  assert.equal(html.match(/class="swarm-row-arrow"/g)?.length, 3);
   assertNoDashes(html, "the outline");
 });
 
@@ -196,13 +226,13 @@ test("yellow survives the switch between the two views, and the status does not 
   );
   for (const html of [tree, outline]) {
     assert.match(html, /data-attention/);
-    assert.match(html, /running long/);
+    assert.match(html, /Still running/);
     // Still working: attention is a second axis, not a status.
     assert.match(html, /working/);
   }
   // The long run warning brings the elapsed time with it, in both.
-  assert.match(tree, /running long 1h 0m/);
-  assert.match(outline, /running long 1h 0m/);
+  assert.match(tree, /Still running 1h 0m/);
+  assert.match(outline, /Still running 1h 0m/);
 });
 
 test("both views print the same completion for the same node", () => {
@@ -254,10 +284,8 @@ test("a report is markdown with raw HTML off, and a title is text", () => {
   // The markdown around it still renders.
   assert.match(html, /<h1>Heading<\/h1>/);
   assert.match(html, /<a href="https:\/\/example.com"/);
-  // Three figures in the drawer too, never one.
-  assert.match(html, /measured/);
-  assert.match(html, /estimated/);
-  assert.match(html, /assumed/);
+  assert.match(html, /Spend estimate/);
+  assert.match(html, /\$0\.70/);
   assertNoDashes(html, "the drawer");
 });
 
@@ -281,12 +309,9 @@ test("the drawer offers marking a leaf done, and never a plan node", () => {
       onMarkDone: () => {},
     }),
   );
-  assert.match(planHtml, /<button class="btn" disabled="">Mark done<\/button>/);
-  assert.match(planHtml, /A plan node is finished by its own tasks finishing\./);
+  assert.doesNotMatch(planHtml, /Mark done<\/button>/);
 
-  // Given no handler the button stays drawn and disabled, rather than
-  // disappearing: a control that vanishes reads as a feature that does
-  // not exist, and this one does.
+  // A working task still shows its activity without introducing a dead control.
   const unwired = renderToStaticMarkup(
     createElement(SwarmNodeDrawer, {
       task: tasks()[3]!,
@@ -294,8 +319,8 @@ test("the drawer offers marking a leaf done, and never a plan node", () => {
       onClose: () => {},
     }),
   );
-  assert.match(unwired, /disabled=""[^>]*>Mark done/);
-  assert.match(unwired, /not available here/);
+  assert.doesNotMatch(unwired, /Mark done<\/button>/);
+  assert.match(unwired, /The worker is running\. Open Worker logs to follow its progress\./);
 });
 
 test("the drawer says what finishing a leaf by hand does to the agent on it", () => {
@@ -309,7 +334,42 @@ test("the drawer says what finishing a leaf by hand does to the agent on it", ()
   );
   // The route stops the run, so the drawer says so before the click
   // rather than leaving a person to notice their agent went quiet.
-  assert.match(html, /stops any agent still working it/);
+  assert.match(html, /Marking this done stops its worker and counts it as finished/);
+});
+
+test("the working task drawer shows inline output without a duplicate action", () => {
+  const task = { ...tasks()[3]!, assignedRunId: "worker-run" };
+  const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task,
+    node: model.byId.get("slow")!,
+    onClose: () => {},
+    onMarkDone: () => {},
+    onRetry: () => {},
+    onEdit: () => {},
+    onCancel: () => {},
+  }));
+
+  assert.ok(html.indexOf("Current activity") < html.indexOf('<span class="label">Worker logs</span>'));
+  assert.doesNotMatch(html, /View worker output/);
+  assert.match(html, /Actions and description/);
+  assert.match(html, /Worker logs/);
+  assert.match(html, /The agent has been running past the warning threshold\. Check worker logs to verify\./);
+  assert.doesNotMatch(html, /Open full output/);
+  assert.match(html, /<details class="feature-more-actions"><summary>More actions<\/summary>/);
+  assert.equal(html.match(/Spend estimate/g)?.length, 1);
+  assert.match(html, /class="swarm-node-cost-line"/);
+  assert.doesNotMatch(html, /swarm-tiers/);
+});
+
+test("a retry refusal is visible inside the open task drawer", () => {
+  const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: tasks()[3]!,
+    node: model.byId.get("slow")!,
+    onClose: () => {},
+    onRetry: () => {},
+    actionError: "This swarm has finished. Reopen it before changing which work is active.",
+  }));
+  assert.match(html, /<p class="error-box" role="alert">This swarm has finished/);
 });
 
 test("the mode toggle is two segments, and only for a tester", () => {
@@ -409,9 +469,11 @@ test("a pull request the console would not link to is drawn without a link", () 
         onResume: () => {},
         onStop: () => {},
         onReopen: () => {},
+        onDelete: () => {},
         onArchive: () => {},
         onRestore: () => {},
         onWorkers: () => {},
+        onSettings: () => {},
         onAnswer: () => {},
       },
     }),
@@ -475,11 +537,14 @@ test("a node draws the commits and the history the drawer was given, not the pla
 
   assert.match(html, /9f2c1ab/, "the sha, shortened");
   assert.match(html, /Refund the last capture/);
-  assert.match(html, /Assigned/);
+  assert.match(html, /Worker started/);
   assert.match(html, /Resolver started/, "the resolver run reads as one, not as an enum");
   assert.match(html, /run 11112222/, "and names the run it served, so the transcript can be found");
   assert.match(html, /shared\.txt: both modified/);
   assert.doesNotMatch(html, /second line/, "one line of git's output, not all of it");
+  assert.equal(html.match(/class="swarm-event-day"/g)?.length, 1, "a shared date is shown once");
+  assert.equal(html.match(/class="swarm-event-main"/g)?.length, 2);
+  assert.match(html, /<time dateTime="2026-01-01T01:00:00.000Z"/);
 });
 
 test("a node with nothing committed says so rather than saying nothing was pushed", () => {
@@ -496,12 +561,57 @@ test("a node with nothing committed says so rather than saying nothing was pushe
   assert.match(html, /No commits carry this task&#x27;s trailer yet/);
 });
 
-test("the node composer says where a message goes, and a finished node gets none", () => {
-  /**
-   * The card composer's rule: the box says whether the words go now or
-   * wait. A swarm worker is headless and holds no live session, so the
-   * only honest promise is the next agent put on the task.
-   */
+test("a failed worker card offers fix forward and shows earlier attempts", () => {
+  const failed = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const,
+    flags: { rejection: "The load test is missing." } };
+  const model = buildSwarmModel([failed], { now: NOW });
+  const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: failed,
+    node: model.byId.get("slow")!,
+    detail: { taskId: "slow", commits: [], events: [], runs: [
+      { id: "run-new", status: "failed", queuedAt: "2026-01-02T00:00:00.000Z", startedAt: null, endedAt: null, error: "stopped" },
+      { id: "run-old", status: "succeeded", queuedAt: "2026-01-01T00:00:00.000Z", startedAt: null, endedAt: null, error: null },
+    ] },
+    onClose: () => {},
+    onFixForward: () => {},
+    onOpenRun: () => {},
+  }));
+  assert.match(html, /Fix forward/);
+  assert.match(html, /Worker attempts/);
+  assert.match(html, /Attempt 2/);
+  assert.match(html, /Attempt 1/);
+  assert.equal((html.match(/View output/g) ?? []).length, 2);
+});
+
+test("a merge queue failure keeps its worker report and offers to retry landing", () => {
+  const failed = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const,
+    flags: { landingError: "fatal: checkout is on a detached HEAD" }, report: "Worker completed the feature." };
+  const model = buildSwarmModel([failed], { now: NOW });
+  const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: failed, node: model.byId.get("slow")!, onClose: () => {},
+    onRetryLanding: () => {}, onRetry: () => {}, onFixForward: () => {},
+    transcript: createElement("p", null, "Recorded agent output"),
+  }));
+  assert.match(html, /merge queue failure, see agent worker for more details/);
+  assert.match(html, /Retry merge queue/);
+  assert.match(html, /Worker completed the feature/);
+  assert.match(html, /Recorded agent output/);
+  assert.match(html, /Technical details/);
+  assert.doesNotMatch(html, /Retry worker|Fix forward/);
+  assert.doesNotMatch(html, /This swarm worker failed/);
+});
+
+test("a failed plan drawer calls the recoverable parent stalled", () => {
+  const plan = { ...tasks().find((row) => row.nodeType === "plan")!, status: "failed" as const, attention: "failed" as const };
+  const model = buildSwarmModel([plan], { now: NOW });
+  const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: plan, node: model.byId.get(plan.id)!, onClose: () => {},
+  }));
+  assert.match(html, /stalled/);
+  assert.doesNotMatch(html, /Swarm worker failed/);
+});
+
+test("a worker drawer shows read-only output", () => {
   const model = buildSwarmModel(tasks(), { now: NOW });
   const working = tasks().find((row) => row.id === "slow")!;
   const live = renderToStaticMarkup(
@@ -509,24 +619,76 @@ test("the node composer says where a message goes, and a finished node gets none
       task: working,
       node: model.byId.get("slow")!,
       onClose: () => {},
-      onMessage: () => {},
+      transcript: createElement("p", null, "Recorded agent output"),
     }),
   );
-  assert.match(live, /aria-label="Queue a message for this task"/);
-  assert.match(live, /cannot hear mid turn/);
-  assert.match(live, /given to the next agent put on it/);
+  assert.match(live, /Worker logs/);
+  assert.match(live, /Recorded agent output/);
+  assert.doesNotMatch(live, /Queue a message/);
+});
 
-  const done = tasks().find((row) => row.id === "s1")!;
-  const finished = renderToStaticMarkup(
-    createElement(SwarmNodeDrawer, {
-      task: done,
-      node: model.byId.get("s1")!,
-      onClose: () => {},
-      onMessage: () => {},
-    }),
-  );
-  assert.doesNotMatch(finished, /aria-label="Queue a message for this task"/);
-  assert.match(finished, /no agent is coming to read a message/);
+test("a worker with a run has a dedicated output tab", () => {
+  const model = buildSwarmModel(tasks(), { now: NOW });
+  const task = { ...tasks().find((row) => row.id === "slow")!, assignedRunId: "run-worker" };
+  const detail = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task, node: model.byId.get("slow")!, onClose: () => {},
+    transcript: createElement("p", null, "Recorded agent output"),
+  }));
+  assert.match(detail, /Worker logs/);
+  assert.match(detail, /Recorded agent output/);
+  assert.match(detail, /role="tabpanel"/);
+  assert.doesNotMatch(detail, /Open full output/);
+
+  const output = renderToStaticMarkup(createElement(SwarmWorkerOutputDrawer, {
+    client: {} as BentoClient, runId: "run-worker", taskTitle: task.title, onClose: () => {},
+  }));
+  assert.match(output, /swarm-output-drawer/);
+  assert.match(output, /Worker logs/);
+  assert.doesNotMatch(output, /Message the planner|<textarea/);
+});
+
+test("the planner conversation has guidance input and worker output stays read-only", () => {
+  const client = {} as BentoClient;
+  const output = renderToStaticMarkup(createElement(SwarmRunOutput, { client, runId: "run-1", agentName: "Worker agent" }));
+  assert.doesNotMatch(output, /Message the planner/);
+
+  const planner = renderToStaticMarkup(createElement(SwarmRunOutputDrawer, {
+    client,
+    api: { listPlannerMessages: async () => [], messagePlanner: async () => { throw new Error("unused"); } },
+    swarmId: "sw-1",
+    swarmStatus: "planning",
+    runId: "run-1",
+    runStatus: "failed",
+    agentName: "Planner agent",
+    onMessageSent: () => {},
+    onClose: () => {},
+  }));
+  assert.match(planner, /Message the planner/);
+  assert.match(planner, /Your message starts another planner turn/);
+  assert.match(planner, /<textarea[^>]*maxLength="20000"/);
+
+  const activePlanner = renderToStaticMarkup(createElement(SwarmRunOutputDrawer, {
+    client,
+    api: { listPlannerMessages: async () => [], messagePlanner: async () => { throw new Error("unused"); } },
+    swarmId: "sw-1", swarmStatus: "planning", runId: "run-2", runStatus: "running",
+    agentName: "Planner agent", onMessageSent: () => {}, onStop: () => {}, onClose: () => {},
+  }));
+  assert.match(activePlanner, /Stop planner/);
+  assert.doesNotMatch(planner, /Stop planner/, "a finished planner has no running turn to stop");
+});
+
+test("a checkout failure offers retry and keeps its error in technical details", () => {
+  const planner = renderToStaticMarkup(createElement(SwarmRunOutputDrawer, {
+    client: {} as BentoClient,
+    api: { listPlannerMessages: async () => [], messagePlanner: async () => { throw new Error("unused"); } },
+    swarmId: "sw-1", swarmStatus: "planning", runId: "run-1", runStatus: "failed",
+    runError: "sandbox provisioning failed: fatal: not a git repository",
+    agentName: "Planner agent", onMessageSent: () => {}, onRetry: () => {}, canRetry: true, onClose: () => {},
+  }));
+  assert.match(planner, /Repository checkout could not be prepared/);
+  assert.match(planner, /Retry planner/);
+  assert.match(planner, /Technical details/);
+  assert.doesNotMatch(planner, /Message the planner|<textarea/);
 });
 
 test("a drawer with no handler for messages draws no composer at all", () => {
@@ -538,9 +700,85 @@ test("a drawer with no handler for messages draws no composer at all", () => {
   assert.doesNotMatch(html, /Queue a message/);
 });
 
-function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
+const AGENTS = [
+  { id: "agent-planner", name: "Swarm Planner", cli: "claude-code", model: "opus" },
+  { id: "agent-worker", name: "Swarm Worker", cli: "codex", model: "gpt-5" },
+];
+
+test("the run settings open on the defaults, grouped and explained", () => {
+  const html = renderToStaticMarkup(
+    createElement(SwarmRunSettingsFields, {
+      draft: DEFAULT_RUN_SETTINGS,
+      onChange: () => {},
+      agents: AGENTS,
+      deliverable: "code",
+      onDeliverable: () => {},
+    }),
+  );
+  assert.match(html, /What it produces/);
+  assert.match(html, /aria-pressed="true"[^>]*>Code change/);
+  assert.match(html, /Final check/);
+  // No judge is the default, and it says so rather than naming nobody.
+  assert.match(html, /<option value="" selected="">None<\/option>/);
+  assert.match(html, /<option value="1" selected="">The planner writes the whole plan/);
+  assert.match(html, /Optional\. Added to every prompt/);
+  assert.doesNotMatch(html, /[\u2013\u2014]/, "no dash reaches a reader");
+  assert.doesNotMatch(html, /[Tt]emplate/, "and nothing asks for a template");
+});
+
+test("a new swarm starts with the workers the server would pick", () => {
+  assert.equal(modeSurfaces("local").defaultSwarmWorkers, 2);
+  assert.equal(modeSurfaces("multi").defaultSwarmWorkers, 4);
+});
+
+test("the settings summary says what a person changed", () => {
+  assert.equal(
+    runSettingsSummary({ ...DEFAULT_RUN_SETTINGS, judgeProfileId: "agent-worker" }, AGENTS, "document"),
+    "Writes a document, final check by Swarm Worker, one planner.",
+  );
+  assert.equal(
+    runSettingsSummary({ ...DEFAULT_RUN_SETTINGS, completionCommand: "pnpm test", maxPlanDepth: 2 }, AGENTS),
+    "Final check runs pnpm test, sub planners allowed.",
+  );
+});
+
+test("a swarm's settings open on what it is set to now, and round trip unchanged", () => {
   const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
-  const detail = status ? { ...seeded, swarm: { ...seeded.swarm, status } } : seeded;
+  const settings = { ...seeded.swarm.settings, judgeProfileId: "agent-worker", completionCommand: "pnpm test" };
+  const draft = draftFrom(settings);
+  const html = renderToStaticMarkup(
+    createElement(SwarmRunSettingsFields, { draft, onChange: () => {}, agents: AGENTS }),
+  );
+  assert.match(html, /value="pnpm test"/);
+  assert.match(html, /<option value="agent-worker" selected="">Swarm Worker/);
+  assert.doesNotMatch(html, /What it produces/, "fixed once the swarm exists");
+  // A round trip through the form is the same settings, so Save with
+  // nothing touched sends nothing.
+  assert.deepEqual(settingsFrom(draft), {
+    judgeProfileId: "agent-worker",
+    completionCommand: "pnpm test",
+    maxPlanDepth: 1,
+    plannerInstructions: null,
+    workerInstructions: null,
+  });
+  assert.equal(settingsFrom({ ...draft, completionCommand: "   " }).completionCommand, null, "blank is none");
+});
+
+function pageHtml(mode: "local" | "multi", status?: SwarmStatus, options: {
+  plannerStatus?: SwarmPlannerRun["status"];
+  approveAllLeaves?: boolean;
+} = {}) {
+  const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
+  const detail = {
+    ...seeded,
+    agentTimeMs: 7_260_000,
+    ...(status ? { swarm: { ...seeded.swarm, status } } : {}),
+    ...(options.approveAllLeaves ? { tasks: seeded.tasks.map((task) => task.nodeType === "leaf" && task.status === "open" ? { ...task, status: "assigned" as const } : task) } : {}),
+    ...(options.plannerStatus ? { plannerRun: {
+      id: "planner-1", status: options.plannerStatus, error: null, agent: null,
+      queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: null,
+    } } : {}),
+  };
   return renderToStaticMarkup(
     createElement(SwarmPage, {
       detail,
@@ -557,50 +795,66 @@ function pageHtml(mode: "local" | "multi", status?: SwarmStatus) {
         onStop: () => {},
         onCreatePullRequest: () => {},
         onReopen: () => {},
+        onDelete: () => {},
         onArchive: () => {},
         onRestore: () => {},
         onWorkers: () => {},
+        onSettings: () => {},
         onAnswer: () => {},
       },
     }),
   );
 }
 
-test("the header carries the ring, the branch, the elapsed time and the controls", () => {
+test("the header carries the ring, branch, agent time and controls", () => {
   const html = pageHtml("multi");
   assert.match(html, /Checkout rewrite/);
-  // The 44px ring, with the percentage printed inside it.
-  assert.match(html, /width:44px;height:44px/);
+  assert.match(html, /width:40px;height:40px/);
   assert.match(html, /class="ring-label"/);
   assert.match(html, /bento\/sw-checkout/);
-  // The clock is the real one, so the figure is asserted as a
-  // duration in the chip that carries it, not as a fixed string.
-  assert.match(html, /title="Since this swarm started">\d+[hms]/);
+  assert.match(html, /2h 1m agent time/);
+  assert.doesNotMatch(html, /Swarm workspace|Since this swarm started/);
   assert.match(html, />4 of 11 tasks</);
-  assert.match(html, />Pause<\/button>/);
-  assert.match(html, />Stop<\/button>/);
+  assert.match(html, />Approve plan<\/button>/);
+  assert.match(html, /approve the plan to start ready workers/);
+  assert.match(html, />Stop swarm<\/button>/);
+  assert.match(html, />Delete swarm<\/button>/);
   assert.match(html, />Create PR<\/button>/);
   assert.match(html, /aria-label="One more worker"/);
   assert.match(html, /aria-label="One fewer worker"/);
   assertNoDashes(html, "the swarm header");
 });
 
+test("disabled worker controls explain the limit on hover", () => {
+  const render = (workers: number, max: number, disabledReason?: string) =>
+    renderToStaticMarkup(createElement(WorkerStepper, {
+      workers, active: 0, max, disabledReason, onChange: () => {},
+    }));
+  assert.match(render(1, 10), /title="A swarm needs at least one worker\."/);
+  assert.match(render(10, 10), /title="Maximum is 10 workers\."/);
+  const finished = render(2, 10, "Worker count cannot change after the swarm ends.");
+  assert.equal(finished.match(/disabled=""/g)?.length, 2);
+  assert.equal(finished.match(/title="Worker count cannot change after the swarm ends\."/g)?.length, 2);
+});
+
+test("a failed swarm is called stalled in its title", () => {
+  const html = pageHtml("local", "failed");
+  assert.match(html, /class="status"><span class="dot" data-state="gated"><\/span>stalled<\/span>/);
+});
+
 test("a finished swarm can be archived from its own page", () => {
-  const html = pageHtml("multi", "done");
-  assert.match(html, />Reopen<\/button>/);
+  const html = pageHtml("multi", "done", { approveAllLeaves: true });
+  assert.match(html, />Add follow up<\/button>/);
   assert.match(html, />Archive<\/button>/);
 });
 
-test("the header keeps every spend figure apart, against the cap", () => {
+test("the swarm workspace shows one spend estimate", () => {
   const html = pageHtml("multi");
-  assert.match(html, />\$5\.08</);
-  assert.match(html, />\$0\.37</);
-  assert.match(html, />\$0\.25</);
-  // 5.08 + 0.37 + 0.25, the number that must never appear.
-  assert.ok(!html.includes("$5.70"));
-  assert.match(html, /against a \$40\.00 cap/);
-  // One track, one fill per tier, each measured on its own.
-  assert.equal(html.match(/class="swarm-cap-fill"/g)?.length, 4);
+  assert.match(html, /Spend estimate<\/span><strong class="spend-figure">\$5\.45<\/strong>/);
+  assert.ok(!html.includes("$5.70"), "legacy assumed costs do not reach the displayed estimate");
+  assert.match(html, /\$40\.00 budget/);
+  assert.ok(!html.includes("Spend by role"));
+  assert.ok(!html.includes("More than a quarter"));
 });
 
 /**
@@ -613,18 +867,23 @@ test("the header keeps every spend figure apart, against the cap", () => {
  * and re-planned, and never started. Pause stays beside it, because
  * pausing a planner mid plan is still a thing somebody wants.
  */
-test("a swarm that has been planned and not started offers Start, beside Pause", () => {
-  const html = pageHtml("multi", "planning");
-  assert.match(html, />Start<\/button>/);
-  assert.match(html, />Pause<\/button>/, "and the planner writing the plan can still be paused");
+test("a finished planner exposes plan approval even when the swarm already says running", () => {
+  const html = pageHtml("multi", "planning", { plannerStatus: "succeeded" });
+  assert.match(html, />Approve plan<\/button>/);
+  assert.doesNotMatch(html, />Pause planner<\/button>/);
   assertNoDashes(html, "the header of a planning swarm");
 
-  // Running, paused and finished swarms are unchanged: Start belongs
-  // to the one state that has a plan and no permission to run it.
-  assert.equal(pageHtml("multi").includes(">Start</button>"), false);
-  assert.equal(pageHtml("multi", "paused").includes(">Start</button>"), false);
-  assert.match(pageHtml("multi", "paused"), />Resume<\/button>/);
-  assert.equal(pageHtml("multi", "done").includes(">Start</button>"), false);
+  assert.match(pageHtml("multi", "running", { plannerStatus: "succeeded" }), />Approve plan<\/button>/);
+  assert.match(pageHtml("multi", "running", { plannerStatus: "succeeded" }), />Pause work<\/button>/,
+    "pause remains available from Actions while approval is the main action");
+  assert.match(pageHtml("multi", "running", { approveAllLeaves: true }), />Pause work<\/button>/);
+  const stillPlanning = pageHtml("multi", "planning", { plannerStatus: "running" });
+  assert.doesNotMatch(stillPlanning, />Approve plan<\/button>/);
+  assert.match(stillPlanning, />Pause planner<\/button>/);
+  assert.match(pageHtml("multi", "paused"), />Resume work<\/button>/);
+  assert.match(pageHtml("multi", "done"), />Approve plan<\/button>/,
+    "an older swarm marked done with an open dependent leaf can continue its saved plan");
+  assert.doesNotMatch(pageHtml("multi", "done", { approveAllLeaves: true }), />Approve plan<\/button>/);
 });
 
 test("a planner question is a banner with the reply in it", () => {
@@ -676,9 +935,38 @@ test("the merge queue says what is landing, what is waiting, and what went in", 
   assert.match(html, /Merge queue/);
   assert.match(html, /Landing/);
   assert.match(html, /Waiting/);
-  assert.match(html, /Landed/);
-  assert.match(html, /1 waiting, one branch at a time/);
+  assert.match(html, /Committed/);
+  assert.match(html, /Branches: 1 waiting/);
+  assert.equal(html.match(/aria-label="Copy branch name swarm\/checkout-aaaa1111"/g)?.length, 3);
+  assert.doesNotMatch(html, /title="Copy branch name:/);
+  assert.equal(html.match(/class="swarm-queue-copy-icon"/g)?.length, 3);
+  assert.doesNotMatch(html, />Copy<\/span>/);
   assertNoDashes(html, "the merge queue");
+});
+
+test("the merge queue names the destination and offers checkout after release", () => {
+  const props = {
+    landings: [landing({ status: "landed" })],
+    tasks: tasks(),
+    summary: { total: 9, committed: 9 },
+    destination: "swarm/todo-app-mvp",
+    swarmDone: true,
+    onReleaseBranch: () => {},
+  };
+  const held = renderToStaticMarkup(createElement(MergeQueue, {
+    ...props,
+    checkout: { mode: "worktree" as const, released: false },
+  }));
+  assert.match(held, /All 9 task branches committed/);
+  assert.match(held, /swarm\/todo-app-mvp/);
+  assert.match(held, /Release branch for checkout/);
+
+  const released = renderToStaticMarkup(createElement(MergeQueue, {
+    ...props,
+    checkout: { mode: "worktree" as const, released: true },
+  }));
+  assert.match(released, /git switch swarm\/todo-app-mvp/);
+  assert.doesNotMatch(released, /Release branch for checkout/);
 });
 
 test("every landing status draws a tone the stylesheet actually defines", () => {
@@ -706,7 +994,7 @@ test("what git said about a conflict is printed as text, and only while it stand
   // Agent adjacent output, escaped by React rather than trusted.
   assert.ok(!conflict.includes("<script>x</script>"));
   assert.match(conflict, /&lt;script&gt;/);
-  assert.match(conflict, /try 2/);
+  assert.match(conflict, /Merge attempt 2/);
   assert.match(conflict, /nothing else lands until this is settled/);
 
   // A landed row's error is history, and printing it would read as a
@@ -738,7 +1026,7 @@ test("a conflict nobody is on says the queue is still asking, not that it gave u
 
 test("a swarm with nothing accepted yet says so rather than drawing an empty list", () => {
   const html = queueHtml([]);
-  assert.match(html, /Nothing has been accepted yet/);
+  assert.match(html, /No branches yet/);
   assert.ok(!html.includes("swarm-queue-row"));
 });
 
@@ -928,14 +1216,14 @@ test("a document swarm names its deliverable and offers to open it", () => {
   );
   assert.match(asDocument, /The document/);
   assert.match(asDocument, /docs\/queue-migration\.md/);
-  assert.match(asDocument, /Assembled from the sections in the plan/);
+  assert.match(asDocument, /Combined document, committed to the swarm branch/);
   assert.match(asDocument, /artifacts\/diagram\.png/, "and whatever else the swarm captured");
 
   const asCode = renderToStaticMarkup(
     createElement(SwarmArtifacts, { artifacts, deliverable: "code", onOpen: () => {} }),
   );
-  assert.match(asCode, /What this swarm produced/);
-  assert.ok(!asCode.includes("Assembled from the sections"), "a code swarm has no assembled document");
+  assert.match(asCode, /Artifacts/);
+  assert.ok(!asCode.includes("Combined document"), "a code swarm has no assembled document");
 
   // A swarm that produced nothing carries no empty box.
   assert.equal(

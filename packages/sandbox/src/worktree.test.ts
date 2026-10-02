@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -90,6 +90,22 @@ test("a worktree whose directory was swept away is recreated", async () => {
   assert.equal(stdout.trim(), branch, "the card is back on its own branch");
 });
 
+test("a worktree whose Git registration vanished is rebuilt without deleting its files", async () => {
+  const repo = await fixtureRepo();
+  const manager = new WorktreeManager(await scratchDir("bento-orphan-data-"));
+  const [first] = await manager.ensureAll([{ name: "app", localPath: repo }], "swarm-orphan", "swarm/demo");
+  await writeFile(path.join(first!.worktreePath, "unfinished.txt"), "agent work\n");
+  const metadata = (await run("git", ["-C", first!.worktreePath, "rev-parse", "--git-dir"])).stdout.trim();
+  await rm(metadata, { recursive: true, force: true });
+
+  const [again] = await manager.ensureAll([{ name: "app", localPath: repo }], "swarm-orphan", "swarm/demo");
+  assert.equal((await run("git", ["-C", again!.worktreePath, "branch", "--show-current"])).stdout.trim(), "swarm/demo");
+  const entries = await readdir(manager.workspacePath("swarm-orphan"));
+  const backup = entries.find((name) => name.startsWith("app.orphan-"));
+  assert.ok(backup, "the old checkout was preserved beside its replacement");
+  assert.equal(await readFile(path.join(manager.workspacePath("swarm-orphan"), backup, "unfinished.txt"), "utf8"), "agent work\n");
+});
+
 /**
  * A merged pull request takes the branch with it, and someone tidying
  * up locally takes the local one. The card is still on the board, so
@@ -103,6 +119,7 @@ test("a card whose branch is gone starts a new one", async () => {
   const manager = new WorktreeManager(dataDir);
   const [first] = await manager.ensureAll([{ name: "app", localPath: repo }], "feat-4", branch);
   await rm(first!.worktreePath, { recursive: true, force: true });
+  await run("git", ["-C", repo, "worktree", "unlock", first!.worktreePath]);
   await run("git", ["-C", repo, "worktree", "prune", "--expire=now"]);
   await run("git", ["-C", repo, "branch", "-D", branch]);
 
@@ -341,6 +358,8 @@ test("removeWorkspace deregisters the worktrees and deletes the workspace", asyn
     featureId,
     "feature/cleanup",
   );
+  const listing = (await run("git", ["-C", repo, "worktree", "list", "--porcelain"])).stdout;
+  assert.match(listing, /locked Bento workspace/, "an active worktree must survive pruning from another filesystem view");
   await writeFile(path.join(prepared!.worktreePath, "WIP.md"), "uncommitted\n");
   await mkdir(path.join(manager.workspacePath(featureId), "node_modules"), { recursive: true });
 

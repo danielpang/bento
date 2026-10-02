@@ -11,7 +11,8 @@ import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
-import { canAccessProject, getAccessibleFeature, getAccessibleRun } from "../access.js";
+import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
+import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
 const createRun = z.object({
   featureId: z.string().uuid(),
@@ -188,8 +189,9 @@ export function runRoutes(ctx: AppContext) {
     .get("/:id/transcript", async (c) => {
       const runId = c.req.param("id");
       const since = Number(c.req.query("since") ?? 0);
-      const found = await getAccessibleRun(ctx, c, runId);
+      const found = await getAccessibleRunOutput(ctx, c, runId);
       if (!found) return c.text("cursor|0|not_found", 404);
+      if (found.swarm && await requireSwarms(ctx, c, found.swarm.organizationId)) return c.text("cursor|0|not_found", 404);
       const run = found.run;
 
       const rows = await db(c, ctx)
@@ -253,7 +255,8 @@ export function runRoutes(ctx: AppContext) {
         Number.isFinite(sinceParam) ? sinceParam : 0,
         Number.isFinite(lastEventId) ? lastEventId : 0,
       );
-      if (!(await getAccessibleRun(ctx, c, runId))) return c.json({ error: "not found" }, 404);
+      const found = await getAccessibleRunOutput(ctx, c, runId);
+      if (!found || (found.swarm && await requireSwarms(ctx, c, found.swarm.organizationId))) return c.json({ error: "not found" }, 404);
 
       return streamSSE(c, async (stream) => {
         let lastSeq = since;

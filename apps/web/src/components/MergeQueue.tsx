@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import type { SwarmLanding, SwarmTask } from "../swarm/types.js";
+import { MERGE_QUEUE_FAILURE } from "../swarm/failures.js";
 
 /**
  * The merge queue, as a person needs to read it.
@@ -33,7 +35,7 @@ import type { SwarmLanding, SwarmTask } from "../swarm/types.js";
 const WORDS: Record<SwarmLanding["status"], { label: string; tone: string }> = {
   landing: { label: "Landing", tone: "running" },
   queued: { label: "Waiting", tone: "idle" },
-  landed: { label: "Landed", tone: "succeeded" },
+  landed: { label: "Committed", tone: "succeeded" },
   conflicted: { label: "Conflict", tone: "gated" },
   failed: { label: "Failed", tone: "failed" },
   cancelled: { label: "Withdrawn", tone: "cancelled" },
@@ -42,17 +44,89 @@ const WORDS: Record<SwarmLanding["status"], { label: string; tone: string }> = {
 /** How many landed rows are worth keeping on screen. */
 const HISTORY = 10;
 
+/** The local OrbStack HTTP origin may not expose the Clipboard API. */
+async function copyBranchName(branchName: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(branchName);
+      return;
+    } catch {
+      // A browser can expose the API but still refuse this origin.
+    }
+  }
+
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const field = document.createElement("textarea");
+  field.value = branchName;
+  field.readOnly = true;
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.append(field);
+  try {
+    field.focus();
+    field.select();
+    if (!document.execCommand("copy")) throw new Error("Clipboard access was denied");
+  } finally {
+    field.remove();
+    previousFocus?.focus();
+  }
+}
+
+function CopyIcon({ copied }: { copied: boolean }) {
+  return copied ? (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+      <path d="m3 8 3.2 3.2L13 4.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+      <rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M10.5 5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function MergeQueue({
   landings,
+  summary,
+  destination,
+  swarmDone,
+  checkout,
+  onReleaseBranch,
+  busy,
   tasks,
   selectedId,
   onSelect,
 }: {
   landings: SwarmLanding[];
+  summary?: { total: number; committed: number };
+  destination?: string | null;
+  swarmDone?: boolean;
+  checkout?: { mode: "worktree" | "remote"; released: boolean };
+  onReleaseBranch?: () => void;
+  busy?: boolean;
   tasks: SwarmTask[];
   selectedId?: string | null;
   onSelect?: (taskId: string) => void;
 }) {
+  const [commandCopyState, setCommandCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  useEffect(() => {
+    if (commandCopyState === "idle") return;
+    const timer = setTimeout(() => setCommandCopyState("idle"), 2000);
+    return () => clearTimeout(timer);
+  }, [commandCopyState]);
+  async function copyCommand() {
+    if (!destination) return;
+    try {
+      await copyBranchName(`git switch ${destination}`);
+      setCommandCopyState("copied");
+    } catch {
+      setCommandCopyState("failed");
+    }
+  }
+  const counts = summary ?? {
+    total: landings.length,
+    committed: landings.filter((landing) => landing.status === "landed").length,
+  };
   const titles = new Map(tasks.map((task) => [task.id, task.title]));
   const inFlight = landings.filter((landing) => landing.status === "landing" || landing.status === "conflicted");
   const waiting = landings.filter((landing) => landing.status === "queued");
@@ -72,11 +146,10 @@ export function MergeQueue({
     return (
       <section className="swarm-queue" aria-label="Merge queue">
         <header className="swarm-queue-head">
-          <span className="label">Merge queue</span>
+          <h2>Merge queue</h2>
         </header>
         <p className="muted swarm-queue-empty">
-          Nothing has been accepted yet. A leaf joins the queue when the planner accepts its work, and the queue lands
-          one branch at a time onto the swarm's branch.
+          No branches yet. Accepted work appears here before it is committed to the swarm branch.
         </p>
       </section>
     );
@@ -85,13 +158,44 @@ export function MergeQueue({
   return (
     <section className="swarm-queue" aria-label="Merge queue">
       <header className="swarm-queue-head">
-        <span className="label">Merge queue</span>
-        <span className="muted">
+        <h2>Merge queue</h2>
+        <span className="muted swarm-queue-branches-heading">
           {waiting.length === 0
-            ? "one branch at a time"
-            : `${waiting.length} waiting, one branch at a time`}
+            ? "Branches"
+            : `Branches: ${waiting.length} waiting`}
         </span>
       </header>
+
+      {destination && counts.total > 0 && (
+        <div className="swarm-queue-destination">
+          <p>
+            <strong>{counts.committed === counts.total
+              ? `All ${counts.committed} task branches committed`
+              : `${counts.committed} of ${counts.total} task branches committed`}</strong>
+            <span className="muted"> to </span>
+            <code>{destination}</code>
+          </p>
+          {checkout?.mode === "worktree" && swarmDone && (
+            checkout.released ? (
+              <div className="swarm-queue-checkout">
+                <span>Ready to check out:</span>
+                <code>git switch {destination}</code>
+                <button type="button" className="swarm-queue-command-copy" data-copy-state={commandCopyState}
+                  aria-label="Copy checkout command" onClick={() => void copyCommand()}>
+                  <CopyIcon copied={commandCopyState === "copied"} />
+                  <span className="visually-hidden" aria-live="polite">
+                    {commandCopyState === "copied" ? "Copied" : commandCopyState === "failed" ? "Copy failed" : ""}
+                  </span>
+                </button>
+              </div>
+            ) : (
+              <button type="button" className="btn" disabled={busy || !onReleaseBranch} onClick={onReleaseBranch}>
+                Release branch for checkout
+              </button>
+            )
+          )}
+        </div>
+      )}
 
       <ul className="swarm-queue-list">
         {[...inFlight, ...waiting, ...finished].map((landing) => (
@@ -120,32 +224,67 @@ function Row({
   onSelect?: (taskId: string) => void;
 }) {
   const words = WORDS[landing.status];
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timer = setTimeout(() => setCopyState("idle"), 2000);
+    return () => clearTimeout(timer);
+  }, [copyState]);
+
+  async function copyBranch() {
+    if (!landing.branchName) return;
+    try {
+      await copyBranchName(landing.branchName);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
   return (
     <li className="swarm-queue-row" data-state={words.tone} data-on={selected ? "" : undefined}>
-      <button
-        type="button"
-        className="swarm-queue-row-main"
-        onClick={() => onSelect?.(landing.taskId)}
-        disabled={!onSelect}
-      >
-        <span className="status">
-          <span className="dot" data-state={words.tone} />
-          {words.label}
-        </span>
-        {/* Agent written, so text and only text. */}
-        <span className="swarm-queue-title swarm-text">{title}</span>
+      <div className="swarm-queue-row-top">
+        <button
+          type="button"
+          className="swarm-queue-row-main"
+          onClick={() => onSelect?.(landing.taskId)}
+          disabled={!onSelect}
+        >
+          <span className="status">
+            <span className="dot" data-state={words.tone} />
+            {words.label}
+          </span>
+          {/* Agent written, so text and only text. */}
+          <span className="swarm-queue-title swarm-text">{title}</span>
+          {landing.attempt > 1 && (
+            <span className="chip" title="Times the merge queue has tried to add this branch to the swarm branch. The worker is not rerun.">
+              Merge attempt {landing.attempt}
+            </span>
+          )}
+        </button>
         {landing.branchName && (
-          <span className="chip chip-clip" title={landing.branchName}>
-            {landing.branchName}
-          </span>
+          <button
+            type="button"
+            className="swarm-queue-copy"
+            data-copy-state={copyState}
+            aria-label={`Copy branch name ${landing.branchName}`}
+            onClick={() => void copyBranch()}
+          >
+            <span className="chip chip-clip">{landing.branchName}</span>
+            <span className="swarm-queue-copy-icon" aria-hidden="true">
+              <CopyIcon copied={copyState === "copied"} />
+            </span>
+            <span className="visually-hidden" aria-live="polite">
+              {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : ""}
+            </span>
+          </button>
         )}
-        {landing.attempt > 1 && (
-          <span className="chip" title="How many times this branch has been tried">
-            try {landing.attempt}
-          </span>
-        )}
-      </button>
-      {landing.error && landing.status !== "landed" && (
+      </div>
+      {landing.status === "failed" && <p className="swarm-queue-note">{MERGE_QUEUE_FAILURE}</p>}
+      {landing.error && landing.status === "failed" && (
+        <details className="swarm-queue-technical"><summary>Technical details</summary><pre className="swarm-queue-error swarm-text">{landing.error}</pre></details>
+      )}
+      {landing.error && landing.status !== "landed" && landing.status !== "failed" && (
         /*
          * What git said, verbatim and as text. It is the only thing
          * that tells somebody whether a conflict is theirs to settle or

@@ -5,6 +5,7 @@ import type {
   SwarmSpend,
   SwarmSummary,
   SwarmTask,
+  SwarmSettings,
   TaskStatus,
 } from "./types.js";
 
@@ -13,9 +14,9 @@ import type {
  *
  * The routes are not built. Everything the console renders comes
  * through `client.ts`, and this is what answers it today: a project's
- * strip, four swarms with real trees, and enough mutation to drive the
- * whole console by hand. When the endpoints land, `client.ts` points
- * at them and this file is the only thing that goes.
+ * strip, four swarms with real trees, and enough mutation to drive
+ * the whole console by hand. When the endpoints land, `client.ts`
+ * points at them and this file is the only thing that goes.
  *
  * Written as a function of `now` rather than of the clock, so a test
  * asking for the same instant gets the same tree, while the browser
@@ -306,6 +307,7 @@ function swarmShell(overrides: Partial<Swarm> & Pick<Swarm, "id" | "name" | "sta
     pausedReason: null,
     branchName: `bento/${overrides.id}`,
     deliverable: "code",
+    settings: { ...DEFAULT_SETTINGS },
     budgetUsd: 40,
     maxWorkers: 8,
     workers: 4,
@@ -497,6 +499,17 @@ export function summarise(detail: SwarmDetail, completion: number): SwarmSummary
   };
 }
 
+/** How a fixture swarm is run: the defaults, on the fixture agents. */
+export const DEFAULT_SETTINGS: SwarmSettings = {
+  plannerProfileId: "agent-planner",
+  workerProfileId: "agent-worker",
+  judgeProfileId: null,
+  completionCommand: null,
+  maxPlanDepth: 1,
+  plannerInstructions: null,
+  workerInstructions: null,
+};
+
 /** A swarm as it exists the moment it is created: a goal, and nothing planned yet. */
 export function draftSwarm(input: NewSwarmInput, now: number): SwarmDetail {
   const id = `sw-${Math.random().toString(36).slice(2, 8)}`;
@@ -510,7 +523,14 @@ export function draftSwarm(input: NewSwarmInput, now: number): SwarmDetail {
         goal: input.goal,
         branchName: input.start.name,
         deliverable: input.deliverable,
+        settings: {
+          ...DEFAULT_SETTINGS,
+          ...(input.plannerProfileId ? { plannerProfileId: input.plannerProfileId } : {}),
+          ...(input.workerProfileId ? { workerProfileId: input.workerProfileId } : {}),
+          ...input.settings,
+        },
         budgetUsd: input.budgetUsd,
+        timeLimitMin: input.timeLimitMin ?? null,
         maxWorkers: input.workers,
         workers: input.workers,
         createdAt: iso(now, 0),
