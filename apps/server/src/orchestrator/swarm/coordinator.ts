@@ -1949,9 +1949,11 @@ async function recomputeSwarmStatus(
   // open. Its stored status must stay done so the dependent can start,
   // but the whole swarm cannot finish until that descendant does.
   // Tasks created after rollUp (such as the automatic final check) use
-  // their own status until the next tick.
+  // their own status until the next tick. The subtree status is read
+  // only for a done root: it was taken before this tick's spawn, so for
+  // any other root it can still say assigned for a leaf now working.
   const roots = tasks.filter((task) => task.parentId === null)
-    .map((task) => subtreeStatus.get(task.id) ?? task.status);
+    .map((task) => (task.status === "done" ? subtreeStatus.get(task.id) ?? task.status : task.status));
   const attention = tasks.some((task) => task.attention !== null && task.status !== "cancelled");
   const rolled = swarmStatusFrom(swarm.status, roots, swarm.pausedReason);
   // A leaf waiting on a person holds the whole swarm's headline, even
