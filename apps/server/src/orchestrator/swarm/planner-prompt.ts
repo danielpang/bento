@@ -1,3 +1,4 @@
+import { formatBytes } from "@bento/core";
 import type { swarms } from "@bento/db";
 import type { PlanSource } from "./plan-sources.js";
 
@@ -380,11 +381,7 @@ function sourceNoun(source: PlanSource): string {
   return source.kind === "website" ? `${what} at ${source.url ?? source.name}` : `${what} ${source.name}`;
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
-}
+
 
 /**
  * What a planner told to use an existing plan is told, before the

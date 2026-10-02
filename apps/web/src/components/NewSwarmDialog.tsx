@@ -1,4 +1,5 @@
 import {
+  formatBytes,
   MAX_SWARM_GOAL_CHARS,
   MAX_SWARM_PLAN_BYTES,
   MAX_SWARM_PLAN_CHARS,
@@ -7,6 +8,8 @@ import {
   MAX_SWARM_PLAN_SOURCE_CHARS,
   MAX_SWARM_PLAN_SOURCE_NAME_CHARS,
   MAX_SWARM_WORKERS,
+  planFileIsBinary,
+  planFileMime,
 } from "@bento/core";
 import { useRef, useState } from "react";
 import { Modal } from "./Modal.js";
@@ -354,39 +357,40 @@ export function NewSwarmDialog({
   );
 
   /**
-   * Reads each chosen file as text and adds it, refusing what cannot
-   * be a plan source with a sentence under the list.
+   * Reads each chosen file and adds it, refusing what cannot be a
+   * plan source with a sentence under the list.
    *
    * One file at a time, in the order chosen, so the list reads in the
    * order the person picked and the refusal names the file it is
    * about. A folder upload arrives with each file's relative path,
    * which is kept as its name: two README files from two folders are
    * two sources.
+   *
+   * Each file is added against the list as it is at that moment, not
+   * the list as it was when the picker closed. Reading a large PDF
+   * takes long enough for a person to add a website or remove a
+   * source meanwhile, and a write made from a stale copy would undo
+   * that: the refusal and the add are decided inside the updater, on
+   * the current list.
    */
   async function addFiles(files: File[]) {
     setPlanRefusal("");
     setReading((count) => count + files.length);
-    let current = planSources;
     try {
       for (const file of files) {
         const name = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
         let candidate: NewPlanSource;
         try {
-          const mime = binaryMime(name, file.type);
-          candidate = mime
-            ? { kind: "file", name, mime, data: toBase64(await file.arrayBuffer()) }
-            : { kind: "file", name, content: await file.text() };
+          candidate = await readPlanFile(file, name);
         } catch {
           setPlanRefusal(`${name} could not be read.`);
           continue;
         }
-        const refusal = planSourceRefusal(current, candidate);
-        if (refusal) {
-          setPlanRefusal(refusal);
-          continue;
-        }
-        current = [...current, candidate];
-        setPlanSources(current);
+        setPlanSources((current) => {
+          const added = withPlanSource(current, candidate);
+          if (added.refusal) setPlanRefusal(added.refusal);
+          return added.sources;
+        });
       }
     } finally {
       setReading((count) => count - files.length);
@@ -397,14 +401,13 @@ export function NewSwarmDialog({
   function addWebsite() {
     const url = siteUrl.trim();
     if (!url) return;
-    const refusal = planSourceRefusal(planSources, { kind: "website", url });
-    if (refusal) {
-      setPlanRefusal(refusal);
-      return;
-    }
     setPlanRefusal("");
-    setPlanSources((current) => [...current, { kind: "website", url }]);
-    setSiteUrl("");
+    setPlanSources((current) => {
+      const added = withPlanSource(current, { kind: "website", url });
+      if (added.refusal) setPlanRefusal(added.refusal);
+      else setSiteUrl("");
+      return added.sources;
+    });
   }
 
   /**
@@ -446,6 +449,27 @@ export function existingPlanHelp(on: boolean, sources: number): string {
   return sources > 0
     ? "The planner reads what you handed over as background and plans from the goal."
     : "Off: the planner reads the goal and the code and writes the plan itself.";
+}
+
+/**
+ * One chosen file as the route takes it: a PDF or an image as its
+ * bytes with its type, anything else as the text the browser reads.
+ */
+export async function readPlanFile(file: Pick<File, "type" | "arrayBuffer" | "text">, name: string): Promise<NewPlanSource> {
+  const mime = planFileMime(name, file.type);
+  return planFileIsBinary(mime)
+    ? { kind: "file", name, mime, data: toBase64(await file.arrayBuffer()) }
+    : { kind: "file", name, content: await file.text() };
+}
+
+/**
+ * The list with one more source on it, or the same list and the
+ * reason it did not grow. Pure, so an add decided from inside a state
+ * updater sees the list as it is now.
+ */
+export function withPlanSource(current: NewPlanSource[], candidate: NewPlanSource): { sources: NewPlanSource[]; refusal: string | null } {
+  const refusal = planSourceRefusal(current, candidate);
+  return refusal ? { sources: current, refusal } : { sources: [...current, candidate], refusal: null };
 }
 
 /**
@@ -511,39 +535,6 @@ export function planSourceRefusal(current: NewPlanSource[], candidate: NewPlanSo
 /** A character count as a person reads one. */
 export function formatChars(count: number): string {
   return `${count.toLocaleString()} ${count === 1 ? "character" : "characters"}`;
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
-}
-
-/**
- * The media type of a file that travels as bytes, or null for one
- * that travels as text. From the browser's type when it gives one,
- * else from the name: a browser leaves the type blank for a file it
- * does not recognise, and a plan.pdf is a PDF whatever it says.
- */
-export function binaryMime(name: string, type: string): string | null {
-  const known = ["application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp"];
-  const lower = type.toLowerCase();
-  if (known.includes(lower)) return lower;
-  switch (/\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase()) {
-    case "pdf":
-      return "application/pdf";
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "gif":
-      return "image/gif";
-    case "webp":
-      return "image/webp";
-    default:
-      return null;
-  }
 }
 
 /** Bytes as base64, in pieces small enough for the string builder. */

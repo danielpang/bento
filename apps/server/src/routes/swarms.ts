@@ -32,7 +32,7 @@ import {
 import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
-import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
@@ -607,11 +607,21 @@ export function swarmRoutes(ctx: AppContext) {
         })
         .returning();
       if (!swarm) return c.json({ error: "something went wrong starting the swarm; try again" }, 500);
-      try {
-        await insertPlanSources(db(c, ctx), ctx.artifacts, { id: swarm.id, organizationId: swarm.organizationId }, planSources);
-      } catch (err) {
-        if (err instanceof PlanSourceRefusal) return c.json({ error: err.message, code: "PLAN_SOURCE" }, 400);
-        throw err;
+      /*
+       * The bytes go on the shelf now, inside the request. If anything
+       * after this throws, the rows roll back with the request and the
+       * objects would stay with nothing pointing at them; the removal
+       * registered here runs on exactly that path. Not a refusal to
+       * answer with 400: collectPlanSources already refused bytes with
+       * nowhere to go, so a throw here is a bug, and answering it
+       * politely would commit a swarm with no sources and no planner.
+       */
+      const shelved = await insertPlanSources(db(c, ctx), ctx.artifacts, { id: swarm.id, organizationId: swarm.organizationId }, planSources);
+      if (shelved.length > 0 && ctx.artifacts) {
+        const store = ctx.artifacts;
+        deferOnRollback(c, async () => {
+          await store.remove(shelved);
+        });
       }
 
       const run = await startRunIfIdle(

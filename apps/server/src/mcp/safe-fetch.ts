@@ -34,6 +34,15 @@ export interface SafeFetchInit {
   signal?: AbortSignal;
   /** Time allowed for the upstream to answer with headers. */
   headersTimeoutMs?: number;
+  /**
+   * What to do with a redirect. "refuse", the default, throws: MCP
+   * JSON-RPC has no legitimate need for one. "return" hands the 3xx
+   * back with its body cancelled, so a caller that does have a reason
+   * to follow one (a plan page that moved) can validate the next hop
+   * through this same function rather than letting fetch follow it
+   * past the checks.
+   */
+  redirects?: "refuse" | "return";
 }
 
 export function safeFetchPolicy(env: { BENTO_MODE: "local" | "multi"; BETTER_AUTH_URL: string }): SafeFetchPolicy {
@@ -94,13 +103,14 @@ export async function safeFetch(
       ...(init.body !== undefined ? { body: init.body } : {}),
       ...(init.signal ? { signal: init.signal } : {}),
       ...(dispatcher ? { dispatcher } : {}),
-      // A redirect would escape the address we just validated. MCP
-      // JSON-RPC has no legitimate need for one, so refuse rather than
-      // re-validate hop by hop.
+      // A redirect would escape the address we just validated, so
+      // fetch never follows one here. A caller that asked for it gets
+      // the 3xx back to validate the next hop itself.
       redirect: "manual",
     });
     if (response.status >= 300 && response.status < 400) {
       response.body?.cancel().catch(() => {});
+      if (init.redirects === "return") return response;
       throw new SafeFetchRefused("this server answered with a redirect, which is not followed");
     }
     return response;

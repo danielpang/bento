@@ -1129,8 +1129,19 @@ async function readPlan(ctx: AppContext, caller: SwarmCaller, args: Args<"read_p
   if (sources.length === 0) return "The person who started this swarm did not hand over a plan. There is nothing to read here; the goal is what the swarm was asked for.";
 
   const label = (source: (typeof sources)[number]) => describeSource(source);
+  /*
+   * Where the copy is, said as far as this tool can know it. The
+   * executor writes the copies when a run starts and tells the prompt
+   * which ones it managed; this tool only knows the name a copy would
+   * have, so it says that, and says what to do when the file is not
+   * there rather than sending an agent looking for it twice. A driver
+   * that cannot take stdin never has a copy, and then nothing is
+   * promised at all.
+   */
   const where = (source: (typeof sources)[number]) =>
-    `A copy is in the ${PLAN_SOURCE_DIR} directory of your workspace, named ${planSourceFileName(source)}; open it with your file tools.`;
+    ctx.driver.supportsStdin
+      ? `If it was copied into your workspace when this run started, it is in the ${PLAN_SOURCE_DIR} directory, named ${planSourceFileName(source)}; your opening prompt says which copies were made. If it is not there, this is all you have of it.`
+      : "It could not be copied into this workspace, so this is all you have of it.";
   const quoted = (source: (typeof sources)[number]) => {
     if (source.content === null) {
       return `Source ${source.position + 1}, ${source.name}: ${source.media === "image" ? "an image, with no text to return" : "a PDF with no text in it, which is a scan"}. ${where(source)}`;

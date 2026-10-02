@@ -1268,10 +1268,13 @@ async function buildRunCommand(
    * its prompt is built, so the prompt can say where each one is. A
    * PDF's layout and an image reach an agent no other way; the text
    * ones are there too for an agent that would rather grep them.
-   * Every swarm role: a worker's leaf may point at a mockup, and the
-   * judge may want the plan it is checking against.
+   * Every role whose prompt reads the plan: a worker's leaf may point
+   * at a mockup, and the judge may want the plan it is checking
+   * against. Not the resolver, whose job is one merge conflict and
+   * whose prompt never mentions the plan.
    */
-  const planSources = subject.kind === "swarm" ? await planSourcesInWorkspace(ctx, handle, subject.swarm.id) : [];
+  const planSources =
+    subject.kind === "swarm" && subject.run.role !== "resolver" ? await planSourcesInWorkspace(ctx, handle, subject.swarm.id) : [];
   const rolePrompt = await buildSubjectPrompt(ctx, subject, mounted, handle, input.cardTools ?? false, planSources);
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
   // Only ordinary work compacts: judge and rebase prompts are complete

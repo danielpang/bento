@@ -6,6 +6,7 @@ import { activeOrg } from "./actor.js";
 
 export const TENANT_DB_KEY = "bentoDb";
 const AFTER_COMMIT_KEY = "bentoAfterCommit";
+const ON_ROLLBACK_KEY = "bentoOnRollback";
 
 /**
  * Runs a request inside a transaction that row-level security applies to.
@@ -27,30 +28,72 @@ const AFTER_COMMIT_KEY = "bentoAfterCommit";
 export function tenantMiddleware(ctx: AppContext): MiddlewareHandler {
   return async (c, next) => {
     const deferred: (() => Promise<void>)[] = [];
+    const onRollback: (() => Promise<void>)[] = [];
     c.set(AFTER_COMMIT_KEY, deferred);
+    c.set(ON_ROLLBACK_KEY, onRollback);
 
     if (ctx.env.BENTO_MODE !== "multi" || isStream(c.req.path)) {
+      // No transaction here, so nothing ever rolls back: rows a handler
+      // wrote before it failed stay, and so must whatever they name.
       c.set(TENANT_DB_KEY, ctx.db);
       await next();
-      await runDeferred(deferred, ctx);
+      if (!c.error) await runDeferred(deferred, ctx);
       return;
     }
 
     const orgId = activeOrg(c) ?? "";
-    await ctx.db.transaction(async (tx) => {
-      // Both settings in one statement, so the guard costs a single
-      // round trip. set_config rather than SET LOCAL ROLE because this
-      // carries a parameter, and Postgres refuses more than one command
-      // in a parameterized statement.
-      await tx.execute(
-        sql`select set_config('role', 'bento_user', true), set_config('bento.org_id', ${orgId}, true)`,
-      );
-      c.set(TENANT_DB_KEY, tx as unknown as Db);
-      await next();
-    });
+    try {
+      await ctx.db.transaction(async (tx) => {
+        // Both settings in one statement, so the guard costs a single
+        // round trip. set_config rather than SET LOCAL ROLE because this
+        // carries a parameter, and Postgres refuses more than one command
+        // in a parameterized statement.
+        await tx.execute(
+          sql`select set_config('role', 'bento_user', true), set_config('bento.org_id', ${orgId}, true)`,
+        );
+        c.set(TENANT_DB_KEY, tx as unknown as Db);
+        await next();
+        /*
+         * A handler that threw does not reach here as a throw. Hono
+         * runs the app's error handler at the handler's own level and
+         * hands the middleware a finished response with the error on
+         * the context, so without this check the transaction would
+         * commit whatever the handler wrote before it failed. Thrown
+         * again here, the transaction rolls back, and the error
+         * handler answers once more with the same response.
+         */
+        if (c.error) throw c.error;
+      });
+    } catch (err) {
+      await runDeferred(onRollback, ctx);
+      throw err;
+    }
     // Only now are the handler's rows visible to anyone else.
     await runDeferred(deferred, ctx);
   };
+}
+
+/**
+ * Undoes work the handler did outside the database, if the request
+ * ends up not committing.
+ *
+ * The case this exists for is bytes put in the artifact store while
+ * the rows that name them are still inside the tenant transaction. If
+ * the handler then throws, the rows roll back and the objects would
+ * stay on the shelf with nothing pointing at them. A task registered
+ * here runs only on that path: a request that commits never runs it,
+ * and neither does local mode, where there is no transaction and the
+ * rows a failed handler wrote are still there to name the objects.
+ */
+export function deferOnRollback(
+  c: { get: (key: string) => unknown },
+  task: () => Promise<void>,
+): void {
+  const tasks = c.get(ON_ROLLBACK_KEY) as (() => Promise<void>)[] | undefined;
+  // No tenant middleware in this chain (tests mounting a route bare):
+  // nothing will roll back, so nothing to undo.
+  if (!tasks) return;
+  tasks.push(task);
 }
 
 /**

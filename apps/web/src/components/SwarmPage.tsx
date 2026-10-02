@@ -10,7 +10,8 @@ import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
-import { browserStorage, readBriefOpen, rememberBriefOpen, type SwarmView } from "../swarm/view-state.js";
+import { formatBytes } from "@bento/core";
+import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
 
 /** Ticks the header's clock, and only while there is something running. */
 function useNow(live: boolean): number {
@@ -166,12 +167,6 @@ export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | 
   return source.hasText ? `${bytes}, ${source.size.toLocaleString()} characters of text` : `${bytes}, no text (a scan)`;
 }
 
-export function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
-}
-
 /**
  * One swarm's page: the header, and the plan under it.
  *
@@ -194,6 +189,7 @@ export function SwarmPage({
   surfaces,
   busy,
   artifacts = [],
+  briefStorage,
   onOpenArtifact,
   onOpenPlannerOutput,
 }: {
@@ -212,17 +208,20 @@ export function SwarmPage({
   /** Opens one in the viewer every other artifact in Bento opens in. */
   onOpenArtifact?: (artifact: SwarmArtifact) => void;
   onOpenPlannerOutput?: () => void;
+  /** Where the fold is remembered. The browser's own unless a test says otherwise. */
+  briefStorage?: StorageLike | null;
 }) {
   /*
    * The brief folds to one line so the diagram gets the screen. The
    * choice is this browser's, remembered across swarms, and never in
    * the address: whoever follows a link sees the goal.
    */
-  const [briefOpen, setBriefOpen] = useState(() => readBriefOpen(browserStorage()));
+  const storage = briefStorage === undefined ? browserStorage() : briefStorage;
+  const [briefOpen, setBriefOpen] = useState(() => readBriefOpen(storage));
   const toggleBrief = () => {
     const next = !briefOpen;
     setBriefOpen(next);
-    rememberBriefOpen(browserStorage(), next);
+    rememberBriefOpen(storage, next);
   };
   const swarm = detail.swarm;
   const live = canPause(swarm.status);
@@ -239,6 +238,14 @@ export function SwarmPage({
     (openLeaves.length > 0 && (swarm.status === "running" || swarm.status === "waiting" || swarm.status === "done"))
   );
   const waitingForPlan = swarm.status === "planning" && !planReady;
+  /** The one sentence about what this swarm waits on a person for, shown whether or not the brief is open. */
+  const nextStep = waitingForPlan
+    ? detail.plannerRun?.status === "failed"
+      ? "Planner failed. Open its output below, then retry."
+      : plannerActive
+        ? "Planner is building the task tree. Review the plan here before starting work."
+        : "The plan is not ready. Message the planner to finish it."
+    : "Review the diagram, then approve the plan to start ready workers.";
   const plannerFailed = waitingForPlan && detail.plannerRun?.status === "failed";
   const primaryAction = planNeedsApproval
     ? { label: "Approve plan", onClick: actions.onResume }
@@ -363,19 +370,19 @@ export function SwarmPage({
             </div>
           )}
         </div>
+        {/*
+          * What the fold must never hide: the one sentence that says
+          * what this swarm is waiting on a person for. Spend and the
+          * worker stepper fold with the goal; a failed planner or a
+          * plan waiting for approval stays on the page whatever this
+          * browser remembers, because the fold is remembered for every
+          * swarm and the next swarm's trouble is not this one's.
+          */}
+        {!briefOpen && (waitingForPlan || planNeedsApproval) && (
+          <p className="swarm-next-step swarm-next-step-folded" role="status">{nextStep}</p>
+        )}
         {briefOpen && <div className="swarm-brief-side">
-          {waitingForPlan && (
-            <p className="swarm-next-step" role="status">
-              {detail.plannerRun?.status === "failed"
-                ? "Planner failed. Open its output below, then retry."
-                : plannerActive
-                  ? "Planner is building the task tree. Review the plan here before starting work."
-                  : "The plan is not ready. Message the planner to finish it."}
-            </p>
-          )}
-          {planNeedsApproval && (
-            <p className="swarm-next-step" role="status">Review the diagram, then approve the plan to start ready workers.</p>
-          )}
+          {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
           <div className="swarm-brief-metrics">
             <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
             <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>

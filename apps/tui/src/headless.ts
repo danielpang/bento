@@ -1,26 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ApiError, unwrapError } from "@bento/api-client";
-
-/** The media type of a plan file that travels as bytes, or null for one that travels as text. */
-function planFileMime(name: string): string | null {
-  switch (/\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase()) {
-    case "pdf":
-      return "application/pdf";
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "gif":
-      return "image/gif";
-    case "webp":
-      return "image/webp";
-    default:
-      return null;
-  }
-}
-import { checkAgentPairing } from "@bento/core";
+import { checkAgentPairing, planFileIsBinary, planFileMime } from "@bento/core";
 import { LocalRunner } from "./runner.js";
 import { startEmbedded } from "./embedded.js";
 import { FileTokenStore } from "./credentials.js";
@@ -495,11 +476,12 @@ export async function runSwarm(options: CliOptions): Promise<void> {
             return;
           }
           const name = path.basename(file);
-          const binary = planFileMime(name);
-          if (binary) {
+          const mime = planFileMime(name);
+          if (planFileIsBinary(mime)) {
             // A PDF or an image travels as its bytes; the server reads
-            // the PDF's text and shelves both.
-            sources.push({ kind: "file", name, data: bytes.toString("base64"), mime: binary });
+            // the PDF's text and shelves both. The same table the
+            // console and the server read, so the three agree.
+            sources.push({ kind: "file", name, data: bytes.toString("base64"), mime });
             continue;
           }
           const content = bytes.toString("utf8");

@@ -3,7 +3,8 @@ import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import { base64Bytes, binaryMime, clampWorkers, existingPlanHelp, newSourceLabel, planSourceRefusal, suggestBranch, toBase64 } from "./components/NewSwarmDialog.js";
+import { base64Bytes, clampWorkers, existingPlanHelp, newSourceLabel, planSourceRefusal, readPlanFile, suggestBranch, toBase64, withPlanSource } from "./components/NewSwarmDialog.js";
+import { planFileMime } from "@bento/core";
 import { goalExcerpt, planSourceLabel, planSourceSize } from "./components/SwarmPage.js";
 import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";
 import type { NewSwarmInput } from "./swarm/types.js";
@@ -240,10 +241,11 @@ test("a plan source is refused for the reasons the route would refuse it, and ac
 });
 
 test("a PDF or an image travels as bytes, is sized in bytes, and is refused past the byte caps", () => {
-  assert.equal(binaryMime("plan.pdf", ""), "application/pdf", "a browser that gives no type is answered by the name");
-  assert.equal(binaryMime("shot.PNG", "image/png"), "image/png");
-  assert.equal(binaryMime("notes.md", "text/markdown"), null);
-  assert.equal(binaryMime("deck", "application/pdf"), "application/pdf");
+  assert.equal(planFileMime("plan.pdf", ""), "application/pdf", "a browser that gives no type is answered by the name");
+  assert.equal(planFileMime("shot.PNG", "image/png"), "image/png");
+  assert.equal(planFileMime("notes.md", "text/markdown"), "text/markdown");
+  assert.equal(planFileMime("deck", "application/pdf"), "application/pdf");
+  assert.equal(planFileMime("diagram.svg", "image/svg+xml"), "image/svg+xml", "and the one table says the same for SVG on every client and the server");
   const data = toBase64(new Uint8Array([1, 2, 3, 4, 5]).buffer);
   assert.equal(data, "AQIDBAU=");
   assert.equal(base64Bytes(data), 5);
@@ -274,6 +276,24 @@ test("a folded brief shows the goal's first line, cut at a word", () => {
   const cut = goalExcerpt(long);
   assert.ok(cut.length <= 121 && cut.endsWith("\u2026") && !cut.endsWith("wor\u2026"), `cut at a word: ${cut}`);
   assert.equal(goalExcerpt(""), "");
+});
+
+test("a file is read as bytes or text by the shared table, and added against the list as it is now", async () => {
+  const bytes = new Uint8Array([37, 80, 68, 70]);
+  const pdf = await readPlanFile({ type: "", arrayBuffer: async () => bytes.buffer, text: async () => "%PDF" }, "plan.pdf");
+  assert.deepEqual(pdf, { kind: "file", name: "plan.pdf", mime: "application/pdf", data: "JVBERg==" });
+  const md = await readPlanFile({ type: "text/markdown", arrayBuffer: async () => bytes.buffer, text: async () => "# Plan" }, "plan.md");
+  assert.deepEqual(md, { kind: "file", name: "plan.md", content: "# Plan" });
+
+  // The list grew while the PDF was being read; the add sees that list, not the one from before.
+  const meanwhile = withPlanSource([], { kind: "website", url: "https://example.test/plan" });
+  assert.equal(meanwhile.refusal, null);
+  const added = withPlanSource(meanwhile.sources, pdf);
+  assert.equal(added.refusal, null);
+  assert.deepEqual(added.sources.map((source) => (source.kind === "file" ? source.name : source.url)), ["https://example.test/plan", "plan.pdf"]);
+  const refused = withPlanSource(added.sources, { kind: "website", url: "https://example.test/plan" });
+  assert.match(refused.refusal!, /already in the list/);
+  assert.equal(refused.sources, added.sources, "a refused add leaves the list as it was");
 });
 
 test("the switch says what it does in each position, and how the sources are read", () => {

@@ -2409,8 +2409,9 @@ test("a PDF and an image are shelved by key, served through the swarm, read by t
   assert.match(all.text, /2\. the image mockup\.png, 70 bytes/);
   assert.match(all.text, /3\. the PDF scan\.pdf, \d+ bytes, no text in it/);
   assert.match(all.text, /Add the rounding helper/);
-  assert.match(all.text, /an image, with no text to return\. A copy is in the plan-sources directory of your workspace, named 2-mockup\.png/);
-  assert.match(all.text, /a PDF with no text in it, which is a scan\. A copy is in the plan-sources directory of your workspace, named 3-scan\.pdf/);
+  assert.match(all.text, /an image, with no text to return\. If it was copied into your workspace when this run started, it is in the plan-sources directory, named 2-mockup\.png/);
+  assert.match(all.text, /a PDF with no text in it, which is a scan\. If it was copied into your workspace when this run started, it is in the plan-sources directory, named 3-scan\.pdf/);
+  assert.match(all.text, /If it is not there, this is all you have of it/, "and the agent is told what to do when the copy is missing, rather than sent looking twice");
 
   // Deleting the swarm takes the objects off the shelf once the rows are gone.
   await db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.swarmId, swarm.id));

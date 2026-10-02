@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
@@ -10,10 +10,15 @@ import {
   MAX_SWARM_PLAN_SOURCES,
   MAX_SWARM_PLAN_SOURCE_CHARS,
   MAX_SWARM_PLAN_SOURCE_NAME_CHARS,
+  planFileExtension,
+  planFileMime,
+  planMediaOf,
+  type PlanMedia,
 } from "@bento/core";
-import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { ArtifactStore } from "../../artifact-store.js";
 import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../../mcp/safe-fetch.js";
+import { sandboxFileExists, writeSandboxFiles } from "../../sandbox-files.js";
 
 /**
  * A plan somebody already has, handed to a swarm when it starts.
@@ -54,14 +59,24 @@ export const MAX_PLAN_WEBSITE_BYTES = 8 * 1024 * 1024;
  */
 export const WEBSITE_TIMEOUT_MS = 20_000;
 
+/**
+ * How many redirects an address may take before it is refused.
+ *
+ * Every hop goes back through safeFetch, so in multi mode each one is
+ * held to the same rules as the first: https, a public address, never
+ * this server. One hop there is enough for a moved page and keeps the
+ * surface small; a local install is one person on their own machine,
+ * and five is what a browser would quietly follow.
+ */
+export const MAX_REDIRECTS = { local: 5, multi: 1 } as const;
+
 /** Where an agent finds a copy of every source, relative to its workspace. */
 export const PLAN_SOURCE_DIR = "plan-sources";
 
-/** What a source is read as. Decided from its media type, never from its bytes. */
-export type PlanMedia = "text" | "pdf" | "image";
+export type { PlanMedia };
 
-/** The image types an agent's file tools open, and a browser draws inline. */
-const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** What a media type is read as. The core table, re-exported for the callers that read it here. */
+export const mediaOf = planMediaOf;
 
 /**
  * The name of an uploaded file: one line, no control characters, and
@@ -171,13 +186,6 @@ export interface PlanSourceSummary {
   byteSize: number | null;
 }
 
-/** What a media type is read as. */
-export function mediaOf(mime: string): PlanMedia {
-  if (mime === "application/pdf") return "pdf";
-  if (IMAGE_MIMES.has(mime)) return "image";
-  return "text";
-}
-
 /**
  * Why a string is not text, or null when it is.
  *
@@ -229,15 +237,25 @@ export async function collectPlanSources(
   const fetchPage = options.fetchPage ?? ((url, signal) => fetchPlanWebsite(env, url, signal));
   const extractPdf = options.extractPdf ?? extractPdfText;
 
-  // Every page at once, under one deadline. The first refusal is the
-  // one reported; the rest are abandoned with it.
-  const deadline = AbortSignal.timeout(WEBSITE_TIMEOUT_MS);
+  /*
+   * Every page at once, under one deadline, and all of them dropped
+   * the moment one is refused: the first refusal is the answer, and a
+   * request that has already failed should not go on downloading
+   * nineteen other pages into memory until the clock runs out.
+   */
+  const stop = new AbortController();
+  const signal = AbortSignal.any([stop.signal, AbortSignal.timeout(WEBSITE_TIMEOUT_MS)]);
   const pages = new Map<number, FetchedPage>();
-  await Promise.all(
-    inputs.map(async (input, index) => {
-      if (input.kind === "website") pages.set(index, await fetchPage(input.url, deadline));
-    }),
-  );
+  try {
+    await Promise.all(
+      inputs.map(async (input, index) => {
+        if (input.kind === "website") pages.set(index, await fetchPage(input.url, signal));
+      }),
+    );
+  } catch (err) {
+    stop.abort();
+    throw err;
+  }
 
   const drafts: PlanSourceDraft[] = [];
   let totalChars = 0;
@@ -246,8 +264,8 @@ export async function collectPlanSources(
     let draft: PlanSourceDraft;
     if (input.kind === "file") {
       const name = input.name.replace(/\\/g, "/").replace(/^(\.\/|\/)+/, "") || input.name;
-      const mime = input.mime?.split(";")[0]!.trim().toLowerCase() || mimeForName(name);
-      const media = mediaOf(mime);
+      const mime = planFileMime(name, input.mime);
+      const media = planMediaOf(mime);
       if (input.data !== undefined) {
         const bytes = Buffer.from(input.data, "base64");
         if (bytes.byteLength === 0) throw new PlanSourceRefusal(`${name} is empty, so there is nothing in it to plan from.`);
@@ -268,7 +286,7 @@ export async function collectPlanSources(
     } else {
       const page = pages.get(index)!;
       if (page.bytes) {
-        draft = await binaryDraft(index, "website", page.title ?? nameFromUrl(page.url), page.url, page.mime, mediaOf(page.mime), page.bytes, options.hasStore, extractPdf);
+        draft = await binaryDraft(index, "website", page.title ?? nameFromUrl(page.url), page.url, page.mime, planMediaOf(page.mime), page.bytes, options.hasStore, extractPdf);
       } else {
         if (page.text.length > MAX_SWARM_PLAN_SOURCE_CHARS) {
           throw new PlanSourceRefusal(
@@ -385,7 +403,7 @@ export async function extractPdfText(bytes: Buffer): Promise<string> {
 
 /** What one fetched page comes back as. */
 export interface FetchedPage {
-  /** The address as it was asked for, after parsing. */
+  /** The address the page was finally read from, after any redirect. */
   url: string;
   /** The page's own title, when it had one. */
   title: string | null;
@@ -402,56 +420,68 @@ export interface FetchedPage {
  * bytes when it is a PDF or an image.
  *
  * Through safeFetch, which is the rule for every URL a tenant chooses:
- * in multi mode that means https only, a public address, never this
- * server, and no redirects. The scheme is checked here first so the
- * refusal reads as a sentence about a plan rather than about an MCP
- * server, which is what safeFetch was written for.
+ * in multi mode that means https only, a public address, and never
+ * this server. A redirect is followed hop by hop through that same
+ * function, so the address actually read is held to the same rules as
+ * the one typed, and only as far as MAX_REDIRECTS allows. The scheme
+ * is checked here first so the refusal reads as a sentence about a
+ * plan rather than about an MCP server, which is what safeFetch was
+ * written for.
  */
 export async function fetchPlanWebsite(
   env: { BENTO_MODE: "local" | "multi"; BETTER_AUTH_URL: string },
   url: string,
   signal: AbortSignal = AbortSignal.timeout(WEBSITE_TIMEOUT_MS),
 ): Promise<FetchedPage> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new PlanSourceRefusal(`${url} is not a web address.`);
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new PlanSourceRefusal(`${url} is not a web address. A plan source starts with https://.`);
-  }
-  if (env.BENTO_MODE === "multi" && parsed.protocol !== "https:") {
-    throw new PlanSourceRefusal(`${url} cannot be fetched. A plan source starts with https://.`);
-  }
-
+  let parsed = parseAddress(env, url, url);
+  const policy = safeFetchPolicy(env);
+  let hops = 0;
   let response: Awaited<ReturnType<typeof safeFetch>>;
-  try {
-    response = await safeFetch(
-      parsed.toString(),
-      {
-        headers: { accept: "text/html, text/markdown, text/plain, application/pdf, image/*, application/json;q=0.9, */*;q=0.5" },
-        headersTimeoutMs: WEBSITE_TIMEOUT_MS,
-        signal,
-      },
-      safeFetchPolicy(env),
-    );
-  } catch (err) {
-    if (err instanceof SafeFetchRefused) throw new PlanSourceRefusal(`${url} cannot be fetched: ${err.message}.`);
-    throw new PlanSourceRefusal(`${url} did not answer.`);
+  for (;;) {
+    try {
+      response = await safeFetch(
+        parsed.toString(),
+        {
+          headers: { accept: "text/html, text/markdown, text/plain, application/pdf, image/*, application/json;q=0.9, */*;q=0.5" },
+          headersTimeoutMs: WEBSITE_TIMEOUT_MS,
+          signal,
+          redirects: "return",
+        },
+        policy,
+      );
+    } catch (err) {
+      if (err instanceof SafeFetchRefused) throw new PlanSourceRefusal(`${parsed} cannot be fetched: ${err.message}.`);
+      throw new PlanSourceRefusal(`${parsed} did not answer.`);
+    }
+    if (response.status < 300 || response.status >= 400) break;
+    const location = response.headers.get("location");
+    if (!location) throw new PlanSourceRefusal(`${parsed} answered ${response.status} with nowhere to go.`);
+    hops += 1;
+    if (hops > MAX_REDIRECTS[env.BENTO_MODE]) {
+      throw new PlanSourceRefusal(
+        `${url} redirects ${hops === 1 ? "once" : `${hops} times`}, which is more than a plan source may. Paste the address of the page itself.`,
+      );
+    }
+    let next: URL;
+    try {
+      next = new URL(location, parsed);
+    } catch {
+      throw new PlanSourceRefusal(`${parsed} redirects to an address that cannot be read.`);
+    }
+    parsed = parseAddress(env, next.toString(), url);
   }
   if (!response.ok) {
     response.body?.cancel().catch(() => {});
-    throw new PlanSourceRefusal(`${url} answered ${response.status}, so there is nothing to read there.`);
+    throw new PlanSourceRefusal(`${parsed} answered ${response.status}, so there is nothing to read there.`);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
   const mime = contentType.split(";")[0]!.trim().toLowerCase() || "application/octet-stream";
   const charset = /charset=["']?([\w-]+)/i.exec(contentType)?.[1];
-  const media = mediaOf(mime);
+  const media = planMediaOf(mime);
   if (media === "text" && !isTextType(mime)) {
     response.body?.cancel().catch(() => {});
-    throw new PlanSourceRefusal(`${url} is ${mime}, not a page, a PDF, an image or a text file. Save the plan as text and upload it instead.`);
+    throw new PlanSourceRefusal(`${parsed} is ${mime}, not a page, a PDF, an image or a text file. Save the plan as text and upload it instead.`);
   }
 
   const cap = media === "text" ? MAX_PLAN_WEBSITE_BYTES : MAX_SWARM_PLAN_FILE_BYTES;
@@ -459,23 +489,45 @@ export async function fetchPlanWebsite(
   try {
     bytes = await readCapped(response, cap);
   } catch {
-    throw new PlanSourceRefusal(`${url} stopped answering before the page was read.`);
+    throw new PlanSourceRefusal(`${parsed} stopped answering before the page was read.`);
   }
   if (bytes === null) {
-    throw new PlanSourceRefusal(`${url} is larger than ${Math.round(cap / (1024 * 1024))} MB, which is too large to be a plan.`);
+    throw new PlanSourceRefusal(`${parsed} is larger than ${Math.round(cap / (1024 * 1024))} MB, which is too large to be a plan.`);
   }
+  const finalUrl = parsed.toString();
   if (media !== "text") {
-    return { url: parsed.toString(), title: null, mime, text: "", bytes: Buffer.from(bytes) };
+    return { url: finalUrl, title: null, mime, text: "", bytes: Buffer.from(bytes) };
   }
   const raw = decode(bytes, charset);
   if (mime === "text/html" || mime === "application/xhtml+xml") {
     const page = htmlToText(raw);
-    return { url: parsed.toString(), title: page.title, mime, text: page.text };
+    return { url: finalUrl, title: page.title, mime, text: page.text };
   }
   const text = raw.replace(/\r\n?/g, "\n").trim();
   const refusal = textRefusal(text);
-  if (refusal) throw new PlanSourceRefusal(`${url} cannot be a plan source: ${refusal}.`);
-  return { url: parsed.toString(), title: null, mime, text };
+  if (refusal) throw new PlanSourceRefusal(`${parsed} cannot be a plan source: ${refusal}.`);
+  return { url: finalUrl, title: null, mime, text };
+}
+
+/**
+ * An address a plan source may be read from, or a refusal naming the
+ * address the person typed. The same question for the first hop and
+ * for every redirect after it.
+ */
+function parseAddress(env: { BENTO_MODE: "local" | "multi" }, candidate: string, typed: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new PlanSourceRefusal(candidate === typed ? `${typed} is not a web address.` : `${typed} redirects to an address that cannot be read.`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new PlanSourceRefusal(candidate === typed ? `${typed} is not a web address. A plan source starts with https://.` : `${typed} redirects somewhere that is not a web address.`);
+  }
+  if (env.BENTO_MODE === "multi" && parsed.protocol !== "https:") {
+    throw new PlanSourceRefusal(candidate === typed ? `${typed} cannot be fetched. A plan source starts with https://.` : `${typed} redirects to a plain http address, which cannot be fetched. A plan source starts with https://.`);
+  }
+  return parsed;
 }
 
 function isTextType(mime: string): boolean {
@@ -524,6 +576,16 @@ async function readCapped(response: Awaited<ReturnType<typeof safeFetch>>, maxBy
   return Buffer.concat(chunks);
 }
 
+/* ------------------------------------------------------------------ *
+ * HTML to text.
+ * ------------------------------------------------------------------ */
+
+/** Elements whose content is never text a reader sees. */
+const DROPPED = new Set(["script", "style", "noscript", "template", "svg", "canvas", "iframe", "head", "nav", "header", "footer", "aside"]);
+
+/** Elements that end a line when they close. */
+const BLOCKS = new Set(["p", "div", "li", "tr", "blockquote", "section", "ul", "ol", "table", "dd", "dt", "figcaption", "summary", "details", "article", "main", "form", "fieldset"]);
+
 /**
  * A page as a reader sees it.
  *
@@ -533,47 +595,149 @@ async function readCapped(response: Awaited<ReturnType<typeof safeFetch>>, maxBy
  * text between its tags. Enough that a plan published as a page reads
  * as the plan, which is the whole job; a page whose content arrives
  * only by script comes back nearly empty, and the route then says so.
+ *
+ * One pass over the characters, never a regular expression over the
+ * whole page. The page is anybody's, up to eight megabytes, and runs
+ * on the server's one thread: a lazy pattern that scans for a closing
+ * tag that never comes is quadratic, and a page of nothing but
+ * unclosed `<head>` tags held the event loop for every tenant. This
+ * walker reads each character once whatever the page does.
  */
 export function htmlToText(html: string): { title: string | null; text: string } {
-  const title = decodeEntities(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").replace(/\s+/g, " ").trim() || null;
-
-  let body = html
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<(script|style|noscript|template|svg|canvas|iframe|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "");
+  const titleStart = indexOfTag(html, "title", 0);
+  let title: string | null = null;
+  if (titleStart !== -1) {
+    const open = html.indexOf(">", titleStart);
+    const close = open === -1 ? -1 : indexOfClose(html, "title", open + 1);
+    if (open !== -1 && close !== -1) title = decodeEntities(html.slice(open + 1, close)).replace(/\s+/g, " ").trim() || null;
+  }
 
   // The article, when the page says which part is the article.
-  const main = /<main\b[^>]*>([\s\S]*?)<\/main\s*>/i.exec(body)?.[1] ?? /<article\b[^>]*>([\s\S]*?)<\/article\s*>/i.exec(body)?.[1];
-  if (main && main.replace(/<[^>]+>/g, "").trim().length > 0) body = main;
-  else body = /<body\b[^>]*>([\s\S]*?)<\/body\s*>/i.exec(body)?.[1] ?? body;
+  let start = 0;
+  let end = html.length;
+  for (const part of ["main", "article", "body"]) {
+    const at = indexOfTag(html, part, 0);
+    if (at === -1) continue;
+    const open = html.indexOf(">", at);
+    if (open === -1) continue;
+    const close = indexOfClose(html, part, open + 1);
+    const inner = close === -1 ? html.length : close;
+    if (part !== "body" && !hasText(html, open + 1, inner)) continue;
+    start = open + 1;
+    end = inner;
+    break;
+  }
 
-  // Navigation, headers and footers are not the plan.
-  body = body.replace(/<(nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "");
+  const out: string[] = [];
+  let i = start;
+  while (i < end) {
+    const lt = html.indexOf("<", i);
+    if (lt === -1 || lt >= end) {
+      out.push(html.slice(i, end));
+      break;
+    }
+    out.push(html.slice(i, lt));
+    // A comment: skip to its end, or to the end of the page.
+    if (html.startsWith("<!--", lt)) {
+      const endComment = html.indexOf("-->", lt + 4);
+      i = endComment === -1 ? end : endComment + 3;
+      continue;
+    }
+    const gt = html.indexOf(">", lt);
+    if (gt === -1 || gt >= end) break;
+    const tag = html.slice(lt + 1, gt);
+    i = gt + 1;
+    const closing = tag.startsWith("/");
+    const name = tagName(tag);
+    if (!name) continue;
+    if (!closing && DROPPED.has(name)) {
+      // Everything up to the matching close tag is not text. Nesting
+      // of the same element is rare enough in these to ignore: a
+      // nav inside a nav ends at the first close, which costs a few
+      // links, never the plan.
+      const close = indexOfClose(html, name, i);
+      i = close === -1 ? end : html.indexOf(">", close) + 1 || end;
+      continue;
+    }
+    if (!closing && name === "pre") {
+      const close = indexOfClose(html, "pre", i);
+      const code = html.slice(i, close === -1 ? end : close);
+      out.push("\n\n```\n", stripTags(code), "\n```\n\n");
+      i = close === -1 ? end : html.indexOf(">", close) + 1 || end;
+      continue;
+    }
+    if (!closing && /^h[1-6]$/.test(name)) out.push("\n\n", "#".repeat(Number(name[1])), " ");
+    else if (closing && /^h[1-6]$/.test(name)) out.push("\n\n");
+    else if (!closing && name === "li") out.push("\n- ");
+    else if (name === "br") out.push("\n");
+    else if (closing && BLOCKS.has(name)) out.push("\n\n");
+    else if (closing && (name === "td" || name === "th")) out.push("\t");
+  }
 
-  // Structure that should survive as text: headings as markdown
-  // headings, list items as bullets, code blocks as fences, and a
-  // line break wherever a block ends.
-  body = body
-    // Entities inside a code block are decoded with everything else
-    // below, after the tags are gone: decoding "&lt;" here would hand
-    // the tag stripper a "<" to eat.
-    .replace(/<pre\b[^>]*>([\s\S]*?)<\/pre\s*>/gi, (_, code: string) => `\n\n\`\`\`\n${code.replace(/<[^>]+>/g, "")}\n\`\`\`\n\n`)
-    .replace(/<h([1-6])\b[^>]*>/gi, (_, level: string) => `\n\n${"#".repeat(Number(level))} `)
-    .replace(/<\/h[1-6]\s*>/gi, "\n\n")
-    .replace(/<li\b[^>]*>/gi, "\n- ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|tr|blockquote|section|ul|ol|table|dd|dt|figcaption|summary|details)\s*>/gi, "\n\n")
-    .replace(/<\/(td|th)\s*>/gi, "\t")
-    .replace(/<[^>]+>/g, "");
-
-  const text = decodeEntities(body)
+  const text = decodeEntities(out.join(""))
     .replace(/ /g, " ")
     .replace(/\r\n?/g, "\n")
-    .replace(/[ \t ]+\n/g, "\n")
-    .replace(/\n[ \t ]+/g, "\n")
-    .replace(/[ \t ]{2,}/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return { title, text };
+}
+
+/** The element's name from the inside of its tag, lower case, or null for something that is not a tag. */
+function tagName(tag: string): string | null {
+  const match = /^\/?\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(tag);
+  return match ? match[1]!.toLowerCase() : null;
+}
+
+/** Where `<name` opens next, as a whole word, case insensitive. */
+function indexOfTag(html: string, name: string, from: number): number {
+  const lower = html.toLowerCase();
+  let at = from;
+  for (;;) {
+    at = lower.indexOf(`<${name}`, at);
+    if (at === -1) return -1;
+    const after = lower.charCodeAt(at + 1 + name.length);
+    if (Number.isNaN(after) || after === 62 /* > */ || after === 32 || after === 9 || after === 10 || after === 13 || after === 47 /* / */) return at;
+    at += 1;
+  }
+}
+
+/** Where `</name` closes next, case insensitive, or -1. */
+function indexOfClose(html: string, name: string, from: number): number {
+  const lower = html.toLowerCase();
+  let at = from;
+  for (;;) {
+    at = lower.indexOf(`</${name}`, at);
+    if (at === -1) return -1;
+    const after = lower.charCodeAt(at + 2 + name.length);
+    if (Number.isNaN(after) || after === 62 || after === 32 || after === 9 || after === 10 || after === 13) return at;
+    at += 1;
+  }
+}
+
+/** Whether a slice has any text outside its tags. */
+function hasText(html: string, from: number, to: number): boolean {
+  return stripTags(html.slice(from, to)).trim().length > 0;
+}
+
+/** Tags gone, text kept, one pass. */
+function stripTags(fragment: string): string {
+  const out: string[] = [];
+  let i = 0;
+  while (i < fragment.length) {
+    const lt = fragment.indexOf("<", i);
+    if (lt === -1) {
+      out.push(fragment.slice(i));
+      break;
+    }
+    out.push(fragment.slice(i, lt));
+    const gt = fragment.indexOf(">", lt);
+    if (gt === -1) break;
+    i = gt + 1;
+  }
+  return out.join("");
 }
 
 const NAMED_ENTITIES: Record<string, string> = {
@@ -611,40 +775,9 @@ function decodeEntities(text: string): string {
   });
 }
 
-/** The media type a file name suggests, when the client did not say. */
-export function mimeForName(name: string): string {
-  const ext = /\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase();
-  switch (ext) {
-    case "md":
-    case "markdown":
-      return "text/markdown";
-    case "json":
-      return "application/json";
-    case "yml":
-    case "yaml":
-      return "application/yaml";
-    case "html":
-    case "htm":
-      return "text/html";
-    case "csv":
-      return "text/csv";
-    case "svg":
-      return "image/svg+xml";
-    case "pdf":
-      return "application/pdf";
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "gif":
-      return "image/gif";
-    case "webp":
-      return "image/webp";
-    default:
-      return "text/plain";
-  }
-}
+/* ------------------------------------------------------------------ *
+ * Rows, keys, and the copy in the workspace.
+ * ------------------------------------------------------------------ */
 
 /** The store key for one source's bytes. Org-prefixed for lifecycle bookkeeping only. */
 export function planSourceStorageKey(organizationId: string | null, swarmId: string, sourceId: string): string {
@@ -652,21 +785,24 @@ export function planSourceStorageKey(organizationId: string | null, swarmId: str
 }
 
 /**
- * Writes the resolved sources against a swarm that now exists.
+ * Writes the resolved sources against a swarm that now exists, and
+ * returns the keys it put on the shelf.
  *
  * Bytes go to the store first, then the rows: a row that names an
- * object that is not there would be a source nobody can open, while
- * an object with no row is a few bytes on a shelf that the delete
- * route's sweep never finds, which is the cheaper mistake. If the
- * rows fail, the objects just shelved are taken down again.
+ * object that is not there would be a source nobody can open. If the
+ * rows fail here, the objects just shelved are taken down again. The
+ * caller holds the keys for the failure this function cannot see: in
+ * multi mode the rows are inside the request's transaction, and a
+ * throw later in the handler rolls them back after this has returned,
+ * so the route registers the same removal on that path.
  */
 export async function insertPlanSources(
   db: Db,
   store: ArtifactStore | null,
   swarm: { id: string; organizationId: string | null },
   drafts: PlanSourceDraft[],
-): Promise<void> {
-  if (drafts.length === 0) return;
+): Promise<string[]> {
+  if (drafts.length === 0) return [];
   const rows = drafts.map((draft) => ({ id: randomUUID(), draft }));
   const shelved: string[] = [];
   try {
@@ -696,6 +832,7 @@ export async function insertPlanSources(
     if (shelved.length > 0 && store) await store.remove(shelved).catch(() => {});
     throw err;
   }
+  return shelved;
 }
 
 /** Every source of a swarm, in the order the person gave them, content included. */
@@ -716,7 +853,7 @@ export async function loadPlanSources(db: Db, swarmId: string): Promise<PlanSour
     .from(swarmPlanSources)
     .where(eq(swarmPlanSources.swarmId, swarmId))
     .orderBy(asc(swarmPlanSources.position), asc(swarmPlanSources.createdAt));
-  return rows.map((row) => ({ ...row, media: mediaOf(row.mime) }));
+  return rows.map((row) => ({ ...row, media: planMediaOf(row.mime) }));
 }
 
 /** The same list without the text, for a console that lists what was handed over. */
@@ -735,7 +872,7 @@ export async function listPlanSources(db: Db, swarmId: string): Promise<PlanSour
     .from(swarmPlanSources)
     .where(eq(swarmPlanSources.swarmId, swarmId))
     .orderBy(asc(swarmPlanSources.position), asc(swarmPlanSources.createdAt));
-  return rows.map((row) => ({ ...row, media: mediaOf(row.mime), hasText: row.size > 0 }));
+  return rows.map((row) => ({ ...row, media: planMediaOf(row.mime), hasText: row.size > 0 }));
 }
 
 /** The keys a swarm's sources hold in the store, for the delete route's sweep. */
@@ -758,48 +895,44 @@ export async function planSourceStorageKeys(db: Db, swarmId: string): Promise<st
 export function planSourceFileName(source: Pick<PlanSource, "position" | "name" | "mime" | "kind" | "url">): string {
   const base = path.basename(source.kind === "website" && source.url ? nameFromUrl(source.url) : source.name);
   const safe = base.replace(/[^\p{L}\p{N}._-]/gu, "_").replace(/^\.+/, "") || "source";
-  const named = /\.[a-z0-9]+$/i.test(safe) ? safe : `${safe}${extensionFor(source.mime)}`;
+  const named = /\.[a-z0-9]+$/i.test(safe) ? safe : `${safe}${planFileExtension(source.mime)}`;
   return `${source.position + 1}-${named}`;
 }
 
-function extensionFor(mime: string): string {
-  switch (mime) {
-    case "application/pdf":
-      return ".pdf";
-    case "image/png":
-      return ".png";
-    case "image/jpeg":
-      return ".jpg";
-    case "image/gif":
-      return ".gif";
-    case "image/webp":
-      return ".webp";
-    case "text/html":
-      return ".html";
-    case "text/markdown":
-      return ".md";
-    case "application/json":
-      return ".json";
-    default:
-      return ".txt";
-  }
+/**
+ * The marker that says this workspace already holds this set of
+ * sources, named by what the set is: a swarm's sources never change,
+ * so one write per sandbox is enough, and the name is how a later run
+ * knows without reading anything.
+ */
+function planSourceMarker(sources: PlanSource[]): string {
+  const fingerprint = createHash("sha256")
+    .update(sources.map((source) => `${source.id}:${source.size}:${source.byteSize ?? ""}`).join("\n"))
+    .digest("hex")
+    .slice(0, 16);
+  return `.bento-plan-${fingerprint}`;
 }
 
 /**
- * Puts a copy of every source in the agent's workspace.
+ * Puts a copy of every source in the agent's workspace, once.
  *
  * Text sources are in the prompt and behind read_plan already; the
  * copy on disk is for the ones a prompt cannot carry (a PDF's layout,
  * an image) and for an agent that would rather grep a long plan than
- * read it in one piece. Written through stdin into a script inside
- * the sandbox, the way message attachments are, so a person's bytes
- * never become a shell argument. Idempotent: a later run on the same
- * machine writes the same files again.
+ * read it in one piece. Through the shared stdin transfer, so a
+ * person's bytes never become a shell argument.
+ *
+ * Once per sandbox, not once per run. A swarm's sources are fixed, a
+ * planner wakes many times on the same machine, and thirty megabytes
+ * of PDFs pulled from the store and pushed through stdin on every
+ * wake is cost with nothing to show for it. A marker file named by
+ * the set is written with the files; a later run that finds it
+ * answers the same paths without touching the store.
  *
  * Returns each source's absolute path, or null for the lot when the
  * driver cannot take stdin, which the prompt then says. A missing
  * object in the store leaves that one source without a path and the
- * rest with theirs.
+ * rest with theirs, and leaves no marker, so the next run tries again.
  */
 export async function writePlanSourceFiles(
   driver: SandboxDriver,
@@ -810,46 +943,38 @@ export async function writePlanSourceFiles(
   if (sources.length === 0) return new Map();
   if (!driver.supportsStdin) return null;
 
+  const directory = path.posix.join(handle.workdir, PLAN_SOURCE_DIR);
+  const marker = planSourceMarker(sources);
+  const pathOf = (source: PlanSource) => path.posix.join(directory, planSourceFileName(source));
+
+  if (await sandboxFileExists(driver, handle, path.posix.join(directory, marker))) {
+    return new Map(sources.map((source) => [source.id, pathOf(source)]));
+  }
+
   const files: { name: string; data: string }[] = [];
   const paths = new Map<string, string>();
+  let complete = true;
   for (const source of sources) {
     let bytes: Buffer | null = null;
     if (source.storageKey) {
-      if (!store) continue;
-      bytes = await store.get(source.storageKey);
-      if (!bytes) continue;
+      bytes = store ? await store.get(source.storageKey) : null;
     } else if (source.content !== null) {
       bytes = Buffer.from(source.content, "utf8");
     }
-    if (!bytes) continue;
-    const name = planSourceFileName(source);
-    files.push({ name, data: bytes.toString("base64") });
-    paths.set(source.id, path.posix.join(handle.workdir, PLAN_SOURCE_DIR, name));
+    if (!bytes) {
+      complete = false;
+      continue;
+    }
+    files.push({ name: planSourceFileName(source), data: bytes.toString("base64") });
+    paths.set(source.id, pathOf(source));
   }
   if (files.length === 0) return paths;
+  if (complete) files.push({ name: marker, data: Buffer.from(marker).toString("base64") });
 
-  const script = `
-const fs = require('node:fs');
-const path = require('node:path');
-let input = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => input += chunk);
-process.stdin.on('end', () => {
-  const {directory, files} = JSON.parse(input);
-  fs.mkdirSync(directory, {recursive: true, mode: 0o700});
-  for (const file of files) fs.writeFileSync(path.join(directory, file.name), Buffer.from(file.data, 'base64'), {mode: 0o600});
-});`;
-  const result = await collectExec(
-    driver.exec(handle, ["node", "-e", script], {
-      cwd: handle.workdir,
-      timeoutMs: 60_000,
-      stdin: (async function* () {
-        yield JSON.stringify({ directory: path.posix.join(handle.workdir, PLAN_SOURCE_DIR), files });
-      })(),
-    }),
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`the plan sources could not be written into the workspace: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`}`);
+  try {
+    await writeSandboxFiles(driver, handle, directory, files, { overwrite: true, timeoutMs: 120_000 });
+  } catch (err) {
+    throw new Error(`the plan sources could not be written into the workspace: ${err instanceof Error ? err.message : String(err)}`);
   }
   return paths;
 }

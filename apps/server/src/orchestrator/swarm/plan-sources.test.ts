@@ -7,6 +7,7 @@ import {
   extractPdfText,
   fetchPlanWebsite,
   htmlToText,
+  MAX_REDIRECTS,
   mediaOf,
   PlanSourceRefusal,
   planSourceFileName,
@@ -194,6 +195,13 @@ before(async () => {
     } else if (req.url === "/away") {
       res.writeHead(302, { location: "/plan" });
       res.end();
+    } else if (req.url === "/nowhere") {
+      res.writeHead(302);
+      res.end();
+    } else if (req.url?.startsWith("/hop/")) {
+      const n = Number(req.url.slice(5));
+      res.writeHead(301, { location: n >= 6 ? "/plan" : `/hop/${n + 1}` });
+      res.end();
     } else {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("nope");
@@ -229,9 +237,60 @@ test("what cannot be a plan is refused with the address and the reason", async (
   assert.ok(image.bytes && image.bytes.byteLength === 4, "an image at an address comes back as its bytes");
   await refused(`${origin}/missing`, /answered 404/);
   await refused(`${origin}/huge`, /larger than 8 MB/);
-  await refused(`${origin}/away`, /redirect/);
+  await refused(`${origin}/nowhere`, /answered 302 with nowhere to go/);
+  await refused(`${origin}/hop/1`, /redirects 6 times, which is more than a plan source may/);
   await assert.rejects(fetchPlanWebsite(ENV, "not a url"), /is not a web address/);
   await assert.rejects(fetchPlanWebsite(ENV, "ftp://example.test/plan"), /starts with https/);
+});
+
+test("a moved page is followed to where it went, within the mode's limit, and read from there", async () => {
+  const page = await fetchPlanWebsite(ENV, `${origin}/away`);
+  assert.equal(page.url, `${origin}/plan`, "the address read is the one the redirect led to");
+  assert.equal(page.title, "The plan");
+  const five = await fetchPlanWebsite(ENV, `${origin}/hop/2`);
+  assert.equal(five.url, `${origin}/plan`, "five hops is what a local install follows");
+  assert.deepEqual(MAX_REDIRECTS, { local: 5, multi: 1 }, "a hosted deploy follows one, each hop through the same address checks");
+});
+
+test("a page of nothing but unclosed tags is stripped in linear time", () => {
+  const hostile = "<head>".repeat(40_000);
+  const started = performance.now();
+  const { text } = htmlToText(hostile);
+  const took = performance.now() - started;
+  assert.equal(text, "");
+  assert.ok(took < 500, `240 KB of unclosed head tags took ${Math.round(took)} ms; a lazy regex took seconds here and tens of minutes at 8 MB`);
+
+  const bigger = `<main>${"<div><p>plan ".repeat(60_000)}</main>`;
+  const again = performance.now();
+  const stripped = htmlToText(bigger).text;
+  assert.ok(performance.now() - again < 1500, "and a megabyte of real tags is still quick");
+  assert.ok(stripped.startsWith("plan"), "with the text still read");
+});
+
+test("when one page is refused the others stop downloading", async () => {
+  const seen: { url: string; aborted: boolean }[] = [];
+  const fetchPage = (url: string, signal: AbortSignal): Promise<FetchedPage> =>
+    new Promise((resolve, reject) => {
+      if (url.endsWith("/missing")) {
+        reject(new PlanSourceRefusal(`${url} answered 404, so there is nothing to read there.`));
+        return;
+      }
+      // A slow page, still downloading when its sibling is refused.
+      signal.addEventListener("abort", () => {
+        seen.push({ url, aborted: true });
+        reject(new Error("aborted"));
+      });
+    });
+  await assert.rejects(
+    collectPlanSources(ENV, [
+      { kind: "website", url: "https://example.test/slow-1" },
+      { kind: "website", url: "https://example.test/missing" },
+      { kind: "website", url: "https://example.test/slow-2" },
+    ], { hasStore: true, fetchPage }),
+    (err: unknown) => err instanceof PlanSourceRefusal && /missing answered 404/.test(err.message),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(seen.map((entry) => entry.url).sort(), ["https://example.test/slow-1", "https://example.test/slow-2"], "both slow fetches were told to stop");
 });
 
 test("in multi mode an address has to be https, said in the plan's own words", async () => {
@@ -287,4 +346,43 @@ test("every source is copied into the workspace by number, bytes from the store 
   // Written again on a later run: the same files, no complaint.
   const again = await writePlanSourceFiles(driver, store, handle, sources);
   assert.equal(again?.size, 3);
+});
+
+test("a workspace that already holds the sources is not written again, and the store is not asked", async () => {
+  const { mkdtemp, readdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const { LocalProcessDriver } = await import("@bento/sandbox");
+  const { DiskArtifactStore } = await import("../../artifact-store.js");
+  const { writePlanSourceFiles, PLAN_SOURCE_DIR } = await import("./plan-sources.js");
+
+  const dataDir = await mkdtemp(path.join(tmpdir(), "bento-plan-store-"));
+  const workdir = await mkdtemp(path.join(tmpdir(), "bento-plan-workspace-"));
+  const store = new DiskArtifactStore(dataDir);
+  await store.put("org/local/swarm/s2/plan/a", ONE_PIXEL_PNG, "image/png");
+  let gets = 0;
+  const counted = { ...store, get: (key: string) => (gets += 1, store.get(key)), put: store.put.bind(store), remove: store.remove.bind(store), description: store.description };
+
+  const driver = new LocalProcessDriver();
+  const handle = { provider: "local-process" as const, externalId: "ws", workdir };
+  const sources = [
+    { id: "a", position: 0, kind: "file" as const, name: "mockup.png", url: null, mime: "image/png", media: "image" as const, size: 0, content: null, storageKey: "org/local/swarm/s2/plan/a", byteSize: ONE_PIXEL_PNG.byteLength },
+    { id: "b", position: 1, kind: "file" as const, name: "plan.md", url: null, mime: "text/markdown", media: "text" as const, size: 6, content: "# Plan", storageKey: null, byteSize: null },
+  ];
+  const first = await writePlanSourceFiles(driver, counted, handle, sources);
+  assert.equal(first?.size, 2);
+  assert.equal(gets, 1, "the image was pulled from the store once");
+  const written = (await readdir(path.join(workdir, PLAN_SOURCE_DIR))).sort();
+  assert.ok(written.some((name) => name.startsWith(".bento-plan-")), `a marker names the set: ${written.join(", ")}`);
+
+  // The planner wakes again on the same machine: same answer, no transfer.
+  const second = await writePlanSourceFiles(driver, counted, handle, sources);
+  assert.deepEqual([...second!.entries()], [...first!.entries()]);
+  assert.equal(gets, 1, "the store was not asked again");
+
+  // A different set (a source added by a reopen, say) is a different marker and is written.
+  const more = [...sources, { id: "c", position: 2, kind: "file" as const, name: "notes.md", url: null, mime: "text/markdown", media: "text" as const, size: 5, content: "notes", storageKey: null, byteSize: null }];
+  const third = await writePlanSourceFiles(driver, counted, handle, more);
+  assert.equal(third?.size, 3);
+  assert.equal(gets, 2, "a new set pulls the bytes again");
 });

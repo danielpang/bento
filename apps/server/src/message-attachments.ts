@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
-import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
+import { writeSandboxFiles } from "./sandbox-files.js";
 
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 export const messageAttachments = z
@@ -34,31 +35,14 @@ export async function writeMessageAttachments(
   attachments: MessageAttachment[],
 ): Promise<string[]> {
   if (!driver.supportsStdin) throw new Error("This sandbox cannot receive file attachments.");
-  const directory = `.bento-input-${randomUUID()}`;
+  const directory = path.posix.join(handle.workdir, `.bento-input-${randomUUID()}`);
   const files = attachments.map((item, index) => ({
-    ...item,
+    data: item.data,
     name: `${index + 1}-${path.basename(item.name).replace(/[^\p{L}\p{N}._-]/gu, "_") || "attachment"}`,
   }));
-  const script = `
-const fs = require('node:fs');
-const path = require('node:path');
-let input = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => input += chunk);
-process.stdin.on('end', () => {
-  const {directory, files} = JSON.parse(input);
-  fs.mkdirSync(directory, {mode: 0o700});
-  for (const file of files) fs.writeFileSync(path.join(directory, file.name), Buffer.from(file.data, 'base64'), {flag:'wx', mode:0o600});
-});`;
-  const result = await collectExec(
-    driver.exec(handle, ["node", "-e", script], {
-      timeoutMs: 30000,
-      stdin: (async function* () {
-        yield JSON.stringify({ directory, files });
-      })(),
-    }),
-  );
-  if (result.exitCode !== 0)
+  try {
+    return await writeSandboxFiles(driver, handle, directory, files, { overwrite: false });
+  } catch {
     throw new Error("Could not transfer attachments to the agent workspace. Try again.");
-  return files.map((file) => path.posix.join(handle.workdir, directory, file.name));
+  }
 }

@@ -10164,6 +10164,7 @@ a.swarm-plan-source-name:hover {
  */
 .swarm-brief[data-open="false"] {
   grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   padding: 8px 20px;
 }
 
@@ -10218,4 +10219,9 @@ a.swarm-plan-source-name:hover {
 
 .swarm-brief-toggle[aria-expanded="true"] .swarm-brief-chevron {
   transform: rotate(180deg);
+}
+
+/* The next step, on the folded brief: under the one line, never hidden with the goal. */
+.swarm-brief[data-open="false"] .swarm-next-step-folded {
+  margin: 4px 0 0;
 }
