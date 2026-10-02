@@ -171,7 +171,8 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
     settings: { judgeProfileId: "judge-1", completionCommand: "pnpm test" },
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
-    attachments: [{ name: "notes.md", bytes: 12 }],
+    planSources: [],
+    planMode: "goal",
     start: { kind: "new-branch", name: "bento/checkout" },
     deliverable: "code",
     budgetUsd: 40,
@@ -195,6 +196,59 @@ test("creating a swarm sends what the route takes and nothing else", async () =>
   });
   assert.equal(created.swarm.status, "planning");
   assert.deepEqual(created.tasks, [], "a new swarm has no plan until its planner writes one");
+});
+
+test("a swarm started from an existing plan sends the plan and the mode, as the route takes them", async () => {
+  const { calls, doFetch } = fetchStub(wireSwarm({ status: "planning", planMode: "existing" }));
+  const created = await httpSwarmApi("", doFetch).createSwarm({
+    projectId: "p1",
+    name: "Checkout rewrite",
+    goal: "Implement the plan.",
+    planSources: [
+      { kind: "file", name: "docs/plan.md", content: "# Plan\n\n1. Add the totals helper." },
+      { kind: "website", url: "https://example.test/plan" },
+    ],
+    planMode: "existing",
+    start: { kind: "new-branch", name: "bento/checkout" },
+    deliverable: "code",
+    budgetUsd: null,
+    workers: 2,
+    planOnly: true,
+  });
+
+  assert.deepEqual(calls[0]!.body, {
+    projectId: "p1",
+    title: "Checkout rewrite",
+    goal: "Implement the plan.",
+    deliverable: "code",
+    maxWorkers: 2,
+    planMode: "existing",
+    planSources: [
+      { kind: "file", name: "docs/plan.md", content: "# Plan\n\n1. Add the totals helper." },
+      { kind: "website", url: "https://example.test/plan" },
+    ],
+  });
+  assert.equal(created.swarm.planMode, "existing", "and the row reads back as a swarm built from a plan");
+});
+
+test("a detail lists what the planner was handed, with a page's address checked before it becomes a link", async () => {
+  const { doFetch } = fetchStub({
+    swarm: wireSwarm({ planMode: "existing" }),
+    tasks: [],
+    activeRuns: [],
+    planSources: [
+      { id: "ps-1", position: 0, kind: "file", name: "docs/plan.md", url: null, size: 1200 },
+      { id: "ps-2", position: 1, kind: "website", name: "The plan", url: "https://example.test/plan", size: 800 },
+      { id: "ps-3", position: 2, kind: "website", name: "Bad", url: "javascript:alert(1)", size: 10 },
+    ],
+  });
+  const read = await httpSwarmApi("", doFetch).getSwarm("sw-1");
+  assert.equal(read.swarm.planMode, "existing");
+  assert.deepEqual(
+    read.planSources?.map((source) => [source.name, source.url]),
+    [["docs/plan.md", null], ["The plan", "https://example.test/plan"], ["Bad", null]],
+    "a file has no address, a page keeps its http address, and anything else is drawn without a link",
+  );
 });
 
 test("retrying a failed planner reaches its run endpoint", async () => {

@@ -3,7 +3,7 @@ import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import { clampWorkers, suggestBranch } from "./components/NewSwarmDialog.js";
+import { clampWorkers, existingPlanHelp, planSourceRefusal, suggestBranch } from "./components/NewSwarmDialog.js";
 import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";
 import type { NewSwarmInput } from "./swarm/types.js";
 
@@ -35,7 +35,8 @@ function input(over: Partial<NewSwarmInput> = {}): NewSwarmInput {
     projectId: "p1",
     name: "Checkout rewrite",
     goal: "Replace the checkout.",
-    attachments: [],
+    planSources: [],
+    planMode: "goal",
     start: { kind: "new-branch", name: "bento/checkout-rewrite" },
     deliverable: "code",
     budgetUsd: 40,
@@ -212,4 +213,34 @@ test("changing a swarm's settings changes what was given and nothing else", asyn
   assert.equal(after.budgetUsd, null, "null clears the cap");
   assert.equal(after.settings.workerProfileId, before.settings.workerProfileId, "and the rest is left alone");
   assert.equal(after.timeLimitMin, before.timeLimitMin);
+});
+
+/* ---------------------------------------------------------------- *
+ * The plan a person hands over: what the dialog refuses before the
+ * request, so a person is told at the moment they pick the file.
+ * ---------------------------------------------------------------- */
+
+test("a plan source is refused for the reasons the route would refuse it, and accepted otherwise", () => {
+  assert.equal(planSourceRefusal([], { kind: "file", name: "plan.md", content: "# Plan" }), null);
+  assert.equal(planSourceRefusal([], { kind: "website", url: "https://example.test/plan" }), null);
+  assert.match(planSourceRefusal([], { kind: "file", name: "plan.pdf", content: "%PDF\u0000\u0001" })!, /not a text file/);
+  assert.match(planSourceRefusal([], { kind: "file", name: "empty.md", content: "  " })!, /is empty/);
+  assert.match(planSourceRefusal([], { kind: "file", name: "big.md", content: "x".repeat(300_001) })!, /at most/);
+  assert.match(planSourceRefusal([], { kind: "website", url: "example.test/plan" })!, /not a web address/);
+  assert.match(planSourceRefusal([], { kind: "website", url: "ftp://example.test/plan" })!, /not a web address/);
+  assert.match(
+    planSourceRefusal([{ kind: "website", url: "https://example.test/plan" }], { kind: "website", url: "https://example.test/plan" })!,
+    /already in the list/,
+  );
+  const full = Array.from({ length: 20 }, (_, i) => ({ kind: "file" as const, name: `${i}.md`, content: "x" }));
+  assert.match(planSourceRefusal(full, { kind: "file", name: "one-more.md", content: "x" })!, /up to 20/);
+  const heavy = Array.from({ length: 4 }, (_, i) => ({ kind: "file" as const, name: `${i}.md`, content: "x".repeat(250_000) }));
+  assert.match(planSourceRefusal(heavy, { kind: "file", name: "last.md", content: "x" })!, /past 1,000,000/);
+});
+
+test("the switch says what it does in each position, and how the sources are read", () => {
+  assert.match(existingPlanHelp(true, 2), /builds the task tree from this plan/);
+  assert.match(existingPlanHelp(true, 0), /The goal above is the plan/);
+  assert.match(existingPlanHelp(false, 2), /as background/);
+  assert.match(existingPlanHelp(false, 0), /writes the plan itself/);
 });

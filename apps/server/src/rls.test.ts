@@ -52,6 +52,7 @@ const TENANT_TABLES = [
   "swarm_landings",
   "swarm_pull_requests",
   "swarm_messages",
+  "swarm_plan_sources",
   "mcp_connections",
   "mcp_oauth_codes",
 ];

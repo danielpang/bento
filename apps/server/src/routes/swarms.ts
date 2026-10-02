@@ -1,6 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import type { SandboxHandle } from "@bento/sandbox";
@@ -51,6 +52,13 @@ import {
   splitLeaf,
 } from "../orchestrator/swarm/task-actions.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
+import {
+  collectPlanSources,
+  insertPlanSources,
+  listPlanSources,
+  PlanSourceRefusal,
+  planSourcesInput,
+} from "../orchestrator/swarm/plan-sources.js";
 import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
 import { reopenRefusal, reopenSwarm, swarmHasActiveRun } from "../orchestrator/swarm/reopen.js";
 import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
@@ -193,7 +201,31 @@ const createSwarm = z.object({
     .max(200)
     .refine((value) => isSafeBranchName(value), "that is not a branch name")
     .nullish(),
+  /**
+   * Where the plan comes from, and the plan itself.
+   *
+   * "goal" is the ordinary swarm: the planner reads the goal and the
+   * code and writes the plan. "existing" says the person already has
+   * one, in the sources below or in the goal text, and the planner
+   * turns it into the task tree rather than planning from scratch.
+   * Sources without the mode are reference material; the mode
+   * without sources means the goal text is the plan.
+   */
+  planMode: z.enum(["goal", "existing"]).default("goal"),
+  planSources: planSourcesInput.optional(),
 });
+
+/**
+ * How large a create request may be.
+ *
+ * A plan arrives inline as text, and the caps on it are in characters
+ * (MAX_SWARM_PLAN_CHARS across every source). JSON escaping and the
+ * UTF-8 of a plan written in anything but ASCII can take that to a
+ * few times the count in bytes, so the limit is generous against the
+ * character cap and still far below anything an uploaded plan has a
+ * reason to be.
+ */
+const CREATE_BODY_BYTES = 8 * 1024 * 1024;
 
 /**
  * What a person may change about a swarm: what it is called, its
@@ -441,7 +473,7 @@ export function swarmRoutes(ctx: AppContext) {
      * reports, no messages. What there is, is a goal somebody just
      * wrote, which is exactly the planner's opening prompt.
      */
-    .post("/", zValidator("json", createSwarm), async (c) => {
+    .post("/", bodyLimit({ maxSize: CREATE_BODY_BYTES }), zValidator("json", createSwarm), async (c) => {
       const body = c.req.valid("json");
       const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, body.projectId));
       if (!project || !(await canAccessProject(ctx, c, project.id))) {
@@ -510,6 +542,20 @@ export function swarmRoutes(ctx: AppContext) {
       });
       if (budget) return c.json({ error: budget, code: "PLAN_LIMIT" }, 402);
 
+      /*
+       * The plan the person handed over, resolved before anything is
+       * written: every website in it is fetched now, by the server,
+       * and a page that cannot be read refuses the whole request
+       * rather than leaving a swarm with half its plan.
+       */
+      let planSources;
+      try {
+        planSources = await collectPlanSources(ctx.env, body.planSources ?? []);
+      } catch (err) {
+        if (err instanceof PlanSourceRefusal) return c.json({ error: err.message, code: "PLAN_SOURCE" }, 400);
+        throw err;
+      }
+
       const slug = await uniqueSlug(ctx, c, project.id, body.title);
       const [swarm] = await db(c, ctx)
         .insert(swarms)
@@ -541,6 +587,7 @@ export function swarmRoutes(ctx: AppContext) {
           branchName: swarmBranchName(slug),
           deliverable: body.deliverable,
           startBranch: body.startBranch ?? null,
+          planMode: body.planMode,
           maxWorkers: body.maxWorkers ?? defaultMaxWorkers(ctx),
           budgetUsd,
           timeLimitMin: body.timeLimitMin ?? null,
@@ -548,6 +595,7 @@ export function swarmRoutes(ctx: AppContext) {
         })
         .returning();
       if (!swarm) return c.json({ error: "something went wrong starting the swarm; try again" }, 500);
+      await insertPlanSources(db(c, ctx), swarm.id, planSources);
 
       const run = await startRunIfIdle(
         db(c, ctx),
@@ -729,9 +777,16 @@ export function swarmRoutes(ctx: AppContext) {
         .from(swarmPullRequests)
         .where(eq(swarmPullRequests.swarmId, swarm.id))
         .orderBy(asc(swarmPullRequests.createdAt));
+      /**
+       * What the person handed the planner, without the text: the
+       * list is for a page that says what the plan was built from,
+       * and the text is the planner's to read through its tools.
+       */
+      const planSources = await listPlanSources(db(c, ctx), swarm.id);
       return c.json({
         swarm,
         tasks,
+        planSources,
         activeRuns: runs,
         agentTimeMs,
         plannerRun: plannerRun ? { ...plannerRun, error: plannerError, agent: plannerAgent ?? null } : null,

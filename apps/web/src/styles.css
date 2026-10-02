@@ -9982,3 +9982,157 @@ a.hours-person-name:hover {
   .swarm-stage { padding: 0; }
   .swarm-outline { padding-inline: 12px; }
 }
+
+
+/*
+ * The plan a person hands a swarm, in the New swarm dialog and under
+ * the goal on the swarm's page: a list of sources, and the switch that
+ * says whether they are the plan or material to plan from.
+ */
+.swarm-plan-field {
+  gap: 8px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.swarm-plan-field > legend {
+  padding: 0;
+}
+
+.swarm-plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-plan-actions .input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.swarm-plan-sources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.swarm-plan-sources li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.swarm-plan-source-kind {
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-plan-source-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+a.swarm-plan-source-name:hover {
+  text-decoration: underline;
+}
+
+.swarm-plan-source-remove {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.swarm-brief-plan {
+  margin-top: 10px;
+}
+
+.swarm-brief-plan .label {
+  color: var(--brand);
+}
+
+.swarm-brief-plan p {
+  margin: 3px 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* A switch: a checkbox drawn as a toggle, keyboard and reader intact. */
+.switch-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.switch-row > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 9px;
+  background: var(--line-bright);
+  transition: background 120ms ease;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  transition: transform 120ms ease;
+}
+
+.switch-row > input:checked + .switch {
+  background: var(--brand);
+}
+
+.switch-row > input:checked + .switch::after {
+  transform: translateX(12px);
+}
+
+.switch-row > input:focus-visible + .switch {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.switch-row > span:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 1.4;
+}

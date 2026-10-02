@@ -240,6 +240,28 @@ export interface Swarm {
   reopenCount: number;
   /** The branch this swarm was started from, when a person named one. */
   startBranch: string | null;
+  /**
+   * Where the plan came from: the planner wrote it from the goal, or
+   * the person handed one over and the planner built the tree from it.
+   */
+  planMode: "goal" | "existing";
+}
+
+/**
+ * One source of the plan a person handed a swarm: a file they
+ * uploaded, or a page the server fetched for them. Metadata only; the
+ * text is the planner's to read, through its tools.
+ */
+export interface SwarmPlanSource {
+  id: string;
+  position: number;
+  kind: "file" | "website";
+  /** The file's name, or the page's title (its address when it had none). */
+  name: string;
+  /** The page's address, checked through `externalHttpUrl`; null on a file. */
+  url: string | null;
+  /** Characters of text. */
+  size: number;
 }
 
 /**
@@ -351,6 +373,8 @@ export interface SwarmDetail {
   branchCheckout?: { mode: "worktree" | "remote"; released: boolean };
   ledger: SwarmLedgerEntry[];
   pullRequests: SwarmPullRequest[];
+  /** What the person handed the planner, when they handed over anything. */
+  planSources?: SwarmPlanSource[];
 }
 
 export interface SwarmPlannerRun {
@@ -399,6 +423,11 @@ export type SwarmSettingsChange = Partial<{
 }>;
 
 /** What the New swarm dialog sends. */
+/** One thing a person hands the planner at creation. */
+export type NewPlanSource =
+  | { kind: "file"; name: string; content: string }
+  | { kind: "website"; url: string };
+
 export interface NewSwarmInput {
   projectId: string;
   /** Absent means the install's own Swarm Planner and Swarm Worker. */
@@ -408,7 +437,17 @@ export interface NewSwarmInput {
   settings?: Partial<Omit<SwarmSettings, "plannerProfileId" | "workerProfileId">>;
   name: string;
   goal: string;
-  attachments: { name: string; bytes: number }[];
+  /**
+   * The plan the person already has, as the route takes it: files read
+   * as text in the browser, and addresses the server fetches itself.
+   */
+  planSources: NewPlanSource[];
+  /**
+   * "existing" says the sources (or the goal) are the plan to
+   * implement, so the planner builds the tree from them rather than
+   * planning from the goal and the code. "goal" is every other swarm.
+   */
+  planMode: "goal" | "existing";
   start: { kind: "new-branch"; name: string } | { kind: "existing-branch"; name: string };
   deliverable: "code" | "document";
   budgetUsd: number | null;

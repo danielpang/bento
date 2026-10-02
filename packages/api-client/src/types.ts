@@ -410,6 +410,8 @@ export interface SwarmRow {
   deliverable?: "code" | "document";
   startBranch?: string | null;
   reopenCount?: number;
+  /** Where the plan came from: the planner wrote it, or a person handed one over. */
+  planMode?: "goal" | "existing";
   budgetUsd: string | null;
   maxWorkers: number;
   timeLimitMin: number | null;
@@ -448,10 +450,23 @@ export interface SwarmTaskRow {
   endedAt: string | null;
 }
 
+/** One source of the plan a person handed a swarm, without its text. */
+export interface SwarmPlanSourceRow {
+  id: string;
+  position: number;
+  kind: "file" | "website";
+  name: string;
+  url: string | null;
+  /** Characters of text. */
+  size: number;
+}
+
 /** One swarm with its plan, as the detail route answers. */
 export interface SwarmDetailResponse {
   swarm: SwarmRow;
   tasks: SwarmTaskRow[];
+  /** What the person handed the planner, when they handed over anything. */
+  planSources?: SwarmPlanSourceRow[];
   activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
   landings?: {
     id: string;

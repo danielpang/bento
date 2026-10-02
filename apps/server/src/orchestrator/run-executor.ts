@@ -37,6 +37,7 @@ import {
   sandboxes,
   stages,
   swarmLandings,
+  swarmPlanSources,
   swarmTasks,
   swarms,
 } from "@bento/db";
@@ -74,6 +75,7 @@ import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { SWARM_DESIGN_PATH } from "./swarm/design-document.js";
+import { loadPlanSources } from "./swarm/plan-sources.js";
 import { isBetaRun } from "../feature-flags.js";
 import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
@@ -1396,6 +1398,7 @@ async function buildSubjectPrompt(
       repositories: mounted,
       swarmInstructions: subject.swarm.plannerInstructions,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
+      hasPlanSources: await swarmHasPlanSources(ctx, subject.swarm.id),
     });
   }
   /*
@@ -1431,6 +1434,7 @@ async function buildSubjectPrompt(
       branch: subject.branch,
       swarmInstructions: subject.swarm.workerInstructions,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
+      hasPlanSources: await swarmHasPlanSources(ctx, subject.swarm.id),
       messages: await takeNodeMessages(ctx.db, subject.task.id, subject.run.id),
     });
   }
@@ -1449,6 +1453,13 @@ async function buildSubjectPrompt(
     swarmInstructions: subject.swarm.plannerInstructions,
     deliverable: subject.swarm.deliverable,
     sectionDir: SECTION_DIR,
+    /*
+     * The plan the person handed over, on every planner turn rather
+     * than the first only: a fresh session on a later turn has to be
+     * told what the tree was built from, and the sources never change.
+     */
+    planMode: subject.swarm.planMode,
+    planSources: await loadPlanSources(ctx.db, subject.swarm.id),
     /*
      * And, on a swarm that started from an existing branch, what is on
      * that branch and what is still being asked about it.
@@ -1584,6 +1595,16 @@ async function swarmBranchBundles(
 }
 
 /** Whether the planner has written the design note a worker is told to read. */
+/** Whether the person who started this swarm handed over a plan. */
+async function swarmHasPlanSources(ctx: AppContext, swarmId: string): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ id: swarmPlanSources.id })
+    .from(swarmPlanSources)
+    .where(eq(swarmPlanSources.swarmId, swarmId))
+    .limit(1);
+  return row !== undefined;
+}
+
 async function swarmHasDesign(ctx: AppContext, swarmId: string): Promise<boolean> {
   const [row] = await ctx.db
     .select({ id: runArtifacts.id })

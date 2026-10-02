@@ -86,6 +86,49 @@ export interface SwarmActions {
 }
 
 /**
+ * What the plan was built from, under the goal.
+ *
+ * Nothing at all for the ordinary swarm, whose planner read the goal
+ * and the code. A swarm handed a plan says so, and lists what was
+ * handed over: a person reading the tree wants to know whether it was
+ * the planner's idea or theirs, and which file it came from.
+ */
+export function SwarmPlanBrief({
+  planMode,
+  sources,
+}: {
+  planMode: SwarmDetail["swarm"]["planMode"];
+  sources: NonNullable<SwarmDetail["planSources"]>;
+}) {
+  if (planMode !== "existing" && sources.length === 0) return null;
+  return (
+    <div className="swarm-brief-plan">
+      <span className="label">{planMode === "existing" ? "Existing plan" : "Plan material"}</span>
+      <p className="muted">
+        {planMode === "existing"
+          ? sources.length > 0
+            ? "The planner builds the task tree from this plan rather than from the goal alone."
+            : "The goal is the plan. The planner builds the task tree from it rather than planning from scratch."
+          : "The planner reads these before it plans."}
+      </p>
+      {sources.length > 0 && (
+        <ul className="swarm-plan-sources" aria-label="Plan sources">
+          {sources.map((source) => (
+            <li key={source.id}>
+              <span className="swarm-plan-source-kind">{source.kind === "file" ? "File" : "Website"}</span>
+              {source.url
+                ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
+                : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
+              <span className="muted">{source.size.toLocaleString()} characters</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
  * One swarm's page: the header, and the plan under it.
  *
  * The header names the swarm and its next action. The brief beneath
@@ -244,6 +287,7 @@ export function SwarmPage({
         <div className="swarm-brief-copy">
           <span className="label">Goal</span>
           <p>{swarm.goal}</p>
+          <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
         </div>
         <div className="swarm-brief-side">
           {waitingForPlan && (

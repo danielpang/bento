@@ -1256,6 +1256,14 @@ export class BentoClient {
     maxPlanDepth?: number;
     plannerInstructions?: string | null;
     workerInstructions?: string | null;
+    /**
+     * "existing" says the person already has a plan, in the sources
+     * below or in the goal, and the planner builds the tree from it
+     * rather than planning from scratch. Absent is "goal".
+     */
+    planMode?: "goal" | "existing";
+    /** Files as text, and addresses the server fetches itself. */
+    planSources?: ({ kind: "file"; name: string; content: string } | { kind: "website"; url: string })[];
   }) {
     return this.request<SwarmRow & { plannerRunId: string | null }>("/api/swarms", {
       method: "POST",

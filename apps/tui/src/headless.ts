@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { ApiError, unwrapError } from "@bento/api-client";
 import { checkAgentPairing } from "@bento/core";
 import { LocalRunner } from "./runner.js";
@@ -453,18 +455,46 @@ export async function runSwarm(options: CliOptions): Promise<void> {
           io.fail();
           return;
         }
+        /*
+         * The plan the person already has: files read here as text,
+         * in the order given, and pages the server fetches itself. A
+         * file that cannot be read is a refusal before the request,
+         * so nothing is half created.
+         */
+        const sources: ({ kind: "file"; name: string; content: string } | { kind: "website"; url: string })[] = [];
+        for (const file of options.plan ?? []) {
+          let content: string;
+          try {
+            content = await readFile(file, "utf8");
+          } catch (err) {
+            io.err(`could not read ${file}: ${err instanceof Error ? err.message : String(err)}`);
+            io.fail();
+            return;
+          }
+          if (content.includes("\u0000")) {
+            io.err(`${file} is not a text file. A plan source is markdown, plain text, or another text format.`);
+            io.fail();
+            return;
+          }
+          sources.push({ kind: "file", name: path.basename(file), content });
+        }
+        for (const url of options.planUrl ?? []) sources.push({ kind: "website", url });
         const created = await client.createSwarm({
           projectId: project.id,
           title,
           goal: options.goal,
           ...(options.branch ? { startBranch: options.branch } : {}),
           ...(options.budget === undefined ? {} : { budgetUsd: options.budget }),
+          ...(options.existingPlan ? { planMode: "existing" as const } : {}),
+          ...(sources.length > 0 ? { planSources: sources } : {}),
         });
         io.out(`${created.slug}\tplanning\t${created.id}`);
         io.out(
-          options.branch
-            ? `Its planner is reading ${options.branch} and whatever its pull request is still being asked about. Watch it with: bento swarm watch ${created.slug}`
-            : `Its planner is at work. Watch it with: bento swarm watch ${created.slug}`,
+          options.existingPlan
+            ? `Its planner is building the task tree from your plan. Watch it with: bento swarm watch ${created.slug}`
+            : options.branch
+              ? `Its planner is reading ${options.branch} and whatever its pull request is still being asked about. Watch it with: bento swarm watch ${created.slug}`
+              : `Its planner is at work. Watch it with: bento swarm watch ${created.slug}`,
         );
         io.out(`Nothing else starts until you run: bento swarm start ${created.slug}`);
         return;

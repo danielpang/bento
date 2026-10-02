@@ -1,8 +1,15 @@
-import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
-import { useState } from "react";
+import {
+  MAX_SWARM_GOAL_CHARS,
+  MAX_SWARM_PLAN_CHARS,
+  MAX_SWARM_PLAN_SOURCES,
+  MAX_SWARM_PLAN_SOURCE_CHARS,
+  MAX_SWARM_PLAN_SOURCE_NAME_CHARS,
+  MAX_SWARM_WORKERS,
+} from "@bento/core";
+import { useRef, useState } from "react";
 import { Modal } from "./Modal.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
-import type { NewSwarmInput } from "../swarm/types.js";
+import type { NewPlanSource, NewSwarmInput } from "../swarm/types.js";
 import type { SwarmAgent } from "../swarm/client.js";
 import { SwarmAgentSelect } from "./SwarmAgentSelect.js";
 import {
@@ -25,6 +32,13 @@ import {
  * enough to press Create. Everything else about how the swarm is run
  * waits behind More settings, with one line saying what it is set to,
  * and can be changed later in the swarm's own settings.
+ *
+ * Between the goal and the agents is the plan: files a person already
+ * has, read here as text, and pages the server fetches for them, with
+ * a switch that says whether those are the plan to implement or
+ * material to plan from. The switch is the difference between a
+ * planner that reads a document and plans anyway, and one that turns
+ * the document into the tree.
  *
  * It asks for what the create route takes and nothing else. A field
  * the server has no home for is a promise the console cannot keep, so
@@ -76,6 +90,22 @@ export function NewSwarmDialog({
   const [startBranch, setStartBranch] = useState("");
   const [deliverable, setDeliverable] = useState<"code" | "document">("code");
   const [runSettings, setRunSettings] = useState<RunSettingsDraft>(DEFAULT_RUN_SETTINGS);
+  /**
+   * The plan the person already has, and whether it is the plan.
+   *
+   * Files are read in the browser as text, so what travels is what
+   * the planner reads and a file that is not text is refused here,
+   * with a sentence, rather than after the request. Addresses travel
+   * as addresses: the server fetches them, through the same guarded
+   * fetch every other tenant chosen URL goes through.
+   */
+  const [planSources, setPlanSources] = useState<NewPlanSource[]>([]);
+  const [existingPlan, setExistingPlan] = useState(false);
+  const [siteUrl, setSiteUrl] = useState("");
+  const [planRefusal, setPlanRefusal] = useState("");
+  /** Files still being read. Create waits for them. */
+  const [reading, setReading] = useState(0);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   // The server names the branch after the swarm, so this is a preview
   // of what it will be rather than a choice.
@@ -92,7 +122,8 @@ export function NewSwarmDialog({
     !goalTooLong &&
     branchRefusal === null &&
     budgetUsd !== undefined &&
-    timeLimitMin !== undefined;
+    timeLimitMin !== undefined &&
+    reading === 0;
 
   return (
     <Modal
@@ -128,7 +159,7 @@ export function NewSwarmDialog({
             className="input textarea-grow"
             value={goal}
             rows={4}
-            placeholder="What should be true when this is finished?"
+            placeholder={existingPlan ? "What should the swarm do with the plan?" : "What should be true when this is finished?"}
             onChange={(e) => setGoal(e.target.value)}
             aria-invalid={goalTooLong}
             aria-describedby="new-swarm-goal-length"
@@ -138,6 +169,88 @@ export function NewSwarmDialog({
             {goalTooLong ? ". Shorten the goal to create this swarm." : ""}
           </span>
         </label>
+
+        <fieldset className="field swarm-plan-field" aria-label="Plan">
+          <legend className="field-heading">Plan</legend>
+          <span className="muted">
+            Already have a plan? Upload it as one or more text files, or point at a page, and the planner reads it before it plans.
+          </span>
+          <div className="swarm-plan-actions">
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              hidden
+              accept=".md,.markdown,.txt,.json,.yaml,.yml,.csv,.html,.htm,.rst,.adoc,text/*,application/json"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                void addFiles(files);
+              }}
+            />
+            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => fileInput.current?.click()}>
+              Upload files
+            </button>
+            <input
+              className="input"
+              type="url"
+              inputMode="url"
+              value={siteUrl}
+              placeholder="https://"
+              aria-label="Website address"
+              onChange={(e) => setSiteUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addWebsite();
+                }
+              }}
+            />
+            <button type="button" className="btn btn-ghost" disabled={busy || siteUrl.trim() === ""} onClick={addWebsite}>
+              Add website
+            </button>
+          </div>
+          {planSources.length > 0 && (
+            <ul className="swarm-plan-sources" aria-label="Plan sources">
+              {planSources.map((source, index) => (
+                <li key={`${index}-${source.kind === "file" ? source.name : source.url}`}>
+                  <span className="swarm-plan-source-kind">{source.kind === "file" ? "File" : "Website"}</span>
+                  <span className="swarm-plan-source-name" title={source.kind === "file" ? source.name : source.url}>
+                    {source.kind === "file" ? source.name : source.url}
+                  </span>
+                  {source.kind === "file" && <span className="muted">{formatChars(source.content.length)}</span>}
+                  <button
+                    type="button"
+                    className="btn btn-ghost swarm-plan-source-remove"
+                    aria-label={`Remove ${source.kind === "file" ? source.name : source.url}`}
+                    onClick={() => {
+                      setPlanRefusal("");
+                      setPlanSources((current) => current.filter((_, at) => at !== index));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {reading > 0 && <span className="muted" role="status">Reading {reading === 1 ? "a file" : `${reading} files`}.</span>}
+          {planRefusal && <span className="swarm-reopen-refusal" role="alert">{planRefusal}</span>}
+          <label className="switch-row">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={existingPlan}
+              aria-checked={existingPlan}
+              onChange={(e) => setExistingPlan(e.target.checked)}
+            />
+            <span className="switch" aria-hidden="true" />
+            <span>
+              <strong>Use existing plan</strong>
+              <span className="muted">{existingPlanHelp(existingPlan, planSources.length)}</span>
+            </span>
+          </label>
+        </fieldset>
 
         <div className="field-row swarm-agent-row">
           <SwarmAgentSelect
@@ -227,12 +340,67 @@ export function NewSwarmDialog({
           />
         </details>
 
-        <p className="muted">Creating a swarm starts the planner. Review its plan, then start the work.</p>
+        <p className="muted">
+          {existingPlan
+            ? "Creating a swarm starts the planner on your plan. Review the task tree it builds, then start the work."
+            : "Creating a swarm starts the planner. Review its plan, then start the work."}
+        </p>
 
         {error && <p className="error error-box" role="alert">{error}</p>}
       </div>
     </Modal>
   );
+
+  /**
+   * Reads each chosen file as text and adds it, refusing what cannot
+   * be a plan source with a sentence under the list.
+   *
+   * One file at a time, in the order chosen, so the list reads in the
+   * order the person picked and the refusal names the file it is
+   * about. A folder upload arrives with each file's relative path,
+   * which is kept as its name: two README files from two folders are
+   * two sources.
+   */
+  async function addFiles(files: File[]) {
+    setPlanRefusal("");
+    setReading((count) => count + files.length);
+    let current = planSources;
+    try {
+      for (const file of files) {
+        const name = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+        let content: string;
+        try {
+          content = await file.text();
+        } catch {
+          setPlanRefusal(`${name} could not be read.`);
+          continue;
+        }
+        const refusal = planSourceRefusal(current, { kind: "file", name, content });
+        if (refusal) {
+          setPlanRefusal(refusal);
+          continue;
+        }
+        current = [...current, { kind: "file", name, content }];
+        setPlanSources(current);
+      }
+    } finally {
+      setReading((count) => count - files.length);
+    }
+  }
+
+  /** Adds the typed address, or says why not. */
+  function addWebsite() {
+    const url = siteUrl.trim();
+    if (!url) return;
+    const refusal = planSourceRefusal(planSources, { kind: "website", url });
+    if (refusal) {
+      setPlanRefusal(refusal);
+      return;
+    }
+    setPlanRefusal("");
+    setPlanSources((current) => [...current, { kind: "website", url }]);
+    setSiteUrl("");
+  }
 
   /**
    * What the create route takes, and the fields the console still
@@ -251,7 +419,8 @@ export function NewSwarmDialog({
       ...(plannerProfileId ? { plannerProfileId } : {}),
       ...(workerProfileId ? { workerProfileId } : {}),
       settings: settingsFrom(runSettings),
-      attachments: [],
+      planSources,
+      planMode: existingPlan ? "existing" : "goal",
       start: continuing ? { kind: "existing-branch", name: continuing } : { kind: "new-branch", name: branchName },
       deliverable,
       budgetUsd: budgetUsd ?? null,
@@ -260,6 +429,71 @@ export function NewSwarmDialog({
       planOnly: true,
     }).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }
+}
+
+/** What the switch says it does, in its current position. */
+export function existingPlanHelp(on: boolean, sources: number): string {
+  if (on) {
+    return sources > 0
+      ? "The planner builds the task tree from this plan. If it has no implementation steps yet, the planner writes them first, then the tree."
+      : "The goal above is the plan. The planner builds the task tree from it rather than planning from scratch. Upload files or add a page to hand over more.";
+  }
+  return sources > 0
+    ? "The planner reads what you handed over as background and plans from the goal."
+    : "Off: the planner reads the goal and the code and writes the plan itself.";
+}
+
+/**
+ * Why a source cannot be added to this list, or null when it can.
+ *
+ * The same rules the route applies, asked before the request so the
+ * refusal is a sentence under the list rather than a failed Create:
+ * how many sources, how big each, how big all of them, and whether a
+ * file is text at all. The server decides; this is here so a person
+ * is told at the moment they pick the file.
+ */
+export function planSourceRefusal(current: NewPlanSource[], candidate: NewPlanSource): string | null {
+  if (current.length >= MAX_SWARM_PLAN_SOURCES) {
+    return `A swarm takes up to ${MAX_SWARM_PLAN_SOURCES} plan sources. Remove one to add another.`;
+  }
+  if (candidate.kind === "website") {
+    let parsed: URL;
+    try {
+      parsed = new URL(candidate.url);
+    } catch {
+      return `${candidate.url} is not a web address. Enter the whole address, starting with https://.`;
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return `${candidate.url} is not a web address. Enter the whole address, starting with https://.`;
+    }
+    if (current.some((source) => source.kind === "website" && source.url === candidate.url)) {
+      return `${candidate.url} is already in the list.`;
+    }
+    return null;
+  }
+  const name = candidate.name.trim();
+  if (name === "" || name.length > MAX_SWARM_PLAN_SOURCE_NAME_CHARS) {
+    return "That file's name is too long to be a plan source.";
+  }
+  if (candidate.content.trim() === "") {
+    return `${name} is empty, so there is nothing in it to plan from.`;
+  }
+  if (candidate.content.includes("\u0000")) {
+    return `${name} is not a text file. A plan source is markdown, plain text, or another text format.`;
+  }
+  if (candidate.content.length > MAX_SWARM_PLAN_SOURCE_CHARS) {
+    return `${name} holds ${formatChars(candidate.content.length)}, and a plan source holds at most ${formatChars(MAX_SWARM_PLAN_SOURCE_CHARS)}.`;
+  }
+  const total = current.reduce((sum, source) => sum + (source.kind === "file" ? source.content.length : 0), 0);
+  if (total + candidate.content.length > MAX_SWARM_PLAN_CHARS) {
+    return `Adding ${name} would take the plan past ${formatChars(MAX_SWARM_PLAN_CHARS)} in all. Leave out what is not the plan.`;
+  }
+  return null;
+}
+
+/** A character count as a person reads one. */
+export function formatChars(count: number): string {
+  return `${count.toLocaleString()} ${count === 1 ? "character" : "characters"}`;
 }
 
 /** What the dialog says about a branch name git would refuse. */
