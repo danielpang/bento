@@ -110,6 +110,8 @@ export interface PlannerPromptInput {
    * planner reads it through read_plan.
    */
   planSources?: PlanSource[];
+  /** Where a copy of every source is in the workspace, when the executor wrote one. */
+  planSourceDir?: string | null;
 }
 
 /**
@@ -208,7 +210,7 @@ export function buildPlannerPrompt(input: PlannerPromptInput): string {
 
   const existingPlan = input.planMode === "existing";
   const sources = input.planSources ?? [];
-  if (sources.length > 0) lines.push(...planSourceLines(sources));
+  if (sources.length > 0) lines.push(...planSourceLines(sources, input.planSourceDir ?? null));
   if (existingPlan) lines.push(...existingPlanLines(sources.length > 0));
 
   lines.push(
@@ -312,7 +314,7 @@ export function startBranchLines(state: StartBranchState): string[] {
  * read through read_plan, so the prompt stays the instructions and the
  * plan stays the plan.
  */
-export function planSourceLines(sources: PlanSource[]): string[] {
+export function planSourceLines(sources: PlanSource[], planSourceDir: string | null = null): string[] {
   const total = sources.reduce((sum, source) => sum + source.size, 0);
   const inline = total <= PLAN_INLINE_CHARS;
   const lines: string[] = [
@@ -322,9 +324,26 @@ export function planSourceLines(sources: PlanSource[]): string[] {
     ...(sources.length === 1 ? [] : sources.map((source) => `- ${describeSource(source)}`)),
     "",
   ];
+  const onDisk = sources.filter((source) => source.path);
+  if (onDisk.length > 0) {
+    lines.push(
+      `A copy of ${onDisk.length === sources.length ? "every source" : `${onDisk.length} of them`} is in ${planSourceDir ?? "your workspace"}, each named with its number: ${onDisk.map((source) => source.path!.split("/").pop()).join(", ")}. An image, and a PDF whose layout or figures matter, you open there with your file tools; the text is also below or behind read_plan.`,
+      "",
+    );
+  } else if (sources.some((source) => source.media !== "text")) {
+    lines.push(
+      "The PDFs and images could not be copied into this workspace, so what you have of them is their text, where there is any.",
+      "",
+    );
+  }
   if (inline) {
     for (const source of sources) {
-      lines.push(`Source ${source.position + 1}, ${source.kind === "website" ? "the page at" : "the file"} ${source.kind === "website" ? source.url ?? source.name : source.name}, as written:`);
+      if (source.content === null) {
+        lines.push(`Source ${source.position + 1}, ${sourceNoun(source)}: ${source.media === "image" ? "an image, with no text to quote" : "a PDF with no text in it, which is a scan"}.${source.path ? ` Open ${source.path} to see it.` : ""}`);
+        lines.push("");
+        continue;
+      }
+      lines.push(`Source ${source.position + 1}, ${sourceNoun(source)}, ${source.media === "pdf" ? "its text as extracted" : "as written"}:`);
       lines.push(quoteUntrusted(source.content));
       lines.push("");
     }
@@ -342,11 +361,29 @@ export function planSourceLines(sources: PlanSource[]): string[] {
 }
 
 /** One source, in a list: its number, what it is, and how big. */
-function describeSource(source: PlanSource): string {
-  const size = `${source.size.toLocaleString("en-US")} characters`;
-  return source.kind === "website"
-    ? `${source.position + 1}. the page at ${source.url ?? source.name}${source.url && source.name !== source.url ? ` (titled "${source.name.replace(/"/g, "'")}")` : ""}, ${size}`
-    : `${source.position + 1}. the file ${source.name}, ${size}`;
+export function describeSource(source: PlanSource): string {
+  const size =
+    source.media === "image"
+      ? `${formatBytes(source.byteSize ?? 0)}`
+      : source.media === "pdf"
+        ? `${formatBytes(source.byteSize ?? 0)}, ${source.content === null ? "no text in it" : `${source.size.toLocaleString("en-US")} characters of text`}`
+        : `${source.size.toLocaleString("en-US")} characters`;
+  // A page's title is worth saying beside its address; a PDF or an
+  // image at an address is named by that address already.
+  const titled = source.kind === "website" && source.media === "text" && source.url && source.name !== source.url;
+  return `${source.position + 1}. ${sourceNoun(source)}${titled ? ` (titled "${source.name.replace(/"/g, "'")}")` : ""}, ${size}`;
+}
+
+/** What a source is called in a sentence: the file, the PDF, the image, the page at. */
+function sourceNoun(source: PlanSource): string {
+  const what = source.media === "pdf" ? "the PDF" : source.media === "image" ? "the image" : source.kind === "website" ? "the page" : "the file";
+  return source.kind === "website" ? `${what} at ${source.url ?? source.name}` : `${what} ${source.name}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} bytes`;
 }
 
 /**
@@ -426,6 +463,8 @@ export function buildSubPlannerPrompt(input: {
   hasDesign?: boolean;
   /** Whether the person handed over a plan this part should follow. */
   hasPlanSources?: boolean;
+  /** Where a copy of every source is in this workspace, when one was written. */
+  planSourceDir?: string | null;
 }): string {
   const { swarm, node, agent, repositories } = input;
   const lines: string[] = [
@@ -468,7 +507,7 @@ export function buildSubPlannerPrompt(input: {
   lines.push(
     "How to plan your part:",
     "",
-    `1. read_design first. It is the swarm's shared note about how the whole change fits together, and your part has to fit the rest of it.${input.hasDesign === false ? " There is none yet; read it anyway, in case one has been written since." : ""}${input.hasPlanSources ? " Then read_plan: the person who started this swarm handed over a plan, and your part of the tree follows what it says about your node." : ""}`,
+    `1. read_design first. It is the swarm's shared note about how the whole change fits together, and your part has to fit the rest of it.${input.hasDesign === false ? " There is none yet; read it anyway, in case one has been written since." : ""}${input.hasPlanSources ? ` Then read_plan: the person who started this swarm handed over a plan, and your part of the tree follows what it says about your node.${input.planSourceDir ? ` A copy of every source, PDFs and images included, is in ${input.planSourceDir}.` : ""}` : ""}`,
     "2. Read enough of the code to know what your node actually involves.",
     `3. create_task under ${node.id} for each piece of work. Split it into leaves a single agent can finish on its own branch: two leaves that have to edit the same lines are one leaf.`,
     "4. Say in each task's description what finished means for it, in enough detail that the agent working it never has to guess.",

@@ -260,8 +260,21 @@ export interface SwarmPlanSource {
   name: string;
   /** The page's address, checked through `externalHttpUrl`; null on a file. */
   url: string | null;
-  /** Characters of text. */
+  mime: string;
+  /** What it is read as: text, a PDF, or an image. */
+  media: "text" | "pdf" | "image";
+  /** Characters of text. Zero for an image or a scanned PDF. */
   size: number;
+  /** Whether there is text in it: false for an image or a scanned PDF. */
+  hasText: boolean;
+  /** Bytes in the store, for a PDF or an image. Null for text. */
+  byteSize: number | null;
+  /**
+   * Where the console fetches the source itself: an image to draw
+   * under the goal, a PDF to download. Same origin as every other API
+   * path, and served by a route that resolves the swarm first.
+   */
+  contentPath: string;
 }
 
 /**
@@ -423,9 +436,14 @@ export type SwarmSettingsChange = Partial<{
 }>;
 
 /** What the New swarm dialog sends. */
-/** One thing a person hands the planner at creation. */
+/**
+ * One thing a person hands the planner at creation: a text file read
+ * in the browser, a PDF or an image as its bytes, or an address the
+ * server fetches itself.
+ */
 export type NewPlanSource =
   | { kind: "file"; name: string; content: string }
+  | { kind: "file"; name: string; data: string; mime: string }
   | { kind: "website"; url: string };
 
 export interface NewSwarmInput {

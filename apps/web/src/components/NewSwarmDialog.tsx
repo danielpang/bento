@@ -1,6 +1,8 @@
 import {
   MAX_SWARM_GOAL_CHARS,
+  MAX_SWARM_PLAN_BYTES,
   MAX_SWARM_PLAN_CHARS,
+  MAX_SWARM_PLAN_FILE_BYTES,
   MAX_SWARM_PLAN_SOURCES,
   MAX_SWARM_PLAN_SOURCE_CHARS,
   MAX_SWARM_PLAN_SOURCE_NAME_CHARS,
@@ -173,7 +175,7 @@ export function NewSwarmDialog({
         <fieldset className="field swarm-plan-field" aria-label="Plan">
           <legend className="field-heading">Plan</legend>
           <span className="muted">
-            Already have a plan? Upload it as one or more text files, or point at a page, and the planner reads it before it plans.
+            Already have a plan? Upload it as text files, PDFs or images, or point at a page, and the planner reads it before it plans.
           </span>
           <div className="swarm-plan-actions">
             <input
@@ -181,7 +183,7 @@ export function NewSwarmDialog({
               type="file"
               multiple
               hidden
-              accept=".md,.markdown,.txt,.json,.yaml,.yml,.csv,.html,.htm,.rst,.adoc,text/*,application/json"
+              accept=".md,.markdown,.txt,.json,.yaml,.yml,.csv,.html,.htm,.rst,.adoc,.pdf,.png,.jpg,.jpeg,.gif,.webp,text/*,application/json,application/pdf,image/png,image/jpeg,image/gif,image/webp"
               onChange={(e) => {
                 const files = Array.from(e.target.files ?? []);
                 e.target.value = "";
@@ -214,11 +216,11 @@ export function NewSwarmDialog({
             <ul className="swarm-plan-sources" aria-label="Plan sources">
               {planSources.map((source, index) => (
                 <li key={`${index}-${source.kind === "file" ? source.name : source.url}`}>
-                  <span className="swarm-plan-source-kind">{source.kind === "file" ? "File" : "Website"}</span>
+                  <span className="swarm-plan-source-kind">{newSourceLabel(source)}</span>
                   <span className="swarm-plan-source-name" title={source.kind === "file" ? source.name : source.url}>
                     {source.kind === "file" ? source.name : source.url}
                   </span>
-                  {source.kind === "file" && <span className="muted">{formatChars(source.content.length)}</span>}
+                  {source.kind === "file" && <span className="muted">{newSourceSize(source)}</span>}
                   <button
                     type="button"
                     className="btn btn-ghost swarm-plan-source-remove"
@@ -368,19 +370,22 @@ export function NewSwarmDialog({
     try {
       for (const file of files) {
         const name = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-        let content: string;
+        let candidate: NewPlanSource;
         try {
-          content = await file.text();
+          const mime = binaryMime(name, file.type);
+          candidate = mime
+            ? { kind: "file", name, mime, data: toBase64(await file.arrayBuffer()) }
+            : { kind: "file", name, content: await file.text() };
         } catch {
           setPlanRefusal(`${name} could not be read.`);
           continue;
         }
-        const refusal = planSourceRefusal(current, { kind: "file", name, content });
+        const refusal = planSourceRefusal(current, candidate);
         if (refusal) {
           setPlanRefusal(refusal);
           continue;
         }
-        current = [...current, { kind: "file", name, content }];
+        current = [...current, candidate];
         setPlanSources(current);
       }
     } finally {
@@ -475,6 +480,18 @@ export function planSourceRefusal(current: NewPlanSource[], candidate: NewPlanSo
   if (name === "" || name.length > MAX_SWARM_PLAN_SOURCE_NAME_CHARS) {
     return "That file's name is too long to be a plan source.";
   }
+  if ("data" in candidate) {
+    const bytes = base64Bytes(candidate.data);
+    if (bytes === 0) return `${name} is empty, so there is nothing in it to plan from.`;
+    if (bytes > MAX_SWARM_PLAN_FILE_BYTES) {
+      return `${name} is ${formatBytes(bytes)}, and a PDF or an image is at most ${formatBytes(MAX_SWARM_PLAN_FILE_BYTES)}.`;
+    }
+    const totalBytes = current.reduce((sum, source) => sum + (source.kind === "file" && "data" in source ? base64Bytes(source.data) : 0), 0);
+    if (totalBytes + bytes > MAX_SWARM_PLAN_BYTES) {
+      return `Adding ${name} would take the PDFs and images past ${formatBytes(MAX_SWARM_PLAN_BYTES)} in all. Leave out what is not the plan.`;
+    }
+    return null;
+  }
   if (candidate.content.trim() === "") {
     return `${name} is empty, so there is nothing in it to plan from.`;
   }
@@ -484,7 +501,7 @@ export function planSourceRefusal(current: NewPlanSource[], candidate: NewPlanSo
   if (candidate.content.length > MAX_SWARM_PLAN_SOURCE_CHARS) {
     return `${name} holds ${formatChars(candidate.content.length)}, and a plan source holds at most ${formatChars(MAX_SWARM_PLAN_SOURCE_CHARS)}.`;
   }
-  const total = current.reduce((sum, source) => sum + (source.kind === "file" ? source.content.length : 0), 0);
+  const total = current.reduce((sum, source) => sum + (source.kind === "file" && "content" in source ? source.content.length : 0), 0);
   if (total + candidate.content.length > MAX_SWARM_PLAN_CHARS) {
     return `Adding ${name} would take the plan past ${formatChars(MAX_SWARM_PLAN_CHARS)} in all. Leave out what is not the plan.`;
   }
@@ -494,6 +511,67 @@ export function planSourceRefusal(current: NewPlanSource[], candidate: NewPlanSo
 /** A character count as a person reads one. */
 export function formatChars(count: number): string {
   return `${count.toLocaleString()} ${count === 1 ? "character" : "characters"}`;
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} bytes`;
+}
+
+/**
+ * The media type of a file that travels as bytes, or null for one
+ * that travels as text. From the browser's type when it gives one,
+ * else from the name: a browser leaves the type blank for a file it
+ * does not recognise, and a plan.pdf is a PDF whatever it says.
+ */
+export function binaryMime(name: string, type: string): string | null {
+  const known = ["application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp"];
+  const lower = type.toLowerCase();
+  if (known.includes(lower)) return lower;
+  switch (/\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase()) {
+    case "pdf":
+      return "application/pdf";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
+/** Bytes as base64, in pieces small enough for the string builder. */
+export function toBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/** How many bytes a base64 string decodes to, without decoding it. */
+export function base64Bytes(data: string): number {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
+/** What a source in the dialog's list is called. */
+export function newSourceLabel(source: NewPlanSource): string {
+  if (source.kind === "website") return "Website";
+  if (!("data" in source)) return "File";
+  return source.mime === "application/pdf" ? "PDF" : "Image";
+}
+
+/** How big a file in the dialog's list is, in the unit a person reads it by. */
+export function newSourceSize(source: Extract<NewPlanSource, { kind: "file" }>): string {
+  return "data" in source ? formatBytes(base64Bytes(source.data)) : formatChars(source.content.length);
 }
 
 /** What the dialog says about a branch name git would refuse. */

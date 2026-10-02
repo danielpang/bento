@@ -1,22 +1,31 @@
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { swarmPlanSources, type Db } from "@bento/db";
 import {
+  MAX_SWARM_PLAN_BYTES,
   MAX_SWARM_PLAN_CHARS,
+  MAX_SWARM_PLAN_FILE_BYTES,
   MAX_SWARM_PLAN_SOURCES,
   MAX_SWARM_PLAN_SOURCE_CHARS,
   MAX_SWARM_PLAN_SOURCE_NAME_CHARS,
 } from "@bento/core";
+import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import type { ArtifactStore } from "../../artifact-store.js";
 import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../../mcp/safe-fetch.js";
 
 /**
  * A plan somebody already has, handed to a swarm when it starts.
  *
- * Three things live here. What the create route accepts (a list of
- * files as text, and addresses to fetch), how an address becomes text
- * (fetched by the server through the same guarded fetch every other
- * tenant chosen URL goes through, then stripped to its text), and how
- * the stored rows are read back for the planner.
+ * Four things live here. What the create route accepts (files as text
+ * or as bytes, and addresses to fetch), how an address or a file
+ * becomes a source (a page stripped to its text, a PDF's text pulled
+ * out, an image kept as it is), where the bytes of a PDF or an image
+ * go (the artifact store, by a server-minted key the row holds), and
+ * how the stored sources reach an agent: as text in its prompt and
+ * through read_plan, and as files in its workspace, because a planner
+ * cannot read a storage key and a prompt cannot quote a mockup.
  *
  * Everything a person hands over is their input, and it is treated
  * the way the goal is: stored as written, quoted as untrusted wherever
@@ -45,6 +54,15 @@ export const MAX_PLAN_WEBSITE_BYTES = 8 * 1024 * 1024;
  */
 export const WEBSITE_TIMEOUT_MS = 20_000;
 
+/** Where an agent finds a copy of every source, relative to its workspace. */
+export const PLAN_SOURCE_DIR = "plan-sources";
+
+/** What a source is read as. Decided from its media type, never from its bytes. */
+export type PlanMedia = "text" | "pdf" | "image";
+
+/** The image types an agent's file tools open, and a browser draws inline. */
+const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
 /**
  * The name of an uploaded file: one line, no control characters, and
  * never empty. A relative path is fine, because a folder upload names
@@ -57,22 +75,40 @@ const sourceName = z
   .max(MAX_SWARM_PLAN_SOURCE_NAME_CHARS)
   .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "a plan file's name is one line of plain text");
 
+/** Base64 of at most one file's worth of bytes, checked as the message attachments check theirs. */
+const base64Bytes = z
+  .string()
+  .max(Math.ceil(MAX_SWARM_PLAN_FILE_BYTES / 3) * 4 + 4)
+  .regex(/^[A-Za-z0-9+/]*={0,2}$/, "a plan file's bytes travel as base64")
+  .refine(
+    (data) => data.length % 4 === 0 && Buffer.byteLength(data, "base64") <= MAX_SWARM_PLAN_FILE_BYTES,
+    `a plan file holds at most ${Math.round(MAX_SWARM_PLAN_FILE_BYTES / (1024 * 1024))} MB`,
+  );
+
 /**
  * What the create route takes.
  *
- * A file arrives as text rather than bytes. The console reads it as
- * UTF-8 before sending, the TUI reads it off the disk the same way,
- * and a file that does not decode as text is refused below rather
- * than stored as something no planner could read.
+ * A file arrives as text, which the console read as UTF-8 and the TUI
+ * read off the disk, or as bytes, for a PDF or an image. One or the
+ * other: a file that says what it is by both is a client that is
+ * confused about it. A file that does not decode as text is refused
+ * below rather than stored as something no planner could read.
  */
 export const planSourcesInput = z
   .array(
-    z.discriminatedUnion("kind", [
-      z.object({
-        kind: z.literal("file"),
-        name: sourceName,
-        content: z.string().max(MAX_SWARM_PLAN_SOURCE_CHARS, `a plan file holds at most ${MAX_SWARM_PLAN_SOURCE_CHARS.toLocaleString("en-US")} characters`),
-      }),
+    z.union([
+      z
+        .object({
+          kind: z.literal("file"),
+          name: sourceName,
+          content: z
+            .string()
+            .max(MAX_SWARM_PLAN_SOURCE_CHARS, `a plan file holds at most ${MAX_SWARM_PLAN_SOURCE_CHARS.toLocaleString("en-US")} characters`)
+            .optional(),
+          data: base64Bytes.optional(),
+          mime: z.string().trim().max(100).optional(),
+        })
+        .refine((file) => (file.content === undefined) !== (file.data === undefined), "a plan file is sent as text or as bytes, not both and not neither"),
       z.object({
         kind: z.literal("website"),
         url: z.string().trim().min(1, "a website needs an address").max(2000),
@@ -90,8 +126,11 @@ export interface PlanSourceDraft {
   name: string;
   url: string | null;
   mime: string;
+  /** Characters of text. Zero when there is none. */
   size: number;
-  content: string;
+  content: string | null;
+  /** The bytes to shelve, for a PDF or an image. */
+  bytes: Buffer | null;
 }
 
 /** One source as the planner and the tools read it. */
@@ -101,12 +140,43 @@ export interface PlanSource {
   kind: "file" | "website";
   name: string;
   url: string | null;
+  mime: string;
+  media: PlanMedia;
+  /** Characters of text. Zero when there is none. */
   size: number;
-  content: string;
+  /** Null for an image, and for a PDF with no text in it. */
+  content: string | null;
+  storageKey: string | null;
+  byteSize: number | null;
+  /**
+   * Where a copy of this source is in the agent's workspace, once the
+   * executor has written one. Null when it could not: a driver that
+   * cannot take stdin, or a store that is missing its object.
+   */
+  path?: string | null;
 }
 
 /** Everything the console needs to list the sources without reading them. */
-export type PlanSourceSummary = Omit<PlanSource, "content">;
+export interface PlanSourceSummary {
+  id: string;
+  position: number;
+  kind: "file" | "website";
+  name: string;
+  url: string | null;
+  mime: string;
+  media: PlanMedia;
+  size: number;
+  /** Whether there is text to read: false for an image or a scanned PDF. */
+  hasText: boolean;
+  byteSize: number | null;
+}
+
+/** What a media type is read as. */
+export function mediaOf(mime: string): PlanMedia {
+  if (mime === "application/pdf") return "pdf";
+  if (IMAGE_MIMES.has(mime)) return "image";
+  return "text";
+}
 
 /**
  * Why a string is not text, or null when it is.
@@ -129,9 +199,20 @@ export function textRefusal(content: string): string | null {
   return null;
 }
 
+export interface CollectOptions {
+  /**
+   * Whether this deployment can shelve bytes. A multi mode deploy
+   * with no bucket cannot, and says so before anything is fetched
+   * rather than after the swarm row exists.
+   */
+  hasStore: boolean;
+  fetchPage?: (url: string, signal: AbortSignal) => Promise<FetchedPage>;
+  extractPdf?: (bytes: Buffer) => Promise<string>;
+}
+
 /**
  * Turns what the route was sent into rows ready to write, fetching
- * every website it names.
+ * every website it names and reading every PDF.
  *
  * Websites are fetched here, in the request, rather than by an agent
  * later: the person is waiting to be told whether their address could
@@ -143,8 +224,11 @@ export function textRefusal(content: string): string | null {
 export async function collectPlanSources(
   env: { BENTO_MODE: "local" | "multi"; BETTER_AUTH_URL: string },
   inputs: PlanSourceInput[],
-  fetchPage: (url: string, signal: AbortSignal) => Promise<FetchedPage> = (url, signal) => fetchPlanWebsite(env, url, signal),
+  options: CollectOptions,
 ): Promise<PlanSourceDraft[]> {
+  const fetchPage = options.fetchPage ?? ((url, signal) => fetchPlanWebsite(env, url, signal));
+  const extractPdf = options.extractPdf ?? extractPdfText;
+
   // Every page at once, under one deadline. The first refusal is the
   // one reported; the rest are abandoned with it.
   const deadline = AbortSignal.timeout(WEBSITE_TIMEOUT_MS);
@@ -156,52 +240,147 @@ export async function collectPlanSources(
   );
 
   const drafts: PlanSourceDraft[] = [];
-  let total = 0;
+  let totalChars = 0;
+  let totalBytes = 0;
   for (const [index, input] of inputs.entries()) {
     let draft: PlanSourceDraft;
     if (input.kind === "file") {
-      if (input.content.trim() === "") throw new PlanSourceRefusal(`${input.name} is empty, so there is nothing in it to plan from.`);
-      const refusal = textRefusal(input.content);
-      if (refusal) throw new PlanSourceRefusal(`${input.name} cannot be a plan source: ${refusal}.`);
-      const content = input.content.replace(/\r\n?/g, "\n");
-      draft = {
-        position: index,
-        kind: "file",
-        name: input.name.replace(/\\/g, "/").replace(/^(\.\/|\/)+/, "") || input.name,
-        url: null,
-        mime: mimeForName(input.name),
-        size: content.length,
-        content,
-      };
+      const name = input.name.replace(/\\/g, "/").replace(/^(\.\/|\/)+/, "") || input.name;
+      const mime = input.mime?.split(";")[0]!.trim().toLowerCase() || mimeForName(name);
+      const media = mediaOf(mime);
+      if (input.data !== undefined) {
+        const bytes = Buffer.from(input.data, "base64");
+        if (bytes.byteLength === 0) throw new PlanSourceRefusal(`${name} is empty, so there is nothing in it to plan from.`);
+        if (media === "text") {
+          // Bytes of a text file, which the TUI sends when it does
+          // not want to guess at an encoding: read them as UTF-8 and
+          // keep the text, with nothing to shelve.
+          draft = textDraft(index, "file", name, null, mime, bytes.toString("utf8"));
+        } else {
+          draft = await binaryDraft(index, "file", name, null, mime, media, bytes, options.hasStore, extractPdf);
+        }
+      } else {
+        if (media !== "text") {
+          throw new PlanSourceRefusal(`${name} is ${media === "pdf" ? "a PDF" : "an image"}, and arrived as text. Upload it as a file instead.`);
+        }
+        draft = textDraft(index, "file", name, null, mime, input.content ?? "");
+      }
     } else {
       const page = pages.get(index)!;
-      if (page.text.length > MAX_SWARM_PLAN_SOURCE_CHARS) {
-        throw new PlanSourceRefusal(
-          `${input.url} holds ${page.text.length.toLocaleString("en-US")} characters of text, and a plan source holds at most ${MAX_SWARM_PLAN_SOURCE_CHARS.toLocaleString("en-US")}. Save the part that is the plan as a file and upload that instead.`,
-        );
+      if (page.bytes) {
+        draft = await binaryDraft(index, "website", page.title ?? nameFromUrl(page.url), page.url, page.mime, mediaOf(page.mime), page.bytes, options.hasStore, extractPdf);
+      } else {
+        if (page.text.length > MAX_SWARM_PLAN_SOURCE_CHARS) {
+          throw new PlanSourceRefusal(
+            `${input.url} holds ${page.text.length.toLocaleString("en-US")} characters of text, and a plan source holds at most ${MAX_SWARM_PLAN_SOURCE_CHARS.toLocaleString("en-US")}. Save the part that is the plan as a file and upload that instead.`,
+          );
+        }
+        if (page.text.trim() === "") {
+          throw new PlanSourceRefusal(`${input.url} has no readable text on it.`);
+        }
+        draft = {
+          position: index,
+          kind: "website",
+          name: page.title?.trim() ? page.title.trim().slice(0, MAX_SWARM_PLAN_SOURCE_NAME_CHARS) : page.url,
+          url: page.url,
+          mime: page.mime,
+          size: page.text.length,
+          content: page.text,
+          bytes: null,
+        };
       }
-      if (page.text.trim() === "") {
-        throw new PlanSourceRefusal(`${input.url} has no readable text on it.`);
-      }
-      draft = {
-        position: index,
-        kind: "website",
-        name: page.title?.trim() ? page.title.trim().slice(0, MAX_SWARM_PLAN_SOURCE_NAME_CHARS) : page.url,
-        url: page.url,
-        mime: page.mime,
-        size: page.text.length,
-        content: page.text,
-      };
     }
-    total += draft.size;
-    if (total > MAX_SWARM_PLAN_CHARS) {
+    totalChars += draft.size;
+    totalBytes += draft.bytes?.byteLength ?? 0;
+    if (totalChars > MAX_SWARM_PLAN_CHARS) {
       throw new PlanSourceRefusal(
         `The plan sources hold more than ${MAX_SWARM_PLAN_CHARS.toLocaleString("en-US")} characters together. Leave out what is not the plan.`,
+      );
+    }
+    if (totalBytes > MAX_SWARM_PLAN_BYTES) {
+      throw new PlanSourceRefusal(
+        `The PDFs and images hold more than ${Math.round(MAX_SWARM_PLAN_BYTES / (1024 * 1024))} MB together. Leave out what is not the plan.`,
       );
     }
     drafts.push(draft);
   }
   return drafts;
+}
+
+/** A text source, checked and normalised. */
+function textDraft(position: number, kind: "file" | "website", name: string, url: string | null, mime: string, text: string): PlanSourceDraft {
+  if (text.trim() === "") throw new PlanSourceRefusal(`${name} is empty, so there is nothing in it to plan from.`);
+  const refusal = textRefusal(text);
+  if (refusal) throw new PlanSourceRefusal(`${name} cannot be a plan source: ${refusal}.`);
+  const content = text.replace(/\r\n?/g, "\n");
+  if (content.length > MAX_SWARM_PLAN_SOURCE_CHARS) {
+    throw new PlanSourceRefusal(
+      `${name} holds ${content.length.toLocaleString("en-US")} characters, and a plan source holds at most ${MAX_SWARM_PLAN_SOURCE_CHARS.toLocaleString("en-US")}.`,
+    );
+  }
+  return { position, kind, name, url, mime, size: content.length, content, bytes: null };
+}
+
+/**
+ * A PDF or an image: bytes to shelve, and for a PDF whatever text its
+ * pages hold.
+ *
+ * A PDF with no text at all is a scan, and it is kept rather than
+ * refused: the agent's own file tools can open it in the workspace,
+ * and the prompt says that is the only way to read it. What is
+ * refused is a deployment with nowhere to put the bytes, and a file
+ * that calls itself a PDF and is not one.
+ */
+async function binaryDraft(
+  position: number,
+  kind: "file" | "website",
+  name: string,
+  url: string | null,
+  mime: string,
+  media: PlanMedia,
+  bytes: Buffer,
+  hasStore: boolean,
+  extractPdf: (bytes: Buffer) => Promise<string>,
+): Promise<PlanSourceDraft> {
+  if (!hasStore) {
+    throw new PlanSourceRefusal(
+      `${name} is ${media === "pdf" ? "a PDF" : "an image"}, and this deployment has no file storage configured, so it cannot be a plan source here. Upload the plan as text, or configure an artifact bucket.`,
+    );
+  }
+  if (bytes.byteLength > MAX_SWARM_PLAN_FILE_BYTES) {
+    throw new PlanSourceRefusal(`${name} is larger than ${Math.round(MAX_SWARM_PLAN_FILE_BYTES / (1024 * 1024))} MB, which is too large to be a plan source.`);
+  }
+  let content: string | null = null;
+  if (media === "pdf") {
+    let text: string;
+    try {
+      text = await extractPdf(bytes);
+    } catch {
+      throw new PlanSourceRefusal(`${name} could not be read as a PDF.`);
+    }
+    text = text.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    if (text.length > MAX_SWARM_PLAN_SOURCE_CHARS) {
+      throw new PlanSourceRefusal(
+        `${name} holds ${text.length.toLocaleString("en-US")} characters of text, and a plan source holds at most ${MAX_SWARM_PLAN_SOURCE_CHARS.toLocaleString("en-US")}. Split it, or upload the part that is the plan.`,
+      );
+    }
+    content = text === "" ? null : text;
+  }
+  return { position, kind, name: name.slice(0, MAX_SWARM_PLAN_SOURCE_NAME_CHARS), url, mime, size: content?.length ?? 0, content, bytes };
+}
+
+/**
+ * The text of a PDF, page after page.
+ *
+ * Through unpdf, which is pdf.js packaged for a server with no canvas
+ * and no native code. Text only: a PDF's images and layout stay in the
+ * bytes, which the agent can open in its workspace.
+ */
+export async function extractPdfText(bytes: Buffer): Promise<string> {
+  const { extractText, getDocumentProxy } = await import("unpdf");
+  const document = await getDocumentProxy(new Uint8Array(bytes));
+  const { text } = await extractText(document, { mergePages: true });
+  return text;
 }
 
 /** What one fetched page comes back as. */
@@ -212,12 +391,15 @@ export interface FetchedPage {
   title: string | null;
   /** The media type the server answered with, without its parameters. */
   mime: string;
-  /** The page as text: HTML stripped to what a reader sees, anything else as sent. */
+  /** The page as text: HTML stripped to what a reader sees, anything else as sent. Empty for a PDF or an image. */
   text: string;
+  /** The bytes, for a PDF or an image at the address. Null for a page. */
+  bytes?: Buffer | null;
 }
 
 /**
- * Fetches one address a person typed and returns its text.
+ * Fetches one address a person typed and returns its text, or its
+ * bytes when it is a PDF or an image.
  *
  * Through safeFetch, which is the rule for every URL a tenant chooses:
  * in multi mode that means https only, a public address, never this
@@ -248,7 +430,7 @@ export async function fetchPlanWebsite(
     response = await safeFetch(
       parsed.toString(),
       {
-        headers: { accept: "text/html, text/markdown, text/plain, application/json;q=0.9, */*;q=0.5" },
+        headers: { accept: "text/html, text/markdown, text/plain, application/pdf, image/*, application/json;q=0.9, */*;q=0.5" },
         headersTimeoutMs: WEBSITE_TIMEOUT_MS,
         signal,
       },
@@ -266,19 +448,24 @@ export async function fetchPlanWebsite(
   const contentType = response.headers.get("content-type") ?? "";
   const mime = contentType.split(";")[0]!.trim().toLowerCase() || "application/octet-stream";
   const charset = /charset=["']?([\w-]+)/i.exec(contentType)?.[1];
-  if (!isTextType(mime)) {
+  const media = mediaOf(mime);
+  if (media === "text" && !isTextType(mime)) {
     response.body?.cancel().catch(() => {});
-    throw new PlanSourceRefusal(`${url} is ${mime}, not a page or a text file. Save the plan as text and upload it instead.`);
+    throw new PlanSourceRefusal(`${url} is ${mime}, not a page, a PDF, an image or a text file. Save the plan as text and upload it instead.`);
   }
 
+  const cap = media === "text" ? MAX_PLAN_WEBSITE_BYTES : MAX_SWARM_PLAN_FILE_BYTES;
   let bytes: Uint8Array | null;
   try {
-    bytes = await readCapped(response, MAX_PLAN_WEBSITE_BYTES);
+    bytes = await readCapped(response, cap);
   } catch {
     throw new PlanSourceRefusal(`${url} stopped answering before the page was read.`);
   }
   if (bytes === null) {
-    throw new PlanSourceRefusal(`${url} is larger than ${Math.round(MAX_PLAN_WEBSITE_BYTES / (1024 * 1024))} MB, which is too large to be a plan.`);
+    throw new PlanSourceRefusal(`${url} is larger than ${Math.round(cap / (1024 * 1024))} MB, which is too large to be a plan.`);
+  }
+  if (media !== "text") {
+    return { url: parsed.toString(), title: null, mime, text: "", bytes: Buffer.from(bytes) };
   }
   const raw = decode(bytes, charset);
   if (mime === "text/html" || mime === "application/xhtml+xml") {
@@ -293,7 +480,17 @@ export async function fetchPlanWebsite(
 
 function isTextType(mime: string): boolean {
   if (mime.startsWith("text/")) return true;
-  return ["application/json", "application/xhtml+xml", "application/xml", "application/x-yaml", "application/yaml", "application/toml"].includes(mime);
+  return ["application/json", "application/xhtml+xml", "application/xml", "application/x-yaml", "application/yaml", "application/toml", "image/svg+xml"].includes(mime);
+}
+
+/** The last path segment of an address, for a PDF or an image that has no title. */
+function nameFromUrl(url: string): string {
+  try {
+    const last = new URL(url).pathname.split("/").filter(Boolean).pop();
+    return last ? decodeURIComponent(last) : url;
+  } catch {
+    return url;
+  }
 }
 
 function decode(bytes: Uint8Array, charset: string | undefined): string {
@@ -369,7 +566,7 @@ export function htmlToText(html: string): { title: string | null; text: string }
     .replace(/<[^>]+>/g, "");
 
   const text = decodeEntities(body)
-    .replace(/\u00a0/g, " ")
+    .replace(/ /g, " ")
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t ]+\n/g, "\n")
     .replace(/\n[ \t ]+/g, "\n")
@@ -414,8 +611,8 @@ function decodeEntities(text: string): string {
   });
 }
 
-/** The media type a file name suggests, for display. */
-function mimeForName(name: string): string {
+/** The media type a file name suggests, when the client did not say. */
+export function mimeForName(name: string): string {
   const ext = /\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase();
   switch (ext) {
     case "md":
@@ -431,46 +628,228 @@ function mimeForName(name: string): string {
       return "text/html";
     case "csv":
       return "text/csv";
+    case "svg":
+      return "image/svg+xml";
+    case "pdf":
+      return "application/pdf";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
     default:
       return "text/plain";
   }
 }
 
-/** Writes the resolved sources against a swarm that now exists. */
-export async function insertPlanSources(db: Db, swarmId: string, drafts: PlanSourceDraft[]): Promise<void> {
+/** The store key for one source's bytes. Org-prefixed for lifecycle bookkeeping only. */
+export function planSourceStorageKey(organizationId: string | null, swarmId: string, sourceId: string): string {
+  return `org/${organizationId ?? "local"}/swarm/${swarmId}/plan/${sourceId}`;
+}
+
+/**
+ * Writes the resolved sources against a swarm that now exists.
+ *
+ * Bytes go to the store first, then the rows: a row that names an
+ * object that is not there would be a source nobody can open, while
+ * an object with no row is a few bytes on a shelf that the delete
+ * route's sweep never finds, which is the cheaper mistake. If the
+ * rows fail, the objects just shelved are taken down again.
+ */
+export async function insertPlanSources(
+  db: Db,
+  store: ArtifactStore | null,
+  swarm: { id: string; organizationId: string | null },
+  drafts: PlanSourceDraft[],
+): Promise<void> {
   if (drafts.length === 0) return;
-  await db.insert(swarmPlanSources).values(drafts.map((draft) => ({ ...draft, swarmId })));
+  const rows = drafts.map((draft) => ({ id: randomUUID(), draft }));
+  const shelved: string[] = [];
+  try {
+    for (const { id, draft } of rows) {
+      if (!draft.bytes) continue;
+      if (!store) throw new PlanSourceRefusal(`${draft.name} cannot be stored: this deployment has no file storage configured.`);
+      const key = planSourceStorageKey(swarm.organizationId, swarm.id, id);
+      await store.put(key, draft.bytes, draft.mime);
+      shelved.push(key);
+    }
+    await db.insert(swarmPlanSources).values(
+      rows.map(({ id, draft }) => ({
+        id,
+        swarmId: swarm.id,
+        position: draft.position,
+        kind: draft.kind,
+        name: draft.name,
+        url: draft.url,
+        mime: draft.mime,
+        size: draft.size,
+        content: draft.content,
+        storageKey: draft.bytes ? planSourceStorageKey(swarm.organizationId, swarm.id, id) : null,
+        byteSize: draft.bytes ? draft.bytes.byteLength : null,
+      })),
+    );
+  } catch (err) {
+    if (shelved.length > 0 && store) await store.remove(shelved).catch(() => {});
+    throw err;
+  }
 }
 
 /** Every source of a swarm, in the order the person gave them, content included. */
 export async function loadPlanSources(db: Db, swarmId: string): Promise<PlanSource[]> {
-  return db
+  const rows = await db
     .select({
       id: swarmPlanSources.id,
       position: swarmPlanSources.position,
       kind: swarmPlanSources.kind,
       name: swarmPlanSources.name,
       url: swarmPlanSources.url,
+      mime: swarmPlanSources.mime,
       size: swarmPlanSources.size,
       content: swarmPlanSources.content,
+      storageKey: swarmPlanSources.storageKey,
+      byteSize: swarmPlanSources.byteSize,
     })
     .from(swarmPlanSources)
     .where(eq(swarmPlanSources.swarmId, swarmId))
     .orderBy(asc(swarmPlanSources.position), asc(swarmPlanSources.createdAt));
+  return rows.map((row) => ({ ...row, media: mediaOf(row.mime) }));
 }
 
 /** The same list without the text, for a console that lists what was handed over. */
 export async function listPlanSources(db: Db, swarmId: string): Promise<PlanSourceSummary[]> {
-  return db
+  const rows = await db
     .select({
       id: swarmPlanSources.id,
       position: swarmPlanSources.position,
       kind: swarmPlanSources.kind,
       name: swarmPlanSources.name,
       url: swarmPlanSources.url,
+      mime: swarmPlanSources.mime,
       size: swarmPlanSources.size,
+      byteSize: swarmPlanSources.byteSize,
     })
     .from(swarmPlanSources)
     .where(eq(swarmPlanSources.swarmId, swarmId))
     .orderBy(asc(swarmPlanSources.position), asc(swarmPlanSources.createdAt));
+  return rows.map((row) => ({ ...row, media: mediaOf(row.mime), hasText: row.size > 0 }));
+}
+
+/** The keys a swarm's sources hold in the store, for the delete route's sweep. */
+export async function planSourceStorageKeys(db: Db, swarmId: string): Promise<string[]> {
+  const rows = await db
+    .select({ storageKey: swarmPlanSources.storageKey })
+    .from(swarmPlanSources)
+    .where(eq(swarmPlanSources.swarmId, swarmId));
+  return rows.map((row) => row.storageKey).filter((key): key is string => key !== null);
+}
+
+/**
+ * The file name a source has in an agent's workspace.
+ *
+ * Deterministic from the row, so the tool that tells an agent where a
+ * source is and the executor that put it there agree without talking:
+ * its number first, so the directory lists in the person's order, then
+ * the base of its name with anything a shell would mind replaced.
+ */
+export function planSourceFileName(source: Pick<PlanSource, "position" | "name" | "mime" | "kind" | "url">): string {
+  const base = path.basename(source.kind === "website" && source.url ? nameFromUrl(source.url) : source.name);
+  const safe = base.replace(/[^\p{L}\p{N}._-]/gu, "_").replace(/^\.+/, "") || "source";
+  const named = /\.[a-z0-9]+$/i.test(safe) ? safe : `${safe}${extensionFor(source.mime)}`;
+  return `${source.position + 1}-${named}`;
+}
+
+function extensionFor(mime: string): string {
+  switch (mime) {
+    case "application/pdf":
+      return ".pdf";
+    case "image/png":
+      return ".png";
+    case "image/jpeg":
+      return ".jpg";
+    case "image/gif":
+      return ".gif";
+    case "image/webp":
+      return ".webp";
+    case "text/html":
+      return ".html";
+    case "text/markdown":
+      return ".md";
+    case "application/json":
+      return ".json";
+    default:
+      return ".txt";
+  }
+}
+
+/**
+ * Puts a copy of every source in the agent's workspace.
+ *
+ * Text sources are in the prompt and behind read_plan already; the
+ * copy on disk is for the ones a prompt cannot carry (a PDF's layout,
+ * an image) and for an agent that would rather grep a long plan than
+ * read it in one piece. Written through stdin into a script inside
+ * the sandbox, the way message attachments are, so a person's bytes
+ * never become a shell argument. Idempotent: a later run on the same
+ * machine writes the same files again.
+ *
+ * Returns each source's absolute path, or null for the lot when the
+ * driver cannot take stdin, which the prompt then says. A missing
+ * object in the store leaves that one source without a path and the
+ * rest with theirs.
+ */
+export async function writePlanSourceFiles(
+  driver: SandboxDriver,
+  store: ArtifactStore | null,
+  handle: SandboxHandle,
+  sources: PlanSource[],
+): Promise<Map<string, string> | null> {
+  if (sources.length === 0) return new Map();
+  if (!driver.supportsStdin) return null;
+
+  const files: { name: string; data: string }[] = [];
+  const paths = new Map<string, string>();
+  for (const source of sources) {
+    let bytes: Buffer | null = null;
+    if (source.storageKey) {
+      if (!store) continue;
+      bytes = await store.get(source.storageKey);
+      if (!bytes) continue;
+    } else if (source.content !== null) {
+      bytes = Buffer.from(source.content, "utf8");
+    }
+    if (!bytes) continue;
+    const name = planSourceFileName(source);
+    files.push({ name, data: bytes.toString("base64") });
+    paths.set(source.id, path.posix.join(handle.workdir, PLAN_SOURCE_DIR, name));
+  }
+  if (files.length === 0) return paths;
+
+  const script = `
+const fs = require('node:fs');
+const path = require('node:path');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => input += chunk);
+process.stdin.on('end', () => {
+  const {directory, files} = JSON.parse(input);
+  fs.mkdirSync(directory, {recursive: true, mode: 0o700});
+  for (const file of files) fs.writeFileSync(path.join(directory, file.name), Buffer.from(file.data, 'base64'), {mode: 0o600});
+});`;
+  const result = await collectExec(
+    driver.exec(handle, ["node", "-e", script], {
+      cwd: handle.workdir,
+      timeoutMs: 60_000,
+      stdin: (async function* () {
+        yield JSON.stringify({ directory: path.posix.join(handle.workdir, PLAN_SOURCE_DIR), files });
+      })(),
+    }),
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`the plan sources could not be written into the workspace: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`}`);
+  }
+  return paths;
 }

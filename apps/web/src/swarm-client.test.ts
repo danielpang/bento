@@ -3,7 +3,8 @@ import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import { clampWorkers, existingPlanHelp, planSourceRefusal, suggestBranch } from "./components/NewSwarmDialog.js";
+import { base64Bytes, binaryMime, clampWorkers, existingPlanHelp, newSourceLabel, planSourceRefusal, suggestBranch, toBase64 } from "./components/NewSwarmDialog.js";
+import { planSourceLabel, planSourceSize } from "./components/SwarmPage.js";
 import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";
 import type { NewSwarmInput } from "./swarm/types.js";
 
@@ -236,6 +237,34 @@ test("a plan source is refused for the reasons the route would refuse it, and ac
   assert.match(planSourceRefusal(full, { kind: "file", name: "one-more.md", content: "x" })!, /up to 20/);
   const heavy = Array.from({ length: 4 }, (_, i) => ({ kind: "file" as const, name: `${i}.md`, content: "x".repeat(250_000) }));
   assert.match(planSourceRefusal(heavy, { kind: "file", name: "last.md", content: "x" })!, /past 1,000,000/);
+});
+
+test("a PDF or an image travels as bytes, is sized in bytes, and is refused past the byte caps", () => {
+  assert.equal(binaryMime("plan.pdf", ""), "application/pdf", "a browser that gives no type is answered by the name");
+  assert.equal(binaryMime("shot.PNG", "image/png"), "image/png");
+  assert.equal(binaryMime("notes.md", "text/markdown"), null);
+  assert.equal(binaryMime("deck", "application/pdf"), "application/pdf");
+  const data = toBase64(new Uint8Array([1, 2, 3, 4, 5]).buffer);
+  assert.equal(data, "AQIDBAU=");
+  assert.equal(base64Bytes(data), 5);
+  assert.equal(base64Bytes(""), 0);
+
+  assert.equal(planSourceRefusal([], { kind: "file", name: "plan.pdf", mime: "application/pdf", data }), null);
+  assert.equal(newSourceLabel({ kind: "file", name: "plan.pdf", mime: "application/pdf", data }), "PDF");
+  assert.equal(newSourceLabel({ kind: "file", name: "shot.png", mime: "image/png", data }), "Image");
+  assert.match(planSourceRefusal([], { kind: "file", name: "empty.pdf", mime: "application/pdf", data: "" })!, /is empty/);
+  const big = "A".repeat(Math.ceil((10 * 1024 * 1024 + 3) / 3) * 4);
+  assert.match(planSourceRefusal([], { kind: "file", name: "big.pdf", mime: "application/pdf", data: big })!, /at most 10\.0 MB/);
+  const nineMb = "A".repeat(Math.ceil((9 * 1024 * 1024) / 3) * 4);
+  const three = Array.from({ length: 3 }, (_, i) => ({ kind: "file" as const, name: `${i}.pdf`, mime: "application/pdf", data: nineMb }));
+  assert.match(planSourceRefusal(three, { kind: "file", name: "4.pdf", mime: "application/pdf", data: nineMb })!, /past 30\.0 MB in all/);
+
+  assert.equal(planSourceLabel({ kind: "file", media: "pdf" }), "PDF");
+  assert.equal(planSourceLabel({ kind: "website", media: "text" }), "Website");
+  assert.equal(planSourceSize({ media: "image", size: 0, hasText: false, byteSize: 4096 }), "4 KB");
+  assert.equal(planSourceSize({ media: "pdf", size: 1200, hasText: true, byteSize: 2 * 1024 * 1024 }), "2.0 MB, 1,200 characters of text");
+  assert.equal(planSourceSize({ media: "pdf", size: 0, hasText: false, byteSize: 500 }), "500 bytes, no text (a scan)");
+  assert.equal(planSourceSize({ media: "text", size: 12, hasText: true, byteSize: null }), "12 characters");
 });
 
 test("the switch says what it does in each position, and how the sources are read", () => {

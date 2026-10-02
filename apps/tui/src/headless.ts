@@ -1,6 +1,25 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ApiError, unwrapError } from "@bento/api-client";
+
+/** The media type of a plan file that travels as bytes, or null for one that travels as text. */
+function planFileMime(name: string): string | null {
+  switch (/\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase()) {
+    case "pdf":
+      return "application/pdf";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
 import { checkAgentPairing } from "@bento/core";
 import { LocalRunner } from "./runner.js";
 import { startEmbedded } from "./embedded.js";
@@ -461,22 +480,35 @@ export async function runSwarm(options: CliOptions): Promise<void> {
          * file that cannot be read is a refusal before the request,
          * so nothing is half created.
          */
-        const sources: ({ kind: "file"; name: string; content: string } | { kind: "website"; url: string })[] = [];
+        const sources: (
+          | { kind: "file"; name: string; content: string }
+          | { kind: "file"; name: string; data: string; mime: string }
+          | { kind: "website"; url: string }
+        )[] = [];
         for (const file of options.plan ?? []) {
-          let content: string;
+          let bytes: Buffer;
           try {
-            content = await readFile(file, "utf8");
+            bytes = await readFile(file);
           } catch (err) {
             io.err(`could not read ${file}: ${err instanceof Error ? err.message : String(err)}`);
             io.fail();
             return;
           }
+          const name = path.basename(file);
+          const binary = planFileMime(name);
+          if (binary) {
+            // A PDF or an image travels as its bytes; the server reads
+            // the PDF's text and shelves both.
+            sources.push({ kind: "file", name, data: bytes.toString("base64"), mime: binary });
+            continue;
+          }
+          const content = bytes.toString("utf8");
           if (content.includes("\u0000")) {
-            io.err(`${file} is not a text file. A plan source is markdown, plain text, or another text format.`);
+            io.err(`${file} is not a text file. A plan source is markdown, plain text, a PDF, or an image.`);
             io.fail();
             return;
           }
-          sources.push({ kind: "file", name: path.basename(file), content });
+          sources.push({ kind: "file", name, content });
         }
         for (const url of options.planUrl ?? []) sources.push({ kind: "website", url });
         const created = await client.createSwarm({

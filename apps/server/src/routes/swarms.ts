@@ -16,6 +16,7 @@ import {
   sandboxes,
   swarmLandings,
   swarmMessages,
+  swarmPlanSources,
   swarmPullRequests,
   swarmTaskEvents,
   swarmTasks,
@@ -57,6 +58,7 @@ import {
   insertPlanSources,
   listPlanSources,
   PlanSourceRefusal,
+  planSourceStorageKeys,
   planSourcesInput,
 } from "../orchestrator/swarm/plan-sources.js";
 import { archiveReapsSandboxes, checkpointSwarmSandboxes } from "../orchestrator/swarm/archive.js";
@@ -218,14 +220,24 @@ const createSwarm = z.object({
 /**
  * How large a create request may be.
  *
- * A plan arrives inline as text, and the caps on it are in characters
- * (MAX_SWARM_PLAN_CHARS across every source). JSON escaping and the
- * UTF-8 of a plan written in anything but ASCII can take that to a
- * few times the count in bytes, so the limit is generous against the
- * character cap and still far below anything an uploaded plan has a
- * reason to be.
+ * A plan arrives inline: text as text, PDFs and images as base64,
+ * which is a third larger than the bytes. The caps are on the sources
+ * themselves (MAX_SWARM_PLAN_CHARS of text, MAX_SWARM_PLAN_BYTES of
+ * bytes across every source), so this only has to be generous against
+ * the sum of both with JSON escaping on top, and still far below
+ * anything an uploaded plan has a reason to be.
  */
-const CREATE_BODY_BYTES = 8 * 1024 * 1024;
+const CREATE_BODY_BYTES = 48 * 1024 * 1024;
+
+/** The media types the plan source content route lets a browser draw inline. Everything else downloads. */
+const PLAN_SOURCE_INLINE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "text/plain", "text/markdown"]);
+
+/** A source's own name, defanged for a header it travels inside. */
+function headerSafeName(name: string): string {
+  const base = name.split("/").pop() ?? "source";
+  const safe = base.replaceAll(/[^\w.-]/g, "_");
+  return safe || "source";
+}
 
 /**
  * What a person may change about a swarm: what it is called, its
@@ -550,7 +562,7 @@ export function swarmRoutes(ctx: AppContext) {
        */
       let planSources;
       try {
-        planSources = await collectPlanSources(ctx.env, body.planSources ?? []);
+        planSources = await collectPlanSources(ctx.env, body.planSources ?? [], { hasStore: ctx.artifacts !== null });
       } catch (err) {
         if (err instanceof PlanSourceRefusal) return c.json({ error: err.message, code: "PLAN_SOURCE" }, 400);
         throw err;
@@ -595,7 +607,12 @@ export function swarmRoutes(ctx: AppContext) {
         })
         .returning();
       if (!swarm) return c.json({ error: "something went wrong starting the swarm; try again" }, 500);
-      await insertPlanSources(db(c, ctx), swarm.id, planSources);
+      try {
+        await insertPlanSources(db(c, ctx), ctx.artifacts, { id: swarm.id, organizationId: swarm.organizationId }, planSources);
+      } catch (err) {
+        if (err instanceof PlanSourceRefusal) return c.json({ error: err.message, code: "PLAN_SOURCE" }, 400);
+        throw err;
+      }
 
       const run = await startRunIfIdle(
         db(c, ctx),
@@ -1354,6 +1371,62 @@ export function swarmRoutes(ctx: AppContext) {
      * Duplicating any of that here would be a second place for it to
      * drift out of date.
      */
+    /**
+     * The bytes of one plan source, for the console: an image drawn
+     * under the goal, a PDF offered as a download, a text file as it
+     * was uploaded.
+     *
+     * Resolved through the swarm and the row, never through the key:
+     * a key is bookkeeping, and nothing is served because one matched.
+     * The headers are the artifact route's, for the artifact route's
+     * reason: a person's upload is not this app, and must never run
+     * as it. Images are safe inline because an image element runs
+     * nothing; a PDF viewer runs script and SVG can carry it, so both
+     * download.
+     */
+    .get("/:id/plan-sources/:sourceId/content", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const sourceId = c.req.param("sourceId");
+      if (!/^[0-9a-f-]{36}$/i.test(sourceId)) return c.json({ error: "not found" }, 404);
+      const [source] = await db(c, ctx)
+        .select()
+        .from(swarmPlanSources)
+        .where(and(eq(swarmPlanSources.id, sourceId), eq(swarmPlanSources.swarmId, swarm.id)))
+        .limit(1);
+      if (!source) return c.json({ error: "not found" }, 404);
+
+      // Sources are immutable, so the id is the strongest ETag there is.
+      const etag = `"${source.id}"`;
+      if (c.req.header("if-none-match") === etag) return c.body(null, 304);
+
+      let body: Buffer | null = null;
+      let mime = source.mime;
+      if (source.storageKey) {
+        if (!ctx.artifacts) return c.json({ error: "this deployment has no artifact storage configured" }, 503);
+        body = await ctx.artifacts.get(source.storageKey);
+      } else if (source.content !== null) {
+        body = Buffer.from(source.content, "utf8");
+        // A page's text is served as text, not as the HTML it was
+        // stripped from, and nothing text-shaped is given a type a
+        // browser would render as markup.
+        mime = source.mime === "text/markdown" ? "text/markdown; charset=utf-8" : "text/plain; charset=utf-8";
+      }
+      // The row outlived its bytes, which is a true answer rather than
+      // an error to dress up: the object was removed from the store.
+      if (body === null) return c.json({ error: "not found" }, 404);
+
+      c.header("content-type", mime);
+      c.header("x-content-type-options", "nosniff");
+      c.header("content-security-policy", "sandbox");
+      c.header("cache-control", "private, max-age=3600");
+      c.header("etag", etag);
+      const mode = PLAN_SOURCE_INLINE_MIMES.has(source.mime) ? "inline" : "attachment";
+      c.header("content-disposition", `${mode}; filename="${headerSafeName(source.name)}"`);
+      return c.body(new Uint8Array(body));
+    })
     .get("/:id/artifacts", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
@@ -1977,7 +2050,20 @@ export function swarmRoutes(ctx: AppContext) {
         }
       }
 
+      /*
+       * What the plan's PDFs and images hold in the store, read before
+       * the rows go, and taken down once the delete has committed: a
+       * row that is gone is not reachable, and an object that stayed
+       * would only be bytes on a shelf nobody can ask for.
+       */
+      const planKeys = await planSourceStorageKeys(db(c, ctx), swarm.id);
       await db(c, ctx).delete(swarms).where(eq(swarms.id, swarm.id));
+      if (planKeys.length > 0 && ctx.artifacts) {
+        const store = ctx.artifacts;
+        deferAfterCommit(c, async () => {
+          await store.remove(planKeys);
+        });
+      }
       /*
        * The sandbox rows last, and by id: the delete above has already
        * set their swarm_id to null, so a delete by swarm_id would now

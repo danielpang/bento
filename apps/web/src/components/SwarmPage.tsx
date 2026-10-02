@@ -9,7 +9,7 @@ import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
-import type { SwarmArtifact, SwarmDetail } from "../swarm/types.js";
+import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
 import type { SwarmView } from "../swarm/view-state.js";
 
 /** Ticks the header's clock, and only while there is something running. */
@@ -114,18 +114,47 @@ export function SwarmPlanBrief({
       {sources.length > 0 && (
         <ul className="swarm-plan-sources" aria-label="Plan sources">
           {sources.map((source) => (
-            <li key={source.id}>
-              <span className="swarm-plan-source-kind">{source.kind === "file" ? "File" : "Website"}</span>
+            <li key={source.id} data-media={source.media}>
+              {source.media === "image" && (
+                <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
+              )}
+              <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
               {source.url
                 ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
                 : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
-              <span className="muted">{source.size.toLocaleString()} characters</span>
+              <span className="muted">{planSourceSize(source)}</span>
+              {source.media !== "text" && (
+                <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
+                  {source.media === "image" ? "Open" : "Download"}
+                </a>
+              )}
             </li>
           ))}
         </ul>
       )}
     </div>
   );
+}
+
+/** What a source is, as the list labels it. */
+export function planSourceLabel(source: Pick<SwarmPlanSource, "kind" | "media">): string {
+  if (source.media === "pdf") return "PDF";
+  if (source.media === "image") return "Image";
+  return source.kind === "file" ? "File" : "Website";
+}
+
+/** How big a source is, in the unit a person reads it by. */
+export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | "hasText" | "byteSize">): string {
+  if (source.media === "text") return `${source.size.toLocaleString()} characters`;
+  const bytes = formatBytes(source.byteSize ?? 0);
+  if (source.media === "image") return bytes;
+  return source.hasText ? `${bytes}, ${source.size.toLocaleString()} characters of text` : `${bytes}, no text (a scan)`;
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} bytes`;
 }
 
 /**

@@ -53,3 +53,14 @@ export const MAX_SWARM_PLAN_CHARS = 1_000_000;
 
 /** How long the name of an uploaded plan file may be, path included. */
 export const MAX_SWARM_PLAN_SOURCE_NAME_CHARS = 240;
+
+/**
+ * Bytes one PDF or image plan source may hold, and bytes every binary
+ * source of one swarm may hold together. Separate from the character
+ * caps above because a PDF's size says nothing about how much text is
+ * in it, and a mockup is read by the agent's eyes rather than as
+ * text. Ten megabytes is a long design document or a large screenshot;
+ * past that a plan source is a dump of something.
+ */
+export const MAX_SWARM_PLAN_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_SWARM_PLAN_BYTES = 30 * 1024 * 1024;

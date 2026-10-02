@@ -676,7 +676,12 @@ export interface WirePlanSource {
   kind: "file" | "website";
   name: string;
   url: string | null;
+  /* Optional: a server from before PDFs and images sends text only. */
+  mime?: string;
+  media?: "text" | "pdf" | "image";
   size: number;
+  hasText?: boolean;
+  byteSize?: number | null;
 }
 
 /** One node, as its own route sends it. */
@@ -1109,7 +1114,7 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     // holds something.
     ledger: [],
     pullRequests: (detail.pullRequests ?? []).map(toPullRequest),
-    planSources: (detail.planSources ?? []).map(toPlanSource),
+    planSources: (detail.planSources ?? []).map((row) => toPlanSource(row, detail.swarm.id)),
   };
 }
 
@@ -1117,14 +1122,19 @@ export function toDetail(detail: WireDetail): SwarmDetail {
  * One plan source. The url is checked the way a pull request's is: it
  * becomes an `href` on the page, and a person typed it.
  */
-export function toPlanSource(row: WirePlanSource): SwarmPlanSource {
+export function toPlanSource(row: WirePlanSource, swarmId: string): SwarmPlanSource {
   return {
     id: row.id,
     position: row.position,
     kind: row.kind,
     name: row.name,
     url: row.url === null ? null : externalHttpUrl(row.url),
+    mime: row.mime ?? "text/plain",
+    media: row.media ?? "text",
     size: Number(row.size),
+    hasText: row.hasText ?? Number(row.size) > 0,
+    byteSize: row.byteSize ?? null,
+    contentPath: `/api/swarms/${encodeURIComponent(swarmId)}/plan-sources/${encodeURIComponent(row.id)}/content`,
   };
 }
 

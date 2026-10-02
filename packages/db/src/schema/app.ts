@@ -2098,12 +2098,33 @@ export const swarmPlanSources = pgTable(
     name: text("name").notNull(),
     /** The address a website source was fetched from. Null on a file. */
     url: text("url"),
-    /** The media type the text was read as. Display only. */
+    /** The media type the source was read as: what a page answered with, or what the file's name says. */
     mime: text("mime").notNull(),
-    /** Characters of text, so a list can say how big each source is without reading it. */
+    /** Characters of text, so a list can say how big each source is without reading it. Zero when there is none. */
     size: integer("size").notNull(),
-    content: text("content").notNull(),
+    /**
+     * The source as text: a text file as uploaded, a page stripped to
+     * its text, a PDF's extracted text. Null for an image, and for a
+     * PDF whose pages held no text at all (a scan), whose bytes are
+     * then the only copy and the agent's own eyes the only reader.
+     */
+    content: text("content"),
+    /**
+     * Where the bytes are, for a PDF or an image: a key in the
+     * artifact store, minted by the server and org-prefixed for
+     * lifecycle bookkeeping, never a URL. Who may read it is decided
+     * by this row, behind the same access helpers and row-level
+     * security as every other tenant row; the store is a shelf.
+     * Null for a source that is text and nothing else.
+     */
+    storageKey: text("storage_key"),
+    /** Bytes in the store. Null when nothing is stored. */
+    byteSize: integer("byte_size"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("swarm_plan_sources_swarm_idx").on(t.swarmId, t.position)],
+  (t) => [
+    index("swarm_plan_sources_swarm_idx").on(t.swarmId, t.position),
+    // A source with neither text nor bytes is nothing a planner could read.
+    check("swarm_plan_sources_content_or_key", sql`${t.content} is not null or ${t.storageKey} is not null`),
+  ],
 );

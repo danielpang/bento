@@ -302,6 +302,13 @@
       "when": 1790620000000,
       "tag": "0042_swarm_plan_sources",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1790630000000,
+      "tag": "0043_swarm_plan_source_bytes",
+      "breakpoints": true
     }
   ]
 }

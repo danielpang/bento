@@ -240,14 +240,25 @@ test("a detail lists what the planner was handed, with a page's address checked 
       { id: "ps-1", position: 0, kind: "file", name: "docs/plan.md", url: null, size: 1200 },
       { id: "ps-2", position: 1, kind: "website", name: "The plan", url: "https://example.test/plan", size: 800 },
       { id: "ps-3", position: 2, kind: "website", name: "Bad", url: "javascript:alert(1)", size: 10 },
+      { id: "ps-4", position: 3, kind: "file", name: "mockup.png", url: null, mime: "image/png", media: "image", size: 0, hasText: false, byteSize: 4096 },
     ],
   });
   const read = await httpSwarmApi("", doFetch).getSwarm("sw-1");
   assert.equal(read.swarm.planMode, "existing");
   assert.deepEqual(
     read.planSources?.map((source) => [source.name, source.url]),
-    [["docs/plan.md", null], ["The plan", "https://example.test/plan"], ["Bad", null]],
+    [["docs/plan.md", null], ["The plan", "https://example.test/plan"], ["Bad", null], ["mockup.png", null]],
     "a file has no address, a page keeps its http address, and anything else is drawn without a link",
+  );
+  assert.deepEqual(
+    read.planSources?.map((source) => [source.media, source.hasText, source.byteSize, source.contentPath]),
+    [
+      ["text", true, null, "/api/swarms/sw-1/plan-sources/ps-1/content"],
+      ["text", true, null, "/api/swarms/sw-1/plan-sources/ps-2/content"],
+      ["text", true, null, "/api/swarms/sw-1/plan-sources/ps-3/content"],
+      ["image", false, 4096, "/api/swarms/sw-1/plan-sources/ps-4/content"],
+    ],
+    "a server from before PDFs and images reads as text, and every source knows where its bytes are served",
   );
 });
 

@@ -1262,8 +1262,15 @@ export class BentoClient {
      * rather than planning from scratch. Absent is "goal".
      */
     planMode?: "goal" | "existing";
-    /** Files as text, and addresses the server fetches itself. */
-    planSources?: ({ kind: "file"; name: string; content: string } | { kind: "website"; url: string })[];
+    /**
+     * Files as text, PDFs and images as base64 bytes with their media
+     * type, and addresses the server fetches itself.
+     */
+    planSources?: (
+      | { kind: "file"; name: string; content: string }
+      | { kind: "file"; name: string; data: string; mime: string }
+      | { kind: "website"; url: string }
+    )[];
   }) {
     return this.request<SwarmRow & { plannerRunId: string | null }>("/api/swarms", {
       method: "POST",

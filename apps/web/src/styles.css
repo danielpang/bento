@@ -10136,3 +10136,23 @@ a.swarm-plan-source-name:hover {
   font-size: 13px;
   line-height: 1.4;
 }
+
+.swarm-plan-source-thumb {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+}
+
+.swarm-plan-source-open {
+  flex: none;
+  font-size: 12px;
+  color: var(--brand);
+}
+
+.swarm-plan-source-open:hover {
+  text-decoration: underline;
+}

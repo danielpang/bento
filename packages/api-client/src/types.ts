@@ -457,8 +457,14 @@ export interface SwarmPlanSourceRow {
   kind: "file" | "website";
   name: string;
   url: string | null;
-  /** Characters of text. */
+  mime: string;
+  /** What it is read as: text, a PDF, or an image. */
+  media: "text" | "pdf" | "image";
+  /** Characters of text. Zero for an image or a scanned PDF. */
   size: number;
+  hasText: boolean;
+  /** Bytes in the store, for a PDF or an image. */
+  byteSize: number | null;
 }
 
 /** One swarm with its plan, as the detail route answers. */

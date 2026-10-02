@@ -252,9 +252,10 @@ test("a document swarm's planner is told it is planning an outline, not a change
  * A plan the person already has.
  * ---------------------------------------------------------------- */
 
+const TEXT = { mime: "text/markdown", media: "text" as const, storageKey: null, byteSize: null };
 const PLAN_SOURCES = [
-  { id: "ps-1", position: 0, kind: "file" as const, name: "docs/plan.md", url: null, size: 42, content: "# Plan\n\n1. Add the totals helper.\n2. Wire it in." },
-  { id: "ps-2", position: 1, kind: "website" as const, name: "Totals design", url: "https://example.test/design", size: 30, content: "Totals are rounded before conversion." },
+  { id: "ps-1", position: 0, kind: "file" as const, name: "docs/plan.md", url: null, size: 42, content: "# Plan\n\n1. Add the totals helper.\n2. Wire it in.", ...TEXT },
+  { id: "ps-2", position: 1, kind: "website" as const, name: "Totals design", url: "https://example.test/design", size: 30, content: "Totals are rounded before conversion.", ...TEXT, mime: "text/html" },
 ];
 
 test("a swarm handed a plan carries every source in the planner's first prompt, quoted and in order", () => {
@@ -329,4 +330,31 @@ test("use existing plan changes what the planner is asked to do, with and withou
 test("a wake message points a planner that was handed a plan back at it", () => {
   const message = plannerWakeMessage([{ kind: "message", text: "Carry on." }]);
   assert.match(message, /If the person handed over a plan, read_plan returns it/);
+});
+
+test("a PDF, an image and a scan are described by what they are, and the planner is told where their copies are", () => {
+  const prompt = buildPlannerPrompt({
+    swarm: { title: "Totals", goal: "Implement the plan." } as never,
+    repositories: [],
+    planSourceDir: "/workspace/plan-sources",
+    planSources: [
+      { id: "a", position: 0, kind: "file", name: "docs/plan.pdf", url: null, mime: "application/pdf", media: "pdf", size: 12, content: "1. Helper.\n2.", storageKey: "k1", byteSize: 2048, path: "/workspace/plan-sources/1-plan.pdf" },
+      { id: "b", position: 1, kind: "file", name: "mockup.png", url: null, mime: "image/png", media: "image", size: 0, content: null, storageKey: "k2", byteSize: 4096, path: "/workspace/plan-sources/2-mockup.png" },
+      { id: "c", position: 2, kind: "website", name: "scan.pdf", url: "https://example.test/scan.pdf", mime: "application/pdf", media: "pdf", size: 0, content: null, storageKey: "k3", byteSize: 1_500_000, path: null },
+    ],
+  });
+  assert.match(prompt, /- 1\. the PDF docs\/plan\.pdf, 2 KB, 12 characters of text/);
+  assert.match(prompt, /- 2\. the image mockup\.png, 4 KB/);
+  assert.match(prompt, /- 3\. the PDF at https:\/\/example\.test\/scan\.pdf, 1\.4 MB, no text in it/);
+  assert.match(prompt, /A copy of 2 of them is in \/workspace\/plan-sources, each named with its number: 1-plan\.pdf, 2-mockup\.png/);
+  assert.match(prompt, /Source 1, the PDF docs\/plan\.pdf, its text as extracted:/);
+  assert.match(prompt, /Source 2, the image mockup\.png: an image, with no text to quote\. Open \/workspace\/plan-sources\/2-mockup\.png to see it\./);
+  assert.match(prompt, /Source 3, the PDF at https:\/\/example\.test\/scan\.pdf: a PDF with no text in it, which is a scan\./);
+
+  const nowhere = buildPlannerPrompt({
+    swarm: { title: "Totals", goal: "Implement the plan." } as never,
+    repositories: [],
+    planSources: [{ id: "b", position: 0, kind: "file", name: "mockup.png", url: null, mime: "image/png", media: "image", size: 0, content: null, storageKey: "k2", byteSize: 4096, path: null }],
+  });
+  assert.match(nowhere, /could not be copied into this workspace/);
 });
