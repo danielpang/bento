@@ -31,7 +31,7 @@ interface ClaimedRun {
     stageId: string;
     prompt: string;
     resumeSessionId: string | null;
-    kind?: string;
+    role?: string;
   };
   feature: {
     id: string;
@@ -207,7 +207,7 @@ export class LocalRunner {
       );
       handle = await this.driver.provision({
         projectId: "runner",
-        featureId: feature.id,
+        workspaceKey: feature.id,
         hostWorkspacePath: this.worktrees.workspacePath(feature.id),
         /**
          * A worktree's .git is a file naming the source repository's
@@ -245,7 +245,7 @@ export class LocalRunner {
       stagePrompt,
       resume,
       compacted: claimed.compactedConversation ?? "",
-      ...(run.kind ? { kind: run.kind } : {}),
+      ...(run.role ? { role: run.role } : {}),
     });
 
     // Built-in provider credentials come from this machine. Custom

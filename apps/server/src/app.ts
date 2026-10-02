@@ -15,6 +15,7 @@ import { customProviderRoutes } from "./routes/custom-providers.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { teamRoutes } from "./routes/team.js";
 import { stageRoutes } from "./routes/stages.js";
+import { swarmRoutes } from "./routes/swarms.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import { catalogRoutes } from "./routes/catalog.js";
 import { and, eq } from "drizzle-orm";
@@ -339,6 +340,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/artifacts", artifactRoutes(ctx))
     .route("/profiles", profileRoutes(ctx))
     .route("/stages", stageRoutes(ctx))
+    .route("/swarms", swarmRoutes(ctx))
     .route("/runs", runRoutes(ctx))
     .route("/runner", runnerRoutes(ctx))
     .route("/secrets", secretRoutes(ctx))

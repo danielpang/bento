@@ -63,7 +63,7 @@ export function needsSendBackPrompt(input: {
   status: string;
   currentStageId: string | null;
   history: { kind: string; trigger: string; at: string | Date }[];
-  runs: { kind?: string | null; stageId: string; queuedAt: string | Date }[];
+  runs: { role?: string | null; stageId: string; queuedAt: string | Date }[];
 }): boolean {
   if (input.status === "done" || input.status === "cancelled") return false;
 
@@ -80,8 +80,8 @@ export function needsSendBackPrompt(input: {
   return !input.runs.some((run) => {
     // Only real work answers the prompt: a judge is the gate's own, and
     // a rebase run fixed the pull request, not the reason the card came
-    // back. Older payloads omit kind entirely and are work.
-    if (run.kind === "judge" || run.kind === "rebase") return false;
+    // back. Older payloads omit role entirely and are work.
+    if (run.role === "judge" || run.role === "rebase") return false;
     if (input.currentStageId && run.stageId !== input.currentStageId) return false;
     const queued = Date.parse(typeof run.queuedAt === "string" ? run.queuedAt : run.queuedAt.toISOString());
     return !Number.isNaN(queued) && queued >= movedAt;

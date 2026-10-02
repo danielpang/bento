@@ -77,7 +77,7 @@ async function provisionWithFilesystemRetries(
   driver: SpriteDriver,
   spec: Parameters<SpriteDriver["provision"]>[0] = {
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   },
 ): Promise<unknown> {
@@ -191,7 +191,7 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
 
   await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [{
       name: "api",
@@ -276,7 +276,7 @@ test("Sprite provisioning leaves the artifacts directory and unreadable director
 
   await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [{ name: "api", cloneUrl: "https://github.com/acme/api.git", branch: "main" }],
   });
@@ -357,7 +357,7 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
     const result = retriable
       ? await provisionWithFilesystemRetries(t, driver)
       : await driver
-          .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+          .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
           .then(
             () => "resolved",
             (err: unknown) => err,
@@ -399,7 +399,7 @@ test("Sprite provisioning still fails when listing the workspace hits a transpor
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     /fetch failed/,
   );
 });
@@ -443,7 +443,7 @@ test("Sprite provisioning survives an empty workspace", async () => {
 
   const handle = await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [],
     onProgress: (message) => {
@@ -487,7 +487,7 @@ test("Sprite provisioning still fails when the filesystem API does", async () =>
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     /503/,
   );
   assert.equal(listings, 1);
@@ -544,7 +544,7 @@ test("Sprite provisioning retries a temporarily unavailable filesystem and still
 
   const result = await provisionWithFilesystemRetries(t, driver, {
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     onProgress: (message) => {
       messages.push(message);
@@ -637,7 +637,7 @@ test("Sprite provisioning says which agent CLI could not be installed", async ()
 
   const handle = await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     onProgress: (message) => {
       messages.push(message);
@@ -672,7 +672,7 @@ test("Sprite provisioning failures carry the script's stderr on the error", asyn
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     (err: Error & { stderr?: string }) => {
       assert.match(err.message, /exit code 1/);
       assert.match(err.stderr ?? "", /claude code install failed/);
@@ -1309,7 +1309,7 @@ test("Sprite provisioning holds the sandbox awake while its scripts run", async 
   const driver = new SpriteDriver({ token: "token" });
   stubClient(driver, sprite);
 
-  await driver.provision({ projectId: "p", featureId: "f", hostWorkspacePath: "/unused" });
+  await driver.provision({ projectId: "p", workspaceKey: "f", hostWorkspacePath: "/unused" });
 
   const registered = calls.filter((call) => /-X POST/.test(call));
   const released = calls.filter((call) => /-X DELETE/.test(call));
@@ -1797,7 +1797,7 @@ test("Sprite provisioning gives up on a script whose connection went silent", as
 
   const provisioning = driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   });
   const outcome = provisioning.then(
@@ -1861,7 +1861,7 @@ test("Sprite provisioning retries a refused exec upgrade and then installs", asy
 
   const pending = driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   });
   await settle();
@@ -1910,7 +1910,7 @@ test("Sprite provisioning reports a refused exec upgrade without the exec URL", 
   stubClient(driver, sprite);
 
   const pending = driver
-    .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
     .then(
       () => "resolved",
       (err: Error) => err,
@@ -1988,7 +1988,7 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
 
   const pending = driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   });
   await settle();
@@ -2038,7 +2038,7 @@ test("Sprite provisioning does not retry a script that exited", async () => {
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     (err: unknown) => {
       assert.ok(err instanceof Error);
       assert.match(err.message, /exit code 1/);
@@ -2204,7 +2204,7 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
   stubClient(driver, sprite);
 
   const outcome = driver
-    .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
     .then(
       () => "resolved",
       (err: Error) => err,
@@ -2560,7 +2560,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     const pending = driver.provision({
       projectId: "project",
-      featureId: "feature",
+      workspaceKey: "feature",
       hostWorkspacePath: "/unused",
       repositories: [],
       onProgress: (message) => {
@@ -2596,7 +2596,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     let settled = false;
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => {
           settled = true;
@@ -2643,7 +2643,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
       },
     };
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => "ok" as const,
         (err: Error) => err,
@@ -2674,7 +2674,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     let settled = false;
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => {
           settled = true;
@@ -2718,7 +2718,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     const pending = driver.provision({
       projectId: "project",
-      featureId: "feature",
+      workspaceKey: "feature",
       hostWorkspacePath: "/unused",
       repositories: [],
       onProgress: (message) => {
@@ -2780,7 +2780,7 @@ test("Sprite provisioning waits out a rate limit even after the short retries ar
     };
     const pending = driver.provision({
       projectId: "project",
-      featureId: "feature",
+      workspaceKey: "feature",
       hostWorkspacePath: "/unused",
       repositories: [],
       onProgress: (message) => {
@@ -2830,7 +2830,7 @@ test("Sprite provisioning waits out a rate limit even after the short retries ar
       },
     };
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => "ok" as const,
         (err: Error) => err,
