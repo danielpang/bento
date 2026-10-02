@@ -10156,3 +10156,66 @@ a.swarm-plan-source-name:hover {
 .swarm-plan-source-open:hover {
   text-decoration: underline;
 }
+
+/*
+ * The brief folds to one line, so the diagram gets the screen. Folded,
+ * the row is the label, the goal's first line, and the button that
+ * opens it again; the metrics and the plan come back with the goal.
+ */
+.swarm-brief[data-open="false"] {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 8px 20px;
+}
+
+.swarm-brief-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.swarm-brief-head .label {
+  flex: none;
+}
+
+.swarm-brief-excerpt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.swarm-brief-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.swarm-brief-toggle:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.swarm-brief-toggle:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.swarm-brief-chevron {
+  transition: transform 120ms ease;
+}
+
+.swarm-brief-toggle[aria-expanded="true"] .swarm-brief-chevron {
+  transform: rotate(180deg);
+}

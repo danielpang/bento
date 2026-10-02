@@ -4,7 +4,7 @@ import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
 import { base64Bytes, binaryMime, clampWorkers, existingPlanHelp, newSourceLabel, planSourceRefusal, suggestBranch, toBase64 } from "./components/NewSwarmDialog.js";
-import { planSourceLabel, planSourceSize } from "./components/SwarmPage.js";
+import { goalExcerpt, planSourceLabel, planSourceSize } from "./components/SwarmPage.js";
 import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";
 import type { NewSwarmInput } from "./swarm/types.js";
 
@@ -265,6 +265,15 @@ test("a PDF or an image travels as bytes, is sized in bytes, and is refused past
   assert.equal(planSourceSize({ media: "pdf", size: 1200, hasText: true, byteSize: 2 * 1024 * 1024 }), "2.0 MB, 1,200 characters of text");
   assert.equal(planSourceSize({ media: "pdf", size: 0, hasText: false, byteSize: 500 }), "500 bytes, no text (a scan)");
   assert.equal(planSourceSize({ media: "text", size: 12, hasText: true, byteSize: null }), "12 characters");
+});
+
+test("a folded brief shows the goal's first line, cut at a word", () => {
+  assert.equal(goalExcerpt("Replace the checkout.\n\nKeep the totals."), "Replace the checkout.");
+  assert.equal(goalExcerpt("\n  \nSecond line first"), "Second line first");
+  const long = "word ".repeat(40).trim();
+  const cut = goalExcerpt(long);
+  assert.ok(cut.length <= 121 && cut.endsWith("\u2026") && !cut.endsWith("wor\u2026"), `cut at a word: ${cut}`);
+  assert.equal(goalExcerpt(""), "");
 });
 
 test("the switch says what it does in each position, and how the sources are read", () => {

@@ -10,7 +10,7 @@ import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
-import type { SwarmView } from "../swarm/view-state.js";
+import { browserStorage, readBriefOpen, rememberBriefOpen, type SwarmView } from "../swarm/view-state.js";
 
 /** Ticks the header's clock, and only while there is something running. */
 function useNow(live: boolean): number {
@@ -136,6 +136,21 @@ export function SwarmPlanBrief({
   );
 }
 
+/**
+ * The goal as one line, for the folded brief.
+ *
+ * The first line that says anything, cut at a word so the fold reads
+ * as a sentence trailing off rather than a word chopped in half. The
+ * whole goal is a hover away and one click away.
+ */
+export function goalExcerpt(goal: string, max = 120): string {
+  const line = goal.split("\n").map((part) => part.trim()).find((part) => part !== "") ?? "";
+  if (line.length <= max) return line;
+  const cut = line.slice(0, max);
+  const atWord = cut.lastIndexOf(" ");
+  return `${(atWord > max / 2 ? cut.slice(0, atWord) : cut).trimEnd()}\u2026`;
+}
+
 /** What a source is, as the list labels it. */
 export function planSourceLabel(source: Pick<SwarmPlanSource, "kind" | "media">): string {
   if (source.media === "pdf") return "PDF";
@@ -198,6 +213,17 @@ export function SwarmPage({
   onOpenArtifact?: (artifact: SwarmArtifact) => void;
   onOpenPlannerOutput?: () => void;
 }) {
+  /*
+   * The brief folds to one line so the diagram gets the screen. The
+   * choice is this browser's, remembered across swarms, and never in
+   * the address: whoever follows a link sees the goal.
+   */
+  const [briefOpen, setBriefOpen] = useState(() => readBriefOpen(browserStorage()));
+  const toggleBrief = () => {
+    const next = !briefOpen;
+    setBriefOpen(next);
+    rememberBriefOpen(browserStorage(), next);
+  };
   const swarm = detail.swarm;
   const live = canPause(swarm.status);
   const now = useNow(live);
@@ -312,13 +338,32 @@ export function SwarmPage({
 
       </header>
 
-      <section className="swarm-brief" aria-label="Swarm goal">
+      <section className="swarm-brief" aria-label="Swarm goal" data-open={briefOpen}>
         <div className="swarm-brief-copy">
-          <span className="label">Goal</span>
-          <p>{swarm.goal}</p>
-          <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
+          <div className="swarm-brief-head">
+            <span className="label">Goal</span>
+            {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
+            <button
+              type="button"
+              className="swarm-brief-toggle"
+              aria-expanded={briefOpen}
+              aria-controls="swarm-brief-body"
+              onClick={toggleBrief}
+            >
+              {briefOpen ? "Hide" : "Show"}
+              <svg className="swarm-brief-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
+                <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+          {briefOpen && (
+            <div id="swarm-brief-body">
+              <p>{swarm.goal}</p>
+              <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
+            </div>
+          )}
         </div>
-        <div className="swarm-brief-side">
+        {briefOpen && <div className="swarm-brief-side">
           {waitingForPlan && (
             <p className="swarm-next-step" role="status">
               {detail.plannerRun?.status === "failed"
@@ -335,7 +380,7 @@ export function SwarmPage({
             <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
             <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
           </div>
-        </div>
+        </div>}
       </section>
 
       {swarm.question && (
