@@ -88,7 +88,13 @@ jobs:
           git commit -m "Refresh the model catalog from models.dev"
           git push --force origin "$BRANCH"
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
-            gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
+            if ! gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
               --title "Refresh the model catalog" \
-              --body "Nightly refresh from models.dev and the AI Gateway by \`pnpm models:update\`. New models are added, sunset ones removed, and models an agent cannot code with are filtered out. Review the diff for anything that should be pinned or hand listed in \`model-catalog.manual.ts\`."
+              --body "Nightly refresh from models.dev and the AI Gateway by \`pnpm models:update\`. New models are added, sunset ones removed, and models an agent cannot code with are filtered out. Review the diff for anything that should be pinned or hand listed in \`model-catalog.manual.ts\`."; then
+              # The branch is pushed either way, so the refresh is not lost.
+              compare="${{ github.server_url }}/${{ github.repository }}/compare/${{ github.event.repository.default_branch }}...$BRANCH?expand=1"
+              echo "::error title=Could not open the catalog pull request::Add a MODELS_UPDATE_TOKEN secret (fine-grained, contents and pull requests read and write), or turn on \"Allow GitHub Actions to create and approve pull requests\" under Settings, Actions, General. The refresh is on $BRANCH: $compare"
+              echo "Could not open the pull request. The refresh is pushed to \`$BRANCH\`; [open it by hand]($compare). See the header of \`.github/workflows/models.yml\` for the fix." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           fi
