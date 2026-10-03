@@ -729,7 +729,8 @@ export function AgentSession({
               <SendMark />
             </button>
           </form>
-          {!blocked && <p className="muted composer-hint">
+          {!blocked && (
+          <p className="muted composer-hint">
           {/* Nothing is running, so no delivery rule applies: saying one
               anyway ("delivered when the run ends") described a run that
               had already finished. */}
@@ -745,6 +746,7 @@ export function AgentSession({
                   ? "This tool takes messages between runs: yours is delivered the moment the current run ends."
                   : "This tool takes messages between runs: yours is delivered the moment the current run ends, as a new run with a compacted transcript of this conversation."}
           </p>
+          )}
         </div>
       )}
 
