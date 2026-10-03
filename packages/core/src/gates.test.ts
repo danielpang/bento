@@ -23,17 +23,12 @@ test("default pipeline has three valid stages", () => {
 });
 
 /**
- * The stages that commit code publish by default; the planning stage
- * does not. A first card should reach GitHub without anyone hunting
- * for the setting, and a plan should not push an empty branch.
+ * Every seeded stage publishes. A first card should reach GitHub
+ * without anyone hunting for the setting, and a stage that stays quiet
+ * is a choice somebody makes, not a default they trip over.
  */
-test("default pipeline opens pull requests from implementation and code review", () => {
-  assert.deepEqual(
-    DEFAULT_STAGES.map((stage) => [stage.slug, stage.createPr]),
-    [
-      ["engineering-requirements", false],
-      ["implementation", true],
-      ["code-review", true],
-    ],
-  );
+test("every default stage opens a pull request", () => {
+  for (const stage of DEFAULT_STAGES) {
+    assert.equal(stage.createPr, true, `${stage.slug} should publish by default`);
+  }
 });
