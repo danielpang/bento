@@ -203,7 +203,7 @@ test("provision reuses a running sandbox", async () => {
     },
   });
   assert.equal(env.creates.length, 0);
-  assert.ok(lines.some((line) => line.startsWith("Reusing this card's Modal sandbox")));
+  assert.ok(lines.some((line) => line.startsWith("Reusing the Modal sandbox")));
 });
 
 test("a failed toolchain build does not provision", async () => {

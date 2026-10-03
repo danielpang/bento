@@ -280,6 +280,7 @@ test("hibernation loses the race with a run that already started", async () => {
     agentProfileId: card.profileId,
     prompt: "next stage",
     status: "running",
+    type: "pipeline",
     sandboxId: card.sandboxId,
   });
   release();
@@ -299,6 +300,7 @@ test("a skip and a finish on an already ready row each arm a later hibernation",
     agentProfileId: skipped.profileId,
     prompt: "still going",
     status: "running",
+    type: "pipeline",
     sandboxId: skipped.sandboxId,
   });
   useModal(idleApi());
@@ -316,6 +318,7 @@ test("a skip and a finish on an already ready row each arm a later hibernation",
       agentProfileId: finished.profileId,
       prompt: "done",
       status: "succeeded",
+      type: "pipeline",
       sandboxId: finished.sandboxId,
     })
     .returning();
@@ -460,6 +463,7 @@ test("the orphan sweep spares a sandbox that is still being provisioned", async 
     agentProfileId: active.profileId,
     prompt: "cloning",
     status: "starting",
+    type: "pipeline",
   });
   const terminated: string[] = [];
   const youngName = `bento-${youngFeature}`;
