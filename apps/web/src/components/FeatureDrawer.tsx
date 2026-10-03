@@ -53,6 +53,7 @@ import { useBetaTesters } from "../beta.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 import { ReviewHandoff } from "./ReviewHandoff.js";
 import { ConversationPlacement } from "./ConversationPlacement.js";
+import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "../repository-setup.js";
 
 interface DrawerProps {
   client: BentoClient;
@@ -81,6 +82,8 @@ interface DrawerProps {
    */
   onSelectFeature: (featureId: string) => void;
   onEvent: (featureId: string, event: AgentEvent) => void;
+  /** Opens Repositories, where a project with none gets its checkout. */
+  onOpenRepositories?: () => void;
 }
 
 /** Runs in these states are over, so there is nothing to stop. */
@@ -132,6 +135,7 @@ export function FeatureDrawer({
   onDeleted,
   onSelectFeature,
   onEvent,
+  onOpenRepositories,
 }: DrawerProps) {
   const toast = useToast();
   const beta = useBetaTesters();
@@ -533,6 +537,11 @@ export function FeatureDrawer({
    * shows: finished, in a stage, or in the backlog.
    */
   const finished = feature.status === "done" || feature.status === "cancelled";
+  /**
+   * Detail has arrived and the project really has no checkout. Until
+   * the list loads, projectRepos is empty and must not read as missing.
+   */
+  const noRepositories = !detailsPending && projectRepos.length === 0;
   // Approving mid-run would advance the card out from under the working
   // agent; the button says why it is waiting instead of failing later.
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
@@ -807,6 +816,16 @@ export function FeatureDrawer({
         )}
         <Tabs.Content value="overview" forceMount hidden={activeDrawerTab !== "overview"} className="feature-pane">
         <section className="section feature-next-step">
+          {noRepositories && !finished && (
+            <div className="setup-prompt setup-prompt-inline" role="status">
+              <span>{REPOSITORY_SETUP_MESSAGE}</span>
+              {onOpenRepositories && (
+                <button className="btn btn-primary" type="button" onClick={onOpenRepositories}>
+                  {REPOSITORY_SETUP_ACTION}
+                </button>
+              )}
+            </div>
+          )}
           <div className="feature-section-heading">
             <h3>{beta && !finished ? runActive ? "Work in progress" : needsRecovery ? "Let's get this moving" : "Your next step" : "Next step"}</h3>
             <span>{finished ? "Reopen to continue" : runActive ? "Agent at work" : stage ? `Next: ${stages[stages.indexOf(stage) + 1]?.name ?? "Completed"}` : "Begin implementation"}</span>
@@ -867,12 +886,17 @@ export function FeatureDrawer({
                 </button>
               </>
             ) : (
-              <button className="btn btn-primary" disabled={busy} onClick={() => act(() => client.advanceFeature(feature.id))}>
+              <button
+                className="btn btn-primary"
+                disabled={busy || noRepositories}
+                title={noRepositories ? REPOSITORY_SETUP_MESSAGE : undefined}
+                onClick={() => act(() => client.advanceFeature(feature.id))}
+              >
                 Start pipeline
               </button>
             )}
           </div>
-          {needsRecovery && stageAgent && !finished && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
+          {needsRecovery && stageAgent && !finished && !noRepositories && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
           {needsRecovery && !stageAgent && !finished && <button className="btn btn-primary recovery-action" onClick={showConversation}>Review the last run</button>}
           {/* Why the last run failed, where the eye lands. The same
               sentence closes the transcript, but a person looking at a
@@ -913,8 +937,8 @@ export function FeatureDrawer({
               {stageAgent && feature.currentStageId && !finished && (
                 <button
                   className="btn"
-                  disabled={busy || runActive}
-                  title={`${stageAgent.cli} ${stageAgent.model}`}
+                  disabled={busy || runActive || noRepositories}
+                  title={noRepositories ? REPOSITORY_SETUP_MESSAGE : `${stageAgent.cli} ${stageAgent.model}`}
                   onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}
                 >
                   Run {stageAgent.name}
@@ -1148,7 +1172,7 @@ export function FeatureDrawer({
                 <Skeleton height={36} />
               </div>
             ) : showPullRequests && projectRepos.length === 0 ? (
-              <p className="muted">This project has no repositories yet. Add one under project settings.</p>
+              <p className="muted">{REPOSITORY_SETUP_MESSAGE}</p>
             ) : (
               <div className="pr-list">
                 {showPullRequests && (
@@ -1313,6 +1337,11 @@ export function FeatureDrawer({
             onEvent={onEvent}
             expandHref={`/session/${feature.id}`}
             visible={!!chatHost || activeDrawerTab === "activity"}
+            blocked={
+              noRepositories && !runActive
+                ? { message: REPOSITORY_SETUP_MESSAGE, action: REPOSITORY_SETUP_ACTION, onFix: onOpenRepositories }
+                : undefined
+            }
           />
         )}
         </ConversationPlacement>

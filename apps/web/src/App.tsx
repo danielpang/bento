@@ -53,6 +53,7 @@ import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 import { desktop } from "./desktop.js";
 import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
+import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -544,6 +545,12 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   }, [usage]);
   /** A board-level load or action failure, shown under the topbar. */
   const [loadError, setLoadError] = useState("");
+  /**
+   * Null until this project's repositories have been read. Zero is the
+   * warning: agents have nowhere to work, and the prompt opens the
+   * panel that adds one.
+   */
+  const [repoCount, setRepoCount] = useState<number | null>(null);
   const toast = useToast();
   /**
    * Where focus goes once a deleted card has left the board, and which
@@ -658,6 +665,30 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   useEffect(() => {
     loadProjectList();
   }, [loadProjectList]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setRepoCount(null);
+      return;
+    }
+    let cancelled = false;
+    setRepoCount(null);
+    void client
+      .listRepositories(projectId)
+      .then((rows) => {
+        if (!cancelled) setRepoCount(rows.length);
+      })
+      .catch(() => {
+        // A failed read must not claim the project has no repositories.
+        // The start routes still refuse a run if it really has none.
+        if (!cancelled) setRepoCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Closing the Repositories panel is when a repository just added
+    // should clear the warning.
+  }, [projectId, panel]);
 
   useEffect(() => {
     if (panel !== "agents") setAgentsIntent(null);
@@ -841,6 +872,13 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * hint why. Name the missing step and offer the panel that fixes it.
    */
   const setupNeeded = useMemo(() => {
+    if (repoCount === 0) {
+      return {
+        message: REPOSITORY_SETUP_MESSAGE,
+        action: REPOSITORY_SETUP_ACTION,
+        panel: "repos" as const,
+      };
+    }
     if (stages.length === 0) return null;
     if (profiles.length === 0) {
       return {
@@ -857,7 +895,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       };
     }
     return null;
-  }, [profiles, stages]);
+  }, [profiles, stages, repoCount]);
 
   async function addFeature(title: string, description: string) {
     if (!projectId) return;
@@ -1216,7 +1254,13 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         /* A second board of the same project. Its own boundary, like
            the panels: the chunk arrives without blanking the chrome. */
         <Suspense fallback={<BoardSkeleton />}>
-          <SwarmBoard projectId={projectId} client={client} surfaces={swarmSurfaces} />
+          <SwarmBoard
+            projectId={projectId}
+            client={client}
+            surfaces={swarmSurfaces}
+            repositoriesMissing={repoCount === 0}
+            onAddRepository={() => setPanel("repos")}
+          />
         </Suspense>
       ) : boardPending ? (
         <BoardSkeleton />
@@ -1326,6 +1370,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
             onDeleted={handleDeleted}
             onSelectFeature={setSelectedId}
             onEvent={recordEvent}
+            onOpenRepositories={() => setPanel("repos")}
           />
         )}
       </Suspense>

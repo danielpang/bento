@@ -7,7 +7,7 @@ import { parseRepoUrl } from "@bento/github";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { featurePullRequestTargets } from "../feature-prs.js";
-import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { ACTIVE_RUN_STATUSES, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun } from "./queue.js";
 import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
@@ -1183,6 +1183,10 @@ async function judgeStageWork(
     .where(eq(agentProfiles.id, criterion.agentProfileId));
   if (!judgeProfile || judgeProfile.organizationId !== feature.organizationId) {
     return { status: "failed", detail: "The judge agent no longer exists. Pick another in the stage settings." };
+  }
+
+  if (!(await projectHasRepositories(ctx.db, feature.projectId))) {
+    return { status: "pending", detail: NO_REPOSITORIES };
   }
 
   const run = await startRunIfIdle(ctx.db, {

@@ -15,16 +15,19 @@ import { createApp } from "../app.js";
 import type { AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
 import { executeRun } from "./run-executor.js";
+import { startAssignedStageAgent } from "./stage-agent.js";
 import { NO_REPOSITORIES } from "./start-run.js";
 
 /**
  * A project with no checkout cannot run an agent. The start route says
- * so before a run exists, and a run that was already queued fails once.
+ * so before a run exists, moving a card onto a stage starts nothing,
+ * and a run that was already queued is cancelled rather than failed.
  *
- * The second half is the production failure: executeRun used to throw
+ * The last part is the production failure: executeRun used to throw
  * before it claimed the row, pg-boss retried the job, and every boot
  * requeued the still-queued run. Each attempt was an exception, and
- * the card stayed busy.
+ * the card stayed busy. Failing the run instead made the card say the
+ * agent had run and lost.
  */
 const adminUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "no_repositories_test";
@@ -103,7 +106,7 @@ after(async () => {
   await pool?.end();
 });
 
-test("a project with no repositories refuses a new run and fails one already queued", async () => {
+test("a project with no repositories refuses a new run and cancels one already queued", async () => {
   const refused = await app.request("/api/runs", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -111,6 +114,15 @@ test("a project with no repositories refuses a new run and fails one already que
   });
   assert.equal(refused.status, 409);
   assert.deepEqual(await refused.json(), { error: NO_REPOSITORIES });
+  assert.equal((await db.select({ id: agentRuns.id }).from(agentRuns)).length, 0);
+
+  // Arriving on a stage whose agent would start on its own must not
+  // insert a run. The board warns; there is nothing to fail.
+  await startAssignedStageAgent(
+    ctx,
+    { id: FEATURE, projectId: PROJECT },
+    { id: STAGE, defaultAgentProfileId: PROFILE },
+  );
   assert.equal((await db.select({ id: agentRuns.id }).from(agentRuns)).length, 0);
 
   const [run] = await db
@@ -131,25 +143,24 @@ test("a project with no repositories refuses a new run and fails one already que
   await assert.doesNotReject(executeRun(ctx, run!.id));
 
   const [closed] = await db.select().from(agentRuns).where(eq(agentRuns.id, run!.id));
-  assert.equal(closed?.status, "failed");
-  assert.equal(closed?.error, NO_REPOSITORIES);
+  assert.equal(closed?.status, "cancelled");
+  assert.equal(closed?.error, null);
 
   const transcript = await db.select().from(runEvents).where(eq(runEvents.runId, run!.id));
-  assert.equal(transcript.length, 1);
-  assert.equal((transcript[0]!.payload as { text?: string }).text, NO_REPOSITORIES);
+  assert.equal(transcript.length, 0);
 
   assert.deepEqual(
     board.filter((event) => event.type === "run_updated").map((event) => event.status),
-    ["failed"],
+    ["cancelled"],
   );
-  assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
+  assert.deepEqual(jobs, []);
 
   // A duplicate job, the shape a retry or a boot requeue would deliver,
-  // finds the run already finished and writes nothing further.
+  // finds the run already closed and writes nothing further.
   await executeRun(ctx, run!.id);
   const again = await db.select().from(runEvents).where(eq(runEvents.runId, run!.id));
-  assert.equal(again.length, 1);
-  assert.equal(jobs.length, 1);
+  assert.equal(again.length, 0);
+  assert.deepEqual(jobs, []);
 
   await db.insert(repositories).values({
     projectId: PROJECT,

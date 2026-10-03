@@ -84,14 +84,13 @@ export const CARD_BUSY = "an agent is already working this card; wait for it to 
  * What a person sees when a run is asked for and the project has
  * nowhere for an agent to work.
  *
- * Said the same way by every start route and by the executor. A run
- * that was already queued (a card moved onto a stage whose agent
- * starts on its own, or a job left over from before the check) fails
- * with this sentence instead of throwing, so the job does not retry
- * and the card does not stay busy.
+ * Said by every start route. The console shows the same sentence
+ * beside a button that opens Repositories. A run is not created, and
+ * one that was already queued is cancelled rather than failed: a
+ * failure reads as the agent having run.
  */
 export const NO_REPOSITORIES =
-  "This project has no repositories. Add one under project settings, then run the agent again.";
+  "This project has no repositories, so agents cannot run. Open Repositories in the top bar and add one.";
 
 /** Whether the project has a checkout an agent can be given. */
 export async function projectHasRepositories(db: Db, projectId: string): Promise<boolean> {

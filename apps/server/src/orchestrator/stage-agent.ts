@@ -1,7 +1,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentRuns, projects, stages, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
-import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun } from "./queue.js";
 import { requeueUndelivered } from "./messages.js";
 import { followUpSource, type FollowUpWorkRun } from "./follow-up-source.js";
@@ -75,6 +75,9 @@ export async function startAssignedStageAgent(
 ): Promise<void> {
   if (!stage.defaultAgentProfileId) return;
   if (await stageIsLooping(ctx, feature.id, stage.id)) return;
+  // Nowhere to check the code out. Starting a run would only cancel
+  // it a moment later. The board says how to add a repository.
+  if (!(await projectHasRepositories(ctx.db, feature.projectId))) return;
 
   const [project] = await ctx.db.select().from(projects).where(eq(projects.id, feature.projectId));
   const executor = project?.executor ?? "server";
