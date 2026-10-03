@@ -6,33 +6,29 @@ export interface StageDefinition {
   description: string;
   gateType: "manual" | "auto";
   gateCriteria: GateCriteria;
+  /**
+   * Whether a successful run here pushes the branch and opens or
+   * updates the pull request. On for every seeded stage, matching the
+   * column's default, so a new project's first card reaches GitHub
+   * without anyone finding the setting first.
+   */
+  createPr: boolean;
 }
 
 /**
- * The default six stage pipeline seeded with every new project.
- * Fully editable per project afterwards.
+ * The default pipeline seeded with every new project: plan it, build
+ * it, review it. Three stages, so a new team sees a card go from idea
+ * to pull request without first configuring product and design stages
+ * it may not want. Fully editable per project afterwards.
  */
 export const DEFAULT_STAGES: StageDefinition[] = [
-  {
-    name: "Product investigation",
-    slug: "product-investigation",
-    description: "Investigate the problem space and generate feature ideas.",
-    gateType: "manual",
-    gateCriteria: [],
-  },
-  {
-    name: "UI/UX design",
-    slug: "design",
-    description: "Design the user interface and experience.",
-    gateType: "manual",
-    gateCriteria: [],
-  },
   {
     name: "Engineering requirements",
     slug: "engineering-requirements",
     description: "Define engineering requirements and technical system design.",
     gateType: "manual",
     gateCriteria: [],
+    createPr: true,
   },
   {
     name: "Implementation",
@@ -40,6 +36,7 @@ export const DEFAULT_STAGES: StageDefinition[] = [
     description: "Implement the feature: code and infrastructure.",
     gateType: "manual",
     gateCriteria: [],
+    createPr: true,
   },
   {
     name: "Code review",
@@ -47,13 +44,7 @@ export const DEFAULT_STAGES: StageDefinition[] = [
     description: "Review the changes before they merge.",
     gateType: "manual",
     gateCriteria: [],
-  },
-  {
-    name: "Quality engineering",
-    slug: "quality-engineering",
-    description: "Verify quality: tests, checks, and acceptance criteria.",
-    gateType: "manual",
-    gateCriteria: [],
+    createPr: true,
   },
 ];
 
@@ -66,13 +57,18 @@ export interface AgentDefinition {
 }
 
 /**
- * An agent per stage, seeded alongside the default pipeline.
+ * The default agents, seeded alongside the default pipeline.
  *
- * A board with six stages and no agents cannot run anything, and the
- * first thing every new install used to do was invent six job titles
+ * A board with stages and no agents cannot run anything, and the
+ * first thing every new install used to do was invent job titles
  * before it could see the thing work at all. These are a starting
  * point: rename them, repoint them at another tool or model, or delete
  * the ones a team does not want.
+ *
+ * Each names the stage it runs by slug. Some name stages the default
+ * pipeline no longer has (product investigation, design, quality
+ * engineering): those agents are still created, unassigned, so a team
+ * that adds the stage back finds its agent waiting.
  *
  * The tool and model are deliberately not here. They come from the
  * catalog's own default, which is the cheaper model rather than the
@@ -108,7 +104,7 @@ export const DEFAULT_AGENTS: AgentDefinition[] = [
     name: "Staff Engineer",
     stageSlug: "engineering-requirements",
     skill: [
-      "Turn the design into a plan somebody else could build from.",
+      "Turn the card into a plan somebody else could build from, working from whatever investigation or design came before it.",
       "",
       "Read the code before proposing anything, and describe the change in terms of what is already there: which modules change, what data has to be stored, what the API accepts and returns.",
       "Call out the risky parts, the migrations, and anything that cannot be undone. Where there is a choice, make it and give the reason.",

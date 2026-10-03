@@ -1141,7 +1141,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
             : {}),
         };
       });
-      const { published, failures } = await publishFeatureBranches(ctx.db, publisher, {
+      const { published, failures, notesOnly } = await publishFeatureBranches(ctx.db, publisher, {
         featureId: feature.id,
         featureTitle: feature.title,
         branch,
@@ -1199,7 +1199,11 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
             ]),
       );
       if (published.length === 0 && failures.length === 0 && recovery.draftPublished.length === 0) {
-        publishNotes.push(wording.noCommits);
+        publishNotes.push(
+          notesOnly.length > 0 && runRole !== "rebase"
+            ? "This stage is set to create a pull request, but it only changed its own write-up, which stays out of the pull request, so there was nothing to publish yet. The pull request opens when a stage commits code."
+            : wording.noCommits,
+        );
       }
     }
     // Written into the transcript so the outcome is visible where the

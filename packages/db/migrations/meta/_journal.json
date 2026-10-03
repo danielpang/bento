@@ -316,6 +316,13 @@
       "when": 1790800000000,
       "tag": "0044_project_sandbox_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1790800060000,
+      "tag": "0045_stages_create_pr_default_on",
+      "breakpoints": true
     }
   ]
 }

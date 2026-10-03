@@ -165,6 +165,18 @@ async function bundleFromWorktree(worktreePath: string, defaultBranch: string): 
  * did open is still worth recording, and the run itself already
  * succeeded. Failures are returned rather than thrown.
  */
+/**
+ * What a publish did per repository. `notesOnly` names the repositories
+ * whose branch changed nothing but Bento's own stage write-ups: with
+ * those kept out of the pull request there was nothing for a reviewer,
+ * so nothing was pushed and no pull request was opened.
+ */
+export interface PublishOutcome {
+  published: PublishedPullRequest[];
+  failures: { name: string; reason: string }[];
+  notesOnly: string[];
+}
+
 export async function publishFeatureBranches(
   db: Db,
   publisher: GitHubPublisher,
@@ -191,7 +203,7 @@ export async function publishFeatureBranches(
     /** When set, only these repository names are published. */
     onlyRepositories?: string[];
   } = {},
-): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
+): Promise<PublishOutcome> {
   const result = await publishBranches(publisher, {
     branch: args.branch,
     title: args.featureTitle,
@@ -293,7 +305,7 @@ export async function publishSwarmBranches(
     remoteUrl?: (owner: string, repo: string) => string;
     includeStageNotes?: boolean;
   } = {},
-): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
+): Promise<PublishOutcome> {
   return publishBranches(publisher, {
     branch: args.branch,
     title: args.title,
@@ -364,9 +376,10 @@ async function publishBranches(
     draft?: boolean;
     onlyRepositories?: string[];
   },
-): Promise<{ published: PublishedPullRequest[]; failures: { name: string; reason: string }[] }> {
+): Promise<PublishOutcome> {
   const published: PublishedPullRequest[] = [];
   const failures: { name: string; reason: string }[] = [];
+  const notesOnly: string[] = [];
 
   // Refused for the whole batch rather than per repository: if the
   // branch is the trunk, nothing about this run should reach a remote.
@@ -376,6 +389,7 @@ async function publishBranches(
     return {
       published,
       failures: [{ name: "any repository", reason: plan.protectedBranchRefusal(plan.branch) }],
+      notesOnly,
     };
   }
 
@@ -430,6 +444,10 @@ async function publishBranches(
         expectedRemoteHead,
         skipAncestryCheck: plan.draft === true,
       });
+      if (pushedHead === null) {
+        notesOnly.push(repo.name);
+        continue;
+      }
 
       const pr = await publisher.ensurePullRequest({
         owner: parsed.owner,
@@ -455,7 +473,7 @@ async function publishBranches(
     }
   }
 
-  return { published, failures };
+  return { published, failures, notesOnly };
 }
 
 async function pushBundle(
@@ -473,7 +491,7 @@ async function pushBundle(
     /** Skip the bundle-base ancestry check and push HEAD anyway. */
     skipAncestryCheck?: boolean;
   },
-): Promise<string> {
+): Promise<string | null> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
   const checkout = path.join(root, "checkout");
   const home = path.join(root, "home");
@@ -509,6 +527,11 @@ async function pushBundle(
     const head = options.includeStageNotes
       ? bundle.headSha
       : await withoutStageNotes(checkout, bundle.headSha, path.join(root, "strip.index"), env);
+    // A stage that only wrote its notes (a plan, say) leaves a branch
+    // that, with the notes taken out, is the base again. Pushing it
+    // would open a pull request with no files changed, so it is held
+    // back until a stage commits something a reviewer can read.
+    if (head !== bundle.headSha && (await sameTreeAsForkPoint(checkout, head, env))) return null;
 
     const actual = remoteRef.trim().split(/\s+/)[0] ?? "";
     /**
@@ -540,6 +563,24 @@ async function pushBundle(
     return head;
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Whether `head` changes nothing relative to where it left the base
+ * branch the clone checked out. The fork point rather than the base's
+ * tip, because that is what a pull request's diff is measured against.
+ * Unknown (no common history) reads as "changes something", so the
+ * push goes ahead as it would have before this check existed.
+ */
+async function sameTreeAsForkPoint(checkout: string, head: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  try {
+    const { stdout: forkPoint } = await run("git", ["-C", checkout, "merge-base", "HEAD", head], { env });
+    const { stdout: forkTree } = await run("git", ["-C", checkout, "rev-parse", `${forkPoint.trim()}^{tree}`], { env });
+    const { stdout: headTree } = await run("git", ["-C", checkout, "rev-parse", `${head}^{tree}`], { env });
+    return forkTree.trim() === headTree.trim();
+  } catch {
+    return false;
   }
 }
 

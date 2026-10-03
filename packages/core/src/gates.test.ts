@@ -15,9 +15,20 @@ test("rejects unknown criterion types", () => {
   assert.throws(() => gateCriteria.parse([{ type: "nope" }]));
 });
 
-test("default pipeline has six valid stages", () => {
-  assert.equal(DEFAULT_STAGES.length, 6);
+test("default pipeline has three valid stages", () => {
+  assert.equal(DEFAULT_STAGES.length, 3);
   for (const stage of DEFAULT_STAGES) {
     gateCriteria.parse(stage.gateCriteria);
+  }
+});
+
+/**
+ * Every seeded stage publishes. A first card should reach GitHub
+ * without anyone hunting for the setting, and a stage that stays quiet
+ * is a choice somebody makes, not a default they trip over.
+ */
+test("every default stage opens a pull request", () => {
+  for (const stage of DEFAULT_STAGES) {
+    assert.equal(stage.createPr, true, `${stage.slug} should publish by default`);
   }
 });

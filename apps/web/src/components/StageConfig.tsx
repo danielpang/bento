@@ -152,7 +152,7 @@ export function StageConfig({
         <div className="drawer-title-row">
           <h2 className="drawer-title">Pipeline</h2>
           {/* Same reasoning as the Agents panel: the way to add one
-              belongs where it can be seen, not below six stage cards
+              belongs where it can be seen, not below every stage card
               and a file section. */}
           <button
             className="btn btn-primary"
@@ -419,7 +419,9 @@ function StageEditor({
     agentId: stage?.defaultAgentProfileId ?? null,
     gateType: (stage?.gateType as "manual" | "auto") ?? "manual",
     criteria: Array.isArray(stage?.gateCriteria) ? (stage.gateCriteria as GateCriterion[]) : [],
-    createPr: stage?.createPr ?? false,
+    // A new stage starts on, the same as the server's default, so the
+    // dialog shows what saving it will do.
+    createPr: stage?.createPr ?? true,
   }));
   const assigned = profiles.find((p) => p.id === draft.agentId);
 
