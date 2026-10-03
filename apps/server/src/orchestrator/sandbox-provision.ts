@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
-import type { PreparedRepository, SandboxDriver, SandboxHandle } from "@bento/sandbox";
+import { ModalProvisionLeak, persistedSandboxProvider, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
@@ -102,6 +102,12 @@ export interface ProvisionWorkspaceInput {
    * checkouts are on this host, where the name is enough.
    */
   startFromBundles?: Map<string, { branch: string; data: Buffer }>;
+  /**
+   * Hosts a restricted Modal sandbox may open. Other drivers ignore it.
+   * The caller names them from the gateway, the clone URLs, and the
+   * agent's base URLs, because those are not known in here.
+   */
+  allowedHosts?: string[];
   /** Progress lines, which go into the transcript of whatever asked. */
   say: (text: string) => Promise<void>;
   /**
@@ -218,67 +224,180 @@ export async function provisionWorkspace(
     );
   }
 
-  const handle = await driver.provision({
-    projectId: input.projectId,
-    workspaceKey,
-    ...(input.restrictNetwork ? { network: "restricted" as const } : {}),
-    hostWorkspacePath: ctx.worktrees.workspacePath(workspaceKey),
-    // Drivers with no host filesystem clone these instead of mounting.
-    repositories: repoRows.map((r) => ({
-      name: r.name,
-      cloneUrl: r.repoUrl ?? undefined,
-      branch,
-      baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
-      seedBundle: seedBundles.get(r.id),
-      startBundle: input.startFromBundles?.get(r.name),
-    })),
-    // Local mode can share the user's own agent logins and git identity.
-    ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
-    mounts: [...repoGitMounts, ...input.authMounts],
-    image: ctx.env.BENTO_SANDBOX_IMAGE,
-    onProgress: input.say,
-  });
-
-  /**
-   * An upsert, not insert-or-ignore. The machine was just provisioned,
-   * so whatever the row said before, it is real and awake now.
-   *
-   * Ignoring the conflict was how two bugs lived in one line. A card
-   * reopened after its sandbox was reaped provisions a new machine
-   * under the same name, and the ignored insert left the row saying
-   * "destroyed": the reaper filters that status out, so the new machine
-   * was never destroyed again and billed forever. And the size recorded
-   * at provision never reached an existing row, so a deployment on large
-   * sprites metered every hour at the standard rate.
-   */
-  const [sandboxRow] = await ctx.db
-    .insert(sandboxes)
-    .values({
+  const restore = driver.provider === "modal" ? await hibernatedRestore(ctx, input.owner) : undefined;
+  let handle: SandboxHandle | undefined;
+  try {
+    handle = await driver.provision({
       projectId: input.projectId,
-      ...input.owner,
-      provider: handle.provider === "sprite" ? "sprite" : "docker",
-      externalId: handle.externalId,
-      status: "busy",
-      workdir: handle.workdir,
-      // What this machine costs, in the price list's own words. Taken
-      // from the driver at the moment it was created, so changing the
-      // deployment's default size later cannot reprice hours already
-      // spent. Absent on the local drivers, which bill nobody.
-      ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
-    })
-    .onConflictDoUpdate({
-      target: sandboxes.externalId,
-      set: {
+      workspaceKey,
+      ...(input.organizationId ? { organizationId: input.organizationId } : {}),
+      ...(restore?.imageRef ? { imageRef: restore.imageRef } : {}),
+      ...(restore?.missingSnapshot ? { missingSnapshot: true } : {}),
+      ...(input.restrictNetwork ? { network: "restricted" as const } : {}),
+      ...(input.allowedHosts ? { allowedHosts: input.allowedHosts } : {}),
+      hostWorkspacePath: ctx.worktrees.workspacePath(workspaceKey),
+      // Drivers with no host filesystem clone these instead of mounting.
+      repositories: repoRows.map((r) => ({
+        name: r.name,
+        cloneUrl: r.repoUrl ?? undefined,
+        branch,
+        baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
+        seedBundle: seedBundles.get(r.id),
+        startBundle: input.startFromBundles?.get(r.name),
+      })),
+      // Local mode can share the user's own agent logins and git identity.
+      ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
+      mounts: [...repoGitMounts, ...input.authMounts],
+      image: ctx.env.BENTO_SANDBOX_IMAGE,
+      onProgress: input.say,
+    });
+
+    /**
+     * An upsert, not insert-or-ignore. The machine was just provisioned,
+     * so whatever the row said before, it is real and awake now.
+     *
+     * Ignoring the conflict was how two bugs lived in one line. A card
+     * reopened after its sandbox was reaped provisions a new machine
+     * under the same name, and the ignored insert left the row saying
+     * "destroyed": the reaper filters that status out, so the new machine
+     * was never destroyed again and billed forever. And the size recorded
+     * at provision never reached an existing row, so a deployment on large
+     * sprites metered every hour at the standard rate.
+     */
+    const [sandboxRow] = await ctx.db
+      .insert(sandboxes)
+      .values({
+        projectId: input.projectId,
         ...input.owner,
+        provider: persistedSandboxProvider(handle.provider),
+        externalId: handle.externalId,
         status: "busy",
         workdir: handle.workdir,
+        // What this machine costs, in the price list's own words. Taken
+        // from the driver at the moment it was created, so changing the
+        // deployment's default size later cannot reprice hours already
+        // spent. Absent on the local drivers, which bill nobody.
         ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
-        lastUsedAt: new Date(),
-      },
-    })
-    .returning();
+      })
+      .onConflictDoUpdate({
+        target: sandboxes.externalId,
+        set: sandboxProvisionConflict({
+          ...input.owner,
+          provider: persistedSandboxProvider(handle.provider),
+          workdir: handle.workdir,
+          ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
+          ...(handle.recordedImageRef !== undefined ? { recordedImageRef: handle.recordedImageRef } : {}),
+        }),
+      })
+      .returning();
 
-  return { handle, prepared, sandboxRow };
+    return { handle, prepared, sandboxRow };
+  } catch (err) {
+    // A machine this attempt created, and then failed to record, would
+    // bill with nobody looking. A hibernated row would also hide it
+    // from the sweep, so that row stops counting as live.
+    if (handle?.createdSandbox) {
+      await driver
+        .destroy({
+          externalId: handle.externalId,
+          provider: handle.provider,
+          workdir: handle.workdir,
+        })
+        .catch((destroyErr) => {
+          console.warn(`could not destroy sandbox ${handle?.externalId} after a failed provision:`, destroyErr);
+        });
+    } else if (err instanceof ModalProvisionLeak) {
+      const ownerWhere =
+        "featureId" in input.owner
+          ? eq(sandboxes.featureId, input.owner.featureId)
+          : and(
+              eq(sandboxes.swarmId, input.owner.swarmId),
+              input.owner.swarmTaskId
+                ? eq(sandboxes.swarmTaskId, input.owner.swarmTaskId)
+                : isNull(sandboxes.swarmTaskId),
+            );
+      await ctx.db
+        .update(sandboxes)
+        .set({ status: "destroyed" })
+        .where(and(ownerWhere, eq(sandboxes.status, "hibernated")))
+        .catch(() => {});
+      await driver
+        .destroy({
+          externalId: err.externalId,
+          provider: "modal",
+          workdir: "/workspace",
+        })
+        .catch(() => {});
+    }
+    throw err;
+  }
+}
+
+/**
+ * Conflict update for a sandbox row whose machine was just provisioned.
+ *
+ * A ready or busy row keeps its provider. A destroyed row takes the
+ * new one, because the name was reused. `recordedImageRef` null drops
+ * a hibernation image this start did not use. Absent leaves the stored
+ * id, except on a destroyed row, which drops it.
+ *
+ * The owner columns are whichever board this machine belongs to. A
+ * card sets its feature. A swarm sets the swarm, and the task when
+ * the machine is a worker's.
+ */
+export function sandboxProvisionConflict(input: {
+  featureId?: string;
+  swarmId?: string;
+  swarmTaskId?: string | null;
+  provider: "docker" | "sprite" | "modal";
+  workdir: string;
+  size?: string;
+  recordedImageRef?: string | null;
+}) {
+  return {
+    ...(input.featureId !== undefined ? { featureId: input.featureId } : {}),
+    ...(input.swarmId !== undefined
+      ? { swarmId: input.swarmId, swarmTaskId: input.swarmTaskId ?? null }
+      : {}),
+    status: "busy" as const,
+    workdir: input.workdir,
+    ...(input.size ? { size: input.size } : {}),
+    lastUsedAt: new Date(),
+    provider: sql`CASE WHEN ${sandboxes.status} = 'destroyed' THEN ${input.provider} ELSE ${sandboxes.provider} END`,
+    imageRef:
+      input.recordedImageRef !== undefined
+        ? input.recordedImageRef
+        : sql`CASE WHEN ${sandboxes.status} = 'destroyed' THEN NULL ELSE ${sandboxes.imageRef} END`,
+  };
+}
+
+/**
+ * What a hibernated machine of this workspace can be restored from.
+ *
+ * A card looks up its feature. A swarm looks up its own machine, or
+ * the worker's, so a later run restores that checkout instead of
+ * cloning again. A row that is merely busy is a live machine and is
+ * not restored from here.
+ */
+async function hibernatedRestore(
+  ctx: AppContext,
+  owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null },
+): Promise<{ imageRef?: string; missingSnapshot: boolean }> {
+  const where =
+    "featureId" in owner
+      ? and(eq(sandboxes.featureId, owner.featureId), eq(sandboxes.status, "hibernated"))
+      : and(
+          eq(sandboxes.swarmId, owner.swarmId),
+          owner.swarmTaskId ? eq(sandboxes.swarmTaskId, owner.swarmTaskId) : isNull(sandboxes.swarmTaskId),
+          eq(sandboxes.status, "hibernated"),
+        );
+  const [row] = await ctx.db.select({ imageRef: sandboxes.imageRef }).from(sandboxes).where(where).limit(1);
+  if (!row) return { missingSnapshot: false };
+  if (row.imageRef) return { imageRef: row.imageRef, missingSnapshot: false };
+  // The row says hibernated and no image id survived. The next start
+  // has to say it is a fresh clone, rather than restoring whatever
+  // older image the process can still see.
+  return { missingSnapshot: true };
 }
 
 /** The repositories a project spans, in the order the board shows them. */

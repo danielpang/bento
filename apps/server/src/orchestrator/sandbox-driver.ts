@@ -43,10 +43,9 @@ export function driverForSandbox(drivers: SandboxDrivers, row: { provider: strin
 /**
  * The driver a new sandbox on a project would use.
  *
- * Always the deployment default. projects.sandboxProvider does not
- * exist yet; the function is here so a later change can read the
- * column without another call-site sweep. It does not consult the
- * beta flag: nothing in this process chooses a provider per project.
+ * Always the deployment default. The project column exists, and this
+ * function does not read it: choosing a provider per project is a
+ * later change. It does not consult the beta flag.
  */
 export function driverForProject(drivers: SandboxDrivers): SandboxDriver {
   return drivers.default;

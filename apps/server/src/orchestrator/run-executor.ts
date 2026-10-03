@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import {
   WORKSPACE_ARTIFACT_DIR,
+  type AgentCli,
   agentRunPrompt,
   customProviderRunError,
   forgetsBetweenRuns,
@@ -40,7 +41,7 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, LineChannel, ModalProvisionLeak, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
@@ -53,6 +54,7 @@ import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
+export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { driverForRun, driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
@@ -82,7 +84,9 @@ import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
-import { enqueueRun, INTERACTIVE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
+import { modalRunHosts } from "./modal-hosts.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
@@ -302,7 +306,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, subject.organizationId);
   try {
+    const modalNetwork =
+      restrictNetwork && driver.provider === "modal"
+        ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model)
+        : {};
     // The workspace, from the function both boards provision through.
+    // Modal restore, the restricted-host list, and the sandboxes row
+    // live in that function, so a swarm and a card take the same path.
     const workspace = await provisionWorkspace(ctx, {
       driver,
       projectId: project.id,
@@ -314,6 +324,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       restrictNetwork,
       owner: subject.sandboxOwner,
       restartedRepoUrls: replaced.map((pr) => pr.repoUrl),
+      ...(modalNetwork.allowedHosts ? { allowedHosts: modalNetwork.allowedHosts } : {}),
       /**
        * Install only the CLIs this run's pipeline actually uses, which
        * is minutes off a new card's first stage.
@@ -393,7 +404,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "pipeline" ? { feature_id: subject.feature.id } : { swarm_id: subject.swarm.id }),
       source: "sandbox_provision",
     });
-    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
+    const reported = err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
+    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(reported)}` }, null);
     emitBoard("failed");
     await subject.settle(ctx);
     return;
@@ -1698,6 +1710,41 @@ async function recordSwarmWorkspace(
     .where(eq(swarms.id, subject.swarm.id));
 }
 
+/**
+ * The network a Modal sandbox for this project must use.
+ *
+ * Provision and rollback both call this, so a machine booted to mount
+ * a checkpoint gets the same allowlist as the one the run started in.
+ * Not restricted: an empty object, and the sandbox keeps open egress.
+ */
+export async function modalNetworkForProject(
+  ctx: AppContext,
+  projectId: string,
+  organizationId: string | null,
+  cli: AgentCli,
+  model: string,
+): Promise<Pick<SandboxHandle, "network" | "allowedHosts">> {
+  if (!(await organizationRestrictsNetwork(ctx, organizationId))) return {};
+  const repos = await ctx.db
+    .select({ repoUrl: repositories.repoUrl })
+    .from(repositories)
+    .where(eq(repositories.projectId, projectId));
+  const adapter = getAdapter(cli);
+  const driver = ctx.drivers.get("modal") ?? ctx.drivers.default;
+  const { env: resolved } = await resolveAgentEnv(ctx, organizationId, adapter, model, driver);
+  const custom = await customProviderRunEnv(ctx, organizationId, cli, model);
+  const env = custom ? custom.env : resolved;
+  return {
+    network: "restricted",
+    allowedHosts: modalRunHosts({
+      gatewayUrl: ctx.env.BENTO_MCP_GATEWAY_URL ?? ctx.env.BETTER_AUTH_URL,
+      cloneUrls: repos.map((row) => row.repoUrl),
+      env,
+      ...(custom?.selection?.baseUrl ? { customBaseUrl: custom.selection.baseUrl } : {}),
+    }),
+  };
+}
+
 /** Whether this organization has asked for sandboxes with no egress. */
 async function organizationRestrictsNetwork(ctx: AppContext, organizationId: string | null): Promise<boolean> {
   if (!organizationId) return false;
@@ -2156,6 +2203,12 @@ async function announceRunFinished(
     });
   }
   await captureRunFinished(ctx, runId, status);
+  try {
+    await scheduleModalHibernation(ctx, runId);
+  } catch (err) {
+    console.warn(`could not schedule hibernation for run ${runId}:`, err);
+    ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "sandbox_hibernate" });
+  }
 }
 
 /** A run the user stopped. Terminal, but not a failure. */
@@ -2722,6 +2775,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * this one's.
    */
   await ctx.boss.createQueue(SWARM_LAND_QUEUE, { name: SWARM_LAND_QUEUE, policy: "short" });
+  await ctx.boss.createQueue(HIBERNATE_SANDBOX_QUEUE);
+  await ctx.boss.createQueue(MODAL_SWEEP_QUEUE);
 
   await recoverInterruptedRuns(ctx);
   /**
@@ -2771,6 +2826,21 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
     }
   }));
+  await ctx.boss.work<{ sandboxId: string }>(
+    HIBERNATE_SANDBOX_QUEUE,
+    { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
+    captureJobErrors(ctx.analytics, HIBERNATE_SANDBOX_QUEUE, async (jobs) => {
+      for (const job of jobs) await hibernateSandbox(ctx, job.data.sandboxId);
+    }),
+  );
+  await ctx.boss.schedule(MODAL_SWEEP_QUEUE, "0 9 * * *");
+  await ctx.boss.work(
+    MODAL_SWEEP_QUEUE,
+    { pollingIntervalSeconds: QUEUE_POLL_SECONDS },
+    captureJobErrors(ctx.analytics, MODAL_SWEEP_QUEUE, async () => {
+      await sweepOrphanModalSandboxes(ctx);
+    }),
+  );
   /**
    * The sweep catches the cards that finished before any of this
    * existed, and anything the queue gave up on. Deliberately not

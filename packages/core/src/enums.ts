@@ -38,7 +38,7 @@ export function isSpendRun(run: { status: string; role?: string | null }): boole
   return (TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status) && run.role !== "judge";
 }
 
-export const sandboxProvider = z.enum(["docker", "sprite"]);
+export const sandboxProvider = z.enum(["docker", "sprite", "modal"]);
 export type SandboxProvider = z.infer<typeof sandboxProvider>;
 
 export const sandboxStatus = z.enum(["provisioning", "ready", "busy", "hibernated", "destroyed"]);

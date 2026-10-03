@@ -4,6 +4,7 @@ import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { agentRuns, features, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
+import { sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
 import { driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
 import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
@@ -130,6 +131,7 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
       externalId: row.externalId,
       provider: driver.provider,
       workdir: row.workdir,
+      ...(row.imageRef ? { imageRef: row.imageRef } : {}),
     };
     await driver.destroy(handle);
 
@@ -397,4 +399,8 @@ export async function reapFinishedSandboxes(ctx: AppContext): Promise<void> {
       ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "sandbox_reap" });
     }
   }
+
+  // Modal machines with no live row are not in the query above. The
+  // same pass, and the nightly job, terminate those.
+  await sweepOrphanModalSandboxes(ctx);
 }

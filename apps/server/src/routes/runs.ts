@@ -8,7 +8,8 @@ import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, sta
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
-import { markCancelled } from "../orchestrator/run-executor.js";
+import { markCancelled, modalNetworkForProject } from "../orchestrator/run-executor.js";
+import { armModalHibernation } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import type { SandboxDriver } from "@bento/sandbox";
@@ -175,10 +176,46 @@ export function runRoutes(ctx: AppContext) {
       }
 
       try {
+        const network = driver.provider === "modal"
+          ? await (async () => {
+              const [profile] = await db(c, ctx)
+                .select({ cli: agentProfiles.cli, model: agentProfiles.model })
+                .from(agentProfiles)
+                .where(eq(agentProfiles.id, run.agentProfileId))
+                .limit(1);
+              if (!profile || !feature) {
+                throw new Error("no sandbox to roll back");
+              }
+              return modalNetworkForProject(
+                ctx,
+                feature.projectId,
+                feature.organizationId,
+                profile.cli,
+                profile.model,
+              );
+            })()
+          : {};
         await driver.restore(
-          { externalId, provider: driver.provider, workdir: sandbox?.workdir ?? "/workspace" },
+          {
+            externalId,
+            provider: driver.provider,
+            workdir: sandbox?.workdir ?? "/workspace",
+            ...network,
+          },
           run.checkpointId,
         );
+        // A stopped Modal machine is booted again here. The row was
+        // still hibernated, which neither the hibernate job nor the
+        // sweep will touch, so the new machine would run until the
+        // 24 hour cap. Ready plus a later job puts it back on the
+        // same path as a run that just finished.
+        if (driver.provider === "modal" && sandbox) {
+          await db(c, ctx)
+            .update(sandboxes)
+            .set({ status: "ready", lastUsedAt: new Date() })
+            .where(and(eq(sandboxes.id, sandbox.id), eq(sandboxes.status, "hibernated")));
+          await armModalHibernation(ctx, sandbox.id);
+        }
       } catch (err) {
         ctx.analytics?.captureException(err, actor(c), run.organizationId, {
           run_id: run.id,

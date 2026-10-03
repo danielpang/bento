@@ -539,6 +539,7 @@ export function featureRoutes(ctx: AppContext) {
                 externalId: sandbox.externalId,
                 provider: driver.provider,
                 workdir: sandbox.workdir,
+                ...(sandbox.imageRef ? { imageRef: sandbox.imageRef } : {}),
               };
               await driver.destroy(handle);
             } catch (err) {

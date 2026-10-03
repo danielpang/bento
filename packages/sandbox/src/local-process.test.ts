@@ -37,7 +37,7 @@ test("local driver names a timeout in the stream it kills", async () => {
   const driver = new LocalProcessDriver();
   const handle = await driver.provision({
     projectId: "p1",
-    featureId: "f3",
+    workspaceKey: "f3",
     hostWorkspacePath: tmpdir(),
   });
   const result = await collectExec(driver.exec(handle, ["sleep", "5"], { timeoutMs: 100 }));

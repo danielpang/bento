@@ -3,9 +3,33 @@ import type { AgentBinary } from "./agent-toolchain.js";
 export interface SandboxHandle {
   /** Driver-specific identifier: container id, sprite name, or process tag. */
   externalId: string;
-  provider: "docker" | "sprite" | "local-process";
+  provider: "docker" | "sprite" | "local-process" | "modal";
   /** Working directory inside the sandbox where the repo is checked out. */
   workdir: string;
+  /**
+   * Hibernation snapshot image id, when the row has one. Modal destroy
+   * deletes it. Other drivers ignore it.
+   */
+  imageRef?: string;
+  /**
+   * Restricted network to apply if restore has to boot a machine.
+   * The same hosts provision would have used. Restricted with no
+   * usable host refuses, rather than opening the network.
+   */
+  network?: "open" | "restricted";
+  allowedHosts?: string[];
+  /**
+   * Set by a Modal provision. Null drops a hibernation image this
+   * start did not use. A string is the image the sandbox actually
+   * restored. Absent leaves the stored id alone, except a destroyed
+   * row, which drops it.
+   */
+  recordedImageRef?: string | null;
+  /**
+   * This provision created the sandbox. A failure after that has to
+   * destroy the machine, or a hibernated row hides it from the sweep.
+   */
+  createdSandbox?: boolean;
 }
 
 export interface ProvisionSpec {
@@ -88,6 +112,29 @@ export interface ProvisionSpec {
    */
   agentBinaries?: readonly AgentBinary[];
   env?: Record<string, string>;
+  /**
+   * Owning organization, stamped onto a Modal sandbox as a tag so the
+   * nightly sweep can tell one tenant's machines from another's.
+   */
+  organizationId?: string;
+  /**
+   * Hibernation image to start from. Set when the card's sandbox row
+   * is hibernated. Absent means a toolchain image, or an exit snapshot
+   * this process still holds.
+   */
+  imageRef?: string;
+  /**
+   * The row was hibernated and no image id survived. The next start
+   * says it is a fresh clone when no exit snapshot can be read.
+   */
+  missingSnapshot?: boolean;
+  /**
+   * Hosts a restricted sandbox may open: the gateway, clone remotes,
+   * and model provider base URLs. The driver turns them into an
+   * allowlist. A restricted run with none, or with one that cannot be
+   * named, fails instead of opening the network.
+   */
+  allowedHosts?: string[];
   /**
    * Called with a human readable line as provisioning advances: sandbox
    * created, tools installed, repository cloned. Provisioning a cold
